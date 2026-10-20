@@ -14,7 +14,7 @@ fn default_workspaces() -> Fixture {
 
 /// `jj undo` undoes the latest operation, whichever machine made it, but refuses one made
 /// in another workspace unless asked explicitly. Another machine's operations count as
-/// made in another workspace, `default@alpha`, even though both workspaces are named
+/// made in another workspace, `alpha/default`, even though both workspaces are named
 /// `default`.
 #[test]
 fn undo_of_another_machines_operation() {
@@ -24,7 +24,7 @@ fn undo_of_another_machines_operation() {
     let refused = hive.repo(1).jj_output(&["undo"]);
     assert!(!refused.status.success());
     let stderr = String::from_utf8_lossy(&refused.stderr);
-    assert!(stderr.contains("default@alpha"), "{stderr}");
+    assert!(stderr.contains("alpha/default"), "{stderr}");
     hive.sync();
     hive.assert_converged();
     assert!(hive.visible(1).iter().any(|c| c.ends_with("to be undone")));
@@ -102,8 +102,34 @@ fn undo_and_redo_of_another_machines_undo() {
     assert_eq!(hive.visible(0), after_alphas_undo);
 }
 
-/// The operation log shows which machine made each operation. jj quotes the name, since
-/// `@` can't appear in a bare one.
+/// Restoring an older view on one machine restores every machine's working copy, as
+/// `jj op restore` restores every workspace's on one machine: the other machine's working
+/// copy goes back to where it was then, and its working copy is stale until its next
+/// command updates the files.
+#[test]
+fn op_restore_restores_other_machines_working_copies() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(1, "b1", "beta committed");
+    hive.sync();
+    let restore_to = hive
+        .repo(0)
+        .jj(&["op", "log", "--no-graph", "-n1", "-T", "id"]);
+    let then = hive.workspaces(0)["beta/beta"].clone();
+    hive.repo(1).write_file("b2", "beta in progress");
+    hive.repo(1).jj(&["describe", "-m", "beta in progress"]);
+    hive.sync();
+    hive.repo(0).jj(&["op", "restore", &restore_to]);
+    hive.sync();
+    hive.repo(1).jj(&["status"]);
+    let now = hive
+        .repo(1)
+        .jj(&["log", "--no-graph", "-r", "@", "-T", "commit_id"]);
+    assert_eq!(now, then);
+    hive.sync();
+    hive.assert_converged();
+}
+
+/// The operation log shows which machine made each operation.
 #[test]
 fn op_log_names_other_machines_workspaces() {
     let mut hive = default_workspaces();
@@ -118,7 +144,7 @@ fn op_log_names_other_machines_workspaces() {
         .jj(&["op", "log", "--no-graph", "-n", "1", "-T", template]);
     assert_eq!(
         (alpha.as_str(), beta.as_str()),
-        ("default@\n", "\"default@alpha\"@\n")
+        ("default@\n", "alpha/default@\n")
     );
 }
 

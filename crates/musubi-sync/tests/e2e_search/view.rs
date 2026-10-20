@@ -6,15 +6,13 @@ use std::collections::BTreeSet;
 
 pub const ROOT: &str = "0000000000000000000000000000000000000000";
 
-/// Remotes that are not other machines' labels.
-pub const REAL_REMOTES: [&str; 2] = ["git", "origin"];
-
 pub const TEMPLATE: &str = concat!(
     r#"commit_id ++ "\t" ++ change_id ++ "\t" ++ parents.map(|c| c.commit_id()).join(",")"#,
     r#" ++ "\t" ++ if(immutable, "i", "m") ++ "\t" ++ if(conflict, "c", "-")"#,
     r#" ++ "\t" ++ local_bookmarks.map(|b| b.name() ++ if(b.conflict(), "?")).join(",")"#,
     r#" ++ "\t" ++ tags.map(|t| t.name() ++ if(t.conflict(), "?")).join(",")"#,
     r#" ++ "\t" ++ remote_bookmarks.map(|b| b.name() ++ "@" ++ b.remote()).join(",")"#,
+    r#" ++ "\t" ++ working_copies.map(|w| w.name()).join(",")"#,
     r#" ++ "\t" ++ description.first_line()"#,
     r#" ++ "\n""#
 );
@@ -32,6 +30,9 @@ pub struct Commit {
     raw_tags: Vec<String>,
     /// Remote bookmarks, `name@remote`.
     pub remote_bookmarks: Vec<String>,
+    /// The workspaces whose working copy this is: this machine's own, and the other
+    /// machines' as `machine/workspace`.
+    pub working_copies: Vec<String>,
     /// The first line of the description.
     pub subject: String,
 }
@@ -61,8 +62,8 @@ impl View {
         let commits = out
             .lines()
             .map(|line| {
-                let fields: Vec<&str> = line.splitn(9, '\t').collect();
-                assert_eq!(fields.len(), 9, "unexpected log line {line:?}");
+                let fields: Vec<&str> = line.splitn(10, '\t').collect();
+                assert_eq!(fields.len(), 10, "unexpected log line {line:?}");
                 Commit {
                     id: fields[0].to_owned(),
                     change: fields[1].to_owned(),
@@ -74,7 +75,8 @@ impl View {
                     raw_bookmarks: split(fields[5]),
                     raw_tags: split(fields[6]),
                     remote_bookmarks: split(fields[7]),
-                    subject: fields[8].to_owned(),
+                    working_copies: split(fields[8]),
+                    subject: fields[9].to_owned(),
                 }
             })
             .collect();
@@ -188,25 +190,24 @@ impl View {
         self.names(|c| &c.tags)
     }
 
-    /// Other machines' workspace labels, `workspace@machine`, with their targets.
-    pub fn labels(&self) -> BTreeMap<String, String> {
-        let mut labels = BTreeMap::new();
+    /// Other machines' workspaces, `machine/workspace`, with their working copies.
+    pub fn other_workspaces(&self) -> BTreeMap<String, String> {
+        let mut workspaces = BTreeMap::new();
         for commit in &self.commits {
-            for label in &commit.remote_bookmarks {
-                let remote = label.rsplit_once('@').map_or("", |(_, r)| r);
-                if !REAL_REMOTES.contains(&remote) {
-                    labels.insert(label.clone(), commit.id.clone());
+            for name in &commit.working_copies {
+                if name.contains('/') {
+                    workspaces.insert(name.clone(), commit.id.clone());
                 }
             }
         }
-        labels
+        workspaces
     }
 
-    /// Commits labeled as another machine's working copy, if mutable.
+    /// Other machines' working copies, if mutable.
     pub fn other_working_copies(&self) -> Vec<String> {
         let mutable: BTreeSet<String> = self.mutable().into_iter().collect();
         let ids: BTreeSet<String> = self
-            .labels()
+            .other_workspaces()
             .into_values()
             .filter(|id| mutable.contains(id))
             .collect();
@@ -218,7 +219,7 @@ impl View {
     pub fn under_other_working_copies(&self) -> Vec<String> {
         let mutable: BTreeSet<String> = self.mutable().into_iter().collect();
         let mut found = BTreeSet::new();
-        for wc in self.labels().into_values() {
+        for wc in self.other_workspaces().into_values() {
             let mut ancestors = self.ancestors(&wc);
             ancestors.remove(&wc);
             found.extend(ancestors.into_iter().filter(|c| mutable.contains(c)));

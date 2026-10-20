@@ -84,11 +84,23 @@ impl Fixture {
 
     /// Every bookmark with its targets, from `jj bookmark list --all-remotes`.
     pub fn bookmarks(&self, index: usize) -> BTreeMap<String, String> {
-        // A tracked remote bookmark with no local bookmark (how other machines' workspaces
-        // are labeled) lists as a deleted local bookmark; skip those.
+        // A tracked remote bookmark with no local bookmark lists as a deleted local
+        // bookmark; skip those.
         let template = r#"if(present, name ++ "@" ++ remote ++ "\t" ++ if(conflict, "conflict:" ++ added_targets.map(|c| c.commit_id()).join(","), normal_target.commit_id()) ++ "\n")"#;
         self.repo(index)
             .jj(&["bookmark", "list", "--all-remotes", "-T", template])
+            .lines()
+            .filter_map(|line| line.split_once('\t'))
+            .map(|(name, target)| (name.to_owned(), target.to_owned()))
+            .collect()
+    }
+
+    /// The workspaces this machine's view has, with their working-copy commits: its own,
+    /// and the other machines' as `<machine>/<workspace>`.
+    pub fn workspaces(&self, index: usize) -> BTreeMap<String, String> {
+        let template = r#"name ++ "\t" ++ target.commit_id() ++ "\n""#;
+        self.repo(index)
+            .jj(&["workspace", "list", "-T", template])
             .lines()
             .filter_map(|line| line.split_once('\t'))
             .map(|(name, target)| (name.to_owned(), target.to_owned()))
@@ -117,9 +129,9 @@ impl Fixture {
     /// The hive's invariants once synced: running `jj` everywhere and syncing again
     /// reaches a fixed point within a few rounds (each machine's next command may reset its
     /// own git HEAD after a rebase, which replicates once, but nothing ping-pongs); then
-    /// every machine agrees on visible commits and bookmarks, each colocated repository's
-    /// git branches match its bookmarks that are not conflicted, and `jj status` changes
-    /// nothing.
+    /// every machine agrees on visible commits and bookmarks, each machine shows the other
+    /// machines' working copies where they are, each colocated repository's git branches
+    /// match its bookmarks that are not conflicted, and `jj status` changes nothing.
     pub fn assert_converged(&mut self) {
         let mut settled = false;
         for _ in 0..3 {
@@ -137,6 +149,28 @@ impl Fixture {
             settled,
             "the hive keeps changing: running jj and syncing never settles"
         );
+        let workspaces: Vec<BTreeMap<String, String>> =
+            (0..self.repos.len()).map(|i| self.workspaces(i)).collect();
+        let own = |ws: &BTreeMap<String, String>| -> Vec<String> {
+            ws.iter()
+                .filter(|(name, _)| !name.contains('/'))
+                .map(|(_, commit)| commit.clone())
+                .collect()
+        };
+        for (index, shown) in workspaces.iter().enumerate() {
+            let mut shown: Vec<String> = shown
+                .iter()
+                .filter(|(name, _)| name.contains('/'))
+                .map(|(_, commit)| commit.clone())
+                .collect();
+            let mut actual: Vec<String> = (0..self.repos.len())
+                .filter(|&other| other != index)
+                .flat_map(|other| own(&workspaces[other]))
+                .collect();
+            shown.sort();
+            actual.sort();
+            assert_eq!(shown, actual, "other machines' working copies on {index}");
+        }
         let first_visible = self.visible(0);
         let first_bookmarks = local_bookmarks(&self.bookmarks(0));
         for index in 0..self.repos.len() {

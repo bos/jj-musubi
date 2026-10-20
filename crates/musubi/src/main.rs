@@ -56,7 +56,8 @@ enum Command {
         hive: Uuid,
         #[arg(long)]
         nats: String,
-        /// This machine's name in the hive, shown in labels such as `default@laptop`.
+        /// This machine's name in the hive, which other machines show its workspaces under, as
+        /// in `laptop/default`.
         /// Defaults to jj's `operation.hostname`.
         #[arg(long)]
         machine: Option<String>,

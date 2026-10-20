@@ -23,15 +23,10 @@ use jj_lib::op_store::OpStoreError;
 use jj_lib::op_store::Operation as StoreOperation;
 use jj_lib::op_store::OperationId;
 use jj_lib::op_store::RefTarget;
-use jj_lib::op_store::RemoteRef;
-use jj_lib::op_store::RemoteRefState;
 use jj_lib::op_store::RemoteView;
 use jj_lib::op_store::View;
 use jj_lib::op_walk;
 use jj_lib::ref_name::GitRefNameBuf;
-use jj_lib::ref_name::RefNameBuf;
-use jj_lib::ref_name::RemoteName;
-use jj_lib::ref_name::RemoteNameBuf;
 use jj_lib::repo::ReadonlyRepo;
 use jj_lib::repo::Repo as _;
 use jj_lib::repo::RepoLoader;
@@ -125,14 +120,14 @@ pub enum NodeError {
     Commit(#[from] jj_lib::transaction::TransactionCommitError),
 }
 
-/// Per-machine fields of a view: this machine's record of its own `.git` (`git_refs` and the
-/// `git` pseudo-remote) and its own workspaces (`wc_commit_ids` and `git_heads`). See
-/// "Per-machine state in a replicated view" in docs/design.md.
+/// Per-machine fields of a view that a realization inherits: this machine's record of its
+/// own `.git` (`git_refs`, the `git` pseudo-remote, and each workspace's `git_heads`). The
+/// working copies come from the canonical view instead. See "Per-machine state in a
+/// replicated view" in docs/design.md.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct PerMachine {
     git_refs: BTreeMap<GitRefNameBuf, RefTarget>,
     git_remote: Option<RemoteView>,
-    wc_commit_ids: BTreeMap<WorkspaceNameBuf, CommitId>,
     git_heads: BTreeMap<WorkspaceNameBuf, RefTarget>,
 }
 
@@ -144,7 +139,6 @@ impl PerMachine {
                 .remote_views
                 .get(REMOTE_NAME_FOR_LOCAL_GIT_REPO)
                 .cloned(),
-            wc_commit_ids: view.wc_commit_ids.clone(),
             git_heads: view.git_heads.clone(),
         }
     }
@@ -155,14 +149,7 @@ impl PerMachine {
             view.remote_views
                 .insert(REMOTE_NAME_FOR_LOCAL_GIT_REPO.to_owned(), remote);
         }
-        view.wc_commit_ids = self.wc_commit_ids;
         view.git_heads = self.git_heads;
-    }
-
-    /// Moves this machine's working-copy commits along the rewrites `op` records, as jj
-    /// moves a workspace's `@` when it rewrites it.
-    fn follow_rewrites(&mut self, op: &StoreOperation) {
-        workspaces::follow_rewrites(&mut self.wc_commit_ids, op.commit_predecessors.as_ref());
     }
 }
 
@@ -320,9 +307,11 @@ impl NodeRepo {
     }
 
     /// The canonical form of a local view: no records of this machine's `.git`, and every
-    /// machine's workspaces under machine-qualified keys, with this machine's from `view`
-    /// and the others' carried over from the canonical parents and along `predecessors`. The
-    /// labels showing other machines' workspaces are removed. Depends only on its
+    /// machine's workspaces under machine-qualified keys. This machine's come from `view`.
+    /// The others' come from the canonical parents, except where this operation moved them:
+    /// they are workspaces in `view` too, which jj moves when it rewrites or abandons their
+    /// commits, or restores an older view. Adding, forgetting or renaming another machine's
+    /// workspace here changes nothing: its workspaces are its own. Depends only on its
     /// arguments, so canonicalizing again after a crash gives the same result.
     fn canonical_view(
         &self,
@@ -330,6 +319,9 @@ impl NodeRepo {
         canonical_parents: &[OperationId],
         predecessors: Option<&BTreeMap<CommitId, Vec<CommitId>>>,
     ) -> Result<View, NodeError> {
+        // The names under which this machine showed the parents' other workspaces, exactly
+        // as `realize_one` named them.
+        let mut others: BTreeMap<WorkspaceNameBuf, WorkspaceNameBuf> = BTreeMap::new();
         for parent in canonical_parents {
             if parent == self.canonical.root_operation_id() {
                 continue;
@@ -337,19 +329,34 @@ impl NodeRepo {
             let parent_view = self
                 .canonical
                 .read_view(&self.canonical.read_operation(parent)?.view_id)?;
-            // The labels this machine showed for the parent's workspaces, exactly as
-            // `realize_one` named them.
-            for remote in self.label_remotes(&parent_view).into_values() {
-                view.remote_views.remove(RemoteName::new(&remote));
+            for (key, name) in self.local_names(&parent_view) {
+                if !self.is_own_key(&key) {
+                    others.insert(name, key);
+                }
             }
         }
         let mut workspaces_by_key = self.merged_workspaces(canonical_parents)?;
-        workspaces_by_key.retain(|key, _| {
-            workspaces::split_key(key.as_str())
-                .is_none_or(|(machine, _)| machine != self.machine.key())
-        });
-        workspaces::follow_rewrites(&mut workspaces_by_key, predecessors);
-        for (workspace, commit) in std::mem::take(&mut view.wc_commit_ids) {
+        workspaces_by_key.retain(|key, _| !self.is_own_key(key));
+        let mut local = std::mem::take(&mut view.wc_commit_ids);
+        let mut moved_here = BTreeSet::new();
+        for (name, key) in &others {
+            if let Some(commit) = local.remove(name)
+                && let Some(entry) = workspaces_by_key.get_mut(key)
+            {
+                *entry = commit;
+                moved_here.insert(key.clone());
+            }
+        }
+        // Another machine's workspace forgotten here can't be moved by jj; follow the
+        // rewrites this operation records instead.
+        let mut forgotten: BTreeMap<WorkspaceNameBuf, CommitId> = workspaces_by_key
+            .iter()
+            .filter(|(key, _)| !moved_here.contains(*key))
+            .map(|(key, commit)| (key.clone(), commit.clone()))
+            .collect();
+        workspaces::follow_rewrites(&mut forgotten, predecessors);
+        workspaces_by_key.extend(forgotten);
+        for (workspace, commit) in local {
             workspaces_by_key.insert(
                 workspaces::workspace_key(self.machine.key(), workspace.as_str()),
                 commit,
@@ -358,6 +365,45 @@ impl NodeRepo {
         strip_git_records(&mut view);
         view.wc_commit_ids = workspaces_by_key;
         Ok(view)
+    }
+
+    fn is_own_key(&self, key: &WorkspaceName) -> bool {
+        workspaces::split_key(key.as_str())
+            .is_some_and(|(machine, _)| machine == self.machine.key())
+    }
+
+    /// The local name of each workspace in a canonical view: this machine's own keep their
+    /// names, and another machine's are prefixed with the machine's name, as in
+    /// `beta/default`, or with its name and part of its id when two machines share a name
+    /// or the prefix would make a name of this machine's own.
+    fn local_names(&self, canonical_view: &View) -> BTreeMap<WorkspaceNameBuf, WorkspaceNameBuf> {
+        let keys = &canonical_view.wc_commit_ids;
+        let machines: BTreeSet<String> = keys
+            .keys()
+            .filter_map(|key| workspaces::split_key(key.as_str()))
+            .map(|(machine, _)| machine.to_owned())
+            .filter(|machine| machine != self.machine.key())
+            .collect();
+        let own: Vec<&str> = keys
+            .keys()
+            .filter(|key| self.is_own_key(key))
+            .map(|key| key_workspace(key))
+            .collect();
+        let prefixes = workspaces::display_names(&machines, |name| {
+            own.iter()
+                .any(|workspace| workspace.starts_with(&format!("{name}/")))
+        });
+        keys.keys()
+            .filter_map(|key| {
+                let (machine, workspace) = workspaces::split_key(key.as_str())?;
+                let name = if machine == self.machine.key() {
+                    workspace.to_owned()
+                } else {
+                    format!("{}/{workspace}", prefixes.get(machine)?)
+                };
+                Some((key.clone(), WorkspaceNameBuf::from(name)))
+            })
+            .collect()
     }
 
     /// Where every machine's workspaces were, as of the canonical form of this machine's
@@ -390,9 +436,10 @@ impl NodeRepo {
         Ok(view.wc_commit_ids)
     }
 
-    /// The parents' machine-qualified workspaces merged three-way, as jj merges views: an
-    /// entry one side changed since the merge base wins; when both changed it, the later
-    /// parent wins.
+    /// The parents' machine-qualified workspaces merged three-way, as jj merges views
+    /// (`workspaces::merge_working_copy`). A removal wins over a move, which matters here:
+    /// only a workspace's own machine removes it, and its removal must win over another
+    /// machine moving it meanwhile.
     fn merged_workspaces(
         &self,
         parents: &[OperationId],
@@ -420,14 +467,11 @@ impl NodeRepo {
                 .collect();
             let mut next = BTreeMap::new();
             for key in keys {
-                let (ours, theirs, base) = (merged.get(&key), theirs.get(&key), base.get(&key));
-                let value = if ours == base {
-                    theirs
-                } else if theirs == base {
-                    ours
-                } else {
-                    theirs
-                };
+                let value = workspaces::merge_working_copy(
+                    merged.get(&key),
+                    base.get(&key),
+                    theirs.get(&key),
+                );
                 if let Some(commit) = value {
                     next.insert(key, commit.clone());
                 }
@@ -436,24 +480,6 @@ impl NodeRepo {
             merged_parents.push(other.clone());
         }
         Ok(merged)
-    }
-
-    /// The remote names under which this machine shows the other machines' workspaces in a
-    /// canonical view, keyed by machine.
-    fn label_remotes(&self, canonical_view: &View) -> BTreeMap<String, String> {
-        let machines: BTreeSet<String> = canonical_view
-            .wc_commit_ids
-            .keys()
-            .filter_map(|key| workspaces::split_key(key.as_str()))
-            .map(|(machine, _)| machine.to_owned())
-            .filter(|machine| machine != self.machine.key())
-            .collect();
-        workspaces::remote_names(&machines, |name| {
-            canonical_view
-                .remote_views
-                .keys()
-                .any(|remote| remote.as_str() == name)
-        })
     }
 
     /// The repository's `.jj/repo` directory.
@@ -764,33 +790,16 @@ impl NodeRepo {
             .map(|parent| self.local_of(parent).expect("parents realized first"))
             .collect();
         let mut view = self.canonical.read_view(&op.view_id)?;
-        // Other machines' workspaces become labels: remote bookmarks of a pseudo-remote per
-        // machine, so beta's `default` shows as `default@beta`. Tracked, because jj's
-        // default `immutable_heads()` includes every *untracked* remote bookmark, which
-        // would make the other machine's work, and everything under it, immutable here.
-        let remotes = self.label_remotes(&view);
-        for (key, commit) in std::mem::take(&mut view.wc_commit_ids) {
-            let Some((machine, workspace)) = workspaces::split_key(key.as_str()) else {
-                continue;
-            };
-            let Some(remote) = remotes.get(machine) else {
-                continue;
-            };
-            view.remote_views
-                .entry(RemoteNameBuf::from(remote.as_str()))
-                .or_default()
-                .bookmarks
-                .insert(
-                    RefNameBuf::from(workspace),
-                    RemoteRef {
-                        target: RefTarget::normal(commit),
-                        state: RemoteRefState::Tracked,
-                    },
-                );
-        }
-        let mut per_machine = self.inherited_per_machine(&parents)?;
-        per_machine.follow_rewrites(op);
-        per_machine.apply_to(&mut view);
+        // Every machine's working copies become workspaces here: this machine's under their
+        // own names, the others' as `beta/default`. This machine's own may have moved: when
+        // another machine rewrites, abandons or restores a working-copy commit, its jj moves
+        // the workspace, and the canonical view records where to.
+        let names = self.local_names(&view);
+        view.wc_commit_ids = std::mem::take(&mut view.wc_commit_ids)
+            .into_iter()
+            .filter_map(|(key, commit)| Some((names.get(&key)?.clone(), commit)))
+            .collect();
+        self.inherited_per_machine(&parents)?.apply_to(&mut view);
         let mut metadata = op.metadata.clone();
         if let Some((prefix, target)) = target_of(&metadata.description)
             && self.canonical.is_ancestor(&target, &op.parents)?
@@ -800,7 +809,7 @@ impl NodeRepo {
         }
         metadata.workspace_name = metadata
             .workspace_name
-            .map(|key| self.realized_workspace_name(&key, &remotes));
+            .map(|key| self.realized_workspace_name(&key, &names));
         metadata
             .attributes
             .insert(CANONICAL_ATTRIBUTE.to_owned(), canonical_id.hex());
@@ -817,24 +826,24 @@ impl NodeRepo {
             .block_on()?)
     }
 
-    /// The local name of the workspace that made a canonical operation. This machine's own
-    /// workspaces keep their names. Another machine's are named like their labels, as in
-    /// `default@beta`. jj's `undo` and `redo` refuse to undo another workspace's operation,
-    /// and they tell workspaces apart only by name, so with the plain name `jj undo` here
-    /// would undo beta's latest operation as if it were this machine's own.
+    /// The local name of the workspace that made a canonical operation, as the operation's
+    /// view names it: `default` for this machine's own, `beta/default` for another's. jj's
+    /// `undo` and `redo` refuse to undo another workspace's operation, and they tell
+    /// workspaces apart only by name, so with the plain name `jj undo` here would undo
+    /// beta's latest operation as if it were this machine's own.
     fn realized_workspace_name(
         &self,
         key: &WorkspaceName,
-        remotes: &BTreeMap<String, String>,
+        names: &BTreeMap<WorkspaceNameBuf, WorkspaceNameBuf>,
     ) -> WorkspaceNameBuf {
+        if let Some(name) = names.get(key) {
+            return name.clone();
+        }
         match workspaces::split_key(key.as_str()) {
             Some((machine, workspace)) if machine == self.machine.key() => workspace.into(),
+            // A workspace the operation forgot, so its view doesn't name it.
             Some((machine, workspace)) => {
-                // A machine with no workspaces left in this view has no label to name.
-                let remote = remotes
-                    .get(machine)
-                    .map_or_else(|| workspaces::machine_name(machine), String::as_str);
-                format!("{workspace}@{remote}").into()
+                format!("{}/{workspace}", workspaces::machine_name(machine)).into()
             }
             None => key.to_owned(),
         }
@@ -905,20 +914,31 @@ impl NodeRepo {
         Ok(head)
     }
 
-    /// Gives each workspace on this machine whose working-copy commit another machine
-    /// abandoned a fresh working-copy commit, as jj does when it abandons a working-copy
-    /// commit locally. Returns the workspaces it moved.
+    /// Gives each workspace on this machine whose working-copy commit is no longer visible
+    /// a fresh working-copy commit, as jj does when it abandons a working-copy commit
+    /// locally. When another machine abandons it, that machine's jj already gave the
+    /// workspace a new commit, which arrives with the operation; this covers the rest, such
+    /// as an abandon on a machine that had forgotten this machine's workspace. Returns the
+    /// workspaces it moved.
     pub fn replace_abandoned_working_copies(&mut self) -> Result<Vec<String>, NodeError> {
         // Merge through `merge_heads`, which exports to `.git`: a bare `load_at_head` would
         // merge without exporting the bookmarks the merge moves.
         let head = self.merge_heads()?;
+        let canonical = self.canonicalize(&head)?;
+        let own: BTreeSet<String> = self
+            .workspaces_of(&canonical)?
+            .into_keys()
+            .filter(|key| self.is_own_key(key))
+            .map(|key| key_workspace(&key).to_owned())
+            .collect();
         let repo = self
             .loader
             .load_at(&self.loader.load_operation(&head).block_on()?)
             .block_on()?;
         let mut abandoned = vec![];
         for (name, wc) in repo.view().wc_commit_ids() {
-            if !is_visible(&repo, wc)? {
+            // Other machines replace their own.
+            if own.contains(name.as_str()) && !is_visible(&repo, wc)? {
                 abandoned.push((name.clone(), wc.clone()));
             }
         }
@@ -1045,4 +1065,9 @@ fn target_of(description: &str) -> Option<(&'static str, OperationId)> {
         let target = OperationId::try_from_hex(description.strip_prefix(prefix)?)?;
         Some((*prefix, target))
     })
+}
+
+/// The workspace part of a machine-qualified key.
+fn key_workspace(key: &WorkspaceName) -> &str {
+    workspaces::split_key(key.as_str()).map_or(key.as_str(), |(_, workspace)| workspace)
 }

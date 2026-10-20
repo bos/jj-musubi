@@ -3,15 +3,12 @@
 //! Workspaces are per-machine (docs/design.md, "Per-machine state in a replicated view"), but
 //! where each machine's working copies are is worth seeing. The canonical view records every
 //! machine's workspaces under machine-qualified keys, `<machine>/<workspace>`. Each machine
-//! writes only its own entries; every machine carries the others' along through rewrites.
-//! A machine shows the other machines' workspaces as remote bookmarks of a pseudo-remote
-//! named after the machine, so `jj log` labels beta's working copy `default@beta`. They are
-//! tracked, since jj treats untracked remote bookmarks as immutable heads by default; with
-//! no local bookmark of the same name, `jj bookmark list` shows them as deleted local
-//! bookmarks. jj never creates or abandons commits for remote bookmarks, and moves them only
-//! on fetch or import, which never involve these, so the labels are inert. The next
-//! realization regenerates them and canonicalization strips them, so nothing done to them
-//! locally reaches other machines.
+//! shows the others' as workspaces of its own view, named after the machine, so `jj log`
+//! shows beta's working copy as `beta/default@`. They are never git refs, so nothing git
+//! does can touch them. jj moves them as it moves any workspace when it rewrites or abandons
+//! their commits, and canonicalization takes those moves, but no other change a machine
+//! makes to another machine's workspaces: adding, forgetting or renaming them stays local,
+//! and the next realization shows them again.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -21,7 +18,8 @@ use std::io::Write as _;
 use std::path::Path;
 
 use jj_lib::backend::CommitId;
-use jj_lib::git::REMOTE_NAME_FOR_LOCAL_GIT_REPO;
+use jj_lib::merge::SameChange;
+use jj_lib::merge::trivial_merge;
 use jj_lib::ref_name::WorkspaceNameBuf;
 
 /// This machine's identity in the hive: a readable name plus a random suffix, `name#1a2b3c4d`,
@@ -113,10 +111,10 @@ pub fn split_key(key: &str) -> Option<(&str, &str)> {
     key.split_once('/')
 }
 
-/// The remote names under which machines' workspaces are shown: the machine's name, or
-/// `name-1a2b` when two machines share a name or the name is taken (by the `git`
-/// pseudo-remote, or a real remote).
-pub fn remote_names(
+/// The names under which machines' workspaces are shown, as `<name>/<workspace>`: the
+/// machine's name, or `name-1a2b` when two machines share a name or `taken` says the name
+/// is in use.
+pub fn display_names(
     machines: &BTreeSet<String>,
     taken: impl Fn(&str) -> bool,
 ) -> BTreeMap<String, String> {
@@ -128,17 +126,32 @@ pub fn remote_names(
         .iter()
         .map(|machine| {
             let name = machine_name(machine);
-            let remote = if by_name[name] > 1
-                || taken(name)
-                || name == REMOTE_NAME_FOR_LOCAL_GIT_REPO.as_str()
-            {
+            let display = if by_name[name] > 1 || taken(name) {
                 format!("{name}-{}", short_id(machine))
             } else {
                 name.to_owned()
             };
-            (machine.clone(), remote)
+            (machine.clone(), display)
         })
         .collect()
+}
+
+/// Merges one workspace's working-copy commit three-way, as jj merges concurrent views: a
+/// trivial merge where there is one, then a removal on either side, then `ours`. This is
+/// jj-lib's `MutableRepo::merge_wc_commit`, which is private, built the same way on jj's
+/// `trivial_merge`; the `workspace_merge_matches_jj` test checks that the two agree.
+pub fn merge_working_copy<'a>(
+    ours: Option<&'a CommitId>,
+    base: Option<&'a CommitId>,
+    theirs: Option<&'a CommitId>,
+) -> Option<&'a CommitId> {
+    if let Some(resolved) = trivial_merge(&[ours, base, theirs], SameChange::Accept) {
+        *resolved
+    } else if ours.is_none() || theirs.is_none() {
+        None
+    } else {
+        ours
+    }
 }
 
 /// Moves working-copy commits along the rewrites an operation records: a commit rewritten
@@ -185,11 +198,11 @@ mod tests {
         ]
         .map(str::to_owned)
         .into();
-        let names = remote_names(&machines, |name| name == "origin");
+        let names = display_names(&machines, |name| name == "origin");
         assert_eq!(names["beta#11112222"], "beta");
         assert_eq!(names["mac#aaaa0000"], "mac-aaaa");
         assert_eq!(names["mac#bbbb0000"], "mac-bbbb");
-        assert_eq!(names["git#cccc0000"], "git-cccc");
+        assert_eq!(names["git#cccc0000"], "git");
         assert_eq!(names["origin#dddd0000"], "origin-dddd");
     }
 

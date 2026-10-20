@@ -32,8 +32,9 @@ musubi join <hive-id> --nats nats://nats.example.com:4222
 musubi daemon
 ```
 
-Workspaces stay per-machine: each machine keeps its own `default@`, and `jj log` labels
-the other machines' working copies `default@laptop` and so on. A machine's name defaults
+Workspaces stay per-machine: each machine keeps its own `default@`, and shows the other
+machines' working copies as workspaces named after them, so `jj log` shows
+`laptop/default@` and so on. A machine's name defaults
 to jj's `operation.hostname`; choose another with `musubi join --machine <name>`.
 
 Or start a new machine from the hive:

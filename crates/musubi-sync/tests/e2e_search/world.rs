@@ -750,15 +750,22 @@ impl World {
             .collect()
     }
 
-    /// Workspace names other machines use that machine `m` does not.
+    /// Other machines' workspaces as machine `m` shows them, `machine/workspace`.
     pub fn foreign_workspace_names(&self, m: usize) -> Vec<String> {
-        let mine: BTreeSet<&String> = self.workspaces[m].iter().map(|ws| &ws.name).collect();
-        let names: BTreeSet<String> = (0..self.nodes())
-            .filter(|&o| o != m)
-            .flat_map(|o| self.workspaces[o].iter().map(|ws| ws.name.clone()))
-            .filter(|name| !mine.contains(name))
-            .collect();
-        names.into_iter().collect()
+        self.raw_jj(
+            m,
+            &[
+                "workspace",
+                "list",
+                "--ignore-working-copy",
+                "-T",
+                "name ++ \"\\n\"",
+            ],
+        )
+        .lines()
+        .filter(|name| name.contains('/'))
+        .map(str::to_owned)
+        .collect()
     }
 
     pub fn add_workspace(&mut self, m: usize, name: &str) {

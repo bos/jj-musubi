@@ -71,43 +71,42 @@ A jj view mixes state that describes the repository with state that describes on
 Replicating views verbatim corrupts the second kind.
 
 - **Workspaces** (`wc_commit_ids`) and each workspace's **git HEAD** (`git_heads`) say where
-  this machine's working copies are checked out, and mean nothing on another machine. jj
-  keeps every workspace in one shared map; replicating it would make every machine's
-  workspaces workspaces of every other machine's repository, as far as jj knows, so any
-  machine could forget or edit another's, and every machine's `default` would collide.
-  So workspaces stay per-machine. The *commits* they point at are replicated like any
-  others: other machines see this machine's working-copy commit as an ordinary commit, and
-  rebase it when they rewrite the commit under it. When a machine takes in an operation
-  that rewrote its own `@`, it follows the rewrite, using the predecessors jj records in
-  every operation, as jj moves a workspace's `@` when it rewrites it locally; if another
-  machine abandoned it, the machine gives itself a fresh `@` on the parent, as jj does
-  locally.
+  this machine's working copies are checked out. jj keeps every workspace in one shared
+  map, and replicating it as is would make every machine's workspaces workspaces of every
+  other machine's repository: any machine could forget or rename another's, and every
+  machine's `default` would collide. So each machine's workspaces are its own, but every
+  machine shows the others'. Each machine has a durable identity, its name plus a random
+  suffix (`laptop#1a2b3c4d`), so two machines that share a hostname are never confused.
+  The canonical view records every machine's workspaces under machine-qualified keys
+  (`laptop#1a2b3c4d/default`). A machine realizes its own under their plain names and the
+  others' as workspaces named after the machine, `laptop/default`, so `jj log` shows the
+  laptop's working copy as `laptop/default@`, and `jj new laptop/default@` builds on it.
+  (Two machines that share a name are shown as `laptop-1a2b/default`.) These are never git
+  refs, so nothing git does can drop them, and jj's git import never abandons work because
+  of them.
 
-  Where the other machines' working copies are is still worth seeing. Each machine has a
-  durable identity, its name plus a random suffix (`laptop#1a2b3c4d`), so two machines
-  that share a hostname are never confused. The canonical view records every machine's
-  workspaces under machine-qualified keys (`laptop#1a2b3c4d/default`). Each machine writes
-  only its own entries, and carries the others' through rewrites and merges, three-way
-  against the merge base as jj merges views. A machine shows the others' workspaces as
-  remote bookmarks of a pseudo-remote named after each machine, so `jj log` labels the
-  laptop's working copy `default@laptop`. The labels are tracked: jj's default
-  `immutable_heads()` includes every untracked remote bookmark, which would make the other
-  machine's work, and everything under it, immutable. With no local bookmark of the same
-  name, `jj bookmark list` shows a label as a deleted local bookmark. jj never creates or
-  abandons commits for remote bookmarks, and moves them only on fetch or import, which
-  never involve these. Each realization regenerates the labels and canonicalization strips
-  them, so nothing done to a label locally reaches another machine. When this machine
-  rewrites another machine's working copy, its own label for it catches up at that
-  machine's next operation.
+  jj moves another machine's workspace as it moves any workspace: when it rewrites the
+  commit, its workspace follows (to the second half of a split, say), and when it abandons
+  it, the workspace gets a new empty commit on the parents. Restoring an older view,
+  through `jj undo`, `jj redo` or `jj op restore`, restores every workspace's position.
+  Canonicalization takes those moves, and the machine that owns the workspace adopts them,
+  as a second workspace does on one machine: its working copy becomes stale, and its next
+  command updates the files (with `snapshot.auto-update-stale`). Nothing else a machine
+  does to another machine's workspaces counts: adding, forgetting or renaming them stays
+  local, and the next sync shows them again. Where concurrent operations disagree about a
+  workspace, musubi merges it three-way exactly as jj does, so a machine's removal of its
+  own workspace wins over another machine moving it meanwhile. If another machine
+  abandons this machine's working-copy commit without moving its workspace (because it had
+  forgotten the workspace), this machine gives itself a fresh `@`, as jj does locally.
 
   Which workspace made an operation is per-machine too. jj records it in the operation's
   metadata, and `jj undo` and `jj redo` refuse to undo another workspace's operation, telling
   workspaces apart only by name. If every machine's operations kept the plain name, each
   machine's `default` would be the same workspace to `jj undo`, which would then undo
   whatever operation last arrived from another machine. So canonical operations record the
-  machine-qualified key, and a machine realizes its own operations under the plain name and
-  another machine's under its label's name: `jj op log` shows `"default@laptop"@`, and
-  `jj undo` refuses to undo the laptop's operation unless given `--allow-cross-workspace`.
+  machine-qualified key, and a machine realizes another machine's operations under that
+  machine's workspace name: `jj op log` shows `laptop/default@`, and `jj undo` refuses to
+  undo the laptop's operation unless given `--allow-cross-workspace`.
 - **`git_refs`** and the **`git` pseudo-remote** (`foo@git`, `tag@git`) record what jj last
   saw in this machine's `.git`. Each `jj` command in a colocated repository compares them with
   the real refs and imports any difference as a change made with git.

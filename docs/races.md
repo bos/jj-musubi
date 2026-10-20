@@ -20,20 +20,21 @@ at random.
 
 ## Workspaces
 
-Workspaces are per-machine (docs/design.md); only the commits they point at are shared.
+Each machine's workspaces are its own, and every machine shows the others' as workspaces
+named after the machine (`beta/default`) (docs/design.md).
 
 | Race | Outcome | Test |
 | --- | --- | --- |
-| Two machines both use workspace `default` | Fine: each keeps its own `default@`; the other's working-copy commit is an ordinary commit. | `machines_may_share_a_workspace_name` |
-| A machine tries to forget or use another machine's workspace | Impossible: it has no such workspace (jj warns "No such workspace"). | `other_machines_workspaces_are_not_visible_as_workspaces` |
-| A machine adds, then forgets, a secondary workspace | Local to that machine; others only ever see the commits it creates. | `secondary_workspaces_stay_local` |
-| A machine rewrites the parent of another machine's `@` | That machine follows the rewrite to its new `@`. jj then treats its working copy as stale; with `snapshot.auto-update-stale = true` its next command updates the files. | `rewriting_under_another_machines_working_copy_is_allowed` |
+| Two machines both use workspace `default` | Fine: each keeps its own `default@`, and shows the other's as `alpha/default@` or `beta/default@`. | `machines_may_share_a_workspace_name` |
+| A machine forgets another machine's workspace | Local only: nothing changes elsewhere, and the next sync shows it again. | `other_machines_workspaces_are_theirs` |
+| A machine adds, then forgets, a secondary workspace | Every machine shows it while it exists. | `secondary_workspaces_show_everywhere` |
+| A machine rewrites the parent of another machine's `@` | jj moves that machine's workspace at once, as it moves any workspace's, and that machine follows. jj then treats its working copy as stale; with `snapshot.auto-update-stale = true` its next command updates the files. | `rewriting_under_another_machines_working_copy_is_allowed`, `other_machines_working_copies_follow_rewrites` |
 | …while that machine has unsnapshotted edits | The edits survive: jj snapshots them at the old operation before updating. At worst the working-copy change diverges. | `unsnapshotted_edit_survives_a_remote_rebase` |
-| A machine abandons another machine's working-copy commit | The owner gives itself a fresh `@` on the parent, as jj does when you abandon `@` locally. | `abandoning_another_machines_working_copy_commit` |
-| Another machine's working copy moves | Its label (`default@beta`) follows. When this machine rewrote it, the label catches up at the other machine's next operation. | `other_machines_workspaces_are_labeled` |
-| A machine edits or forgets another machine's label | Local only; the next sync puts it back. | `labels_are_local` |
-| A machine renames its workspace | The other machines' label for it follows. | `renamed_workspace_relabels` |
-| Several machines share a hostname | Told apart by a random suffix in each machine's durable identity; labels become `default@mac-1a2b`. | `machines_sharing_a_hostname_are_told_apart` |
+| A machine abandons another machine's working-copy commit | jj gives that workspace a new commit on the parent, as for any workspace, and its machine adopts it. | `abandoning_another_machines_working_copy_commit` |
+| A machine renames its workspace | The other machines show the new name. | `renamed_workspace_shows_renamed` |
+| A machine renames or forgets its workspace while another machine rewrites its working copy | The rename or forget wins, as when jj merges concurrent operations on one machine: musubi merges workspaces three-way as jj does, removals first. | `e2e_smoke`, `workspace_merge_matches_jj` |
+| Several machines share a hostname | Told apart by a random suffix in each machine's durable identity, and shown as `mac-1a2b/default`. | `machines_sharing_a_hostname_are_told_apart` |
+| A workspace name git can't store as a ref, an import in a repository that isn't colocated, or a git remote named after a machine | Nothing happens: other machines' working copies are never git refs, so git can't drop them, and jj's import never abandons work because of them. | `git_never_sees_other_machines_working_copies` |
 
 ## Bookmarks and tags
 
@@ -70,8 +71,9 @@ Workspaces are per-machine (docs/design.md); only the commits they point at are 
 
 | Race | Outcome | Test |
 | --- | --- | --- |
-| `jj undo` when the latest operation came from another machine, even with both workspaces named `default` | jj refuses, naming the other machine's workspace (`default@alpha`), since musubi realizes other machines' operations under their label names. With `--allow-cross-workspace` the undo happens and replicates. To undo this machine's own earlier operation once others have arrived, use `jj op revert <op>`. | `undo_of_another_machines_operation`, `op_log_names_other_machines_workspaces` |
+| `jj undo` when the latest operation came from another machine, even with both workspaces named `default` | jj refuses, naming the other machine's workspace (`alpha/default`), since musubi realizes other machines' operations under those workspaces' names. With `--allow-cross-workspace` the undo happens and replicates. To undo this machine's own earlier operation once others have arrived, use `jj op revert <op>`. | `undo_of_another_machines_operation`, `op_log_names_other_machines_workspaces` |
 | `jj undo` past another machine's undo, or of it with `--allow-cross-workspace`, then `jj redo` | As on one machine: jj continues along the undo stack. jj finds the stack by the operation id in an undo's description ("undo: restore to operation <id>"), so musubi translates that id between machines, as it does in `redo:`, `restore to operation` and `revert operation` descriptions. | `undo_stack_continues_across_machines`, `undo_and_redo_of_another_machines_undo` |
+| `jj op restore` (or undo or redo) on one machine, back to before another machine's latest working-copy change | Every machine's working copy goes back to where it was then, as jj restores every workspace on one machine; the other machine's working copy is stale until its next command updates the files. | `op_restore_restores_other_machines_working_copies` |
 | `jj undo` and `jj redo` of this machine's own latest operation | As without musubi; both replicate. `jj redo` finds nothing to redo once another machine's operation has arrived after the undo. | `undo_and_redo_of_own_operation` |
 | A command based at an older operation (`--at-op`, or a long-running command) | A concurrent local operation; jj merges it locally and the merge replicates. | `concurrent_operation_on_one_machine` |
 | A machine misses many updates while working | Catches up with one merge. | `long_offline_machine_catches_up` |

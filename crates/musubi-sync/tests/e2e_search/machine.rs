@@ -232,7 +232,7 @@ impl Search {
         self.note(&tc);
     }
 
-    /// Abandons another machine's working-copy commit, found by its label.
+    /// Abandons another machine's working-copy commit.
     #[rule]
     fn abandon_other_wc(&mut self, tc: TestCase) {
         let m = self.machine(&tc);
@@ -487,24 +487,6 @@ impl Search {
         let name = choose(&tc, &world.foreign_workspace_names(m));
         fired("forget_other_workspace");
         world.jj(m, &["workspace", "forget", &name]);
-        drop(world);
-        self.note(&tc);
-    }
-
-    /// Edits another machine's label locally; the next sync puts it back.
-    #[rule]
-    fn edit_label(&mut self, tc: TestCase) {
-        let m = self.machine(&tc);
-        let mut world = self.world.borrow_mut();
-        let labels: Vec<String> = world.observe(m).labels().into_keys().collect();
-        let label = choose(&tc, &labels);
-        fired("edit_label");
-        if tc.draw(gs::booleans()) {
-            world.jj(m, &["bookmark", "untrack", &label]);
-        } else {
-            let name = label.rsplit_once('@').unwrap().0.to_owned();
-            world.jj(m, &["bookmark", "forget", "--include-remotes", &name]);
-        }
         drop(world);
         self.note(&tc);
     }

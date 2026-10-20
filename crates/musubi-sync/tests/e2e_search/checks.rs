@@ -8,9 +8,6 @@ use std::fmt::Write as _;
 use crate::view::View;
 use crate::world::World;
 
-/// Remote name → workspace name → commit.
-type Labels = BTreeMap<String, BTreeMap<String, String>>;
-
 /// Whether `MUSUBI_SEARCH_MASK` (a comma-separated list) masks a known bug, so a search
 /// can look past it until it is fixed.
 pub fn masked(bug: &str) -> bool {
@@ -53,7 +50,7 @@ impl World {
         self.check_workspaces(&views);
         self.check_divergence(&views[0]);
         self.check_conflicts(&views[0]);
-        self.check_labels();
+        self.check_other_workspaces();
         let view = self.view_at_head(0);
         self.ledger.reset(&view);
     }
@@ -156,12 +153,14 @@ impl World {
         }
     }
 
-    /// Each machine lists only its own workspaces, and their working copies are visible.
+    /// Each machine has its own workspaces, and their working copies are visible. (It
+    /// shows the other machines' too, as `machine/workspace`: `check_other_workspaces`.)
     fn check_workspaces(&self, views: &[View]) {
         for (m, view) in views.iter().enumerate() {
             let listed: BTreeSet<String> = self
                 .raw_jj(m, &["workspace", "list", "-T", "name ++ \"\\n\""])
                 .lines()
+                .filter(|name| !name.contains('/'))
                 .map(str::to_owned)
                 .collect();
             let expected: BTreeSet<String> = self.workspaces[m]
@@ -276,15 +275,14 @@ impl World {
     }
 
     /// After every workspace of every machine makes an operation and the hive syncs, every
-    /// machine labels each other machine's workspaces `<workspace>@<machine>` at their
-    /// working-copy commits, and in its `.git` as `refs/remotes/<machine>/<workspace>`.
+    /// machine shows each other machine's workspaces, as `machine/workspace`, at their
+    /// working-copy commits, and its `.git` has no refs for them.
     ///
-    /// The workspaces take turns, each syncing the whole hive, ancestors first: snapshotting
-    /// a working copy rebases every working copy built on it, and when one machine rewrites
-    /// another's working copy, its label for it catches up only at that machine's next
-    /// operation (docs/races.md). Taking turns this way, each workspace's last operation
-    /// comes after every rewrite of its working copy.
-    fn check_labels(&mut self) {
+    /// The workspaces take turns, each syncing the whole hive, ancestors first:
+    /// snapshotting a working copy rebases every working copy built on it, so taking turns
+    /// this way, each workspace's last operation comes after every rewrite of its working
+    /// copy.
+    fn check_other_workspaces(&mut self) {
         for (m, ws) in self.workspaces_ancestors_first() {
             // Update a stale working copy first, so the edit is not snapshotted at an older
             // operation.
@@ -297,25 +295,21 @@ impl World {
         let expected: Vec<BTreeMap<String, String>> =
             (0..self.nodes()).map(|m| self.working_copies(m)).collect();
         for o in 0..self.nodes() {
-            let mut labels: Labels = BTreeMap::new();
-            // Every label, including any on a hidden commit or conflicted.
-            let template = concat!(
-                r#"if(remote && remote != "git" && remote != "origin", "#,
-                r#"remote ++ "\t" ++ name ++ "\t" ++ if(conflict, "conflict:" "#,
-                r#"++ added_targets.map(|c| c.commit_id()).join(","), "#,
-                r#"normal_target.commit_id()) ++ "\n")"#
-            );
-            let listed = self.raw_jj(o, &["bookmark", "list", "--all-remotes", "-T", template]);
+            // Every other machine's workspace, including any on a hidden commit.
+            let template = r#"name ++ "\t" ++ target.commit_id() ++ "\n""#;
+            let listed = self.raw_jj(o, &["workspace", "list", "-T", template]);
+            let mut shown: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
             for line in listed.lines() {
-                let fields: Vec<&str> = line.split('\t').collect();
-                if let [remote, ws, commit] = fields[..] {
-                    labels
-                        .entry(remote.to_owned())
+                if let Some((name, commit)) = line.split_once('\t')
+                    && let Some((machine, ws)) = name.split_once('/')
+                {
+                    shown
+                        .entry(machine.to_owned())
                         .or_default()
                         .insert(ws.to_owned(), commit.to_owned());
                 }
             }
-            let mut got: Vec<&BTreeMap<String, String>> = labels.values().collect();
+            let mut got: Vec<&BTreeMap<String, String>> = shown.values().collect();
             let mut want: Vec<&BTreeMap<String, String>> = (0..self.nodes())
                 .filter(|&m| m != o)
                 .map(|m| &expected[m])
@@ -324,26 +318,20 @@ impl World {
             want.sort();
             if got != want {
                 self.fail(&format!(
-                    "{}'s labels {labels:?} do not match the other machines' working copies {want:?}\n{}\n{}",
+                    "{} shows the other machines' workspaces as {shown:?}, not at their working copies {want:?}\n{}",
                     self.machine(o),
-                    self.raw_jj(o, &["bookmark", "list", "--all-remotes"]),
                     self.raw_jj(o, &["op", "log", "-n", "12"]),
                 ));
             }
-            for (remote, workspaces) in &labels {
-                for (ws, commit) in workspaces {
-                    let git = self
-                        .fx
-                        .repo(o)
-                        .git(&["rev-parse", &format!("refs/remotes/{remote}/{ws}")]);
-                    if git.trim() != commit {
-                        self.fail(&format!(
-                            "{}'s git ref for {ws}@{remote} is {}, not {commit}",
-                            self.machine(o),
-                            git.trim()
-                        ));
-                    }
-                }
+            let refs =
+                self.fx
+                    .repo(o)
+                    .git(&["for-each-ref", "--format=%(refname)", "refs/remotes"]);
+            if let Some(stray) = refs
+                .lines()
+                .find(|r| !r.starts_with("refs/remotes/origin/"))
+            {
+                self.fail(&format!("{}'s git has {stray}", self.machine(o)));
             }
         }
     }

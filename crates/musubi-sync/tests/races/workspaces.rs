@@ -1,8 +1,18 @@
-//! Workspace names: keys of every machine's working-copy commit in the shared view.
+//! Workspaces are per-machine, and each machine shows the others' as workspaces named
+//! after the machine (`beta/default`).
 
 use musubi_testutil::TestEnv;
 
 use crate::fixture::Fixture;
+
+fn names(hive: &Fixture, index: usize) -> Vec<String> {
+    hive.workspaces(index).into_keys().collect()
+}
+
+fn working_copy(hive: &Fixture, index: usize) -> String {
+    hive.repo(index)
+        .jj(&["log", "--no-graph", "-r", "@", "-T", "commit_id"])
+}
 
 #[test]
 fn basic_replication_converges() {
@@ -17,17 +27,14 @@ fn basic_replication_converges() {
         visible.iter().any(|c| c.ends_with("from alpha"))
             && visible.iter().any(|c| c.ends_with("from beta"))
     );
-    // Workspaces are per-machine: each machine lists only its own, while the other's
-    // working-copy commit is replicated as an ordinary commit.
-    let workspaces = hive
-        .repo(0)
-        .jj(&["workspace", "list", "-T", "name ++ \"\\n\""]);
-    assert_eq!(workspaces, "alpha\n");
+    // Each machine has its own workspace, and shows the other's under the machine's name.
+    assert_eq!(names(&hive, 0), ["alpha", "beta/beta"]);
+    assert_eq!(names(&hive, 1), ["alpha/alpha", "beta"]);
 }
 
 /// Every machine's first workspace is called `default`. Workspaces are per-machine, so
-/// that is fine: each machine keeps its own `default@`, and the other machine's
-/// working-copy commit is just a commit.
+/// that is fine: each machine keeps its own `default@`, and shows the other's as
+/// `alpha/default@` or `beta/default@`.
 #[test]
 fn machines_may_share_a_workspace_name() {
     let env = TestEnv::new();
@@ -38,11 +45,9 @@ fn machines_may_share_a_workspace_name() {
     hive.commit(1, "b", "from beta");
     hive.sync();
     hive.assert_converged();
+    assert_eq!(names(&hive, 0), ["beta/default", "default"]);
+    assert_eq!(names(&hive, 1), ["alpha/default", "default"]);
     for index in [0, 1] {
-        let workspaces = hive
-            .repo(index)
-            .jj(&["workspace", "list", "-T", "name ++ \"\\n\""]);
-        assert_eq!(workspaces, "default\n");
         let parent = hive.repo(index).jj(&[
             "log",
             "--no-graph",
@@ -57,29 +62,65 @@ fn machines_may_share_a_workspace_name() {
             "{index}'s @ moved"
         );
     }
+    // The other machine's working copy is a revision like any workspace's.
+    let beta_wc = hive.repo(0).jj(&[
+        "log",
+        "--no-graph",
+        "-r",
+        "beta/default@",
+        "-T",
+        "commit_id",
+    ]);
+    assert_eq!(beta_wc, working_copy(&hive, 1));
 }
 
-/// No machine has another machine's workspaces, so none can forget, edit, or otherwise
-/// touch them.
+/// Another machine's workspaces are that machine's own: forgetting or renaming them here
+/// changes nothing anywhere else, and the next sync shows them again.
 #[test]
-fn other_machines_workspaces_are_not_visible_as_workspaces() {
+fn other_machines_workspaces_are_theirs() {
     let mut hive = Fixture::new(&["alpha", "beta"]);
     hive.sync();
-    // jj only warns about forgetting a workspace it does not have, and changes nothing.
-    let forget = hive.repo(0).jj_output(&["workspace", "forget", "beta"]);
-    assert!(String::from_utf8_lossy(&forget.stderr).contains("No such workspace: beta"));
-    assert!(
-        !hive
-            .repo(0)
-            .jj_output(&["log", "-r", "beta@"])
-            .status
-            .success()
-    );
+    hive.repo(0).jj(&["workspace", "forget", "beta/beta"]);
+    assert_eq!(names(&hive, 0), ["alpha"]);
     hive.sync();
-    let workspaces = hive
-        .repo(1)
-        .jj(&["workspace", "list", "-T", "name ++ \"\\n\""]);
-    assert_eq!(workspaces, "beta\n");
+    assert_eq!(names(&hive, 1), ["alpha/alpha", "beta"]);
+    hive.commit(1, "b", "from beta");
+    hive.sync();
+    hive.assert_converged();
+    assert_eq!(names(&hive, 0), ["alpha", "beta/beta"]);
+}
+
+/// Each machine's view of the others' working copies follows them, including when this
+/// machine rewrites the commit under one: jj moves the other machine's workspace at once,
+/// as it moves any workspace's, and the other machine follows.
+#[test]
+fn other_machines_working_copies_follow_rewrites() {
+    let env = TestEnv::new();
+    let alpha = env.init_repo_with_workspace("alpha", "default");
+    let beta = env.init_repo_with_workspace("beta", "default");
+    let mut hive = Fixture::join(env, vec![alpha, beta]);
+    hive.commit(1, "b", "from beta");
+    hive.sync();
+    hive.assert_converged();
+    assert_eq!(hive.workspaces(0)["beta/default"], working_copy(&hive, 1));
+    let parent = hive.commit_id(0, "from beta");
+    hive.repo(0)
+        .jj(&["describe", &parent, "-m", "reworded by alpha"]);
+    let moved_here = hive.workspaces(0)["beta/default"].clone();
+    hive.sync();
+    hive.repo(1).jj(&["status"]);
+    assert_eq!(working_copy(&hive, 1), moved_here);
+    let parent_on_beta = hive.repo(1).jj(&[
+        "log",
+        "--no-graph",
+        "-r",
+        "@-",
+        "-T",
+        "description.first_line()",
+    ]);
+    assert_eq!(parent_on_beta, "reworded by alpha");
+    hive.sync();
+    hive.assert_converged();
 }
 
 /// Rebasing another machine's working-copy commit (by rewriting its parent) is the normal
@@ -184,130 +225,39 @@ fn abandoning_another_machines_working_copy_commit() {
     hive.assert_converged();
 }
 
-/// Adding and forgetting a secondary workspace is a local matter: other machines never
-/// see the workspace, only the commits it creates.
+/// A machine's other workspaces show on every machine, and go when it forgets them.
 #[test]
-fn secondary_workspaces_stay_local() {
+fn secondary_workspaces_show_everywhere() {
     let mut hive = Fixture::new(&["alpha", "beta"]);
     let extra = hive.env.root().join("beta-extra");
     hive.repo(1).jj(&[
         "workspace",
         "add",
         "--name",
-        "beta-extra",
+        "extra",
         extra.to_str().unwrap(),
     ]);
     hive.sync();
-    hive.repo(1).jj(&["workspace", "forget", "beta-extra"]);
+    assert_eq!(names(&hive, 0), ["alpha", "beta/beta", "beta/extra"]);
+    hive.repo(1).jj(&["workspace", "forget", "extra"]);
     hive.sync();
     hive.assert_converged();
-    let workspaces = hive
-        .repo(0)
-        .jj(&["workspace", "list", "-T", "name ++ \"\\n\""]);
-    assert_eq!(workspaces, "alpha\n");
+    assert_eq!(names(&hive, 0), ["alpha", "beta/beta"]);
 }
 
-fn working_copy(hive: &Fixture, index: usize) -> String {
-    hive.repo(index)
-        .jj(&["log", "--no-graph", "-r", "@", "-T", "commit_id"])
-}
-
-/// Other machines' workspaces show as labels: beta's `default` is `default@beta` on alpha,
-/// an untracked remote bookmark that follows beta's working copy around.
+/// A machine renames its workspace; the other machines show the new name.
 #[test]
-fn other_machines_workspaces_are_labeled() {
-    let env = TestEnv::new();
-    let alpha = env.init_repo_with_workspace("alpha", "default");
-    let beta = env.init_repo_with_workspace("beta", "default");
-    let mut hive = Fixture::join(env, vec![alpha, beta]);
-    hive.commit(1, "b", "from beta");
-    hive.sync();
-    hive.assert_converged();
-    assert_eq!(hive.bookmarks(0)["default@beta"], working_copy(&hive, 1));
-    assert_eq!(hive.bookmarks(1)["default@alpha"], working_copy(&hive, 0));
-    assert!(
-        !hive.bookmarks(0).contains_key("default@alpha"),
-        "no label for oneself"
-    );
-    // In a colocated repository the label is also a git remote-tracking ref.
-    let git = hive
-        .repo(0)
-        .git(&["rev-parse", "refs/remotes/beta/default"]);
-    assert_eq!(git.trim(), working_copy(&hive, 1));
-
-    // The label follows beta's working copy.
-    hive.commit(1, "c", "more from beta");
-    hive.sync();
-    hive.assert_converged();
-    assert_eq!(hive.bookmarks(0)["default@beta"], working_copy(&hive, 1));
-
-    // When alpha rewrites the commit under beta's working copy, beta follows the rewrite,
-    // and alpha's label catches up with beta's next operation. (Alpha's own label lags
-    // until then: jj does not move remote bookmarks when it rewrites, and a label-only
-    // operation after every such rewrite would be noise.)
-    let parent = hive.commit_id(0, "more from beta");
-    hive.repo(0)
-        .jj(&["describe", &parent, "-m", "reworded by alpha"]);
-    hive.sync();
-    hive.repo(1).write_file("d", "beta keeps working");
-    hive.repo(1).jj(&["status"]);
-    hive.sync();
-    hive.assert_converged();
-    assert_eq!(hive.bookmarks(0)["default@beta"], working_copy(&hive, 1));
-    let parent_on_beta = hive.repo(1).jj(&[
-        "log",
-        "--no-graph",
-        "-r",
-        "@-",
-        "-T",
-        "description.first_line()",
-    ]);
-    assert_eq!(parent_on_beta, "reworded by alpha");
-}
-
-/// Labels are alpha's own view of the hive: changing them changes nothing for anyone else,
-/// and the next sync puts them back.
-#[test]
-fn labels_are_local() {
-    let env = TestEnv::new();
-    let alpha = env.init_repo_with_workspace("alpha", "default");
-    let beta = env.init_repo_with_workspace("beta", "default");
-    let mut hive = Fixture::join(env, vec![alpha, beta]);
-    hive.sync();
-    let beta_wc = working_copy(&hive, 1);
-    hive.repo(0)
-        .jj(&["bookmark", "forget", "--include-remotes", "default"]);
-    hive.sync();
-    hive.repo(1).jj(&["status"]);
-    hive.commit(1, "b", "from beta");
-    hive.sync();
-    hive.assert_converged();
-    assert_ne!(working_copy(&hive, 1), beta_wc);
-    assert_eq!(hive.bookmarks(0)["default@beta"], working_copy(&hive, 1));
-    let workspaces = hive
-        .repo(1)
-        .jj(&["workspace", "list", "-T", "name ++ \"\\n\""]);
-    assert_eq!(workspaces, "default\n");
-}
-
-/// A machine renames its workspace; the other machines' label for it follows.
-#[test]
-fn renamed_workspace_relabels() {
+fn renamed_workspace_shows_renamed() {
     let mut hive = Fixture::new(&["alpha", "beta"]);
     hive.sync();
-    assert!(hive.bookmarks(0).contains_key("beta@beta"));
     hive.repo(1).jj(&["workspace", "rename", "laptop"]);
     hive.sync();
     hive.assert_converged();
-    let labels = hive.bookmarks(0);
-    assert!(
-        labels.contains_key("laptop@beta") && !labels.contains_key("beta@beta"),
-        "{labels:?}"
-    );
+    assert_eq!(names(&hive, 0), ["alpha", "beta/laptop"]);
 }
 
 /// Three machines with the same hostname: musubi tells them apart by a random suffix, and
-/// labels the two others on each machine `default@mac-xxxx` and `default@mac-yyyy`.
+/// shows the two others on each machine as `mac-xxxx/default` and `mac-yyyy/default`.
 #[test]
 fn machines_sharing_a_hostname_are_told_apart() {
     let env = TestEnv::new();
@@ -316,48 +266,50 @@ fn machines_sharing_a_hostname_are_told_apart() {
     hive.sync();
     hive.assert_converged();
     for index in 0..3 {
-        let labels: Vec<String> = hive
-            .bookmarks(index)
+        let others: Vec<String> = names(&hive, index)
             .into_iter()
-            .filter(|(name, _)| name.starts_with("default@mac-"))
-            .map(|(_, target)| target)
+            .filter(|name| name.contains('/'))
             .collect();
-        let mut others: Vec<String> = (0..3)
-            .filter(|&i| i != index)
-            .map(|i| working_copy(&hive, i))
-            .collect();
-        let mut labels = labels;
-        labels.sort();
-        others.sort();
-        assert_eq!(labels, others, "labels on {index}");
+        assert_eq!(others.len(), 2, "{others:?}");
+        assert!(
+            others
+                .iter()
+                .all(|name| name.starts_with("mac-") && name.ends_with("/default")),
+            "{others:?}"
+        );
     }
 }
 
-/// Labels are tracked remote bookmarks, and jj merges a tracked remote bookmark's changes
-/// into the local bookmark of the same name. Editing labels (untracking, forgetting,
-/// undoing that) and the labeled machine moving on must never create a local bookmark,
-/// which would replicate to every machine.
+/// Other machines' working copies are never git refs, so nothing git does can drop them
+/// and have jj abandon the work under them: not a workspace name git can't store as a
+/// ref, not an import in a repository that isn't colocated, and not a git remote named
+/// after a machine.
 #[test]
-fn label_edits_never_become_local_bookmarks() {
-    let mut hive = Fixture::new(&["alpha", "beta"]);
-    hive.commit(1, "b", "from beta");
+fn git_never_sees_other_machines_working_copies() {
+    let env = TestEnv::new();
+    let alpha = env.init_repo_with_workspace("alpha", "default");
+    let beta = env.init_repo_with_workspace("beta", "my laptop");
+    let mut hive = Fixture::join(env, vec![alpha, beta]);
+    hive.commit(1, "b1", "beta's stack 1");
+    hive.commit(1, "b2", "beta's stack 2");
     hive.sync();
-    for step in [
-        &["bookmark", "untrack", "beta@beta"][..],
-        &["bookmark", "forget", "--include-remotes", "beta"],
-        &["undo"],
-    ] {
-        hive.repo(0).jj(step);
-        hive.sync();
-    }
-    hive.repo(0).jj(&["bookmark", "untrack", "beta@beta"]);
-    hive.commit(1, "c", "beta moves on");
-    hive.sync();
+    let refs = hive.repo(0).git(&["for-each-ref", "--format=%(refname)"]);
+    assert!(!refs.contains("beta"), "{refs}");
+    let bare = hive.env.root().join("remote.git");
+    hive.repo(0)
+        .git(&["init", "--bare", "--quiet", bare.to_str().unwrap()]);
+    hive.repo(0)
+        .jj(&["git", "remote", "add", "beta", bare.to_str().unwrap()]);
+    hive.repo(0).jj(&["git", "fetch", "--remote", "beta"]);
+    hive.repo(0).jj(&["git", "import"]);
     hive.repo(0).jj(&["status"]);
     hive.sync();
     hive.assert_converged();
     for index in [0, 1] {
-        let locals = crate::fixture::local_bookmarks(&hive.bookmarks(index));
-        assert!(locals.is_empty(), "local bookmarks on {index}: {locals:?}");
+        let visible = hive.visible(index);
+        assert!(
+            visible.iter().any(|c| c.ends_with("beta's stack 2")),
+            "{index}: {visible:?}"
+        );
     }
 }

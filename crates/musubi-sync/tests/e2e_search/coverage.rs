@@ -40,7 +40,6 @@ pub const RULES: &[&str] = &[
     "workspace_rename",
     "workspace_forget",
     "forget_other_workspace",
-    "edit_label",
     "origin_advance",
     "fetch",
     "push",
@@ -77,11 +76,11 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         Some(&["setup:shared_workspace_name", "commit"]),
     ),
     (
-        "other_machines_workspaces_are_not_visible_as_workspaces",
+        "other_machines_workspaces_are_theirs",
         Some(&["forget_other_workspace"]),
     ),
     (
-        "secondary_workspaces_stay_local",
+        "secondary_workspaces_show_everywhere",
         Some(&["workspace_commit", "workspace_forget"]),
     ),
     (
@@ -96,9 +95,15 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         "abandoning_another_machines_working_copy_commit",
         Some(&["abandon_other_wc"]),
     ),
-    ("other_machines_workspaces_are_labeled", Some(&["commit"])),
-    ("labels_are_local", Some(&["edit_label"])),
-    ("renamed_workspace_relabels", Some(&["workspace_rename"])),
+    (
+        "other_machines_working_copies_follow_rewrites",
+        Some(&["rewrite_under_other_wc"]),
+    ),
+    (
+        "renamed_workspace_shows_renamed",
+        Some(&["workspace_rename"]),
+    ),
+    ("git_never_sees_other_machines_working_copies", None),
     (
         "machines_sharing_a_hostname_are_told_apart",
         Some(&["setup:shared_hostname"]),

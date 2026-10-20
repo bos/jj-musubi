@@ -8,10 +8,10 @@
 //! After every rule, every op head of every repository a sync or fault touched loads, and
 //! every `jj` command and sync step must succeed. At every full convergence (`checks`):
 //! the fixture's `assert_converged`; every node's canonical head is the hub's; every
-//! operation is on every machine; tags agree; each machine lists only its own workspaces,
-//! at visible commits; no divergence and no bookmark or tag conflict that the commands since
-//! the last convergence do not explain (`ledger`); and every machine labels the others'
-//! workspaces at their working copies, in jj and in git.
+//! operation is on every machine; tags agree; each machine has its own workspaces, at
+//! visible commits; no divergence and no bookmark or tag conflict that the commands since
+//! the last convergence do not explain (`ledger`); and every machine shows the others'
+//! workspaces at their working copies, and git never sees them.
 //!
 //! `e2e_smoke` runs in the default suite. The search, `e2e_search_shard_*`, runs with
 //! `cargo nextest run -p musubi-sync --profile search`; each shard has its own example

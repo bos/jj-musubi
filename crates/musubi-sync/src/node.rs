@@ -184,11 +184,46 @@ impl NodeAdapter {
     /// an old operation's.
     fn haves(&self, ops: &[OpId]) -> anyhow::Result<Vec<CommitId>> {
         let mut have_ops = self.local_frontier(ops)?;
-        for head in self.repo.local_heads()? {
-            have_ops.extend(self.repo.canonical_of(&head));
-        }
+        have_ops.extend(self.canonical_heads()?);
         have_ops.push(self.accepted_base()?);
-        let commits = self.required_commits(&have_ops)?;
+        self.present(self.required_commits(&have_ops)?)
+    }
+
+    /// The canonical forms of the op heads that are canonicalized already.
+    fn canonical_heads(&self) -> anyhow::Result<Vec<OpId>> {
+        Ok(self
+            .repo
+            .local_heads()?
+            .iter()
+            .filter_map(|head| self.repo.canonical_of(head))
+            .collect())
+    }
+
+    /// Haves for the hub, which adds `closure(accepted base)` on its own: those of `ops`'
+    /// commits that are present and that the base's do not include.
+    fn haves_beyond_base(&self, ops: &[OpId]) -> anyhow::Result<Attachment> {
+        let base = self.accepted_base()?;
+        let ops: Vec<OpId> = ops.iter().filter(|op| **op != base).cloned().collect();
+        if ops.is_empty() {
+            return Ok(Attachment::Haves(vec![]));
+        }
+        let base_commits: HashSet<CommitId> = self
+            .required_commits(std::slice::from_ref(&base))?
+            .into_iter()
+            .collect();
+        let commits = self
+            .required_commits(&ops)?
+            .into_iter()
+            .filter(|commit| !base_commits.contains(commit))
+            .collect();
+        Ok(Attachment::Haves(self.present(commits)?))
+    }
+
+    /// Those of `commits` present here.
+    fn present(&self, commits: Vec<CommitId>) -> anyhow::Result<Vec<CommitId>> {
+        if commits.is_empty() {
+            return Ok(commits);
+        }
         let absent: HashSet<CommitId> = self
             .repo
             .object_store()?
@@ -263,8 +298,14 @@ impl LocalRepo for NodeAdapter {
         Ok(Attachment::bundle(bundle))
     }
 
+    fn fetch_haves(&self) -> anyhow::Result<Attachment> {
+        self.haves_beyond_base(&self.canonical_heads()?)
+    }
+
     fn objects_request(&self, ops: &[OpId]) -> anyhow::Result<Attachment> {
-        Ok(Attachment::Haves(self.haves(ops)?))
+        let mut have_ops = self.local_frontier(ops)?;
+        have_ops.extend(self.canonical_heads()?);
+        self.haves_beyond_base(&have_ops)
     }
 
     fn stage_ops(&mut self, ops: &[OpEntry<OpId>], attachment: &Attachment) -> anyhow::Result<()> {
@@ -285,6 +326,10 @@ impl LocalRepo for NodeAdapter {
     }
 
     fn stage_objects(&mut self, for_ops: &[OpId], attachment: &Attachment) -> anyhow::Result<()> {
+        if matches!(attachment, Attachment::None) {
+            // The hub had nothing this node lacks.
+            return Ok(());
+        }
         let wants = self.required_commits(for_ops)?;
         let haves = self.haves(for_ops)?;
         // The import may add a pack, which jj-lib must be able to read.

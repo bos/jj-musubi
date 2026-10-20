@@ -4,6 +4,7 @@ Axiom audit: every main theorem depends only on `propext`, `Classical.choice`, a
 -/
 import Musubi.Safety
 import Musubi.Liveness
+import Musubi.Merged
 import Musubi.Chunks
 import Musubi.Scenario
 import Musubi.ExecSound
@@ -39,6 +40,14 @@ open Musubi
 #print axioms eventually_converges
 #print axioms maximal_run_converges
 #print axioms converged_all_accepted
+-- Merged requests
+#print axioms measure_agree
+#print axioms converged_agree
+#print axioms pushAccept_merged
+#print axioms pushIdem_merged
+#print axioms pushReject_merged
+#print axioms fetch_merged
+#print axioms realize_agree
 -- Chunked blobs
 #print axioms Chunks.stored_identical
 #print axioms Chunks.session_finishes

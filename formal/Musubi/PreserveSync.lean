@@ -108,8 +108,8 @@ theorem inv_setNode {s : State} {n : Nat} {nd : Node} (hI : Inv N s) (h : NodeOK
   intro m hm
   have hm' := hI.msgs m hm
   cases m with
-  | cas i e d =>
-    simp only [MsgOK, setNode_U, setNode_hub] at hm' ⊢
+  | cas i e d | push i _ _ e d =>
+    simp only [MsgOK, CasOK, setNode_U, setNode_hub] at hm' ⊢
     rcases hm' with ⟨g, hg, hA⟩ | hA
     · by_cases hi : i = n
       · subst hi; simp only [setNode_self]; exact Or.inl (h.headsMono d g hg hA)
@@ -124,6 +124,7 @@ theorem inv_setNode {s : State} {n : Nat} {nd : Node} (hI : Inv N s) (h : NodeOK
   | getObjs => trivial
   | objs => trivial
   | stored => trivial
+  | fetch => trivial
 
 /-! ## Node-local sync actions -/
 
@@ -250,6 +251,9 @@ theorem inv_hubStoreObjs {s : State} (hI : Inv N s) {S : OSet} : Inv N (s.hubSto
       obtain ⟨h1, h2⟩ := hI.hubClosed y hy
       exact ⟨h1, fun o ho => Or.inl (h2 o ho)⟩ }
 
+theorem inv_hubStore {s : State} (hI : Inv N s) {S O : OSet} : Inv N (s.hubStore S O) :=
+  inv_hubStoreObjs (inv_hubStoreOps hI)
+
 /-! ## Cas acceptance -/
 
 section accept
@@ -269,13 +273,11 @@ variable {s : State} {d : Nat}
 end accept
 
 /-- The heart of `MergeOwnership`: a head of node `n` that becomes accepted when the hub
-accepts `Cas(e, d)` from node `n0` is `d` itself. -/
+accepts `Cas(e, d)` from node `n0`, alone or in a `push`, is `d` itself. -/
 theorem newly_accepted_head {s : State} (hI : Inv N s) {n0 e d : Nat}
-    (hm : s.net (.cas n0 e d)) (he : s.hub.head = e) {n x : Nat}
+    (hok : CasOK s n0 d) (he : s.hub.head = e) {n x : Nat}
     (hx : (s.node n).heads x) (hxd : Anc s.U.par x d) (hxe : ¬ Anc s.U.par x e) : x = d := by
-  have hm' : MsgOK s (.cas n0 e d) := hI.msgs _ hm
-  simp only [MsgOK] at hm'
-  rcases hm' with ⟨g, hg, hdg⟩ | hde
+  rcases hok with ⟨g, hg, hdg⟩ | hde
   · -- x is local at n0, unaccepted, so created by n0; and created by n
     have hxl0 : (s.node n0).lops x := hI.lopsAnc (hI.headsLocal n0 g hg) (hxd.trans hdg)
     rw [← he] at hxe
@@ -290,16 +292,14 @@ theorem newly_accepted_head {s : State} (hI : Inv N s) {n0 e d : Nat}
     exact absurd (hxd.trans hde) hxe
 
 theorem inv_casAccept {s : State} (hI : Inv N s) {n0 e d : Nat}
-    (hm : s.net (.cas n0 e d)) (hne : s.hub.head ≠ d) (he : s.hub.head = e)
+    (hok : CasOK s n0 d) (hne : s.hub.head ≠ d) (he : s.hub.head = e)
     (ha : Anc s.U.par e d) (hc : ClosedAt s d) :
     Inv N (((s.hubAccept d).send (.head n0 .accepted (s.hub.seq + 1) d)).notifyAll
       (s.hub.seq + 1) d) := by
   have hed : Anc s.U.par s.hub.head d := he ▸ ha
   have grow : ∀ {x}, Anc s.U.par x s.hub.head → Anc s.U.par x d := fun h => h.trans hed
   have hdlt : d < s.U.next := by
-    have hm' : MsgOK s (.cas n0 e d) := hI.msgs _ hm
-    simp only [MsgOK] at hm'
-    rcases hm' with ⟨g, hg, hdg⟩ | hde
+    rcases hok with ⟨g, hg, hdg⟩ | hde
     · exact Nat.lt_of_le_of_lt (hdg.le hI.parLt) (hI.headsLt hg)
     · exact hI.accLt hde
   have histOld : ∀ {i}, i ≤ s.hub.seq → upd s.hub.hist (s.hub.seq + 1) d i = s.hub.hist i :=
@@ -310,7 +310,7 @@ theorem inv_casAccept {s : State} (hI : Inv N s) {n0 e d : Nat}
     intro n x hx hxd
     by_cases hxe : Anc s.U.par x s.hub.head
     · exact Or.inl hxe
-    · exact Or.inr (newly_accepted_head hI hm he hx hxd (he ▸ hxe))
+    · exact Or.inr (newly_accepted_head hI hok he hx hxd (he ▸ hxe))
   -- the post-state, field by field
   refine
     { parLt := hI.parLt, nextPos := hI.nextPos, rootAnc := hI.rootAnc,
@@ -383,8 +383,8 @@ theorem inv_casAccept {s : State} (hI : Inv N s) {n0 e d : Nat}
       cases msg with
       | getOps i S => intro x hx; exact grow (h' x hx)
       | ops i S => intro x hx; exact grow (h' x hx)
-      | cas i e' d' =>
-        simp only [MsgOK] at h' ⊢
+      | cas i e' d' | push i _ _ e' d' =>
+        simp only [MsgOK, CasOK] at h' ⊢
         rcases h' with h1 | h1
         · exact Or.inl h1
         · exact Or.inr (grow h1)
@@ -399,6 +399,7 @@ theorem inv_casAccept {s : State} (hI : Inv N s) {n0 e d : Nat}
       | getObjs => trivial
       | objs => trivial
       | stored => trivial
+      | fetch => trivial
     · subst hmsg
       show s.hub.seq + 1 ≤ s.hub.seq + 1 ∧ upd s.hub.hist (s.hub.seq + 1) d (s.hub.seq + 1) = d
       simp
@@ -411,6 +412,14 @@ theorem inv_casAccept {s : State} (hI : Inv N s) {n0 e d : Nat}
 theorem MsgOK_headNow {s : State} (hI : Inv N s) (n : Nat) (k : HeadKind) :
     MsgOK s (.head n k s.hub.seq s.hub.head) :=
   ⟨Nat.le_refl _, hI.histHead⟩
+
+/-- A node may `Cas` to any local operation: it is its own, so in `anc*` of its heads, or
+accepted. -/
+theorem casOK_of_local {s : State} (hI : Inv N s) {n d : Nat} (hd : (s.node n).lops d) :
+    CasOK s n d := by
+  rcases hI.locality n d hd with hc | hA
+  · exact Or.inl (hI.ownInHeads n d (hI.lLt n d hd) hc)
+  · exact Or.inr hA
 
 theorem inv_syncStep {s s' : State} (hI : Inv N s) (h : SyncStep N s s') : Inv N s' := by
   cases h with
@@ -425,12 +434,9 @@ theorem inv_syncStep {s s' : State} (hI : Inv N s) (h : SyncStep N s s') : Inv N
   | advance n hn hk hna => exact inv_advance hI hk hna
   | uploadOps n S hn hS => exact hI.send trivial
   | uploadObjs n S hn hS => exact hI.send trivial
-  | push n e d hn hd =>
-    refine hI.send ?_
-    show (∃ h, (s.node n).heads h ∧ Anc s.U.par d h) ∨ Anc s.U.par d s.hub.head
-    rcases hI.locality n d hd with hc | hA
-    · exact Or.inl (hI.ownInHeads n d (hI.lLt n d hd) hc)
-    · exact Or.inr hA
+  | push n e d hn hd => exact hI.send (casOK_of_local hI hd)
+  | pushAll n S O e d hn hS hO hd => exact hI.send (casOK_of_local hI hd)
+  | fetchAll n b H hn => exact hI.send trivial
   | crashNode n hn => exact hI
   | loseKnown n hn =>
     exact inv_setNode hI { hI.nodeOK n with known := ⟨Nat.zero_le _, hI.hist0⟩ }
@@ -447,8 +453,17 @@ theorem inv_syncStep {s s' : State} (hI : Inv N s) (h : SyncStep N s s') : Inv N
     exact (hI.msgs _ hm : MsgOK s (.getOps n S)) x hx.1
   | hubGetObjs n S hm => exact hI.send trivial
   | casIdem n e d hm hh => exact hI.send (MsgOK_headNow hI n _)
-  | casAccept n e d hm hne he ha hc => exact inv_casAccept hI hm hne he ha hc
+  | casAccept n e d hm hne he ha hc => exact inv_casAccept hI (hI.msgs _ hm) hne he ha hc
   | casReject n e d hm hne hrej => exact hI.send (MsgOK_headNow hI n _)
+  | hubPushIdem n S O e d hm hh =>
+    exact (inv_hubStore hI).send (MsgOK_headNow (inv_hubStore hI) n _)
+  | hubPushAccept n S O e d hm hne he ha hc =>
+    exact inv_casAccept (inv_hubStore hI) (hI.msgs _ hm : CasOK s n d) hne he ha hc
+  | hubPushReject n S O e d hm hne hrej =>
+    exact (inv_hubStore hI).send (MsgOK_headNow (inv_hubStore hI) n _)
+  | hubFetch n b H hm =>
+    refine ((hI.send (MsgOK_headNow hI n _)).send ?_).send trivial
+    exact fun x hx => hx.1
   | crashHub => exact hI
   | hubForget O J hO hJ hc => exact { hI with hubClosed := hc }
 

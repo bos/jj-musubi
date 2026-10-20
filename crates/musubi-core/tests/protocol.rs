@@ -95,14 +95,14 @@ impl Machine {
         tc.assume(!candidates.is_empty());
         let node = pick(&tc, world.nodes());
         let op = candidates[pick(&tc, candidates.len())];
-        // Usually about the head the node asked for, so only the reachability check stands
-        // between the node and the lie.
-        let head = if tc.draw(gs::booleans()) {
-            world.known_head(node)
-        } else {
-            op + 1
+        // About the head the node knows, so only the reachability check stands between the
+        // node and the lie; about another head; or about the operation itself, so that it
+        // reaches itself and only the check that the reply is about the known head stands.
+        let head = match tc.draw(gs::integers::<u8>().max_value(2)) {
+            0 => world.known_head(node),
+            1 => op + 1,
+            _ => op,
         };
-        tc.assume(head != op);
         world.rogue_ops_reply(node, head, op);
     }
 
@@ -122,6 +122,15 @@ impl Machine {
         let mut world = self.world.borrow_mut();
         let node = pick(&tc, world.nodes());
         world.crash_node(node);
+    }
+
+    #[rule]
+    fn crash_mid_fetch(&mut self, tc: TestCase) {
+        tc.assume(self.crashes < 3);
+        self.crashes += 1;
+        let mut world = self.world.borrow_mut();
+        let node = pick(&tc, world.nodes());
+        world.crash_before_objects(node);
     }
 
     #[rule]
@@ -174,20 +183,16 @@ fn conformance(tc: TestCase) {
     run(tc, Some(Oracle::spawn()));
 }
 
-/// A hub may drop uploads it acknowledged but never accepted (the model's `hubForget`). A
-/// node whose push is then rejected must upload again rather than retry the push forever.
+/// A hub may drop uploads it stored but never accepted (the model's `hubForget`), such as
+/// those of a push it rejected. The node must upload them again with its next push.
 #[test]
 fn push_after_forgotten_upload_reuploads() {
     let mut world = World::new(2, None);
     world.user_op(0, 0, 1);
-    // Send the upload and deliver it with both acknowledgements, leaving the push unsent.
-    world.node_step(0, 0);
-    for index in world.undelivered() {
-        world.deliver(index);
-    }
-    for index in world.undelivered() {
-        world.deliver(index);
-    }
+    world.user_op(1, 0, 1);
+    // Node 1's push wins; node 0's, stored but rejected, is then forgotten.
+    world.exchange(1, 0);
+    world.exchange(0, 0);
     world.hub_forget();
     world.quiesce();
     world.check_invariants();
@@ -202,15 +207,13 @@ fn fetch_after_own_push_asks_only_for_newer_operations() {
         world.user_op(0, 0, 1);
         world.quiesce();
         world.user_op(1, 1, 1);
-        // Node 1 uploads, then pushes.
-        world.exchange(1, 0);
         world.exchange(1, 0);
         if restart {
             world.crash_node(0);
             world.exchange(0, 0);
         }
         world.quiesce();
-        assert_eq!(world.last_fetch(0), Some(&[2][..]), "restart: {restart}");
+        assert_eq!(world.last_staged(0), Some(&[2][..]), "restart: {restart}");
     }
 }
 
@@ -230,4 +233,36 @@ fn catching_up_is_linear() {
     let (reads, checks) = world.repo_work(0);
     assert!(reads <= 4 * length, "{reads} reads of staged operations");
     assert!(checks <= 4, "{checks} object checks");
+}
+
+/// A node that crashed after staging operations but before staging their objects asks for
+/// the objects, and does not realize the operations without them.
+#[test]
+fn objects_lost_in_a_crash_are_fetched_again() {
+    let mut world = World::new(2, None);
+    world.user_op(0, 0, 2);
+    world.quiesce();
+    world.user_op(0, 1, 2);
+    world.exchange(0, 0);
+    // Node 1 fetches, staging the operation but not its objects, and restarts.
+    world.crash_before_objects(1);
+    world.poll(1);
+    let sent = world.net_len();
+    world.deliver(sent - 1);
+    world.deliver(sent);
+    // It learns the head from a notification, not from fetching again.
+    world.deliver_notifications(1);
+    for _ in 0..5 {
+        world.exchange(1, 0);
+    }
+    assert!(
+        world
+            .trace
+            .iter()
+            .any(|action| action["kind"] == "fetchObjs"),
+        "no GetObjects: {:#?}",
+        world.trace
+    );
+    world.quiesce();
+    world.check_invariants();
 }

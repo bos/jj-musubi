@@ -5,12 +5,17 @@ import Musubi.Model
 
 namespace Musubi
 
+/-- What a `Cas(_, d)` from node `n`, alone or in a `push`, guarantees: `d` is in `anc*` of
+one of the node's heads, or accepted. -/
+def CasOK (s : State) (n d : Nat) : Prop :=
+  (∃ h, (s.node n).heads h ∧ Anc s.U.par d h) ∨ Anc s.U.par d s.hub.head
+
 /-- What every in-flight message guarantees. -/
 def MsgOK (s : State) : Msg → Prop
   | .getOps _ S => ∀ x, S x → Anc s.U.par x s.hub.head
   | .ops _ S => ∀ x, S x → Anc s.U.par x s.hub.head
-  | .cas n _ d =>
-      (∃ h, (s.node n).heads h ∧ Anc s.U.par d h) ∨ Anc s.U.par d s.hub.head
+  | .cas n _ d => CasOK s n d
+  | .push n _ _ _ d => CasOK s n d
   | .head _ _ sq h => sq ≤ s.hub.seq ∧ s.hub.hist sq = h
   | _ => True
 

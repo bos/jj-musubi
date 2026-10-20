@@ -166,12 +166,19 @@ impl HubStorage for FakeHub {
         Ok((entries, vec![]))
     }
 
-    fn objects_for(&self, for_ops: &[Op], _: &Vec<Obj>) -> Result<Vec<Obj>, Infallible> {
+    /// The model's objects have no structure, so `closure(base)` says nothing; the node's
+    /// haves say everything it has.
+    fn objects_for(
+        &self,
+        for_ops: &[Op],
+        _: &Op,
+        haves: &Vec<Obj>,
+    ) -> Result<Vec<Obj>, Infallible> {
         let univ = self.univ.borrow();
         let wanted = univ.objs_of(for_ops.iter().copied());
         Ok(wanted
             .into_iter()
-            .filter(|o| self.objs.contains(o))
+            .filter(|o| self.objs.contains(o) && !haves.contains(o))
             .collect())
     }
 
@@ -202,6 +209,9 @@ pub struct FakeRepo {
     /// real repository does in files and `git` processes.
     pub staged_reads: Cell<usize>,
     pub object_checks: Cell<usize>,
+    /// Crash before writing the next objects to stage: a real repository writes operations
+    /// and objects separately.
+    pub crash_before_objects: bool,
 }
 
 impl FakeRepo {
@@ -219,6 +229,7 @@ impl FakeRepo {
             last_merge: None,
             staged_reads: Cell::new(0),
             object_checks: Cell::new(0),
+            crash_before_objects: false,
         }
     }
 
@@ -284,8 +295,13 @@ impl LocalRepo for FakeRepo {
             .collect())
     }
 
+    /// Every object this node has, which the hub then leaves out.
+    fn fetch_haves(&self) -> Result<Vec<Obj>, Infallible> {
+        Ok(self.lobj.iter().chain(&self.sobj).copied().collect())
+    }
+
     fn objects_request(&self, _: &[Op]) -> Result<Vec<Obj>, Infallible> {
-        Ok(vec![])
+        self.fetch_haves()
     }
 
     fn stage_ops(&mut self, ops: &[OpEntry<Op>], _: &Vec<Obj>) -> Result<(), Infallible> {
@@ -296,7 +312,9 @@ impl LocalRepo for FakeRepo {
     }
 
     fn stage_objects(&mut self, _: &[Op], objs: &Vec<Obj>) -> Result<(), Infallible> {
-        self.sobj.extend(objs.iter().copied());
+        if !self.crash_before_objects {
+            self.sobj.extend(objs.iter().copied());
+        }
         Ok(())
     }
 

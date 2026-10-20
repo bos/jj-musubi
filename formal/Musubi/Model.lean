@@ -62,7 +62,13 @@ inductive HeadKind
 
 /-- Messages. Requests carry the sending node; replies carry the destination node. Request
 ids are not modeled: a node handles any reply addressed to it, which over-approximates
-matching replies to outstanding requests. -/
+matching replies to outstanding requests.
+
+`push` and `fetch` are the merged requests the implementation sends: `push n S O e d` is
+`PutOps(S)`, `PutObjects(O)` and `Cas(e, d)` handled in one critical section, and
+`fetch n b H` asks for the hub's head together with the operations accepted since `b` and
+their objects, less the haves `H`, replied to with a `head`, an `ops` and an `objs`
+message. -/
 inductive Msg
   | getHead (n : Nat)
   | putOps (n : Nat) (S : OSet)
@@ -74,6 +80,8 @@ inductive Msg
   | ops (n : Nat) (S : OSet)
   | objs (n : Nat) (S : OSet)
   | stored (n : Nat)
+  | push (n : Nat) (S O : OSet) (e d : Nat)
+  | fetch (n b : Nat) (H : OSet)
 
 /-- The global state. `net` is the set of every message ever sent. A message in `net` may be
 delivered any number of times (duplication), in any order (reordering), arbitrarily late
@@ -176,6 +184,17 @@ def hubStoreOps (s : State) (S : OSet) : State :=
 def hubStoreObjs (s : State) (S : OSet) : State :=
   { s with hub := { s.hub with objs := fun x => s.hub.objs x ∨ S x } }
 
+/-- The hub stores a `push`'s operations and objects. -/
+def hubStore (s : State) (S O : OSet) : State := (s.hubStoreOps S).hubStoreObjs O
+
+/-- What `fetch n b H` returns: the stored operations in `anc*(head) \ anc*(b)`... -/
+def sinceOps (s : State) (b : Nat) : OSet :=
+  fun x => Anc s.U.par x s.hub.head ∧ ¬ Anc s.U.par x b ∧ s.hub.ops x
+
+/-- ... and the stored objects they require, less the haves `H`. -/
+def sinceObjs (s : State) (b : Nat) (H : OSet) : OSet :=
+  fun o => (∃ x, s.sinceOps b x ∧ o ∈ s.U.objs x) ∧ ¬ H o ∧ s.hub.objs o
+
 /-- The hub accepts `d`: `head := d`, `seq := seq + 1` (and the ghost history records it). -/
 def hubAccept (s : State) (d : Nat) : State :=
   { s with hub := { s.hub with head := d, seq := s.hub.seq + 1,
@@ -236,6 +255,14 @@ inductive SyncStep (N : Nat) : State → State → Prop
       (hS : ∀ o, S o → (s.node n).lobj o) : SyncStep N s (s.send (.putObjs n S))
   | push (s : State) (n e d : Nat) (hn : n < N) (hd : (s.node n).lops d) :
       SyncStep N s (s.send (.cas n e d))
+  /-- The merged `Push`: upload and `Cas` in one request, with the guards of all three. -/
+  | pushAll (s : State) (n : Nat) (S O : OSet) (e d : Nat) (hn : n < N)
+      (hS : ∀ x, S x → (s.node n).lops x) (hO : ∀ o, O o → (s.node n).lobj o)
+      (hd : (s.node n).lops d) :
+      SyncStep N s (s.send (.push n S O e d))
+  /-- The merged `Fetch`. It needs no guard: the hub chooses the operations, all accepted. -/
+  | fetchAll (s : State) (n b : Nat) (H : OSet) (hn : n < N) :
+      SyncStep N s (s.send (.fetch n b H))
   | crashNode (s : State) (n : Nat) (hn : n < N) : SyncStep N s s
   /-- Relaxation (stronger than `protocol.md` requires): a restarting node may lose `known`
   while keeping `staged` (what the Rust node does: it persists staged files, not `known`). -/
@@ -267,6 +294,26 @@ inductive SyncStep (N : Nat) : State → State → Prop
   | casReject (s : State) (n e d : Nat) (hm : s.net (.cas n e d)) (hne : s.hub.head ≠ d)
       (hrej : ¬ (s.hub.head = e ∧ Anc s.U.par e d ∧ ClosedAt s d)) :
       SyncStep N s (s.send (.head n .rejected s.hub.seq s.hub.head))
+  /-- A `push` stores its operations and objects, then is answered as a `Cas`: here `new` is
+  the head already. -/
+  | hubPushIdem (s : State) (n : Nat) (S O : OSet) (e d : Nat) (hm : s.net (.push n S O e d))
+      (hh : s.hub.head = d) :
+      SyncStep N s ((s.hubStore S O).send (.head n .accepted s.hub.seq s.hub.head))
+  /-- A `push` accepted: the closure is checked after storing, in the same critical section. -/
+  | hubPushAccept (s : State) (n : Nat) (S O : OSet) (e d : Nat)
+      (hm : s.net (.push n S O e d)) (hne : s.hub.head ≠ d) (he : s.hub.head = e)
+      (ha : Anc s.U.par e d) (hc : ClosedAt (s.hubStore S O) d) :
+      SyncStep N s
+        ((((s.hubStore S O).hubAccept d).send (.head n .accepted (s.hub.seq + 1) d)).notifyAll
+          (s.hub.seq + 1) d)
+  | hubPushReject (s : State) (n : Nat) (S O : OSet) (e d : Nat)
+      (hm : s.net (.push n S O e d)) (hne : s.hub.head ≠ d)
+      (hrej : ¬ (s.hub.head = e ∧ Anc s.U.par e d ∧ ClosedAt (s.hubStore S O) d)) :
+      SyncStep N s ((s.hubStore S O).send (.head n .rejected s.hub.seq s.hub.head))
+  /-- A `fetch` answered with the head, and the operations and objects since `b`. -/
+  | hubFetch (s : State) (n b : Nat) (H : OSet) (hm : s.net (.fetch n b H)) :
+      SyncStep N s (((s.send (.head n .head s.hub.seq s.hub.head)).send
+        (.ops n (s.sinceOps b))).send (.objs n (s.sinceObjs b H)))
   | crashHub (s : State) : SyncStep N s s
   /-- Relaxation (stronger than `protocol.md` requires): the hub may lose (or garbage-collect)
   any stored operations and objects outside `closure(head)`. -/

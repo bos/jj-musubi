@@ -47,4 +47,31 @@ def errorOf : Except String EState → String
 #guard errorOf (run 2 initE (pre ++ [.fetchOps 1 [1]])) ==
   "fetchOps: [1] not all in anc*(known.head = 0)"
 
+/-- The same run with the merged requests: node 0's `push` uploads and is accepted at once,
+and node 1's `fetch` brings the head with the operation and its object. -/
+def merged : List Action :=
+  [.userOp 0 root [10], .pushAll 0 [1] [10] root 1, .hubPushAccept 0 [1] [10] root 1,
+   .learn 0 .accepted 1 1, .fetchAll 1 root [], .hubFetch 1 root [], .learn 1 .head 1 1,
+   .recvOps 1 [1], .recvObjs 1 [10], .realize 1 1, .advance 1]
+
+#guard match run 2 initE merged with
+  | .ok es => es.hub.head == 1 && es.hub.seq == 1 && (es.nodeOf 1).heads == [1] &&
+      (es.nodeOf 1).known == (1, 1)
+  | .error _ => false
+
+-- A push whose upload leaves the closure incomplete is rejected, and stores what it carried.
+#guard errorOf (run 2 initE [.userOp 0 root [10], .pushAll 0 [1] [] root 1,
+    .hubPushAccept 0 [1] [] root 1]) ==
+  "hubPushAccept: closure of 1 not stored at hub (missing object 10 of op 1)"
+#guard match run 2 initE [.userOp 0 root [10], .pushAll 0 [1] [] root 1,
+    .hubPushReject 0 [1] [] root 1] with
+  | .ok es => es.hub.ops.contains 1 && es.hub.head == root
+  | .error _ => false
+
+-- A fetch returns nothing below its base, and leaves out the haves.
+#guard match run 2 initE (merged ++ [.userOp 1 1 [11], .pushAll 1 [2] [11] 1 2,
+    .hubPushAccept 1 [2] [11] 1 2, .fetchAll 0 1 [11], .hubFetch 0 1 [11]]) with
+  | .ok es => es.inNet (.ops 0 [2]) && es.inNet (.objs 0 [])
+  | .error _ => false
+
 end Musubi.Exec.Test

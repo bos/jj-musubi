@@ -82,6 +82,9 @@ impl HubStorage for HubAdapter {
         base: &OpId,
     ) -> anyhow::Result<(Vec<OpEntry<OpId>>, Attachment)> {
         let ids = self.store.ops_since(head, base)?;
+        if ids.is_empty() {
+            return Ok((vec![], Attachment::None));
+        }
         let canonical = self.store.canonical();
         let mut entries = Vec::with_capacity(ids.len());
         for id in &ids {
@@ -95,19 +98,33 @@ impl HubStorage for HubAdapter {
         Ok((entries, Attachment::bundle(bundle)))
     }
 
-    fn objects_for(&self, for_ops: &[OpId], request: &Attachment) -> anyhow::Result<Attachment> {
+    fn objects_for(
+        &self,
+        for_ops: &[OpId],
+        base: &OpId,
+        haves: &Attachment,
+    ) -> anyhow::Result<Attachment> {
         let mut wants = BTreeSet::new();
         for op in for_ops {
             if self.store.canonical().has_operation(op) {
                 wants.extend(self.store.required_commits(op)?);
             }
         }
+        if wants.is_empty() {
+            return Ok(Attachment::None);
+        }
         let wants: Vec<CommitId> = wants.into_iter().collect();
         let objects = self.store.object_store();
         let absent = objects.missing(&wants)?;
         let present: Vec<CommitId> = wants.into_iter().filter(|c| !absent.contains(c)).collect();
+        // The node has `closure(base)`, and what it says it has.
+        let mut haves: BTreeSet<CommitId> = haves.haves().iter().cloned().collect();
+        if self.store.canonical().has_operation(base) {
+            haves.extend(self.store.required_commits(base)?);
+        }
+        let haves: Vec<CommitId> = haves.into_iter().collect();
         let bundle = temp_bundle(&self.tmp)?;
-        objects.export(&present, request.haves(), &bundle)?;
+        objects.export(&present, &haves, &bundle)?;
         Ok(Attachment::bundle(bundle))
     }
 

@@ -5,7 +5,6 @@
 //! it in tests. Neither performs I/O on the network: [`NodeCore::step`] returns requests to
 //! send, and [`NodeCore::handle`] consumes replies.
 
-use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
@@ -38,18 +37,23 @@ pub trait LocalRepo {
     /// `anc*(head) \ anc*(base)`, ancestors first, for local `head` and `base`.
     fn ops_between(&self, head: &Self::Op, base: &Self::Op) -> Result<Vec<Self::Op>, Self::Error>;
 
-    /// The content of `ops`, for `PutOps`.
+    /// The content of `ops`, for `Push`.
     fn ops_attachment(&self, ops: &[Self::Op]) -> Result<Self::Attachment, Self::Error>;
 
-    /// The objects `ops` require, for `PutObjects`, omitting what the hub has because it
-    /// holds `closure(base)`.
+    /// The objects `ops` require, for `Push`, omitting what the hub has because it holds
+    /// `closure(base)`.
     fn objects_attachment(
         &self,
         ops: &[Self::Op],
         base: &Self::Op,
     ) -> Result<Self::Attachment, Self::Error>;
 
-    /// What to tell the hub in `GetObjects` about the objects this node already has.
+    /// What to tell the hub in `Fetch` about the objects this node has beyond
+    /// `closure(accepted_base)`, which the hub leaves out anyway.
+    fn fetch_haves(&self) -> Result<Self::Attachment, Self::Error>;
+
+    /// What to tell the hub in `GetObjects` for `ops` about the objects this node has
+    /// beyond `closure(accepted_base)`.
     fn objects_request(&self, ops: &[Self::Op]) -> Result<Self::Attachment, Self::Error>;
 
     /// Stores received operations without realizing them.
@@ -80,8 +84,9 @@ pub trait LocalRepo {
     /// Makes a local operation an op head (`heads := max(heads ∪ {op})`).
     fn advance(&mut self, op: &Self::Op) -> Result<(), Self::Error>;
 
-    /// A local operation the hub has accepted, used as the base of `GetOpsSince` so a node
-    /// is not sent history it already has. The root operation is always valid.
+    /// A local operation the hub has accepted, reachable from the op heads, used as the
+    /// base of `Fetch` so a node is not sent history it already has. The root operation is
+    /// always valid.
     fn accepted_base(&self) -> Result<Self::Op, Self::Error>;
 
     fn set_accepted_base(&mut self, op: &Self::Op) -> Result<(), Self::Error>;
@@ -104,35 +109,20 @@ pub enum Step<O, A> {
 pub enum Handled<O> {
     /// Adopted a newer `(seq, head)`.
     Learned { kind: HeadKind, seq: u64, head: O },
-    /// Staged the operations of an `Ops` reply.
-    StagedOps(Vec<O>),
+    /// Took in a `Fetched` reply: adopted its `(seq, head)` if it was newer, and staged its
+    /// operations and their objects if they were all in `anc*(known.head)`.
+    Fetched {
+        learned: Option<(u64, O)>,
+        staged: Vec<O>,
+    },
     /// Staged the objects of an `Objects` reply.
     StagedObjects(Vec<O>),
-    /// Counted a `Stored` acknowledgement.
-    Acknowledged,
-    /// Ignored: stale, unrequested, or not an ancestor of the head it claims.
+    /// Ignored: stale, or about another head, or not all reachable from the head it names.
     Ignored,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum Upload<O> {
-    None,
-    /// `PutOps` and `PutObjects` for `head` were sent; `acks` counts `Stored` replies.
-    Sent {
-        head: O,
-        acks: u8,
-    },
-    /// Both were acknowledged; push next.
-    Stored {
-        head: O,
-    },
 }
 
 pub struct NodeCore<O> {
     known: (u64, O),
-    /// Heads this node sent `GetOpsSince` for; replies about any other head are ignored.
-    requested: BTreeSet<O>,
-    upload: Upload<O>,
     /// Staged operations to realize, in order: each one's parents are local or earlier,
     /// and its objects are available. Planned by one walk, rather than one per step.
     plan: VecDeque<O>,
@@ -153,14 +143,24 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
     pub fn new(root: O) -> Self {
         Self {
             known: (0, root),
-            requested: BTreeSet::new(),
-            upload: Upload::None,
             plan: VecDeque::new(),
         }
     }
 
     pub fn known(&self) -> &(u64, O) {
         &self.known
+    }
+
+    /// What a node sends when it connects, and on every poll: a `Fetch` of the hub's head,
+    /// with whatever is new since this node's accepted base.
+    pub fn poll<R>(&self, repo: &R) -> Result<Request<O, R::Attachment>, R::Error>
+    where
+        R: LocalRepo<Op = O>,
+    {
+        Ok(Request::Fetch {
+            base: repo.accepted_base()?,
+            haves: repo.fetch_haves()?,
+        })
     }
 
     /// Takes the next policy step (docs/protocol.md, "Policy").
@@ -178,7 +178,7 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
             if self.plan.is_empty() {
                 let survey = Self::survey(repo, &known)?;
                 if survey.plan.is_empty() {
-                    return self.fetch(repo, &known, survey);
+                    return self.fetch(repo, survey);
                 }
                 self.plan = survey.plan;
             }
@@ -207,29 +207,15 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
         if *head == known {
             return Ok(Step::Idle);
         }
-        // `known ∈ anc*(head)`: upload what the hub lacks, then push.
-        if self.upload == (Upload::Stored { head: head.clone() }) {
-            return Ok(Step::Send(vec![Request::Cas {
-                expected: known,
-                new: head.clone(),
-            }]));
-        }
+        // `known ∈ anc*(head)`: push, uploading what the hub lacks with it.
         let ops = repo.ops_between(head, &known)?;
-        let requests = vec![
-            Request::PutOps {
-                attachment: repo.ops_attachment(&ops)?,
-                ops: ops.clone(),
-            },
-            Request::PutObjects {
-                attachment: repo.objects_attachment(&ops, &known)?,
-                for_ops: ops,
-            },
-        ];
-        self.upload = Upload::Sent {
-            head: head.clone(),
-            acks: 0,
-        };
-        Ok(Step::Send(requests))
+        Ok(Step::Send(vec![Request::Push {
+            ops_attachment: repo.ops_attachment(&ops)?,
+            objects: repo.objects_attachment(&ops, &known)?,
+            ops,
+            expected: known,
+            new: head.clone(),
+        }]))
     }
 
     /// Walks `anc*(known)` down to the local operations, once: which staged operations can
@@ -292,13 +278,10 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
         })
     }
 
-    /// Requests whatever `closure(known)` still lacks, as a survey found.
-    fn fetch<R>(
-        &mut self,
-        repo: &R,
-        known: &O,
-        survey: Survey<O>,
-    ) -> Result<Step<O, R::Attachment>, R::Error>
+    /// Requests whatever `closure(known.head)` still lacks, as a survey found: operations
+    /// come with their objects from `Fetch`, which asks about the hub's head, the newest
+    /// `known.head`; `GetObjects` asks only for objects of operations already staged.
+    fn fetch<R>(&self, repo: &R, survey: Survey<O>) -> Result<Step<O, R::Attachment>, R::Error>
     where
         R: LocalRepo<Op = O>,
     {
@@ -309,18 +292,13 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
         } = survey;
         let mut requests = vec![];
         if missing_ops {
-            self.requested.insert(known.clone());
-            let base = repo.accepted_base()?;
-            requests.push(Request::GetOpsSince {
-                head: known.clone(),
-                base,
-            });
+            requests.push(self.poll(repo)?);
         }
         if !missing_objects.is_empty() {
-            let attachment = repo.objects_request(&missing_objects)?;
             requests.push(Request::GetObjects {
+                haves: repo.objects_request(&missing_objects)?,
+                base: repo.accepted_base()?,
                 for_ops: missing_objects,
-                attachment,
             });
         }
         Ok(if requests.is_empty() {
@@ -340,13 +318,6 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
     {
         match reply {
             Reply::Head { kind, seq, head } => {
-                if kind == HeadKind::Rejected
-                    || matches!(&self.upload, Upload::Stored { head: h } if *h == head)
-                {
-                    // Rejected: the upload may not have landed, or the hub moved on; either
-                    // way the next push starts over. Accepted: done with this upload.
-                    self.upload = Upload::None;
-                }
                 if seq > self.known.0 {
                     self.known = (seq, head.clone());
                     Ok(Handled::Learned { kind, seq, head })
@@ -354,27 +325,33 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
                     Ok(Handled::Ignored)
                 }
             }
-            Reply::Stored => {
-                if let Upload::Sent { head, acks } = &mut self.upload {
-                    *acks += 1;
-                    if *acks >= 2 {
-                        self.upload = Upload::Stored { head: head.clone() };
-                    }
-                }
-                Ok(Handled::Acknowledged)
-            }
-            Reply::Ops {
+            Reply::Fetched {
+                seq,
                 head,
                 ops,
-                attachment,
+                ops_attachment,
+                objects,
             } => {
-                if !self.requested.contains(&head) || !all_reach(&head, &ops) {
-                    return Ok(Handled::Ignored);
+                let learned = (seq > self.known.0).then(|| {
+                    self.known = (seq, head.clone());
+                    (seq, head.clone())
+                });
+                // Stage only operations in `anc*(known.head)`: the guard Locality, and so
+                // MergeOwnership, depend on (docs/protocol.md, "Fetch").
+                if ops.is_empty() || head != self.known.1 || !all_reach(&head, &ops) {
+                    return Ok(match learned {
+                        Some((seq, head)) => Handled::Learned {
+                            kind: HeadKind::Head,
+                            seq,
+                            head,
+                        },
+                        None => Handled::Ignored,
+                    });
                 }
-                repo.stage_ops(&ops, &attachment)?;
-                Ok(Handled::StagedOps(
-                    ops.into_iter().map(|entry| entry.id).collect(),
-                ))
+                repo.stage_ops(&ops, &ops_attachment)?;
+                let staged: Vec<O> = ops.into_iter().map(|entry| entry.id).collect();
+                repo.stage_objects(&staged, &objects)?;
+                Ok(Handled::Fetched { learned, staged })
             }
             Reply::Objects {
                 for_ops,

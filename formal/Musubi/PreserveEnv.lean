@@ -326,8 +326,8 @@ theorem inv_createOp (hI : Inv N s) (hn : n < N)
       intro x hx; exact (T hI.headLt).2 (hm' x hx)
     | ops i S =>
       intro x hx; exact (T hI.headLt).2 (hm' x hx)
-    | cas i e d =>
-      simp only [MsgOK, createOp_U, create_par, createOp_hub] at hm' ⊢
+    | cas i e d | push i _ _ e d =>
+      simp only [MsgOK, CasOK, createOp_U, create_par, createOp_hub] at hm' ⊢
       rcases hm' with ⟨h, hh, hA⟩ | hA
       · by_cases hi : i = n
         · subst hi
@@ -343,6 +343,7 @@ theorem inv_createOp (hI : Inv N s) (hn : n < N)
     | getObjs => trivial
     | objs => trivial
     | stored => trivial
+    | fetch => trivial
 
 end createOp
 

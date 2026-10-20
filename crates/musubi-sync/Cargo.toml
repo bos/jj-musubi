@@ -11,6 +11,7 @@ publish.workspace = true
 anyhow.workspace = true
 blake3.workspace = true
 bytes.workspace = true
+futures.workspace = true
 jj-lib.workspace = true
 musubi-core.workspace = true
 musubi-hub.workspace = true
@@ -23,6 +24,7 @@ tokio = { workspace = true, features = ["rt", "time", "sync", "macros"] }
 tracing.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
 hegeltest.workspace = true
 musubi-testutil.workspace = true
 tokio = { workspace = true, features = ["rt", "time", "macros"] }

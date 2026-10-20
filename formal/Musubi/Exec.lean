@@ -55,6 +55,8 @@ inductive EMsg
   | ops (n : Nat) (S : List Nat)
   | objs (n : Nat) (S : List Nat)
   | stored (n : Nat)
+  | push (n : Nat) (S O : List Nat) (e d : Nat)
+  | fetch (n b : Nat) (H : List Nat)
   | notifyAll (sq h : Nat)
   deriving Repr
 
@@ -130,6 +132,8 @@ def EMsg.toMsg : EMsg → Msg
   | .ops n S => .ops n (setP S)
   | .objs n S => .objs n (setP S)
   | .stored n => .stored n
+  | .push n S O e d => .push n (setP S) (setP O) e d
+  | .fetch n b H => .fetch n b (setP H)
   | .notifyAll sq h => .head 0 .notify sq h
 
 /-- The relational messages a finite message stands for. -/
@@ -145,6 +149,8 @@ def EMsg.covers : EMsg → Msg → Prop
   | .ops n S, m => m = .ops n (setP S)
   | .objs n S, m => m = .objs n (setP S)
   | .stored n, m => m = .stored n
+  | .push n S O e d, m => m = .push n (setP S) (setP O) e d
+  | .fetch n b H, m => m = .fetch n b (setP H)
 
 def abs (es : EState) : State where
   U := { next := es.next, par := es.parF, objs := es.objsF, creator := es.creatorF,
@@ -187,6 +193,9 @@ def matchB : EMsg → EMsg → Bool
   | .ops a S, .ops b T => a == b && seteq S T
   | .objs a S, .objs b T => a == b && seteq S T
   | .stored a, .stored b => a == b
+  | .push a S O e d, .push b T P e' d' =>
+    a == b && seteq S T && seteq O P && e == e' && d == d'
+  | .fetch a c H, .fetch b c' H' => a == b && c == c' && seteq H H'
   | .notifyAll s h, .head _ k s' h' => k == .notify && s == s' && h == h'
   | .notifyAll s h, .notifyAll s' h' => s == s' && h == h'
   | _, _ => false
@@ -226,6 +235,16 @@ def hubStoreOps (es : EState) (S : List Nat) : EState :=
 
 def hubStoreObjs (es : EState) (S : List Nat) : EState :=
   { es with hub := { es.hub with objs := union es.hub.objs S } }
+
+def hubStore (es : EState) (S O : List Nat) : EState := (es.hubStoreOps S).hubStoreObjs O
+
+/-- The stored operations in `anc*(head) \ anc*(b)`, which a `fetch` returns. -/
+def sinceOpsL (es : EState) (b : Nat) : List Nat :=
+  (ancL es.parF es.hub.head).filter (fun x => !ancB es.parF x b && es.hub.ops.contains x)
+
+/-- The stored objects they require, less the haves `H`. -/
+def sinceObjsL (es : EState) (b : Nat) (H : List Nat) : List Nat :=
+  ((es.sinceOpsL b).flatMap es.objsF).filter (fun o => !H.contains o && es.hub.objs.contains o)
 
 def hubAccept (es : EState) (d : Nat) : EState :=
   { es with hub := { es.hub with head := d, seq := es.hub.seq + 1,
@@ -268,6 +287,8 @@ inductive Action
   | uploadOps (node : Nat) (ops : List Nat)
   | uploadObjs (node : Nat) (objs : List Nat)
   | push (node expected new : Nat)
+  | pushAll (node : Nat) (ops objs : List Nat) (expected new : Nat)
+  | fetchAll (node base : Nat) (haves : List Nat)
   | crashNode (node : Nat)
   | loseKnown (node : Nat)
   | loseVolatile (node : Nat)
@@ -279,6 +300,10 @@ inductive Action
   | casIdem (node expected new : Nat)
   | casAccept (node expected new : Nat)
   | casReject (node expected new : Nat)
+  | hubPushIdem (node : Nat) (ops objs : List Nat) (expected new : Nat)
+  | hubPushAccept (node : Nat) (ops objs : List Nat) (expected new : Nat)
+  | hubPushReject (node : Nat) (ops objs : List Nat) (expected new : Nat)
+  | hubFetch (node base : Nat) (haves : List Nat)
   | crashHub
   deriving Repr
 
@@ -378,6 +403,18 @@ def execCore (N : Nat) (es : EState) : Action → Except String EState
     req ((es.nodeOf n).lops.contains d) (fun _ => s!"push: op {d} not local on node {n}")
       fun _ =>
     .ok (es.send (.cas n e d))
+  | .pushAll n S O e d =>
+    req (decide (n < N)) (fun _ => s!"pushAll: node {n} out of range") fun _ =>
+    req (S.all ((es.nodeOf n).lops.contains ·))
+      (fun _ => s!"pushAll: {showL S} not all local on node {n}") fun _ =>
+    req (O.all ((es.nodeOf n).lobj.contains ·))
+      (fun _ => s!"pushAll: objects {showL O} not all local on node {n}") fun _ =>
+    req ((es.nodeOf n).lops.contains d) (fun _ => s!"pushAll: op {d} not local on node {n}")
+      fun _ =>
+    .ok (es.send (.push n S O e d))
+  | .fetchAll n b H =>
+    req (decide (n < N)) (fun _ => s!"fetchAll: node {n} out of range") fun _ =>
+    .ok (es.send (.fetch n b H))
   | .crashNode n =>
     req (decide (n < N)) (fun _ => s!"crashNode: node {n} out of range") fun _ => .ok es
   | .loseKnown n =>
@@ -432,6 +469,39 @@ def execCore (N : Nat) (es : EState) : Action → Except String EState
     req (!(decide (es.hub.head = e) && ancB es.parF e d && es.closedB d))
       (fun _ => s!"casReject: cas({e}, {d}) is acceptable") fun _ =>
     .ok (es.send (.head n .rejected es.hub.seq es.hub.head))
+  | .hubPushIdem n S O e d =>
+    req (es.inNet (.push n S O e d))
+      (fun _ => s!"hubPushIdem: push({e}, {d}) from node {n} not in net") fun _ =>
+    req (decide (es.hub.head = d)) (fun _ => s!"hubPushIdem: head {es.hub.head} is not {d}")
+      fun _ =>
+    .ok ((es.hubStore S O).send (.head n .accepted es.hub.seq es.hub.head))
+  | .hubPushAccept n S O e d =>
+    req (es.inNet (.push n S O e d))
+      (fun _ => s!"hubPushAccept: push({e}, {d}) from node {n} not in net") fun _ =>
+    req (decide (es.hub.head ≠ d))
+      (fun _ => s!"hubPushAccept: head is already {d} (idempotent)") fun _ =>
+    req (decide (es.hub.head = e))
+      (fun _ => s!"hubPushAccept: head {es.hub.head} is not expected {e}") fun _ =>
+    req (ancB es.parF e d) (fun _ => s!"hubPushAccept: expected {e} not in anc*({d})")
+      fun _ =>
+    req ((es.hubStore S O).closedB d)
+      (fun _ => s!"hubPushAccept: closure of {d} not stored at hub ({(es.hubStore S O).missingMsg d})")
+      fun _ =>
+    .ok ((((es.hubStore S O).hubAccept d).send (.head n .accepted (es.hub.seq + 1) d)).send
+      (.notifyAll (es.hub.seq + 1) d))
+  | .hubPushReject n S O e d =>
+    req (es.inNet (.push n S O e d))
+      (fun _ => s!"hubPushReject: push({e}, {d}) from node {n} not in net") fun _ =>
+    req (decide (es.hub.head ≠ d))
+      (fun _ => s!"hubPushReject: head is already {d} (idempotent)") fun _ =>
+    req (!(decide (es.hub.head = e) && ancB es.parF e d && (es.hubStore S O).closedB d))
+      (fun _ => s!"hubPushReject: push({e}, {d}) is acceptable") fun _ =>
+    .ok ((es.hubStore S O).send (.head n .rejected es.hub.seq es.hub.head))
+  | .hubFetch n b H =>
+    req (es.inNet (.fetch n b H))
+      (fun _ => s!"hubFetch: fetch({b}) from node {n} not in net") fun _ =>
+    .ok (((es.send (.head n .head es.hub.seq es.hub.head)).send (.ops n (es.sinceOpsL b))).send
+      (.objs n (es.sinceObjsL b H)))
   | .crashHub => .ok es
 
 /-- The executable step. The well-formedness check (parents below children) holds in every

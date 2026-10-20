@@ -12,6 +12,7 @@ use musubi_core::hub;
 use musubi_core::message::HeadKind;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
+use musubi_core::node::LocalRepo as _;
 use musubi_core::node::Step;
 use musubi_jj::node::NodeError;
 use musubi_jj::node::NodeRepo;
@@ -669,7 +670,12 @@ impl World {
             sent += 1;
             world.deliver(m, request, lost)
         };
-        deliver(self, Request::GetHead)?;
+        let poll = {
+            let member = &mut self.fx.hive.members[m];
+            member.adapter.heads()?;
+            member.core.poll(&member.adapter)?
+        };
+        deliver(self, poll)?;
         for _ in 0..steps {
             let member = &mut self.fx.hive.members[m];
             match member.core.step(&mut member.adapter)? {

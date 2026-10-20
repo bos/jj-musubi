@@ -6,6 +6,7 @@ import Musubi.PreserveEnv
 import Musubi.PreserveSync
 import Musubi.Safety
 import Musubi.Liveness
+import Musubi.Merged
 import Musubi.Chunks
 import Musubi.Scenario
 import Musubi.Exec

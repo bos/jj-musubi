@@ -33,10 +33,11 @@ enum Payload {
     Reply(usize, Rep),
 }
 
-/// A message in flight: its Lean model form, and what the Rust side actually sent.
+/// A message in flight: what the Rust side actually sent, and its Lean model form, which is
+/// several messages for a `Fetched` reply.
 #[derive(Clone, Debug)]
 struct InFlight {
-    model: Value,
+    model: Vec<Value>,
     payload: Payload,
     delivered: bool,
 }
@@ -52,8 +53,8 @@ pub struct World {
     net: Vec<InFlight>,
     oracle: Option<Oracle>,
     pub trace: Vec<Value>,
-    /// The operations each node last asked for with `GetOpsSince`.
-    last_fetch: Vec<Option<Vec<Op>>>,
+    /// The operations each node last staged from a `Fetched` reply.
+    last_staged: Vec<Option<Vec<Op>>>,
 }
 
 fn kind_name(kind: HeadKind) -> &'static str {
@@ -85,7 +86,7 @@ impl World {
             univ,
             oracle,
             trace: vec![],
-            last_fetch: vec![None; nodes],
+            last_staged: vec![None; nodes],
         };
         if let Some(oracle) = &mut world.oracle {
             oracle.reset(nodes);
@@ -115,24 +116,33 @@ impl World {
     /// Records a model action and, with an oracle, checks it is a legal step leading to the
     /// state the Rust side is in.
     fn act(&mut self, action: Value) {
-        self.trace.push(action.clone());
+        self.act_all(vec![action]);
+    }
+
+    /// Records model actions that one Rust event performs together, such as taking in a
+    /// `Fetched` reply, and checks that they lead to the state the Rust side is in.
+    fn act_all(&mut self, actions: Vec<Value>) {
+        self.trace.extend(actions.iter().cloned());
         let expected = self.state_json();
         if let Some(oracle) = &mut self.oracle {
-            let state = oracle.step(&action).unwrap_or_else(|error| {
-                panic!(
-                    "the Lean model rejects {action}: {error}\ntrace: {:#?}",
-                    self.trace
-                )
-            });
+            let mut state = Value::Null;
+            for action in &actions {
+                state = oracle.step(action).unwrap_or_else(|error| {
+                    panic!(
+                        "the Lean model rejects {action}: {error}\ntrace: {:#?}",
+                        self.trace
+                    )
+                });
+            }
             let (got, want) = (canonical_state(&state), canonical_state(&expected));
             assert_eq!(
                 got, want,
-                "state differs from the Lean model after {action}"
+                "state differs from the Lean model after {actions:?}"
             );
         }
     }
 
-    fn send(&mut self, model: Value, payload: Payload) {
+    fn send(&mut self, model: Vec<Value>, payload: Payload) {
         self.net.push(InFlight {
             model,
             payload,
@@ -149,13 +159,10 @@ impl World {
 
     // Node side.
 
-    /// The poll timer: send `GetHead`.
+    /// The poll timer: send a `Fetch`.
     pub fn poll(&mut self, node: usize) {
-        self.send(
-            json!({"msg": "getHead", "node": node}),
-            Payload::Request(node, Request::GetHead),
-        );
-        self.act(json!({"kind": "getHead", "node": node}));
+        let request = self.cores[node].poll(&self.repos[node]).unwrap();
+        self.send_request(node, request);
     }
 
     /// One policy step. Returns whether anything happened.
@@ -186,53 +193,57 @@ impl World {
         let univ = self.univ.clone();
         let univ = univ.borrow();
         let (action, model) = match &request {
-            Request::GetHead => (
-                json!({"kind": "getHead", "node": node}),
-                json!({"msg": "getHead", "node": node}),
-            ),
-            Request::GetOpsSince { head, base } => {
-                let ops = univ.between(*head, *base);
-                self.last_fetch[node] = Some(ops.clone());
+            Request::Fetch { base, haves } => {
+                let haves = sorted(haves.iter().copied());
                 (
-                    json!({"kind": "fetchOps", "node": node, "ops": ops}),
-                    json!({"msg": "getOps", "node": node, "ops": ops}),
+                    json!({"kind": "fetchAll", "node": node, "base": base, "haves": haves}),
+                    json!({"msg": "fetch", "node": node, "base": base, "haves": haves}),
                 )
             }
-            Request::GetObjects { for_ops, .. } => {
-                let objs = sorted(univ.objs_of(for_ops.iter().copied()));
+            Request::GetObjects { for_ops, haves, .. } => {
+                // What the hub sends back: the objects, less the haves.
+                let objs = sorted(
+                    univ.objs_of(for_ops.iter().copied())
+                        .into_iter()
+                        .filter(|o| !haves.contains(o)),
+                );
                 (
                     json!({"kind": "fetchObjs", "node": node, "objs": objs}),
                     json!({"msg": "getObjs", "node": node, "objs": objs}),
                 )
             }
-            Request::PutOps { ops, .. } => {
-                let ops = sorted(ops.iter().copied());
+            Request::Push {
+                ops,
+                objects,
+                expected,
+                new,
+                ..
+            } => {
+                let (ops, objs) = (sorted(ops.iter().copied()), sorted(objects.iter().copied()));
                 (
-                    json!({"kind": "uploadOps", "node": node, "ops": ops}),
-                    json!({"msg": "putOps", "node": node, "ops": ops}),
+                    json!({"kind": "pushAll", "node": node, "ops": ops, "objs": objs,
+                        "expected": expected, "new": new}),
+                    json!({"msg": "push", "node": node, "ops": ops, "objs": objs,
+                        "expected": expected, "new": new}),
                 )
             }
-            Request::PutObjects { attachment, .. } => {
-                let objs = sorted(attachment.iter().copied());
-                (
-                    json!({"kind": "uploadObjs", "node": node, "objs": objs}),
-                    json!({"msg": "putObjs", "node": node, "objs": objs}),
-                )
-            }
-            Request::Cas { expected, new } => (
-                json!({"kind": "push", "node": node, "expected": expected, "new": new}),
-                json!({"msg": "cas", "node": node, "expected": expected, "new": new}),
-            ),
         };
         drop(univ);
-        self.send(model, Payload::Request(node, request));
+        self.send(vec![model], Payload::Request(node, request));
         self.act(action);
     }
 
     /// A push the policy would never make: `Cas(expected, new)` for any local `new`, without
     /// uploading anything. The model allows it, so the hub must defend itself.
     pub fn rogue_push(&mut self, node: usize, expected: Op, new: Op) {
-        self.send_request(node, Request::Cas { expected, new });
+        let request = Request::Push {
+            ops: vec![],
+            ops_attachment: vec![],
+            objects: vec![],
+            expected,
+            new,
+        };
+        self.send_request(node, request);
     }
 
     /// How often `node`'s core has read a staged operation, and asked about objects.
@@ -241,9 +252,9 @@ impl World {
         (repo.staged_reads.get(), repo.object_checks.get())
     }
 
-    /// The operations `node` last asked for with `GetOpsSince`.
-    pub fn last_fetch(&self, node: usize) -> Option<&[Op]> {
-        self.last_fetch[node].as_deref()
+    /// The operations `node` last staged from a `Fetched` reply.
+    pub fn last_staged(&self, node: usize) -> Option<&[Op]> {
+        self.last_staged[node].as_deref()
     }
 
     pub fn accepted_heads(&self) -> Vec<Op> {
@@ -287,44 +298,43 @@ impl World {
     }
 
     fn hub_handle(&mut self, node: usize, request: Req) {
-        let univ = self.univ.clone();
-        let action = {
-            let univ = univ.borrow();
-            match &request {
-                Request::GetHead => json!({"kind": "hubGetHead", "node": node}),
-                Request::PutOps { ops, .. } => {
-                    json!({"kind": "hubPutOps", "node": node, "ops": sorted(ops.iter().copied())})
-                }
-                Request::PutObjects { attachment, .. } => {
-                    json!({"kind": "hubPutObjs", "node": node, "objs": sorted(attachment.iter().copied())})
-                }
-                Request::GetOpsSince { head, base } => {
-                    json!({"kind": "hubGetOps", "node": node, "ops": univ.between(*head, *base)})
-                }
-                Request::GetObjects { for_ops, .. } => {
-                    let objs = sorted(univ.objs_of(for_ops.iter().copied()));
-                    json!({"kind": "hubGetObjs", "node": node, "objs": objs})
-                }
-                Request::Cas { .. } => Value::Null,
+        let action = match &request {
+            Request::Fetch { base, haves } => {
+                json!({"kind": "hubFetch", "node": node, "base": base,
+                    "haves": sorted(haves.iter().copied())})
+            }
+            Request::GetObjects { for_ops, haves, .. } => {
+                let objs = sorted(
+                    self.univ
+                        .borrow()
+                        .objs_of(for_ops.iter().copied())
+                        .into_iter()
+                        .filter(|o| !haves.contains(o)),
+                );
+                json!({"kind": "hubGetObjs", "node": node, "objs": objs})
+            }
+            Request::Push {
+                ops,
+                ops_attachment,
+                objects,
+                expected,
+                new,
+            } => {
+                let (outcome, handled) =
+                    hub::push(&mut self.hub, ops, ops_attachment, objects, expected, new).unwrap();
+                let kind = match outcome {
+                    CasOutcome::Idempotent => "hubPushIdem",
+                    CasOutcome::Accepted => "hubPushAccept",
+                    CasOutcome::Rejected => "hubPushReject",
+                };
+                let action = json!({"kind": kind, "node": node,
+                    "ops": sorted(ops.iter().copied()), "objs": sorted(objects.iter().copied()),
+                    "expected": expected, "new": new});
+                self.reply_and_act(node, handled.reply, action, handled.publish);
+                return;
             }
         };
-        let handled = if let Request::Cas { expected, new } = &request {
-            let (outcome, handled) = hub::cas(&mut self.hub, expected, new).unwrap();
-            let kind = match outcome {
-                CasOutcome::Idempotent => "casIdem",
-                CasOutcome::Accepted => "casAccept",
-                CasOutcome::Rejected => "casReject",
-            };
-            self.reply_and_act(
-                node,
-                handled.reply,
-                json!({"kind": kind, "node": node, "expected": expected, "new": new}),
-                handled.publish,
-            );
-            return;
-        } else {
-            hub::handle(&mut self.hub, request).unwrap()
-        };
+        let handled = hub::handle(&mut self.hub, request).unwrap();
         self.reply_and_act(node, handled.reply, action, handled.publish);
     }
 
@@ -337,14 +347,25 @@ impl World {
     ) {
         let model = match &reply {
             Reply::Head { kind, seq, head } => {
-                json!({"msg": "head", "node": node, "headKind": kind_name(*kind), "seq": seq, "head": head})
+                vec![
+                    json!({"msg": "head", "node": node, "headKind": kind_name(*kind), "seq": seq, "head": head}),
+                ]
             }
-            Reply::Stored => json!({"msg": "stored", "node": node}),
-            Reply::Ops { ops, .. } => {
-                json!({"msg": "ops", "node": node, "ops": sorted(ops.iter().map(|e| e.id))})
-            }
+            Reply::Fetched {
+                seq,
+                head,
+                ops,
+                objects,
+                ..
+            } => vec![
+                json!({"msg": "head", "node": node, "headKind": "head", "seq": seq, "head": head}),
+                json!({"msg": "ops", "node": node, "ops": sorted(ops.iter().map(|e| e.id))}),
+                json!({"msg": "objs", "node": node, "objs": sorted(objects.iter().copied())}),
+            ],
             Reply::Objects { attachment, .. } => {
-                json!({"msg": "objs", "node": node, "objs": sorted(attachment.iter().copied())})
+                vec![
+                    json!({"msg": "objs", "node": node, "objs": sorted(attachment.iter().copied())}),
+                ]
             }
         };
         self.send(model, Payload::Reply(node, reply));
@@ -358,7 +379,7 @@ impl World {
                     head,
                 };
                 let model = json!({"msg": "head", "node": target, "headKind": "notify", "seq": seq, "head": head});
-                self.send(model, Payload::Reply(target, reply));
+                self.send(vec![model], Payload::Reply(target, reply));
             }
         }
         self.act(action);
@@ -367,23 +388,55 @@ impl World {
     fn node_handle(&mut self, node: usize, reply: Rep) {
         let objects = match &reply {
             Reply::Objects { attachment, .. } => sorted(attachment.iter().copied()),
-            _ => vec![],
+            Reply::Fetched { objects, .. } => sorted(objects.iter().copied()),
+            Reply::Head { .. } => vec![],
         };
         match self.cores[node].handle(&mut self.repos[node], reply).unwrap() {
             Handled::Learned { kind, seq, head } => self.act(
                 json!({"kind": "learn", "node": node, "headKind": kind_name(kind), "seq": seq, "head": head}),
             ),
-            Handled::StagedOps(ops) => {
-                self.act(json!({"kind": "recvOps", "node": node, "ops": sorted(ops)}));
+            Handled::Fetched { learned, staged } => {
+                let mut actions = vec![];
+                if let Some((seq, head)) = learned {
+                    actions.push(json!({"kind": "learn", "node": node, "headKind": "head", "seq": seq, "head": head}));
+                }
+                actions.push(json!({"kind": "recvOps", "node": node, "ops": sorted(staged.iter().copied())}));
+                let crashed = std::mem::take(&mut self.repos[node].crash_before_objects);
+                if crashed {
+                    self.act_all(actions);
+                    self.crash_node(node);
+                } else {
+                    actions.push(json!({"kind": "recvObjs", "node": node, "objs": objects}));
+                    self.act_all(actions);
+                }
+                self.last_staged[node] = Some(staged);
             }
             Handled::StagedObjects(_) => {
                 self.act(json!({"kind": "recvObjs", "node": node, "objs": objects}));
             }
-            Handled::Acknowledged | Handled::Ignored => {}
+            Handled::Ignored => {}
         }
     }
 
     // Failures.
+
+    /// Delivers to `node` every head notification it has not had.
+    pub fn deliver_notifications(&mut self, node: usize) {
+        for index in self.undelivered() {
+            if matches!(
+                &self.net[index].payload,
+                Payload::Reply(to, Reply::Head { kind: HeadKind::Notify, .. }) if *to == node
+            ) {
+                self.deliver(index);
+            }
+        }
+    }
+
+    /// Makes `node` crash the next time it takes in a `Fetched` reply, after staging the
+    /// operations and before staging their objects.
+    pub fn crash_before_objects(&mut self, node: usize) {
+        self.repos[node].crash_before_objects = true;
+    }
 
     pub fn crash_node(&mut self, node: usize) {
         self.cores[node].restart(ROOT);
@@ -412,15 +465,20 @@ impl World {
         self.trace.push(json!({"kind": "hubForget"}));
     }
 
-    /// A lying hub: an `Ops` reply about `head` carrying `op`, which is not reachable from
-    /// `head`, delivered straight to the node. The node must ignore it (docs/protocol.md,
-    /// "Fetch"): staging operations the hub never accepted is how Locality would break.
+    /// A lying hub: a `Fetched` reply about `head` carrying `op`, which the hub never
+    /// accepted, delivered straight to the node. Either `op` is not reachable from `head`, or
+    /// `head` is not the head the node knows (it is `op`, say). The node must ignore it
+    /// (docs/protocol.md, "Fetch"): staging operations the hub never accepted is how
+    /// Locality would break.
     pub fn rogue_ops_reply(&mut self, node: usize, head: Op, op: Op) {
         let parents = self.univ.borrow().parents[op as usize].clone();
-        let reply = Reply::Ops {
+        // Not newer than what the node knows, or it would believe the head too.
+        let reply = Reply::Fetched {
+            seq: self.cores[node].known().0,
             head,
             ops: vec![OpEntry { id: op, parents }],
-            attachment: vec![],
+            ops_attachment: vec![],
+            objects: vec![],
         };
         let handled = self.cores[node]
             .handle(&mut self.repos[node], reply)
@@ -567,7 +625,11 @@ impl World {
                 })
             })
             .collect();
-        let net: BTreeSet<String> = self.net.iter().map(|m| m.model.to_string()).collect();
+        let net: BTreeSet<String> = self
+            .net
+            .iter()
+            .flat_map(|m| m.model.iter().map(Value::to_string))
+            .collect();
         json!({
             "next": univ.next(),
             "ops": ops,

@@ -2,7 +2,8 @@
 //!
 //! Operation ids are generic so the same core serves real jj operation ids and the small
 //! integers of the conformance tests. Bulky content (operation and object bundles) travels
-//! as an opaque attachment, `A`: in production a reference to a chunked blob, in tests `()`.
+//! as an opaque attachment, `A`: in production a bundle file, carried inline or as a chunked
+//! blob; in tests the object ids themselves.
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -16,39 +17,30 @@ pub enum HeadKind {
     Notify,
 }
 
+/// A request. Each takes one round trip: `Fetch` and `Push` each do what used to take
+/// several.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Request<O, A> {
-    GetHead,
-    /// Store these operations; the attachment carries their content.
-    PutOps {
+    /// The hub's head, with the stored operations in `anc*(head) \ anc*(base)` and the
+    /// stored objects they require. `base` is an operation the hub accepted that the node
+    /// has, so the hub leaves out `closure(base)`; `haves` says what else the node has.
+    Fetch { base: O, haves: A },
+    /// The stored objects these operations require, less `closure(base)` and what `haves`
+    /// says the node has.
+    GetObjects { for_ops: Vec<O>, base: O, haves: A },
+    /// Store these operations and objects, then `Cas(expected, new)`, in one critical
+    /// section. The attachments carry the operations and the objects they require.
+    Push {
         ops: Vec<O>,
-        attachment: A,
-    },
-    /// Store the objects these operations require; the attachment carries them.
-    PutObjects {
-        for_ops: Vec<O>,
-        attachment: A,
-    },
-    /// The stored operations in `anc*(head) \ anc*(base)`. Sent only with `head` equal to
-    /// the node's `known.head`, and `base` an operation the hub accepted.
-    GetOpsSince {
-        head: O,
-        base: O,
-    },
-    /// The stored objects these operations require. The attachment can describe what the
-    /// node already has, so the hub can send less.
-    GetObjects {
-        for_ops: Vec<O>,
-        attachment: A,
-    },
-    Cas {
+        ops_attachment: A,
+        objects: A,
         expected: O,
         new: O,
     },
 }
 
-/// An operation in an [`Reply::Ops`] reply, with its parents, so the node can check it is
-/// an ancestor of the head it asked about before staging it.
+/// An operation in a [`Reply::Fetched`] reply, with its parents, so the node can check it
+/// is an ancestor of the head before staging it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OpEntry<O> {
     pub id: O,
@@ -57,17 +49,20 @@ pub struct OpEntry<O> {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Reply<O, A> {
+    /// Answer to `Push` (`Accepted` or `Rejected`), and the hub's announcements (`Notify`).
     Head {
         kind: HeadKind,
         seq: u64,
         head: O,
     },
-    Stored,
-    /// Answer to `GetOpsSince { head, .. }`, ancestors first.
-    Ops {
+    /// Answer to `Fetch`: the hub's `(seq, head)`, and the operations since the base,
+    /// ancestors first, with their objects.
+    Fetched {
+        seq: u64,
         head: O,
         ops: Vec<OpEntry<O>>,
-        attachment: A,
+        ops_attachment: A,
+        objects: A,
     },
     Objects {
         for_ops: Vec<O>,

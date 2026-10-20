@@ -7,6 +7,7 @@ use musubi_core::hub;
 use musubi_core::message::HeadKind;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
+use musubi_core::node::LocalRepo as _;
 use musubi_core::node::NodeCore;
 use musubi_core::node::Step;
 use musubi_hub::store::Backend;
@@ -71,14 +72,29 @@ impl Hive {
     }
 
     fn request(&mut self, node: usize, request: Request<OpId, Attachment>) -> anyhow::Result<()> {
-        if let Request::PutOps { attachment, .. } | Request::PutObjects { attachment, .. } =
-            &request
+        if let Request::Push {
+            ops_attachment,
+            objects,
+            ..
+        } = &request
         {
-            self.members[node].uploaded += attachment_size(attachment)?;
+            self.members[node].uploaded +=
+                attachment_size(ops_attachment)? + attachment_size(objects)?;
         }
         let handled = hub::handle(&mut self.hub, request)?;
-        if let Reply::Ops { attachment, .. } | Reply::Objects { attachment, .. } = &handled.reply {
-            self.members[node].downloaded += attachment_size(attachment)?;
+        match &handled.reply {
+            Reply::Fetched {
+                ops_attachment,
+                objects,
+                ..
+            } => {
+                self.members[node].downloaded +=
+                    attachment_size(ops_attachment)? + attachment_size(objects)?;
+            }
+            Reply::Objects { attachment, .. } => {
+                self.members[node].downloaded += attachment_size(attachment)?;
+            }
+            Reply::Head { .. } => {}
         }
         self.reply(node, handled.reply)?;
         if let Some((seq, head)) = handled.publish {
@@ -104,7 +120,10 @@ impl Hive {
     /// how many steps it took.
     pub fn sync(&mut self, node: usize) -> anyhow::Result<usize> {
         self.members[node].adapter.reconcile_settings(true)?;
-        self.request(node, Request::GetHead)?;
+        let member = &mut self.members[node];
+        member.adapter.heads()?;
+        let poll = member.core.poll(&member.adapter)?;
+        self.request(node, poll)?;
         for steps in 0..10_000 {
             let member = &mut self.members[node];
             match member.core.step(&mut member.adapter)? {

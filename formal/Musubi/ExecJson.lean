@@ -43,6 +43,10 @@ def decodeAction (j : Json) : Except String Action := do
   | "uploadOps" => return .uploadOps (← node) (← getNats j "ops")
   | "uploadObjs" => return .uploadObjs (← node) (← getNats j "objs")
   | "push" => return .push (← node) (← getNat j "expected") (← getNat j "new")
+  | "pushAll" =>
+    return .pushAll (← node) (← getNats j "ops") (← getNats j "objs") (← getNat j "expected")
+      (← getNat j "new")
+  | "fetchAll" => return .fetchAll (← node) (← getNat j "base") (← getNats j "haves")
   | "crashNode" => return .crashNode (← node)
   | "loseKnown" => return .loseKnown (← node)
   | "loseVolatile" => return .loseVolatile (← node)
@@ -54,6 +58,16 @@ def decodeAction (j : Json) : Except String Action := do
   | "casIdem" => return .casIdem (← node) (← getNat j "expected") (← getNat j "new")
   | "casAccept" => return .casAccept (← node) (← getNat j "expected") (← getNat j "new")
   | "casReject" => return .casReject (← node) (← getNat j "expected") (← getNat j "new")
+  | "hubPushIdem" =>
+    return .hubPushIdem (← node) (← getNats j "ops") (← getNats j "objs")
+      (← getNat j "expected") (← getNat j "new")
+  | "hubPushAccept" =>
+    return .hubPushAccept (← node) (← getNats j "ops") (← getNats j "objs")
+      (← getNat j "expected") (← getNat j "new")
+  | "hubPushReject" =>
+    return .hubPushReject (← node) (← getNats j "ops") (← getNats j "objs")
+      (← getNat j "expected") (← getNat j "new")
+  | "hubFetch" => return .hubFetch (← node) (← getNat j "base") (← getNats j "haves")
   | "crashHub" => return .crashHub
   | k => throw s!"unknown action kind {k}"
 
@@ -87,6 +101,10 @@ def encodeMsg (N : Nat) : EMsg → List Json
   | .ops n S => [msgObj "ops" n [("ops", nats S)]]
   | .objs n S => [msgObj "objs" n [("objs", nats S)]]
   | .stored n => [msgObj "stored" n []]
+  | .push n S O e d =>
+    [msgObj "push" n [("ops", nats S), ("objs", nats O), ("expected", toJson e),
+      ("new", toJson d)]]
+  | .fetch n b H => [msgObj "fetch" n [("base", toJson b), ("haves", nats H)]]
   | .notifyAll sq h =>
     (List.range N).map fun n =>
       msgObj "head" n [("headKind", Json.str "notify"), ("seq", toJson sq), ("head", toJson h)]

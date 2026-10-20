@@ -40,6 +40,7 @@ The binary is `formal/.lake/build/bin/oracle`.
 | `Musubi/PreserveSync.lean` | `Inv` is preserved by every sync, hub and crash step; `inv_reachable`. |
 | `Musubi/Safety.lean` | The safety properties and no-feedback. |
 | `Musubi/Liveness.lean` | The reliable policy model `PStep`, simulation into the async model, the measure, progress, termination and convergence. |
+| `Musubi/Merged.lean` | The merged `Push` and `Fetch` exchanges reach states that agree with policy steps on everything the measure and convergence depend on. |
 | `Musubi/Chunks.lean` | The chunked-blob model, its safety and its liveness. |
 | `Musubi/Scenario.lean` | A concrete reachable run: a lost Cas race, then fetch, advance, merge, and the merge accepted. It shows the model is not vacuous. |
 | `Musubi/Exec.lean` | The executable model: finite `EState`, the `Action` vocabulary of `docs/conformance.md`, and `execStep`. |
@@ -67,6 +68,8 @@ The binary is `formal/.lake/build/bin/oracle`.
 | `PutOps`/`PutObjects`/`Stored` | `Msg.putOps n S`, `Msg.putObjs n S`, `Msg.stored` |
 | `GetOps`/`Ops`, `GetObjects`/`Objects` | `Msg.getOps`, `Msg.ops`, `Msg.getObjs`, `Msg.objs` |
 | `Cas(expected, new)` | `Msg.cas n e d`; hub steps `casIdem`, `casAccept`, `casReject` |
+| `Push(operations, objects, expected, new)` | `Msg.push n S O e d`; node step `pushAll`; hub steps `hubPushIdem`, `hubPushAccept`, `hubPushReject`, each storing `S` and `O` first (`State.hubStore`) |
+| `Fetch(base, haves)`/`Fetched` | `Msg.fetch n b H`; node step `fetchAll`; hub step `hubFetch`, which sends `head n head seq head`, `ops n (sinceOps b)` and `objs n (sinceObjs b H)` |
 | `UserOp(p)` | `EnvStep.userOp` → `State.userOp` |
 | `Merge` | `EnvStep.merge` → `State.mergeOp` |
 | `Learn`, `Fetch`, `Realize`, `Advance`, `Upload`, `Push` | `SyncStep.learn`, `.fetchOps`/`.fetchObjs`/`.recvOps`/`.recvObjs`, `.realize`, `.advance`, `.uploadOps`/`.uploadObjs`, `.push` |
@@ -119,6 +122,16 @@ Liveness (`Liveness.lean`):
   is converged, and a converged state cannot be extended.
 - `converged_all_accepted`: once converged, every created operation is in `anc*(hub.head)`.
 
+Merged requests (`Merged.lean`):
+
+- `pushAccept_merged`, `pushIdem_merged`, `pushReject_merged`: a merged `Push` exchange
+  reaches a state that agrees with the corresponding policy step's up to the network and
+  staging.
+- `fetch_merged`: a merged `Fetch` exchange does the same for `PStep.learn`, and stages
+  every operation the node lacks below the head, with its objects at hand.
+- `realize_agree`: realizing a staged operation agrees with `PStep.realize`.
+- `measure_agree`, `converged_agree`: the measure and convergence see no difference.
+
 `Converged N s` means that every node `n < N` has `heads = {hub.head}` and
 `known = (hub.seq, hub.head)`.
 
@@ -142,7 +155,7 @@ Chunked blobs (`Chunks.lean`, with `hash` assumed injective):
   separate messages. Request ids are not modeled: a node accepts any reply addressed to it,
   which over-approximates matching replies to outstanding requests. This over-approximation
   also covers a node crash losing its in-flight requests.
-- **Atomic payloads.** `PutOps`, `Ops` and the other bulky payloads are atomic messages
+- **Atomic payloads.** `Push`, `Fetched` and the other bulky payloads are atomic messages
   carrying sets, as `protocol.md` specifies at this level. `Chunks.lean` justifies the
   atomicity: a finished blob is exactly the sent bytes, so a payload arrives whole or not at
   all.
@@ -154,8 +167,10 @@ Chunked blobs (`Chunks.lean`, with `hash` assumed injective):
 - **Node-side guards are weakened where safety does not need them**, so the safety theorems
   also hold for a buggy node:
   - `Upload` may send any local operations and objects.
-  - `Push` may send `Cas(e, d)` for any `e` and any local `d`.
-  - `GetObjects` may ask for anything.
+  - `Push` may send `Cas(e, d)` for any `e` and any local `d`, alone or in a merged `push`
+    with any local operations and objects.
+  - `GetObjects` and `Fetch` may ask for anything; `Fetch`'s operations are chosen by the
+    hub from its own head.
   - `Learn` is also allowed without its staleness filter (`learnUnfiltered`), so `known`
     can move backwards.
 
@@ -229,7 +244,15 @@ one particular schedule. `Merge` is a policy action, because musubi loads the re
 merges. `UserOp` is absent, because environment activity has stopped.
 
 1. **Each `PStep` is a run of the real system** (`pstep_reachable`). So every policy run
-   stays inside the reachable states, and all safety invariants hold along it.
+   stays inside the reachable states, and all safety invariants hold along it. The
+   implementation exchanges the merged requests instead, and `Merged.lean` shows that
+   those runs end in states that agree with the policy step's on the universe, the hub, and
+   each node's operations, objects, heads and `known`, differing only in the network and in
+   what is staged (`AgreeUpToStaging`). The measure and `Converged` read nothing else
+   (`measure_agree`, `converged_agree`). `pushAccept_merged`, `pushIdem_merged` and
+   `pushReject_merged` cover pushes. `fetch_merged` covers `PStep.learn`, and leaves every
+   operation the node lacks below the head staged with its objects at hand, so that
+   `Realize` takes each in turn with the effect of `PStep.realize` (`realize_agree`).
 2. **Failures only delay.** A failed exchange (lost request or reply, crash, hub restart)
    leaves persistent state unchanged, or changes it in a way that a retry absorbs:
    - Storing is idempotent.
@@ -237,7 +260,7 @@ merges. `UserOp` is absent, because environment activity has stopped.
    - `Cas` with `new = head` answers `Accepted` and changes nothing.
    - Realizing an operation that is already local adds nothing.
    - A `Cas` that was accepted but whose reply was lost has exactly the hub-side effect of
-     `pushAccept`. The node's next `GetHead` performs the remaining `Learn`.
+     `pushAccept`. The node's next `Fetch` performs the remaining `Learn`.
    - Stored-but-unacknowledged uploads only grow hub stores, which the measure ignores.
 
    With eventual delivery, each retried exchange eventually completes. The run of
@@ -247,8 +270,8 @@ merges. `UserOp` is absent, because environment activity has stopped.
    - A stale `Cas(e, d)` can change the hub at most once, because the head never returns to
      `e`, and it can only move the head forward.
    - Stale head-carrying replies only raise `known.seq`, which is bounded by `hub.seq`.
-   - Stale `Ops` replies only stage accepted operations, and stale uploads only grow hub
-     stores.
+   - Stale `Fetched` and `Ops` replies only stage accepted operations, and stale uploads
+     only grow hub stores.
 
    After them, `eventually_converges` applies again from the then-current state, because it
    holds from every reachable state, whatever messages are still in flight.

@@ -25,6 +25,7 @@ theorem hubMonotone {s s' : State} (h : Reachable N s) (hs : Step N s s') :
   · cases hs <;> exact Anc.refl
   · cases hs with
     | casAccept n e d hm hne he ha hc => exact he ▸ ha
+    | hubPushAccept n S O e d hm hne he ha hc => exact he ▸ ha
     | _ => exact Anc.refl
 
 /-- The ghost history only grows: entries up to the old `seq` are unchanged, `seq` never
@@ -38,12 +39,14 @@ theorem histStable {s s' : State} (h : Reachable N s) (hs : Step N s s') :
     · cases hs <;> exact Nat.le_refl _
     · cases hs with
       | casAccept => exact Nat.le_succ _
+      | hubPushAccept => exact Nat.le_succ _
       | _ => exact Nat.le_refl _
   · intro i hi
     rcases hs with hs | hs
     · cases hs <;> rfl
     · cases hs with
       | casAccept => exact upd_ne _ _ (by omega)
+      | hubPushAccept => exact upd_ne _ _ (show i ≠ s.hub.seq + 1 by omega)
       | _ => rfl
 
 /-- Consequence of HubMonotone: an operation that is ever in `anc*(head)` stays there. -/

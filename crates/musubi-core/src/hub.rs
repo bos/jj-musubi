@@ -1,7 +1,7 @@
 //! The hub's request handling (docs/protocol.md, "Hub").
 //!
 //! The hub is a function of its storage: [`handle`] answers one request. Callers must run it
-//! for one request at a time per hive, which makes every `Cas` check-and-set atomic.
+//! for one request at a time per hive, which makes every `Push` atomic.
 
 use crate::message::HeadKind;
 use crate::message::OpEntry;
@@ -42,11 +42,12 @@ pub trait HubStorage {
     ) -> Result<(Vec<OpEntry<Self::Op>>, Self::Attachment), Self::Error>;
 
     /// An attachment carrying the stored objects that `for_ops` require, omitting what the
-    /// request's attachment says the node has.
+    /// node has: `closure(base)`, and what `haves` says.
     fn objects_for(
         &self,
         for_ops: &[Self::Op],
-        request: &Self::Attachment,
+        base: &Self::Op,
+        haves: &Self::Attachment,
     ) -> Result<Self::Attachment, Self::Error>;
 
     /// Whether `closure(op) ⊆ ops ∪ objects`.
@@ -68,7 +69,7 @@ pub struct Handled<O, A> {
 /// [`Handled`] for a given storage.
 pub type HandledBy<S> = Handled<<S as HubStorage>::Op, <S as HubStorage>::Attachment>;
 
-/// How the hub answered a `Cas`, for tests that check each decision.
+/// How the hub answered a `Push`, for tests that check each decision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CasOutcome {
     /// `new` was already the head.
@@ -88,54 +89,54 @@ pub fn handle<S: HubStorage>(
         })
     };
     match request {
-        Request::GetHead => {
+        Request::Fetch { base, haves } => {
             let (seq, head) = storage.head();
-            reply(Reply::Head {
-                kind: HeadKind::Head,
+            let (ops, ops_attachment) = storage.ops_since(&head, &base)?;
+            let ids: Vec<S::Op> = ops.iter().map(|entry| entry.id.clone()).collect();
+            let objects = storage.objects_for(&ids, &base, &haves)?;
+            reply(Reply::Fetched {
                 seq,
                 head,
-            })
-        }
-        Request::PutOps { ops, attachment } => {
-            storage.store_ops(&ops, &attachment)?;
-            reply(Reply::Stored)
-        }
-        Request::PutObjects {
-            for_ops,
-            attachment,
-        } => {
-            storage.store_objects(&for_ops, &attachment)?;
-            reply(Reply::Stored)
-        }
-        Request::GetOpsSince { head, base } => {
-            let (ops, attachment) = storage.ops_since(&head, &base)?;
-            reply(Reply::Ops {
-                head,
                 ops,
-                attachment,
+                ops_attachment,
+                objects,
             })
         }
         Request::GetObjects {
             for_ops,
-            attachment,
+            base,
+            haves,
         } => {
-            let attachment = storage.objects_for(&for_ops, &attachment)?;
+            let attachment = storage.objects_for(&for_ops, &base, &haves)?;
             reply(Reply::Objects {
                 for_ops,
                 attachment,
             })
         }
-        Request::Cas { expected, new } => cas(storage, &expected, &new).map(|(_, handled)| handled),
+        Request::Push {
+            ops,
+            ops_attachment,
+            objects,
+            expected,
+            new,
+        } => push(storage, &ops, &ops_attachment, &objects, &expected, &new)
+            .map(|(_, handled)| handled),
     }
 }
 
-/// Answers `Cas(expected, new)`: idempotent if `new` is already the head; otherwise accepted
-/// exactly when `head = expected`, `closure(new)` is stored, and `expected ∈ anc*(new)`.
-pub fn cas<S: HubStorage>(
+/// Answers `Push`: stores the operations and objects, then is idempotent if `new` is already
+/// the head, and otherwise accepts exactly when `head = expected`, `closure(new)` is stored,
+/// and `expected ∈ anc*(new)`.
+pub fn push<S: HubStorage>(
     storage: &mut S,
+    ops: &[S::Op],
+    ops_attachment: &S::Attachment,
+    objects: &S::Attachment,
     expected: &S::Op,
     new: &S::Op,
 ) -> Result<(CasOutcome, HandledBy<S>), S::Error> {
+    storage.store_ops(ops, ops_attachment)?;
+    storage.store_objects(ops, objects)?;
     let (seq, head) = storage.head();
     if *new == head {
         let reply = Reply::Head {

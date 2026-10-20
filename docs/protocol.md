@@ -35,22 +35,21 @@ Requests and replies (each request carries a node-chosen request id that the rep
 
 | Request | Reply |
 | --- | --- |
-| `GetHead` | `Head(seq, head)` |
-| `PutOps(operations)` | `Stored` |
-| `PutObjects(objects)` | `Stored` |
-| `GetOpsSince(head, base)` | `Ops`: the stored operations in `anc*(head) \ anc*(base)` |
-| `GetObjects(for operations S, haves H)` | `Objects`: the stored objects of `S` that `H` does not cover |
-| `Cas(expected, new)` | `Accepted(seq, head)` or `Rejected(seq, head)` |
+| `Fetch(base, haves H)` | `Fetched(seq, head, ops, objects)`: the hub's `(seq, head)`, the stored operations in `anc*(head) \ anc*(base)`, and the stored objects they require, less `closure(base)` and `H` |
+| `GetObjects(for operations S, base, haves H)` | `Objects`: the stored objects `S` requires, less `closure(base)` and `H` |
+| `Push(operations, objects, expected, new)` | `Accepted(seq, head)` or `Rejected(seq, head)` |
 
-`GetOpsSince` names a range because a node cannot name operations it has never seen. A node
-sends it only with `head = known.head`. The haves of `GetObjects` name objects the node
-already has, so the hub can leave them out; in a git-backed hive they are commits, and they
-cover everything those commits reach. The hub ignores haves it does not have.
+`Fetch` asks for a range ending at the hub's own head, because a node cannot name operations
+it has never seen, and the reply says which head that was. `base` is an operation the hub
+accepted that the node has, so the hub leaves out `closure(base)`; the haves name other
+objects the node has, which the hub leaves out too. In a git-backed hive haves are commits,
+and they cover everything those commits reach. The hub ignores haves it does not have.
 
-The hub answers `Cas(expected, new)` in one atomic critical section:
+The hub answers `Push(operations, objects, expected, new)` in one atomic critical section:
+it stores the operations and objects, then answers `Cas(expected, new)`:
 
-1. If `new = head`, it replies `Accepted(seq, head)` and changes nothing, whatever
-   `expected` is. This makes a retried `Cas` idempotent.
+1. If `new = head`, it replies `Accepted(seq, head)` and changes nothing else, whatever
+   `expected` is. This makes a retried `Push` idempotent.
 2. Otherwise it accepts if and only if `head = expected`, `closure(new) ⊆ ops ∪ objects`, and
    `expected ∈ anc*(new)`. The ancestry check walks `parents` over stored operations, so it
    is only meaningful once the closure check has passed. Since `closure(head)` is stored
@@ -60,10 +59,17 @@ The hub answers `Cas(expected, new)` in one atomic critical section:
    replies `Accepted(seq, new)` and publishes `Head(seq, new)` to subscribers. Otherwise it
    replies `Rejected(seq, head)`.
 
-Every `Head`, `Accepted`, and `Rejected` carries a `(seq, head)` pair the hub actually had.
+Every `Head`, `Accepted`, `Rejected`, and `Fetched` carries a `(seq, head)` pair the hub
+actually had.
 
-Bulky `PutOps`, `PutObjects`, `Ops`, and `Objects` payloads travel as chunked blobs (see
-[Chunked blobs](#chunked-blobs)). At this level of the protocol each is atomic.
+Each request takes one round trip. Bulky payloads (operations and objects) travel inline when
+they are small, and otherwise as chunked blobs (see [Chunked blobs](#chunked-blobs)). At this
+level of the protocol each is atomic.
+
+The formal model also has finer-grained requests, which earlier versions of musubi sent:
+`GetHead`, `PutOps`, `PutObjects`, `GetOpsSince(head, base)` for `head = known.head`, and
+`Cas`. A `Push` is `PutOps`, `PutObjects` and `Cas` handled together. Safety is proved for
+nodes that send any of them.
 
 ## Node
 
@@ -93,35 +99,36 @@ These happen outside musubi, through `jj`:
 
 ### Sync actions
 
-- `Learn(s, h)`: on receiving `Head`, `Accepted`, or `Rejected` carrying `(s, h)`, if
-  `s > known.seq` then `known := (s, h)`. Stale and duplicated notifications are therefore
-  harmless.
-- `Fetch`: send `GetOpsSince(known.head, base)`, where `base` is any local operation the
-  node knows the hub accepted, and `GetObjects` for the operations it receives, with the
-  objects of its heads, of `base`, and of the local operations those operations descend
-  from as haves. So that the node is never sent what it has, `base` is the newest
-  `known.head` that was local and in `anc*(heads)`, which includes the node's own push
-  once the hub accepts it. Add the replies to `staged`, but only
-  operations in `anc*(known.head)`: a reply's operations must all be reachable from the
-  requested head through parents in the reply or in `local`. Anything else, including any
-  reply to a request the node did not make, is ignored. **This is the one guard Locality,
-  and so MergeOwnership, depends on.**
+- `Learn(s, h)`: on receiving `Head`, `Accepted`, `Rejected`, or `Fetched` carrying
+  `(s, h)`, if `s > known.seq` then `known := (s, h)`. Stale and duplicated notifications
+  are therefore harmless.
+- `Fetch`: send `Fetch(base, H)`, where `base` is any local operation the node knows the
+  hub accepted, and `H` names objects of its heads. So that the node is never sent what it
+  has, `base` is the newest `known.head` that was local and in `anc*(heads)`, which
+  includes the node's own push once the hub accepts it. Learn the reply's head, and add its
+  operations and objects to `staged`, but only operations in `anc*(known.head)`: the
+  reply's head must be `known.head`, and its operations must all be reachable from it
+  through parents in the reply. Anything else is ignored. The hub replies only with
+  accepted operations, so this check guards only against a hub that lies. **Staging only
+  operations in `anc*` of a head the hub accepted is the one guard Locality, and so
+  MergeOwnership, depends on.** `GetObjects` asks for the objects of staged operations
+  that lack them, with the objects of the node's heads and of the local operations those
+  descend from as haves.
 - `Realize(x)`, for `x ∈ staged` with `parents(x) ⊆ local` and `objs(x)` available locally:
   write the realization and set `local := local ∪ {x}`. `heads` does not change.
 - `Advance`, when `known.head ∈ local` and `known.head ∉ anc*(heads)`: set
   `heads := max(heads ∪ {known.head})`.
-- `Upload`, when `heads = {h}` and `known.head ∈ anc*(h)`: send `PutOps` and `PutObjects` for
-  `closure(h) \ closure(known.head)`.
 - `Push`, when `heads = {h}`, `h ≠ known.head`, and `known.head ∈ anc*(h)`: send
+  `Push(closure(h) \ closure(known.head), known.head, h)`: what the hub lacks of `h`, and
   `Cas(known.head, h)`.
 
 ### Policy
 
 Only three node-side rules matter for safety: stage and realize only operations in
-`anc*(known.head)`, push only local operations, and merge all current heads. The guards on
-`Upload` and `Push`, the order below, and `Learn`'s sequence filter matter only for liveness
-and efficiency; the formal model proves safety even for a node that ignores them, and proves
-that any interleaving of policy steps converges.
+`anc*` of a head the hub accepted, push only local operations, and merge all current heads.
+The guards on `Push`, the order below, and `Learn`'s sequence filter matter only for
+liveness and efficiency; the formal model proves safety even for a node that ignores them,
+and proves that any interleaving of policy steps converges.
 
 The node's daemon repeatedly takes the first applicable step:
 
@@ -132,10 +139,11 @@ The node's daemon repeatedly takes the first applicable step:
    operations takes time linear in `n`.
 3. If `known.head ∉ anc*(heads)`, advance. Afterwards `|heads| ≥ 2` or `heads = {known.head}`.
 4. If `heads = {h}` with `h ≠ known.head`, which by now implies `known.head ∈ anc*(h)`:
-   upload, then push.
+   push, uploading what the hub lacks with it.
 5. Otherwise idle until a notification, a local op-heads change, or the poll timer.
 
-On connecting, and on every poll, the node sends `GetHead`.
+On connecting, and on every poll, the node sends `Fetch`. A sync that finds something new
+therefore takes one round trip, and one that pushes takes two.
 
 ## Network and failures
 
@@ -193,6 +201,13 @@ from an earlier session could make every retry fail its hash check.
 Properties: a finished blob is byte-identical to the one sent, even when corrupt or stale
 chunks arrive; and if the network eventually delivers and the receiver eventually stops
 crashing, every session finishes.
+
+A sender need not wait for one chunk's acknowledgement before sending the next: musubi keeps
+up to eight chunks in flight, uploading and downloading, so that a transfer costs a round
+trip per eight chunks. The model lets a sender send any chunk at any time, so this needs
+nothing more. The musubi receiver keeps only bytes that extend what it has contiguously, as
+if the others had been lost. An attachment of at most a quarter of the transport's message
+limit travels inline in its message, which takes no session at all.
 
 ## Verification
 

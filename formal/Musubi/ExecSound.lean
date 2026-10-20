@@ -220,6 +220,8 @@ theorem matchB_covers {em t : EMsg} (h : matchB em t = true) {m : Msg} (ht : t.c
     | (obtain rfl := h; exact ht)
     | (obtain ⟨⟨rfl, rfl⟩, rfl⟩ := h; exact ⟨_, ht⟩)
     | (obtain ⟨rfl, rfl⟩ := h; exact ht)
+    | (obtain ⟨⟨⟨⟨rfl, h2⟩, h3⟩, rfl⟩, rfl⟩ := h; rw [ht, seteq_setP h2, seteq_setP h3])
+    | (obtain ⟨⟨rfl, rfl⟩, h2⟩ := h; rw [ht, seteq_setP h2])
 
 theorem inNet_net {es : EState} {m : EMsg} (hm : ∀ s h, m ≠ .notifyAll s h)
     (h : es.inNet m = true) : (abs es).net m.toMsg := by
@@ -349,6 +351,31 @@ theorem abs_hubStoreObjs (S : List Nat) :
   congr 1
   funext x
   simp [setP, EState.hubStoreObjs, abs]
+
+theorem abs_hubStore (S O : List Nat) :
+    abs (es.hubStore S O) = (abs es).hubStore (setP S) (setP O) := by
+  unfold EState.hubStore State.hubStore
+  rw [abs_hubStoreObjs, abs_hubStoreOps]
+
+theorem mem_sinceOpsL (hlt : ParLt es.parF) {b x : Nat} :
+    x ∈ es.sinceOpsL b ↔ (abs es).sinceOps b x := by
+  unfold EState.sinceOpsL State.sinceOps
+  simp only [List.mem_filter, mem_ancL hlt, Bool.and_eq_true, Bool.not_eq_true',
+    List.contains_iff_mem]
+  have hb : ancB es.parF x b = false ↔ ¬ Anc es.parF x b := by
+    rw [← ancB_iff hlt]; simp
+  rw [hb]
+  rfl
+
+theorem mem_sinceObjsL (hlt : ParLt es.parF) {b o : Nat} {H : List Nat} :
+    o ∈ es.sinceObjsL b H ↔ (abs es).sinceObjs b (setP H) o := by
+  unfold EState.sinceObjsL State.sinceObjs
+  simp only [List.mem_filter, List.mem_flatMap, Bool.and_eq_true, Bool.not_eq_true',
+    List.contains_iff_mem, mem_sinceOpsL hlt]
+  have hH : H.contains o = false ↔ ¬ o ∈ H := by
+    rw [← List.contains_iff_mem]; simp
+  rw [hH]
+  rfl
 
 theorem abs_hubAccept (d : Nat) : abs (es.hubAccept d) = (abs es).hubAccept d := by
   refine state_ext rfl ?_ rfl rfl
@@ -497,6 +524,22 @@ theorem execCore_sound {N : Nat} {es es' : EState} {a : Action} (hlt : ParLt es.
     cases h
     rw [abs_send _ nb]
     exact Or.inr (SyncStep.push _ n e d (of_decide_eq_true h1) (List.contains_iff_mem.1 h2))
+  | pushAll n S O e d =>
+    simp only [execCore] at h
+    obtain ⟨h1, h⟩ := req_ok h; obtain ⟨h2, h⟩ := req_ok h; obtain ⟨h3, h⟩ := req_ok h
+    obtain ⟨h4, h⟩ := req_ok h
+    cases h
+    rw [abs_send _ nb]
+    exact Or.inr (SyncStep.pushAll _ n (setP S) (setP O) e d (of_decide_eq_true h1)
+      (fun x hx => List.contains_iff_mem.1 (List.all_eq_true.1 h2 x hx))
+      (fun o ho => List.contains_iff_mem.1 (List.all_eq_true.1 h3 o ho))
+      (List.contains_iff_mem.1 h4))
+  | fetchAll n b H =>
+    simp only [execCore] at h
+    obtain ⟨h1, h⟩ := req_ok h
+    cases h
+    rw [abs_send _ nb]
+    exact Or.inr (SyncStep.fetchAll _ n b (setP H) (of_decide_eq_true h1))
   | crashNode n =>
     simp only [execCore] at h
     obtain ⟨h1, h⟩ := req_ok h
@@ -585,6 +628,52 @@ theorem execCore_sound {N : Nat} {es es' : EState} {a : Action} (hlt : ParLt es.
       exact ⟨⟨he, (ancB_iff hlt).2 ha⟩, (closedB_iff hlt).2 hc⟩
     rw [this] at h3
     cases h3
+  | hubPushIdem n S O e d =>
+    simp only [execCore] at h
+    obtain ⟨h1, h⟩ := req_ok h; obtain ⟨h2, h⟩ := req_ok h
+    cases h
+    rw [abs_send _ nb, abs_hubStore]
+    exact Or.inr (SyncStep.hubPushIdem _ n (setP S) (setP O) e d (inNet_net nb h1)
+      (of_decide_eq_true h2))
+  | hubPushAccept n S O e d =>
+    simp only [execCore] at h
+    obtain ⟨h1, h⟩ := req_ok h; obtain ⟨h2, h⟩ := req_ok h; obtain ⟨h3, h⟩ := req_ok h
+    obtain ⟨h4, h⟩ := req_ok h; obtain ⟨h5, h⟩ := req_ok h
+    cases h
+    rw [abs_send_notify, abs_send _ nb, abs_hubAccept, abs_hubStore]
+    have hc : ClosedAt ((abs es).hubStore (setP S) (setP O)) d := by
+      rw [← abs_hubStore]; exact (closedB_iff (es := es.hubStore S O) hlt).1 h5
+    exact Or.inr (SyncStep.hubPushAccept _ n (setP S) (setP O) e d (inNet_net nb h1)
+      (of_decide_eq_true h2) (of_decide_eq_true h3) ((ancB_iff hlt).1 h4) hc)
+  | hubPushReject n S O e d =>
+    simp only [execCore] at h
+    obtain ⟨h1, h⟩ := req_ok h; obtain ⟨h2, h⟩ := req_ok h; obtain ⟨h3, h⟩ := req_ok h
+    cases h
+    rw [abs_send _ nb, abs_hubStore]
+    refine Or.inr (SyncStep.hubPushReject _ n (setP S) (setP O) e d (inNet_net nb h1)
+      (of_decide_eq_true h2) ?_)
+    rintro ⟨he, ha, hc⟩
+    have : (decide (es.hub.head = e) && ancB es.parF e d && (es.hubStore S O).closedB d)
+        = true := by
+      simp only [Bool.and_eq_true, decide_eq_true_eq]
+      refine ⟨⟨he, (ancB_iff hlt).2 ha⟩, (closedB_iff (es := es.hubStore S O) hlt).2 ?_⟩
+      rw [abs_hubStore]; exact hc
+    rw [this] at h3
+    cases h3
+  | hubFetch n b H =>
+    simp only [execCore] at h
+    obtain ⟨h1, h⟩ := req_ok h
+    cases h
+    rw [abs_send _ nb, abs_send _ nb, abs_send _ nb]
+    have e1 : (EMsg.ops n (es.sinceOpsL b)).toMsg = Msg.ops n ((abs es).sinceOps b) := by
+      show Msg.ops n _ = Msg.ops n _
+      congr 1; funext x; exact propext (mem_sinceOpsL hlt)
+    have e2 : (EMsg.objs n (es.sinceObjsL b H)).toMsg =
+        Msg.objs n ((abs es).sinceObjs b (setP H)) := by
+      show Msg.objs n _ = Msg.objs n _
+      congr 1; funext o; exact propext (mem_sinceObjsL hlt)
+    rw [e1, e2]
+    exact Or.inr (SyncStep.hubFetch _ n b (setP H) (inNet_net nb h1))
   | crashHub =>
     simp only [execCore] at h
     cases h

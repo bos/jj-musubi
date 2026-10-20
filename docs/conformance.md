@@ -72,6 +72,8 @@ compared as sets.
 | `uploadOps` | `node`, `ops` | `SyncStep.uploadOps` |
 | `uploadObjs` | `node`, `objs` | `SyncStep.uploadObjs` |
 | `push` | `node`, `expected`, `new` | `SyncStep.push` |
+| `pushAll` | `node`, `ops`, `objs`, `expected`, `new` | `SyncStep.pushAll`: the merged `Push` |
+| `fetchAll` | `node`, `base`, `haves` | `SyncStep.fetchAll`: the merged `Fetch` |
 | `crashNode` | `node` | `SyncStep.crashNode` |
 | `loseKnown` | `node` | `SyncStep.loseKnown`: `known := (0, root)` |
 | `loseVolatile` | `node` | `SyncStep.loseVolatile` |
@@ -83,12 +85,17 @@ compared as sets.
 | `casIdem` | `node`, `expected`, `new` | `SyncStep.casIdem` |
 | `casAccept` | `node`, `expected`, `new` | `SyncStep.casAccept` |
 | `casReject` | `node`, `expected`, `new` | `SyncStep.casReject` |
+| `hubPushIdem` | `node`, `ops`, `objs`, `expected`, `new` | `SyncStep.hubPushIdem` |
+| `hubPushAccept` | `node`, `ops`, `objs`, `expected`, `new` | `SyncStep.hubPushAccept` |
+| `hubPushReject` | `node`, `ops`, `objs`, `expected`, `new` | `SyncStep.hubPushReject` |
+| `hubFetch` | `node`, `base`, `haves` | `SyncStep.hubFetch`: replies with a `head`, an `ops` and an `objs` message |
 | `crashHub` | none | `SyncStep.crashHub` |
 
 `headKind` is one of `head`, `accepted`, `rejected`, `notify`. The Rust hub decides how to
-answer a `Cas`, and the test sends whichever of `casIdem`, `casAccept`, or `casReject` it
-chose. The oracle checks that choice's guard, so a hub that accepts a `Cas` the model would
-reject is caught.
+answer a `Push`, and the test sends whichever of `hubPushIdem`, `hubPushAccept`, or
+`hubPushReject` it chose. The oracle checks that choice's guard, so a hub that accepts a
+`Push` the model would reject is caught. The Rust core sends only the merged requests;
+the finer-grained actions remain in the model and the oracle.
 
 ### Replies
 
@@ -128,7 +135,9 @@ Two consequences of the model that the Rust test implementations must match:
     {"msg": "head", "node": 0, "headKind": "accepted", "seq": 1, "head": 1},
     {"msg": "ops", "node": 0, "ops": [1]},
     {"msg": "objs", "node": 0, "objs": [10]},
-    {"msg": "stored", "node": 0}
+    {"msg": "stored", "node": 0},
+    {"msg": "push", "node": 0, "ops": [1], "objs": [10], "expected": 0, "new": 1},
+    {"msg": "fetch", "node": 1, "base": 0, "haves": []}
   ]
 }
 ```
@@ -152,23 +161,19 @@ Deliberately broken versions of the core, each caught:
 
 | Change | Caught by |
 | --- | --- |
-| Hub accepts `Cas` without checking the closure is stored | invariants (HubClosed) and conformance |
-| Hub accepts `Cas` without checking ancestry | invariants and conformance |
-| Hub accepts `Cas` when `head ≠ expected` | invariants and conformance |
+| Hub accepts a `Push` without checking the closure is stored | invariants (HubClosed) and conformance |
+| Hub accepts a `Push` without checking ancestry | invariants and conformance |
+| Hub accepts a `Push` when `head ≠ expected` | invariants and conformance |
 | Node realizes an operation before its parents | invariants and conformance |
 | Node realizes an operation before its objects arrive | invariants and conformance |
 | Node learns a head whose `seq` equals the one it knows | conformance only: harmless, but not a model step |
 
-`just mutants` (cargo-mutants over `hub.rs` and `node.rs`) found 7 surviving mutants out of
-58; adding a lying hub, a hub that forgets unaccepted uploads, and a directed test for
-re-uploading after a forgotten upload killed three. The four left are behaviorally
-equivalent:
-
-| Surviving mutant | Why it is harmless |
-| --- | --- |
-| `seen.insert(..) \|\| is_local(..)` to `&&` in the two ancestry walks | Revisits nodes; same result, more work. |
-| Push after one `Stored` acknowledgement instead of two | A premature push fails the hub's atomic closure check and is retried. |
-| Reset the upload on every non-rejection head message instead of on rejections | Polling delivers such a message, so a rejected push still re-uploads. |
+`just mutants` (cargo-mutants over `hub.rs` and `node.rs`) leaves no surviving mutant out
+of 61. Earlier versions had survivors; tests that killed them added a lying hub, a hub that
+forgets unaccepted uploads, a directed test for re-uploading after a forgotten upload, and a
+node that crashes after staging operations but before staging their objects. Without that
+crash no node ever lacked the objects of an operation it had staged, so nothing checked
+that it asks for them.
 
 ## How Rust events map to model actions
 
@@ -176,19 +181,20 @@ equivalent:
 | --- | --- |
 | A machine runs a `jj` command (test rule) | `userOp` |
 | `NodeCore` asks the repo to merge heads | `merge` |
-| `NodeCore` sends `GetHead` | `getHead` |
-| `NodeCore` sends `GetOpsSince { head: k, base: b }` | `fetchOps` with `anc*(k) \ anc*(b)` |
-| `NodeCore` sends `GetObjects { for_ops: S }` | `fetchObjs` with `objs(S)` |
-| `NodeCore` sends `PutOps { ops: S }` | `uploadOps` with `S` |
-| `NodeCore` sends `PutObjects { for_ops: S }` | `uploadObjs` with `objs(S)` |
-| `NodeCore` sends `Cas { expected, new }` | `push` |
+| `NodeCore` sends `Fetch { base, haves }`, on every poll | `fetchAll` |
+| `NodeCore` sends `GetObjects { for_ops: S, haves: H, .. }` | `fetchObjs` with `objs(S) \ H` |
+| `NodeCore` sends `Push { ops: S, objects: O, expected, new, .. }` | `pushAll` |
 | `NodeCore` accepts a head-carrying reply | `learn`; a stale one it ignores maps to nothing |
-| `NodeCore` stages an `Ops` / `Objects` reply | `recvOps` / `recvObjs` |
+| `NodeCore` takes in a `Fetched` reply | `learn` if its head is newer, then `recvOps` and `recvObjs` if it stages the operations; the states are compared after the last |
+| `NodeCore` stages an `Objects` reply | `recvObjs` |
 | `NodeCore` realizes or advances | `realize` / `advance` |
-| `HubCore` handles a request | the matching `hub*` or `cas*` action |
+| The hub handles `Fetch` | `hubFetch` |
+| The hub handles `GetObjects { for_ops: S, haves: H, .. }` | `hubGetObjs` with `objs(S) \ H` |
+| The hub handles `Push` | `hubPushIdem`, `hubPushAccept`, or `hubPushReject` |
 | A node restarts | `loseKnown` (its staged files survive; `known` does not) |
+| A node restarts while taking in a `Fetched` reply, after staging its operations and before staging its objects (test rule) | `learn` if its head is newer, `recvOps`, then `loseKnown` |
 | The hub restarts | `crashHub` |
 
-`GetOpsSince` asks for a range rather than a list because a node cannot name operations it
-has never seen. The test computes the set the range denotes, and the oracle checks that it
-satisfies `fetchOps`'s guard: every member is in `anc*(known.head)`.
+The test's objects have no structure, so the test's hub ignores `closure(base)` and leaves
+out exactly what the haves name, as the model's `hubFetch` does; a node's haves there are
+every object it holds.

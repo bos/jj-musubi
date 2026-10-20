@@ -1,8 +1,10 @@
 //! The hub as a network service: answers requests on the hive's RPC subject, one at a
 //! time, and announces new heads on its head subject.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 use std::time::SystemTime;
 
 use bytes::Bytes;
@@ -17,24 +19,35 @@ use crate::blobs::BlobId;
 use crate::blobs::BlobStore;
 use crate::blobs::Received;
 use crate::hub::HubAdapter;
+use crate::temp_bundle;
 use crate::wire::Envelope;
 use crate::wire::HeadNotice;
 use crate::wire::HubReply;
 use crate::wire::HubRequest;
 use crate::wire::WireAttachment;
+use crate::wire::inline_limit;
 use crate::wire::map_reply;
 use crate::wire::map_request;
 
-/// How long the hub keeps a bundle it prepared for a node to download.
+/// How long the hub keeps a blob it prepared for a node that never downloaded all of it,
+/// and an abandoned partial upload.
 const PREPARED_BLOB_LIFETIME: Duration = Duration::from_secs(3600);
+
+/// How long the hub keeps a prepared blob after serving its last chunk, in case the node
+/// asks for a chunk again because a reply was lost.
+const SERVED_BLOB_LIFETIME: Duration = Duration::from_secs(60);
 
 pub struct HubService {
     hub: HubAdapter,
     blobs: BlobStore,
     blobs_dir: std::path::PathBuf,
+    tmp: std::path::PathBuf,
     rpc_subject: String,
     head_subject: String,
     handled: u64,
+    /// Prepared blobs whose last chunk has been served, and when.
+    served: HashMap<BlobId, Instant>,
+    served_lifetime: Duration,
 }
 
 impl HubService {
@@ -45,14 +58,25 @@ impl HubService {
         head_subject: String,
     ) -> anyhow::Result<Self> {
         let blobs_dir = dir.join("blobs");
+        let tmp = dir.join("tmp");
+        std::fs::create_dir_all(&tmp)?;
         Ok(Self {
             hub,
             blobs: BlobStore::open(&blobs_dir)?,
             blobs_dir,
+            tmp,
             rpc_subject,
             head_subject,
             handled: 0,
+            served: HashMap::new(),
+            served_lifetime: SERVED_BLOB_LIFETIME,
         })
+    }
+
+    /// How long to keep a prepared blob after serving its last chunk, for tests.
+    pub fn with_served_blob_lifetime(mut self, lifetime: Duration) -> Self {
+        self.served_lifetime = lifetime;
+        self
     }
 
     pub fn hub(&self) -> &HubAdapter {
@@ -61,7 +85,7 @@ impl HubService {
 
     /// Serves until the transport's subscription ends, calling `ready` once subscribed, when
     /// requests start being answered. Requests are handled strictly one at a time, which is
-    /// what makes every `Cas` atomic.
+    /// what makes every `Push` atomic.
     pub async fn run(
         mut self,
         transport: Arc<dyn Transport>,
@@ -101,11 +125,12 @@ impl HubService {
         max_payload: usize,
     ) -> anyhow::Result<(Vec<u8>, Option<HeadNotice>)> {
         self.handled += 1;
+        self.forget_served();
         if self.handled.is_multiple_of(100) {
             self.sweep();
         }
         let request = Envelope::<HubRequest>::decode(bytes)?;
-        let (reply, notice) = self.handle(request)?;
+        let (reply, notice) = self.handle(request, max_payload)?;
         let encoded = Envelope::encode(reply.clone())?;
         if encoded.len() <= max_payload {
             return Ok((encoded, notice));
@@ -114,7 +139,11 @@ impl HubService {
         Ok((Envelope::encode(HubReply::Indirect { blob, len })?, notice))
     }
 
-    fn handle(&mut self, request: HubRequest) -> anyhow::Result<(HubReply, Option<HeadNotice>)> {
+    fn handle(
+        &mut self,
+        request: HubRequest,
+        max_payload: usize,
+    ) -> anyhow::Result<(HubReply, Option<HeadNotice>)> {
         match request {
             HubRequest::PutChunk {
                 blob,
@@ -132,6 +161,9 @@ impl HubService {
             HubRequest::GetChunk { blob, offset, len } => {
                 let len = usize::try_from(len)?;
                 let (total, data) = self.blobs.read(&blob, offset, len)?;
+                if offset + data.len() as u64 >= total {
+                    self.served.insert(blob, Instant::now());
+                }
                 Ok((HubReply::Chunk { total, data }, None))
             }
             HubRequest::Indirect { blob } => {
@@ -145,7 +177,7 @@ impl HubService {
                     matches!(inner, HubRequest::Protocol(_)),
                     "nested indirection"
                 );
-                self.handle(inner)
+                self.handle(inner, max_payload)
             }
             HubRequest::Protocol(request) => {
                 let mut uploaded = vec![];
@@ -159,6 +191,11 @@ impl HubService {
                             })?;
                             Attachment::File(path)
                         }
+                        WireAttachment::Inline(bytes) => {
+                            let path = temp_bundle(&self.tmp)?;
+                            std::fs::write(&path, bytes)?;
+                            Attachment::bundle(path)
+                        }
                         WireAttachment::Haves(ids) => {
                             Attachment::Haves(ids.into_iter().map(CommitId::new).collect())
                         }
@@ -170,19 +207,23 @@ impl HubService {
                     self.blobs.remove(&blob);
                 }
                 let handled = handled?;
+                let mut inline_left = inline_limit(max_payload);
                 let reply = map_reply(
                     handled.reply,
                     |id| id.to_bytes(),
                     |attachment| {
                         Ok(match attachment {
                             Attachment::None => WireAttachment::None,
-                            Attachment::Bundle(path) => {
-                                let (blob, len) = self.blobs.insert_file(&path)?;
-                                WireAttachment::Blob { blob, len }
-                            }
-                            Attachment::File(path) => {
-                                let (blob, len) = self.blobs.insert_file(&path)?;
-                                WireAttachment::Blob { blob, len }
+                            Attachment::Bundle(_) | Attachment::File(_) => {
+                                let path = attachment.bundle_path()?;
+                                let len = std::fs::metadata(path)?.len();
+                                if len <= inline_left {
+                                    inline_left -= len;
+                                    WireAttachment::Inline(std::fs::read(path)?)
+                                } else {
+                                    let (blob, len) = self.blobs.insert_file(path)?;
+                                    WireAttachment::Blob { blob, len }
+                                }
                             }
                             Attachment::Haves(ids) => {
                                 WireAttachment::Haves(ids.iter().map(|id| id.to_bytes()).collect())
@@ -197,6 +238,19 @@ impl HubService {
                 Ok((HubReply::Protocol(reply), notice))
             }
         }
+    }
+
+    /// Deletes prepared blobs a while after their last chunk was served.
+    fn forget_served(&mut self) {
+        let now = Instant::now();
+        let (blobs, lifetime) = (&self.blobs, self.served_lifetime);
+        self.served.retain(|blob, served| {
+            let keep = now.duration_since(*served) < lifetime;
+            if !keep {
+                blobs.remove(blob);
+            }
+            keep
+        });
     }
 
     /// Deletes prepared blobs nobody downloaded in time, and abandoned partial uploads.

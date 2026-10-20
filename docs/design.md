@@ -209,9 +209,9 @@ to make several machines feel like one.
 
 The hub therefore keeps a single canonical head and accepts only fast-forward updates.
 
-- **Push**: a node uploads any missing canonical operations and objects. It then asks the hub
-  to compare-and-swap the canonical head from H to H', and the hub agrees only if H' descends
-  from H and everything H' refers to is stored.
+- **Push**: in one request, a node uploads any missing canonical operations and objects, and
+  asks the hub to compare-and-swap the canonical head from H to H'. The hub stores the
+  upload, then agrees only if H' descends from H and everything H' refers to is stored.
 - **Pull**: a node fetches the operations and objects between its last-known canonical head
   and the current one, realizes them in topological order, and publishes the realization of
   the new head. Any of its local heads that are ancestors drop out.
@@ -293,11 +293,19 @@ commits and sends the store files the receiver lacks, in batches.
 ### Size limits and chunking
 
 NATS rejects messages larger than the server's `max_payload`, which defaults to 1 MiB. Control
-messages are small. Everything bulky (packs, large views, batches of operations) moves as a
-content-addressed blob in a resumable upload or download session. Each chunk carries its
-offset and fits under the negotiated limit, and the blob's hash is checked when the session
-finishes. An interrupted session resumes from the receiver's reported offset. Unfinished
-sessions expire.
+messages are small. Something bulky (packs, large views, batches of operations) travels
+inline in the request or reply it belongs to when it fits in a quarter of that, and
+otherwise moves as a content-addressed blob in a resumable upload or download session. Each
+chunk carries its offset and fits under the negotiated limit, up to eight chunks are in
+flight at once, and the blob's hash is checked when the session finishes. An interrupted
+session resumes from the receiver's reported offset. The hub deletes a blob it prepared a
+minute after serving its last chunk, and unfinished sessions expire after an hour.
+
+A sync takes few round trips. A node's first request, which it also sends whenever it
+polls, asks for the hub's head together with every operation accepted since the newest
+head the node has, and the objects they require. Its push carries its upload along with the
+compare-and-swap. A sync that brings something new therefore takes one round trip, and one
+that pushes two.
 
 Views are stored whole for every operation, and a repository with thousands of remote
 bookmarks can have megabyte-sized views, while consecutive views usually differ in a few

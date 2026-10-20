@@ -3,6 +3,7 @@
 use musubi_core::message::HeadKind;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
+use musubi_core::node::LocalRepo as _;
 use musubi_core::node::NodeCore;
 use musubi_core::node::Step;
 use musubi_jj::node::NodeRepo;
@@ -36,13 +37,16 @@ impl NodeDriver {
         self.core.known()
     }
 
-    /// Asks the hub for its head, then runs the policy until there is nothing left to do.
-    /// Returns how many steps that took.
+    /// Asks the hub for its head and anything new, then runs the policy until there is
+    /// nothing left to do. Returns how many steps that took.
     pub async fn sync(&mut self) -> anyhow::Result<usize> {
         // Settings changed here go up with this sync, and once the node has the hive's head,
         // the hive's settings apply here.
         self.adapter.reconcile_settings(true)?;
-        self.deliver(Request::GetHead).await?;
+        // Op heads may have changed since the last step: a fetch's haves should say so.
+        self.adapter.heads()?;
+        let poll = self.core.poll(&self.adapter)?;
+        self.deliver(poll).await?;
         let mut steps = 0;
         loop {
             match self.core.step(&mut self.adapter)? {
@@ -68,15 +72,18 @@ impl NodeDriver {
 
     async fn deliver(&mut self, request: Request<OpId, crate::Attachment>) -> anyhow::Result<()> {
         let reply = self.remote.call(request).await?;
-        let attachment = match &reply {
-            Reply::Ops { attachment, .. } | Reply::Objects { attachment, .. } => {
-                Some(attachment.clone())
-            }
-            _ => None,
+        let attachments = match &reply {
+            Reply::Fetched {
+                ops_attachment,
+                objects,
+                ..
+            } => vec![ops_attachment.clone(), objects.clone()],
+            Reply::Objects { attachment, .. } => vec![attachment.clone()],
+            Reply::Head { .. } => vec![],
         };
         let result = self.core.handle(&mut self.adapter, reply);
-        if let Some(attachment) = attachment {
-            self.remote.release(&attachment);
+        for attachment in &attachments {
+            self.remote.release(attachment);
         }
         result?;
         Ok(())

@@ -5,9 +5,10 @@
 //! operation ids are hashes of jj-lib's structs, so peers must agree on jj-lib exactly
 //! (docs/design.md, "Compatibility").
 //!
-//! Bundles travel as blobs, in chunks. A message that would itself exceed the transport's
-//! payload limit (a long list of operation ids, say) is stored as a blob and sent as
-//! [`HubRequest::Indirect`] or [`HubReply::Indirect`].
+//! A small bundle travels inline, in the message that refers to it; a larger one as a blob,
+//! in chunks, several of them in flight at once. A message that would itself exceed the
+//! transport's payload limit (a long list of operation ids, say) is stored as a blob and
+//! sent as [`HubRequest::Indirect`] or [`HubReply::Indirect`].
 
 use musubi_core::message::OpEntry;
 use musubi_core::message::Reply;
@@ -17,7 +18,7 @@ use serde::Serialize;
 
 use crate::blobs::BlobId;
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 pub const JJ_LIB_VERSION: &str = "0.46.0";
 
 /// An operation or commit id on the wire.
@@ -27,6 +28,7 @@ pub type WireId = Vec<u8>;
 pub enum WireAttachment {
     None,
     Blob { blob: BlobId, len: u64 },
+    Inline(Vec<u8>),
     Haves(Vec<WireId>),
 }
 
@@ -121,6 +123,12 @@ pub fn chunk_size(max_payload: usize) -> usize {
     max_payload.saturating_sub(1024).max(1024)
 }
 
+/// How many bytes of attachments one message carries inline, leaving room for the rest of
+/// it. Larger attachments travel as blobs.
+pub fn inline_limit(max_payload: usize) -> u64 {
+    (max_payload / 4) as u64
+}
+
 /// Converts ids and attachments of a request.
 pub fn map_request<O, A, P, B>(
     request: Request<O, A>,
@@ -128,30 +136,29 @@ pub fn map_request<O, A, P, B>(
     mut attachment: impl FnMut(A) -> anyhow::Result<B>,
 ) -> anyhow::Result<Request<P, B>> {
     Ok(match request {
-        Request::GetHead => Request::GetHead,
-        Request::PutOps { ops, attachment: a } => Request::PutOps {
-            ops: ops.into_iter().map(&mut id).collect(),
-            attachment: attachment(a)?,
-        },
-        Request::PutObjects {
-            for_ops,
-            attachment: a,
-        } => Request::PutObjects {
-            for_ops: for_ops.into_iter().map(&mut id).collect(),
-            attachment: attachment(a)?,
-        },
-        Request::GetOpsSince { head, base } => Request::GetOpsSince {
-            head: id(head),
+        Request::Fetch { base, haves } => Request::Fetch {
             base: id(base),
+            haves: attachment(haves)?,
         },
         Request::GetObjects {
             for_ops,
-            attachment: a,
+            base,
+            haves,
         } => Request::GetObjects {
             for_ops: for_ops.into_iter().map(&mut id).collect(),
-            attachment: attachment(a)?,
+            base: id(base),
+            haves: attachment(haves)?,
         },
-        Request::Cas { expected, new } => Request::Cas {
+        Request::Push {
+            ops,
+            ops_attachment,
+            objects,
+            expected,
+            new,
+        } => Request::Push {
+            ops: ops.into_iter().map(&mut id).collect(),
+            ops_attachment: attachment(ops_attachment)?,
+            objects: attachment(objects)?,
             expected: id(expected),
             new: id(new),
         },
@@ -170,12 +177,14 @@ pub fn map_reply<O, A, P, B>(
             seq,
             head: id(head),
         },
-        Reply::Stored => Reply::Stored,
-        Reply::Ops {
+        Reply::Fetched {
+            seq,
             head,
             ops,
-            attachment: a,
-        } => Reply::Ops {
+            ops_attachment,
+            objects,
+        } => Reply::Fetched {
+            seq,
             head: id(head),
             ops: ops
                 .into_iter()
@@ -184,7 +193,8 @@ pub fn map_reply<O, A, P, B>(
                     parents: entry.parents.into_iter().map(&mut id).collect(),
                 })
                 .collect(),
-            attachment: attachment(a)?,
+            ops_attachment: attachment(ops_attachment)?,
+            objects: attachment(objects)?,
         },
         Reply::Objects {
             for_ops,

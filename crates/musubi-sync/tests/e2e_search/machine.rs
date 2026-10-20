@@ -372,15 +372,27 @@ impl Search {
         self.undos += 1;
         fired("undo");
         // jj refuses to undo another workspace's operation unless told to, and another
-        // machine's operations are another workspace's even when the names match.
-        let made_in = world.head_op_workspace(m);
-        let made_in = made_in.trim_end_matches('@').trim_matches('"');
-        let own = made_in.is_empty() || made_in == world.workspaces[m][0].name;
+        // machine's operations are another workspace's even when the names match. jj
+        // undoes the latest operation when it runs, which can be one it wrote itself first
+        // (importing git HEAD, say), so check the operation it actually undid.
+        let ws = world.workspaces[m][0].name.clone();
+        let own = |made_in: &str| {
+            let made_in = made_in.trim_end_matches('@').trim_matches('"');
+            made_in.is_empty() || made_in == ws
+        };
+        let latest = world.head_op_workspace(m);
         let refusal = "Refusing to undo operation";
         match world.try_jj_in(m, 0, &["undo"], &[refusal]) {
-            Ok(_) if !own => world.fail(&format!("`jj undo` undid an operation made in {made_in}")),
-            Ok(_) => {}
-            Err(_) if own => world.fail("`jj undo` refused this workspace's own operation"),
+            Ok(_) => {
+                if let Some(undone) = world.undone_workspace(m)
+                    && !own(&undone)
+                {
+                    world.fail(&format!("`jj undo` undid an operation made in {undone}"));
+                }
+            }
+            Err(_) if own(&latest) => {
+                world.fail("`jj undo` refused this workspace's own operation");
+            }
             Err(_) => {
                 world.jj(m, &["undo", "--allow-cross-workspace"]);
             }

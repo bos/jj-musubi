@@ -514,6 +514,31 @@ impl World {
         )
     }
 
+    /// If machine `m`'s latest operation is an undo, the workspace that made the operation
+    /// it undid, as `jj op log` shows it. (Without anything to change, `jj undo` writes no
+    /// operation.)
+    pub fn undone_workspace(&self, m: usize) -> Option<String> {
+        let template =
+            r#"description.first_line() ++ "\t" ++ parents.map(|p| p.workspace_name()).join(",")"#;
+        let latest = self.raw_jj(
+            m,
+            &[
+                "--ignore-working-copy",
+                "op",
+                "log",
+                "--no-graph",
+                "-n",
+                "1",
+                "-T",
+                template,
+            ],
+        );
+        let (description, parents) = latest.split_once('\t')?;
+        description
+            .starts_with("undo: restore to operation")
+            .then(|| parents.trim().to_owned())
+    }
+
     pub fn write(&mut self, m: usize, ws: usize, file: &str, contents: &str) {
         let dir = self.workspaces[m][ws]
             .path
@@ -601,33 +626,37 @@ impl World {
         self.touched.insert(m);
         self.merge_local_heads(m);
         let steps = loop {
-            let err = match self.fx.hive.sync(m) {
+            match self.fx.hive.sync(m) {
                 Ok(steps) => break steps,
-                Err(err) => err,
-            };
-            // A known jj limitation (docs/races.md): jj can't merge this machine's
-            // operations with the hive's, so musubi pauses. Recover as its error says, by
-            // reverting this machine's operations the hive doesn't have, newest first.
-            let ours = err
-                .chain()
-                .find_map(|e| match e.downcast_ref::<NodeError>() {
-                    Some(NodeError::Unmergeable { ours, .. }) => Some(ours.clone()),
-                    _ => None,
-                });
-            let Some(op) = ours.and_then(|ours| ours.first().cloned()) else {
-                self.fail(&format!("sync of {} failed: {err:#}", self.machine(m)));
-            };
-            if self.unmergeable_reverts >= MAX_UNMERGEABLE_REVERTS {
-                self.fail(&format!(
-                    "sync of {} keeps failing: {err:#}",
-                    self.machine(m)
-                ));
+                Err(err) => self.recover_unmergeable(m, "sync", &err),
             }
-            self.unmergeable_reverts += 1;
-            self.jj(m, &["op", "revert", &op.hex()]);
         };
         self.record_merges(m);
         steps
+    }
+
+    /// Recovers from a sync of node `m` that failed because of a known jj limitation
+    /// (docs/races.md): jj can't merge this machine's operations with the hive's, so musubi
+    /// pauses. Recovers as the error says, by reverting the newest of this machine's
+    /// operations the hive doesn't have. Fails the case on any other error.
+    fn recover_unmergeable(&mut self, m: usize, what: &str, err: &anyhow::Error) {
+        let ours = err
+            .chain()
+            .find_map(|e| match e.downcast_ref::<NodeError>() {
+                Some(NodeError::Unmergeable { ours, .. }) => Some(ours.clone()),
+                _ => None,
+            });
+        let Some(op) = ours.and_then(|ours| ours.first().cloned()) else {
+            self.fail(&format!("{what} of {} failed: {err:#}", self.machine(m)));
+        };
+        if self.unmergeable_reverts >= MAX_UNMERGEABLE_REVERTS {
+            self.fail(&format!(
+                "{what} of {} keeps failing: {err:#}",
+                self.machine(m)
+            ));
+        }
+        self.unmergeable_reverts += 1;
+        self.jj(m, &["op", "revert", &op.hex()]);
     }
 
     /// Records the commits node `m`'s merges made, after a sync.
@@ -649,11 +678,9 @@ impl World {
                 .unwrap_or_default()
         ));
         self.merge_local_heads(m);
+        // Progress stops here either way: a partial sync that pauses has nothing to retry.
         if let Err(err) = self.try_sync_partial(m, steps, lose) {
-            self.fail(&format!(
-                "partial sync of {} failed: {err:#}",
-                self.machine(m)
-            ));
+            self.recover_unmergeable(m, "partial sync", &err);
         }
         self.record_merges(m);
     }

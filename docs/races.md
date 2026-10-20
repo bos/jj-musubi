@@ -64,6 +64,7 @@ Workspaces are per-machine (docs/design.md); only the commits they point at are 
 | One machine fetches | Every machine gets the remote bookmarks, and its `.git` gets the matching remote-tracking refs. | `fetch_on_one_machine_reaches_the_other` |
 | Two machines fetch while the remote moves in between | The newer fetch descends from the older one, so jj resolves the remote bookmark to it; no conflict. | `concurrent_fetches_of_a_moving_remote` |
 | One machine pushes | Every machine sees the pushed, tracked remote bookmark. | `push_from_one_machine` |
+| `jj git colocation disable` or `enable` while `musubi daemon` runs | The daemon's next sync fails, since the repository it had open moved its git store. The daemon reopens the repository after any failed sync and retries after its backoff, so it carries on. | `daemon_carries_on_after_colocation_changes` |
 
 ## Operation history
 

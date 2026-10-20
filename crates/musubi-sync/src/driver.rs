@@ -82,6 +82,16 @@ impl NodeDriver {
         Ok(())
     }
 
+    /// Starts over with `repo`, a fresh handle on the same repository, as after a crash.
+    /// jj-lib and gix cache what they read from the repository, so a handle can keep
+    /// failing after the repository changed under it (colocation turned on or off), or
+    /// after git's object store outgrew what gix sized for it.
+    pub fn reopen(&mut self, repo: NodeRepo) -> anyhow::Result<()> {
+        self.adapter = NodeAdapter::new(repo)?;
+        self.restart();
+        Ok(())
+    }
+
     /// Forgets volatile protocol state, as after a crash.
     pub fn restart(&mut self) {
         let root = self

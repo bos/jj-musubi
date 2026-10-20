@@ -247,3 +247,39 @@ fn machines_whose_workspaces_are_all_default_can_join() {
     );
     assert!(log(&beta).contains("from alpha"));
 }
+
+/// The daemon reopens the repository after a failed sync, so it carries on after changes
+/// an open repository can't follow, such as turning colocation off.
+#[test]
+fn daemon_carries_on_after_colocation_changes() {
+    let server = NatsServer::start(1024 * 1024);
+    let env = TestEnv::new();
+    let mut logs = Logs::default();
+    let (_hub, hive) = start_hub(&env, &mut logs, &server.url());
+    let alpha = env.init_repo("alpha");
+    let beta = env.init_repo("beta");
+    musubi_in(
+        &env,
+        &logs,
+        &alpha,
+        &["join", &hive, "--nats", &server.url()],
+    );
+    musubi_in(
+        &env,
+        &logs,
+        &beta,
+        &["join", &hive, "--nats", &server.url()],
+    );
+
+    let mut daemon = beta.program(musubi());
+    daemon.arg("daemon").stdout(Stdio::null());
+    logs.attach(&env, "daemon", &mut daemon);
+    let _daemon = Killed(daemon.spawn().unwrap());
+    beta.jj(&["git", "colocation", "disable"]);
+    alpha.write_file("a", "from alpha");
+    alpha.jj(&["commit", "-m", "after beta stopped colocating"]);
+    musubi_in(&env, &logs, &alpha, &["sync"]);
+    wait_for(&logs, "beta's daemon to fetch alpha's commit", || {
+        log(&beta).contains("after beta stopped colocating")
+    });
+}

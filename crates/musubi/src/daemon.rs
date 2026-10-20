@@ -69,8 +69,21 @@ pub fn run() -> anyhow::Result<()> {
     let mut threads = vec![];
     for workspace in config.repos {
         threads.push(std::thread::spawn(move || {
-            if let Err(err) = serve(&workspace) {
-                tracing::error!("{}: {err:#}", workspace.display());
+            // A repository that can't be served now, such as one whose git store is moving,
+            // may be servable soon: keep trying.
+            let mut backoff = Duration::from_secs(1);
+            loop {
+                match serve(&workspace) {
+                    Ok(()) => return,
+                    Err(err) => {
+                        tracing::error!(
+                            "{}: {err:#}; retrying in {backoff:?}",
+                            workspace.display()
+                        );
+                    }
+                }
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(MAX_BACKOFF);
             }
         }));
     }
@@ -101,16 +114,21 @@ async fn serve_async(workspace: &Path) -> anyhow::Result<()> {
     let mut driver = NodeDriver::new(located.open()?, remote)?;
     let mut poll = tokio::time::interval(POLL_INTERVAL);
     let mut backoff = Duration::from_millis(500);
+    let mut retry = false;
     tracing::info!("serving {} in hive {}", workspace.display(), hive.hive);
     loop {
-        tokio::select! {
-            _ = poll.tick() => {}
-            () = watcher.changed() => {}
-            notice = notices.next() => {
-                let Some(notice) = notice else { anyhow::bail!("lost the head subscription") };
-                match Envelope::<HeadNotice>::decode(&notice.payload) {
-                    Ok(notice) => driver.notice(notice)?,
-                    Err(err) => tracing::warn!("ignoring announcement: {err:#}"),
+        // After a failure, try again once the backoff has passed, rather than waiting for
+        // something to change.
+        if !retry {
+            tokio::select! {
+                _ = poll.tick() => {}
+                () = watcher.changed() => {}
+                notice = notices.next() => {
+                    let Some(notice) = notice else { anyhow::bail!("lost the head subscription") };
+                    match Envelope::<HeadNotice>::decode(&notice.payload) {
+                        Ok(notice) => driver.notice(notice)?,
+                        Err(err) => tracing::warn!("ignoring announcement: {err:#}"),
+                    }
                 }
             }
         }
@@ -119,14 +137,20 @@ async fn serve_async(workspace: &Path) -> anyhow::Result<()> {
         match driver.sync().await {
             Ok(_) => {
                 backoff = Duration::from_millis(500);
+                retry = false;
                 status.last_success = Some(now());
                 status.error = None;
             }
             Err(err) => {
                 tracing::warn!("{}: {err:#}", workspace.display());
                 status.error = Some(format!("{err:#}"));
-                // Lost replies are indistinguishable from lost requests; start over.
-                driver.restart();
+                // Lost replies are indistinguishable from lost requests, and the open
+                // repository's cached state may be what failed: start over, reopened.
+                if let Err(err) = located.open().and_then(|repo| driver.reopen(repo)) {
+                    tracing::warn!("{}: cannot reopen: {err:#}", workspace.display());
+                    driver.restart();
+                }
+                retry = true;
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(MAX_BACKOFF);
             }

@@ -151,7 +151,6 @@ fn hub(dir: &Path, nats: &str, hive: Option<Uuid>, backend: &str) -> anyhow::Res
         adapter
     };
     let hive: Uuid = std::fs::read_to_string(&hive_file)?.trim().parse()?;
-    println!("{hive}");
     let (rpc, head) = subjects(hive);
     let service = HubService::new(adapter, dir, rpc, head)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -159,8 +158,13 @@ fn hub(dir: &Path, nats: &str, hive: Option<Uuid>, backend: &str) -> anyhow::Res
         .build()?;
     runtime.block_on(async {
         let transport: Arc<dyn Transport> = Arc::new(NatsTransport::connect(nats).await?);
-        tracing::info!("serving hive {hive} from {}", dir.display());
-        service.run(transport).await
+        // Printing the hive id says the hub is ready: nodes can join as soon as they see it.
+        service
+            .run(transport, || {
+                println!("{hive}");
+                tracing::info!("serving hive {hive} from {}", dir.display());
+            })
+            .await
     })
 }
 

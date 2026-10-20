@@ -3,19 +3,28 @@
 
 #![allow(clippy::unwrap_used)]
 
+use std::fmt::Write as _;
+use std::fs;
 use std::io::BufRead as _;
 use std::io::BufReader;
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::Child;
 use std::process::Command;
-use std::process::Output;
 use std::process::Stdio;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::mpsc;
 use std::time::Duration;
 use std::time::Instant;
 
 use musubi_testutil::NatsServer;
 use musubi_testutil::TestEnv;
 use musubi_testutil::TestRepo;
+
+/// How long one command may take. A command that hangs usually means a hub or daemon that
+/// stopped answering, so failing here, with their logs, says more than nextest's timeout.
+const DEADLINE: Duration = Duration::from_secs(45);
 
 fn musubi() -> &'static Path {
     Path::new(env!("CARGO_BIN_EXE_musubi"))
@@ -30,26 +39,71 @@ impl Drop for Killed {
     }
 }
 
-fn run(mut command: Command) -> String {
-    let output: Output = command.output().unwrap();
-    assert!(
-        output.status.success(),
-        "{command:?} failed:\n{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap()
+/// The logs of the background processes, for failure messages.
+#[derive(Default)]
+struct Logs(Vec<PathBuf>);
+
+impl Logs {
+    /// A log file for a background process: its stderr, at debug level for musubi.
+    fn attach(&mut self, env: &TestEnv, name: &str, command: &mut Command) {
+        let path = env.root().join(format!("{name}.log"));
+        command
+            .env("RUST_LOG", "info,musubi=debug,musubi_sync=debug")
+            .stderr(fs::File::create(&path).unwrap());
+        self.0.push(path);
+    }
+
+    fn dump(&self) -> String {
+        let mut dump = String::new();
+        for path in &self.0 {
+            let log = fs::read_to_string(path).unwrap_or_default();
+            writeln!(dump, "--- {}:\n{log}", path.display()).unwrap();
+        }
+        dump
+    }
 }
 
-fn musubi_in(repo: &TestRepo, args: &[&str]) -> String {
+/// Runs `command` to completion within the deadline, returning its stdout.
+fn run(env: &TestEnv, logs: &Logs, mut command: Command) -> String {
+    static RUNS: AtomicUsize = AtomicUsize::new(0);
+    let n = RUNS.fetch_add(1, Ordering::Relaxed);
+    let out = env.root().join(format!("run-{n}.out"));
+    let err = env.root().join(format!("run-{n}.err"));
+    command
+        .stdout(fs::File::create(&out).unwrap())
+        .stderr(fs::File::create(&err).unwrap());
+    let mut child = command.spawn().unwrap();
+    let deadline = Instant::now() + DEADLINE;
+    let (status, outcome) = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break (status, "failed");
+        }
+        if Instant::now() > deadline {
+            child.kill().ok();
+            break (child.wait().unwrap(), "did not finish in time");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let stdout = fs::read_to_string(&out).unwrap();
+    assert!(
+        status.success(),
+        "{command:?} {outcome}:\n{stdout}{}\n{}",
+        fs::read_to_string(&err).unwrap(),
+        logs.dump()
+    );
+    stdout
+}
+
+fn musubi_in(env: &TestEnv, logs: &Logs, repo: &TestRepo, args: &[&str]) -> String {
     let mut command = repo.program(musubi());
     command.args(args);
-    run(command)
+    run(env, logs, command)
 }
 
-/// Starts `musubi hub` and returns it with the hive id it prints.
-fn start_hub(env: &TestEnv, nats: &str) -> (Killed, String) {
-    let mut child = Command::new(musubi())
+/// Starts `musubi hub` and returns it with the hive id it prints once it is serving.
+fn start_hub(env: &TestEnv, logs: &mut Logs, nats: &str) -> (Killed, String) {
+    let mut command = Command::new(musubi());
+    command
         .args([
             "hub",
             "--dir",
@@ -57,15 +111,25 @@ fn start_hub(env: &TestEnv, nats: &str) -> (Killed, String) {
             "--nats",
             nats,
         ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap();
-    let mut line = String::new();
-    BufReader::new(child.stdout.take().unwrap())
-        .read_line(&mut line)
-        .unwrap();
-    (Killed(child), line.trim().to_owned())
+        .stdout(Stdio::piped());
+    logs.attach(env, "hub", &mut command);
+    let mut child = command.spawn().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        let mut stdout = BufReader::new(stdout);
+        stdout.read_line(&mut line).ok();
+        tx.send(line).ok();
+        // Keep reading, so the hub never writes to a closed pipe.
+        std::io::copy(&mut stdout, &mut std::io::sink()).ok();
+    });
+    let hub = Killed(child);
+    let line = rx
+        .recv_timeout(DEADLINE)
+        .unwrap_or_else(|_| panic!("the hub did not start serving:\n{}", logs.dump()));
+    assert!(!line.trim().is_empty(), "the hub exited:\n{}", logs.dump());
+    (hub, line.trim().to_owned())
 }
 
 fn log(repo: &TestRepo) -> String {
@@ -79,10 +143,14 @@ fn log(repo: &TestRepo) -> String {
     ])
 }
 
-fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(20);
+fn wait_for(logs: &Logs, what: &str, mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + DEADLINE;
     while !done() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {what}:\n{}",
+            logs.dump()
+        );
         std::thread::sleep(Duration::from_millis(100));
     }
 }
@@ -91,17 +159,28 @@ fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
 fn hub_join_sync_clone_and_daemon() {
     let server = NatsServer::start(1024 * 1024);
     let env = TestEnv::new();
-    let (_hub, hive) = start_hub(&env, &server.url());
+    let mut logs = Logs::default();
+    let (_hub, hive) = start_hub(&env, &mut logs, &server.url());
     let alpha = env.init_repo("alpha");
     let beta = env.init_repo("beta");
 
     alpha.write_file("a", "from alpha");
     alpha.jj(&["commit", "-m", "from alpha"]);
-    musubi_in(&alpha, &["join", &hive, "--nats", &server.url()]);
-    musubi_in(&beta, &["join", &hive, "--nats", &server.url()]);
+    musubi_in(
+        &env,
+        &logs,
+        &alpha,
+        &["join", &hive, "--nats", &server.url()],
+    );
+    musubi_in(
+        &env,
+        &logs,
+        &beta,
+        &["join", &hive, "--nats", &server.url()],
+    );
     assert!(log(&beta).contains("from alpha"));
 
-    let status = musubi_in(&beta, &["status"]);
+    let status = musubi_in(&env, &logs, &beta, &["status"]);
     assert!(
         status.contains(&hive) && status.contains("Machine:   beta"),
         "{status}"
@@ -111,21 +190,19 @@ fn hub_join_sync_clone_and_daemon() {
 
     // The daemon keeps beta in sync on its own.
     let mut daemon = beta.program(musubi());
-    daemon
-        .arg("daemon")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+    daemon.arg("daemon").stdout(Stdio::null());
+    logs.attach(&env, "daemon", &mut daemon);
     let _daemon = Killed(daemon.spawn().unwrap());
     alpha.write_file("b", "more");
     alpha.jj(&["commit", "-m", "picked up by the daemon"]);
-    musubi_in(&alpha, &["sync"]);
-    wait_for("beta's daemon to fetch alpha's commit", || {
+    musubi_in(&env, &logs, &alpha, &["sync"]);
+    wait_for(&logs, "beta's daemon to fetch alpha's commit", || {
         log(&beta).contains("picked up by the daemon")
     });
 
     // Operation ids translate between this machine's and the hive's.
     let local = beta.jj(&["op", "log", "--no-graph", "-n1", "-T", "id"]);
-    let translated = musubi_in(&beta, &["op-id", &local]);
+    let translated = musubi_in(&env, &logs, &beta, &["op-id", &local]);
     assert!(
         translated.starts_with(&format!("local {local}")),
         "{translated}"
@@ -142,7 +219,7 @@ fn hub_join_sync_clone_and_daemon() {
         &server.url(),
     ]);
     clone.current_dir(env.root());
-    run(clone);
+    run(&env, &logs, clone);
     assert!(log(&gamma).contains("picked up by the daemon"));
 }
 
@@ -150,12 +227,23 @@ fn hub_join_sync_clone_and_daemon() {
 fn machines_whose_workspaces_are_all_default_can_join() {
     let server = NatsServer::start(1024 * 1024);
     let env = TestEnv::new();
-    let (_hub, hive) = start_hub(&env, &server.url());
+    let mut logs = Logs::default();
+    let (_hub, hive) = start_hub(&env, &mut logs, &server.url());
     let alpha = env.init_repo_with_workspace("alpha", "default");
     let beta = env.init_repo_with_workspace("beta", "default");
     alpha.write_file("a", "from alpha");
     alpha.jj(&["commit", "-m", "from alpha"]);
-    musubi_in(&alpha, &["join", &hive, "--nats", &server.url()]);
-    musubi_in(&beta, &["join", &hive, "--nats", &server.url()]);
+    musubi_in(
+        &env,
+        &logs,
+        &alpha,
+        &["join", &hive, "--nats", &server.url()],
+    );
+    musubi_in(
+        &env,
+        &logs,
+        &beta,
+        &["join", &hive, "--nats", &server.url()],
+    );
     assert!(log(&beta).contains("from alpha"));
 }

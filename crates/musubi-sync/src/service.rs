@@ -59,10 +59,16 @@ impl HubService {
         &self.hub
     }
 
-    /// Serves until the transport's subscription ends. Requests are handled strictly one
-    /// at a time, which is what makes every `Cas` atomic.
-    pub async fn run(mut self, transport: Arc<dyn Transport>) -> anyhow::Result<()> {
+    /// Serves until the transport's subscription ends, calling `ready` once subscribed, when
+    /// requests start being answered. Requests are handled strictly one at a time, which is
+    /// what makes every `Cas` atomic.
+    pub async fn run(
+        mut self,
+        transport: Arc<dyn Transport>,
+        ready: impl FnOnce(),
+    ) -> anyhow::Result<()> {
         let mut requests = transport.subscribe(&self.rpc_subject).await?;
+        ready();
         while let Some(message) = requests.next().await {
             let Some(reply_to) = message.reply else {
                 continue;

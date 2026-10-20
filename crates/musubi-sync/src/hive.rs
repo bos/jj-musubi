@@ -90,11 +90,17 @@ impl Hive {
     /// Polls the hub, then runs the node's policy until it has nothing left to do. Returns
     /// how many steps it took.
     pub fn sync(&mut self, node: usize) -> anyhow::Result<usize> {
+        self.members[node].adapter.reconcile_settings(true)?;
         self.request(node, Request::GetHead)?;
         for steps in 0..10_000 {
             let member = &mut self.members[node];
             match member.core.step(&mut member.adapter)? {
-                Step::Idle => return Ok(steps),
+                Step::Idle => {
+                    if member.adapter.reconcile_settings(false)? {
+                        continue;
+                    }
+                    return Ok(steps);
+                }
                 Step::Send(requests) => {
                     for request in requests {
                         self.request(node, request)?;

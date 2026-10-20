@@ -2972,6 +2972,8 @@ dependencies = [
  "musubi-testutil",
  "pollster",
  "prost",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.21",
 ]

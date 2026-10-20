@@ -4,6 +4,7 @@
 //! docs/protocol.md.
 
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::io::Write as _;
@@ -35,6 +36,8 @@ use jj_lib::repo::StoreLoadError;
 use jj_lib::settings::UserSettings;
 use jj_lib::simple_op_store::SimpleOpStore;
 use pollster::FutureExt as _;
+use serde::Deserialize;
+use serde::Serialize;
 use thiserror::Error;
 
 use std::collections::BTreeSet;
@@ -52,7 +55,10 @@ use crate::canonical::CanonicalStore;
 use crate::canonical::strip_git_records;
 use crate::format_guard;
 use crate::format_guard::FormatError;
+use crate::hive_settings;
+use crate::hive_settings::HiveSettings;
 use crate::objects;
+use crate::objects::GitObjects;
 use crate::objects::GitStore;
 use crate::objects::ObjectError;
 use crate::objects::ObjectStore;
@@ -100,6 +106,8 @@ pub enum NodeError {
     NotRealizable(String, &'static str),
     #[error("operation {op} names canonical operation {canonical}, which is not stored")]
     DanglingAttribute { op: String, canonical: String },
+    #[error("bad hive settings in {op}: {message}")]
+    Settings { op: String, message: String },
     #[error(
         "operation {op} realizes canonical operation {canonical} but no longer has its parents \
          (was `jj op abandon` run?); musubi does not replicate op abandon yet, so replication is \
@@ -165,6 +173,19 @@ pub struct NodeRepo {
     /// The canonical join operation each join point maps to, by the join point's
     /// fingerprint, so that a copy of it that `jj op abandon` rewrote maps there too.
     joins: BTreeMap<String, OperationId>,
+    /// The hive's settings as of canonical operations, as computed so far.
+    settings: HashMap<OperationId, Option<HiveSettings>>,
+}
+
+/// The settings this machine and the hive agreed on when they were last reconciled.
+#[derive(Serialize, Deserialize)]
+struct SettingsState {
+    /// The canonical operation they were reconciled at.
+    op: String,
+    /// The hive's settings there, if any machine had recorded some.
+    hive: Option<HiveSettings>,
+    /// The settings both had afterwards.
+    settings: HiveSettings,
 }
 
 impl NodeRepo {
@@ -196,6 +217,7 @@ impl NodeRepo {
             colocated,
             heads_mapped: false,
             joins: BTreeMap::new(),
+            settings: HashMap::new(),
             machine: Machine::load_or_create(
                 &musubi_dir.join("machine"),
                 settings.operation_hostname(),
@@ -480,6 +502,205 @@ impl NodeRepo {
             merged_parents.push(other.clone());
         }
         Ok(merged)
+    }
+
+    /// The hive's settings as of a canonical operation: what its nearest recording
+    /// ancestor recorded, merged three-way where concurrent operations met, or `None` if no
+    /// ancestor recorded any.
+    pub fn settings_at(&mut self, op: &OperationId) -> Result<Option<HiveSettings>, NodeError> {
+        let root = self.canonical.root_operation_id().clone();
+        let mut stack = vec![op.clone()];
+        while let Some(id) = stack.last().cloned() {
+            if self.settings.contains_key(&id) {
+                stack.pop();
+                continue;
+            }
+            if id == root {
+                self.settings.insert(id, None);
+                stack.pop();
+                continue;
+            }
+            let operation = self.canonical.read_operation(&id)?;
+            if let Some(text) = operation.metadata.attributes.get(hive_settings::ATTRIBUTE) {
+                let settings = HiveSettings::parse(text).map_err(|err| NodeError::Settings {
+                    op: id.hex(),
+                    message: err.to_string(),
+                })?;
+                self.settings.insert(id, Some(settings));
+                stack.pop();
+                continue;
+            }
+            // A merge needs its parents' settings and its merge bases'.
+            let parents = &operation.parents;
+            let mut bases = vec![];
+            for i in 1..parents.len() {
+                let base = self
+                    .canonical
+                    .closest_common_ancestors(&parents[..i], &parents[i..=i])?
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| root.clone());
+                bases.push(base);
+            }
+            let missing: Vec<OperationId> = parents
+                .iter()
+                .chain(&bases)
+                .filter(|needed| !self.settings.contains_key(*needed))
+                .cloned()
+                .collect();
+            if !missing.is_empty() {
+                stack.extend(missing);
+                continue;
+            }
+            let mut merged = self.settings[&parents[0]].clone();
+            for (other, base) in parents[1..].iter().zip(&bases) {
+                let (theirs, base) = (&self.settings[other], &self.settings[base]);
+                merged = if merged.is_none() && theirs.is_none() && base.is_none() {
+                    None
+                } else {
+                    Some(HiveSettings::merge(
+                        &merged.unwrap_or_default(),
+                        &base.clone().unwrap_or_default(),
+                        &theirs.clone().unwrap_or_default(),
+                    ))
+                };
+            }
+            self.settings.insert(id, merged);
+            stack.pop();
+        }
+        Ok(self.settings[op].clone())
+    }
+
+    /// Brings this machine's settings and the hive's together, three-way against what they
+    /// agreed on last time: records this machine's changes for the hive, in an operation of
+    /// its own, and applies the hive's changes here. A machine that joins a hive with
+    /// settings adds its own remotes to the hive's, but takes the hive's where both have a
+    /// remote of the same name; the first machine's settings become the hive's. Returns
+    /// whether it recorded a change, which then needs uploading.
+    pub fn reconcile_settings(&mut self) -> Result<bool, NodeError> {
+        let head = self.merge_heads()?;
+        let canonical = self.canonicalize(&head)?;
+        let state = self.read_settings_state()?;
+        if let Some((op, hive, _)) = &state {
+            self.settings
+                .entry(op.clone())
+                .or_insert_with(|| hive.clone());
+        }
+        let hive = self.settings_at(&canonical)?;
+        let local = self.local_settings()?;
+        let base = match (&state, &hive) {
+            (Some((_, _, settings)), _) => settings.clone(),
+            (None, Some(hive)) => HiveSettings {
+                remotes: local
+                    .remotes
+                    .iter()
+                    .filter(|(name, _)| hive.remotes.contains_key(*name))
+                    .map(|(name, remote)| (name.clone(), remote.clone()))
+                    .collect(),
+            },
+            (None, None) => HiveSettings::default(),
+        };
+        let current = hive.clone().unwrap_or_default();
+        let merged = HiveSettings::merge(&local, &base, &current);
+        let (mut at, mut hive_now, mut recorded) = (canonical, hive, false);
+        if merged != current {
+            let op = self.record_settings(&head, &merged)?;
+            at = self.canonicalize(&op)?;
+            self.settings.insert(at.clone(), Some(merged.clone()));
+            hive_now = Some(merged.clone());
+            recorded = true;
+        }
+        if merged != local {
+            self.apply_settings(&local, &merged)?;
+        }
+        self.write_settings_state(&SettingsState {
+            op: at.hex(),
+            hive: hive_now,
+            settings: merged,
+        })?;
+        Ok(recorded)
+    }
+
+    fn git_objects(&self) -> Option<GitObjects> {
+        let backend = jj_lib::git::get_git_backend(self.loader.store()).ok()?;
+        Some(GitObjects::new(backend.git_repo_path()))
+    }
+
+    /// The settings this machine has now.
+    fn local_settings(&self) -> Result<HiveSettings, NodeError> {
+        Ok(HiveSettings {
+            remotes: match self.git_objects() {
+                Some(git) => git.remotes()?,
+                None => BTreeMap::new(),
+            },
+        })
+    }
+
+    fn apply_settings(&self, from: &HiveSettings, to: &HiveSettings) -> Result<(), NodeError> {
+        if let Some(git) = self.git_objects() {
+            git.change_remotes(&from.remotes, &to.remotes)?;
+        }
+        Ok(())
+    }
+
+    /// Writes an operation on top of `head` that changes nothing but records `settings`.
+    fn record_settings(
+        &self,
+        head: &OperationId,
+        settings: &HiveSettings,
+    ) -> Result<OperationId, NodeError> {
+        let repo = self
+            .loader
+            .load_at(&self.loader.load_operation(head).block_on()?)
+            .block_on()?;
+        let mut tx = repo.start_transaction();
+        tx.set_attribute(hive_settings::ATTRIBUTE.to_owned(), settings.to_attribute());
+        let repo = tx.commit("musubi: hive settings changed").block_on()?;
+        Ok(repo.op_id().clone())
+    }
+
+    fn settings_state_path(&self) -> PathBuf {
+        self.repo_path.join("musubi/settings.json")
+    }
+
+    /// Whether this machine has reconciled its settings with the hive's before.
+    pub fn has_reconciled_settings(&self) -> bool {
+        self.settings_state_path().exists()
+    }
+
+    fn read_settings_state(
+        &self,
+    ) -> Result<Option<(OperationId, Option<HiveSettings>, HiveSettings)>, NodeError> {
+        let path = self.settings_state_path();
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => return Err(NodeError::Io { path, source }),
+        };
+        let state: SettingsState =
+            serde_json::from_str(&text).map_err(|err| NodeError::Settings {
+                op: path.display().to_string(),
+                message: err.to_string(),
+            })?;
+        let op = OperationId::try_from_hex(&state.op).ok_or_else(|| NodeError::Settings {
+            op: state.op.clone(),
+            message: "not an operation id".to_owned(),
+        })?;
+        Ok(Some((op, state.hive, state.settings)))
+    }
+
+    fn write_settings_state(&self, state: &SettingsState) -> Result<(), NodeError> {
+        let path = self.settings_state_path();
+        let json = serde_json::to_vec_pretty(state).expect("settings serialize");
+        let dir = path.parent().expect("path has a parent");
+        let io_err = |source| NodeError::Io {
+            path: path.clone(),
+            source,
+        };
+        let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(io_err)?;
+        tmp.write_all(&json).map_err(io_err)?;
+        tmp.persist(&path).map_err(|err| io_err(err.error))?;
+        Ok(())
     }
 
     /// The repository's `.jj/repo` directory.

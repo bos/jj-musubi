@@ -39,11 +39,19 @@ impl NodeDriver {
     /// Asks the hub for its head, then runs the policy until there is nothing left to do.
     /// Returns how many steps that took.
     pub async fn sync(&mut self) -> anyhow::Result<usize> {
+        // Settings changed here go up with this sync, and once the node has the hive's head,
+        // the hive's settings apply here.
+        self.adapter.reconcile_settings(true)?;
         self.deliver(Request::GetHead).await?;
         let mut steps = 0;
         loop {
             match self.core.step(&mut self.adapter)? {
-                Step::Idle => return Ok(steps),
+                Step::Idle => {
+                    if self.adapter.reconcile_settings(false)? {
+                        continue;
+                    }
+                    return Ok(steps);
+                }
                 Step::Send(requests) => {
                     for request in requests {
                         self.deliver(request).await?;

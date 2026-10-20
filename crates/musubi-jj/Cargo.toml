@@ -12,6 +12,8 @@ gix.workspace = true
 jj-lib.workspace = true
 pollster.workspace = true
 prost.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 

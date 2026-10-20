@@ -48,6 +48,16 @@ impl NodeAdapter {
         &self.repo
     }
 
+    /// Reconciles this machine's settings with the hive's (`NodeRepo::reconcile_settings`).
+    /// Before fetching, a machine that has never reconciled waits: it doesn't know the
+    /// hive's settings yet. Returns whether it recorded a change to upload.
+    pub fn reconcile_settings(&mut self, before_fetching: bool) -> anyhow::Result<bool> {
+        if before_fetching && !self.repo.has_reconciled_settings() {
+            return Ok(false);
+        }
+        Ok(self.repo.reconcile_settings()?)
+    }
+
     pub fn repo_mut(&mut self) -> &mut NodeRepo {
         &mut self.repo
     }

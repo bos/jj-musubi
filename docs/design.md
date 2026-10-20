@@ -47,6 +47,7 @@ This document targets jj-lib 0.46.0.
 | Working copies and working-copy state | no | Each machine snapshots its own. |
 | Commit index (`.jj/repo/index`) | no | Derived; jj rebuilds it. |
 | `View::git_refs`, the `git` pseudo-remote | no | Per-machine record of this machine's `.git`. |
+| Git remote definitions (names and URLs) | yes | See [hive settings](#hive-settings). |
 | Repo and user config | no | |
 
 Every operation is replicated, including working-copy snapshots. If you snapshot a file
@@ -154,6 +155,30 @@ Translation applies to every backend. Canonical operations are always written by
 pinned jj-lib, while local operations may be older files in legacy formats, so even with
 nothing to strip the two need not share ids. An operation has one id on the hub and its own
 local id on each machine. `musubi op-id` translates between them.
+
+## Hive settings
+
+Some settings must agree across the hive but live outside jj's operations. Remote
+bookmarks replicate with the view, so a fetch or push on one machine reaches every other.
+But which remotes exist, and where they point, is in each machine's git config. Without
+more, `jj git remote rename` on one machine would rename the remote bookmarks everywhere
+while every other machine's git config kept the old name.
+
+So musubi treats the remote definitions (each remote's name, URL, and push URL) as hive
+settings. When a machine's settings change, musubi records the new settings in an
+attribute (`musubi.settings`) of an operation it writes, which changes nothing else. That
+operation replicates like any other, so settings changes are ordered by the hub, and where
+concurrent operations meet, the settings merge three-way, remote by remote, as jj merges
+workspaces. The hive's settings as of an operation are the nearest recording ancestor's,
+merged at merge operations.
+
+At the start and end of every sync, a machine reconciles its settings three-way: what it
+has now, what the hive has as of its head, and what both had when they last agreed. It
+records its own changes, and applies the hive's to its git config with `git remote`, which
+also renames or deletes the remote-tracking refs. A machine that joins adds its remotes to
+the hive's, but takes the hive's where both have a remote of the same name; the first
+machine's settings become the hive's. A machine that needs another URL for the same remote
+can rewrite it with git's own `url.<base>.insteadOf` in its user config.
 
 ## Ordering: one hub, one canonical head
 

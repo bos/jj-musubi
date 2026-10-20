@@ -18,8 +18,6 @@ use std::io::Write as _;
 use std::path::Path;
 
 use jj_lib::backend::CommitId;
-use jj_lib::merge::SameChange;
-use jj_lib::merge::trivial_merge;
 use jj_lib::ref_name::WorkspaceNameBuf;
 
 /// This machine's identity in the hive: a readable name plus a random suffix, `name#1a2b3c4d`,
@@ -136,22 +134,13 @@ pub fn display_names(
         .collect()
 }
 
-/// Merges one workspace's working-copy commit three-way, as jj merges concurrent views: a
-/// trivial merge where there is one, then a removal on either side, then `ours`. This is
-/// jj-lib's `MutableRepo::merge_wc_commit`, which is private, built the same way on jj's
-/// `trivial_merge`; the `workspace_merge_matches_jj` test checks that the two agree.
+/// Merges one workspace's working-copy commit three-way, as jj does.
 pub fn merge_working_copy<'a>(
     ours: Option<&'a CommitId>,
     base: Option<&'a CommitId>,
     theirs: Option<&'a CommitId>,
 ) -> Option<&'a CommitId> {
-    if let Some(resolved) = trivial_merge(&[ours, base, theirs], SameChange::Accept) {
-        *resolved
-    } else if ours.is_none() || theirs.is_none() {
-        None
-    } else {
-        ours
-    }
+    crate::merge::merge_entry(ours, base, theirs)
 }
 
 /// Moves working-copy commits along the rewrites an operation records: a commit rewritten

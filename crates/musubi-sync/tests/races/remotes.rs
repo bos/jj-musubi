@@ -8,6 +8,16 @@ use crate::fixture::Fixture;
 
 /// A bare `origin` with one commit on `main`, and each machine configured to use it.
 fn with_origin(hive: &Fixture) -> PathBuf {
+    let seed = create_origin(hive);
+    let origin = hive.env.root().join("origin.git");
+    for repo in &hive.repos {
+        repo.jj(&["git", "remote", "add", "origin", origin.to_str().unwrap()]);
+    }
+    seed
+}
+
+/// A bare `origin` with one commit on `main`; returns the clone that seeded it.
+fn create_origin(hive: &Fixture) -> PathBuf {
     let origin = hive.env.root().join("origin.git");
     let seed = hive.env.root().join("seed");
     let git = |dir: &std::path::Path, args: &[&str]| {
@@ -47,10 +57,122 @@ fn with_origin(hive: &Fixture) -> PathBuf {
         &seed,
         &["push", "--quiet", origin.to_str().unwrap(), "main"],
     );
-    for repo in &hive.repos {
-        repo.jj(&["git", "remote", "add", "origin", origin.to_str().unwrap()]);
-    }
     seed
+}
+
+fn remotes(hive: &Fixture, index: usize) -> String {
+    hive.repo(index).jj(&["git", "remote", "list"])
+}
+
+/// A remote added on one machine is added on every machine, so any machine can fetch it.
+#[test]
+fn remote_added_on_one_machine_reaches_the_others() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    create_origin(&hive);
+    let origin = hive.env.root().join("origin.git");
+    hive.repo(0)
+        .jj(&["git", "remote", "add", "origin", origin.to_str().unwrap()]);
+    hive.sync();
+    assert_eq!(remotes(&hive, 1), remotes(&hive, 0));
+    hive.repo(1).jj(&["git", "fetch"]);
+    hive.sync();
+    hive.assert_converged();
+    assert!(hive.bookmarks(0).contains_key("main@origin"));
+}
+
+/// Renaming or removing a remote on one machine does it on every machine, as jj renames
+/// or forgets its remote bookmarks everywhere.
+#[test]
+fn remote_renamed_and_removed_everywhere() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    with_origin(&hive);
+    hive.repo(0).jj(&["git", "fetch"]);
+    hive.sync();
+    hive.repo(0)
+        .jj(&["git", "remote", "rename", "origin", "upstream"]);
+    hive.sync();
+    hive.assert_converged();
+    assert_eq!(remotes(&hive, 1), remotes(&hive, 0));
+    assert!(
+        remotes(&hive, 1).starts_with("upstream "),
+        "{}",
+        remotes(&hive, 1)
+    );
+    hive.repo(1).jj(&["git", "fetch", "--remote", "upstream"]);
+    hive.sync();
+    hive.assert_converged();
+    assert!(hive.bookmarks(0).contains_key("main@upstream"));
+    hive.repo(1).jj(&["git", "remote", "remove", "upstream"]);
+    hive.sync();
+    hive.assert_converged();
+    assert_eq!(remotes(&hive, 0), "");
+}
+
+/// Two machines point a remote at different URLs at once: they end up agreeing.
+#[test]
+fn remote_changed_on_two_machines_at_once() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.repo(0).jj(&[
+        "git",
+        "remote",
+        "add",
+        "origin",
+        "https://example.com/one.git",
+    ]);
+    hive.sync();
+    hive.repo(0).jj(&[
+        "git",
+        "remote",
+        "set-url",
+        "origin",
+        "https://example.com/two.git",
+    ]);
+    hive.repo(1).jj(&[
+        "git",
+        "remote",
+        "set-url",
+        "origin",
+        "https://example.com/three.git",
+    ]);
+    hive.sync();
+    hive.assert_converged();
+    assert_eq!(remotes(&hive, 0), remotes(&hive, 1));
+}
+
+/// A machine that joins adds its own remotes to the hive's, but takes the hive's where
+/// both have a remote of the same name.
+#[test]
+fn joining_machine_merges_its_remotes_with_the_hives() {
+    let env = TestEnv::new();
+    let alpha = env.init_repo("alpha");
+    let beta = env.init_repo("beta");
+    alpha.jj(&[
+        "git",
+        "remote",
+        "add",
+        "origin",
+        "https://example.com/hive.git",
+    ]);
+    beta.jj(&[
+        "git",
+        "remote",
+        "add",
+        "origin",
+        "https://example.com/beta.git",
+    ]);
+    beta.jj(&[
+        "git",
+        "remote",
+        "add",
+        "extra",
+        "https://example.com/extra.git",
+    ]);
+    let mut hive = Fixture::join(env, vec![alpha, beta]);
+    hive.sync();
+    hive.assert_converged();
+    let expected = "extra https://example.com/extra.git\norigin https://example.com/hive.git\n";
+    assert_eq!(remotes(&hive, 0), expected);
+    assert_eq!(remotes(&hive, 1), expected);
 }
 
 fn advance_origin(hive: &Fixture, seed: &std::path::Path, n: usize) {

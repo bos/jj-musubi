@@ -1,6 +1,7 @@
 //! The git backend's objects: packfiles built and indexed by the `git` binary, which jj
 //! already requires for fetch and push, plus the backend extras jj cannot derive from them.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::fs::File;
@@ -27,6 +28,7 @@ use super::ObjectStore;
 use super::bundle;
 use super::bundle::BundleWriter;
 use super::bundle::Record;
+use crate::hive_settings::Remote;
 
 /// A git object database, driven through the `git` binary.
 pub struct GitObjects {
@@ -59,6 +61,75 @@ impl GitObjects {
         let objects = Self::new(git_dir);
         objects.run(&["config", "gc.auto", "0"], None)?;
         Ok(objects)
+    }
+
+    /// The remotes in this repository's own git config, with their URLs.
+    pub fn remotes(&self) -> Result<BTreeMap<String, Remote>, ObjectError> {
+        let output = self.run(&["config", "--local", "--list"], None)?;
+        let mut remotes: BTreeMap<String, Remote> = BTreeMap::new();
+        for line in String::from_utf8_lossy(&output).lines() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            let Some((name, variable)) = key
+                .strip_prefix("remote.")
+                .and_then(|rest| rest.rsplit_once('.'))
+            else {
+                continue;
+            };
+            let remote = remotes.entry(name.to_owned()).or_default();
+            match variable {
+                "url" => remote.url = Some(value.to_owned()),
+                "pushurl" => remote.push_url = Some(value.to_owned()),
+                _ => {}
+            }
+        }
+        Ok(remotes)
+    }
+
+    /// Changes this repository's git remotes from `from` to `to`, as `git remote` does:
+    /// renaming a remote moves its remote-tracking refs, and removing one deletes them.
+    pub fn change_remotes(
+        &self,
+        from: &BTreeMap<String, Remote>,
+        to: &BTreeMap<String, Remote>,
+    ) -> Result<(), ObjectError> {
+        let mut removed: Vec<&String> = from.keys().filter(|n| !to.contains_key(*n)).collect();
+        for (name, remote) in to {
+            match from.get(name) {
+                Some(old) if old == remote => continue,
+                Some(_) => {}
+                None => {
+                    // The same remote under a new name is a rename.
+                    if let Some(position) = removed.iter().position(|old| from[*old] == *remote) {
+                        let old = removed.remove(position);
+                        self.run(&["remote", "rename", old, name], None)?;
+                        continue;
+                    }
+                    let url = remote.url.as_deref().unwrap_or_default();
+                    self.run(&["remote", "add", name, url], None)?;
+                }
+            }
+            self.set_remote_urls(name, remote)?;
+        }
+        for name in removed {
+            self.run(&["remote", "remove", name], None)?;
+        }
+        Ok(())
+    }
+
+    fn set_remote_urls(&self, name: &str, remote: &Remote) -> Result<(), ObjectError> {
+        for (variable, value) in [("url", &remote.url), ("pushurl", &remote.push_url)] {
+            let key = format!("remote.{name}.{variable}");
+            match value {
+                Some(value) => self.run(&["config", "--local", &key, value], None)?,
+                // Unsetting a variable that isn't set fails; that's fine.
+                None => self
+                    .run(&["config", "--local", "--unset-all", &key], None)
+                    .unwrap_or_default(),
+            };
+        }
+        Ok(())
     }
 
     /// The subset of `ids` not present in the object database.

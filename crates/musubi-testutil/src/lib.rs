@@ -121,8 +121,13 @@ fn check_jj_version() {
             .output()
             .expect("`jj` is not on PATH");
         let version = String::from_utf8_lossy(&output.stdout);
+        // Release builds append the commit they were built from: `jj 0.46.0-7d382314...`.
+        let number = version
+            .split_whitespace()
+            .nth(1)
+            .map(|v| v.split_once('-').map_or(v, |(number, _)| number));
         assert!(
-            version.split_whitespace().nth(1) == Some(JJ_VERSION),
+            number == Some(JJ_VERSION),
             "tests need jj {JJ_VERSION} on PATH, found {version:?}"
         );
     });

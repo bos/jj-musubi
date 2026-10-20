@@ -287,6 +287,8 @@ impl LocalRepo for NodeAdapter {
     fn stage_objects(&mut self, for_ops: &[OpId], attachment: &Attachment) -> anyhow::Result<()> {
         let wants = self.required_commits(for_ops)?;
         let haves = self.haves(for_ops)?;
+        // The import may add a pack, which jj-lib must be able to read.
+        self.repo.reload()?;
         self.repo
             .object_store()?
             .import(attachment.bundle_path()?, &wants, &haves)?;

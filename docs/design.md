@@ -266,6 +266,15 @@ already needs `git` for fetch and push, and this gets delta compression and bitm
   `refs/jj/keep/*` refs and backend extras. The keep refs are what protect commits that no
   bookmark reaches from `git gc`. Without them, git would eventually delete every anonymous
   head.
+- As `git fetch` does, a received pack of fewer than 100 objects is unpacked into loose
+  objects, and a larger one kept as a pack. After receiving, the hub and nodes run
+  `git gc --auto`, which consolidates packs and loose objects once there are enough of them
+  (by git's thresholds, or the repository's), but with pruning disabled: musubi never deletes
+  an object, reachable or not. The hub's repository has no refs, so to git all of its
+  objects are unreachable, and they go to a cruft pack.
+- jj-lib's git backend sizes gix's table of pack indexes when it opens the repository, so a
+  long-running node could fail to read objects in packs added since. A node therefore reopens
+  the repository before it imports objects.
 - jj commits carry `change-id` and conflict headers by default, so for nearly every commit the
   raw object is enough: the receiver derives the same extras from it. The exceptions are
   commits written by older jj or with the header disabled, whose change id lives only in the

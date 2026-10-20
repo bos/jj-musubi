@@ -47,8 +47,9 @@ impl GitObjects {
         &self.git_dir
     }
 
-    /// Creates a bare repository for a hub. It never garbage-collects: the hub decides what
-    /// is unreferenced, not git.
+    /// Creates a bare repository for a hub. git never garbage-collects it on its own: the
+    /// hub decides what is unreferenced, not git, and a hub's repository has no refs. Only
+    /// [`Self::maintain`] consolidates it.
     pub fn init_bare(git_dir: &Path) -> Result<Self, ObjectError> {
         // Not through `run`: GIT_DIR must not be set when the repository does not exist yet.
         let args = ["init", "--quiet", "--bare"];
@@ -193,16 +194,45 @@ impl GitObjects {
         check_status(&args, &output)
     }
 
-    /// Indexes a received pack into the object database, completing a thin pack from local
-    /// objects.
-    pub fn index_pack(&self, pack: &Path) -> Result<(), ObjectError> {
-        let args = ["index-pack", "--stdin", "--fix-thin"];
+    /// Stores a received pack's objects, completing a thin pack from local objects. As
+    /// `git fetch` does by default, a pack of fewer than `UNPACK_LIMIT` objects is unpacked
+    /// into loose objects rather than kept, so that small transfers don't each leave a pack
+    /// behind: they slow git down, and jj-lib's gix sizes its table of packs only when it
+    /// opens the repository.
+    pub fn receive_pack(&self, pack: &Path) -> Result<(), ObjectError> {
+        let args: &[&str] = if pack_object_count(pack)? < UNPACK_LIMIT {
+            &["unpack-objects", "-q"]
+        } else {
+            &["index-pack", "--stdin", "--fix-thin"]
+        };
         let output = self
-            .command(&args)
+            .command(args)
             .stdin(File::open(pack)?)
             .output()
-            .map_err(|source| spawn_err(&args, source))?;
-        check_status(&args, &output)
+            .map_err(|source| spawn_err(args, source))?;
+        check_status(args, &output)
+    }
+
+    /// Consolidates packs and loose objects once there are enough of them, as git itself
+    /// does after a fetch, with `git gc --auto` and the repository's own thresholds. It
+    /// never deletes an object, reachable or not: jj's `refs/jj/keep` refs need not cover
+    /// every commit an operation refers to, and a hub's repository has no refs at all. git
+    /// may finish in the background.
+    pub fn maintain(&self, hub: bool) -> Result<(), ObjectError> {
+        let mut args = vec![
+            "-c",
+            "gc.pruneExpire=never",
+            "-c",
+            "gc.worktreePruneExpire=never",
+        ];
+        if hub {
+            // A hub's objects are all unreachable to git: keep them in a cruft pack rather
+            // than loose, and override the hub's own `gc.auto 0`.
+            args.extend(["-c", "gc.cruftPacks=true", "-c", "gc.auto=6700"]);
+        }
+        args.extend(["gc", "--auto", "--quiet"]);
+        self.run(&args, None)?;
+        Ok(())
     }
 
     /// Fails unless every object reachable from `wants` is present, assuming everything
@@ -271,6 +301,22 @@ impl GitObjects {
         check_status(args, &output)?;
         Ok(output.stdout)
     }
+}
+
+/// `fetch.unpackLimit`'s default: received packs with fewer objects are unpacked.
+const UNPACK_LIMIT: u32 = 100;
+
+/// The number of objects a pack holds, from its header. Anything that isn't a pack counts
+/// as large, so that `git index-pack` reports what is wrong with it.
+fn pack_object_count(pack: &Path) -> Result<u32, ObjectError> {
+    let mut header = [0; 12];
+    let mut file = File::open(pack)?;
+    if io::Read::read_exact(&mut file, &mut header).is_err() || &header[..4] != b"PACK" {
+        return Ok(u32::MAX);
+    }
+    Ok(u32::from_be_bytes([
+        header[8], header[9], header[10], header[11],
+    ]))
 }
 
 fn hex_lines<'a>(ids: impl Iterator<Item = &'a CommitId>, prefix: &str) -> Vec<u8> {
@@ -525,12 +571,12 @@ impl ObjectStore for GitStore<'_> {
         // commit, and those must not win over the sender's.
         self.store_extras(&extras)?;
         for pack in &packs {
-            self.git.index_pack(pack.path())?;
+            self.git.receive_pack(pack.path())?;
         }
         self.git.check_connected(wants, haves)?;
         if let Extras::Jj { backend, .. } = &self.extras {
             backend.import_head_commits(wants)?;
         }
-        Ok(())
+        self.git.maintain(matches!(self.extras, Extras::Files(_)))
     }
 }

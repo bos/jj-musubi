@@ -843,6 +843,20 @@ impl NodeRepo {
         &self.loader
     }
 
+    /// Opens the repository's stores afresh. jj-lib's git backend sizes gix's table of pack
+    /// indexes when it opens the repository, at a little more than the packs there were
+    /// then, so packs added since can be out of its reach. Afterwards there is room for at
+    /// least one more.
+    pub fn reload(&mut self) -> Result<(), NodeError> {
+        let settings = self.loader.settings().clone();
+        self.loader = RepoLoader::init_from_file_system(
+            &settings,
+            &self.repo_path,
+            &default_backend_factories(),
+        )?;
+        Ok(())
+    }
+
     pub fn is_colocated(&self) -> bool {
         self.colocated
     }

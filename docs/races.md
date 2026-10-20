@@ -69,7 +69,8 @@ Workspaces are per-machine (docs/design.md); only the commits they point at are 
 
 | Race | Outcome | Test |
 | --- | --- | --- |
-| `jj undo` of an operation another machine made | jj itself refuses unless given `--allow-cross-workspace`; with it, the undo replicates. | `undo_of_another_machines_operation` |
+| `jj undo` when the latest operation came from another machine, even with both workspaces named `default` | jj refuses, naming the other machine's workspace (`default@alpha`), since musubi realizes other machines' operations under their label names. With `--allow-cross-workspace` the undo happens and replicates. To undo this machine's own earlier operation once others have arrived, use `jj op revert <op>`. | `undo_of_another_machines_operation`, `op_log_names_other_machines_workspaces` |
+| `jj undo` and `jj redo` of this machine's own latest operation | As without musubi; both replicate. `jj redo` finds nothing to redo once another machine's operation has arrived after the undo. | `undo_and_redo_of_own_operation` |
 | A command based at an older operation (`--at-op`, or a long-running command) | A concurrent local operation; jj merges it locally and the merge replicates. | `concurrent_operation_on_one_machine` |
 | A machine misses many updates while working | Catches up with one merge. | `long_offline_machine_catches_up` |
 | The hub restarts between one machine's push and another's fetch | Nothing lost: the head log and stores are durable. | `hub_restart_between_push_and_fetch` |

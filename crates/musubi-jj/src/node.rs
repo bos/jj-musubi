@@ -48,6 +48,7 @@ use jj_lib::backend::CommitId;
 use jj_lib::backend::Timestamp;
 use jj_lib::op_store::OperationMetadata;
 use jj_lib::op_store::TimestampRange;
+use jj_lib::ref_name::WorkspaceName;
 use jj_lib::ref_name::WorkspaceNameBuf;
 
 use crate::canonical::CanonicalError;
@@ -614,10 +615,17 @@ impl NodeRepo {
             })
             .collect();
         let view = self.canonical_view(view, &parents, op.commit_predecessors.as_ref())?;
+        let mut metadata = op.metadata.clone();
+        // Which workspace made an operation is per-machine, like the view's working copies:
+        // qualify it, so that each machine can tell its own workspaces' operations from
+        // another machine's workspace of the same name (see `realized_workspace_name`).
+        metadata.workspace_name = metadata
+            .workspace_name
+            .map(|name| workspaces::workspace_key(self.machine.key(), name.as_str()));
         let canonical_op = StoreOperation {
             view_id: self.canonical.write_view(&view)?,
             parents,
-            metadata: op.metadata.clone(),
+            metadata,
             commit_predecessors: op.commit_predecessors.clone(),
         };
         Ok(self.canonical.write_operation(&canonical_op)?)
@@ -728,6 +736,9 @@ impl NodeRepo {
         per_machine.follow_rewrites(op);
         per_machine.apply_to(&mut view);
         let mut metadata = op.metadata.clone();
+        metadata.workspace_name = metadata
+            .workspace_name
+            .map(|key| self.realized_workspace_name(&key, &remotes));
         metadata
             .attributes
             .insert(CANONICAL_ATTRIBUTE.to_owned(), canonical_id.hex());
@@ -742,6 +753,29 @@ impl NodeRepo {
             .op_store()
             .write_operation(&local_op)
             .block_on()?)
+    }
+
+    /// The local name of the workspace that made a canonical operation. This machine's own
+    /// workspaces keep their names. Another machine's are named like their labels, as in
+    /// `default@beta`. jj's `undo` and `redo` refuse to undo another workspace's operation,
+    /// and they tell workspaces apart only by name, so with the plain name `jj undo` here
+    /// would undo beta's latest operation as if it were this machine's own.
+    fn realized_workspace_name(
+        &self,
+        key: &WorkspaceName,
+        remotes: &BTreeMap<String, String>,
+    ) -> WorkspaceNameBuf {
+        match workspaces::split_key(key.as_str()) {
+            Some((machine, workspace)) if machine == self.machine.key() => workspace.into(),
+            Some((machine, workspace)) => {
+                // A machine with no workspaces left in this view has no label to name.
+                let remote = remotes
+                    .get(machine)
+                    .map_or_else(|| workspaces::machine_name(machine), String::as_str);
+                format!("{workspace}@{remote}").into()
+            }
+            None => key.to_owned(),
+        }
     }
 
     /// The per-machine fields a realization starts from: its parent's, or for a merge, the

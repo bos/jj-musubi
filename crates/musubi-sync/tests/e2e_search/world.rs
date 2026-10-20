@@ -429,12 +429,33 @@ impl World {
         // Undoing a workspace operation strands a working copy: after undoing a rename,
         // the working copy's recorded name is no longer in the view, and jj says the
         // command "requires a working copy". jj's own behavior; jj refuses it too unless
-        // told `--allow-cross-workspace`, which these undos need for other machines'
-        // operations.
+        // told `--allow-cross-workspace`, which the `undo` rule uses after checking that
+        // jj refuses other workspaces' and machines' operations.
         parents == "1"
             && !description.starts_with("undo")
             && !description.starts_with("redo")
             && !description.to_lowercase().contains("workspace")
+    }
+
+    /// The workspace that made the head operation, as `jj op log` shows it: `default@`,
+    /// `"default@beta"@` for another machine's, or nothing for an operation musubi made.
+    pub fn head_op_workspace(&self, m: usize) -> String {
+        let heads = self.op_heads(m);
+        let template = "workspace_name";
+        self.raw_jj(
+            m,
+            &[
+                "--at-op",
+                &heads[0],
+                "op",
+                "log",
+                "--no-graph",
+                "-n",
+                "1",
+                "-T",
+                template,
+            ],
+        )
     }
 
     pub fn write(&mut self, m: usize, ws: usize, file: &str, contents: &str) {

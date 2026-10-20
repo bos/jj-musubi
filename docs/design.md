@@ -99,6 +99,15 @@ Replicating views verbatim corrupts the second kind.
   them, so nothing done to a label locally reaches another machine. When this machine
   rewrites another machine's working copy, its own label for it catches up at that
   machine's next operation.
+
+  Which workspace made an operation is per-machine too. jj records it in the operation's
+  metadata, and `jj undo` and `jj redo` refuse to undo another workspace's operation, telling
+  workspaces apart only by name. If every machine's operations kept the plain name, each
+  machine's `default` would be the same workspace to `jj undo`, which would then undo
+  whatever operation last arrived from another machine. So canonical operations record the
+  machine-qualified key, and a machine realizes its own operations under the plain name and
+  another machine's under its label's name: `jj op log` shows `"default@laptop"@`, and
+  `jj undo` refuses to undo the laptop's operation unless given `--allow-cross-workspace`.
 - **`git_refs`** and the **`git` pseudo-remote** (`foo@git`, `tag@git`) record what jj last
   saw in this machine's `.git`. Each `jj` command in a colocated repository compares them with
   the real refs and imports any difference as a change made with git.
@@ -122,10 +131,10 @@ and breaks A's record in turn.
 The per-machine fields therefore stay per-machine.
 
 - **Canonicalizing** a local operation copies it, but with `git_refs` and the `git`
-  pseudo-remote removed from the view. Its parents are replaced with their canonical ids. It
+  pseudo-remote removed from the view, and its workspace machine-qualified. Its parents are replaced with their canonical ids. It
   is written to a canonical op store kept beside the repository, which assigns the id.
-- **Realizing** a canonical operation C on a node writes a local operation with C's metadata
-  plus a `musubi.canonical = <id>` attribute. Its parents are the local realizations of C's
+- **Realizing** a canonical operation C on a node writes a local operation with C's metadata,
+  its workspace named as above, plus a `musubi.canonical = <id>` attribute. Its parents are the local realizations of C's
   parents, and its view is C's view plus per-machine fields. jj's `Transaction` cannot
   reproduce another machine's metadata, so musubi writes these operations through jj-lib's
   `OpStore`, as `jj op integrate` does, and lets jj build the index lazily.

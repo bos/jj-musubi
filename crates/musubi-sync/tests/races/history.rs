@@ -1,20 +1,83 @@
 //! Operation-log level races: undo, op abandon, offline machines, restarts.
 
+use musubi_testutil::TestEnv;
+
 use crate::fixture::Fixture;
 
-/// `jj undo` on one machine undoes the last operation even when another machine made it.
+/// Both machines' workspaces called `default`, as they are unless renamed.
+fn default_workspaces() -> Fixture {
+    let env = TestEnv::new();
+    let alpha = env.init_repo_with_workspace("alpha", "default");
+    let beta = env.init_repo_with_workspace("beta", "default");
+    Fixture::join(env, vec![alpha, beta])
+}
+
+/// `jj undo` undoes the latest operation, whichever machine made it, but refuses one made
+/// in another workspace unless asked explicitly. Another machine's operations count as
+/// made in another workspace, `default@alpha`, even though both workspaces are named
+/// `default`.
 #[test]
 fn undo_of_another_machines_operation() {
-    let mut hive = Fixture::new(&["alpha", "beta"]);
+    let mut hive = default_workspaces();
     hive.commit(0, "a", "to be undone");
     hive.sync();
-    // jj itself refuses to undo another workspace's operation unless asked explicitly.
     let refused = hive.repo(1).jj_output(&["undo"]);
     assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("default@alpha"), "{stderr}");
+    hive.sync();
+    hive.assert_converged();
+    assert!(hive.visible(1).iter().any(|c| c.ends_with("to be undone")));
+
     hive.repo(1).jj(&["undo", "--allow-cross-workspace"]);
     hive.sync();
     hive.assert_converged();
     assert!(!hive.visible(0).iter().any(|c| c.ends_with("to be undone")));
+}
+
+/// A machine undoes and redoes its own latest operation as usual, and both replicate.
+#[test]
+fn undo_and_redo_of_own_operation() {
+    let mut hive = default_workspaces();
+    hive.commit(0, "a", "undone and redone");
+    hive.sync();
+    hive.repo(0).jj(&["undo"]);
+    hive.sync();
+    hive.assert_converged();
+    assert!(
+        !hive
+            .visible(1)
+            .iter()
+            .any(|c| c.ends_with("undone and redone"))
+    );
+    hive.repo(0).jj(&["redo"]);
+    hive.sync();
+    hive.assert_converged();
+    assert!(
+        hive.visible(1)
+            .iter()
+            .any(|c| c.ends_with("undone and redone"))
+    );
+}
+
+/// The operation log shows which machine made each operation. jj quotes the name, since
+/// `@` can't appear in a bare one.
+#[test]
+fn op_log_names_other_machines_workspaces() {
+    let mut hive = default_workspaces();
+    hive.commit(0, "a", "on alpha");
+    hive.sync();
+    let template = "workspace_name ++ \"\\n\"";
+    let alpha = hive
+        .repo(0)
+        .jj(&["op", "log", "--no-graph", "-n", "1", "-T", template]);
+    let beta = hive
+        .repo(1)
+        .jj(&["op", "log", "--no-graph", "-n", "1", "-T", template]);
+    assert_eq!(
+        (alpha.as_str(), beta.as_str()),
+        ("default@\n", "\"default@alpha\"@\n")
+    );
 }
 
 /// A machine that misses many updates while doing its own work catches up with one merge.
@@ -117,7 +180,7 @@ fn joining_with_full_history() {
     use musubi_jj::node::NodeRepo;
     use musubi_sync::hive::Hive;
 
-    let env = musubi_testutil::TestEnv::new();
+    let env = TestEnv::new();
     let alpha = env.init_repo("alpha");
     let beta = env.init_repo("beta");
     for i in 0..3 {

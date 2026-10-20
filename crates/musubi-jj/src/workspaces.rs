@@ -61,7 +61,7 @@ impl Machine {
     }
 
     pub fn name(&self) -> &str {
-        name_of(&self.key)
+        machine_name(&self.key)
     }
 }
 
@@ -93,7 +93,8 @@ pub fn sanitize(name: &str) -> String {
     }
 }
 
-fn name_of(key: &str) -> &str {
+/// The readable part of a machine key: `beta` of `beta#1a2b3c4d`.
+pub fn machine_name(key: &str) -> &str {
     key.split_once('#').map_or(key, |(name, _)| name)
 }
 
@@ -121,12 +122,12 @@ pub fn remote_names(
 ) -> BTreeMap<String, String> {
     let mut by_name: BTreeMap<&str, usize> = BTreeMap::new();
     for machine in machines {
-        *by_name.entry(name_of(machine)).or_default() += 1;
+        *by_name.entry(machine_name(machine)).or_default() += 1;
     }
     machines
         .iter()
         .map(|machine| {
-            let name = name_of(machine);
+            let name = machine_name(machine);
             let remote = if by_name[name] > 1
                 || taken(name)
                 || name == REMOTE_NAME_FOR_LOCAL_GIT_REPO.as_str()

@@ -371,7 +371,20 @@ impl Search {
         tc.assume(world.can_undo(m));
         self.undos += 1;
         fired("undo");
-        world.jj(m, &["undo", "--allow-cross-workspace"]);
+        // jj refuses to undo another workspace's operation unless told to, and another
+        // machine's operations are another workspace's even when the names match.
+        let made_in = world.head_op_workspace(m);
+        let made_in = made_in.trim_end_matches('@').trim_matches('"');
+        let own = made_in.is_empty() || made_in == world.workspaces[m][0].name;
+        let refusal = "Refusing to undo operation";
+        match world.try_jj_in(m, 0, &["undo"], &[refusal]) {
+            Ok(_) if !own => world.fail(&format!("`jj undo` undid an operation made in {made_in}")),
+            Ok(_) => {}
+            Err(_) if own => world.fail("`jj undo` refused this workspace's own operation"),
+            Err(_) => {
+                world.jj(m, &["undo", "--allow-cross-workspace"]);
+            }
+        }
         drop(world);
         self.note(&tc);
     }

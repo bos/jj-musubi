@@ -3,13 +3,14 @@
 //! - Each node keeps its hive membership in `.jj/repo/musubi/hive.toml`, beside the
 //!   repository it describes, so moving or copying the repository keeps it consistent.
 //! - The daemon reads the list of repositories to serve from `config.toml` in the user's
-//!   musubi config directory (`$XDG_CONFIG_HOME/musubi` or the platform equivalent).
+//!   musubi config directory (`$XDG_CONFIG_HOME/musubi`, or `%APPDATA%\musubi` on Windows).
 
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 
 use anyhow::Context as _;
+use etcetera::BaseStrategy as _;
 use serde::Deserialize;
 use serde::Serialize;
 use uuid::Uuid;
@@ -77,9 +78,10 @@ impl DaemonConfig {
         if let Some(dir) = std::env::var_os("MUSUBI_CONFIG_DIR") {
             return Ok(PathBuf::from(dir).join("config.toml"));
         }
-        let base = std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        // Where jj keeps its own: `$XDG_CONFIG_HOME` or `~/.config` on Unix and macOS,
+        // `%APPDATA%` on Windows.
+        let base = etcetera::choose_base_strategy()
+            .map(|strategy| strategy.config_dir())
             .context("cannot locate a config directory; set MUSUBI_CONFIG_DIR")?;
         Ok(base.join("musubi/config.toml"))
     }

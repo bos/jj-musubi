@@ -23,6 +23,7 @@ async-trait = "0.1.89"
 blake3 = "1"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
+etcetera = "0.11"
 futures = "0.3.32"
 jj-cli = { version = "=0.46.0", default-features = false, features = ["git"] }
 jj-lib = { version = "=0.46.0", default-features = false, features = ["git"] }

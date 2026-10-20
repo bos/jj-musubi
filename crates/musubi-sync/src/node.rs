@@ -48,6 +48,12 @@ impl NodeAdapter {
         &self.repo
     }
 
+    /// Shows other machines' workspaces again where this machine's view lost them
+    /// (`NodeRepo::show_other_workspaces`). Returns whether it wrote an operation.
+    pub fn show_other_workspaces(&mut self) -> anyhow::Result<bool> {
+        Ok(self.repo.show_other_workspaces()?)
+    }
+
     /// Reconciles this machine's settings with the hive's (`NodeRepo::reconcile_settings`).
     /// Before fetching, a machine that has never reconciled waits: it doesn't know the
     /// hive's settings yet. Returns whether it recorded a change to upload.

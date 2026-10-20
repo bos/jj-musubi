@@ -96,7 +96,10 @@ impl Hive {
             let member = &mut self.members[node];
             match member.core.step(&mut member.adapter)? {
                 Step::Idle => {
-                    if member.adapter.reconcile_settings(false)? {
+                    // Both run; either may write an operation to upload.
+                    let settings = member.adapter.reconcile_settings(false)?;
+                    let workspaces = member.adapter.show_other_workspaces()?;
+                    if settings || workspaces {
                         continue;
                     }
                     return Ok(steps);

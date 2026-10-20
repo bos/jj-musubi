@@ -47,7 +47,10 @@ impl NodeDriver {
         loop {
             match self.core.step(&mut self.adapter)? {
                 Step::Idle => {
-                    if self.adapter.reconcile_settings(false)? {
+                    // Both run; either may write an operation to upload.
+                    let settings = self.adapter.reconcile_settings(false)?;
+                    let workspaces = self.adapter.show_other_workspaces()?;
+                    if settings || workspaces {
                         continue;
                     }
                     return Ok(steps);

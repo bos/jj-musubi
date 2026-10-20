@@ -368,6 +368,7 @@ impl NodeRepo {
         // The names under which this machine showed the parents' other workspaces, exactly
         // as `realize_one` named them.
         let mut others: BTreeMap<WorkspaceNameBuf, WorkspaceNameBuf> = BTreeMap::new();
+        let mut parent_heads: BTreeSet<CommitId> = BTreeSet::new();
         for parent in canonical_parents {
             if parent == self.canonical.root_operation_id() {
                 continue;
@@ -375,6 +376,7 @@ impl NodeRepo {
             let parent_view = self
                 .canonical
                 .read_view(&self.canonical.read_operation(parent)?.view_id)?;
+            parent_heads.extend(parent_view.head_ids.iter().cloned());
             for (key, name) in self.local_names(&parent_view) {
                 if !self.is_own_key(&key) {
                     others.insert(name, key);
@@ -401,6 +403,14 @@ impl NodeRepo {
             .map(|(key, commit)| (key.clone(), commit.clone()))
             .collect();
         workspaces::follow_rewrites(&mut forgotten, predecessors);
+        // Forgetting a workspace abandons its working-copy commit if it's empty, as
+        // `jj workspace forget` does. Forgetting another machine's workspace here mustn't
+        // abandon that machine's working copy: keep the commit visible.
+        for commit in forgotten.values() {
+            if parent_heads.contains(commit) {
+                view.head_ids.insert(commit.clone());
+            }
+        }
         workspaces_by_key.extend(forgotten);
         for (workspace, commit) in local {
             workspaces_by_key.insert(
@@ -1323,6 +1333,52 @@ impl NodeRepo {
             listed: listed.join(", "),
             reason,
         }
+    }
+
+    /// Shows other machines' workspaces in this machine's view again where they went
+    /// missing: forgotten here, or dropped when jj merged a forget with concurrent
+    /// operations, a removal winning. They are the other machines' own, so this machine's
+    /// changes to them never count (see `canonical_view`), and the canonical view still has
+    /// them. Returns whether it wrote an operation, which then needs uploading.
+    pub fn show_other_workspaces(&mut self) -> Result<bool, NodeError> {
+        let head = self.merge_heads()?;
+        let canonical = self.canonicalize(&head)?;
+        if canonical == *self.canonical.root_operation_id() {
+            return Ok(false);
+        }
+        let view = self
+            .canonical
+            .read_view(&self.canonical.read_operation(&canonical)?.view_id)?;
+        let names = self.local_names(&view);
+        let repo = self
+            .loader
+            .load_at(&self.loader.load_operation(&head).block_on()?)
+            .block_on()?;
+        let missing: Vec<(WorkspaceNameBuf, CommitId)> = view
+            .wc_commit_ids
+            .iter()
+            .filter(|(key, _)| !self.is_own_key(key))
+            .filter_map(|(key, commit)| {
+                let name = names.get(key)?;
+                let shown = repo.view().get_wc_commit_id(name).is_some();
+                (!shown).then(|| (name.clone(), commit.clone()))
+            })
+            .collect();
+        if missing.is_empty() {
+            return Ok(false);
+        }
+        let mut tx = repo.start_transaction();
+        for (name, commit) in missing {
+            // Forgetting the workspace here hid its commit here, if it was empty.
+            let commit = repo.store().get_commit_async(&commit).block_on()?;
+            tx.repo_mut().add_head(&commit).block_on()?;
+            tx.repo_mut()
+                .set_wc_commit(name, commit.id().clone())
+                .map_err(|err| NodeError::Index(err.to_string()))?;
+        }
+        tx.commit("musubi: show other machines' workspaces")
+            .block_on()?;
+        Ok(true)
     }
 
     /// Gives each workspace on this machine whose working-copy commit is no longer visible

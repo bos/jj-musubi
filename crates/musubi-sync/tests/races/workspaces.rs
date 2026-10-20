@@ -74,16 +74,22 @@ fn machines_may_share_a_workspace_name() {
     assert_eq!(beta_wc, working_copy(&hive, 1));
 }
 
-/// Another machine's workspaces are that machine's own: forgetting or renaming them here
-/// changes nothing anywhere else, and the next sync shows them again.
+/// Another machine's workspaces are that machine's own: forgetting them here changes
+/// nothing anywhere else, and the next sync shows them again, even when the other machine
+/// has done nothing since.
 #[test]
 fn other_machines_workspaces_are_theirs() {
     let mut hive = Fixture::new(&["alpha", "beta"]);
     hive.sync();
+    let beta_wc = working_copy(&hive, 1);
+    // jj abandons an empty working-copy commit when it forgets the workspace, but not
+    // another machine's.
     hive.repo(0).jj(&["workspace", "forget", "beta/beta"]);
     assert_eq!(names(&hive, 0), ["alpha"]);
     hive.sync();
+    assert_eq!(names(&hive, 0), ["alpha", "beta/beta"]);
     assert_eq!(names(&hive, 1), ["alpha/alpha", "beta"]);
+    assert_eq!(working_copy(&hive, 1), beta_wc);
     hive.commit(1, "b", "from beta");
     hive.sync();
     hive.assert_converged();

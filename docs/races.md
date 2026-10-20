@@ -26,7 +26,7 @@ named after the machine (`beta/default`) (docs/design.md).
 | Race | Outcome | Test |
 | --- | --- | --- |
 | Two machines both use workspace `default` | Fine: each keeps its own `default@`, and shows the other's as `alpha/default@` or `beta/default@`. | `machines_may_share_a_workspace_name` |
-| A machine forgets another machine's workspace | Local only: nothing changes elsewhere, and the next sync shows it again. | `other_machines_workspaces_are_theirs` |
+| A machine forgets another machine's workspace | Local only: nothing changes elsewhere, not even an empty working-copy commit, which `jj workspace forget` would otherwise abandon. The next sync shows the workspace again, even if the other machine has done nothing since. | `other_machines_workspaces_are_theirs` |
 | A machine adds, then forgets, a secondary workspace | Every machine shows it while it exists. | `secondary_workspaces_show_everywhere` |
 | A machine rewrites the parent of another machine's `@` | jj moves that machine's workspace at once, as it moves any workspace's, and that machine follows. jj then treats its working copy as stale; with `snapshot.auto-update-stale = true` its next command updates the files. | `rewriting_under_another_machines_working_copy_is_allowed`, `other_machines_working_copies_follow_rewrites` |
 | …while that machine has unsnapshotted edits | The edits survive: jj snapshots them at the old operation before updating. At worst the working-copy change diverges. | `unsnapshotted_edit_survives_a_remote_rebase` |

@@ -95,7 +95,9 @@ Replicating views verbatim corrupts the second kind.
   as a second workspace does on one machine: its working copy becomes stale, and its next
   command updates the files (with `snapshot.auto-update-stale`). Nothing else a machine
   does to another machine's workspaces counts: adding, forgetting or renaming them stays
-  local, and the next sync shows them again. Where concurrent operations disagree about a
+  local (forgetting one doesn't even abandon its empty working-copy commit, as
+  `jj workspace forget` otherwise would), and at the end of every sync musubi shows any
+  that went missing again. Where concurrent operations disagree about a
   workspace, musubi merges it three-way exactly as jj does, so a machine's removal of its
   own workspace wins over another machine moving it meanwhile. If another machine
   abandons this machine's working-copy commit without moving its workspace (because it had

@@ -149,6 +149,12 @@ The per-machine fields therefore stay per-machine.
     process would. musubi records the resulting per-machine fields and then publishes the op
     head. Because of the lock, a concurrent `jj` command never sees the operation before
     `.git` matches it.
+  - Before publishing it next to this machine's own concurrent operations, musubi merges
+    them as jj will, in jj's order and the reverse, since the result can depend on it. jj
+    0.46 can't merge some concurrent operations (docs/races.md, "Known jj limitations"),
+    and published, they would leave every `jj` command here failing or panicking. So if
+    the merge fails, musubi publishes nothing: the sync fails, naming this machine's
+    operations the hive doesn't have yet, one of which to revert, and jj keeps working.
 - Canonicalizing a realization returns the canonical operation its attribute names.
   Realizing never creates new canonical operations, so updates cannot loop between machines.
 

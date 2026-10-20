@@ -28,3 +28,39 @@ fn bookmark_moved_by_a_node_merge_is_exported() {
     hive.sync();
     hive.assert_converged();
 }
+
+/// Two machines rebase concurrently so that their rebases form a loop: alpha moves X, and
+/// Y on it, onto Z, while beta moves Z onto Y. jj 0.46 panics merging such operations
+/// ("graph has cycle"), and again on every load, which would leave every `jj` command on
+/// alpha panicking. So musubi doesn't apply beta's operation on alpha: alpha's sync fails
+/// with a hint, jj keeps working there, and once alpha reverts its rebase, it catches up.
+#[test]
+fn rebases_that_form_a_loop_pause_instead_of_breaking_jj() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    let alpha = hive.repo(0);
+    alpha.jj(&["new", "root()", "-m", "X"]);
+    alpha.jj(&["new", "-m", "Y"]);
+    alpha.jj(&["new", "root()", "-m", "Z"]);
+    alpha.jj(&["new", "root()"]);
+    hive.sync();
+    let (x, y, z) = (
+        hive.commit_id(0, "X"),
+        hive.commit_id(0, "Y"),
+        hive.commit_id(0, "Z"),
+    );
+    hive.repo(0).jj(&["rebase", "-s", &x, "-o", &z]);
+    let rebase = hive
+        .repo(0)
+        .jj(&["op", "log", "--no-graph", "-n1", "-T", "id"]);
+    hive.repo(1).jj(&["rebase", "-s", &z, "-o", &y]);
+    hive.hive.sync(1).unwrap();
+    let err = hive.hive.sync(0).unwrap_err();
+    assert!(
+        format!("{err:#}").contains("jj cannot merge this machine's operations"),
+        "{err:#}"
+    );
+    hive.repo(0).jj(&["status"]);
+    hive.repo(0).jj(&["op", "revert", &rebase]);
+    hive.sync();
+    hive.assert_converged();
+}

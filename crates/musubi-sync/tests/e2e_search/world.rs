@@ -7,11 +7,13 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
+use jj_lib::object_id::ObjectId as _;
 use musubi_core::hub;
 use musubi_core::message::HeadKind;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
 use musubi_core::node::Step;
+use musubi_jj::node::NodeError;
 use musubi_jj::node::NodeRepo;
 use musubi_sync::Attachment;
 use musubi_sync::OpId;
@@ -82,6 +84,9 @@ pub struct Workspace {
     pub path: Option<PathBuf>,
 }
 
+/// How many operations a sequence may revert to get past jj failing to merge operations.
+const MAX_UNMERGEABLE_REVERTS: usize = 10;
+
 pub struct World {
     pub fx: Fixture,
     pub origin: Origin,
@@ -97,6 +102,8 @@ pub struct World {
     pub ledger: Ledger,
     /// Machines whose repository changed in ways no recorded command has loaded since.
     pub touched: BTreeSet<usize>,
+    /// Operations reverted so far to get past jj's failure to merge operations.
+    unmergeable_reverts: usize,
     counter: usize,
     pub trace: Vec<String>,
 }
@@ -174,6 +181,7 @@ impl World {
             seen: vec![None; setup.nodes],
             ledger: Ledger::default(),
             touched: BTreeSet::new(),
+            unmergeable_reverts: 0,
             counter: 0,
             trace: vec![],
         };
@@ -544,9 +552,31 @@ impl World {
     pub fn sync_counted(&mut self, m: usize) -> usize {
         self.touched.insert(m);
         self.merge_local_heads(m);
-        let steps = match self.fx.hive.sync(m) {
-            Ok(steps) => steps,
-            Err(err) => self.fail(&format!("sync of {} failed: {err:#}", self.machine(m))),
+        let steps = loop {
+            let err = match self.fx.hive.sync(m) {
+                Ok(steps) => break steps,
+                Err(err) => err,
+            };
+            // A known jj limitation (docs/races.md): jj can't merge this machine's
+            // operations with the hive's, so musubi pauses. Recover as its error says, by
+            // reverting this machine's operations the hive doesn't have, newest first.
+            let ours = err
+                .chain()
+                .find_map(|e| match e.downcast_ref::<NodeError>() {
+                    Some(NodeError::Unmergeable { ours, .. }) => Some(ours.clone()),
+                    _ => None,
+                });
+            let Some(op) = ours.and_then(|ours| ours.first().cloned()) else {
+                self.fail(&format!("sync of {} failed: {err:#}", self.machine(m)));
+            };
+            if self.unmergeable_reverts >= MAX_UNMERGEABLE_REVERTS {
+                self.fail(&format!(
+                    "sync of {} keeps failing: {err:#}",
+                    self.machine(m)
+                ));
+            }
+            self.unmergeable_reverts += 1;
+            self.jj(m, &["op", "revert", &op.hex()]);
         };
         self.record_merges(m);
         steps

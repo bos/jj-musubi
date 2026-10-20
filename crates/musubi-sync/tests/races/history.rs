@@ -337,9 +337,9 @@ fn empty_repositories_make_a_hive() {
 
 /// jj 0.46 bug: one machine abandons a commit directly on the root while another makes it a
 /// parent of a merge commit. Reconciling them would rebase the merge onto the root, which
-/// jj's git backend refuses, and the merging machine's repository stops loading. musubi's
-/// sync error names the problem and the recovery. When jj fixes this, this test fails, and
-/// the hint in `NodeAdapter::merge_heads` can go.
+/// jj's git backend refuses, so every jj command on the merging machine would fail. musubi
+/// doesn't apply the other machine's operation there: its sync error names the problem and
+/// the recovery, and jj keeps working. When jj fixes this, this test fails.
 #[test]
 fn root_parent_merge_bug_is_explained() {
     let mut hive = Fixture::new(&["alpha", "beta"]);
@@ -354,7 +354,10 @@ fn root_parent_merge_bug_is_explained() {
     let err = hive.try_sync().unwrap_err();
     let message = format!("{err:#}");
     assert!(
-        message.contains("a jj bug") && message.contains("op revert"),
+        message.contains("root commit as one of the parents") && message.contains("op revert"),
         "{message}"
     );
+    for machine in [0, 1] {
+        hive.repo(machine).jj(&["status"]);
+    }
 }

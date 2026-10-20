@@ -12,6 +12,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use futures::TryStreamExt as _;
 use jj_lib::config::ConfigFile;
 use jj_lib::config::ConfigNamePathBuf;
 use jj_lib::config::ConfigSource;
@@ -112,6 +113,20 @@ pub enum NodeError {
     DanglingAttribute { op: String, canonical: String },
     #[error("bad hive settings in {op}: {message}")]
     Settings { op: String, message: String },
+    /// jj cannot merge this machine's concurrent operations with the hive's, as when two
+    /// machines' rebases form a loop: jj 0.46 then panics ("graph has cycle").
+    #[error(
+        "jj cannot merge this machine's operations with the hive's ({reason}). musubi has not \
+         applied the hive's latest operations here, so jj keeps working. To go on, revert this \
+         machine's operation that conflicts with them, one of those the hive doesn't have yet \
+         (newest first: {listed}), with `jj op revert <id>`; musubi then catches up"
+    )]
+    Unmergeable {
+        /// This machine's operations the hive doesn't have, newest first.
+        ours: Vec<OperationId>,
+        listed: String,
+        reason: String,
+    },
     #[error("repo config {path}: {message}")]
     Config { path: PathBuf, message: String },
     #[error(
@@ -886,13 +901,15 @@ impl NodeRepo {
 
     /// Loads the repository at its op head, letting jj merge concurrent heads.
     fn load_at_head(&self) -> Result<Arc<ReadonlyRepo>, NodeError> {
-        self.loader.load_at_head().block_on().map_err(|err| {
-            if format!("{err:?}").contains("root commit as one of the parents") {
-                NodeError::RootParentMerge(err)
-            } else {
-                err.into()
+        let loaded = catch_jj_panic(|| Ok(self.loader.load_at_head().block_on()));
+        match loaded {
+            Ok(Ok(repo)) => Ok(repo),
+            Ok(Err(err)) if format!("{err:?}").contains("root commit as one of the parents") => {
+                Err(NodeError::RootParentMerge(err))
             }
-        })
+            Ok(Err(err)) => Err(err.into()),
+            Err(reason) => Err(self.unmergeable(&self.local_heads()?, reason)),
+        }
     }
 
     /// The canonical form of each local op head.
@@ -1208,6 +1225,7 @@ impl NodeRepo {
     /// it.
     pub fn advance(&mut self, canonical: &OperationId) -> Result<OperationId, NodeError> {
         let realized = self.realize(canonical)?;
+        self.check_mergeable(&realized)?;
         let _lock = if self.colocated {
             Some(FileLock::lock(
                 self.repo_path.join("git_import_export.lock"),
@@ -1235,6 +1253,76 @@ impl NodeRepo {
         drop(_lock);
         self.replace_abandoned_working_copies()?;
         Ok(head)
+    }
+
+    /// Refuses to publish a realization that jj cannot merge with this machine's own
+    /// concurrent operations. Published, it would be merged by every `jj` command here, and
+    /// each would fail, or for some jj bugs panic, until someone reverted an operation by
+    /// hand. Unpublished, jj keeps working, and the error says which operations to revert.
+    fn check_mergeable(&self, realized: &OperationId) -> Result<(), NodeError> {
+        let realized_op = self.loader.load_operation(realized).block_on()?;
+        let concurrent: Vec<OperationId> = self
+            .local_heads()?
+            .into_iter()
+            .filter(|head| head != realized && !realized_op.parent_ids().contains(head))
+            .collect();
+        if concurrent.is_empty() {
+            return Ok(());
+        }
+        let mut theirs = vec![];
+        for head in &concurrent {
+            theirs.push(self.loader.load_operation(head).block_on()?);
+        }
+        // This machine's operations that the hive doesn't have: one of them conflicts.
+        let roots = realized_op.parents().block_on()?;
+        let ours: Vec<OperationId> = op_walk::walk_ancestors_range(&theirs, &roots)
+            .map_ok(|op| op.id().clone())
+            .try_collect()
+            .block_on()?;
+        let mut operations = theirs;
+        operations.push(realized_op);
+        // jj merges op heads in order of their end times, and the result can depend on the
+        // order, so try that order. Try the reverse too: equal times sort either way.
+        operations.sort_by_key(|op| op.metadata().time.end.timestamp);
+        let reversed: Vec<_> = operations.iter().rev().cloned().collect();
+        for order in [operations, reversed] {
+            let merged = catch_jj_panic(|| {
+                self.loader
+                    .merge_operations(order, None, Some("reconcile divergent operations"), [])
+                    .block_on()
+                    .map(|_| ())
+                    .map_err(|err| format!("{err:#}"))
+            });
+            merged.map_err(|reason| self.unmergeable(&ours, reason))?;
+        }
+        Ok(())
+    }
+
+    /// The error for operations of this machine's, `ours` (newest first), that jj can't
+    /// merge with the hive's.
+    fn unmergeable(&self, ours: &[OperationId], reason: String) -> NodeError {
+        const SHOWN: usize = 5;
+        let mut listed: Vec<String> = ours
+            .iter()
+            .take(SHOWN)
+            .map(|id| {
+                let description = self
+                    .loader
+                    .load_operation(id)
+                    .block_on()
+                    .map(|op| op.metadata().description.clone())
+                    .unwrap_or_default();
+                format!("{} ({description})", &id.hex()[..12])
+            })
+            .collect();
+        if ours.len() > SHOWN {
+            listed.push(format!("and {} older", ours.len() - SHOWN));
+        }
+        NodeError::Unmergeable {
+            ours: ours.to_vec(),
+            listed: listed.join(", "),
+            reason,
+        }
     }
 
     /// Gives each workspace on this machine whose working-copy commit is no longer visible
@@ -1404,5 +1492,19 @@ fn config_err(path: &Path, err: impl std::fmt::Display) -> NodeError {
     NodeError::Config {
         path: path.to_owned(),
         message: err.to_string(),
+    }
+}
+
+/// Runs `f`, turning a panic in jj-lib into an error with the panic's message. jj 0.46
+/// panics, rather than failing, when it merges concurrent operations whose rebases form a
+/// loop ("graph has cycle").
+fn catch_jj_panic<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(result) => result,
+        Err(panic) => Err(panic
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_owned())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "jj panicked".to_owned())),
     }
 }

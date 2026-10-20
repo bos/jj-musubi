@@ -1,0 +1,9 @@
+name = "musubi"
+defaultTargets = ["Musubi", "oracle"]
+
+[[lean_lib]]
+name = "Musubi"
+
+[[lean_exe]]
+name = "oracle"
+root = "Oracle"

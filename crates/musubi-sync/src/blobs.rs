@@ -1,0 +1,219 @@
+//! Content-addressed blobs and chunked transfer (docs/protocol.md, "Chunked blobs").
+//!
+//! A transfer session is keyed by the blob's id, so it is never confused with another
+//! blob's. Chunks may arrive lost, duplicated, or out of order: the receiver appends only
+//! bytes that extend what it has contiguously, reports how much that is, and checks the
+//! hash once everything has arrived, starting over on a mismatch. A receiver that already
+//! has the blob reports it complete at once. This is the protocol `formal/Musubi/Chunks.lean`
+//! verifies.
+
+use std::fs;
+use std::fs::File;
+use std::fs::OpenOptions;
+use std::io;
+use std::io::Read as _;
+use std::io::Seek as _;
+use std::io::SeekFrom;
+use std::io::Write as _;
+use std::path::Path;
+use std::path::PathBuf;
+
+use serde::Deserialize;
+use serde::Serialize;
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct BlobId(pub [u8; 32]);
+
+impl BlobId {
+    pub fn of_file(path: &Path) -> io::Result<(Self, u64)> {
+        let mut hasher = blake3::Hasher::new();
+        let len = io::copy(&mut File::open(path)?, &mut hasher)?;
+        Ok((Self(*hasher.finalize().as_bytes()), len))
+    }
+
+    pub fn of_bytes(bytes: &[u8]) -> Self {
+        Self(*blake3::hash(bytes).as_bytes())
+    }
+
+    pub fn hex(&self) -> String {
+        blake3::Hash::from_bytes(self.0).to_hex().to_string()
+    }
+}
+
+impl std::fmt::Debug for BlobId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "BlobId({})", &self.hex()[..12])
+    }
+}
+
+/// What a receiver has of a blob after taking a chunk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Received {
+    /// The first `n` bytes; send from there.
+    Prefix(u64),
+    Complete,
+}
+
+/// Blobs in a directory: `complete/<id>` and `partial/<id>`.
+pub struct BlobStore {
+    dir: PathBuf,
+}
+
+impl BlobStore {
+    pub fn open(dir: &Path) -> io::Result<Self> {
+        fs::create_dir_all(dir.join("complete"))?;
+        fs::create_dir_all(dir.join("partial"))?;
+        Ok(Self {
+            dir: dir.to_owned(),
+        })
+    }
+
+    fn complete_path(&self, id: &BlobId) -> PathBuf {
+        self.dir.join("complete").join(id.hex())
+    }
+
+    fn partial_path(&self, id: &BlobId) -> PathBuf {
+        self.dir.join("partial").join(id.hex())
+    }
+
+    /// The finished blob's file, if this store has it.
+    pub fn get(&self, id: &BlobId) -> Option<PathBuf> {
+        let path = self.complete_path(id);
+        path.exists().then_some(path)
+    }
+
+    /// Adds a file this side created, returning its id and length.
+    pub fn insert_file(&self, path: &Path) -> io::Result<(BlobId, u64)> {
+        let (id, len) = BlobId::of_file(path)?;
+        let dest = self.complete_path(&id);
+        if !dest.exists() {
+            fs::copy(path, &dest)?;
+        }
+        Ok((id, len))
+    }
+
+    pub fn insert_bytes(&self, bytes: &[u8]) -> io::Result<(BlobId, u64)> {
+        let id = BlobId::of_bytes(bytes);
+        let dest = self.complete_path(&id);
+        if !dest.exists() {
+            let tmp = tempfile::NamedTempFile::new_in(self.dir.join("partial"))?;
+            fs::write(tmp.path(), bytes)?;
+            tmp.persist(&dest).map_err(|err| err.error)?;
+        }
+        Ok((id, bytes.len() as u64))
+    }
+
+    /// Takes a chunk of `id`, which is `total` bytes long. See the module docs.
+    pub fn receive(
+        &self,
+        id: &BlobId,
+        total: u64,
+        offset: u64,
+        data: &[u8],
+    ) -> io::Result<Received> {
+        if self.get(id).is_some() {
+            return Ok(Received::Complete);
+        }
+        let partial = self.partial_path(id);
+        let mut file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .append(true)
+            .open(&partial)?;
+        let have = file.metadata()?.len();
+        let end = offset + data.len() as u64;
+        if offset <= have && end > have {
+            let skip = usize::try_from(have - offset).expect("chunks are small");
+            file.write_all(&data[skip..])?;
+        }
+        let have = file.metadata()?.len();
+        if have < total {
+            return Ok(Received::Prefix(have));
+        }
+        drop(file);
+        let (actual, len) = BlobId::of_file(&partial)?;
+        if actual != *id || len != total {
+            // Corrupt or mismatched data: start over.
+            fs::remove_file(&partial)?;
+            return Ok(Received::Prefix(0));
+        }
+        fs::rename(&partial, self.complete_path(id))?;
+        Ok(Received::Complete)
+    }
+
+    /// Up to `len` bytes of a finished blob from `offset`, and the blob's total length.
+    pub fn read(&self, id: &BlobId, offset: u64, len: usize) -> io::Result<(u64, Vec<u8>)> {
+        let path = self
+            .get(id)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such blob"))?;
+        let mut file = File::open(path)?;
+        let total = file.metadata()?.len();
+        file.seek(SeekFrom::Start(offset.min(total)))?;
+        let mut data = vec![];
+        file.take(len as u64).read_to_end(&mut data)?;
+        Ok((total, data))
+    }
+
+    pub fn remove(&self, id: &BlobId) {
+        fs::remove_file(self.complete_path(id)).ok();
+        fs::remove_file(self.partial_path(id)).ok();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use hegel::TestCase;
+    use hegel::generators as gs;
+
+    use super::*;
+
+    /// Chunks delivered in any order, duplicated, some corrupt, some lost and resent:
+    /// once the receiver reports the blob complete, its content is exactly what was sent.
+    #[hegel::test(test_cases = 200)]
+    fn chunked_transfer_survives_any_delivery_order(tc: TestCase) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::open(dir.path()).unwrap();
+        let len = tc.draw(gs::integers::<usize>().max_value(300));
+        let blob: Vec<u8> = (0..len).map(|i| (i * 7 % 251) as u8).collect();
+        let id = BlobId::of_bytes(&blob);
+        let chunk = tc.draw(gs::integers::<usize>().min_value(1).max_value(64));
+        let mut done = false;
+        for _ in 0..1000 {
+            // The sender learns the receiver's prefix and sends some chunk at or after a
+            // random point, possibly corrupted.
+            let offset = tc.draw(gs::integers::<usize>().max_value(len));
+            let end = (offset + chunk).min(len);
+            let mut data = blob[offset..end].to_vec();
+            if !data.is_empty() && tc.draw(gs::integers::<u8>().max_value(9)) == 0 {
+                data[0] ^= 1;
+            }
+            match store
+                .receive(&id, len as u64, offset as u64, &data)
+                .unwrap()
+            {
+                Received::Complete => {
+                    done = true;
+                    break;
+                }
+                Received::Prefix(have) => {
+                    // The well-behaved retransmission from the reported prefix.
+                    let have = usize::try_from(have).unwrap();
+                    let end = (have + chunk).min(len);
+                    if let Received::Complete = store
+                        .receive(&id, len as u64, have as u64, &blob[have..end])
+                        .unwrap()
+                    {
+                        done = true;
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(done, "transfer did not finish");
+        let (total, data) = store.read(&id, 0, len + 1).unwrap();
+        assert_eq!(total, len as u64);
+        assert_eq!(data, blob);
+    }
+}

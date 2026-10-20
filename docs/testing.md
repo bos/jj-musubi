@@ -1,0 +1,86 @@
+# Testing
+
+musubi's correctness rests on three layers of evidence. Each guards a different risk, so a
+test belongs at the narrowest layer that can catch its bug.
+
+| Layer | Where | Guards against | Cost |
+| --- | --- | --- | --- |
+| Formal model | `formal/` (Lean) | Protocol design errors: lost operations, dangling references, duplicate merges, livelock | Proof effort, no runtime |
+| Protocol property tests | `crates/musubi-core/tests` | The Rust state machines departing from the model | Milliseconds per case |
+| Race catalogue | `crates/musubi-sync/tests/races` | Concurrent changes on different machines resolving differently from jj's local behavior (docs/races.md) | ~2 s per test |
+| Example tests | each crate's `tests/` | jj integration details: translation, git refs, objects, joins, transports, the CLI | ~1 s per test |
+| Generated end-to-end tests | `crates/musubi-sync/tests/e2e_search` | Everything interacting: real `jj` commands, real repositories, faults | Seconds per case; opt-in |
+
+Run the default suite with `cargo nextest run`, or everything with `just check`. It needs `jj` 0.46.0, `git`, and `nats-server`
+on `PATH`. Run the generated end-to-end search with `cargo nextest run --profile search`. Check
+the formal model with `lake build` in `formal/`.
+
+## Protocol property tests
+
+A Hegel state machine owns a hub and several nodes, all of them sans-IO state machines from
+`musubi-core`, joined by a simulated network that the test controls completely. Its rules:
+
+- environment: a node makes a local operation on some local parent, not necessarily a head;
+  a node merges its heads;
+- delivery: deliver, drop, duplicate, or delay a chosen in-flight message;
+- failure: crash a node or the hub, keeping only persistent state;
+- progress: let a node take its next policy step.
+
+After every rule the test checks the model's safety invariants: HubClosed, HubMonotone,
+NodeClosed, Locality, and MergeOwnership. A final `quiesce` step stops environment actions,
+makes the network reliable, and runs every node's policy until nothing changes. The test then
+checks liveness: every node's heads are `{hub.head}`, and every created operation is in its
+ancestry. A bound on quiescence steps turns livelock into a failure.
+
+Operations here are abstract: ids, parents, and object sets. No jj repository is involved.
+
+## Example tests
+
+These pin down jj-specific behavior with real repositories created by the `jj` CLI, using
+`musubi-testutil`'s hermetic environment. Each one names the hazard it guards against. Some
+tests are deliberately negative controls. `verbatim_replication_reverts_bookmarks` shows that
+copying operations without translation loses bookmark moves; if it ever starts failing, jj
+has changed and the design needs revisiting, not the test.
+
+## Generated end-to-end tests
+
+Modeled on jj-stack's generated integration tests. A Hegel state machine drives two or three
+real colocated repositories, each served by a real musubi node, through an in-process hub
+over the in-memory transport. A smaller set of scenarios also runs across processes against
+`nats-server`.
+
+Rules fall into separate groups, and are kept separate so that the inconsistent states
+between them get explored:
+
+- **Local work**, through the `jj` CLI on a chosen machine: write files and commit, describe,
+  new on a random commit, rebase, squash, abandon, bookmark create, move, and delete, undo,
+  and commands at an older operation (`--at-op`), which create concurrent operations.
+- **Git-side work** in a colocated repository: move or delete a branch with `git`.
+- **Sync**: let one node take a single sync step, which may stop partway through an upload.
+- **Faults**: partition and heal a node, drop or delay messages, crash a node or the hub.
+  Faults are capped per sequence, so that a short walk still reaches recovery.
+
+After each rule, every repository must still load, and `jj status` must succeed. At the end,
+`quiesce` heals everything and syncs to a fixed point, then checks:
+
+- every node's canonical head equals the hub's;
+- all repositories agree on visible commits, change ids, bookmarks, tags, and remote
+  bookmarks;
+- in every colocated repository, `refs/heads` matches the local bookmarks that are not
+  conflicted, and a further `jj status` imports nothing;
+- every operation made on any machine appears in every machine's `jj op log`.
+
+As in jj-stack:
+
+- a rule is eligible only when it has work to do, and its candidates are computed by a helper
+  that its precondition shares;
+- each seeded search shard has its own Hegel example database;
+- the search run ends by listing rules that never fired. An unreached rule is a search
+  problem: give it a richer starting state or fix its precondition.
+
+## Testing the tests
+
+`just mutants` runs `cargo-mutants` over the protocol core's hub and node logic: each
+surviving mutant is a change to the protocol the property tests and the Lean conformance
+check fail to notice. docs/conformance.md lists hand-made mutants and which check catches
+each.

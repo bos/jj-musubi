@@ -1,0 +1,64 @@
+//! The protocol core (`musubi-core`) bound to real jj repositories (`musubi-jj`) and hub
+//! storage (`musubi-hub`).
+//!
+//! - [`node::NodeAdapter`] implements the core's `LocalRepo` over a jj repository.
+//! - [`hub::HubAdapter`] implements the core's `HubStorage` over a hub store.
+//! - [`hive::Hive`] runs a hub and nodes in one process with direct delivery, for tests.
+//!
+//! Attachments are local bundle files here; transports carry them as chunked blobs.
+
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use jj_lib::backend::CommitId;
+
+pub mod blobs;
+pub mod driver;
+pub mod hive;
+pub mod hub;
+pub mod node;
+pub mod remote;
+pub mod service;
+pub mod wire;
+
+pub type OpId = jj_lib::op_store::OperationId;
+
+/// Content accompanying a protocol message.
+#[derive(Clone, Debug, Default)]
+pub enum Attachment {
+    #[default]
+    None,
+    /// A bundle file (see `musubi_jj::objects::bundle`), deleted once nothing refers to it.
+    Bundle(Arc<tempfile::TempPath>),
+    /// A bundle file owned by someone else, such as a blob store.
+    File(PathBuf),
+    /// Commits the requester has, with everything reachable from them.
+    Haves(Vec<CommitId>),
+}
+
+impl Attachment {
+    pub fn bundle(path: tempfile::TempPath) -> Self {
+        Self::Bundle(Arc::new(path))
+    }
+
+    pub fn bundle_path(&self) -> anyhow::Result<&Path> {
+        match self {
+            Self::Bundle(path) => Ok(path),
+            Self::File(path) => Ok(path),
+            other => anyhow::bail!("expected a bundle, got {other:?}"),
+        }
+    }
+
+    pub fn haves(&self) -> &[CommitId] {
+        match self {
+            Self::Haves(haves) => haves,
+            _ => &[],
+        }
+    }
+}
+
+/// A fresh temporary file in `dir` for building a bundle.
+pub(crate) fn temp_bundle(dir: &Path) -> anyhow::Result<tempfile::TempPath> {
+    Ok(tempfile::NamedTempFile::new_in(dir)?.into_temp_path())
+}

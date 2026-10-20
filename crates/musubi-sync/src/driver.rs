@@ -1,0 +1,95 @@
+//! Runs a node's policy against a remote hub.
+
+use musubi_core::message::HeadKind;
+use musubi_core::message::Reply;
+use musubi_core::message::Request;
+use musubi_core::node::NodeCore;
+use musubi_core::node::Step;
+use musubi_jj::node::NodeRepo;
+
+use crate::OpId;
+use crate::node::NodeAdapter;
+use crate::remote::RemoteHub;
+use crate::wire::HeadNotice;
+
+pub struct NodeDriver {
+    adapter: NodeAdapter,
+    core: NodeCore<OpId>,
+    remote: RemoteHub,
+}
+
+impl NodeDriver {
+    pub fn new(repo: NodeRepo, remote: RemoteHub) -> anyhow::Result<Self> {
+        let root = repo.canonical_store().root_operation_id().clone();
+        Ok(Self {
+            adapter: NodeAdapter::new(repo)?,
+            core: NodeCore::new(root),
+            remote,
+        })
+    }
+
+    pub fn adapter(&self) -> &NodeAdapter {
+        &self.adapter
+    }
+
+    pub fn known(&self) -> &(u64, OpId) {
+        self.core.known()
+    }
+
+    /// Asks the hub for its head, then runs the policy until there is nothing left to do.
+    /// Returns how many steps that took.
+    pub async fn sync(&mut self) -> anyhow::Result<usize> {
+        self.deliver(Request::GetHead).await?;
+        let mut steps = 0;
+        loop {
+            match self.core.step(&mut self.adapter)? {
+                Step::Idle => return Ok(steps),
+                Step::Send(requests) => {
+                    for request in requests {
+                        self.deliver(request).await?;
+                    }
+                }
+                Step::Merged | Step::Realized(_) | Step::Advanced(_) => {}
+            }
+            steps += 1;
+        }
+    }
+
+    async fn deliver(&mut self, request: Request<OpId, crate::Attachment>) -> anyhow::Result<()> {
+        let reply = self.remote.call(request).await?;
+        let attachment = match &reply {
+            Reply::Ops { attachment, .. } | Reply::Objects { attachment, .. } => {
+                Some(attachment.clone())
+            }
+            _ => None,
+        };
+        let result = self.core.handle(&mut self.adapter, reply);
+        if let Some(attachment) = attachment {
+            self.remote.release(&attachment);
+        }
+        result?;
+        Ok(())
+    }
+
+    /// Takes a head announcement. A newer head makes the next `sync` fetch it.
+    pub fn notice(&mut self, notice: HeadNotice) -> anyhow::Result<()> {
+        let reply = Reply::Head {
+            kind: HeadKind::Notify,
+            seq: notice.seq,
+            head: OpId::new(notice.head),
+        };
+        self.core.handle(&mut self.adapter, reply)?;
+        Ok(())
+    }
+
+    /// Forgets volatile protocol state, as after a crash.
+    pub fn restart(&mut self) {
+        let root = self
+            .adapter
+            .repo()
+            .canonical_store()
+            .root_operation_id()
+            .clone();
+        self.core.restart(root);
+    }
+}

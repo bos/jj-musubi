@@ -1,0 +1,151 @@
+//! Git remotes: fetches and pushes on different machines.
+
+use std::path::PathBuf;
+
+use musubi_testutil::TestEnv;
+
+use crate::fixture::Fixture;
+
+/// A bare `origin` with one commit on `main`, and each machine configured to use it.
+fn with_origin(hive: &Fixture) -> PathBuf {
+    let origin = hive.env.root().join("origin.git");
+    let seed = hive.env.root().join("seed");
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("HOME", hive.env.root().join("home"))
+            .env("GIT_AUTHOR_NAME", "o")
+            .env("GIT_AUTHOR_EMAIL", "o@example.com")
+            .env("GIT_COMMITTER_NAME", "o")
+            .env("GIT_COMMITTER_EMAIL", "o@example.com")
+            .output()
+            .unwrap();
+        assert!(
+            status.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+    };
+    std::fs::create_dir_all(&seed).unwrap();
+    git(
+        hive.env.root(),
+        &[
+            "init",
+            "--quiet",
+            "--bare",
+            "--initial-branch=main",
+            origin.to_str().unwrap(),
+        ],
+    );
+    git(&seed, &["init", "--quiet", "--initial-branch=main"]);
+    std::fs::write(seed.join("upstream"), "upstream 1").unwrap();
+    git(&seed, &["add", "."]);
+    git(&seed, &["commit", "--quiet", "-m", "upstream 1"]);
+    git(
+        &seed,
+        &["push", "--quiet", origin.to_str().unwrap(), "main"],
+    );
+    for repo in &hive.repos {
+        repo.jj(&["git", "remote", "add", "origin", origin.to_str().unwrap()]);
+    }
+    seed
+}
+
+fn advance_origin(hive: &Fixture, seed: &std::path::Path, n: usize) {
+    let origin = hive.env.root().join("origin.git");
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(seed)
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("HOME", hive.env.root().join("home"))
+            .env("GIT_AUTHOR_NAME", "o")
+            .env("GIT_AUTHOR_EMAIL", "o@example.com")
+            .env("GIT_COMMITTER_NAME", "o")
+            .env("GIT_COMMITTER_EMAIL", "o@example.com")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    std::fs::write(seed.join("upstream"), format!("upstream {n}")).unwrap();
+    run(&["commit", "--quiet", "-am", &format!("upstream {n}")]);
+    run(&["push", "--quiet", origin.to_str().unwrap(), "main"]);
+}
+
+/// One machine fetches; the other sees the remote bookmark, and its own git gets the
+/// matching remote-tracking ref.
+#[test]
+fn fetch_on_one_machine_reaches_the_other() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    let _seed = with_origin(&hive);
+    hive.repo(0).jj(&["git", "fetch"]);
+    hive.sync();
+    hive.assert_converged();
+    let fetched = hive.bookmarks(0)["main@origin"].clone();
+    assert_eq!(hive.bookmarks(1)["main@origin"], fetched);
+    assert_eq!(
+        hive.repo(1)
+            .git(&["rev-parse", "refs/remotes/origin/main"])
+            .trim(),
+        fetched
+    );
+}
+
+/// Both machines fetch, at different moments, while origin moves between the fetches.
+/// The later fetch descends from the earlier one, so jj resolves the remote bookmark to the
+/// newer commit rather than a conflict.
+#[test]
+fn concurrent_fetches_of_a_moving_remote() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    let seed = with_origin(&hive);
+    hive.repo(0).jj(&["git", "fetch"]);
+    advance_origin(&hive, &seed, 2);
+    hive.repo(1).jj(&["git", "fetch"]);
+    hive.sync();
+    hive.assert_converged();
+    let main = &hive.bookmarks(0)["main@origin"];
+    assert!(!main.starts_with("conflict:"), "{main}");
+    let newest = hive.repo(1).git(&["rev-parse", "refs/remotes/origin/main"]);
+    assert_eq!(main, newest.trim());
+}
+
+/// One machine pushes a bookmark; the other sees it tracked and pushed.
+#[test]
+fn push_from_one_machine() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    let _seed = with_origin(&hive);
+    hive.repo(0).jj(&["git", "fetch"]);
+    hive.repo(0).jj(&["new", "main@origin"]);
+    hive.commit(0, "feature", "feature");
+    hive.repo(0)
+        .jj(&["bookmark", "create", "feature", "-r", "@-"]);
+    hive.repo(0).jj(&["git", "push", "--bookmark", "feature"]);
+    hive.sync();
+    hive.assert_converged();
+    let feature = hive.commit_id(1, "feature");
+    assert_eq!(hive.bookmarks(1)["feature@origin"], feature);
+}
+
+/// Two repositories created independently, each with a `main` at a different commit,
+/// joining one hive: jj merges the histories at the root, and `main` is conflicted until
+/// someone resolves it.
+#[test]
+fn joining_repositories_with_conflicting_bookmarks() {
+    let env = TestEnv::new();
+    let alpha = env.init_repo("alpha");
+    let beta = env.init_repo("beta");
+    for (repo, name) in [(&alpha, "alpha"), (&beta, "beta")] {
+        repo.write_file(name, name);
+        repo.jj(&["commit", "-m", name]);
+        repo.jj(&["bookmark", "create", "main", "-r", "@-"]);
+    }
+    let mut hive = Fixture::join(env, vec![alpha, beta]);
+    hive.assert_converged();
+    assert!(hive.bookmarks(0)["main@"].starts_with("conflict:"));
+}

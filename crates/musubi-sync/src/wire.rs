@@ -1,0 +1,197 @@
+//! The bytes on the wire between nodes and a hub.
+//!
+//! Messages are postcard-encoded [`Envelope`]s. Every envelope carries the protocol version
+//! and the jj-lib version, and the hub refuses to talk across a mismatch: canonical
+//! operation ids are hashes of jj-lib's structs, so peers must agree on jj-lib exactly
+//! (docs/design.md, "Compatibility").
+//!
+//! Bundles travel as blobs, in chunks. A message that would itself exceed the transport's
+//! payload limit (a long list of operation ids, say) is stored as a blob and sent as
+//! [`HubRequest::Indirect`] or [`HubReply::Indirect`].
+
+use musubi_core::message::OpEntry;
+use musubi_core::message::Reply;
+use musubi_core::message::Request;
+use serde::Deserialize;
+use serde::Serialize;
+
+use crate::blobs::BlobId;
+
+pub const PROTOCOL_VERSION: u32 = 1;
+pub const JJ_LIB_VERSION: &str = "0.46.0";
+
+/// An operation or commit id on the wire.
+pub type WireId = Vec<u8>;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WireAttachment {
+    None,
+    Blob { blob: BlobId, len: u64 },
+    Haves(Vec<WireId>),
+}
+
+pub type WireRequest = Request<WireId, WireAttachment>;
+pub type WireReply = Reply<WireId, WireAttachment>;
+pub type WireOpEntry = OpEntry<WireId>;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HubRequest {
+    Protocol(WireRequest),
+    /// The real request is the content of this blob, already uploaded.
+    Indirect {
+        blob: BlobId,
+    },
+    PutChunk {
+        blob: BlobId,
+        total: u64,
+        offset: u64,
+        data: Vec<u8>,
+    },
+    GetChunk {
+        blob: BlobId,
+        offset: u64,
+        len: u64,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HubReply {
+    Protocol(WireReply),
+    /// The real reply is the content of this blob; fetch it with `GetChunk`.
+    Indirect {
+        blob: BlobId,
+        len: u64,
+    },
+    /// After `PutChunk`: the receiver has the first `received` bytes, or all of them.
+    ChunkAck {
+        received: u64,
+        complete: bool,
+    },
+    Chunk {
+        total: u64,
+        data: Vec<u8>,
+    },
+    Error(String),
+}
+
+/// Published on the head subject whenever the hub accepts a new head.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeadNotice {
+    pub seq: u64,
+    pub head: WireId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Envelope<T> {
+    pub protocol: u32,
+    pub jj_lib: String,
+    pub body: T,
+}
+
+impl<T: Serialize> Envelope<T> {
+    pub fn encode(body: T) -> anyhow::Result<Vec<u8>> {
+        let envelope = Self {
+            protocol: PROTOCOL_VERSION,
+            jj_lib: JJ_LIB_VERSION.to_owned(),
+            body,
+        };
+        Ok(postcard::to_stdvec(&envelope)?)
+    }
+}
+
+impl<T: for<'de> Deserialize<'de>> Envelope<T> {
+    /// Decodes and checks versions.
+    pub fn decode(bytes: &[u8]) -> anyhow::Result<T> {
+        let envelope: Self = postcard::from_bytes(bytes)?;
+        anyhow::ensure!(
+            envelope.protocol == PROTOCOL_VERSION && envelope.jj_lib == JJ_LIB_VERSION,
+            "incompatible peer: protocol {} with jj-lib {}, but this is protocol {} with \
+             jj-lib {}",
+            envelope.protocol,
+            envelope.jj_lib,
+            PROTOCOL_VERSION,
+            JJ_LIB_VERSION
+        );
+        Ok(envelope.body)
+    }
+}
+
+/// The largest chunk to put in one message, leaving room for the envelope.
+pub fn chunk_size(max_payload: usize) -> usize {
+    max_payload.saturating_sub(1024).max(1024)
+}
+
+/// Converts ids and attachments of a request.
+pub fn map_request<O, A, P, B>(
+    request: Request<O, A>,
+    mut id: impl FnMut(O) -> P,
+    mut attachment: impl FnMut(A) -> anyhow::Result<B>,
+) -> anyhow::Result<Request<P, B>> {
+    Ok(match request {
+        Request::GetHead => Request::GetHead,
+        Request::PutOps { ops, attachment: a } => Request::PutOps {
+            ops: ops.into_iter().map(&mut id).collect(),
+            attachment: attachment(a)?,
+        },
+        Request::PutObjects {
+            for_ops,
+            attachment: a,
+        } => Request::PutObjects {
+            for_ops: for_ops.into_iter().map(&mut id).collect(),
+            attachment: attachment(a)?,
+        },
+        Request::GetOpsSince { head, base } => Request::GetOpsSince {
+            head: id(head),
+            base: id(base),
+        },
+        Request::GetObjects {
+            for_ops,
+            attachment: a,
+        } => Request::GetObjects {
+            for_ops: for_ops.into_iter().map(&mut id).collect(),
+            attachment: attachment(a)?,
+        },
+        Request::Cas { expected, new } => Request::Cas {
+            expected: id(expected),
+            new: id(new),
+        },
+    })
+}
+
+/// Converts ids and attachments of a reply.
+pub fn map_reply<O, A, P, B>(
+    reply: Reply<O, A>,
+    mut id: impl FnMut(O) -> P,
+    mut attachment: impl FnMut(A) -> anyhow::Result<B>,
+) -> anyhow::Result<Reply<P, B>> {
+    Ok(match reply {
+        Reply::Head { kind, seq, head } => Reply::Head {
+            kind,
+            seq,
+            head: id(head),
+        },
+        Reply::Stored => Reply::Stored,
+        Reply::Ops {
+            head,
+            ops,
+            attachment: a,
+        } => Reply::Ops {
+            head: id(head),
+            ops: ops
+                .into_iter()
+                .map(|entry| OpEntry {
+                    id: id(entry.id),
+                    parents: entry.parents.into_iter().map(&mut id).collect(),
+                })
+                .collect(),
+            attachment: attachment(a)?,
+        },
+        Reply::Objects {
+            for_ops,
+            attachment: a,
+        } => Reply::Objects {
+            for_ops: for_ops.into_iter().map(&mut id).collect(),
+            attachment: attachment(a)?,
+        },
+    })
+}

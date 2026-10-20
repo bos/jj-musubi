@@ -1,0 +1,9 @@
+[files]
+extend-exclude = ["formal/.lake", "target", "Cargo.lock"]
+
+[default.extend-words]
+# The Lean model's names: `Anc` is ancestry (`anc*`), `nd` a node, `hed` a head.
+anc = "anc"
+Anc = "Anc"
+nd = "nd"
+hed = "hed"

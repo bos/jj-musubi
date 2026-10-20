@@ -1,0 +1,23 @@
+[package]
+name = "musubi-transport"
+description = "Pluggable message transports for jj-musubi: NATS and an in-memory network for tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-nats.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+futures.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+musubi-testutil.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "process"] }
+
+[lints]
+workspace = true

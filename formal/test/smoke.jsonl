@@ -1,0 +1,19 @@
+{"op": "reset", "nodes": 2}
+{"op": "step", "action": {"kind": "userOp", "node": 0, "parent": 0, "objs": [10]}}
+{"op": "step", "action": {"kind": "push", "node": 0, "expected": 0, "new": 1}}
+{"op": "step", "action": {"kind": "casAccept", "node": 0, "expected": 0, "new": 1}}
+{"op": "step", "action": {"kind": "uploadOps", "node": 0, "ops": [1]}}
+{"op": "step", "action": {"kind": "uploadObjs", "node": 0, "objs": [10]}}
+{"op": "step", "action": {"kind": "hubPutOps", "node": 0, "ops": [1]}}
+{"op": "step", "action": {"kind": "hubPutObjs", "node": 0, "objs": [10]}}
+{"op": "step", "action": {"kind": "casAccept", "node": 0, "expected": 0, "new": 1}}
+{"op": "step", "action": {"kind": "learn", "node": 0, "headKind": "accepted", "seq": 1, "head": 1}}
+{"op": "step", "action": {"kind": "learn", "node": 1, "headKind": "notify", "seq": 1, "head": 1}}
+{"op": "step", "action": {"kind": "fetchOps", "node": 1, "ops": [1]}}
+{"op": "step", "action": {"kind": "hubGetOps", "node": 1, "ops": [1]}}
+{"op": "step", "action": {"kind": "recvOps", "node": 1, "ops": [1]}}
+{"op": "step", "action": {"kind": "fetchObjs", "node": 1, "objs": [10]}}
+{"op": "step", "action": {"kind": "hubGetObjs", "node": 1, "objs": [10]}}
+{"op": "step", "action": {"kind": "recvObjs", "node": 1, "objs": [10]}}
+{"op": "step", "action": {"kind": "realize", "node": 1, "opId": 1}}
+{"op": "step", "action": {"kind": "advance", "node": 1}}

@@ -1,0 +1,100 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+musubi-core = { path = "crates/musubi-core" }
+musubi-hub = { path = "crates/musubi-hub" }
+musubi-jj = { path = "crates/musubi-jj" }
+musubi-sync = { path = "crates/musubi-sync" }
+musubi-testutil = { path = "crates/musubi-testutil" }
+musubi-transport = { path = "crates/musubi-transport" }
+
+anyhow = "1"
+async-nats = "=0.50.0"
+async-trait = "0.1.89"
+blake3 = "1"
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+futures = "0.3.32"
+jj-cli = { version = "=0.46.0", default-features = false, features = ["git"] }
+jj-lib = { version = "=0.46.0", default-features = false, features = ["git"] }
+notify = "8"
+pollster = "1.0.1"
+postcard = { version = "1", default-features = false, features = ["use-std"] }
+tempfile = "3"
+gix = { version = "=0.88.0", default-features = false }
+hegeltest = "=0.50.2"
+prost = "=0.14.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+tokio = { version = "1.52.3", features = ["rt", "sync", "time"] }
+
+[workspace.lints.rust]
+let_underscore_drop = "warn"
+redundant_imports = "warn"
+unsafe_code = "forbid"
+unused_qualifications = "warn"
+
+# jj's own lint set, plus a few that matter for a daemon that must not panic.
+[workspace.lints.clippy]
+borrow_as_ptr = "warn"
+cast_lossless = "warn"
+cloned_instead_of_copied = "warn"
+dbg_macro = "warn"
+elidable_lifetime_names = "warn"
+explicit_into_iter_loop = "warn"
+explicit_iter_loop = "warn"
+flat_map_option = "warn"
+format_collect = "warn"
+format_push_string = "warn"
+implicit_clone = "warn"
+manual_let_else = "warn"
+needless_for_each = "warn"
+ref_option = "warn"
+semicolon_if_nothing_returned = "warn"
+single_char_pattern = "warn"
+stable_sort_primitive = "warn"
+todo = "warn"
+uninlined_format_args = "warn"
+unnecessary_literal_bound = "warn"
+unnecessary_semicolon = "warn"
+unnested_or_patterns = "warn"
+unused_trait_names = "warn"
+unwrap_used = "warn"
+use_self = "warn"
+useless_conversion = "warn"
+while_let_loop = "warn"
+wildcard_imports = "warn"
+
+# Fast iteration: our own code builds unoptimized with only line tables (enough for
+# backtraces); dependencies (jj-lib, gix, hashing) build once, optimized, without debug info,
+# so tests that do real repo work stay fast.
+[profile.dev]
+opt-level = 0
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+incremental = true
+
+[profile.dev.package."*"]
+opt-level = 2
+debug = false
+
+[profile.dev.build-override]
+opt-level = 0
+debug = false
+
+[profile.release]
+debug = "line-tables-only"

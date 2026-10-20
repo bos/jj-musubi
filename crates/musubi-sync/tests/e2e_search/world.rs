@@ -654,14 +654,15 @@ impl World {
         let Some(ours) = ours else {
             self.fail(&format!("{what} of {} failed: {err:#}", self.machine(m)));
         };
-        // Workspace operations rewrite no commits, so they can't be what jj fails to merge,
-        // and reverting one strands a working copy (see `can_undo`).
-        let descriptions = self.op_descriptions(m);
+        // As `can_undo` does, skip merges, which jj refuses to revert, and workspace
+        // operations, which rewrite no commits, so they can't be what jj fails to merge, and
+        // which strand a working copy when reverted.
+        let ops = self.op_summaries(m);
         let op = ours.iter().map(|op| op.hex()).find(|op| {
             !self.recovery_ops.contains(op)
-                && !descriptions
-                    .get(op)
-                    .is_some_and(|d| d.to_lowercase().contains("workspace"))
+                && ops.get(op).is_some_and(|(parents, description)| {
+                    *parents == 1 && !description.to_lowercase().contains("workspace")
+                })
         });
         let Some(op) = op.filter(|_| self.unmergeable_reverts < MAX_UNMERGEABLE_REVERTS) else {
             self.fail(&format!(
@@ -672,17 +673,17 @@ impl World {
         self.unmergeable_reverts += 1;
         self.jj(m, &["op", "revert", &op]);
         let written: Vec<String> = self
-            .op_descriptions(m)
+            .op_summaries(m)
             .into_keys()
-            .filter(|id| !descriptions.contains_key(id))
+            .filter(|id| !ops.contains_key(id))
             .collect();
         self.recovery_ops.insert(op);
         self.recovery_ops.extend(written);
     }
 
-    /// Every operation in machine `m`'s operation log, by hex id, with the first line of
-    /// its description.
-    fn op_descriptions(&self, m: usize) -> BTreeMap<String, String> {
+    /// Every operation in machine `m`'s operation log, by hex id, with its number of parents
+    /// and the first line of its description.
+    fn op_summaries(&self, m: usize) -> BTreeMap<String, (usize, String)> {
         self.raw_jj(
             m,
             &[
@@ -691,12 +692,16 @@ impl World {
                 "log",
                 "--no-graph",
                 "-T",
-                r#"id ++ "\t" ++ description.first_line() ++ "\n""#,
+                r#"id ++ "\t" ++ parents.len() ++ "\t" ++ description.first_line() ++ "\n""#,
             ],
         )
         .lines()
-        .filter_map(|line| line.split_once('\t'))
-        .map(|(id, description)| (id.to_owned(), description.to_owned()))
+        .filter_map(|line| {
+            let mut fields = line.splitn(3, '\t');
+            let id = fields.next()?;
+            let parents = fields.next()?.parse().ok()?;
+            Some((id.to_owned(), (parents, fields.next()?.to_owned())))
+        })
         .collect()
     }
 

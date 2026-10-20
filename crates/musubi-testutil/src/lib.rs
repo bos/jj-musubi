@@ -36,10 +36,14 @@ impl Default for TestEnv {
 impl TestEnv {
     pub fn new() -> Self {
         check_jj_version();
-        let root = tempfile::Builder::new()
+        let mut root = tempfile::Builder::new()
             .prefix("musubi-test-")
             .tempdir()
             .unwrap();
+        // For inspecting a failure's repositories afterwards.
+        if std::env::var_os("MUSUBI_KEEP_TEST_DIRS").is_some() {
+            root.disable_cleanup(true);
+        }
         fs::create_dir_all(root.path().join("home/.config")).unwrap();
         Self { root }
     }

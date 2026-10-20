@@ -326,6 +326,7 @@ impl World {
         refusals: &[&str],
     ) -> Result<String, String> {
         let before = self.seen(m);
+        let stale = self.is_stale(m, ws);
         let path = self.workspaces[m][ws]
             .path
             .as_ref()
@@ -356,8 +357,54 @@ impl World {
         }
         let after = self.seen(m);
         let what = self.trace.last().cloned().unwrap_or_default();
-        self.ledger.record(m, &what, &before, &after, false);
+        // In a stale workspace, jj snapshots the files at the operation the working copy
+        // was last updated at, before updating it: a command at an older operation, which
+        // can leave the working-copy change divergent, as on one machine.
+        self.ledger.record(m, &what, &before, &after, stale);
         Ok(String::from_utf8(output.stdout).unwrap())
+    }
+
+    /// Whether workspace `ws` of machine `m` is stale: its working-copy commit has changed
+    /// since the operation its working copy was last updated at. With several op heads,
+    /// assumed so.
+    fn is_stale(&self, m: usize, ws: usize) -> bool {
+        let heads = self.op_heads(m);
+        let [head] = heads.as_slice() else {
+            return true;
+        };
+        let mut place = vec![];
+        if let Some(path) = &self.workspaces[m][ws].path {
+            place.extend(["-R".to_owned(), path.to_string_lossy().into_owned()]);
+        }
+        let jj = |args: &[&str]| {
+            let mut full: Vec<&str> = place.iter().map(String::as_str).collect();
+            full.extend_from_slice(args);
+            let output = self.fx.repo(m).jj_output(&full);
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        };
+        let state = jj(&["--ignore-working-copy", "debug", "working-copy"]);
+        let Some(updated_at) = state
+            .split_once("Current operation: OperationId(\"")
+            .and_then(|(_, rest)| rest.split_once('"'))
+            .map(|(op, _)| op.to_owned())
+        else {
+            return true;
+        };
+        let wc = format!("{}@", self.workspaces[m][ws].name);
+        let at = |op: &str| {
+            jj(&[
+                "--ignore-working-copy",
+                "--at-op",
+                op,
+                "log",
+                "--no-graph",
+                "-r",
+                &wc,
+                "-T",
+                "commit_id",
+            ])
+        };
+        at(&updated_at) != at(head)
     }
 
     /// Runs a command at an older operation `op` of machine `m`, creating a concurrent

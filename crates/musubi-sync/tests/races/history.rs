@@ -60,6 +60,48 @@ fn undo_and_redo_of_own_operation() {
     );
 }
 
+/// jj's undo stack names operations by id, in descriptions such as "undo: restore to
+/// operation <id>", and reads the ids back. An undo made on another machine names that
+/// machine's operations, so musubi translates the ids, and the undo stack continues here.
+#[test]
+fn undo_stack_continues_across_machines() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(0, "a", "undone on alpha");
+    hive.repo(0).jj(&["undo"]);
+    hive.sync();
+    hive.repo(1).jj(&["new", "-m", "undone on beta"]);
+    hive.repo(1).jj(&["undo"]);
+    hive.sync();
+    hive.assert_converged();
+    for machine in [0, 1] {
+        let visible = hive.visible(machine);
+        assert!(
+            !visible.iter().any(|c| c.contains("undone on")),
+            "{visible:?}"
+        );
+    }
+}
+
+/// Undoing another machine's undo goes further back along its undo stack, which jj finds
+/// by the id in the undo's description, and redoing returns to where the other machine's
+/// undo left things. (Redo has to come first: once another machine's operation arrives,
+/// jj finds nothing to redo.)
+#[test]
+fn undo_and_redo_of_another_machines_undo() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(0, "a", "first");
+    hive.commit(0, "b", "second");
+    hive.repo(0).jj(&["undo"]);
+    hive.sync();
+    let after_alphas_undo = hive.visible(1);
+    hive.repo(1).jj(&["undo", "--allow-cross-workspace"]);
+    assert_ne!(hive.visible(1), after_alphas_undo);
+    hive.repo(1).jj(&["redo"]);
+    hive.sync();
+    hive.assert_converged();
+    assert_eq!(hive.visible(0), after_alphas_undo);
+}
+
 /// The operation log shows which machine made each operation. jj quotes the name, since
 /// `@` can't appear in a bare one.
 #[test]

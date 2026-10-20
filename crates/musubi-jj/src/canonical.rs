@@ -228,6 +228,26 @@ impl CanonicalStore {
         fs::rename(staged, dest).map_err(io_err(dest))
     }
 
+    /// Whether `ancestor` is in `anc*(heads)`.
+    pub fn is_ancestor(
+        &self,
+        ancestor: &OperationId,
+        heads: &[OperationId],
+    ) -> Result<bool, CanonicalError> {
+        let mut seen: HashSet<OperationId> = HashSet::new();
+        let mut stack = heads.to_vec();
+        while let Some(id) = stack.pop() {
+            if id == *ancestor {
+                return Ok(true);
+            }
+            if id == *self.root_operation_id() || !seen.insert(id.clone()) {
+                continue;
+            }
+            stack.extend(self.read_operation(&id)?.parents);
+        }
+        Ok(false)
+    }
+
     /// The operations in `anc*(heads)` that `stop` rejects, ancestors before descendants.
     /// The walk does not enter operations that `stop` accepts, nor the root, nor operations
     /// this store lacks.

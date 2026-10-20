@@ -666,6 +666,12 @@ impl NodeRepo {
             .collect();
         let view = self.canonical_view(view, &parents, op.commit_predecessors.as_ref())?;
         let mut metadata = op.metadata.clone();
+        if let Some((prefix, target)) = target_of(&metadata.description)
+            && let Some(canonical) = self.canonical_of(&target)
+            && self.canonical.is_ancestor(&canonical, &parents)?
+        {
+            metadata.description = format!("{prefix}{}", canonical.hex());
+        }
         // Which workspace made an operation is per-machine, like the view's working copies:
         // qualify it, so that each machine can tell its own workspaces' operations from
         // another machine's workspace of the same name (see `realized_workspace_name`).
@@ -786,6 +792,12 @@ impl NodeRepo {
         per_machine.follow_rewrites(op);
         per_machine.apply_to(&mut view);
         let mut metadata = op.metadata.clone();
+        if let Some((prefix, target)) = target_of(&metadata.description)
+            && self.canonical.is_ancestor(&target, &op.parents)?
+        {
+            let local = self.local_of(&target).expect("ancestors realized first");
+            metadata.description = format!("{prefix}{}", local.hex());
+        }
         metadata.workspace_name = metadata
             .workspace_name
             .map(|key| self.realized_workspace_name(&key, &remotes));
@@ -1014,4 +1026,23 @@ fn fingerprint(op: &StoreOperation) -> String {
         ..op.clone()
     };
     OperationId::new(blake2b_hash(&without_parents).to_vec()).hex()
+}
+
+/// Descriptions in which jj names an operation's target by its id. `jj undo` and `jj redo`
+/// read the id back to find where their undo stacks continue, so musubi translates it
+/// between this machine's ids and canonical ones. Only targets that are ancestors are
+/// translated, as they always are for undo and redo: those are canonicalized and realized
+/// first, so the translation never depends on the order operations arrive in.
+const TARGET_PREFIXES: [&str; 4] = [
+    "undo: restore to operation ",
+    "redo: restore to operation ",
+    "restore to operation ",
+    "revert operation ",
+];
+
+fn target_of(description: &str) -> Option<(&'static str, OperationId)> {
+    TARGET_PREFIXES.iter().find_map(|prefix| {
+        let target = OperationId::try_from_hex(description.strip_prefix(prefix)?)?;
+        Some((*prefix, target))
+    })
 }

@@ -713,7 +713,7 @@ impl World {
     pub fn op_keys(&self, m: usize) -> BTreeSet<String> {
         self.raw_jj(m, &["op", "log", "--no-graph", "-T", OP_KEY_TEMPLATE])
             .lines()
-            .map(str::to_owned)
+            .map(without_op_ids)
             .collect()
     }
 
@@ -788,4 +788,19 @@ impl World {
         self.jj(m, &["workspace", "forget", &name]);
         self.workspaces[m].remove(ws);
     }
+}
+
+/// An operation's key without the operation ids its description names, as in "undo:
+/// restore to operation <id>": musubi translates those to each machine's own ids.
+fn without_op_ids(key: &str) -> String {
+    for marker in ["restore to operation ", "revert operation "] {
+        if let Some(at) = key.find(marker) {
+            let start = at + marker.len();
+            let end = key[start..]
+                .find(|c: char| !c.is_ascii_hexdigit())
+                .map_or(key.len(), |len| start + len);
+            return format!("{}<op>{}", &key[..start], &key[end..]);
+        }
+    }
+    key.to_owned()
 }

@@ -2,3 +2,4 @@
 /formal/.lake
 .hegel/
 /bench/work
+/mutants.out*

@@ -295,3 +295,34 @@ fn daemon_carries_on_after_colocation_changes() {
         try_log(&beta).is_some_and(|log| log.contains("after beta stopped colocating"))
     });
 }
+
+/// The hive shares remotes and chosen repo config through the binary, which finds jj's
+/// repo config where jj keeps it.
+#[test]
+fn settings_are_shared_through_the_binary() {
+    let server = NatsServer::start(1024 * 1024);
+    let env = TestEnv::new();
+    let mut logs = Logs::default();
+    let (_hub, hive) = start_hub(&env, &mut logs, &server.url());
+    let alpha = env.init_repo("alpha");
+    let beta = env.init_repo("beta");
+    let join = ["join", &hive, "--nats", &server.url()];
+    musubi_in(&env, &logs, &alpha, &join);
+    musubi_in(&env, &logs, &beta, &join);
+    let key = r#"revset-aliases."trunk()""#;
+    alpha.jj(&["config", "set", "--repo", key, "main@upstream"]);
+    alpha.jj(&[
+        "git",
+        "remote",
+        "add",
+        "upstream",
+        "https://example.com/up.git",
+    ]);
+    musubi_in(&env, &logs, &alpha, &["sync"]);
+    musubi_in(&env, &logs, &beta, &["sync"]);
+    assert_eq!(beta.jj(&["config", "get", key]), "main@upstream\n");
+    assert_eq!(
+        beta.jj(&["git", "remote", "list"]),
+        "upstream https://example.com/up.git\n"
+    );
+}

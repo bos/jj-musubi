@@ -5,6 +5,7 @@
 //! repo's config and conditional scopes.
 
 use std::path::Path;
+use std::path::PathBuf;
 
 use anyhow::Context as _;
 use jj_cli::config::ConfigEnv;
@@ -30,4 +31,14 @@ pub fn load(workspace_root: &Path, repo_path: &Path) -> anyhow::Result<UserSetti
     let config = env.resolve_config(&raw).context("resolving config")?;
     UserSettings::from_config_and_home_dir(config, env.home_dir().map(ToOwned::to_owned))
         .context("reading settings")
+}
+
+/// jj's repo config file for the repository at `repo_path`, where jj keeps it, outside the
+/// repository. Like `jj config set --repo`, gives the repository a config id if it has none.
+pub fn repo_config_path(repo_path: &Path) -> anyhow::Result<Option<PathBuf>> {
+    let ui = Ui::null();
+    let mut env = ConfigEnv::from_environment();
+    env.reset_repo_path(repo_path);
+    env.repo_config_path(&ui)
+        .map_err(|err| anyhow::anyhow!("finding the repo config: {err:?}"))
 }

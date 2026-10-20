@@ -45,6 +45,7 @@ impl Located {
 
     pub fn open(&self) -> anyhow::Result<NodeRepo> {
         let settings = settings::load(&self.workspace_root, &self.repo_path)?;
-        Ok(NodeRepo::open(&self.repo_path, &settings)?)
+        let repo_config = settings::repo_config_path(&self.repo_path)?;
+        Ok(NodeRepo::open(&self.repo_path, &settings)?.with_repo_config(repo_config))
     }
 }

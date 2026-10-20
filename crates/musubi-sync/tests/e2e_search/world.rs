@@ -669,7 +669,7 @@ impl World {
             }
         }
         let node = match NodeRepo::open(&repo.repo_path(), &repo.settings()) {
-            Ok(node) => node,
+            Ok(node) => node.with_repo_config(Some(repo.repo_config_path())),
             Err(err) => self.fail(&format!("reopening {}: {err}", self.machine(m))),
         };
         let adapter = NodeAdapter::new(node).unwrap();

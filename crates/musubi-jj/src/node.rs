@@ -12,6 +12,10 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use jj_lib::config::ConfigFile;
+use jj_lib::config::ConfigNamePathBuf;
+use jj_lib::config::ConfigSource;
+use jj_lib::config::ConfigValue;
 use jj_lib::content_hash::blake2b_hash;
 use jj_lib::default_backend_factories::default_backend_factories;
 use jj_lib::git::GitExportError;
@@ -108,6 +112,8 @@ pub enum NodeError {
     DanglingAttribute { op: String, canonical: String },
     #[error("bad hive settings in {op}: {message}")]
     Settings { op: String, message: String },
+    #[error("repo config {path}: {message}")]
+    Config { path: PathBuf, message: String },
     #[error(
         "operation {op} realizes canonical operation {canonical} but no longer has its parents \
          (was `jj op abandon` run?); musubi does not replicate op abandon yet, so replication is \
@@ -175,6 +181,8 @@ pub struct NodeRepo {
     joins: BTreeMap<String, OperationId>,
     /// The hive's settings as of canonical operations, as computed so far.
     settings: HashMap<OperationId, Option<HiveSettings>>,
+    /// jj's repo config file for this repository, which holds the config the hive shares.
+    repo_config: Option<PathBuf>,
 }
 
 /// The settings this machine and the hive agreed on when they were last reconciled.
@@ -218,6 +226,7 @@ impl NodeRepo {
             heads_mapped: false,
             joins: BTreeMap::new(),
             settings: HashMap::new(),
+            repo_config: None,
             machine: Machine::load_or_create(
                 &musubi_dir.join("machine"),
                 settings.operation_hostname(),
@@ -587,7 +596,14 @@ impl NodeRepo {
                 .or_insert_with(|| hive.clone());
         }
         let hive = self.settings_at(&canonical)?;
-        let local = self.local_settings()?;
+        let mut extra: Vec<String> = hive
+            .as_ref()
+            .map(HiveSettings::extra_config_keys)
+            .unwrap_or_default();
+        if let Some((_, _, settings)) = &state {
+            extra.extend(settings.extra_config_keys());
+        }
+        let local = self.local_settings(&extra)?;
         let base = match (&state, &hive) {
             (Some((_, _, settings)), _) => settings.clone(),
             (None, Some(hive)) => HiveSettings {
@@ -596,6 +612,12 @@ impl NodeRepo {
                     .iter()
                     .filter(|(name, _)| hive.remotes.contains_key(*name))
                     .map(|(name, remote)| (name.clone(), remote.clone()))
+                    .collect(),
+                config: local
+                    .config
+                    .iter()
+                    .filter(|(key, _)| hive.config.contains_key(*key))
+                    .map(|(key, value)| (key.clone(), value.clone()))
                     .collect(),
             },
             (None, None) => HiveSettings::default(),
@@ -626,13 +648,15 @@ impl NodeRepo {
         Some(GitObjects::new(backend.git_repo_path()))
     }
 
-    /// The settings this machine has now.
-    fn local_settings(&self) -> Result<HiveSettings, NodeError> {
+    /// The settings this machine has now: its git remotes, and the shared keys of its repo
+    /// config, including `extra` keys.
+    fn local_settings(&self, extra: &[String]) -> Result<HiveSettings, NodeError> {
         Ok(HiveSettings {
             remotes: match self.git_objects() {
                 Some(git) => git.remotes()?,
                 None => BTreeMap::new(),
             },
+            config: self.read_shared_config(extra)?,
         })
     }
 
@@ -640,7 +664,77 @@ impl NodeRepo {
         if let Some(git) = self.git_objects() {
             git.change_remotes(&from.remotes, &to.remotes)?;
         }
-        Ok(())
+        self.write_shared_config(&from.config, &to.config)
+    }
+
+    fn repo_config_file(&self) -> Result<Option<ConfigFile>, NodeError> {
+        let Some(path) = &self.repo_config else {
+            return Ok(None);
+        };
+        ConfigFile::load_or_empty(ConfigSource::Repo, path)
+            .map(Some)
+            .map_err(|err| config_err(path, err))
+    }
+
+    /// The shared keys this machine's repo config sets: the default ones, those its own
+    /// `musubi.shared-config` names, and `extra`.
+    fn read_shared_config(&self, extra: &[String]) -> Result<BTreeMap<String, String>, NodeError> {
+        let Some(file) = self.repo_config_file()? else {
+            return Ok(BTreeMap::new());
+        };
+        let value_of = |key: &str| -> Option<String> {
+            let name: ConfigNamePathBuf = key.parse().ok()?;
+            let item = file.layer().look_up_item(&name).ok()??;
+            hive_settings::normalize_value(&item.as_value()?.to_string())
+        };
+        let mut keys: BTreeSet<String> = hive_settings::SHARED_CONFIG
+            .iter()
+            .map(|key| (*key).to_owned())
+            .chain(extra.iter().cloned())
+            .collect();
+        if let Some(value) = value_of(hive_settings::SHARED_CONFIG_KEY) {
+            keys.extend(hive_settings::config_keys(&value));
+        }
+        Ok(keys
+            .into_iter()
+            .filter_map(|key| {
+                let value = value_of(&key)?;
+                Some((key, value))
+            })
+            .collect())
+    }
+
+    fn write_shared_config(
+        &self,
+        from: &BTreeMap<String, String>,
+        to: &BTreeMap<String, String>,
+    ) -> Result<(), NodeError> {
+        if from == to {
+            return Ok(());
+        }
+        let Some(mut file) = self.repo_config_file()? else {
+            return Ok(());
+        };
+        let path = file.path().to_owned();
+        let keys: BTreeSet<&String> = from.keys().chain(to.keys()).collect();
+        for key in keys {
+            if from.get(key) == to.get(key) {
+                continue;
+            }
+            let name: ConfigNamePathBuf = key.parse().map_err(|err| config_err(&path, err))?;
+            match to.get(key) {
+                Some(text) => {
+                    let value: ConfigValue = text.parse().map_err(|err| config_err(&path, err))?;
+                    file.set_value(&name, value)
+                        .map_err(|err| config_err(&path, err))?;
+                }
+                None => {
+                    file.delete_value(&name)
+                        .map_err(|err| config_err(&path, err))?;
+                }
+            }
+        }
+        file.save().map_err(|err| config_err(&path, err))
     }
 
     /// Writes an operation on top of `head` that changes nothing but records `settings`.
@@ -661,6 +755,14 @@ impl NodeRepo {
 
     fn settings_state_path(&self) -> PathBuf {
         self.repo_path.join("musubi/settings.json")
+    }
+
+    /// Uses `path` as this repository's jj repo config file, which holds the config the
+    /// hive shares. jj keeps it outside the repository, so the caller finds it as jj does
+    /// (`jj config path --repo`). Without one, no config is shared.
+    pub fn with_repo_config(mut self, path: Option<PathBuf>) -> Self {
+        self.repo_config = path;
+        self
     }
 
     /// Whether this machine has reconciled its settings with the hive's before.
@@ -1291,4 +1393,11 @@ fn target_of(description: &str) -> Option<(&'static str, OperationId)> {
 /// The workspace part of a machine-qualified key.
 fn key_workspace(key: &WorkspaceName) -> &str {
     workspaces::split_key(key.as_str()).map_or(key.as_str(), |(_, workspace)| workspace)
+}
+
+fn config_err(path: &Path, err: impl std::fmt::Display) -> NodeError {
+    NodeError::Config {
+        path: path.to_owned(),
+        message: err.to_string(),
+    }
 }

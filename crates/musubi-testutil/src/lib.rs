@@ -165,6 +165,11 @@ impl TestRepo {
         UserSettings::from_config_and_home_dir(config, Some(self.home.clone())).unwrap()
     }
 
+    /// jj's repo config file for this repository (`jj config path --repo`).
+    pub fn repo_config_path(&self) -> PathBuf {
+        PathBuf::from(self.jj(&["config", "path", "--repo"]).trim())
+    }
+
     pub fn write_file(&self, name: &str, contents: &str) {
         let path = self.path.join(name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();

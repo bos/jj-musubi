@@ -35,7 +35,9 @@ impl Fixture {
     pub fn unsynced(env: TestEnv, repos: Vec<TestRepo>) -> Self {
         let mut hive = Hive::new(&env.root().join("hub"), Backend::Git).unwrap();
         for repo in &repos {
-            let mut node = NodeRepo::open(&repo.repo_path(), &repo.settings()).unwrap();
+            let mut node = NodeRepo::open(&repo.repo_path(), &repo.settings())
+                .unwrap()
+                .with_repo_config(Some(repo.repo_config_path()));
             node.create_join_operation(&format!("musubi: {} joins", repo.machine()))
                 .unwrap();
             hive.add(node).unwrap();

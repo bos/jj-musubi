@@ -115,6 +115,48 @@ fn op_abandon_pauses_replication() {
     assert!(format!("{err:#}").contains("op abandon"), "{err:#}");
 }
 
+/// The same when this machine's latest operation is a realization of another machine's:
+/// `jj op abandon` rewrites the realizations above what it abandons, and they still name
+/// their canonical operations.
+#[test]
+fn op_abandon_under_a_realized_head_pauses_replication() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(0, "a", "alpha 1");
+    hive.sync();
+    hive.commit(1, "b", "beta 1");
+    hive.sync();
+    hive.repo(0).jj(&["op", "abandon", "..@-"]);
+    let err = hive.try_sync().unwrap_err();
+    assert!(format!("{err:#}").contains("op abandon"), "{err:#}");
+}
+
+/// Abandoning only history from before a machine joined rewrites the operations since
+/// into ones that canonicalize as before, so replication carries on, even once garbage
+/// collection has removed the original join point.
+#[test]
+fn op_abandon_of_pre_join_history_is_harmless() {
+    let env = TestEnv::new();
+    let alpha = env.init_repo("alpha");
+    let beta = env.init_repo("beta");
+    for i in 0..3 {
+        alpha.write_file(&format!("pre{i}"), "x");
+        alpha.jj(&["commit", "-m", &format!("before joining {i}")]);
+    }
+    let join_point = alpha.jj(&["op", "log", "--no-graph", "-n1", "-T", "id"]);
+    let mut hive = Fixture::join(env, vec![alpha, beta]);
+    hive.commit(0, "post", "alpha after joining");
+    hive.sync();
+    hive.commit(1, "bpost", "beta after joining");
+    hive.sync();
+    hive.repo(0)
+        .jj(&["op", "abandon", &format!("..{join_point}-")]);
+    hive.repo(0).jj(&["util", "gc", "--expire=now"]);
+    hive.commit(1, "b2", "beta again");
+    hive.commit(0, "a2", "alpha again");
+    hive.sync();
+    hive.assert_converged();
+}
+
 /// A long-running command based on an old operation (here forced with `--at-op`) creates a
 /// concurrent operation on the same machine; jj merges it locally, and the merge
 /// replicates like any other.

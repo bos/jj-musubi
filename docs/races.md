@@ -76,7 +76,8 @@ Workspaces are per-machine (docs/design.md); only the commits they point at are 
 | The hub restarts between one machine's push and another's fetch | Nothing lost: the head log and stores are durable. | `hub_restart_between_push_and_fetch` |
 | A repository joins with its whole operation history | Other machines' op logs include that history. | `joining_with_full_history` |
 | Two fresh, empty repositories form a hive | Works like any other join. | `empty_repositories_make_a_hive` |
-| `jj op abandon` of operations the hub accepted | **Replication pauses** for that repository, with an error, rather than reintroducing the abandoned operations or duplicating history. Planned: replicate it as a supersede record (docs/design.md). | `op_abandon_pauses_replication` |
+| `jj op abandon` of operations the hub accepted, whether this machine's latest operation is its own or another machine's | **Replication pauses** for that repository, with an error, rather than reintroducing the abandoned operations or duplicating history. Planned: replicate it as a supersede record (docs/design.md). | `op_abandon_pauses_replication`, `op_abandon_under_a_realized_head_pauses_replication` |
+| `jj op abandon` of only the history from before the machine joined, then `jj util gc` | Nothing changes for the other machines, and replication carries on: the rewritten join point maps to the same canonical join operation, by its view and metadata. | `op_abandon_of_pre_join_history_is_harmless` |
 | Restart that loses the translation cache | Recovered from operation attributes and the durable join records; no duplicate realizations. | `restart_with_lost_cache`, `lost_cache_does_not_duplicate_realizations` |
 | Colocated git state replicated verbatim | Would silently move bookmarks back. Translation exists to prevent this. | `verbatim_replication_reverts_bookmarks` (negative control) |
 

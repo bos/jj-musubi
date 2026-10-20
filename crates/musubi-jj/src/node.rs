@@ -11,6 +11,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use jj_lib::content_hash::blake2b_hash;
 use jj_lib::default_backend_factories::default_backend_factories;
 use jj_lib::git::GitExportError;
 use jj_lib::git::REMOTE_NAME_FOR_LOCAL_GIT_REPO;
@@ -104,6 +105,12 @@ pub enum NodeError {
     NotRealizable(String, &'static str),
     #[error("operation {op} names canonical operation {canonical}, which is not stored")]
     DanglingAttribute { op: String, canonical: String },
+    #[error(
+        "operation {op} realizes canonical operation {canonical} but no longer has its parents \
+         (was `jj op abandon` run?); musubi does not replicate op abandon yet, so replication is \
+         paused for this repository"
+    )]
+    RewrittenRealization { op: String, canonical: String },
     #[error(transparent)]
     Objects(#[from] ObjectError),
     #[error(transparent)]
@@ -168,6 +175,9 @@ pub struct NodeRepo {
     /// Whether every operation reachable from the op heads has been mapped since opening.
     heads_mapped: bool,
     machine: Machine,
+    /// The canonical join operation each join point maps to, by the join point's
+    /// fingerprint, so that a copy of it that `jj op abandon` rewrote maps there too.
+    joins: BTreeMap<String, OperationId>,
 }
 
 impl NodeRepo {
@@ -198,6 +208,7 @@ impl NodeRepo {
             map,
             colocated,
             heads_mapped: false,
+            joins: BTreeMap::new(),
             machine: Machine::load_or_create(
                 &musubi_dir.join("machine"),
                 settings.operation_hostname(),
@@ -207,7 +218,8 @@ impl NodeRepo {
                 source,
             })?,
         };
-        for (local, canonical) in node.read_joins()? {
+        for (local, canonical, fingerprint) in node.read_joins()? {
+            node.joins.insert(fingerprint, canonical.clone());
             node.insert_map(local, canonical)?;
         }
         Ok(node)
@@ -218,8 +230,9 @@ impl NodeRepo {
     }
 
     /// Join records are the one part of the translation that cannot be recomputed, so
-    /// unlike the translation cache they are written durably.
-    fn read_joins(&self) -> Result<Vec<(OperationId, OperationId)>, NodeError> {
+    /// unlike the translation cache they are written durably: each line holds the local
+    /// join point, the canonical join operation, and the join point's fingerprint.
+    fn read_joins(&self) -> Result<Vec<(OperationId, OperationId, String)>, NodeError> {
         let path = self.joins_path();
         let text = match fs::read_to_string(&path) {
             Ok(text) => text,
@@ -229,16 +242,22 @@ impl NodeRepo {
         Ok(text
             .lines()
             .filter_map(|line| {
-                let (local, canonical) = line.split_once(' ')?;
+                let mut fields = line.split(' ');
                 Some((
-                    OperationId::try_from_hex(local)?,
-                    OperationId::try_from_hex(canonical)?,
+                    OperationId::try_from_hex(fields.next()?)?,
+                    OperationId::try_from_hex(fields.next()?)?,
+                    fields.next()?.to_owned(),
                 ))
             })
             .collect())
     }
 
-    fn record_join(&mut self, local: OperationId, canonical: OperationId) -> Result<(), NodeError> {
+    fn record_join(
+        &mut self,
+        local: OperationId,
+        local_op: &StoreOperation,
+        canonical: OperationId,
+    ) -> Result<(), NodeError> {
         let path = self.joins_path();
         let io_err = |source| NodeError::Io {
             path: path.clone(),
@@ -249,8 +268,10 @@ impl NodeRepo {
             .append(true)
             .open(&path)
             .map_err(io_err)?;
-        writeln!(file, "{} {}", local.hex(), canonical.hex()).map_err(io_err)?;
+        let fingerprint = fingerprint(local_op);
+        writeln!(file, "{} {} {fingerprint}", local.hex(), canonical.hex()).map_err(io_err)?;
         file.sync_all().map_err(io_err)?;
+        self.joins.insert(fingerprint, canonical.clone());
         self.insert_map(local, canonical)
     }
 
@@ -289,7 +310,7 @@ impl NodeRepo {
             commit_predecessors: Some(BTreeMap::new()),
         };
         let canonical = self.canonical.write_operation(&join)?;
-        self.record_join(head, canonical.clone())?;
+        self.record_join(head, &op, canonical.clone())?;
         Ok(canonical)
     }
 
@@ -567,36 +588,65 @@ impl NodeRepo {
             }
             let op = match loaded {
                 Some(op) => op,
-                None => {
-                    let op = op_store.read_operation(&id).block_on()?;
-                    if let Some(canonical) = op.metadata.attributes.get(CANONICAL_ATTRIBUTE) {
-                        let canonical_id = OperationId::try_from_hex(canonical)
-                            .filter(|c| self.canonical.has_operation(c))
-                            .ok_or_else(|| NodeError::DanglingAttribute {
-                                op: id.hex(),
-                                canonical: canonical.clone(),
-                            })?;
-                        self.insert_map(id, canonical_id)?;
-                        continue;
-                    }
-                    let missing: Vec<_> = op
-                        .parents
-                        .iter()
-                        .filter(|parent| self.canonical_of(parent).is_none())
-                        .cloned()
-                        .collect();
-                    if !missing.is_empty() {
-                        stack.push((id, Some(op)));
-                        stack.extend(missing.into_iter().map(|parent| (parent, None)));
-                        continue;
-                    }
-                    op
-                }
+                None => op_store.read_operation(&id).block_on()?,
             };
-            let canonical_id = self.write_canonical(&id, &op)?;
+            let missing: Vec<_> = op
+                .parents
+                .iter()
+                .filter(|parent| self.canonical_of(parent).is_none())
+                .cloned()
+                .collect();
+            if !missing.is_empty() {
+                stack.push((id, Some(op)));
+                stack.extend(missing.into_iter().map(|parent| (parent, None)));
+                continue;
+            }
+            let canonical_id =
+                if let Some(canonical) = op.metadata.attributes.get(CANONICAL_ATTRIBUTE) {
+                    self.realized_canonical(&id, &op, canonical)?
+                } else if let Some(join) = self.joins.get(&fingerprint(&op)) {
+                    // A join point that `jj op abandon` rewrote, abandoning history from before
+                    // the join, which no other machine has.
+                    join.clone()
+                } else {
+                    self.write_canonical(&id, &op)?
+                };
             self.insert_map(id, canonical_id)?;
         }
         Ok(self.canonical_of(local).expect("canonicalized above"))
+    }
+
+    /// The canonical operation a realization names in its `musubi.canonical` attribute.
+    /// `jj op abandon` rewrites the operations above the ones it abandons, keeping their
+    /// metadata, so a rewritten realization still names its canonical operation, but has
+    /// other parents. Its parents must already be canonicalized.
+    fn realized_canonical(
+        &self,
+        id: &OperationId,
+        op: &StoreOperation,
+        canonical: &str,
+    ) -> Result<OperationId, NodeError> {
+        let canonical_id = OperationId::try_from_hex(canonical)
+            .filter(|c| self.canonical.has_operation(c))
+            .ok_or_else(|| NodeError::DanglingAttribute {
+                op: id.hex(),
+                canonical: canonical.to_owned(),
+            })?;
+        let parents: Vec<OperationId> = op
+            .parents
+            .iter()
+            .map(|parent| {
+                self.canonical_of(parent)
+                    .expect("parents canonicalized first")
+            })
+            .collect();
+        if parents != self.canonical.read_operation(&canonical_id)?.parents {
+            return Err(NodeError::RewrittenRealization {
+                op: id.hex(),
+                canonical: canonical_id.hex(),
+            });
+        }
+        Ok(canonical_id)
     }
 
     fn write_canonical(
@@ -953,4 +1003,15 @@ fn is_visible(repo: &ReadonlyRepo, commit: &CommitId) -> Result<bool, NodeError>
 
 fn index_err(err: impl std::fmt::Display) -> NodeError {
     NodeError::Index(err.to_string())
+}
+
+/// What identifies an operation apart from its parents: its view, metadata, and the
+/// rewrites it records. `jj op abandon` changes only the parents of the operations it
+/// rewrites.
+fn fingerprint(op: &StoreOperation) -> String {
+    let without_parents = StoreOperation {
+        parents: vec![],
+        ..op.clone()
+    };
+    OperationId::new(blake2b_hash(&without_parents).to_vec()).hex()
 }

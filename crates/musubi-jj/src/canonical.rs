@@ -26,6 +26,7 @@ use jj_lib::op_store::View;
 use jj_lib::op_store::ViewId;
 use jj_lib::simple_op_store::SimpleOpStore;
 use pollster::FutureExt as _;
+use prost::Message as _;
 use thiserror::Error;
 
 use crate::objects::ObjectError;
@@ -51,6 +52,10 @@ pub enum CanonicalError {
         expected: String,
         actual: String,
     },
+    #[error("received view {view} as a delta against view {base}, which is not stored")]
+    MissingDeltaBase { view: String, base: String },
+    #[error("view {0} is malformed")]
+    MalformedView(String),
 }
 
 fn io_err(path: &Path) -> impl FnOnce(io::Error) -> CanonicalError + '_ {
@@ -286,15 +291,36 @@ impl CanonicalStore {
         Ok(order)
     }
 
-    /// Writes `ops` and their views to a bundle, in the given order, which should put
-    /// ancestors first (as [`Self::ancestors_until`] does).
+    /// Writes `ops` and their views to a bundle, compressed, in the given order, which must
+    /// put ancestors first (as [`Self::ancestors_until`] does).
+    ///
+    /// The reader must have the parents of `ops` that are not among them, as it does when
+    /// `ops` is `anc*(head) \ anc*(base)` and it has `base`. Then it has every parent's view
+    /// by the time it reads an operation, so a view a parent has is not sent at all, and
+    /// any other view goes as a delta against the first parent's: consecutive views
+    /// usually differ in a few bookmarks, however large they are.
     pub fn export_operations(&self, ops: &[OperationId], out: &Path) -> Result<(), CanonicalError> {
+        let is_root_view = |id: &ViewId| id.as_bytes().iter().all(|&b| b == 0);
         let mut writer = BundleWriter::create(out)?;
-        let mut views = HashSet::new();
+        writer.begin_compressed()?;
+        let mut sent = HashSet::new();
         for id in ops {
             let op = self.read_operation(id)?;
-            if views.insert(op.view_id.clone()) && !op.view_id.as_bytes().iter().all(|&b| b == 0) {
-                writer.view(op.view_id.as_bytes(), &self.view_bytes(&op.view_id)?)?;
+            let mut parent_views = vec![];
+            for parent in &op.parents {
+                parent_views.push(self.read_operation(parent)?.view_id);
+            }
+            let view = &op.view_id;
+            if !is_root_view(view) && !parent_views.contains(view) && sent.insert(view.clone()) {
+                match parent_views.first().filter(|base| !is_root_view(base)) {
+                    Some(base) => writer.view_delta(
+                        view.as_bytes(),
+                        base.as_bytes(),
+                        &self.normal_view_bytes(base)?,
+                        &self.normal_view_bytes(view)?,
+                    )?,
+                    None => writer.view(view.as_bytes(), &self.view_bytes(view)?)?,
+                }
             }
             writer.operation(id.as_bytes(), &self.operation_bytes(id)?)?;
         }
@@ -313,6 +339,20 @@ impl CanonicalStore {
                 Record::View { id, contents } => {
                     self.import_view(&ViewId::new(id), &contents)
                         .map_err(boxed)?;
+                }
+                Record::ViewDelta { id, base, delta } => {
+                    let (id, base) = (ViewId::new(id), ViewId::new(base));
+                    if !self.has_view(&id) {
+                        if !self.has_view(&base) {
+                            return Err(boxed(CanonicalError::MissingDeltaBase {
+                                view: id.hex(),
+                                base: base.hex(),
+                            }));
+                        }
+                        let base = self.normal_view_bytes(&base).map_err(boxed)?;
+                        let contents = bundle::apply_view_delta(&base, &delta)?;
+                        self.import_view(&id, &contents).map_err(boxed)?;
+                    }
                 }
                 Record::Operation { id, contents } => {
                     let id = OperationId::new(id);
@@ -334,6 +374,37 @@ impl CanonicalStore {
         Ok(ops)
     }
 
+    /// A stored view's bytes as a function of its content alone, which view deltas are
+    /// between. jj encodes `head_ids`, a set, and `wc_commit_ids`, a map, in hash order,
+    /// and rewrites a view's file whenever it writes the same view again, so two stores
+    /// can hold different bytes for one view, and the store's own can change. Re-encoding
+    /// drops anything this jj-lib does not know, and sorting the entries of those two
+    /// fields leaves nothing to chance. The result is a valid encoding of the same view.
+    fn normal_view_bytes(&self, id: &ViewId) -> Result<Vec<u8>, CanonicalError> {
+        /// `head_ids` and `wc_commit_ids`.
+        const UNORDERED: [u32; 2] = [1, 8];
+        let malformed = || CanonicalError::MalformedView(id.hex());
+        let encoded = jj_lib::protos::simple_op_store::View::decode(&*self.view_bytes(id)?)
+            .map_err(|_| malformed())?
+            .encode_to_vec();
+        let mut fields = top_level_fields(&encoded).ok_or_else(malformed)?;
+        // Stable, so other repeated fields keep their order.
+        fields.sort_by(|(number, bytes), (other_number, other_bytes)| {
+            number.cmp(other_number).then_with(|| {
+                if UNORDERED.contains(number) {
+                    bytes.cmp(other_bytes)
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+        });
+        Ok(fields
+            .into_iter()
+            .flat_map(|(_, bytes)| bytes)
+            .copied()
+            .collect())
+    }
+
     fn op_path(&self, id: &OperationId) -> PathBuf {
         self.path.join("operations").join(id.hex())
     }
@@ -343,6 +414,42 @@ impl CanonicalStore {
     }
 }
 
+/// The top-level fields of a protobuf message, each with its number and its encoding,
+/// key included, in order.
+fn top_level_fields(mut bytes: &[u8]) -> Option<Vec<(u32, &[u8])>> {
+    fn varint(bytes: &mut &[u8]) -> Option<u64> {
+        let mut value = 0;
+        for shift in (0..64).step_by(7) {
+            let (&byte, rest) = bytes.split_first()?;
+            *bytes = rest;
+            value |= u64::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return Some(value);
+            }
+        }
+        None
+    }
+    let mut fields = vec![];
+    while !bytes.is_empty() {
+        let start = bytes;
+        let key = varint(&mut bytes)?;
+        let len = match key & 7 {
+            0 => {
+                varint(&mut bytes)?;
+                0
+            }
+            1 => 8,
+            2 => usize::try_from(varint(&mut bytes)?).ok()?,
+            5 => 4,
+            _ => return None,
+        };
+        bytes = bytes.get(len..)?;
+        let number = u32::try_from(key >> 3).ok()?;
+        fields.push((number, &start[..start.len() - bytes.len()]));
+    }
+    Some(fields)
+}
+
 /// Removes this machine's records of its own `.git` from a view: `git_refs`, the `git`
 /// pseudo-remote, and each workspace's git HEAD. (Workspaces themselves are handled in
 /// `NodeRepo`, which replaces them with machine-qualified entries.)
@@ -350,4 +457,64 @@ pub fn strip_git_records(view: &mut View) {
     view.git_refs.clear();
     view.remote_views.remove(REMOTE_NAME_FOR_LOCAL_GIT_REPO);
     view.git_heads.clear();
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    fn view_with_heads(heads: u8) -> View {
+        let mut view = View::make_root(CommitId::from_bytes(&[0; 20]));
+        view.head_ids = (1..=heads)
+            .map(|i| CommitId::from_bytes(&[i; 20]))
+            .collect();
+        view
+    }
+
+    fn operation(parent: &OperationId, view_id: ViewId) -> Operation {
+        let mut op = Operation::make_root(view_id);
+        op.parents = vec![parent.clone()];
+        op
+    }
+
+    /// jj writes a set in hash order, so two stores can hold different bytes for the same
+    /// view. A view sent as a delta against it still arrives intact.
+    #[test]
+    fn delta_survives_differently_encoded_base() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_commit = CommitId::from_bytes(&[0; 20]);
+        let sender = CanonicalStore::open(&dir.path().join("sender"), root_commit.clone()).unwrap();
+        let receiver = CanonicalStore::open(&dir.path().join("receiver"), root_commit).unwrap();
+        let root = sender.root_operation_id().clone();
+
+        let base_view = sender.write_view(&view_with_heads(30)).unwrap();
+        let base = sender
+            .write_operation(&operation(&root, base_view.clone()))
+            .unwrap();
+        let view = view_with_heads(31);
+        let child_view = sender.write_view(&view).unwrap();
+        let child = sender
+            .write_operation(&operation(&base, child_view.clone()))
+            .unwrap();
+
+        // The receiver has the base, with its heads in the opposite order.
+        let bytes = sender.view_bytes(&base_view).unwrap();
+        let mut proto = jj_lib::protos::simple_op_store::View::decode(&*bytes).unwrap();
+        proto.head_ids.reverse();
+        let reordered = proto.encode_to_vec();
+        assert_ne!(reordered, bytes);
+        receiver.import_view(&base_view, &reordered).unwrap();
+        receiver
+            .import_operation(&base, &sender.operation_bytes(&base).unwrap())
+            .unwrap();
+
+        let bundle = tempfile::NamedTempFile::new().unwrap();
+        sender
+            .export_operations(std::slice::from_ref(&child), bundle.path())
+            .unwrap();
+        assert_eq!(receiver.import_operations(bundle.path()).unwrap(), [child]);
+        assert_eq!(receiver.read_view(&child_view).unwrap(), view);
+    }
 }

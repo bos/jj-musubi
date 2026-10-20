@@ -42,6 +42,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 tokio = { version = "1.52.3", features = ["rt", "sync", "time"] }
+zstd = { version = "0.14.3", default-features = false }
 
 [workspace.lints.rust]
 let_underscore_drop = "warn"

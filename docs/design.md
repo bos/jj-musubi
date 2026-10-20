@@ -300,8 +300,15 @@ finishes. An interrupted session resumes from the receiver's reported offset. Un
 sessions expire.
 
 Views are stored whole for every operation, and a repository with thousands of remote
-bookmarks can have megabyte-sized views. musubi compresses them, and will later send them as
-deltas against the parent view.
+bookmarks can have megabyte-sized views, while consecutive views usually differ in a few
+bookmarks. In transit, musubi compresses a bundle's operations and views together with zstd,
+and sends each view as a delta against its operation's first parent's view: the view
+compressed with the parent's as a prefix that zstd may refer back to, a few hundred bytes for
+a view of any size. A view a parent has is not sent at all. The receiver always has the
+parents' views. Every bundle of operations is a range `anc*(head) \ anc*(base)` for a `base`
+the receiver has, in topological order, so each parent is either earlier in the bundle or in
+`anc*(base)`. Ids remain those of the uncompressed views, and the receiver checks them after
+reconstructing each one. Stores keep views whole and uncompressed, as jj does.
 
 ## Joining
 
@@ -433,4 +440,4 @@ across incompatible ones. musubi is pinned to jj-lib 0.46.0.
 4. Hub storage, NATS transport, daemon and CLI (`hub`, `join`, `clone`, `sync`, `status`,
    `op-id`).
 5. Generated end-to-end tests and multi-process NATS tests.
-6. Supersede records for `jj op abandon`, hub garbage collection, view deltas.
+6. Supersede records for `jj op abandon`, hub garbage collection.

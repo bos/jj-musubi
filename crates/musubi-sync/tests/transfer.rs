@@ -258,3 +258,34 @@ fn node_keeps_up_as_packs_pile_up() {
     hive.sync(a).unwrap();
     hive.sync_all().unwrap();
 }
+
+/// Views go as deltas against their parent's: an operation that moves one bookmark among
+/// hundreds costs about that bookmark, not the whole view.
+#[test]
+fn views_travel_as_deltas() {
+    let env = TestEnv::new();
+    let alpha = env.init_repo("alpha");
+    let beta = env.init_repo("beta");
+    let names: Vec<String> = (0..400).map(|i| format!("bookmark-{i}")).collect();
+    let mut args = vec!["bookmark", "create", "-r", "root()"];
+    args.extend(names.iter().map(String::as_str));
+    alpha.jj(&args);
+    let mut hive = Hive::new(&env.root().join("hub"), Backend::Git).unwrap();
+    let a = join(&mut hive, &alpha);
+    let b = join(&mut hive, &beta);
+    hive.sync_all().unwrap();
+    let canonical = hive.hub.store().canonical();
+    let head = canonical.read_operation(&hive.hub_head()).unwrap();
+    let view = canonical.view_bytes(&head.view_id).unwrap().len() as u64;
+
+    alpha.write_file("small", "small");
+    alpha.jj(&["bookmark", "set", "bookmark-7", "-r", "@"]);
+    let uploaded = hive.members[a].uploaded;
+    hive.sync(a).unwrap();
+    let uploaded = hive.members[a].uploaded - uploaded;
+    let downloaded = downloaded_by_sync(&mut hive, b);
+    assert!(
+        uploaded < view / 4 && downloaded < view / 4,
+        "a {view}-byte view: {uploaded} bytes up, {downloaded} down"
+    );
+}

@@ -559,7 +559,10 @@ impl ObjectStore for GitStore<'_> {
                     });
                 }
                 Record::Pack(file) => packs.push(file),
-                Record::Object { .. } | Record::View { .. } | Record::Operation { .. } => {
+                Record::Object { .. }
+                | Record::View { .. }
+                | Record::ViewDelta { .. }
+                | Record::Operation { .. } => {
                     return Err(ObjectError::MalformedBundle(
                         "unexpected record in a git object bundle".to_owned(),
                     ));

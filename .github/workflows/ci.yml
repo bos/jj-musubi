@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+# Pushes to this repository's branches already run CI, so pull requests run it only when they
+# come from forks.
+jobs:
+  lint:
+    name: Lint
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install stable --profile minimal --component clippy,rustfmt && rustup default stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: just,cargo-deny,cargo-machete,typos
+      - run: just fmt-check
+      - run: just lint
+      - run: just docs
+      - run: just deny
+      - run: just machete
+      - run: just typos
+
+  test:
+    name: Test (${{ matrix.name }})
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-latest
+            jj: jj-v0.46.0-x86_64-unknown-linux-musl.tar.gz
+            jj-sha256: fce0271158e665ceb82dc66c5eb95b1728649094e9133074f3b5baece345fc08
+            nats: nats-server-v2.15.1-linux-amd64.tar.gz
+            nats-sha256: bf5edc7b1ce98e885c368cb43a886eb148dc5d0551d99f3cf6141fb5e1954c70
+          - name: macOS
+            os: macos-latest
+            jj: jj-v0.46.0-aarch64-apple-darwin.tar.gz
+            jj-sha256: 43daa37ce0f9716cdf6fb65a29cbcae74a3160aef048cf3cb3d166d41cb4ab58
+            nats: nats-server-v2.15.1-darwin-arm64.tar.gz
+            nats-sha256: ed0fe39222ec2e317c4d0e1a9cdc16c63ec523d94f9355d24a902a4db2655ffd
+          - name: Windows
+            os: windows-latest
+            jj: jj-v0.46.0-x86_64-pc-windows-msvc.zip
+            jj-sha256: c42316b10df04611bc65029a18bcb2d92636edddb6871d511f7bb4233e999b83
+            nats: nats-server-v2.15.1-windows-amd64.zip
+            nats-sha256: 4f7edfa376750b2720463bd22766ed469a5f13f378a643097866fcd953cbf7e3
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-nextest
+      - name: Install jj and nats-server
+        shell: bash
+        run: |
+          .github/scripts/install-release.sh jj-vcs/jj v0.46.0 "${{ matrix.jj }}" "${{ matrix.jj-sha256 }}" jj
+          .github/scripts/install-release.sh nats-io/nats-server v2.15.1 "${{ matrix.nats }}" "${{ matrix.nats-sha256 }}" nats-server
+      - run: jj --version && nats-server --version && git --version
+      # The conformance test needs the Lean oracle; the conformance job runs it.
+      - run: cargo nextest run --workspace --locked -E "not test(=conformance)"
+
+  conformance:
+    name: Lean model and conformance
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The Lean toolchain, so that a run doesn't depend on downloading it.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.elan
+          key: elan-${{ runner.os }}-${{ hashFiles('formal/lean-toolchain') }}
+      # Checks the proofs and builds the oracle.
+      - uses: leanprover/lean-action@24581d74d674803a25a81b10b059c5c0cdd344c6 # v1.6.2
+        with:
+          lake-package-directory: formal
+          auto-config: false
+          build: true
+          test: false
+          lint: false
+          use-mathlib-cache: false
+      - run: formal/test/run_smoke.sh
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-nextest
+      - run: cargo nextest run -p musubi-core --locked -E "test(=conformance)"
+        env:
+          MUSUBI_ORACLE: ${{ github.workspace }}/formal/.lake/build/bin/oracle

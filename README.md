@@ -64,3 +64,21 @@ just property   # the generated end-to-end search (slow)
 
 Needs `cargo-nextest`, `nats-server`, `cargo-deny`, `cargo-machete`, `typos`, and Lean via
 `elan` (`~/.elan/bin`).
+
+CI (`.github/workflows/ci.yml`) runs the same lints on Linux, the tests on Linux, macOS and
+Windows, and the Lean proofs and conformance test on Linux.
+
+## Releasing
+
+Set the version in `Cargo.toml`, then push a matching tag:
+
+```sh
+jj tag set v0.1.0 -r main
+jj git push --remote origin --tag v0.1.0
+```
+
+`.github/workflows/release.yml` builds `musubi` for Linux (static, x86_64 and aarch64),
+macOS (x86_64 and aarch64), and Windows (x86_64 and aarch64), with build provenance
+attestations, and attaches the archives and their checksums to a draft GitHub release.
+Review the draft and publish it. Running the workflow by hand from the Actions tab builds
+the same archives without releasing anything.

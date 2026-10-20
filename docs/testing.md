@@ -15,6 +15,9 @@ Run the default suite with `cargo nextest run`, or everything with `just check`.
 on `PATH`. Run the generated end-to-end search with `cargo nextest run --profile search`. Check
 the formal model with `lake build` in `formal/`.
 
+CI runs the default suite on Linux, macOS and Windows, and checks the Lean model and runs
+the conformance test against its oracle on Linux. It doesn't run the end-to-end search.
+
 ## Protocol property tests
 
 A Hegel state machine owns a hub and several nodes, all of them sans-IO state machines from

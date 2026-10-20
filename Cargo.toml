@@ -98,3 +98,11 @@ debug = false
 
 [profile.release]
 debug = "line-tables-only"
+
+# Binary releases (.github/workflows/release.yml): smaller and somewhat faster, for a slower
+# build.
+[profile.dist]
+inherits = "release"
+debug = false
+lto = "thin"
+strip = "symbols"

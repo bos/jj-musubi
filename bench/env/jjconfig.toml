@@ -1,0 +1,10 @@
+[user]
+name = "Bench User"
+email = "bench@example.com"
+
+[ui]
+paginate = "never"
+color = "never"
+
+[snapshot]
+auto-update-stale = true

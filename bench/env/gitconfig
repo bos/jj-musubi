@@ -1,0 +1,7 @@
+[user]
+	name = Bench User
+	email = bench@example.com
+[init]
+	defaultBranch = main
+[advice]
+	detachedHead = false

@@ -342,7 +342,12 @@ fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), StoreError> {
     tmp.write_all(contents).map_err(io_err(path))?;
     tmp.as_file().sync_all().map_err(io_err(path))?;
     tmp.persist(path).map_err(|err| io_err(path)(err.error))?;
-    fs::File::open(dir)
-        .and_then(|d| d.sync_all())
-        .map_err(io_err(dir))
+    // Make the rename durable. Windows can't open a directory as a file to sync it, so
+    // there the rename is as durable as the filesystem makes it.
+    if cfg!(unix) {
+        fs::File::open(dir)
+            .and_then(|d| d.sync_all())
+            .map_err(io_err(dir))?;
+    }
+    Ok(())
 }

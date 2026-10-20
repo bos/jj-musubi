@@ -156,6 +156,50 @@ impl NodeAdapter {
         }
         Ok(commits.into_iter().collect())
     }
+
+    /// The local operations nearest to `ops` among their ancestors: where a walk up from
+    /// `ops` through operations that are not local stops.
+    fn local_frontier(&self, ops: &[OpId]) -> anyhow::Result<Vec<OpId>> {
+        let store = self.repo.canonical_store();
+        let mut frontier = vec![];
+        let mut seen = HashSet::new();
+        let mut stack = ops.to_vec();
+        while let Some(op) = stack.pop() {
+            if !seen.insert(op.clone()) {
+                continue;
+            }
+            if self.repo.local_of(&op).is_some() {
+                frontier.push(op);
+            } else if store.has_operation(&op) {
+                stack.extend(store.read_operation(&op)?.parents);
+            }
+        }
+        Ok(frontier)
+    }
+
+    /// Commits this node has, with everything they reach, that the objects of `ops` are
+    /// likely to share: those of the local operations `ops` descend from, of the op heads,
+    /// and of the accepted base. The hub leaves out of a transfer everything they reach
+    /// (docs/design.md, "Joining"). Only commits present here count: jj may have collected
+    /// an old operation's.
+    fn haves(&self, ops: &[OpId]) -> anyhow::Result<Vec<CommitId>> {
+        let mut have_ops = self.local_frontier(ops)?;
+        for head in self.repo.local_heads()? {
+            have_ops.extend(self.repo.canonical_of(&head));
+        }
+        have_ops.push(self.accepted_base()?);
+        let commits = self.required_commits(&have_ops)?;
+        let absent: HashSet<CommitId> = self
+            .repo
+            .object_store()?
+            .missing(&commits)?
+            .into_iter()
+            .collect();
+        Ok(commits
+            .into_iter()
+            .filter(|c| !absent.contains(c))
+            .collect())
+    }
 }
 
 impl LocalRepo for NodeAdapter {
@@ -219,9 +263,8 @@ impl LocalRepo for NodeAdapter {
         Ok(Attachment::bundle(bundle))
     }
 
-    fn objects_request(&self, _: &[OpId]) -> anyhow::Result<Attachment> {
-        let base = self.accepted_base()?;
-        Ok(Attachment::Haves(self.required_commits(&[base])?))
+    fn objects_request(&self, ops: &[OpId]) -> anyhow::Result<Attachment> {
+        Ok(Attachment::Haves(self.haves(ops)?))
     }
 
     fn stage_ops(&mut self, ops: &[OpEntry<OpId>], attachment: &Attachment) -> anyhow::Result<()> {
@@ -243,7 +286,7 @@ impl LocalRepo for NodeAdapter {
 
     fn stage_objects(&mut self, for_ops: &[OpId], attachment: &Attachment) -> anyhow::Result<()> {
         let wants = self.required_commits(for_ops)?;
-        let haves = self.required_commits(&[self.accepted_base()?])?;
+        let haves = self.haves(for_ops)?;
         self.repo
             .object_store()?
             .import(attachment.bundle_path()?, &wants, &haves)?;

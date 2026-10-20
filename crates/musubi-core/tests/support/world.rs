@@ -52,6 +52,8 @@ pub struct World {
     net: Vec<InFlight>,
     oracle: Option<Oracle>,
     pub trace: Vec<Value>,
+    /// The operations each node last asked for with `GetOpsSince`.
+    last_fetch: Vec<Option<Vec<Op>>>,
 }
 
 fn kind_name(kind: HeadKind) -> &'static str {
@@ -83,6 +85,7 @@ impl World {
             univ,
             oracle,
             trace: vec![],
+            last_fetch: vec![None; nodes],
         };
         if let Some(oracle) = &mut world.oracle {
             oracle.reset(nodes);
@@ -189,6 +192,7 @@ impl World {
             ),
             Request::GetOpsSince { head, base } => {
                 let ops = univ.between(*head, *base);
+                self.last_fetch[node] = Some(ops.clone());
                 (
                     json!({"kind": "fetchOps", "node": node, "ops": ops}),
                     json!({"msg": "getOps", "node": node, "ops": ops}),
@@ -229,6 +233,11 @@ impl World {
     /// uploading anything. The model allows it, so the hub must defend itself.
     pub fn rogue_push(&mut self, node: usize, expected: Op, new: Op) {
         self.send_request(node, Request::Cas { expected, new });
+    }
+
+    /// The operations `node` last asked for with `GetOpsSince`.
+    pub fn last_fetch(&self, node: usize) -> Option<&[Op]> {
+        self.last_fetch[node].as_deref()
     }
 
     pub fn accepted_heads(&self) -> Vec<Op> {

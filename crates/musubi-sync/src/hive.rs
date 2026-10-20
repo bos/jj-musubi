@@ -20,6 +20,9 @@ use crate::node::NodeAdapter;
 pub struct Member {
     pub adapter: NodeAdapter,
     pub core: NodeCore<OpId>,
+    /// Bytes of attachments this node has sent and received: what a transport would carry.
+    pub uploaded: u64,
+    pub downloaded: u64,
 }
 
 pub struct Hive {
@@ -49,6 +52,8 @@ impl Hive {
         self.members.push(Member {
             adapter: NodeAdapter::new(repo)?,
             core: NodeCore::new(root),
+            uploaded: 0,
+            downloaded: 0,
         });
         Ok(self.members.len() - 1)
     }
@@ -66,7 +71,15 @@ impl Hive {
     }
 
     fn request(&mut self, node: usize, request: Request<OpId, Attachment>) -> anyhow::Result<()> {
+        if let Request::PutOps { attachment, .. } | Request::PutObjects { attachment, .. } =
+            &request
+        {
+            self.members[node].uploaded += attachment_size(attachment)?;
+        }
         let handled = hub::handle(&mut self.hub, request)?;
+        if let Reply::Ops { attachment, .. } | Reply::Objects { attachment, .. } = &handled.reply {
+            self.members[node].downloaded += attachment_size(attachment)?;
+        }
         self.reply(node, handled.reply)?;
         if let Some((seq, head)) = handled.publish {
             for target in 0..self.members.len() {
@@ -132,4 +145,13 @@ impl Hive {
     pub fn hub_head(&self) -> OpId {
         self.hub.store().head().1.clone()
     }
+}
+
+fn attachment_size(attachment: &Attachment) -> anyhow::Result<u64> {
+    Ok(match attachment {
+        Attachment::Bundle(_) | Attachment::File(_) => {
+            std::fs::metadata(attachment.bundle_path()?)?.len()
+        }
+        Attachment::None | Attachment::Haves(_) => 0,
+    })
 }

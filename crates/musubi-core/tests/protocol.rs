@@ -192,3 +192,24 @@ fn push_after_forgotten_upload_reuploads() {
     world.quiesce();
     world.check_invariants();
 }
+
+/// A node fetches only operations it lacks: once the hub accepts its own push, it fetches
+/// from there, and a restart, which forgets `known`, does not set it back.
+#[test]
+fn fetch_after_own_push_asks_only_for_newer_operations() {
+    for restart in [false, true] {
+        let mut world = World::new(2, None);
+        world.user_op(0, 0, 1);
+        world.quiesce();
+        world.user_op(1, 1, 1);
+        // Node 1 uploads, then pushes.
+        world.exchange(1, 0);
+        world.exchange(1, 0);
+        if restart {
+            world.crash_node(0);
+            world.exchange(0, 0);
+        }
+        world.quiesce();
+        assert_eq!(world.last_fetch(0), Some(&[2][..]), "restart: {restart}");
+    }
+}

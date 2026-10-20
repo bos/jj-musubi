@@ -310,7 +310,11 @@ node pulls the canonical head, and jj merges the two three-way against the empty
 Bookmarks set identically on both sides merge cleanly; bookmarks that differ become conflicted
 bookmarks that you resolve as usual. The node then pushes. Commits that both sides already
 have, such as history cloned from the same origin, are never transferred twice, because
-transfers exclude objects the receiver already has.
+transfers exclude objects the receiver already has. A node fetching objects names, as haves,
+the commits of its op heads and of the operations it has that the new ones descend from,
+and the hub leaves out everything they reach. A node also fetches operations starting from
+the newest hub head it has, which includes its own accepted push, so it never downloads
+what it uploaded.
 
 `musubi hub` creates a hive, with a new id, the first time it runs on a directory. Every
 machine, the first included, then runs `musubi join <hive>`. `musubi clone <hive>` creates a

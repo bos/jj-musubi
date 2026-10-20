@@ -173,6 +173,12 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
             repo.set_accepted_base(&known)?;
             return Ok(Step::Advanced(known));
         }
+        // The hub accepted `known`, and this node has it: fetch from here next time, so
+        // that nothing is fetched twice, even when `known` is this node's own push. A
+        // restart forgets `known`, so its root says nothing.
+        if self.known.0 > 0 && repo.accepted_base()? != known {
+            repo.set_accepted_base(&known)?;
+        }
         // Not two or more heads, and op heads are never empty.
         let head = &heads[0];
         if *head == known {

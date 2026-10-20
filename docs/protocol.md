@@ -39,11 +39,13 @@ Requests and replies (each request carries a node-chosen request id that the rep
 | `PutOps(operations)` | `Stored` |
 | `PutObjects(objects)` | `Stored` |
 | `GetOpsSince(head, base)` | `Ops`: the stored operations in `anc*(head) \ anc*(base)` |
-| `GetObjects(for operations S)` | `Objects`: the stored objects of `S` |
+| `GetObjects(for operations S, haves H)` | `Objects`: the stored objects of `S` that `H` does not cover |
 | `Cas(expected, new)` | `Accepted(seq, head)` or `Rejected(seq, head)` |
 
 `GetOpsSince` names a range because a node cannot name operations it has never seen. A node
-sends it only with `head = known.head`.
+sends it only with `head = known.head`. The haves of `GetObjects` name objects the node
+already has, so the hub can leave them out; in a git-backed hive they are commits, and they
+cover everything those commits reach. The hub ignores haves it does not have.
 
 The hub answers `Cas(expected, new)` in one atomic critical section:
 
@@ -92,9 +94,12 @@ These happen outside musubi, through `jj`:
 - `Learn(s, h)`: on receiving `Head`, `Accepted`, or `Rejected` carrying `(s, h)`, if
   `s > known.seq` then `known := (s, h)`. Stale and duplicated notifications are therefore
   harmless.
-- `Fetch`: send `GetOpsSince(known.head, base)`, where `base` is any operation the node knows
-  the hub accepted (for instance the last `known.head` it fully realized), and
-  `GetObjects` for the operations it receives. Add the replies to `staged`, but only
+- `Fetch`: send `GetOpsSince(known.head, base)`, where `base` is any local operation the
+  node knows the hub accepted, and `GetObjects` for the operations it receives, with the
+  objects of its heads, of `base`, and of the local operations those operations descend
+  from as haves. So that the node is never sent what it has, `base` is the newest
+  `known.head` that was local and in `anc*(heads)`, which includes the node's own push
+  once the hub accepts it. Add the replies to `staged`, but only
   operations in `anc*(known.head)`: a reply's operations must all be reachable from the
   requested head through parents in the reply or in `local`. Anything else, including any
   reply to a request the node did not make, is ignored. **This is the one guard Locality,

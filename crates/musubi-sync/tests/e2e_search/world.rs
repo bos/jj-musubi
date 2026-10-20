@@ -105,6 +105,9 @@ pub struct World {
     pub touched: BTreeSet<usize>,
     /// Operations reverted so far to get past jj's failure to merge operations.
     unmergeable_reverts: usize,
+    /// Those operations, and the ones reverting them wrote, which reverting again would
+    /// only undo the recovery: hex ids.
+    recovery_ops: BTreeSet<String>,
     counter: usize,
     pub trace: Vec<String>,
 }
@@ -183,6 +186,7 @@ impl World {
             ledger: Ledger::default(),
             touched: BTreeSet::new(),
             unmergeable_reverts: 0,
+            recovery_ops: BTreeSet::new(),
             counter: 0,
             trace: vec![],
         };
@@ -638,7 +642,8 @@ impl World {
     /// Recovers from a sync of node `m` that failed because of a known jj limitation
     /// (docs/races.md): jj can't merge this machine's operations with the hive's, so musubi
     /// pauses. Recovers as the error says, by reverting the newest of this machine's
-    /// operations the hive doesn't have. Fails the case on any other error.
+    /// operations the hive doesn't have, other than the recovery's own: reverting a revert
+    /// would put back what it reverted. Fails the case on any other error.
     fn recover_unmergeable(&mut self, m: usize, what: &str, err: &anyhow::Error) {
         let ours = err
             .chain()
@@ -646,17 +651,53 @@ impl World {
                 Some(NodeError::Unmergeable { ours, .. }) => Some(ours.clone()),
                 _ => None,
             });
-        let Some(op) = ours.and_then(|ours| ours.first().cloned()) else {
+        let Some(ours) = ours else {
             self.fail(&format!("{what} of {} failed: {err:#}", self.machine(m)));
         };
-        if self.unmergeable_reverts >= MAX_UNMERGEABLE_REVERTS {
+        // Workspace operations rewrite no commits, so they can't be what jj fails to merge,
+        // and reverting one strands a working copy (see `can_undo`).
+        let descriptions = self.op_descriptions(m);
+        let op = ours.iter().map(|op| op.hex()).find(|op| {
+            !self.recovery_ops.contains(op)
+                && !descriptions
+                    .get(op)
+                    .is_some_and(|d| d.to_lowercase().contains("workspace"))
+        });
+        let Some(op) = op.filter(|_| self.unmergeable_reverts < MAX_UNMERGEABLE_REVERTS) else {
             self.fail(&format!(
                 "{what} of {} keeps failing: {err:#}",
                 self.machine(m)
             ));
-        }
+        };
         self.unmergeable_reverts += 1;
-        self.jj(m, &["op", "revert", &op.hex()]);
+        self.jj(m, &["op", "revert", &op]);
+        let written: Vec<String> = self
+            .op_descriptions(m)
+            .into_keys()
+            .filter(|id| !descriptions.contains_key(id))
+            .collect();
+        self.recovery_ops.insert(op);
+        self.recovery_ops.extend(written);
+    }
+
+    /// Every operation in machine `m`'s operation log, by hex id, with the first line of
+    /// its description.
+    fn op_descriptions(&self, m: usize) -> BTreeMap<String, String> {
+        self.raw_jj(
+            m,
+            &[
+                "--ignore-working-copy",
+                "op",
+                "log",
+                "--no-graph",
+                "-T",
+                r#"id ++ "\t" ++ description.first_line() ++ "\n""#,
+            ],
+        )
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .map(|(id, description)| (id.to_owned(), description.to_owned()))
+        .collect()
     }
 
     /// Records the commits node `m`'s merges made, after a sync.

@@ -235,6 +235,12 @@ impl World {
         self.send_request(node, Request::Cas { expected, new });
     }
 
+    /// How often `node`'s core has read a staged operation, and asked about objects.
+    pub fn repo_work(&self, node: usize) -> (usize, usize) {
+        let repo = &self.repos[node];
+        (repo.staged_reads.get(), repo.object_checks.get())
+    }
+
     /// The operations `node` last asked for with `GetOpsSince`.
     pub fn last_fetch(&self, node: usize) -> Option<&[Op]> {
         self.last_fetch[node].as_deref()

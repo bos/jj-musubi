@@ -126,7 +126,10 @@ that any interleaving of policy steps converges.
 The node's daemon repeatedly takes the first applicable step:
 
 1. If `|heads| ≥ 2`, merge (musubi loads the repo, so jj performs the merge).
-2. If `known.head ∉ local`, fetch and realize until it is local, then advance.
+2. If `known.head ∉ local`, fetch and realize until it is local, then advance. One walk
+   down from `known.head` plans the realization: the staged operations in an order that
+   puts parents first, with their objects checked together, so that catching up on `n`
+   operations takes time linear in `n`.
 3. If `known.head ∉ anc*(heads)`, advance. Afterwards `|heads| ≥ 2` or `heads = {known.head}`.
 4. If `heads = {h}` with `h ≠ known.head`, which by now implies `known.head ∈ anc*(h)`:
    upload, then push.

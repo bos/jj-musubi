@@ -303,9 +303,31 @@ impl LocalRepo for NodeAdapter {
         Ok(Some(store.read_operation(op)?.parents))
     }
 
-    fn objects_available(&self, op: &OpId) -> anyhow::Result<bool> {
-        let wanted = self.required_commits(std::slice::from_ref(op))?;
-        Ok(self.repo.object_store()?.missing(&wanted)?.is_empty())
+    fn objects_missing(&self, ops: &[OpId]) -> anyhow::Result<Vec<OpId>> {
+        // One question to git for all of them. Usually nothing is missing, and then each
+        // view is read only once.
+        let wanted = self.required_commits(ops)?;
+        let absent: HashSet<CommitId> = self
+            .repo
+            .object_store()?
+            .missing(&wanted)?
+            .into_iter()
+            .collect();
+        if absent.is_empty() {
+            return Ok(vec![]);
+        }
+        let mut missing = vec![];
+        for op in ops {
+            if self
+                .repo
+                .required_commits(op)?
+                .iter()
+                .any(|commit| absent.contains(commit))
+            {
+                missing.push(op.clone());
+            }
+        }
+        Ok(missing)
     }
 
     fn realize(&mut self, op: &OpId) -> anyhow::Result<()> {

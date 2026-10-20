@@ -213,3 +213,21 @@ fn fetch_after_own_push_asks_only_for_newer_operations() {
         assert_eq!(world.last_fetch(0), Some(&[2][..]), "restart: {restart}");
     }
 }
+
+/// Catching up on a long history costs time linear in its length: each staged operation is
+/// read a bounded number of times, and objects are checked in a few batches, not once per
+/// operation per step.
+#[test]
+fn catching_up_is_linear() {
+    let length = 200;
+    let mut world = World::new(2, None);
+    let mut head = 0;
+    for _ in 0..length {
+        world.user_op(1, head, 1);
+        head = *world.local_ops(1).last().unwrap();
+    }
+    world.quiesce();
+    let (reads, checks) = world.repo_work(0);
+    assert!(reads <= 4 * length, "{reads} reads of staged operations");
+    assert!(checks <= 4, "{checks} object checks");
+}

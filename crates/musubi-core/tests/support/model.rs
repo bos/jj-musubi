@@ -1,6 +1,7 @@
 //! Test implementations of the core's storage traits that keep exactly the Lean model's
 //! state (docs/conformance.md, "The abstraction").
 
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -197,6 +198,10 @@ pub struct FakeRepo {
     pub merge_objs: usize,
     /// The merge the last `merge_heads` created: `(id, parents, objs)`.
     pub last_merge: Option<(Op, Vec<Op>, Vec<Obj>)>,
+    /// How often the core read a staged operation, and asked about objects: the work a
+    /// real repository does in files and `git` processes.
+    pub staged_reads: Cell<usize>,
+    pub object_checks: Cell<usize>,
 }
 
 impl FakeRepo {
@@ -212,6 +217,8 @@ impl FakeRepo {
             base: ROOT,
             merge_objs: 0,
             last_merge: None,
+            staged_reads: Cell::new(0),
+            object_checks: Cell::new(0),
         }
     }
 
@@ -294,14 +301,22 @@ impl LocalRepo for FakeRepo {
     }
 
     fn staged_parents(&self, op: &Op) -> Result<Option<Vec<Op>>, Infallible> {
+        self.staged_reads.set(self.staged_reads.get() + 1);
         Ok(self.sops.get(op).cloned())
     }
 
-    fn objects_available(&self, op: &Op) -> Result<bool, Infallible> {
+    fn objects_missing(&self, ops: &[Op]) -> Result<Vec<Op>, Infallible> {
+        self.object_checks.set(self.object_checks.get() + 1);
         let univ = self.univ.borrow();
-        Ok(univ.objs[*op as usize]
+        Ok(ops
             .iter()
-            .all(|o| self.lobj.contains(o) || self.sobj.contains(o)))
+            .filter(|op| {
+                !univ.objs[**op as usize]
+                    .iter()
+                    .all(|o| self.lobj.contains(o) || self.sobj.contains(o))
+            })
+            .copied()
+            .collect())
     }
 
     /// Like a real repository, refuses to realize anything not staged, without its parents,

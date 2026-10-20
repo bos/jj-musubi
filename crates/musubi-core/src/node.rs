@@ -8,6 +8,7 @@
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::hash::Hash;
 
@@ -68,8 +69,10 @@ pub trait LocalRepo {
     /// The parents of a staged operation, or `None` if it is not staged.
     fn staged_parents(&self, op: &Self::Op) -> Result<Option<Vec<Self::Op>>, Self::Error>;
 
-    /// Whether the objects `op` requires are all present, locally or staged.
-    fn objects_available(&self, op: &Self::Op) -> Result<bool, Self::Error>;
+    /// The operations among `ops` whose objects are not all present, locally or staged.
+    /// One question for many operations, since a real repository answers it by running
+    /// `git`.
+    fn objects_missing(&self, ops: &[Self::Op]) -> Result<Vec<Self::Op>, Self::Error>;
 
     /// Realizes a staged operation whose parents are local and whose objects are available.
     fn realize(&mut self, op: &Self::Op) -> Result<(), Self::Error>;
@@ -130,6 +133,19 @@ pub struct NodeCore<O> {
     /// Heads this node sent `GetOpsSince` for; replies about any other head are ignored.
     requested: BTreeSet<O>,
     upload: Upload<O>,
+    /// Staged operations to realize, in order: each one's parents are local or earlier,
+    /// and its objects are available. Planned by one walk, rather than one per step.
+    plan: VecDeque<O>,
+}
+
+/// What [`NodeCore::survey`] found below `known.head`.
+struct Survey<O> {
+    /// The staged operations that can be realized, parents first.
+    plan: VecDeque<O>,
+    /// Whether some operation is not staged yet.
+    missing_ops: bool,
+    /// The staged operations whose objects are not all here.
+    missing_objects: Vec<O>,
 }
 
 impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
@@ -139,6 +155,7 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
             known: (0, root),
             requested: BTreeSet::new(),
             upload: Upload::None,
+            plan: VecDeque::new(),
         }
     }
 
@@ -158,12 +175,18 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
         }
         let known = self.known.1.clone();
         if !repo.is_local(&known)? {
-            if let Some(op) = self.next_to_realize(repo, &known)? {
-                repo.realize(&op)?;
-                return Ok(Step::Realized(op));
+            if self.plan.is_empty() {
+                let survey = Self::survey(repo, &known)?;
+                if survey.plan.is_empty() {
+                    return self.fetch(repo, &known, survey);
+                }
+                self.plan = survey.plan;
             }
-            return self.fetch(repo, &known);
+            let op = self.plan.pop_front().expect("planned above");
+            repo.realize(&op)?;
+            return Ok(Step::Realized(op));
         }
+        self.plan.clear();
         let mut descends = false;
         for head in &heads {
             descends |= repo.is_ancestor(&known, head)?;
@@ -209,58 +232,81 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
         Ok(Step::Send(requests))
     }
 
-    /// A staged operation in `anc*(known)` that can be realized now: its parents are local
-    /// and its objects are available.
-    fn next_to_realize<R>(&self, repo: &R, known: &O) -> Result<Option<O>, R::Error>
-    where
-        R: LocalRepo<Op = O>,
-    {
-        let mut seen = HashSet::new();
-        let mut stack = vec![known.clone()];
-        while let Some(op) = stack.pop() {
-            if !seen.insert(op.clone()) || repo.is_local(&op)? {
-                continue;
-            }
-            let Some(parents) = repo.staged_parents(&op)? else {
-                continue;
-            };
-            let mut all_local = true;
-            for parent in &parents {
-                if !repo.is_local(parent)? {
-                    all_local = false;
-                    stack.push(parent.clone());
-                }
-            }
-            if all_local && repo.objects_available(&op)? {
-                return Ok(Some(op));
-            }
-        }
-        Ok(None)
-    }
-
-    /// Requests whatever `closure(known)` still lacks.
-    fn fetch<R>(&mut self, repo: &R, known: &O) -> Result<Step<O, R::Attachment>, R::Error>
+    /// Walks `anc*(known)` down to the local operations, once: which staged operations can
+    /// be realized now, in an order that puts parents first, and what the rest lack.
+    fn survey<R>(repo: &R, known: &O) -> Result<Survey<O>, R::Error>
     where
         R: LocalRepo<Op = O>,
     {
         let mut missing_ops = false;
-        let mut missing_objects = vec![];
+        let mut local = HashSet::new();
+        let mut parents_of = HashMap::new();
+        // Staged operations, each after its parents.
+        let mut order = vec![];
         let mut seen = HashSet::new();
-        let mut stack = vec![known.clone()];
-        while let Some(op) = stack.pop() {
-            if !seen.insert(op.clone()) || repo.is_local(&op)? {
+        // (operation, whether its parents have been pushed)
+        let mut stack = vec![(known.clone(), false)];
+        while let Some((op, expanded)) = stack.pop() {
+            if expanded {
+                order.push(op);
+                continue;
+            }
+            if !seen.insert(op.clone()) {
+                continue;
+            }
+            if repo.is_local(&op)? {
+                local.insert(op);
                 continue;
             }
             match repo.staged_parents(&op)? {
                 None => missing_ops = true,
                 Some(parents) => {
-                    if !repo.objects_available(&op)? {
-                        missing_objects.push(op.clone());
-                    }
-                    stack.extend(parents);
+                    stack.push((op.clone(), true));
+                    stack.extend(parents.iter().map(|parent| (parent.clone(), false)));
+                    parents_of.insert(op, parents);
                 }
             }
         }
+        let without_objects: HashSet<O> = if order.is_empty() {
+            HashSet::new()
+        } else {
+            repo.objects_missing(&order)?.into_iter().collect()
+        };
+        let mut plan = VecDeque::new();
+        let mut planned = HashSet::new();
+        for op in order {
+            let parents_ready = parents_of[&op]
+                .iter()
+                .all(|parent| local.contains(parent) || planned.contains(parent));
+            if parents_ready && !without_objects.contains(&op) {
+                planned.insert(op.clone());
+                plan.push_back(op);
+            }
+        }
+        let mut missing_objects: Vec<O> = without_objects.into_iter().collect();
+        missing_objects.sort();
+        Ok(Survey {
+            plan,
+            missing_ops,
+            missing_objects,
+        })
+    }
+
+    /// Requests whatever `closure(known)` still lacks, as a survey found.
+    fn fetch<R>(
+        &mut self,
+        repo: &R,
+        known: &O,
+        survey: Survey<O>,
+    ) -> Result<Step<O, R::Attachment>, R::Error>
+    where
+        R: LocalRepo<Op = O>,
+    {
+        let Survey {
+            missing_ops,
+            missing_objects,
+            ..
+        } = survey;
         let mut requests = vec![];
         if missing_ops {
             self.requested.insert(known.clone());
@@ -271,7 +317,6 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
             });
         }
         if !missing_objects.is_empty() {
-            missing_objects.sort();
             let attachment = repo.objects_request(&missing_objects)?;
             requests.push(Request::GetObjects {
                 for_ops: missing_objects,

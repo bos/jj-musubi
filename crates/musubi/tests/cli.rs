@@ -143,6 +143,18 @@ fn log(repo: &TestRepo) -> String {
     ])
 }
 
+/// The repository's log, or `None` if `jj` failed. On Windows, a `jj` command can fail
+/// with "Access is denied" while a daemon writes the same repository: jj renames index
+/// files into place, and Windows won't rename over a file another process has open.
+fn try_log(repo: &TestRepo) -> Option<String> {
+    let template = "commit_id ++ \" \" ++ description.first_line() ++ \"\\n\"";
+    let output = repo.jj_output(&["log", "--no-graph", "-r", "all()", "-T", template]);
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8(output.stdout).unwrap())
+}
+
 fn wait_for(logs: &Logs, what: &str, mut done: impl FnMut() -> bool) {
     let deadline = Instant::now() + DEADLINE;
     while !done() {
@@ -197,7 +209,7 @@ fn hub_join_sync_clone_and_daemon() {
     alpha.jj(&["commit", "-m", "picked up by the daemon"]);
     musubi_in(&env, &logs, &alpha, &["sync"]);
     wait_for(&logs, "beta's daemon to fetch alpha's commit", || {
-        log(&beta).contains("picked up by the daemon")
+        try_log(&beta).is_some_and(|log| log.contains("picked up by the daemon"))
     });
 
     // Operation ids translate between this machine's and the hive's.
@@ -280,6 +292,6 @@ fn daemon_carries_on_after_colocation_changes() {
     alpha.jj(&["commit", "-m", "after beta stopped colocating"]);
     musubi_in(&env, &logs, &alpha, &["sync"]);
     wait_for(&logs, "beta's daemon to fetch alpha's commit", || {
-        log(&beta).contains("after beta stopped colocating")
+        try_log(&beta).is_some_and(|log| log.contains("after beta stopped colocating"))
     });
 }

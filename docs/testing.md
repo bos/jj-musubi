@@ -71,7 +71,15 @@ After each rule, every repository must still load, and `jj status` must succeed.
   bookmarks;
 - in every colocated repository, `refs/heads` matches the local bookmarks that are not
   conflicted, and a further `jj status` imports nothing;
-- every operation made on any machine appears in every machine's `jj op log`.
+- every operation made on any machine appears in every machine's `jj op log`;
+- no change diverges, and no bookmark or tag conflicts, unless jj would do the same with
+  the same concurrent operations on one machine. A ledger of which machine's commands
+  rewrote what explains each: two machines rewrote it, or a command at an older operation
+  or a git-side move did; or a commit holds it visible that jj can't move, such as a
+  descendant of a commit rewritten two ways, a target of a conflicted bookmark, or a branch
+  imported from git. A bookmark on a merge commit that is abandoned conflicts between the
+  merge's parents. Two commits of a change with the same parents and contents are the same
+  rebase done twice, which the hub's sequencing exists to prevent.
 
 As in jj-stack:
 

@@ -188,7 +188,21 @@ impl World {
     /// A change diverges only if two machines, or a command at an older operation,
     /// rewrote it since the hive last converged.
     fn check_divergence(&self, view: &View) {
-        let spurious = self.ledger.spurious_divergence(view);
+        let spurious = self.ledger.spurious_divergence(view, |a, b| {
+            let diff = self.raw_jj(
+                0,
+                &[
+                    "--ignore-working-copy",
+                    "diff",
+                    "--summary",
+                    "--from",
+                    a,
+                    "--to",
+                    b,
+                ],
+            );
+            diff.is_empty()
+        });
         if !spurious.is_empty() {
             let details: Vec<String> = spurious
                 .iter()
@@ -268,7 +282,29 @@ impl World {
     /// A bookmark or tag is conflicted only if two machines, git, or a command at an older
     /// operation changed it since the hive last converged.
     fn check_conflicts(&self, view: &View) {
-        let spurious = self.ledger.spurious_conflicts(view);
+        let spurious = self.ledger.spurious_conflicts(view, |conflicted| {
+            let (kind, name) = conflicted.split_once(' ').unwrap();
+            // The parents of each commit the name moved away from, then the commits it
+            // might point to now.
+            let template = concat!(
+                r#"if(!remote, removed_targets.map(|c| c.parents().map(|p| p.commit_id())"#,
+                r#".join(",")).join(";") ++ "\t" ++ added_targets.map(|c| c.commit_id())"#,
+                r#".join(",") ++ "\n")"#,
+            );
+            let listed = self.raw_jj(
+                0,
+                &["--ignore-working-copy", kind, "list", name, "-T", template],
+            );
+            listed.lines().any(|line| {
+                let Some((removed, added)) = line.split_once('\t') else {
+                    return false;
+                };
+                let added: BTreeSet<&str> = added.split(',').collect();
+                removed
+                    .split(';')
+                    .any(|parents| parents.split(',').collect::<BTreeSet<_>>() == added)
+            })
+        });
         if !spurious.is_empty() {
             self.fail(&format!("spurious conflicts: {}", spurious.join(", ")));
         }

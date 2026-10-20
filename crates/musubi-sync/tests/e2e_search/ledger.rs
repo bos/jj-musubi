@@ -160,12 +160,8 @@ impl Ledger {
     }
 
     /// The divergent changes in `view` that something explains: two machines, or a command
-    /// at an older operation, rewrote them; or they descend from such a change. (Every
-    /// rewrite of a commit rebases its descendants, so when two machines rewrite a commit,
-    /// each rebases the descendants it knows of, and a descendant that only one of them
-    /// knew of is rebased the other way when the hub's sequencing has a node merge the
-    /// two: once each way, and the descendant diverges too, exactly as jj does with two
-    /// workspaces on one machine.)
+    /// at an older operation, rewrote them; or they descend from such a change, or are
+    /// kept visible beneath one.
     pub fn explained_divergence(&self, view: &View) -> BTreeSet<String> {
         let divergent = view.divergent();
         let mut explained: BTreeSet<String> = divergent
@@ -186,18 +182,53 @@ impl Ledger {
             .iter()
             .map(|c| (c.id.as_str(), c.change.as_str()))
             .collect();
-        // Parents come after children in `jj log` order.
-        for commit in view.commits.iter().rev() {
-            if divergent.contains(&commit.change)
-                && !explained.contains(&commit.change)
-                && view.ancestors(&commit.id).iter().any(|a| {
-                    *a != commit.id
-                        && change_of
-                            .get(a.as_str())
-                            .is_some_and(|c| explained.contains(*c))
-                })
-            {
-                explained.insert(commit.change.clone());
+        // Every rewrite of a commit rebases its descendants, so when two machines rewrite a
+        // commit, each rebases the descendants it knows of, and a descendant that only one
+        // of them knew of is rebased the other way when the hub's sequencing has a node
+        // merge the two: once each way, and the descendant diverges too. And some commits
+        // keep rewritten ancestors visible beside their new versions: a branch moved with
+        // git to a commit the hive has since rewritten, which jj imports; a conflicted
+        // bookmark or tag, which keeps every commit it might point to visible (and merging
+        // over one turns the commits it moved away from into ones it might point to); and a
+        // divergent commit's descendants, which jj leaves where they are when it merges
+        // operations, since it can't tell which of the change's commits replaced their
+        // parent. jj does all of this on one machine, with concurrent operations.
+        let held: BTreeSet<String> = view
+            .conflicted_names()
+            .iter()
+            .filter(|conflicted| self.conflict_explained(conflicted))
+            .filter_map(|conflicted| conflict_targets(view, conflicted))
+            .flatten()
+            .collect();
+        loop {
+            let before = explained.len();
+            for commit in &view.commits {
+                let ancestors = view.ancestors(&commit.id);
+                if self.git_targets.contains(&commit.change)
+                    || held.contains(&commit.id)
+                    || explained.contains(&commit.change)
+                {
+                    for ancestor in &ancestors {
+                        if let Some(change) = change_of.get(ancestor.as_str())
+                            && divergent.contains(*change)
+                        {
+                            explained.insert((*change).to_owned());
+                        }
+                    }
+                }
+                if divergent.contains(&commit.change)
+                    && ancestors.iter().any(|a| {
+                        *a != commit.id
+                            && change_of
+                                .get(a.as_str())
+                                .is_some_and(|c| explained.contains(*c))
+                    })
+                {
+                    explained.insert(commit.change.clone());
+                }
+            }
+            if explained.len() == before {
+                break;
             }
         }
         explained
@@ -211,11 +242,16 @@ impl Ledger {
     }
 
     /// The divergent changes in `view` that nothing explains, and those that look like the
-    /// same rebase done twice: two visible commits of a change with the same parents and
-    /// description, which is what two nodes merging the same concurrent operations would
-    /// produce, and which the hub's sequencing exists to prevent. (Two machines' commands
-    /// can do that too, by rewriting a commit the same way, which explains it.)
-    pub fn spurious_divergence(&self, view: &View) -> Vec<String> {
+    /// same rebase done twice: two visible commits of a change with the same parents,
+    /// description and contents (as `same_contents` says of two commit ids), which is what
+    /// two nodes merging the same concurrent operations would produce, and which the hub's
+    /// sequencing exists to prevent. (Two machines' commands can do that too, by rewriting
+    /// a commit the same way, which explains it.)
+    pub fn spurious_divergence(
+        &self,
+        view: &View,
+        same_contents: impl Fn(&str, &str) -> bool,
+    ) -> Vec<String> {
         let explained = self.explained_divergence(view);
         let mut spurious = vec![];
         for change in view.divergent() {
@@ -223,14 +259,20 @@ impl Ledger {
                 spurious.push(change);
                 continue;
             }
-            let mut copies: BTreeMap<(&Vec<String>, &String), usize> = BTreeMap::new();
+            let mut copies: BTreeMap<(&Vec<String>, &String), Vec<&str>> = BTreeMap::new();
             for commit in view.commits.iter().filter(|c| c.change == change) {
-                *copies
+                copies
                     .entry((&commit.parents, &commit.subject))
-                    .or_default() += 1;
+                    .or_default()
+                    .push(&commit.id);
             }
+            let twice = copies.values().any(|ids| {
+                ids.iter()
+                    .enumerate()
+                    .any(|(i, a)| ids[i + 1..].iter().any(|b| same_contents(a, b)))
+            });
             let commanded = self.rewrites.get(&change).map_or(0, BTreeSet::len);
-            if copies.values().any(|&n| n > 1)
+            if twice
                 && commanded < 2
                 && !self.at_op.contains(&change)
                 && !self.git_targets.contains(&change)
@@ -243,38 +285,56 @@ impl Ledger {
     }
 
     /// The conflicted bookmarks and tags in `view` that nothing explains.
-    pub fn spurious_conflicts(&self, view: &View) -> Vec<String> {
+    ///
+    /// `abandoned_merge` says whether a conflicted name (as `View::conflicted_names` names
+    /// it) conflicts only because a merge commit it pointed to was abandoned: jj moves a
+    /// bookmark on an abandoned commit to the commit's parents, so to several at once from
+    /// a merge, even when the abandon and the bookmark were concurrent.
+    pub fn spurious_conflicts(
+        &self,
+        view: &View,
+        abandoned_merge: impl Fn(&str) -> bool,
+    ) -> Vec<String> {
         let divergence = self.explained_divergence(view);
         let mut spurious = vec![];
         for conflicted in view.conflicted_names() {
-            let (kind, name) = conflicted.split_once(' ').unwrap();
-            let (changers, at_op) = if kind == "bookmark" {
-                (self.bookmarks.get(name), &self.at_op_bookmarks)
-            } else {
-                (self.tags.get(name), &self.at_op_tags)
-            };
             // A bookmark on a divergent commit moves with each rewrite, so it conflicts
             // whenever the divergence does.
-            let targets = if kind == "bookmark" {
-                view.bookmark_targets()
-            } else {
-                view.tag_targets()
-            };
-            let on_divergence = targets.get(name).is_some_and(|ids| {
+            let on_divergence = conflict_targets(view, &conflicted).is_some_and(|ids| {
                 view.commits
                     .iter()
                     .any(|c| ids.contains(&c.id) && divergence.contains(&c.change))
             });
-            let explained = self.conflicted_before.contains(&conflicted)
-                || on_divergence
-                || at_op.contains(name)
-                || (kind == "bookmark" && self.git_moves.contains(name))
-                || changers.is_some_and(|ms| ms.len() >= 2);
-            if !explained {
+            if !on_divergence
+                && !self.conflict_explained(&conflicted)
+                && !abandoned_merge(&conflicted)
+            {
+                let (kind, name) = conflicted.split_once(' ').unwrap();
+                let changers = if kind == "bookmark" {
+                    self.bookmarks.get(name)
+                } else {
+                    self.tags.get(name)
+                };
                 spurious.push(format!("{conflicted} (changed by {changers:?})"));
             }
         }
         spurious
+    }
+
+    /// Whether something other than divergence explains why a bookmark or tag
+    /// (`conflicted`, as `View::conflicted_names` names it) conflicts: two machines, git,
+    /// or a command at an older operation changed it, or it already conflicted.
+    fn conflict_explained(&self, conflicted: &str) -> bool {
+        let (kind, name) = conflicted.split_once(' ').unwrap();
+        let (changers, at_op) = if kind == "bookmark" {
+            (self.bookmarks.get(name), &self.at_op_bookmarks)
+        } else {
+            (self.tags.get(name), &self.at_op_tags)
+        };
+        self.conflicted_before.contains(conflicted)
+            || at_op.contains(name)
+            || (kind == "bookmark" && self.git_moves.contains(name))
+            || changers.is_some_and(|ms| ms.len() >= 2)
     }
 
     /// Who rewrote `change`, for failure messages.
@@ -290,4 +350,16 @@ impl Ledger {
 
 fn conflicted(view: &View) -> BTreeSet<String> {
     view.conflicted_names()
+}
+
+/// The commits a conflicted bookmark or tag (`conflicted`, as `View::conflicted_names` names
+/// it) might point to.
+fn conflict_targets(view: &View, conflicted: &str) -> Option<BTreeSet<String>> {
+    let (kind, name) = conflicted.split_once(' ')?;
+    let mut targets = if kind == "bookmark" {
+        view.bookmark_targets()
+    } else {
+        view.tag_targets()
+    };
+    targets.remove(name)
 }

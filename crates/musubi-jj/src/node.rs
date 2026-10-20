@@ -320,7 +320,7 @@ impl NodeRepo {
         self.check_format(&head, &op)?;
         let view = self.loader.op_store().read_view(&op.view_id).block_on()?;
         let root = self.canonical.root_operation_id().clone();
-        let view = self.canonical_view(view, std::slice::from_ref(&root), None)?;
+        let view = self.canonical_view(&head, view, std::slice::from_ref(&root), None)?;
         let settings = self.loader.settings();
         let now = settings
             .operation_timestamp()
@@ -361,6 +361,7 @@ impl NodeRepo {
     /// arguments, so canonicalizing again after a crash gives the same result.
     fn canonical_view(
         &self,
+        local_op: &OperationId,
         mut view: View,
         canonical_parents: &[OperationId],
         predecessors: Option<&BTreeMap<CommitId, Vec<CommitId>>>,
@@ -405,9 +406,30 @@ impl NodeRepo {
         workspaces::follow_rewrites(&mut forgotten, predecessors);
         // Forgetting a workspace abandons its working-copy commit if it's empty, as
         // `jj workspace forget` does. Forgetting another machine's workspace here mustn't
-        // abandon that machine's working copy: keep the commit visible.
+        // abandon that machine's working copy: keep the commit visible. But only while its
+        // parents are visible here: jj, no longer seeing the commit, doesn't rebase it when
+        // this machine rewrites or abandons them, and keeping it would bring them back.
+        // Its machine then replaces it, as if jj had abandoned it here
+        // (`replace_abandoned_working_copies`).
+        let mut repo = None;
         for commit in forgotten.values() {
-            if parent_heads.contains(commit) {
+            if !parent_heads.contains(commit) || view.head_ids.contains(commit) {
+                continue;
+            }
+            let repo = match &repo {
+                Some(repo) => repo,
+                None => repo.insert(
+                    self.loader
+                        .load_at(&self.loader.load_operation(local_op).block_on()?)
+                        .block_on()?,
+                ),
+            };
+            let parents = repo.store().get_commit_async(commit).block_on()?;
+            let mut parents_visible = true;
+            for parent in parents.parent_ids() {
+                parents_visible &= is_visible(repo, parent)?;
+            }
+            if parents_visible {
                 view.head_ids.insert(commit.clone());
             }
         }
@@ -1054,7 +1076,7 @@ impl NodeRepo {
                     .expect("parents canonicalized first")
             })
             .collect();
-        let view = self.canonical_view(view, &parents, op.commit_predecessors.as_ref())?;
+        let view = self.canonical_view(id, view, &parents, op.commit_predecessors.as_ref())?;
         let mut metadata = op.metadata.clone();
         if let Some((prefix, target)) = target_of(&metadata.description)
             && let Some(canonical) = self.canonical_of(&target)
@@ -1368,27 +1390,34 @@ impl NodeRepo {
             .loader
             .load_at(&self.loader.load_operation(&head).block_on()?)
             .block_on()?;
-        let missing: Vec<(WorkspaceNameBuf, CommitId)> = view
-            .wc_commit_ids
-            .iter()
-            .filter(|(key, _)| !self.is_own_key(key))
-            .filter_map(|(key, commit)| {
-                let name = names.get(key)?;
-                let shown = repo.view().get_wc_commit_id(name).is_some();
-                (!shown).then(|| (name.clone(), commit.clone()))
-            })
-            .collect();
-        if missing.is_empty() {
-            return Ok(false);
-        }
+        let hive_heads: Vec<CommitId> = view.head_ids.iter().cloned().collect();
         let mut tx = repo.start_transaction();
-        for (name, commit) in missing {
-            // Forgetting the workspace here hid its commit here, if it was empty.
-            let commit = repo.store().get_commit_async(&commit).block_on()?;
-            tx.repo_mut().add_head(&commit).block_on()?;
+        let mut shown = false;
+        for (key, commit) in &view.wc_commit_ids {
+            let Some(name) = names.get(key) else {
+                continue;
+            };
+            if self.is_own_key(key) || repo.view().get_wc_commit_id(name).is_some() {
+                continue;
+            }
+            if !is_visible(&repo, commit)? {
+                // Forgetting the workspace here hid its commit here, if it was empty, but
+                // the hive kept it. Never show a commit the hive hides, though: that would
+                // bring back a commit something rewrote. Such a workspace waits for its
+                // machine's next operation.
+                if !is_ancestor_of_any(&repo, commit, &hive_heads)? {
+                    continue;
+                }
+                let commit = repo.store().get_commit_async(commit).block_on()?;
+                tx.repo_mut().add_head(&commit).block_on()?;
+            }
             tx.repo_mut()
-                .set_wc_commit(name, commit.id().clone())
+                .set_wc_commit(name.clone(), commit.clone())
                 .map_err(|err| NodeError::Index(err.to_string()))?;
+            shown = true;
+        }
+        if !shown {
+            return Ok(false);
         }
         tx.commit("musubi: show other machines' workspaces")
             .block_on()?;
@@ -1494,6 +1523,29 @@ fn is_colocated(repo_path: &Path, loader: &RepoLoader) -> bool {
 }
 
 /// Whether `commit` is visible: reachable from the view's heads.
+/// Whether `commit` is one of `heads` or an ancestor of one.
+fn is_ancestor_of_any(
+    repo: &ReadonlyRepo,
+    commit: &CommitId,
+    heads: &[CommitId],
+) -> Result<bool, NodeError> {
+    let index = repo.index();
+    if !index.has_id(commit).block_on().map_err(index_err)? {
+        return Ok(false);
+    }
+    for head in heads {
+        if index.has_id(head).block_on().map_err(index_err)?
+            && index
+                .is_ancestor(commit, head)
+                .block_on()
+                .map_err(index_err)?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn is_visible(repo: &ReadonlyRepo, commit: &CommitId) -> Result<bool, NodeError> {
     if commit == repo.store().root_commit_id() {
         return Ok(true);

@@ -96,6 +96,36 @@ fn other_machines_workspaces_are_theirs() {
     assert_eq!(names(&hive, 0), ["alpha", "beta/beta"]);
 }
 
+/// A machine that forgot another machine's workspace no longer sees its empty working-copy
+/// commit, so jj leaves that commit behind when this machine rewrites its parent. The hive
+/// mustn't keep it, which would bring the old parent back as a divergent copy: the other
+/// machine gets a fresh `@` instead, as when this machine abandons its working copy.
+#[test]
+fn forgotten_working_copies_dont_keep_rewritten_parents() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(1, "b", "from beta");
+    hive.sync();
+    hive.repo(0).jj(&["workspace", "forget", "beta/beta"]);
+    let parent = hive.commit_id(0, "from beta");
+    hive.repo(0)
+        .jj(&["describe", &parent, "-m", "reworded by alpha"]);
+    hive.sync();
+    hive.sync();
+    for m in 0..2 {
+        let divergent = hive.repo(m).jj(&[
+            "log",
+            "--no-graph",
+            "-r",
+            "divergent()",
+            "-T",
+            "commit_id ++ \"\\n\"",
+        ]);
+        assert_eq!(divergent, "", "divergence on {}", hive.repo(m).machine());
+    }
+    hive.assert_converged();
+    assert_eq!(names(&hive, 0), ["alpha", "beta/beta"]);
+}
+
 /// Each machine's view of the others' working copies follows them, including when this
 /// machine rewrites the commit under one: jj moves the other machine's workspace at once,
 /// as it moves any workspace's, and the other machine follows.

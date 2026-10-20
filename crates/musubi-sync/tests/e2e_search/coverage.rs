@@ -66,8 +66,6 @@ pub const EVENTS: &[&str] = &[
 ];
 
 /// Each catalogue row, by test name, with the rules and events that together exercise it
-/// in one sequence; `None` for rows the search deliberately avoids.
-/// Each catalogue row, by test name, with the rules and events that together exercise it
 /// in one sequence (every sequence ends by syncing everything); `None` for rows the search
 /// deliberately avoids.
 pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
@@ -78,6 +76,10 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
     (
         "other_machines_workspaces_are_theirs",
         Some(&["forget_other_workspace"]),
+    ),
+    (
+        "forgotten_working_copies_dont_keep_rewritten_parents",
+        Some(&["forget_other_workspace", "rebase_revision"]),
     ),
     (
         "secondary_workspaces_show_everywhere",

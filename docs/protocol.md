@@ -53,7 +53,9 @@ The hub answers `Cas(expected, new)` in one atomic critical section:
    `expected` is. This makes a retried `Cas` idempotent.
 2. Otherwise it accepts if and only if `head = expected`, `closure(new) ⊆ ops ∪ objects`, and
    `expected ∈ anc*(new)`. The ancestry check walks `parents` over stored operations, so it
-   is only meaningful once the closure check has passed.
+   is only meaningful once the closure check has passed. Since `closure(head)` is stored
+   (HubClosed), and so is the closure of every operation in `anc*(head)`, the closure check
+   need only look at what `new` adds to them.
 3. On acceptance it sets `head := new` and `seq := seq + 1`, persists both, and only then
    replies `Accepted(seq, new)` and publishes `Head(seq, new)` to subscribers. Otherwise it
    replies `Rejected(seq, head)`.

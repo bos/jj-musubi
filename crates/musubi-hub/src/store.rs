@@ -265,13 +265,22 @@ impl HubStore {
 
     /// Whether `closure(op)` is stored: every operation in `anc*(op)`, its view, and every
     /// object its view requires. Returns the missing pieces' descriptions if not.
+    ///
+    /// Accepted operations are closed (HubClosed), so the check covers only what is new:
+    /// the walk stops at accepted operations, and so does the walk over objects, at the
+    /// commits of those it reached and of the head.
     pub fn missing_closure(&self, op: &OperationId) -> Result<Vec<String>, StoreError> {
         let mut missing = vec![];
         let mut wanted_commits = BTreeSet::new();
+        let mut boundary = BTreeSet::from([self.head.clone()]);
         let mut seen = HashSet::new();
         let mut stack = vec![op.clone()];
         while let Some(id) = stack.pop() {
-            if self.accepted.contains_key(&id) || !seen.insert(id.clone()) {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            if self.accepted.contains_key(&id) {
+                boundary.insert(id);
                 continue;
             }
             if !self.canonical.has_operation(&id) {
@@ -295,7 +304,12 @@ impl HubStore {
         if absent.is_empty() && missing.is_empty() {
             // Imports check connectivity, but verify anyway: a head is accepted at most
             // once, and accepting one with a hole would break every node that adopts it.
-            if let Err(err) = objects.check_connected(&wanted, &[]) {
+            let mut haves = BTreeSet::new();
+            for id in &boundary {
+                haves.extend(self.required_commits(id)?);
+            }
+            let haves: Vec<CommitId> = haves.into_iter().collect();
+            if let Err(err) = objects.check_connected(&wanted, &haves) {
                 missing.push(err.to_string());
             }
         }

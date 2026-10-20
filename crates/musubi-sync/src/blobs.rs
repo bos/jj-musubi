@@ -82,11 +82,13 @@ impl BlobStore {
         path.exists().then_some(path)
     }
 
-    /// Adds a file this side created, returning its id and length.
+    /// Adds a file this side created, returning its id and length. The file is linked in
+    /// rather than copied where the filesystem allows: a bundle can be gigabytes, and its
+    /// creator deletes its own name for it.
     pub fn insert_file(&self, path: &Path) -> io::Result<(BlobId, u64)> {
         let (id, len) = BlobId::of_file(path)?;
         let dest = self.complete_path(&id);
-        if !dest.exists() {
+        if !dest.exists() && fs::hard_link(path, &dest).is_err() {
             fs::copy(path, &dest)?;
         }
         Ok((id, len))
@@ -168,6 +170,24 @@ mod tests {
     use hegel::generators as gs;
 
     use super::*;
+
+    /// A file this side created goes into the store without being copied.
+    #[cfg(unix)]
+    #[test]
+    fn inserted_files_are_linked() {
+        use std::os::unix::fs::MetadataExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::open(&dir.path().join("blobs")).unwrap();
+        let file = dir.path().join("bundle");
+        fs::write(&file, b"contents").unwrap();
+        let (id, len) = store.insert_file(&file).unwrap();
+        assert_eq!(len, 8);
+        let stored = store.get(&id).unwrap();
+        let inode = |path: &Path| fs::metadata(path).unwrap().ino();
+        assert_eq!(inode(&file), inode(&stored));
+        fs::remove_file(&file).unwrap();
+        assert_eq!(store.read(&id, 0, 100).unwrap(), (8, b"contents".to_vec()));
+    }
 
     /// Chunks delivered in any order, duplicated, some corrupt, some lost and resent:
     /// once the receiver reports the blob complete, its content is exactly what was sent.

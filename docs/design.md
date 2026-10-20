@@ -261,6 +261,9 @@ the receiver's known commits as exclusions, and `git index-pack --fix-thin` to r
 already needs `git` for fetch and push, and this gets delta compression and bitmaps for free.
 
 - The hub stores objects in a bare git repository.
+- A pack is written once on each side: `git pack-objects` writes it straight into the bundle
+  that carries it, which goes into the blob store as a hard link rather than a copy where
+  the filesystem allows, and the receiver pipes it from the bundle into git.
 - A node writes received objects into the repository's object store (`.git` for colocated
   repositories). It then calls jj-lib's `GitBackend::import_head_commits`, which creates the
   `refs/jj/keep/*` refs and backend extras. The keep refs are what protect commits that no

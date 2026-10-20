@@ -4,9 +4,8 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
-use std::fs::File;
 use std::io;
-use std::io::Write as _;
+use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -27,6 +26,7 @@ use super::ObjectError;
 use super::ObjectStore;
 use super::bundle;
 use super::bundle::BundleWriter;
+use super::bundle::PackRecord;
 use super::bundle::Record;
 use crate::hive_settings::Remote;
 
@@ -164,12 +164,13 @@ impl GitObjects {
     }
 
     /// Writes a thin pack of everything reachable from `wants` but not from `haves` to
-    /// `out`. The receiver must have every object reachable from `haves`.
+    /// `out`, as git produces it. The receiver must have every object reachable from
+    /// `haves`.
     pub fn write_pack(
         &self,
         wants: &[CommitId],
         haves: &[CommitId],
-        out: &Path,
+        out: &mut dyn Write,
     ) -> Result<(), ObjectError> {
         let args = [
             "pack-objects",
@@ -182,34 +183,60 @@ impl GitObjects {
         let mut child = self
             .command(&args)
             .stdin(Stdio::piped())
-            .stdout(File::create(out)?)
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|source| spawn_err(&args, source))?;
         let mut stdin = child.stdin.take().expect("stdin is piped");
         let input = revs_input(wants, haves);
         let writer = thread::spawn(move || stdin.write_all(&input));
-        let output = child.wait_with_output()?;
+        let mut stderr = child.stderr.take().expect("stderr is piped");
+        let errors = thread::spawn(move || {
+            let mut bytes = vec![];
+            io::Read::read_to_end(&mut stderr, &mut bytes).map(|_| bytes)
+        });
+        let copied = io::copy(&mut child.stdout.take().expect("stdout is piped"), out);
+        let status = child.wait()?;
         writer.join().expect("stdin writer panicked")?;
-        check_status(&args, &output)
+        let stderr = errors.join().expect("stderr reader panicked")?;
+        copied?;
+        check_status(
+            &args,
+            &std::process::Output {
+                status,
+                stdout: vec![],
+                stderr,
+            },
+        )
     }
 
     /// Stores a received pack's objects, completing a thin pack from local objects. As
     /// `git fetch` does by default, a pack of fewer than `UNPACK_LIMIT` objects is unpacked
     /// into loose objects rather than kept, so that small transfers don't each leave a pack
     /// behind: they slow git down, and jj-lib's gix sizes its table of packs only when it
-    /// opens the repository.
-    pub fn receive_pack(&self, pack: &Path) -> Result<(), ObjectError> {
-        let args: &[&str] = if pack_object_count(pack)? < UNPACK_LIMIT {
+    /// opens the repository. The pack goes to git straight from the bundle.
+    pub fn receive_pack(&self, pack: &PackRecord) -> Result<(), ObjectError> {
+        let mut reader = pack.reader()?;
+        let mut header = vec![];
+        io::Read::read_to_end(&mut io::Read::take(&mut reader, 12), &mut header)?;
+        let args: &[&str] = if pack_object_count(&header) < UNPACK_LIMIT {
             &["unpack-objects", "-q"]
         } else {
             &["index-pack", "--stdin", "--fix-thin"]
         };
-        let output = self
+        let mut input = io::Read::chain(io::Cursor::new(header), reader);
+        let mut child = self
             .command(args)
-            .stdin(File::open(pack)?)
-            .output()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .map_err(|source| spawn_err(args, source))?;
+        let mut stdin = child.stdin.take().expect("stdin is piped");
+        let writer = thread::spawn(move || io::copy(&mut input, &mut stdin));
+        let output = child.wait_with_output()?;
+        // A failing git may close stdin early; its exit status explains why.
+        writer.join().expect("stdin writer panicked").ok();
         check_status(args, &output)
     }
 
@@ -306,17 +333,13 @@ impl GitObjects {
 /// `fetch.unpackLimit`'s default: received packs with fewer objects are unpacked.
 const UNPACK_LIMIT: u32 = 100;
 
-/// The number of objects a pack holds, from its header. Anything that isn't a pack counts
-/// as large, so that `git index-pack` reports what is wrong with it.
-fn pack_object_count(pack: &Path) -> Result<u32, ObjectError> {
-    let mut header = [0; 12];
-    let mut file = File::open(pack)?;
-    if io::Read::read_exact(&mut file, &mut header).is_err() || &header[..4] != b"PACK" {
-        return Ok(u32::MAX);
+/// The number of objects a pack holds, from its 12-byte header. Anything that isn't a pack
+/// counts as large, so that `git index-pack` reports what is wrong with it.
+fn pack_object_count(header: &[u8]) -> u32 {
+    match header {
+        [b'P', b'A', b'C', b'K', _, _, _, _, a, b, c, d] => u32::from_be_bytes([*a, *b, *c, *d]),
+        _ => u32::MAX,
     }
-    Ok(u32::from_be_bytes([
-        header[8], header[9], header[10], header[11],
-    ]))
 }
 
 fn hex_lines<'a>(ids: impl Iterator<Item = &'a CommitId>, prefix: &str) -> Vec<u8> {
@@ -536,9 +559,7 @@ impl ObjectStore for GitStore<'_> {
         for entry in self.extras_for(&commits)? {
             writer.extras(entry.commit.as_bytes(), &entry.value)?;
         }
-        let pack = tempfile::NamedTempFile::new()?;
-        self.git.write_pack(wants, &haves, pack.path())?;
-        writer.pack(pack.path())?;
+        writer.pack_from(|out| self.git.write_pack(wants, &haves, out))?;
         writer.finish()
     }
 
@@ -558,7 +579,7 @@ impl ObjectStore for GitStore<'_> {
                         value,
                     });
                 }
-                Record::Pack(file) => packs.push(file),
+                Record::Pack(pack) => packs.push(pack),
                 Record::Object { .. }
                 | Record::View { .. }
                 | Record::ViewDelta { .. }
@@ -574,7 +595,7 @@ impl ObjectStore for GitStore<'_> {
         // commit, and those must not win over the sender's.
         self.store_extras(&extras)?;
         for pack in &packs {
-            self.git.receive_pack(pack.path())?;
+            self.git.receive_pack(pack)?;
         }
         self.git.check_connected(wants, haves)?;
         if let Extras::Jj { backend, .. } = &self.extras {

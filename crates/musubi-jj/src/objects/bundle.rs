@@ -18,15 +18,19 @@
 //! A view delta is the view compressed by zstd with the base view as a prefix it may refer
 //! back to ([`view_delta`]). Ids are of the uncompressed contents.
 //!
-//! Packs can be gigabytes, so records stream through files rather than memory.
+//! Packs can be gigabytes, so they stream into a bundle as they are produced, and out of
+//! one in place, never through memory or a copy.
 
 use std::fs::File;
 use std::io;
 use std::io::BufReader;
 use std::io::BufWriter;
 use std::io::Read;
+use std::io::Seek as _;
+use std::io::SeekFrom;
 use std::io::Write;
 use std::path::Path;
+use std::path::PathBuf;
 
 use super::ObjectError;
 
@@ -177,12 +181,37 @@ impl BundleWriter {
         self.keyed(TAG_OPERATION, id, contents)
     }
 
-    pub fn pack(&mut self, pack: &Path) -> Result<(), ObjectError> {
+    /// A pack, written by `produce` straight into the bundle as it is produced: writing it
+    /// to a file of its own first, only to copy it here, would write it twice.
+    pub fn pack_from(
+        &mut self,
+        produce: impl FnOnce(&mut dyn Write) -> Result<(), ObjectError>,
+    ) -> Result<(), ObjectError> {
         self.end_compressed()?;
-        let mut file = File::open(pack)?;
-        self.header(TAG_PACK, file.metadata()?.len())?;
-        io::copy(&mut file, &mut self.out)?;
+        self.out.write_all(&[TAG_PACK])?;
+        self.out.flush()?;
+        let len_at = self.out.get_mut().stream_position()?;
+        self.out.write_all(&0u64.to_le_bytes())?;
+        let mut counted = Counted {
+            inner: &mut self.out,
+            len: 0,
+        };
+        produce(&mut counted)?;
+        let len = counted.len;
+        self.out.flush()?;
+        let file = self.out.get_mut();
+        file.seek(SeekFrom::Start(len_at))?;
+        file.write_all(&len.to_le_bytes())?;
+        file.seek(SeekFrom::End(0))?;
         Ok(())
+    }
+
+    pub fn pack(&mut self, pack: &Path) -> Result<(), ObjectError> {
+        let mut file = File::open(pack)?;
+        self.pack_from(|out| {
+            io::copy(&mut file, out)?;
+            Ok(())
+        })
     }
 
     pub fn object(
@@ -211,13 +240,55 @@ impl BundleWriter {
     }
 }
 
-/// A record read from a bundle. Packs are copied to a temporary file.
+/// A writer that counts what passes through it.
+struct Counted<'a> {
+    inner: &'a mut dyn Write,
+    len: u64,
+}
+
+impl Write for Counted<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.len += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// A pack in a bundle, read where it is rather than copied out.
+pub struct PackRecord {
+    path: PathBuf,
+    offset: u64,
+    len: u64,
+}
+
+impl PackRecord {
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The pack's bytes.
+    pub fn reader(&self) -> io::Result<io::Take<BufReader<File>>> {
+        let mut file = File::open(&self.path)?;
+        file.seek(SeekFrom::Start(self.offset))?;
+        Ok(BufReader::new(file).take(self.len))
+    }
+}
+
+/// A record read from a bundle.
 pub enum Record {
     Extras {
         commit: Vec<u8>,
         value: Vec<u8>,
     },
-    Pack(tempfile::NamedTempFile),
+    Pack(PackRecord),
     Object {
         kind: ObjectKind,
         id: Vec<u8>,
@@ -244,12 +315,14 @@ fn malformed(what: &str) -> ObjectError {
 }
 
 /// Reads every record of the bundle at `path`, in order. Compressed records are read as
-/// the records they hold.
+/// the records they hold. A pack is not read at all: its record says where it is.
 pub fn read(
     path: &Path,
     mut on_record: impl FnMut(Record) -> Result<(), ObjectError>,
 ) -> Result<(), ObjectError> {
-    let mut input = BufReader::new(File::open(path)?);
+    let file = File::open(path)?;
+    let file_len = file.metadata()?.len();
+    let mut input = BufReader::new(file);
     let mut magic = vec![0; MAGIC.len()];
     input
         .read_exact(&mut magic)
@@ -257,41 +330,25 @@ pub fn read(
     if magic != MAGIC {
         return Err(malformed("bad header"));
     }
-    read_records(&mut input, false, &mut on_record)
-}
-
-fn read_records(
-    input: &mut dyn Read,
-    compressed: bool,
-    on_record: &mut dyn FnMut(Record) -> Result<(), ObjectError>,
-) -> Result<(), ObjectError> {
-    loop {
-        let mut tag = [0u8];
-        if input.read(&mut tag)? == 0 {
-            return Ok(());
-        }
-        let mut len = [0u8; 8];
-        input
-            .read_exact(&mut len)
-            .map_err(|_| malformed("truncated record"))?;
-        let len = u64::from_le_bytes(len);
-        if compressed && len > MAX_COMPRESSED_RECORD {
-            return Err(malformed("oversized record"));
-        }
-        let mut body = (&mut *input).take(len);
-        let record = match tag[0] {
-            TAG_PACK if !compressed => {
-                let mut file = tempfile::NamedTempFile::new()?;
-                let copied = io::copy(&mut body, file.as_file_mut())?;
-                if copied != len {
+    while let Some((tag, len)) = read_header(&mut input)? {
+        match tag {
+            TAG_PACK => {
+                let offset = input.stream_position()?;
+                if offset.checked_add(len).is_none_or(|end| end > file_len) {
                     return Err(malformed("truncated pack"));
                 }
-                Record::Pack(file)
+                input.seek(SeekFrom::Start(offset + len))?;
+                on_record(Record::Pack(PackRecord {
+                    path: path.to_owned(),
+                    offset,
+                    len,
+                }))?;
             }
-            TAG_COMPRESSED if !compressed => {
+            TAG_COMPRESSED => {
+                let mut body = (&mut input).take(len);
                 let mut decoder = zstd::stream::read::Decoder::new(&mut body)
                     .map_err(|_| malformed("bad compressed record"))?;
-                read_records(&mut decoder, true, on_record).map_err(|err| match err {
+                read_compressed(&mut decoder, &mut on_record).map_err(|err| match err {
                     ObjectError::Io(_) => malformed("bad compressed record"),
                     other => other,
                 })?;
@@ -299,20 +356,53 @@ fn read_records(
                 if io::copy(&mut body, &mut io::sink())? != 0 {
                     return Err(malformed("trailing data in a compressed record"));
                 }
-                continue;
             }
-            TAG_EXTRAS | TAG_OBJECT | TAG_VIEW | TAG_VIEW_DELTA | TAG_OPERATION => {
-                let mut bytes = Vec::with_capacity(usize::try_from(len).unwrap_or(0).min(1 << 20));
-                body.read_to_end(&mut bytes)?;
-                if bytes.len() as u64 != len {
-                    return Err(malformed("truncated record"));
-                }
-                parse_small(tag[0], bytes).ok_or_else(|| malformed("bad record"))?
-            }
-            _ => return Err(malformed("unknown record tag")),
-        };
-        on_record(record)?;
+            _ => on_record(read_small(tag, &mut (&mut input).take(len), len)?)?,
+        }
     }
+    Ok(())
+}
+
+/// A record's tag and length, or `None` at the end.
+fn read_header(input: &mut dyn Read) -> Result<Option<(u8, u64)>, ObjectError> {
+    let mut tag = [0u8];
+    if input.read(&mut tag)? == 0 {
+        return Ok(None);
+    }
+    let mut len = [0u8; 8];
+    input
+        .read_exact(&mut len)
+        .map_err(|_| malformed("truncated record"))?;
+    Ok(Some((tag[0], u64::from_le_bytes(len))))
+}
+
+/// The records of a compressed record: neither packs nor compressed records.
+fn read_compressed(
+    input: &mut dyn Read,
+    on_record: &mut dyn FnMut(Record) -> Result<(), ObjectError>,
+) -> Result<(), ObjectError> {
+    while let Some((tag, len)) = read_header(input)? {
+        if len > MAX_COMPRESSED_RECORD || matches!(tag, TAG_PACK | TAG_COMPRESSED) {
+            return Err(malformed("bad record in a compressed record"));
+        }
+        on_record(read_small(tag, &mut input.take(len), len)?)?;
+    }
+    Ok(())
+}
+
+fn read_small(tag: u8, body: &mut dyn Read, len: u64) -> Result<Record, ObjectError> {
+    if !matches!(
+        tag,
+        TAG_EXTRAS | TAG_OBJECT | TAG_VIEW | TAG_VIEW_DELTA | TAG_OPERATION
+    ) {
+        return Err(malformed("unknown record tag"));
+    }
+    let mut bytes = Vec::with_capacity(usize::try_from(len).unwrap_or(0).min(1 << 20));
+    body.read_to_end(&mut bytes)?;
+    if bytes.len() as u64 != len {
+        return Err(malformed("truncated record"));
+    }
+    parse_small(tag, bytes).ok_or_else(|| malformed("bad record"))
 }
 
 fn parse_small(tag: u8, bytes: Vec<u8>) -> Option<Record> {
@@ -402,7 +492,7 @@ mod tests {
         read(&bundle, |record| {
             seen.push(match record {
                 Record::Extras { commit, value } => format!("extras {commit:?} {value:?}"),
-                Record::Pack(file) => format!("pack {:?}", std::fs::read(file.path()).unwrap()),
+                Record::Pack(pack) => format!("pack {:?}", pack_bytes(&pack)),
                 Record::Object { kind, id, contents } => format!("{kind:?} {id:?} {contents:?}"),
                 Record::View { .. } | Record::ViewDelta { .. } | Record::Operation { .. } => {
                     unreachable!()
@@ -419,6 +509,57 @@ mod tests {
                 format!("Tree {:?} {:?}", b"tree-id", b""),
             ]
         );
+    }
+
+    fn pack_bytes(pack: &PackRecord) -> Vec<u8> {
+        let mut bytes = vec![];
+        pack.reader().unwrap().read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes.len() as u64, pack.len());
+        bytes
+    }
+
+    /// A pack streams into a bundle, and the records after it are read where they are.
+    #[test]
+    fn streamed_pack_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = dir.path().join("bundle");
+        let pack: Vec<u8> = (0..3_000_000u32).map(|i| (i % 251) as u8).collect();
+        let mut writer = BundleWriter::create(&bundle).unwrap();
+        writer.extras(b"commit", b"value").unwrap();
+        writer
+            .pack_from(|out| {
+                for chunk in pack.chunks(4096) {
+                    out.write_all(chunk)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        writer.object(ObjectKind::File, b"id", b"after").unwrap();
+        writer.finish().unwrap();
+        let mut seen = vec![];
+        read(&bundle, |record| {
+            seen.push(match record {
+                Record::Pack(record) => {
+                    assert_eq!(pack_bytes(&record), pack);
+                    "pack".to_owned()
+                }
+                Record::Extras { .. } => "extras".to_owned(),
+                Record::Object { contents, .. } => String::from_utf8(contents).unwrap(),
+                Record::View { .. } | Record::ViewDelta { .. } | Record::Operation { .. } => {
+                    unreachable!()
+                }
+            });
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(seen, ["extras", "pack", "after"]);
+        // A pack that runs past the end of the bundle is caught.
+        let bytes = std::fs::read(&bundle).unwrap();
+        std::fs::write(&bundle, &bytes[..bytes.len() / 2]).unwrap();
+        assert!(matches!(
+            read(&bundle, |_| Ok(())),
+            Err(ObjectError::MalformedBundle(_))
+        ));
     }
 
     /// Lines like a view's bookmarks: similar, but not trivially compressible.
@@ -472,7 +613,7 @@ mod tests {
                     (id, apply_view_delta(&base, &delta).unwrap())
                 }
                 Record::Operation { id, contents } => (id, contents),
-                Record::Pack(file) => (b"pack".to_vec(), std::fs::read(file.path()).unwrap()),
+                Record::Pack(pack) => (b"pack".to_vec(), pack_bytes(&pack)),
                 Record::Extras { .. } | Record::Object { .. } => unreachable!(),
             });
             Ok(())

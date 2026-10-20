@@ -3,9 +3,9 @@
 #![allow(clippy::unwrap_used)]
 
 use std::collections::BTreeSet;
-use std::fs::File;
 use std::path::Path;
 use std::process::Command;
+use std::process::Stdio;
 
 use jj_lib::backend::CommitId;
 use jj_lib::op_store::OperationId;
@@ -134,13 +134,15 @@ fn required(node: &NodeRepo, ops: &[OperationId]) -> Vec<CommitId> {
 fn unpack_loose(bundle_path: &Path, git_dir: &Path) {
     bundle::read(bundle_path, |record| {
         if let Record::Pack(pack) = record {
-            let status = Command::new("git")
+            let mut child = Command::new("git")
                 .args(["unpack-objects", "-q"])
                 .env("GIT_DIR", git_dir)
-                .stdin(File::open(pack.path()).unwrap())
-                .status()
+                .stdin(Stdio::piped())
+                .spawn()
                 .unwrap();
-            assert!(status.success());
+            std::io::copy(&mut pack.reader().unwrap(), child.stdin.as_mut().unwrap()).unwrap();
+            drop(child.stdin.take());
+            assert!(child.wait().unwrap().success());
         }
         Ok(())
     })

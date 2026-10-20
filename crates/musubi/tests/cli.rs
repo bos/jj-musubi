@@ -287,7 +287,13 @@ fn daemon_carries_on_after_colocation_changes() {
     daemon.arg("daemon").stdout(Stdio::null());
     logs.attach(&env, "daemon", &mut daemon);
     let _daemon = Killed(daemon.spawn().unwrap());
-    beta.jj(&["git", "colocation", "disable"]);
+    // On Windows, moving `.git` fails while the daemon has a file in it open (to read the
+    // remotes, say), and jj then leaves it where it was: try again.
+    wait_for(&logs, "jj to stop colocating beta", || {
+        beta.jj_output(&["git", "colocation", "disable"])
+            .status
+            .success()
+    });
     alpha.write_file("a", "from alpha");
     alpha.jj(&["commit", "-m", "after beta stopped colocating"]);
     musubi_in(&env, &logs, &alpha, &["sync"]);

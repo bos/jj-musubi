@@ -217,6 +217,19 @@ impl TestRepo {
             .env("GIT_AUTHOR_EMAIL", "test@example.com")
             .env("GIT_COMMITTER_NAME", "Test User")
             .env("GIT_COMMITTER_EMAIL", "test@example.com");
+        // What Windows itself needs: without `SystemRoot`, for one, sockets don't work.
+        for name in [
+            "SystemRoot",
+            "SystemDrive",
+            "windir",
+            "TEMP",
+            "TMP",
+            "PATHEXT",
+        ] {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
         command
     }
 }

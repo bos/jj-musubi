@@ -1376,9 +1376,14 @@ fn fingerprint(op: &StoreOperation) -> String {
 /// between this machine's ids and canonical ones. Only targets that are ancestors are
 /// translated, as they always are for undo and redo: those are canonicalized and realized
 /// first, so the translation never depends on the order operations arrive in.
-const TARGET_PREFIXES: [&str; 4] = [
+///
+/// The `revert operation` forms of undo and redo are from a proposed jj change that makes
+/// `jj undo` revert this workspace's latest operation when others' are on top of it.
+const TARGET_PREFIXES: [&str; 6] = [
     "undo: restore to operation ",
     "redo: restore to operation ",
+    "undo: revert operation ",
+    "redo: revert operation ",
     "restore to operation ",
     "revert operation ",
 ];

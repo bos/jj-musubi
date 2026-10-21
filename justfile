@@ -25,7 +25,7 @@ install profile="release":
         if [[ $out == Stopped* ]]; then running=true; fi
     fi
     cargo install --locked --path crates/musubi --profile {{profile}} --root "$root"
-    if $running; then "$musubi" daemon restart; fi
+    if $running; then "$musubi" daemon start; fi
 
 fmt:
     cargo fmt --all

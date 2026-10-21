@@ -314,13 +314,16 @@ fn serve(
     stop: watch::Receiver<bool>,
     status: &Mutex<Status>,
 ) {
+    // Everything this thread logs is about this workspace. At error level, the span stays
+    // on under any filter that shows anything.
+    let _span = tracing::error_span!("sync", repo = %workspace.display()).entered();
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
     {
         Ok(runtime) => runtime,
         Err(err) => {
-            tracing::error!("{}: {err}", workspace.display());
+            tracing::error!("{err}");
             return;
         }
     };
@@ -353,10 +356,7 @@ async fn serve_retrying(
             Ok(()) => return,
             Err(err) => {
                 let message = format!("{err:#}");
-                tracing::error!(
-                    "{}: {message}; retrying in {backoff:?}",
-                    workspace.display()
-                );
+                tracing::error!("{message}; retrying in {backoff:?}");
                 record(workspace, status, |status| {
                     status.last_attempt = Some(now());
                     status.error = Some(message.clone());
@@ -437,32 +437,45 @@ async fn serve_async(
     let mut poll = tokio::time::interval(POLL_INTERVAL);
     let mut backoff = Duration::from_millis(500);
     let mut retry = false;
-    tracing::info!(
-        "serving {} in hive {}",
-        workspace.display(),
-        hive.display_name()
-    );
+    tracing::info!("serving in hive {}", hive.display_name());
     loop {
         // After a failure, try again once the backoff has passed, rather than waiting for
         // something to change; and sync at once when asked.
-        if !retry && waiting.is_empty() {
+        let trigger = if retry {
+            "a retry".to_owned()
+        } else if !waiting.is_empty() {
+            "a request".to_owned()
+        } else {
             tokio::select! {
-                _ = poll.tick() => {}
-                () = watcher.changed() => {}
+                _ = poll.tick() => "the poll interval".to_owned(),
+                () = watcher.changed() => "a local operation".to_owned(),
                 notice = notices.next() => {
                     let Some(notice) = notice else { anyhow::bail!("lost the head subscription") };
                     match Envelope::<HeadNotice>::decode(&notice.payload) {
-                        Ok(notice) => driver.notice(notice)?,
-                        Err(err) => tracing::warn!("ignoring announcement: {err:#}"),
+                        Ok(notice) => {
+                            let seq = notice.seq;
+                            driver.notice(notice)?;
+                            format!("the hub announcing {seq}")
+                        }
+                        Err(err) => {
+                            tracing::warn!("ignoring announcement: {err:#}");
+                            "an unreadable announcement".to_owned()
+                        }
                     }
                 }
                 command = commands.recv() => match command {
                     None => return Ok(()),
-                    Some(Command::Sync(reply)) => waiting.push(reply),
+                    Some(Command::Sync(reply)) => {
+                        waiting.push(reply);
+                        "a request".to_owned()
+                    }
                 },
             }
-        }
+        };
+        tracing::debug!("syncing after {trigger}");
+        let started = std::time::Instant::now();
         let result = driver.sync().await;
+        tracing::debug!("sync took {:?}", started.elapsed());
         let (seq, head) = driver.known();
         let synced = Synced {
             seq: *seq,
@@ -493,11 +506,11 @@ async fn serve_async(
                 retry = false;
             }
             Err(err) => {
-                tracing::warn!("{}: {err:#}", workspace.display());
+                tracing::warn!("{err:#}");
                 // Lost replies are indistinguishable from lost requests, and the open
                 // repository's cached state may be what failed: start over, reopened.
                 if let Err(err) = located.open().and_then(|repo| driver.reopen(repo)) {
-                    tracing::warn!("{}: cannot reopen: {err:#}", workspace.display());
+                    tracing::warn!("cannot reopen: {err:#}");
                     driver.restart();
                 }
                 retry = true;

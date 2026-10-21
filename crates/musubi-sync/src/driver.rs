@@ -1,8 +1,10 @@
 //! Runs a node's policy against a remote hub.
 
+use jj_lib::object_id::ObjectId as _;
 use musubi_core::message::HeadKind;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
+use musubi_core::node::Handled;
 use musubi_core::node::LocalRepo as _;
 use musubi_core::node::NodeCore;
 use musubi_core::node::Step;
@@ -17,6 +19,14 @@ pub struct NodeDriver {
     adapter: NodeAdapter,
     core: NodeCore<OpId>,
     remote: RemoteHub,
+    /// What the current `sync` has done, for its log line.
+    tally: Tally,
+}
+
+#[derive(Default)]
+struct Tally {
+    pushed: usize,
+    realized: usize,
 }
 
 impl NodeDriver {
@@ -26,6 +36,7 @@ impl NodeDriver {
             adapter: NodeAdapter::new(repo)?,
             core: NodeCore::new(root),
             remote,
+            tally: Tally::default(),
         })
     }
 
@@ -45,6 +56,7 @@ impl NodeDriver {
         self.adapter.reconcile_settings(true)?;
         // Op heads may have changed since the last step: a fetch's haves should say so.
         self.adapter.heads()?;
+        self.tally = Tally::default();
         let poll = self.core.poll(&self.adapter)?;
         self.deliver(poll).await?;
         let mut steps = 0;
@@ -57,6 +69,16 @@ impl NodeDriver {
                     if settings || workspaces {
                         continue;
                     }
+                    // Learning the head alone, as after a restart, changes nothing here.
+                    let Tally { pushed, realized } = self.tally;
+                    if pushed > 0 || realized > 0 {
+                        let (seq, head) = self.core.known();
+                        tracing::info!(
+                            "synced: {pushed} operations pushed, {realized} realized; \
+                             the hive is at {seq} ({})",
+                            short(head)
+                        );
+                    }
                     return Ok(steps);
                 }
                 Step::Send(requests) => {
@@ -64,13 +86,39 @@ impl NodeDriver {
                         self.deliver(request).await?;
                     }
                 }
-                Step::Merged | Step::Realized(_) | Step::Advanced(_) => {}
+                Step::Merged => tracing::debug!("merged the op heads"),
+                Step::Realized(op) => {
+                    self.tally.realized += 1;
+                    tracing::debug!("realized {}", short(&op));
+                }
+                Step::Advanced(op) => tracing::debug!("advanced to {}", short(&op)),
             }
             steps += 1;
         }
     }
 
     async fn deliver(&mut self, request: Request<OpId, crate::Attachment>) -> anyhow::Result<()> {
+        let pushing = match &request {
+            Request::Fetch { base, .. } => {
+                tracing::debug!("fetching what follows {}", short(base));
+                0
+            }
+            Request::GetObjects { for_ops, .. } => {
+                tracing::debug!("asking for the objects of {} operations", for_ops.len());
+                0
+            }
+            Request::Push {
+                ops, expected, new, ..
+            } => {
+                tracing::debug!(
+                    "pushing {} operations to move the head from {} to {}",
+                    ops.len(),
+                    short(expected),
+                    short(new)
+                );
+                ops.len()
+            }
+        };
         let reply = self.remote.call(request).await?;
         let attachments = match &reply {
             Reply::Fetched {
@@ -85,7 +133,15 @@ impl NodeDriver {
         for attachment in &attachments {
             self.remote.release(attachment);
         }
-        result?;
+        let handled = result?;
+        if let Handled::Learned {
+            kind: HeadKind::Accepted,
+            ..
+        } = handled
+        {
+            self.tally.pushed += pushing;
+        }
+        log_handled(&handled);
         Ok(())
     }
 
@@ -96,7 +152,7 @@ impl NodeDriver {
             seq: notice.seq,
             head: OpId::new(notice.head),
         };
-        self.core.handle(&mut self.adapter, reply)?;
+        log_handled(&self.core.handle(&mut self.adapter, reply)?);
         Ok(())
     }
 
@@ -120,4 +176,31 @@ impl NodeDriver {
             .clone();
         self.core.restart(root);
     }
+}
+
+fn log_handled(handled: &Handled<OpId>) {
+    match handled {
+        Handled::Learned { kind, seq, head } => {
+            let kind = format!("{kind:?}").to_lowercase();
+            tracing::debug!("learned the hive's head ({kind}): {seq} ({})", short(head));
+        }
+        Handled::Fetched { learned, staged } => match learned {
+            Some((seq, head)) => tracing::debug!(
+                "staged {} fetched operations; the hive is at {seq} ({})",
+                staged.len(),
+                short(head)
+            ),
+            None => tracing::debug!("staged {} fetched operations", staged.len()),
+        },
+        Handled::StagedObjects(ops) => {
+            tracing::debug!("staged the objects of {} operations", ops.len());
+        }
+        Handled::Ignored => tracing::debug!("nothing new"),
+    }
+}
+
+/// An abbreviated id. Ids from the wire are not checked for length.
+fn short(op: &OpId) -> String {
+    let hex = op.hex();
+    hex.get(..12).unwrap_or(&hex).to_owned()
 }

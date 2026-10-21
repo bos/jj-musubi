@@ -258,8 +258,61 @@ impl GitObjects {
             args.extend(["-c", "gc.cruftPacks=true", "-c", "gc.auto=6700"]);
         }
         args.extend(["gc", "--auto", "--quiet"]);
+        // git finishes `gc --auto` in the background (`gc.autoDetach`, true by default), but
+        // can't on Windows, where whatever triggered it would wait for the whole repack.
+        // Start it there without waiting, unless `gc.autoDetach` is false, as git would.
+        if self.gc_in_background(&args)? {
+            return Ok(());
+        }
         self.run(&args, None)?;
         Ok(())
+    }
+
+    /// Starts `args` without waiting, if git would run it in the background, and says whether
+    /// it did.
+    #[cfg(windows)]
+    fn gc_in_background(&self, args: &[&str]) -> Result<bool, ObjectError> {
+        use std::os::windows::process::CommandExt as _;
+        // Its own hidden console and process group, as `setsid` gives git elsewhere, so that
+        // Ctrl-C or closing the terminal doesn't stop it partway. (A job object that kills its
+        // processes when it closes still can; git copes, and repacks next time.)
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        if !self.auto_detach()? {
+            return Ok(false);
+        }
+        // Nothing waits for it, so as with git's own detached gc a failure goes unreported,
+        // and the next `gc --auto` tries again.
+        self.command(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|source| spawn_err(args, source))?;
+        Ok(true)
+    }
+
+    /// git detaches `gc --auto` itself here.
+    #[cfg(not(windows))]
+    fn gc_in_background(&self, _args: &[&str]) -> Result<bool, ObjectError> {
+        Ok(false)
+    }
+
+    /// Whether git would run `gc --auto` in the background: `gc.autoDetach`, true by default.
+    #[cfg(windows)]
+    fn auto_detach(&self) -> Result<bool, ObjectError> {
+        let value = self.run(
+            &[
+                "config",
+                "--type=bool",
+                "--default=true",
+                "--get",
+                "gc.autoDetach",
+            ],
+            None,
+        )?;
+        Ok(String::from_utf8_lossy(&value).trim() != "false")
     }
 
     /// Fails unless every object reachable from `wants` is present, assuming everything

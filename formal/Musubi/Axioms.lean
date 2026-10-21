@@ -8,6 +8,7 @@ import Musubi.Merged
 import Musubi.Chunks
 import Musubi.Scenario
 import Musubi.ExecSound
+import Musubi.Refs
 
 open Musubi
 
@@ -58,3 +59,12 @@ open Musubi
 #print axioms Exec.abs_initE
 #print axioms Exec.exec_reachable
 #print axioms Exec.exec_inv
+-- Per-machine and shared view state
+#print axioms Refs.noSpuriousRevert
+#print axioms Refs.import_moves_only_after_git
+#print axioms Refs.verbatim_reverts
+#print axioms Refs.realize_noninterference
+#print axioms Refs.verbatim_interferes
+#print axioms Refs.merge_in_sync
+#print axioms Refs.remoteNoSpuriousRevert
+#print axioms Refs.remote_reset_without_export

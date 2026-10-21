@@ -1,6 +1,7 @@
 # Lean model of the musubi sync protocol
 
-This directory is a machine-checked Lean 4 model of [`docs/protocol.md`](../docs/protocol.md).
+This directory is a machine-checked Lean 4 model of [`docs/protocol.md`](../docs/protocol.md),
+and, in `Musubi/Refs.lean`, of the per-machine view state of [`docs/design.md`](../docs/design.md).
 It contains no `sorry` and adds no axioms. Every main theorem depends only on `propext`,
 `Classical.choice` and `Quot.sound`. Some depend on fewer, and `Musubi/Axioms.lean` prints
 the exact list.
@@ -49,6 +50,7 @@ The binary is `formal/.lake/build/bin/oracle`.
 | `Musubi/ExecTest.lean` | `#guard` smoke tests of `execStep`, checked at build time. |
 | `Oracle.lean` | The `oracle` executable: a stdin/stdout loop around `ExecJson.handle`. |
 | `test/smoke.jsonl`, `test/smoke.expected`, `test/run_smoke.sh` | The oracle smoke test. |
+| `Musubi/Refs.lean` | Per-machine and shared state of a replicated view, for one git ref: jj's ref import and export against an adversarial `.git`, no spurious revert for local and remote bookmarks, and the verbatim-replication counterexample (docs/design.md, "Per-machine state in a replicated view"). Independent of the protocol model. |
 | `Musubi/Axioms.lean` | `#print axioms` for every main theorem. |
 
 ## Correspondence with protocol.md

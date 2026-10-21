@@ -203,16 +203,19 @@ has now, what the hive has as of its head, and what both had when they last agre
 records its own changes, and applies the hive's: remotes with `git remote`, which also
 renames or deletes the remote-tracking refs, and config keys in its repo config file.
 Config values are compared as TOML, normalized, so that machines that write the same value
-differently agree on it. Remote URLs, likewise, are compared by the repository they name,
-their key as for joining (under "Which hive"): the merge works on keys, and each machine
-writes the result in its own spelling. The key is a pure function of the URL, so every
-machine agrees on which URLs are the same. Each URL is compared on its own (a push URL that
-names the repository the URL names is spelling too), and against both what the machines
-last agreed on and the hive's current settings, so that a machine's spelling of what they
-agreed on doesn't read as a change of its own when the hive has since moved on. So a
-machine keeps its own spelling of a shared remote, one over https and another over ssh,
-joining or later, and respelling it records nothing; pointing a URL at another repository
-replicates, and only the URLs that changed are written. A machine that joins adds its remotes to the hive's, but takes the hive's where both have a
+differently agree on it. Remotes, likewise, are compared by the repositories they name:
+two are equal when their URLs have the same key (as for joining, under "Which hive"), and
+so do their push targets (the push URL, or else the URL). The merge, the checks for what
+changed, and the detection of renames all use that equality, so they work on where remotes
+point, not on how they are spelled, and the key is a pure function of the URL, so every
+machine agrees on it. A machine's own spelling of a shared remote, over https on one
+machine and ssh on another, is never a change, and respelling it records nothing. Applying
+a change writes only the URLs whose repository differs, and removes a push URL that no
+longer names where pushes go, so a machine keeps its spelling of whatever it still shares.
+For machines that don't have a remote yet, the settings hold the spelling of whichever
+machine last recorded settings; every spelling names the same repository. Merges are per
+remote: one machine changing a remote's URL while another changes its push URL conflict,
+and the change that reaches the hub first wins. A machine that joins adds its remotes to the hive's, but takes the hive's where both have a
 remote of the same name for different repositories; the first machine's settings become
 the hive's. A machine that needs another identity for a remote, an ssh key of its own,
 say, should keep the ordinary URL and rewrite it with git's `url.<base>.insteadOf` in its

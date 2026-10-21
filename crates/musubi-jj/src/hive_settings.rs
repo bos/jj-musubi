@@ -252,10 +252,12 @@ mod tests {
 
     #[test]
     fn round_trips_through_the_attribute() {
+        // Compared as written: remotes' equality ignores spelling, the attribute doesn't.
         let settings = with(&[("origin", "git@example.com:repo.git")]);
+        let attribute = settings.to_attribute();
         assert_eq!(
-            HiveSettings::parse(&settings.to_attribute()).unwrap(),
-            settings
+            HiveSettings::parse(&attribute).unwrap().to_attribute(),
+            attribute
         );
     }
 }

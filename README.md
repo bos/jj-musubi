@@ -56,7 +56,7 @@ the URLs it prints then carry (`nats://<token>@myhost:41234`).
 
 A hub serves any number of repositories, each its own hive. A fork, which shares history
 but has a remote of its own, gets a hive of its own; `musubi join --hive <name>` joins a
-chosen hive instead, and `musubi join --new --name <name>` starts one. Run `musubi hub`
+chosen hive instead, and `musubi join --new <name>` starts one. Run `musubi hub`
 again in the same place after a restart: it keeps its port (and token).
 
 Workspaces stay per-machine: each machine keeps its own `default@`, and shows the other

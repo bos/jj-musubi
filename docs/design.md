@@ -362,7 +362,7 @@ copies joining at once can't both create a hive:
 1. A repository with no commits of its own is refused: there is nothing to match, and
    nothing to share.
 2. `--hive <name>` joins that hive, but only if the repository is related to it.
-3. `--new --name <name>` creates a hive.
+3. `--new <name>` creates a hive.
 4. Otherwise, a hive is *related* if it has stored one of the repository's root commits
    (ever: hidden ones count), or has a commit one of its remote bookmarks points to (which
    covers a shallow clone, whose roots are cut off). Among related hives, one that shares a

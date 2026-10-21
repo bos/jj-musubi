@@ -69,12 +69,9 @@ enum Command {
         /// Join this hive (a name, a prefix of one, or an id).
         #[arg(long, conflicts_with = "new")]
         hive: Option<String>,
-        /// Start a new hive, even if one matches.
-        #[arg(long, requires = "name")]
-        new: bool,
-        /// The new hive's name.
-        #[arg(long, requires = "new")]
-        name: Option<String>,
+        /// Start a new hive with this name, even if one matches.
+        #[arg(long, value_name = "NAME")]
+        new: Option<String>,
         /// This machine's name in the hive, which other machines show its workspaces under,
         /// as in `laptop/default`. Defaults to jj's `operation.hostname`.
         #[arg(long)]
@@ -210,12 +207,11 @@ fn main() -> anyhow::Result<()> {
         Command::Join {
             hive,
             new,
-            name,
             machine,
             full_history,
             nats,
         } => {
-            let choice = match (hive, new.then_some(name).flatten()) {
+            let choice = match (hive, new) {
                 (Some(hive), _) => Choice::Hive(hive),
                 (None, Some(name)) => Choice::New(name),
                 (None, None) => Choice::Match,

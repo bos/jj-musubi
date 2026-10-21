@@ -46,6 +46,10 @@ struct NatsSettings {
     /// A token clients must give, once `--token` has asked for one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     token: Option<String>,
+    /// The host name other machines reach it by, once `--advertise` has given one: a
+    /// machine's own name for itself isn't always one they can use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    advertise: Option<String>,
 }
 
 impl HubSettings {
@@ -142,13 +146,19 @@ pub fn serve(args: ServeArgs) -> anyhow::Result<()> {
             None => NatsSettings {
                 port: free_port()?,
                 token: None,
+                advertise: None,
             },
         };
         let token = match nats.token {
             None if args.token => Some(uuid::Uuid::new_v4().simple().to_string()),
             token => token,
         };
-        settings.nats = Some(NatsSettings { token, ..nats });
+        let advertise = args.advertise.clone().or(nats.advertise);
+        settings.nats = Some(NatsSettings {
+            token,
+            advertise,
+            ..nats
+        });
     }
     settings.save(&dir)?;
     let server = HubServer::open(&dir, &default_subject_prefix())?;
@@ -177,8 +187,8 @@ pub fn serve(args: ServeArgs) -> anyhow::Result<()> {
                         );
                     }
                 }
-                let host = match args.advertise {
-                    Some(host) => host,
+                let host = match &nats.advertise {
+                    Some(host) => host.clone(),
                     None => whoami::hostname().unwrap_or_else(|_| "localhost".to_owned()),
                 };
                 let credentials = nats

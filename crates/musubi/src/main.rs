@@ -55,8 +55,8 @@ enum Command {
         /// A NATS server to serve on, in place of starting one.
         #[arg(long)]
         nats: Option<String>,
-        /// The host name other machines reach this one by, for the join command it
-        /// prints [default: this machine's host name].
+        /// The host name other machines reach this one by, for the commands it prints
+        /// [default: this machine's host name]. Once given, the hub keeps it (in hub.toml).
         #[arg(long)]
         advertise: Option<String>,
         /// Have the NATS server it starts require a token, which the URLs it prints then
@@ -175,7 +175,12 @@ fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                tracing_subscriber::EnvFilter::new(if serving { "info" } else { "warn" })
+                tracing_subscriber::EnvFilter::new(if serving {
+                    // async_nats announces every connection at info.
+                    "info,async_nats=warn"
+                } else {
+                    "warn"
+                })
             }),
         )
         .with_writer(std::io::stderr)

@@ -58,8 +58,7 @@ impl HiveConfig {
     pub fn save(&self, repo_path: &Path) -> anyhow::Result<()> {
         let dir = repo_path.join("musubi");
         fs::create_dir_all(&dir)?;
-        let path = dir.join("hive.toml");
-        fs::write(&path, toml::to_string(self)?).with_context(|| format!("writing {path:?}"))
+        write_private(&dir.join("hive.toml"), toml::to_string(self)?.as_bytes())
     }
 
     /// The subject the hub serves requests on.
@@ -102,6 +101,28 @@ impl DaemonSettings {
     fn is_default(&self) -> bool {
         *self == Self::default()
     }
+}
+
+/// Writes `path` so that only its owner can read it, since it may hold a hub's token, and
+/// so that a crash leaves either the old contents or the new ones, durably. Windows can't
+/// open a directory to sync it, so there the rename is as durable as the filesystem makes
+/// it.
+pub fn write_private(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    let dir = path.parent().context("a file to write has no directory")?;
+    let write = || -> std::io::Result<()> {
+        // On Unix the temporary file is created readable only by its owner (0600), and the
+        // rename keeps that.
+        let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+        tmp.write_all(contents)?;
+        tmp.as_file().sync_all()?;
+        tmp.persist(path).map_err(|err| err.error)?;
+        if cfg!(unix) {
+            fs::File::open(dir)?.sync_all()?;
+        }
+        Ok(())
+    };
+    write().with_context(|| format!("writing {path:?}"))
 }
 
 /// The user's musubi config directory.
@@ -148,14 +169,7 @@ impl UserConfig {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;
         }
-        // Atomically, so that a reader never sees half of it.
-        let dir = path.parent().context("config path has no directory")?;
-        let tmp = tempfile::NamedTempFile::new_in(dir)?;
-        fs::write(tmp.path(), toml::to_string(self)?)?;
-        tmp.persist(&path)
-            .map_err(|err| err.error)
-            .with_context(|| format!("writing {path:?}"))?;
-        Ok(())
+        write_private(&path, toml::to_string(self)?.as_bytes())
     }
 
     /// Changes the saved config.
@@ -194,5 +208,25 @@ impl UserConfig {
                  saves it as the default)",
             ),
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use super::*;
+
+    #[test]
+    fn private_files_are_owner_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        // Replacing a file other users could read leaves one they can't.
+        fs::write(&path, "old").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        write_private(&path, b"new").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+        let mode = fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 }

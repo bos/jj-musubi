@@ -7,6 +7,8 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::Duration;
+use std::time::Instant;
 
 use jj_lib::backend::CommitId;
 use musubi_jj::workspaces;
@@ -75,15 +77,32 @@ pub struct Joined {
     pub reason: String,
 }
 
+/// How long the hub counts what a joining repository brings as the hive's before the
+/// repository has pushed it: long enough for its first sync to start.
+const PENDING_LIFETIME: Duration = Duration::from_secs(120);
+
 struct Hive {
     dir: PathBuf,
     meta: HiveMeta,
     index: HiveIndex,
+    /// Joins whose first push the hive hasn't accepted yet.
+    pending: Vec<Pending>,
+}
+
+/// What a joining repository said it brings, so that another copy of it joining meanwhile
+/// finds the same hive. It is forgotten once the joining machine's first push is accepted,
+/// which puts what it really brought in the index, or after a while if it never comes.
+struct Pending {
+    machine: String,
+    urls: Vec<String>,
+    roots: BTreeSet<String>,
+    until: Instant,
 }
 
 pub struct HubDir {
     dir: PathBuf,
     hives: BTreeMap<String, Hive>,
+    pending_lifetime: Duration,
 }
 
 /// Errors that are the requester's to fix, worded for them.
@@ -128,13 +147,21 @@ impl HubDir {
                     dir: hive_dir,
                     meta,
                     index,
+                    pending: vec![],
                 },
             );
         }
         Ok(Self {
             dir: dir.to_owned(),
             hives,
+            pending_lifetime: PENDING_LIFETIME,
         })
+    }
+
+    /// How long a join counts for matching before its first push, for tests.
+    pub fn with_pending_lifetime(mut self, lifetime: Duration) -> Self {
+        self.pending_lifetime = lifetime;
+        self
     }
 
     pub fn len(&self) -> usize {
@@ -167,7 +194,15 @@ impl HubDir {
         write_meta(&dir, &meta)?;
         let index = HiveIndex::default();
         index.save(&dir)?;
-        self.hives.insert(id.clone(), Hive { dir, meta, index });
+        self.hives.insert(
+            id.clone(),
+            Hive {
+                dir,
+                meta,
+                index,
+                pending: vec![],
+            },
+        );
         Ok(id)
     }
 
@@ -255,12 +290,14 @@ impl HubDir {
         Ok(info)
     }
 
-    /// Replaces a hive's index with one its store computed, keeping what joining
-    /// repositories said they would bring.
+    /// Adds what newly accepted operations brought to a hive's index, and forgets the
+    /// pending joins of machines that are now in it.
     pub fn update_index(&mut self, id: &str, index: HiveIndex) -> anyhow::Result<()> {
         let Some(hive) = self.hives.get_mut(id) else {
             return Ok(());
         };
+        hive.pending
+            .retain(|pending| !index.machines.contains(&pending.machine));
         hive.index.urls.extend(index.urls);
         hive.index.roots.extend(index.roots);
         hive.index.machines = index.machines;
@@ -288,6 +325,10 @@ impl HubDir {
                 return Err(format!("there is already a hive named {name}"));
             }
         }
+        let now = Instant::now();
+        for hive in self.hives.values_mut() {
+            hive.pending.retain(|pending| pending.until > now);
+        }
         let roots: BTreeSet<&String> = request.roots.iter().collect();
         let targets: Vec<CommitId> = request
             .remote_targets
@@ -296,9 +337,16 @@ impl HubDir {
             .collect();
         let mut candidates = vec![];
         for (id, hive) in &self.hives {
+            let pending_roots = hive.pending.iter().flat_map(|pending| &pending.roots);
             let related = hive.meta.backend == backend.name()
-                && (hive.index.roots.iter().any(|root| roots.contains(root))
+                && (hive
+                    .index
+                    .roots
+                    .iter()
+                    .chain(pending_roots)
+                    .any(|root| roots.contains(root))
                     || has_any(backend, &hive.dir, &targets).map_err(refusal)?);
+            let pending_urls = hive.pending.iter().flat_map(|pending| &pending.urls);
             candidates.push(Candidate {
                 id: id.clone(),
                 name: hive.meta.name.clone(),
@@ -307,6 +355,7 @@ impl HubDir {
                     .index
                     .urls
                     .iter()
+                    .chain(pending_urls)
                     .filter_map(|url| RemoteUrl::parse(url))
                     .map(|url| url.key())
                     .collect(),
@@ -338,9 +387,12 @@ impl HubDir {
             }
         };
         let hive = self.hives.get_mut(&id).expect("chosen or created");
-        let urls: Vec<String> = request.remotes.iter().map(|(_, url)| url.clone()).collect();
-        hive.index.expect(&urls, &request.roots);
-        hive.index.save(&hive.dir).map_err(refusal)?;
+        hive.pending.push(Pending {
+            machine: request.machine.clone(),
+            urls: request.remotes.iter().map(|(_, url)| url.clone()).collect(),
+            roots: request.roots.iter().cloned().collect(),
+            until: now + self.pending_lifetime,
+        });
         let mut info = self.info(&id).expect("chosen or created");
         let joining = workspaces::machine_name(&request.machine).to_owned();
         let mut machines: BTreeSet<String> = info.machines.into_iter().collect();
@@ -374,4 +426,55 @@ fn write_meta(dir: &Path, meta: &HiveMeta) -> anyhow::Result<()> {
     fs::write(tmp.path(), toml::to_string(meta)?)?;
     tmp.persist(dir.join(HIVE_FILE))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(machine: &str, url: &str) -> JoinRequest {
+        JoinRequest {
+            backend: "git".to_owned(),
+            remotes: vec![("origin".to_owned(), url.to_owned())],
+            dir_name: "project".to_owned(),
+            roots: vec!["11".repeat(20)],
+            machine: format!("{machine}#00000000"),
+            ..JoinRequest::default()
+        }
+    }
+
+    /// A second copy joining before the first has pushed finds the first's hive, but only
+    /// for a while: a join that never pushes stops counting.
+    #[test]
+    fn pending_joins_count_until_they_expire_or_push() {
+        for (lifetime, joins_the_same) in [(PENDING_LIFETIME, true), (Duration::ZERO, false)] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut hubs = HubDir::open(dir.path())
+                .unwrap()
+                .with_pending_lifetime(lifetime);
+            let url = "https://example.com/team/project";
+            let first = hubs.join(&request("alpha", url)).unwrap();
+            assert!(first.created);
+            let second = hubs.join(&request("beta", url)).unwrap();
+            assert_eq!(
+                second.hive.id == first.hive.id,
+                joins_the_same,
+                "{lifetime:?}"
+            );
+        }
+        // An accepted push from the joining machine replaces its pending join.
+        let dir = tempfile::tempdir().unwrap();
+        let mut hubs = HubDir::open(dir.path()).unwrap();
+        let first = hubs
+            .join(&request("alpha", "https://example.com/a"))
+            .unwrap();
+        let id = first.hive.id;
+        assert_eq!(hubs.hives[&id].pending.len(), 1);
+        let pushed = HiveIndex {
+            machines: BTreeSet::from(["alpha#00000000".to_owned()]),
+            ..HiveIndex::default()
+        };
+        hubs.update_index(&id, pushed).unwrap();
+        assert!(hubs.hives[&id].pending.is_empty());
+    }
 }

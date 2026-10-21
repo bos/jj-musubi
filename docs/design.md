@@ -381,9 +381,11 @@ repository doesn't orphan it.
 For this the hub keeps an index for each hive: every remote URL its settings have recorded,
 every root commit it has stored, and the machines with workspaces at its head. The index is
 updated whenever a head is accepted, and is a cache: the hub rebuilds it from the hive's
-operations and objects when it is missing. A join also adds what the joining repository
-brings to its hive's index before it has pushed it, so that another copy joining meanwhile
-finds the hive.
+operations and objects when it is missing. A join also counts what the joining repository
+says it brings, its URLs and root commits, as its hive's for a couple of minutes, so that
+another copy joining before the first one's push finds the same hive. That stops counting
+once the joining machine's first push is accepted, which puts what it really brought in
+the index, or when the time is up, so a join that never pushes leaves nothing behind.
 
 A new hive is named after the remote named `origin`, else the first remote by name, else
 the repository's directory. The name follows the forge: `owner/repo` on GitHub, Codeberg,

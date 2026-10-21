@@ -117,7 +117,9 @@ session against the hub directly, downloads its blob, backdates the blob past th
 hour, and makes the fetch again, as another node would. The second fetch gets the same
 blob, and its download survives a sweep and outlasts the time the hub keeps a blob it has
 served. So does the download for a third fetch, made before the second download finishes
-and paced to span that time.
+and paced to span that time. `uploads_leave_prepared_blobs_alone` downloads a fetch's
+blob, then uploads the same content and pushes it, as another node would push what the
+first fetched, and downloads the blob again.
 
 A connection that dies partway through a message never delivers part of it: the stream
 transport frames each message with its length and drops an incomplete one. A killed connection reaches

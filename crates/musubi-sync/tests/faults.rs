@@ -261,7 +261,7 @@ fn blobs_prepared_again_last_as_long_as_new_ones() {
 
     // Just after, another node's fetch gets the same blob, prepared long ago as far as the
     // sweep can tell.
-    let file = hub_dir.join("blobs/complete").join(blob.hex());
+    let file = hub_dir.join("blobs/prepared/complete").join(blob.hex());
     std::fs::File::options()
         .write(true)
         .open(file)
@@ -284,6 +284,52 @@ fn blobs_prepared_again_last_as_long_as_new_ones() {
         std::thread::sleep(served_lifetime / 10);
         chunk(&mut hub, blob, 0);
     }
+    download(&mut hub, blob, len);
+}
+
+/// A node may upload a bundle with the same content as a blob the hub prepared for another
+/// node's download, as a push of what the other node fetched. Its upload is its own: the
+/// hub deletes it once it has the push, and the blob for the download stays.
+#[test]
+fn uploads_leave_prepared_blobs_alone() {
+    let session = session();
+    let fetch_call = session
+        .calls
+        .iter()
+        .find(|call| matches!(call.request, Request::Fetch { .. }) && call.requests > 1)
+        .unwrap();
+    // A push that uploads its objects.
+    let push_call = session
+        .calls
+        .iter()
+        .find(|call| matches!(call.request, Request::Push { .. }) && call.requests > 1)
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut hub = session.hub_after(fetch_call.start, &dir.path().join("hub"));
+    let fetch = encode(HubRequest::Protocol(fetch_call.request.clone()));
+    let (blob, len) = prepare(&mut hub, &fetch);
+    let content = download(&mut hub, blob, len);
+
+    // Another node pushes the same content.
+    for request in upload(&content) {
+        hub.handle_bytes(&request, MAX_PAYLOAD).unwrap();
+    }
+    let push = map_request(
+        push_call.request.clone(),
+        |id| id,
+        |attachment| {
+            Ok(match attachment {
+                WireAttachment::Blob { .. } => WireAttachment::Blob { blob, len },
+                other => other,
+            })
+        },
+    )
+    .unwrap();
+    hub.handle_bytes(&encode(HubRequest::Protocol(push)), MAX_PAYLOAD)
+        .ok();
+    let upload = dir.path().join("hub/blobs/complete").join(blob.hex());
+    assert!(!upload.exists(), "the hub kept the push's upload");
+    // The first node asks again, as when a reply was lost.
     download(&mut hub, blob, len);
 }
 
@@ -405,9 +451,11 @@ impl Transport for Link {
 /// What an hour without a word from a node does at the hub: its sweep removes the
 /// transfers in progress, uploads and prepared downloads alike.
 fn an_hour_passes(hub_dir: &Path) {
-    for sub in ["partial", "complete"] {
-        for entry in std::fs::read_dir(hub_dir.join("blobs").join(sub)).unwrap() {
-            std::fs::remove_file(entry.unwrap().path()).unwrap();
+    for store in ["blobs", "blobs/prepared"] {
+        for sub in ["partial", "complete"] {
+            for entry in std::fs::read_dir(hub_dir.join(store).join(sub)).unwrap() {
+                std::fs::remove_file(entry.unwrap().path()).unwrap();
+            }
         }
     }
 }
@@ -842,9 +890,18 @@ fn encode(request: HubRequest) -> Vec<u8> {
 
 /// `bytes` uploaded as a blob, then sent as an indirect request.
 fn as_blob(bytes: &[u8]) -> Vec<Vec<u8>> {
+    let mut requests = upload(bytes);
+    requests.push(encode(HubRequest::Indirect {
+        blob: BlobId::of_bytes(bytes),
+    }));
+    requests
+}
+
+/// The requests that upload `bytes` as a blob.
+fn upload(bytes: &[u8]) -> Vec<Vec<u8>> {
     let blob = BlobId::of_bytes(bytes);
     let chunk = chunk_size(MAX_PAYLOAD);
-    let mut requests: Vec<Vec<u8>> = bytes
+    bytes
         .chunks(chunk)
         .enumerate()
         .map(|(i, data)| {
@@ -855,9 +912,7 @@ fn as_blob(bytes: &[u8]) -> Vec<Vec<u8>> {
                 data: data.to_vec(),
             })
         })
-        .collect();
-    requests.push(encode(HubRequest::Indirect { blob }));
-    requests
+        .collect()
 }
 
 /// Makes `fetch`, returning the blob the objects it brings travel as.
@@ -901,7 +956,7 @@ fn chunk(hub: &mut HubService, blob: BlobId, offset: u64) -> Vec<u8> {
 }
 
 /// Downloads all of `blob`, a chunk at a time.
-fn download(hub: &mut HubService, blob: BlobId, len: u64) {
+fn download(hub: &mut HubService, blob: BlobId, len: u64) -> Vec<u8> {
     let mut content = vec![];
     while (content.len() as u64) < len {
         let data = chunk(hub, blob, content.len() as u64);
@@ -909,6 +964,7 @@ fn download(hub: &mut HubService, blob: BlobId, len: u64) {
         content.extend(data);
     }
     assert_eq!(BlobId::of_bytes(&content), blob);
+    content
 }
 
 /// The ids a malformed request most needs to get anywhere: the hub's head, the root, and

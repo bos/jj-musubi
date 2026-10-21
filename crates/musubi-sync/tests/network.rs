@@ -355,7 +355,7 @@ async fn prepared_blobs_go_once_downloaded() {
             assert!(visible(&beta).contains("big"));
             // Any request lets the hub tidy up.
             drivers[1].sync().await.unwrap();
-            let complete = env.root().join("hub/blobs/complete");
+            let complete = env.root().join("hub/blobs/prepared/complete");
             let left: Vec<_> = std::fs::read_dir(complete).unwrap().collect();
             assert!(left.is_empty(), "prepared blobs left: {left:?}");
         })

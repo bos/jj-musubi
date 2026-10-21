@@ -34,7 +34,7 @@ use crate::wire::map_reply;
 use crate::wire::map_request;
 
 /// How long the hub keeps a blob it prepared for a node that never downloaded all of it,
-/// and an abandoned partial upload.
+/// and an abandoned upload.
 const PREPARED_BLOB_LIFETIME: Duration = Duration::from_secs(3600);
 
 /// How long the hub keeps a prepared blob after serving its last chunk, in case the node
@@ -43,8 +43,12 @@ const SERVED_BLOB_LIFETIME: Duration = Duration::from_secs(60);
 
 pub struct HubService {
     hub: HubAdapter,
-    blobs: BlobStore,
-    blobs_dir: std::path::PathBuf,
+    /// Blobs nodes upload: bundles attached to their requests, and requests too large to
+    /// send whole.
+    uploads: BlobStore,
+    /// Blobs prepared for nodes to download. They are kept apart from uploads, which can
+    /// have the same content, so that deleting one never takes away the other.
+    prepared: BlobStore,
     tmp: std::path::PathBuf,
     rpc_subject: String,
     head_subject: String,
@@ -63,13 +67,16 @@ impl HubService {
         rpc_subject: String,
         head_subject: String,
     ) -> anyhow::Result<Self> {
-        let blobs_dir = dir.join("blobs");
+        let blobs = dir.join("blobs");
         let tmp = dir.join("tmp");
         std::fs::create_dir_all(&tmp)?;
         Ok(Self {
             hub,
-            blobs: BlobStore::open(&blobs_dir)?,
-            blobs_dir,
+            uploads: BlobStore::open(&blobs)?,
+            // Inside `blobs/`, so that it still holds every transfer, and so that a hub
+            // upgraded from before sweeps the prepared blobs it left in `blobs/complete` as
+            // old uploads.
+            prepared: BlobStore::open(&blobs.join("prepared"))?,
             tmp,
             rpc_subject,
             head_subject,
@@ -142,7 +149,7 @@ impl HubService {
         if encoded.len() <= max_payload {
             return Ok((encoded, notice));
         }
-        let (blob, len) = self.blobs.insert_bytes(&encoded)?;
+        let (blob, len) = self.prepared.insert_bytes(&encoded)?;
         self.served.remove(&blob);
         Ok((Envelope::encode(HubReply::Indirect { blob, len })?, notice))
     }
@@ -159,7 +166,7 @@ impl HubService {
                 offset,
                 data,
             } => {
-                let received = self.blobs.receive(&blob, total, offset, &data)?;
+                let received = self.uploads.receive(&blob, total, offset, &data)?;
                 let (received, complete) = match received {
                     Received::Prefix(have) => (have, false),
                     Received::Complete => (total, true),
@@ -171,7 +178,7 @@ impl HubService {
                 let len = usize::try_from(len)
                     .unwrap_or(usize::MAX)
                     .min(chunk_size(max_payload));
-                let (total, data) = self.blobs.read(&blob, offset, len)?;
+                let (total, data) = self.prepared.read(&blob, offset, len)?;
                 // Once one download has finished, another may still be going: the minute
                 // runs from the last chunk anyone asks for.
                 if offset + data.len() as u64 >= total || self.served.contains_key(&blob) {
@@ -181,11 +188,11 @@ impl HubService {
             }
             HubRequest::Indirect { blob } => {
                 let path = self
-                    .blobs
+                    .uploads
                     .get(&blob)
                     .ok_or_else(|| anyhow::anyhow!("no blob {blob:?}"))?;
                 let inner = Envelope::<HubRequest>::decode(&std::fs::read(path)?)?;
-                self.blobs.remove(&blob);
+                self.uploads.remove(&blob);
                 anyhow::ensure!(
                     matches!(inner, HubRequest::Protocol(_)),
                     "nested indirection"
@@ -199,7 +206,7 @@ impl HubService {
                         WireAttachment::None => Attachment::None,
                         WireAttachment::Blob { blob, .. } => {
                             uploaded.push(blob);
-                            let path = self.blobs.get(&blob).ok_or_else(|| {
+                            let path = self.uploads.get(&blob).ok_or_else(|| {
                                 anyhow::anyhow!("attachment {blob:?} was not uploaded")
                             })?;
                             Attachment::File(path)
@@ -219,7 +226,7 @@ impl HubService {
                 let handled = hub::handle(&mut self.hub, request);
                 // Uploaded bundles are imported (or rejected) now; either way they are done.
                 for blob in uploaded {
-                    self.blobs.remove(&blob);
+                    self.uploads.remove(&blob);
                 }
                 let handled = handled?;
                 log_reply(&handled.reply);
@@ -243,7 +250,7 @@ impl HubService {
                                     inline_left -= len;
                                     WireAttachment::Inline(std::fs::read(path)?)
                                 } else {
-                                    let (blob, len) = self.blobs.insert_file(path)?;
+                                    let (blob, len) = self.prepared.insert_file(path)?;
                                     self.served.remove(&blob);
                                     WireAttachment::Blob { blob, len }
                                 }
@@ -266,33 +273,21 @@ impl HubService {
     /// Deletes prepared blobs a while after their last chunk was served.
     fn forget_served(&mut self) {
         let now = Instant::now();
-        let (blobs, lifetime) = (&self.blobs, self.served_lifetime);
+        let (prepared, lifetime) = (&self.prepared, self.served_lifetime);
         self.served.retain(|blob, served| {
             let keep = now.duration_since(*served) < lifetime;
             if !keep {
-                blobs.remove(blob);
+                prepared.remove(blob);
             }
             keep
         });
     }
 
-    /// Deletes prepared blobs nobody downloaded in time, and abandoned partial uploads.
+    /// Deletes prepared blobs nobody downloaded in time, and abandoned uploads.
     fn sweep(&self) {
         let cutoff = SystemTime::now() - PREPARED_BLOB_LIFETIME;
-        for sub in ["complete", "partial"] {
-            let Ok(entries) = std::fs::read_dir(self.blobs_dir.join(sub)) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                let old = entry
-                    .metadata()
-                    .and_then(|m| m.modified())
-                    .is_ok_and(|t| t < cutoff);
-                if old {
-                    std::fs::remove_file(entry.path()).ok();
-                }
-            }
-        }
+        self.uploads.sweep(cutoff);
+        self.prepared.sweep(cutoff);
     }
 }
 

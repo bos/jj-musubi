@@ -208,6 +208,24 @@ impl BlobStore {
         fs::remove_file(self.complete_path(id)).ok();
         fs::remove_file(self.partial_path(id)).ok();
     }
+
+    /// Removes blobs, finished or not, last modified before `cutoff`.
+    pub fn sweep(&self, cutoff: SystemTime) {
+        for sub in ["complete", "partial"] {
+            let Ok(entries) = fs::read_dir(self.dir.join(sub)) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let old = entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .is_ok_and(|t| t < cutoff);
+                if old {
+                    fs::remove_file(entry.path()).ok();
+                }
+            }
+        }
+    }
 }
 
 /// Makes a blob's file as new as one just added, since the hub expires blobs by age.

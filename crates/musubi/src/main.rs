@@ -81,6 +81,13 @@ enum Command {
     Sync,
     /// Show the replication state of the repository in the current directory.
     Status,
+    /// Tools for investigating a hive, not for everyday use.
+    #[command(hide = true, subcommand)]
+    Debug(Debug),
+}
+
+#[derive(Subcommand)]
+enum Debug {
     /// Translate an operation id between this machine's id and the hive's.
     OpId { id: String },
 }
@@ -116,7 +123,7 @@ fn main() -> anyhow::Result<()> {
         Command::Daemon => daemon::run(),
         Command::Sync => sync_once(&cwd),
         Command::Status => status(&cwd),
-        Command::OpId { id } => op_id(&cwd, &id),
+        Command::Debug(Debug::OpId { id }) => op_id(&cwd, &id),
     }
 }
 

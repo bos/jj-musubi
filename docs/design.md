@@ -166,7 +166,7 @@ The per-machine fields therefore stay per-machine.
 Translation applies to every backend. Canonical operations are always written by musubi's
 pinned jj-lib, while local operations may be older files in legacy formats, so even with
 nothing to strip the two need not share ids. An operation has one id on the hub and its own
-local id on each machine. `musubi op-id` translates between them.
+local id on each machine. `musubi debug op-id` translates between them.
 
 ## Hive settings
 
@@ -452,6 +452,6 @@ across incompatible ones. musubi is pinned to jj-lib 0.46.0.
    op-heads watching, realization under the colocated lock.
 3. Objects: git packs, keep refs, and extras; simple-backend store files.
 4. Hub storage, NATS transport, daemon and CLI (`hub`, `join`, `clone`, `sync`, `status`,
-   `op-id`).
+   `debug op-id`).
 5. Generated end-to-end tests and multi-process NATS tests.
 6. Supersede records for `jj op abandon`, hub garbage collection.

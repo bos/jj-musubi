@@ -214,7 +214,7 @@ fn hub_join_sync_clone_and_daemon() {
 
     // Operation ids translate between this machine's and the hive's.
     let local = beta.jj(&["op", "log", "--no-graph", "-n1", "-T", "id"]);
-    let translated = musubi_in(&env, &logs, &beta, &["op-id", &local]);
+    let translated = musubi_in(&env, &logs, &beta, &["debug", "op-id", &local]);
     assert!(
         translated.starts_with(&format!("local {local}")),
         "{translated}"

@@ -43,9 +43,10 @@ Or start a new machine from the hive:
 musubi clone <hive-id> ~/src/project --nats nats://nats.example.com:4222
 ```
 
-`musubi status` shows a repository's replication state. `musubi op-id <id>` translates an
-operation id between this machine's op log and the hive's: each machine records its own
-git refs and workspaces in its operations, so the ids differ.
+`musubi status` shows a repository's replication state. Each machine records its own git refs
+and workspaces in its operations, so the same operation has a different id on each machine and
+in the hive; `musubi debug op-id <id>` translates between them. (`musubi debug` holds tools for
+investigating a hive, and is left out of `musubi --help`.)
 
 ## How it works
 

@@ -56,8 +56,7 @@ impl HubSettings {
     }
 
     fn save(&self, dir: &Path) -> anyhow::Result<()> {
-        fs::write(dir.join(HUB_FILE), toml::to_string(self)?)?;
-        Ok(())
+        config::write_private(&dir.join(HUB_FILE), toml::to_string(self)?.as_bytes())
     }
 }
 

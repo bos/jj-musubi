@@ -357,26 +357,29 @@ fn a_machine_that_lags_behind_respellings_takes_later_changes() {
     );
 }
 
+/// Runs `git` in the clone that seeds origin.
+fn seed_git(hive: &Fixture, seed: &std::path::Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .current_dir(seed)
+        .args(args)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("HOME", hive.env.root().join("home"))
+        .env("GIT_AUTHOR_NAME", "o")
+        .env("GIT_AUTHOR_EMAIL", "o@example.com")
+        .env("GIT_COMMITTER_NAME", "o")
+        .env("GIT_COMMITTER_EMAIL", "o@example.com")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 fn advance_origin(hive: &Fixture, seed: &std::path::Path, n: usize) {
     let origin = hive.env.root().join("origin.git");
-    let run = |args: &[&str]| {
-        let out = std::process::Command::new("git")
-            .current_dir(seed)
-            .args(args)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("HOME", hive.env.root().join("home"))
-            .env("GIT_AUTHOR_NAME", "o")
-            .env("GIT_AUTHOR_EMAIL", "o@example.com")
-            .env("GIT_COMMITTER_NAME", "o")
-            .env("GIT_COMMITTER_EMAIL", "o@example.com")
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    };
+    let run = |args: &[&str]| seed_git(hive, seed, args);
     std::fs::write(seed.join("upstream"), format!("upstream {n}")).unwrap();
     run(&["commit", "--quiet", "-am", &format!("upstream {n}")]);
     run(&["push", "--quiet", origin.to_str().unwrap(), "main"]);
@@ -452,4 +455,113 @@ fn joining_repositories_with_conflicting_bookmarks() {
     let mut hive = Fixture::join(env, vec![alpha, beta]);
     hive.assert_converged();
     assert!(hive.bookmarks(0)["main@"].starts_with("conflict:"));
+}
+
+/// Force-pushes `main` on origin to a sibling of its current commit: a new commit on the
+/// current commit's parent.
+fn force_origin(hive: &Fixture, seed: &std::path::Path, n: usize) {
+    let origin = hive.env.root().join("origin.git");
+    let run = |args: &[&str]| seed_git(hive, seed, args);
+    run(&["reset", "--quiet", "--hard", "HEAD~"]);
+    std::fs::write(seed.join("upstream"), format!("upstream {n}")).unwrap();
+    run(&["commit", "--quiet", "-am", &format!("upstream {n}")]);
+    run(&[
+        "push",
+        "--quiet",
+        "--force",
+        origin.to_str().unwrap(),
+        "main",
+    ]);
+}
+
+/// `main@origin` as the machine's latest operation records it. `--ignore-working-copy`
+/// keeps jj from importing git refs first, as any other `jj` command would.
+fn recorded_main_at_origin(hive: &Fixture, index: usize) -> String {
+    let template = r#"if(remote == "origin", if(conflict, "conflict", normal_target.commit_id()))"#;
+    hive.repo(index).jj(&[
+        "--ignore-working-copy",
+        "bookmark",
+        "list",
+        "--all-remotes",
+        "main",
+        "-T",
+        template,
+    ])
+}
+
+/// Two machines fetch while origin is force-pushed between their fetches, so the hive's
+/// `main@origin` is conflicted. A third machine's `.git` still has the
+/// `refs/remotes/origin/main` of its own earlier fetch, and every `jj` command resolves a
+/// conflicted remote bookmark to what `.git` has. musubi writes one of the conflict's sides
+/// there, the same on every machine, so the hive settles on one of the two fetches rather
+/// than on the older commit. With `stale_record`, the third machine's `.git` has the fetch
+/// of that machine instead, disagreeing with jj's record of it, as after `jj op restore`.
+fn conflicted_fetches(stale_record: Option<usize>) {
+    let mut hive = Fixture::new(&["alpha", "beta", "gamma"]);
+    let seed = with_origin(&hive);
+    hive.repo(2).jj(&["git", "fetch"]);
+    hive.sync();
+    let first = recorded_main_at_origin(&hive, 2);
+    advance_origin(&hive, &seed, 2);
+    hive.repo(0).jj(&["git", "fetch"]);
+    let alphas = recorded_main_at_origin(&hive, 0);
+    force_origin(&hive, &seed, 3);
+    hive.repo(1).jj(&["git", "fetch"]);
+    let betas = recorded_main_at_origin(&hive, 1);
+    if let Some(fetcher) = stale_record {
+        // Behind jj's back: fetch that machine's commit into a scratch ref, then point
+        // gamma's remote-tracking ref at it.
+        let gamma = hive.repo(2);
+        let fetched = recorded_main_at_origin(&hive, fetcher);
+        gamma.git(&[
+            "fetch",
+            "--quiet",
+            hive.repo(fetcher).path().to_str().unwrap(),
+            "+refs/remotes/origin/main:refs/scratch/main",
+        ]);
+        gamma.git(&["update-ref", "refs/remotes/origin/main", &fetched]);
+        gamma.git(&["update-ref", "-d", "refs/scratch/main"]);
+    }
+    hive.sync();
+    for index in 0..3 {
+        assert_eq!(
+            recorded_main_at_origin(&hive, index),
+            "conflict",
+            "on {index}"
+        );
+    }
+    let git_main = |index: usize| {
+        hive.repo(index)
+            .git(&["rev-parse", "refs/remotes/origin/main"])
+            .trim()
+            .to_owned()
+    };
+    let side = git_main(2);
+    assert!(
+        side == alphas || side == betas,
+        "{side} is not a fetched side"
+    );
+    assert_ne!(side, first);
+    for index in 0..3 {
+        assert_eq!(git_main(index), side, "git on {index}");
+        hive.repo(index).jj(&["status"]);
+        assert_eq!(recorded_main_at_origin(&hive, index), side, "on {index}");
+    }
+    hive.sync();
+    hive.assert_converged();
+    for index in 0..3 {
+        assert_eq!(recorded_main_at_origin(&hive, index), side, "on {index}");
+    }
+}
+
+#[test]
+fn conflicted_remote_bookmark_resolves_to_a_fetched_side() {
+    conflicted_fetches(None);
+}
+
+/// One of these two has gamma's `.git` on the side musubi doesn't choose.
+#[test]
+fn conflicted_remote_bookmark_resolves_despite_a_stale_record() {
+    conflicted_fetches(Some(0));
+    conflicted_fetches(Some(1));
 }

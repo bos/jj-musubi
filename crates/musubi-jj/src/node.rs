@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use futures::TryStreamExt as _;
+use gix::refs::transaction::PreviousValue;
 use jj_lib::config::ConfigFile;
 use jj_lib::config::ConfigNamePathBuf;
 use jj_lib::config::ConfigSource;
@@ -33,6 +34,7 @@ use jj_lib::op_store::RemoteView;
 use jj_lib::op_store::View;
 use jj_lib::op_walk;
 use jj_lib::ref_name::GitRefNameBuf;
+use jj_lib::repo::MutableRepo;
 use jj_lib::repo::ReadonlyRepo;
 use jj_lib::repo::Repo as _;
 use jj_lib::repo::RepoLoader;
@@ -1557,6 +1559,7 @@ impl NodeRepo {
         // Refs that fail to export keep their recorded values, exactly as after a failed
         // export in a local `jj` command; jj's next import reconciles them.
         let _stats = jj_lib::git::export_refs(tx.repo_mut())?;
+        export_conflicted_remote_bookmarks(tx.repo_mut())?;
         let view = tx.repo().view().store_view();
         if view == repo.view().store_view() {
             return Ok(realized.clone());
@@ -1578,6 +1581,104 @@ impl NodeRepo {
                 source,
             })
     }
+}
+
+/// Writes one side of each conflicted remote bookmark to this machine's `.git`, which jj's
+/// export leaves alone. Every `jj` command imports `refs/remotes/<remote>/<name>` and resolves
+/// a conflicted remote bookmark to what it finds there. On one machine that is its latest
+/// fetch, one of the sides. Here a machine that made neither fetch still has an older one,
+/// and its import would replicate that, losing both sides (docs/races.md, "Remotes"). Every
+/// machine writes the same side, the one committed last (then the greatest commit id), so
+/// their imports agree: one machine importing anything else would merge with the others'
+/// imports back to an older value. So the write compares against what `.git` holds, not jj's
+/// record of it, and replaces any value the hive already knows of: a term of the conflict,
+/// absent included, or the record. That includes a `git fetch` that happens to match a term;
+/// the next fetch after the conflict resolves corrects it. Any other value, absent included,
+/// was put there by git since, and the import takes it, as it would without musubi. A ref
+/// that can't be read or written is left alone, as jj's export leaves a failed ref.
+fn export_conflicted_remote_bookmarks(mut_repo: &mut MutableRepo) -> Result<(), NodeError> {
+    type Terms = Vec<Option<CommitId>>;
+    let conflicted: Vec<(GitRefNameBuf, Terms)> = mut_repo
+        .view()
+        .all_remote_bookmarks()
+        .filter(|(symbol, remote_ref)| {
+            symbol.remote != REMOTE_NAME_FOR_LOCAL_GIT_REPO
+                && symbol.name.as_str() != "HEAD"
+                && !remote_ref.target.is_resolved()
+        })
+        .map(|(symbol, remote_ref)| {
+            let name = format!(
+                "refs/remotes/{}/{}",
+                symbol.remote.as_str(),
+                symbol.name.as_str()
+            );
+            (name.into(), remote_ref.target.iter().cloned().collect())
+        })
+        .collect();
+    if conflicted.is_empty() {
+        return Ok(());
+    }
+    let git_repo = jj_lib::git::get_git_repo(mut_repo.store()).map_err(GitExportError::from)?;
+    for (name, terms) in conflicted {
+        let mut chosen: Option<(i64, CommitId)> = None;
+        // A conflict's terms alternate add, remove, add, ...; its sides are the adds.
+        for id in terms.iter().step_by(2).flatten() {
+            let time = mut_repo
+                .store()
+                .get_commit(id)?
+                .committer()
+                .timestamp
+                .timestamp
+                .0;
+            if chosen
+                .as_ref()
+                .is_none_or(|(best_time, best)| (time, id) > (*best_time, best))
+            {
+                chosen = Some((time, id.clone()));
+            }
+        }
+        let Some((_, side)) = chosen else {
+            continue;
+        };
+        let actual = match git_repo.try_find_reference(name.as_str()) {
+            Ok(Some(reference)) => match reference.into_fully_peeled_id() {
+                Ok(id) => Some(CommitId::from_bytes(id.detach().as_bytes())),
+                Err(_) => continue,
+            },
+            Ok(None) => None,
+            Err(_) => continue,
+        };
+        let recorded = mut_repo.view().get_git_ref(&name);
+        let known = terms.contains(&actual)
+            || (recorded.is_resolved() && recorded.as_normal() == actual.as_ref());
+        if actual.as_ref() != Some(&side) {
+            if !known {
+                continue;
+            }
+            let Ok(new) = gix::ObjectId::try_from(side.as_bytes()) else {
+                continue;
+            };
+            let constraint = match &actual {
+                Some(old) => {
+                    let Ok(old) = gix::ObjectId::try_from(old.as_bytes()) else {
+                        continue;
+                    };
+                    PreviousValue::MustExistAndMatch(old.into())
+                }
+                None => PreviousValue::MustNotExist,
+            };
+            if git_repo
+                .reference(name.as_str(), new, constraint, "export from musubi")
+                .is_err()
+            {
+                continue;
+            }
+        }
+        if recorded.as_normal() != Some(&side) {
+            mut_repo.set_git_ref_target(&name, RefTarget::normal(side));
+        }
+    }
+    Ok(())
 }
 
 /// Whether the repository shares its git repository with a working copy, so that every

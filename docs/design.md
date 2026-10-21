@@ -20,13 +20,16 @@ This document targets jj-lib 0.46.0.
 ## Vocabulary
 
 - **Hive**: one logical repository replicated by musubi. It has a hive id, a UUID that musubi
-  generates, and one hub. jj repositories have no identity of their own: every repository
-  shares the same all-zero root operation and root commit, and `.jj/repo/config-id` is a
-  machine-local pointer that jj regenerates when it detects a copy.
+  generates, a name for people (`jj-musubi`), and one hub. jj repositories have no identity
+  of their own: every repository shares the same all-zero root operation and root commit,
+  and `.jj/repo/config-id` is a machine-local pointer that jj regenerates when it detects a
+  copy. Which hive a repository belongs to is therefore decided by its history, when it
+  joins (see [Joining](#joining)).
 - **Node**: one local jj repository on one machine taking part in a hive, together with the
   musubi daemon serving it.
-- **Hub**: a long-running musubi process that stores a complete copy of the hive, orders
-  updates, and serves catch-up. It never originates changes. Any machine can run it.
+- **Hub**: a long-running musubi process that stores a complete copy of each of its hives,
+  orders their updates, and serves catch-up. It never originates changes. Any machine can
+  run it, and one hub serves any number of hives.
 - **Canonical operation**: the form of a jj operation that is replicated (see
   [Per-machine state](#per-machine-state-in-a-replicated-view)). Its id is computed by jj's own
   op store code, so it is an ordinary jj operation id.
@@ -351,9 +354,51 @@ and the hub leaves out everything they reach. A node also fetches operations sta
 the newest hub head it has, which includes its own accepted push, so it never downloads
 what it uploaded.
 
-`musubi hub` creates a hive, with a new id, the first time it runs on a directory. Every
-machine, the first included, then runs `musubi join <hive>`. `musubi clone <hive>` creates a
-new colocated repository from a hive and joins it.
+### Which hive
+
+A hub holds many hives, and a joining repository doesn't say which it belongs to: the hub
+works it out, so that setting up a machine is one command. In one request the node sends
+its backend, its remotes' URLs, its root commits (the commits whose parent is the root
+commit, git's parentless commits, leaving out an empty, undescribed working-copy commit),
+and the commits its remote bookmarks point to. The hub decides under its lock, so two
+copies joining at once can't both create a hive:
+
+1. A repository with no commits of its own is refused: there is nothing to match, and
+   nothing to share.
+2. `--hive <name>` joins that hive, but only if the repository is related to it.
+3. `--new --name <name>` creates a hive.
+4. Otherwise, a hive is *related* if it has stored one of the repository's root commits
+   (ever: hidden ones count), or has a commit one of its remote bookmarks points to (which
+   covers a shallow clone, whose roots are cut off). Among related hives, one that shares a
+   remote URL with the repository, any remote and not only `origin`, is the one: exactly
+   one is joined, and several are refused with their names, to choose from with `--hive`.
+   With none, the repository gets a new hive, so a fork, sharing history but with remotes
+   of its own, is a hive of its own. A repository without remotes joins its one related
+   hive, and one with remotes joins a single related hive that has none.
+
+URLs match after normalization: https, ssh, scp-style, `file://`, and local paths reduce
+to a lowercase host, without any user or default port, and a path without trailing `/` or
+`.git`, and the host and path are what is compared. Azure DevOps' https and ssh forms are
+made one. Each hive keeps every URL it has ever had, so renaming a remote or moving a
+repository doesn't orphan it.
+
+For this the hub keeps an index for each hive: every remote URL its settings have recorded,
+every root commit it has stored, and the machines with workspaces at its head. The index is
+updated whenever a head is accepted, and is a cache: the hub rebuilds it from the hive's
+operations and objects when it is missing. A join also adds what the joining repository
+brings to its hive's index before it has pushed it, so that another copy joining meanwhile
+finds the hive.
+
+A new hive is named after the remote named `origin`, else the first remote by name, else
+the repository's directory. The name follows the forge: `owner/repo` on GitHub, Codeberg,
+Forgejo, Gitea, and Bitbucket; the full group path on GitLab; `user/repo` for sourcehut's
+`~user/repo`; `org/project/repo` on Azure DevOps; a Gerrit project without its `a/`; and
+otherwise the last two components of the path. A hive gets the shortest form of its name no
+other hive has: `jj-musubi`, then `bos/jj-musubi`, then `github.com/bos/jj-musubi`. Names
+never change by themselves; `musubi hub rename` changes one. Commands that take a hive
+accept any unique prefix of its name.
+
+`musubi clone <name>` creates a new colocated repository and joins it to the named hive.
 
 ## Abandoning operations and garbage collection
 
@@ -381,10 +426,35 @@ The transport is a small trait. Request/response carries messages up to the nego
 limit. Subscriptions carry hub notifications.
 
 - **NATS** is the first real transport. Hub requests go to `musubi.<hive>.rpc`, and
-  notifications to `musubi.<hive>.head`. Core NATS is enough: the hub is the durable store,
-  so JetStream is not needed. TLS and NATS credentials authenticate machines. Every operation
-  and object is verified against its content hash on receipt, so a misbehaving peer cannot
-  inject data under a false id.
+  notifications to `musubi.<hive>.head`. Requests about the hub as a whole (join, list,
+  resolve a name, rename, remove) go to `musubi.hub.rpc`. The hub takes all of them on one
+  subscription, `musubi.*.rpc`; each hive's requests go to a thread of its own, which
+  opens the hive's store on its first request and answers one request at a time, which is
+  what makes each push atomic, while different hives don't wait for each other. A request
+  for a hive the hub doesn't have is an error: only a join creates hives. Core NATS is
+  enough: the hub is the durable store, so JetStream is not needed. NATS credentials
+  authenticate machines, carried in the URL (`nats://<token>@host:port`, or a user and
+  password), and TLS can protect them in transit. Every operation and object is verified
+  against its content hash on receipt, so a misbehaving peer cannot inject data under a
+  false id.
+
+### Running a hub
+
+A hub is meant for one person's machines, or a team that trusts each other: anyone who can
+reach it, or who has its token if it has one, can read and write every hive on it.
+`musubi hub` serves a directory holding one subdirectory per hive, named by the hive's id,
+each with the hive's store (`canonical/`, `backend`, `git/` and `extras/` or `simple/`,
+`heads`, `blobs/`, `tmp/`), its `hive.toml` (name and backend), and its index. Removed hives move to `removed/`. Without `--dir` the
+hub serves `./musubi-hub`, or the current directory if it is a hub's, and takes a lock in
+the user's state directory, so that a second hub started the same way says where the first
+one is instead of starting; `--dir` runs more hubs on purpose.
+
+Without `--nats`, the hub runs `nats-server` itself, listening on every interface, on a port
+chosen on the first run and kept in the hub directory's `hub.toml` so the URL never
+changes. With `--token` the server requires a random token, also kept there (delete it
+from `hub.toml` to turn it off again). It prints the commands other machines run, with this
+machine's host name (or `--advertise`) in the URL. A hub that was killed leaves its NATS
+server running; the next one finds it on the port and uses it.
 - **In-memory** transport for tests. It can drop, delay, duplicate, and reorder messages, and
   disconnect peers.
 
@@ -394,6 +464,18 @@ the formal model.
 
 ## Local integration
 
+- Each user runs one daemon, which serves every repository listed in its config file
+  (`config.toml` in musubi's config directory, the source of truth), one thread each.
+  Commands reach it over a control socket: tarpc, with JSON messages, over a Unix domain
+  socket (`$XDG_RUNTIME_DIR/musubi/daemon.sock` on Linux, `$TMPDIR/musubi/daemon.sock` on
+  macOS) or a Windows named pipe (`\\.\pipe\musubi-<user>`). It answers `version`, `add`
+  (start serving a repository now, and reply after its first sync), `remove`, `sync`,
+  `status`, and `stop`. `musubi join` and `musubi clone` write the repository's membership
+  and the config file, then ask the daemon to add it, starting the daemon in the background
+  first if none is running. A lock file in the state directory, named after the socket,
+  keeps a second daemon from starting; the daemon holding it removes a socket a crashed
+  daemon left behind. Commands check the daemon's version first, and suggest
+  `musubi daemon restart` when it differs.
 - The daemon watches `.jj/repo/op_heads/heads` with filesystem notifications and also polls
   slowly. It reads operations through jj-lib's op store and never parses jj files itself.
 - Loads and merges go through jj-lib's repo loader, which takes jj's op heads lock. musubi
@@ -456,7 +538,9 @@ across incompatible ones. musubi is pinned to jj-lib 0.46.0.
 2. jj integration: canonical op store, format guard, translation of per-machine fields,
    op-heads watching, realization under the colocated lock.
 3. Objects: git packs, keep refs, and extras; simple-backend store files.
-4. Hub storage, NATS transport, daemon and CLI (`hub`, `join`, `clone`, `sync`, `status`,
-   `debug op-id`).
+4. Hub storage, NATS transport, daemon and CLI (`hub`, `join`, `clone`, `sync`, `list`,
+   `leave`, `debug op-id`); hubs serving many hives, matching joining repositories to them,
+   and a daemon controlled over a local socket.
 5. Generated end-to-end tests and multi-process NATS tests.
 6. Supersede records for `jj op abandon`, hub garbage collection.
+7. Starting the daemon at login, as a launchd, systemd, or Windows login service.

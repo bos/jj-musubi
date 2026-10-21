@@ -8,7 +8,8 @@ test belongs at the narrowest layer that can catch its bug.
 | Formal model | `formal/` (Lean) | Protocol design errors: lost operations, dangling references, duplicate merges, livelock | Proof effort, no runtime |
 | Protocol property tests | `crates/musubi-core/tests` | The Rust state machines departing from the model | Milliseconds per case |
 | Race catalogue | `crates/musubi-sync/tests/races` | Concurrent changes on different machines resolving differently from jj's local behavior (docs/races.md) | ~2 s per test |
-| Example tests | each crate's `tests/` | jj integration details: translation, git refs, objects, joins, transports, the CLI | ~1 s per test |
+| Unit tests | `#[cfg(test)]` modules | Pure logic: URL normalization and hive names across forges, matching joining repositories to hives | Microseconds |
+| Example tests | each crate's `tests/` | jj integration details: translation, git refs, objects, joins, transports, the hub's hives, the CLI | ~1 s per test |
 | Generated end-to-end tests | `crates/musubi-sync/tests/e2e_search` | Everything interacting: real `jj` commands, real repositories, faults | Seconds per case; opt-in |
 
 Run the default suite with `cargo nextest run`, or everything with `just check`. It needs `jj` 0.46.0, `git`, and `nats-server`
@@ -44,6 +45,22 @@ These pin down jj-specific behavior with real repositories created by the `jj` C
 tests are deliberately negative controls. `verbatim_replication_reverts_bookmarks` shows that
 copying operations without translation loses bookmark moves; if it ever starts failing, jj
 has changed and the design needs revisiting, not the test.
+
+### The hub and the CLI
+
+`musubi-sync/tests/server.rs` runs one hub serving several hives over the in-memory
+transport: a first copy creating a hive, a copy with the same remote spelled differently
+joining it, a fork getting its own, an unrelated repository refused, requests for a hive the
+hub lacks failing, and listing, renaming, removing, and an index rebuilt after a restart.
+`musubi-hub`'s unit tests cover URL normalization, naming, and the matching rules case by
+case.
+
+`musubi/tests/cli.rs` runs the binary as a user would: `musubi hub` starting its own
+`nats-server`, `musubi join` creating and then matching a hive, `musubi clone` by a prefix
+of the hive's name, `musubi list`, `leave`, and each machine's daemon, which the first join
+starts in the background, serving a repository joined later without a restart. Each test
+machine has its own config directory, and so its own daemon and control socket; the tests
+stop the daemons, and kill the NATS server a killed hub leaves behind, when they finish.
 
 ## Generated end-to-end tests
 

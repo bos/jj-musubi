@@ -1,86 +1,116 @@
 //! `musubi`: replicate jj repositories between machines.
 
 mod config;
+mod control;
 mod daemon;
+mod hub;
 mod repo;
 mod settings;
 mod watch;
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command as Process;
-use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context as _;
 use clap::Parser;
 use clap::Subcommand;
 use jj_lib::object_id::ObjectId as _;
-use musubi_hub::store::Backend;
-use musubi_sync::hub::HubAdapter;
-use musubi_sync::service::HubService;
-use musubi_transport::NatsTransport;
-use musubi_transport::Transport;
-use uuid::Uuid;
+use musubi_hub::hub_dir::HiveInfo;
+use musubi_hub::hub_dir::JoinRequest;
+use musubi_sync::wire::HubWideReply;
+use musubi_sync::wire::HubWideRequest;
 
-use crate::config::DaemonConfig;
 use crate::config::HiveConfig;
+use crate::config::UserConfig;
+use crate::control::Socket;
+use crate::daemon::Status;
 use crate::repo::Located;
 
 #[derive(Parser)]
 #[command(version, about = "Replicate jj repositories between machines")]
 struct Cli {
+    /// The daemon's control socket, in place of the usual one.
+    #[arg(long, global = true, env = "MUSUBI_SOCKET", hide_env = true)]
+    socket: Option<String>,
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run a hub, which stores a hive and orders its updates. Creates the hive, with a new
-    /// id, the first time it runs on a directory.
+    /// Run a hub, which stores hives and orders their updates. Serves every hive in its
+    /// directory, and starts a NATS server for them unless given one.
+    #[command(args_conflicts_with_subcommands = true)]
     Hub {
-        /// Directory holding the hub's store; created if missing.
+        #[command(subcommand)]
+        action: Option<HubAction>,
+        /// The hub's directory [default: ./musubi-hub, or the current directory if it is a
+        /// hub's].
+        #[arg(short, long)]
+        dir: Option<PathBuf>,
+        /// A NATS server to serve on, in place of starting one.
         #[arg(long)]
-        dir: PathBuf,
-        /// NATS server to serve on.
+        nats: Option<String>,
+        /// The host name other machines reach this one by, for the join command it
+        /// prints [default: this machine's host name].
         #[arg(long)]
-        nats: String,
-        /// The hive's id, when creating it; a new one is generated otherwise.
-        #[arg(long)]
-        hive: Option<Uuid>,
-        /// The backend of the hive's repositories (only needed when creating the store).
-        #[arg(long, default_value = "git")]
-        backend: String,
+        advertise: Option<String>,
+        /// Have the NATS server it starts require a token, which the URLs it prints then
+        /// carry. Once chosen, the hub keeps it (in hub.toml).
+        #[arg(long, conflicts_with = "nats")]
+        token: bool,
     },
-    /// Make the repository in the current directory part of an existing hive.
+    /// Make the repository in the current directory part of a hive: the one on the hub it
+    /// shares history and a remote with, or a new one.
     Join {
-        hive: Uuid,
-        #[arg(long)]
-        nats: String,
-        /// This machine's name in the hive, which other machines show its workspaces under, as
-        /// in `laptop/default`.
-        /// Defaults to jj's `operation.hostname`.
+        /// Join this hive (a name, a prefix of one, or an id).
+        #[arg(long, conflicts_with = "new")]
+        hive: Option<String>,
+        /// Start a new hive, even if one matches.
+        #[arg(long, requires = "name")]
+        new: bool,
+        /// The new hive's name.
+        #[arg(long, requires = "new")]
+        name: Option<String>,
+        /// This machine's name in the hive, which other machines show its workspaces under,
+        /// as in `laptop/default`. Defaults to jj's `operation.hostname`.
         #[arg(long)]
         machine: Option<String>,
         /// Replicate the whole operation history, not just the current state.
         #[arg(long)]
         full_history: bool,
+        /// The hub's NATS URL, as `musubi hub` prints it [default: the one first joined].
+        #[arg(long)]
+        nats: Option<String>,
     },
     /// Create a new colocated repository from a hive.
     Clone {
-        hive: Uuid,
+        /// The hive: a name, a prefix of one, or an id.
+        hive: String,
         destination: PathBuf,
+        /// The hub's NATS URL [default: the one first joined].
         #[arg(long)]
-        nats: String,
+        nats: Option<String>,
         /// This machine's name in the hive. Defaults to jj's `operation.hostname`.
         #[arg(long)]
         machine: Option<String>,
     },
-    /// Serve every configured repository until interrupted.
-    Daemon,
-    /// Sync the repository in the current directory once, then exit.
+    /// List the hub's hives, this machine's copies of them, and how their syncing goes
+    /// (the default command).
+    #[command(alias = "status")]
+    List,
+    /// Stop syncing the repository in the current directory.
+    Leave,
+    /// Sync the repository in the current directory now.
     Sync,
-    /// Show the replication state of the repository in the current directory.
-    Status,
+    /// Run the daemon that keeps this machine's repositories in sync, or control it.
+    Daemon {
+        #[command(subcommand)]
+        action: Option<DaemonAction>,
+    },
     /// Tools for investigating a hive, not for everyday use.
     #[command(hide = true, subcommand)]
     Debug(Debug),
@@ -92,158 +122,361 @@ enum Debug {
     OpId { id: String },
 }
 
+#[derive(Subcommand)]
+enum HubAction {
+    /// Remove a hive from the hub. Its store moves to the hub's `removed/` directory.
+    Rm {
+        hive: String,
+        #[arg(long)]
+        nats: Option<String>,
+    },
+    /// Rename a hive.
+    Rename {
+        hive: String,
+        new_name: String,
+        #[arg(long)]
+        nats: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum DaemonAction {
+    /// Stop the running daemon.
+    Stop,
+    /// Stop the running daemon, if any, and start a new one in the background.
+    Restart,
+}
+
 fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    // The hub and the daemon log what they do; other commands say it themselves.
+    let serving = matches!(
+        cli.command,
+        Some(Command::Hub { action: None, .. } | Command::Daemon { action: None })
+    );
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                tracing_subscriber::EnvFilter::new(if serving { "info" } else { "warn" })
+            }),
         )
         .with_writer(std::io::stderr)
         .init();
     let cwd = std::env::current_dir()?;
-    match Cli::parse().command {
+    let socket = || Socket::locate(cli.socket.as_deref());
+    match cli.command.unwrap_or(Command::List) {
         Command::Hub {
+            action: None,
             dir,
             nats,
-            hive,
-            backend,
-        } => hub(&dir, &nats, hive, &backend),
+            advertise,
+            token,
+        } => hub::serve(hub::ServeArgs {
+            dir,
+            nats,
+            advertise,
+            token,
+        }),
+        Command::Hub {
+            action: Some(HubAction::Rm { hive, nats }),
+            ..
+        } => block_on(async {
+            let nats = UserConfig::nats(nats.as_deref())?;
+            let reply = hub::ask(&nats, HubWideRequest::Remove { name: hive }).await?;
+            if let HubWideReply::Hive(info) = reply {
+                println!("Removed hive {}", info.name);
+            }
+            Ok(())
+        }),
+        Command::Hub {
+            action:
+                Some(HubAction::Rename {
+                    hive,
+                    new_name,
+                    nats,
+                }),
+            ..
+        } => block_on(async {
+            let nats = UserConfig::nats(nats.as_deref())?;
+            let request = HubWideRequest::Rename {
+                name: hive.clone(),
+                to: new_name,
+            };
+            if let HubWideReply::Hive(info) = hub::ask(&nats, request).await? {
+                println!("Renamed hive {hive} to {}", info.name);
+            }
+            Ok(())
+        }),
         Command::Join {
             hive,
-            nats,
+            new,
+            name,
             machine,
             full_history,
-        } => join(&cwd, hive, &nats, machine.as_deref(), full_history),
+            nats,
+        } => {
+            let choice = match (hive, new.then_some(name).flatten()) {
+                (Some(hive), _) => Choice::Hive(hive),
+                (None, Some(name)) => Choice::New(name),
+                (None, None) => Choice::Match,
+            };
+            join(
+                &cwd,
+                choice,
+                nats.as_deref(),
+                machine.as_deref(),
+                full_history,
+                &socket()?,
+            )
+        }
         Command::Clone {
             hive,
             destination,
             nats,
             machine,
-        } => clone(&destination, hive, &nats, machine.as_deref()),
-        Command::Daemon => daemon::run(),
-        Command::Sync => sync_once(&cwd),
-        Command::Status => status(&cwd),
+        } => clone(
+            &destination,
+            &hive,
+            nats.as_deref(),
+            machine.as_deref(),
+            &socket()?,
+        ),
+        Command::List => list(&cwd, socket()),
+        Command::Leave => leave(&cwd, &socket()?),
+        Command::Daemon { action: None } => daemon::run(&socket()?),
+        Command::Daemon {
+            action: Some(DaemonAction::Stop),
+        } => block_on(async {
+            if daemon::stop(&socket()?).await? {
+                println!("Stopped the daemon.");
+            } else {
+                println!("No daemon is running.");
+            }
+            Ok(())
+        }),
+        Command::Daemon {
+            action: Some(DaemonAction::Restart),
+        } => block_on(async {
+            let socket = socket()?;
+            daemon::stop(&socket).await?;
+            daemon::ensure(&socket).await?;
+            println!("Started the daemon.");
+            Ok(())
+        }),
+        Command::Sync => sync(&cwd, &socket()?),
         Command::Debug(Debug::OpId { id }) => op_id(&cwd, &id),
     }
 }
 
-fn subjects(hive: Uuid) -> (String, String) {
-    let config = HiveConfig {
-        hive,
-        nats_url: String::new(),
-        subject_prefix: "musubi".into(),
-        node: String::new(),
-    };
-    (config.rpc_subject(), config.head_subject())
-}
-
-fn hub(dir: &Path, nats: &str, hive: Option<Uuid>, backend: &str) -> anyhow::Result<()> {
-    let hive_file = dir.join("hive");
-    let adapter = if dir.exists() {
-        let stored: Uuid = std::fs::read_to_string(&hive_file)?.trim().parse()?;
-        anyhow::ensure!(
-            hive.is_none_or(|hive| hive == stored),
-            "{} holds hive {stored}, not {}",
-            dir.display(),
-            hive.unwrap_or(stored)
-        );
-        HubAdapter::open(dir)?
-    } else {
-        let backend = match backend {
-            "git" => Backend::Git,
-            "simple" => Backend::Simple,
-            other => anyhow::bail!("unknown backend {other:?}; use git or simple"),
-        };
-        let adapter = HubAdapter::init(dir, backend)?;
-        std::fs::write(&hive_file, hive.unwrap_or_else(Uuid::new_v4).to_string())?;
-        adapter
-    };
-    let hive: Uuid = std::fs::read_to_string(&hive_file)?.trim().parse()?;
-    let (rpc, head) = subjects(hive);
-    let service = HubService::new(adapter, dir, rpc, head)?;
-    let runtime = tokio::runtime::Builder::new_current_thread()
+fn block_on<T>(future: impl Future<Output = anyhow::Result<T>>) -> anyhow::Result<T> {
+    tokio::runtime::Builder::new_current_thread()
         .enable_all()
-        .build()?;
-    runtime.block_on(async {
-        let transport: Arc<dyn Transport> = Arc::new(NatsTransport::connect(nats).await?);
-        // Printing the hive id says the hub is ready: nodes can join as soon as they see it.
-        service
-            .run(transport, || {
-                println!("{hive}");
-                tracing::info!("serving hive {hive} from {}", dir.display());
-            })
-            .await
-    })
+        .build()?
+        .block_on(future)
 }
 
-/// Makes the repository at `start` a node of `hive`: checks its workspace name, records the
-/// join (unless replicating full history), saves the hive config, registers it with the
-/// daemon, and syncs once.
+/// Which hive `musubi join` joins.
+enum Choice {
+    /// Whichever matches, or a new one.
+    Match,
+    Hive(String),
+    New(String),
+}
+
+/// Makes the repository at `start` part of a hive: the hub decides which (see
+/// `musubi_hub::matching`); then this records the membership and has the daemon serve it.
 fn join(
     start: &Path,
-    hive: Uuid,
-    nats: &str,
+    choice: Choice,
+    nats: Option<&str>,
     machine: Option<&str>,
     full_history: bool,
+    socket: &Socket,
 ) -> anyhow::Result<()> {
     let located = Located::find(start)?;
-    anyhow::ensure!(
-        HiveConfig::load(&located.repo_path)?.is_none(),
-        "this repository is already part of a hive"
-    );
+    if let Some(hive) = HiveConfig::load(&located.repo_path)? {
+        anyhow::bail!(
+            "this repository is already part of hive {}; `musubi leave` first to join another",
+            hive.display_name()
+        );
+    }
+    let nats = UserConfig::nats(nats)?;
+    set_machine_name(&located, machine)?;
+    let node = located.open()?;
+    let summary = node.join_summary()?;
+    let (hive, new) = match choice {
+        Choice::Match => (None, None),
+        Choice::Hive(hive) => (Some(hive), None),
+        Choice::New(name) => (None, Some(name)),
+    };
+    let request = JoinRequest {
+        hive,
+        new,
+        backend: summary.backend.to_owned(),
+        remotes: summary
+            .remotes
+            .into_iter()
+            .filter_map(|(name, remote)| Some((name, remote.url?)))
+            .collect(),
+        dir_name: located
+            .workspace_root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        roots: summary.roots.iter().map(|id| id.hex()).collect(),
+        remote_targets: summary.remote_targets.iter().map(|id| id.hex()).collect(),
+        machine: node.machine().key().to_owned(),
+    };
+    drop(node);
+    let joined = match block_on(hub::ask(&nats, HubWideRequest::Join(request)))? {
+        HubWideReply::Joined(joined) => joined,
+        other => anyhow::bail!("unexpected reply from the hub: {other:?}"),
+    };
+    become_node(&located, &joined.hive, &nats, full_history)?;
+    let count = joined.hive.machines.len();
+    let machines = if count == 1 {
+        "1 machine".to_owned()
+    } else {
+        format!("{count} machines")
+    };
+    if joined.created {
+        println!("Created hive {}", joined.hive.name);
+    } else {
+        println!(
+            "Joined hive {} ({}), {machines}",
+            joined.hive.name, joined.reason
+        );
+    }
+    start_serving(&located, socket)
+}
+
+fn set_machine_name(located: &Located, machine: Option<&str>) -> anyhow::Result<()> {
     if let Some(name) = machine {
         let path = located.repo_path.join("musubi/machine");
-        anyhow::ensure!(!path.exists(), "this repository already has a machine name");
-        musubi_jj::workspaces::Machine::load_or_create(&path, name)?;
+        let machine = musubi_jj::workspaces::Machine::load_or_create(&path, name)?;
+        // The same name again, as when retrying a refused join, is no change.
+        anyhow::ensure!(
+            machine.name() == musubi_jj::workspaces::sanitize(name),
+            "this repository's machine is already named {}",
+            machine.name()
+        );
     }
+    Ok(())
+}
+
+/// Records that the repository is part of `hive`: the join operation (unless replicating
+/// full history), its hive config, and its place in the user's config. The first hub joined
+/// becomes the user's default.
+fn become_node(
+    located: &Located,
+    hive: &HiveInfo,
+    nats: &str,
+    full_history: bool,
+) -> anyhow::Result<()> {
     let mut node = located.open()?;
     let machine = node.machine().name().to_owned();
     if !full_history {
         node.create_join_operation(&format!("musubi: {machine} joins the hive"))?;
     }
     let config = HiveConfig {
-        hive,
+        hive: hive
+            .id
+            .parse()
+            .context("the hub sent a malformed hive id")?,
+        name: Some(hive.name.clone()),
         nats_url: nats.to_owned(),
-        subject_prefix: "musubi".into(),
+        subject_prefix: config::default_subject_prefix(),
         node: machine,
     };
     config.save(&located.repo_path)?;
-    DaemonConfig::add_repo(&located.workspace_root)?;
-    println!("Joined hive {hive}. Syncing...");
-    sync_once(start)?;
-    println!("Done. `musubi daemon` keeps it in sync from now on.");
+    UserConfig::add_repo(&located.workspace_root)?;
+    UserConfig::update(|config| {
+        config.nats.get_or_insert_with(|| nats.to_owned());
+    })?;
     Ok(())
 }
 
-fn clone(destination: &Path, hive: Uuid, nats: &str, machine: Option<&str>) -> anyhow::Result<()> {
-    let parent = destination
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    let dest = destination.to_str().context("destination is not UTF-8")?;
-    let status = Process::new("jj")
-        .args(["git", "init", "--colocate", dest])
-        .current_dir(parent)
-        .status()?;
-    anyhow::ensure!(status.success(), "`jj git init --colocate {dest}` failed");
-    join(destination, hive, nats, machine, false)
+/// Has the daemon, started if need be, serve the repository, and reports its first sync.
+/// Without a daemon, syncs once.
+fn start_serving(located: &Located, socket: &Socket) -> anyhow::Result<()> {
+    let workspace = located.workspace_root.clone();
+    // The client lives on the runtime that made it, so one runtime does it all.
+    let synced = block_on(async {
+        let client = match daemon::ensure(socket).await {
+            Ok(client) => client,
+            Err(err) => return Ok(Err(err)),
+        };
+        println!("Syncing...");
+        let synced = client
+            .add(control::context(Duration::from_secs(3600)), workspace)
+            .await
+            .context("asking the daemon to serve this repository")?;
+        Ok(Ok(synced))
+    })?;
+    match synced {
+        Err(err) => {
+            eprintln!("Could not start the daemon ({err:#}); syncing once instead.");
+            sync_directly(located)?;
+            println!("Synced. Run `musubi daemon` to keep it in sync.");
+            Ok(())
+        }
+        Ok(Ok(synced)) => {
+            println!(
+                "Synced with the hub (hive at #{}). The daemon keeps it in sync from now on.",
+                synced.seq
+            );
+            Ok(())
+        }
+        Ok(Err(message)) => anyhow::bail!(
+            "the first sync failed: {message}\nThe daemon keeps trying; `musubi list` shows how \
+             it goes."
+        ),
+    }
 }
 
-fn sync_once(start: &Path) -> anyhow::Result<()> {
-    let located = Located::find(start)?;
+fn clone(
+    destination: &Path,
+    hive: &str,
+    nats: Option<&str>,
+    machine: Option<&str>,
+    socket: &Socket,
+) -> anyhow::Result<()> {
+    let nats = UserConfig::nats(nats)?;
+    let reply = block_on(hub::ask(
+        &nats,
+        HubWideRequest::Resolve {
+            name: hive.to_owned(),
+        },
+    ))?;
+    let HubWideReply::Hive(info) = reply else {
+        anyhow::bail!("unexpected reply from the hub: {reply:?}");
+    };
+    let dest = destination.to_str().context("destination is not UTF-8")?;
+    let init: &[&str] = match info.backend.as_str() {
+        "git" => &["git", "init", "--colocate"],
+        _ => &["debug", "init-simple"],
+    };
+    let status = Process::new("jj").args(init).arg(dest).status()?;
+    anyhow::ensure!(status.success(), "`jj {} {dest}` failed", init.join(" "));
+    let located = Located::find(destination)?;
+    set_machine_name(&located, machine)?;
+    become_node(&located, &info, &nats, false)?;
+    println!("Cloning hive {} into {}", info.name, destination.display());
+    start_serving(&located, socket)
+}
+
+/// Syncs once, in this process.
+fn sync_directly(located: &Located) -> anyhow::Result<()> {
     let hive =
         HiveConfig::load(&located.repo_path)?.context("this repository is not part of a hive")?;
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    runtime.block_on(async {
-        let transport: Arc<dyn Transport> = Arc::new(NatsTransport::connect(&hive.nats_url).await?);
+    block_on(async {
+        let transport = hub::connect(&hive.nats_url, Duration::from_secs(30)).await?;
         let blobs = located.repo_path.join("musubi/blobs");
         let remote = musubi_sync::remote::RemoteHub::new(
             transport,
             hive.rpc_subject(),
             &blobs,
-            std::time::Duration::from_secs(60),
+            Duration::from_secs(60),
         )?;
         let mut driver = musubi_sync::driver::NodeDriver::new(located.open()?, remote)?;
         driver.sync().await?;
@@ -251,38 +484,218 @@ fn sync_once(start: &Path) -> anyhow::Result<()> {
     })
 }
 
-fn status(start: &Path) -> anyhow::Result<()> {
+/// Syncs through the daemon when it serves the repository, else directly.
+fn sync(start: &Path, socket: &Socket) -> anyhow::Result<()> {
     let located = Located::find(start)?;
-    let Some(hive) = HiveConfig::load(&located.repo_path)? else {
-        println!("Not part of a hive.");
-        return Ok(());
+    HiveConfig::load(&located.repo_path)?.context("this repository is not part of a hive")?;
+    let served = UserConfig::load()?.repos.contains(&located.workspace_root);
+    let through_daemon = block_on(async {
+        if !served {
+            return Ok(None);
+        }
+        let Some(client) = daemon::running(socket).await? else {
+            return Ok(None);
+        };
+        let workspace = located.workspace_root.clone();
+        let synced = client
+            .sync(control::context(Duration::from_secs(3600)), workspace)
+            .await?;
+        Ok::<_, anyhow::Error>(Some(synced))
+    })?;
+    match through_daemon {
+        Some(Ok(synced)) => println!("Synced (hive at #{}).", synced.seq),
+        Some(Err(message)) => anyhow::bail!("{message}"),
+        None => sync_directly(&located)?,
+    }
+    Ok(())
+}
+
+fn leave(start: &Path, socket: &Socket) -> anyhow::Result<()> {
+    let located = Located::find(start)?;
+    let hive =
+        HiveConfig::load(&located.repo_path)?.context("this repository is not part of a hive")?;
+    block_on(async {
+        if let Some(client) = daemon::running(socket).await? {
+            client
+                .remove(
+                    control::context(Duration::from_secs(120)),
+                    located.workspace_root.clone(),
+                )
+                .await?
+                .map_err(anyhow::Error::msg)?;
+        }
+        Ok(())
+    })?;
+    UserConfig::remove_repo(&located.workspace_root)?;
+    std::fs::remove_file(HiveConfig::path(&located.repo_path))?;
+    std::fs::remove_file(Status::path(&located.repo_path)).ok();
+    println!(
+        "This repository no longer syncs with hive {}. Everything it has stays.",
+        hive.display_name()
+    );
+    Ok(())
+}
+
+/// A repository on this machine that is part of a hive.
+struct Copy {
+    located: Located,
+    hive: HiveConfig,
+    status: Option<Status>,
+}
+
+/// Lists what it can: a daemon or hub out of reach is a line of the listing.
+fn list(start: &Path, socket: anyhow::Result<Socket>) -> anyhow::Result<()> {
+    let config = UserConfig::load()?;
+    let (daemon, statuses) = block_on(async {
+        let running = match &socket {
+            Ok(socket) => daemon::running(socket).await,
+            Err(err) => Err(anyhow::anyhow!("{err:#}")),
+        };
+        let client = match running {
+            Ok(Some(client)) => client,
+            Ok(None) => return Ok((Ok(false), BTreeMap::new())),
+            Err(err) => return Ok((Err(err), BTreeMap::new())),
+        };
+        let statuses: BTreeMap<PathBuf, Status> = client
+            .status(control::context(Duration::from_secs(10)))
+            .await?
+            .into_iter()
+            .map(|repo| (repo.workspace, repo.status))
+            .collect();
+        Ok::<_, anyhow::Error>((Ok(true), statuses))
+    })?;
+    let mut copies = vec![];
+    for workspace in &config.repos {
+        let Ok(located) = Located::find(workspace) else {
+            println!(
+                "{} is gone; remove it from {}",
+                workspace.display(),
+                UserConfig::path()?.display()
+            );
+            continue;
+        };
+        let Some(hive) = HiveConfig::load(&located.repo_path)? else {
+            continue;
+        };
+        let status = statuses
+            .get(workspace)
+            .cloned()
+            .or_else(|| Status::load(&located.repo_path));
+        copies.push(Copy {
+            located,
+            hive,
+            status,
+        });
+    }
+    // Every hub this machine knows of, the default first.
+    let mut hubs: Vec<String> = config.nats.iter().cloned().collect();
+    for copy in &copies {
+        if !hubs.contains(&copy.hive.nats_url) {
+            hubs.push(copy.hive.nats_url.clone());
+        }
+    }
+    if hubs.is_empty() {
+        println!("No hubs yet: run `musubi hub` on one machine, then the join command it prints.");
+    }
+    for nats in &hubs {
+        let here: Vec<&Copy> = copies
+            .iter()
+            .filter(|copy| &copy.hive.nats_url == nats)
+            .collect();
+        let shown = hub::without_credentials(nats);
+        match block_on(list_hub(nats)) {
+            Ok(hives) => {
+                println!("Hub {shown}:");
+                if hives.is_empty() {
+                    println!("  no hives yet");
+                }
+                for info in &hives {
+                    let machines = match info.machines.as_slice() {
+                        [] => "no machines yet".to_owned(),
+                        [one] => format!("1 machine: {one}"),
+                        all => format!("{} machines: {}", all.len(), all.join(", ")),
+                    };
+                    println!("  {}  {machines}", info.name);
+                    for copy in here.iter().filter(|c| c.hive.hive.to_string() == info.id) {
+                        print_copy(copy);
+                    }
+                }
+                for copy in here
+                    .iter()
+                    .filter(|copy| !hives.iter().any(|h| h.id == copy.hive.hive.to_string()))
+                {
+                    println!("  {}  (no longer on the hub)", copy.hive.display_name());
+                    print_copy(copy);
+                }
+            }
+            Err(err) => {
+                println!("Hub {shown}: {err:#}. This machine's copies:");
+                for copy in &here {
+                    println!("  {}", copy.hive.display_name());
+                    print_copy(copy);
+                }
+            }
+        }
+    }
+    match daemon {
+        Ok(true) => println!("Daemon: running, serving {} repositories", statuses.len()),
+        Ok(false) if copies.is_empty() => {}
+        Ok(false) => println!("Daemon: not running; `musubi daemon restart` starts it"),
+        Err(err) => println!("Daemon: {err:#}"),
+    }
+    if let Ok(located) = Located::find(start)
+        && let Some(hive) = HiveConfig::load(&located.repo_path)?
+    {
+        print_details(&located, &hive)?;
+    }
+    Ok(())
+}
+
+async fn list_hub(nats: &str) -> anyhow::Result<Vec<HiveInfo>> {
+    let transport = hub::connect(nats, Duration::from_secs(3)).await?;
+    match hub::ask_over(&*transport, nats, HubWideRequest::List).await? {
+        HubWideReply::Hives(hives) => Ok(hives),
+        other => anyhow::bail!("unexpected reply from the hub: {other:?}"),
+    }
+}
+
+fn print_copy(copy: &Copy) {
+    println!(
+        "    here: {}  {}",
+        copy.located.workspace_root.display(),
+        describe(copy.status.as_ref())
+    );
+}
+
+fn describe(status: Option<&Status>) -> String {
+    let Some(status) = status else {
+        return "not synced yet".to_owned();
     };
-    println!("Hive:      {}", hive.hive);
-    println!("Hub:       {}", hive.nats_url);
-    println!("Machine:   {}", hive.node);
+    if let Some(error) = &status.error {
+        return format!("sync failing: {error}");
+    }
+    match status.last_success {
+        Some(t) => format!("synced {}s ago", daemon::now().saturating_sub(t)),
+        None => "not synced yet".to_owned(),
+    }
+}
+
+/// The current repository's replication state, in detail.
+fn print_details(located: &Located, hive: &HiveConfig) -> anyhow::Result<()> {
+    println!();
+    println!("This repository:");
+    println!("  Hive:      {} ({})", hive.display_name(), hive.hive);
+    println!("  Hub:       {}", hub::without_credentials(&hive.nats_url));
+    println!("  Machine:   {}", hive.node);
     let mut node = located.open()?;
     for (machine, workspace, commit) in node.machine_workspaces()? {
         let short = &commit.hex()[..12];
-        println!("           {workspace}@{machine} is at {short}");
+        println!("             {workspace}@{machine} is at {short}");
     }
-    match daemon::Status::load(&located.repo_path) {
-        None => println!("Never synced by the daemon."),
-        Some(status) => {
-            let ago = |t: Option<u64>| {
-                t.map_or("never".to_owned(), |t| {
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                        .map_or(0, |d| d.as_secs());
-                    format!("{}s ago", now.saturating_sub(t))
-                })
-            };
-            println!("Last sync: {}", ago(status.last_success));
-            if let (Some(seq), Some(head)) = (status.known_seq, status.known_head) {
-                println!("Hub head:  #{seq} {}", &head[..12.min(head.len())]);
-            }
-            if let Some(error) = status.error {
-                println!("Error:     {error}");
-            }
+    if let Some(status) = Status::load(&located.repo_path) {
+        println!("  Last sync: {}", describe(Some(&status)));
+        if let (Some(seq), Some(head)) = (status.known_seq, &status.known_head) {
+            println!("  Hub head:  #{seq} {}", &head[..12.min(head.len())]);
         }
     }
     Ok(())

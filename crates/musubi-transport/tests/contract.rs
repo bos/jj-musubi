@@ -102,13 +102,25 @@ async fn memory_transport_meets_contract() {
 /// own transport, over an in-memory pipe it can cut.
 struct Pipe {
     hub: Arc<dyn Transport>,
+    /// What the hub's side says before the hub, as some shells' startup files do over ssh.
+    noise: &'static [u8],
     serving: Mutex<Vec<tokio::task::AbortHandle>>,
 }
 
+/// What some machines print for every shell, interactive or not.
+const GOAT: &[u8] = b"\x1b[1;33m      _))\n     > *\\     _~\n     `;'\\\\__-' \\_\n\
+                      Welcome to musubi-linux, home of the goat.\n\x1b[0m\
+                      Last login: never (and no newline after this)";
+
 impl Pipe {
     fn new(hub: Arc<dyn Transport>) -> Arc<Self> {
+        Self::noisy(hub, b"")
+    }
+
+    fn noisy(hub: Arc<dyn Transport>, noise: &'static [u8]) -> Arc<Self> {
         Arc::new(Self {
             hub,
+            noise,
             serving: Mutex::new(vec![]),
         })
     }
@@ -125,12 +137,13 @@ impl Pipe {
 impl Connector for Pipe {
     async fn connect(&self) -> io::Result<(Reader, Writer)> {
         let (ours, theirs) = tokio::io::duplex(64 * 1024);
-        let (reader, writer) = tokio::io::split(theirs);
-        let serving = tokio::spawn(musubi_transport::stream::serve(
-            self.hub.clone(),
-            reader,
-            writer,
-        ));
+        let (reader, mut writer) = tokio::io::split(theirs);
+        let (hub, noise) = (self.hub.clone(), self.noise);
+        let serving = tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt as _;
+            writer.write_all(noise).await?;
+            musubi_transport::stream::serve(hub, reader, writer).await
+        });
         self.serving.lock().unwrap().push(serving.abort_handle());
         let (reader, writer) = tokio::io::split(ours);
         Ok((Box::new(reader), Box::new(writer)))
@@ -141,6 +154,17 @@ impl Connector for Pipe {
 async fn stream_transport_meets_contract() {
     let network = MemoryNetwork::new(1, LIMIT);
     let pipe = Pipe::new(Arc::new(network.connect()));
+    let a = StreamTransport::connect(pipe.clone()).await.unwrap();
+    let b = StreamTransport::connect(pipe).await.unwrap();
+    check_contract(&a, &b).await;
+}
+
+/// What the hub's machine prints before the hub, as a shell's startup files can over ssh, is
+/// passed over.
+#[tokio::test]
+async fn stream_transport_passes_over_login_noise() {
+    let network = MemoryNetwork::new(1, LIMIT);
+    let pipe = Pipe::noisy(Arc::new(network.connect()), GOAT);
     let a = StreamTransport::connect(pipe.clone()).await.unwrap();
     let b = StreamTransport::connect(pipe).await.unwrap();
     check_contract(&a, &b).await;
@@ -199,32 +223,48 @@ async fn stream_transport_reconnects() {
     assert_eq!(head.payload, "head");
 }
 
-/// What answers must greet as a hub, or connecting fails at once rather than retrying.
+/// What answers must greet as a hub of this version, after no more than so much noise, or
+/// connecting fails at once rather than retrying, and the connector hears why.
 #[tokio::test]
 async fn stream_transport_refuses_what_is_not_a_hub() {
-    struct Talker;
+    struct Talker(Vec<u8>, Mutex<Option<String>>);
     #[async_trait]
     impl Connector for Talker {
+        fn not_hub(&self, why: &io::Error) {
+            *self.1.lock().unwrap() = Some(why.to_string());
+        }
+
         async fn connect(&self) -> io::Result<(Reader, Writer)> {
             let (ours, mut theirs) = tokio::io::duplex(1024);
+            let said = self.0.clone();
             tokio::spawn(async move {
                 use tokio::io::AsyncWriteExt as _;
-                theirs.write_all(b"SSH-2.0-OpenSSH_9.9\r\n").await.ok();
+                theirs.write_all(&said).await.ok();
                 tokio::time::sleep(Duration::from_secs(60)).await;
             });
             let (reader, writer) = tokio::io::split(ours);
             Ok((Box::new(reader), Box::new(writer)))
         }
     }
-    let err = tokio::time::timeout(
-        Duration::from_secs(5),
-        StreamTransport::connect(Arc::new(Talker)),
-    )
-    .await
-    .unwrap()
-    .err()
-    .unwrap();
-    assert!(err.to_string().contains("not a musubi hub"), "{err}");
+    let banner = "Unauthorized access is prohibited.\n".repeat(2000);
+    for (said, expected) in [
+        (banner.into_bytes(), "not a musubi hub"),
+        (b"motd\n\0musubi2\n\0\0\x10\0".to_vec(), "another version"),
+        (b"\0musubi1\n\0\0\0\0".to_vec(), "up to 0 bytes"),
+    ] {
+        let talker = Arc::new(Talker(said, Mutex::new(None)));
+        let err = tokio::time::timeout(
+            Duration::from_secs(5),
+            StreamTransport::connect(talker.clone()),
+        )
+        .await
+        .unwrap()
+        .err()
+        .unwrap();
+        assert!(err.to_string().contains(expected), "{err}");
+        let told = talker.1.lock().unwrap().clone().unwrap_or_default();
+        assert!(told.contains(expected), "{told}");
+    }
 }
 
 #[tokio::test]

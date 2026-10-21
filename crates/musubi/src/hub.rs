@@ -55,9 +55,6 @@ struct HubSettings {
     /// machine's own name for itself isn't always one they can use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     advertise: Option<String>,
-    /// The local socket it listens on, for `musubi hub connect`, as it last started.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    socket: Option<String>,
 }
 
 impl HubSettings {
@@ -138,8 +135,13 @@ pub fn serve(args: ServeArgs) -> anyhow::Result<()> {
     if args.advertise.is_some() {
         settings.advertise = args.advertise;
     }
-    let socket = Socket::hub(&dir)?;
-    settings.socket = Some(socket.to_string());
+    let socket = Socket::hub(&dir);
+    if let Some(over) = socket.too_long() {
+        anyhow::bail!(
+            "the hub's socket, {socket}, would be {over} bytes longer than this system allows; \
+             serve the hub from a shorter path"
+        );
+    }
     settings.save(&dir)?;
     let server = HubServer::open(&dir, &default_subject_prefix())?;
     match (created, server.hive_count()) {
@@ -287,6 +289,18 @@ pub fn is_local(hub: &str) -> bool {
     Path::new(hub).is_absolute()
 }
 
+/// `hub` as given to --hub, with a hub directory here made absolute, which given relative
+/// would be taken for an ssh destination.
+pub fn absolute(hub: &str) -> String {
+    if !is_local(hub)
+        && Path::new(hub).join(HUB_FILE).is_file()
+        && let Ok(dir) = std::path::absolute(hub)
+    {
+        return dir.display().to_string();
+    }
+    hub.to_owned()
+}
+
 /// Connects to `hub`, an ssh destination or the directory of a hub on this machine, giving
 /// up after `limit`.
 pub async fn connect(hub: &str, limit: Duration) -> anyhow::Result<Connection> {
@@ -351,12 +365,10 @@ async fn open_local(dir: &Path) -> anyhow::Result<Stream> {
         )
     };
     anyhow::ensure!(dir.join(HUB_FILE).exists(), not_serving());
-    let socket = HubSettings::load(dir)?
-        .socket
-        .as_deref()
-        .map(Socket::named)
-        .with_context(not_serving)?;
-    socket.connect_stream().await?.with_context(not_serving)
+    Socket::hub(&std::path::absolute(dir)?)
+        .connect_stream()
+        .await?
+        .with_context(not_serving)
 }
 
 /// Asks `hub` about its hives; a refusal is an error.

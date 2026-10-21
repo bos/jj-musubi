@@ -33,7 +33,7 @@ use crate::config::UserConfig;
 use crate::daemon::Status;
 use crate::socket::Socket;
 use crate::socket::fnv;
-use crate::socket::runtime_dir;
+use crate::socket::uid;
 
 /// Changes whenever the control service does, so that a command and a daemon from
 /// different builds notice each other.
@@ -103,22 +103,26 @@ impl Socket {
             let user = std::env::var("USERNAME").unwrap_or_else(|_| "user".to_owned());
             return Ok(Self::Pipe(format!("musubi-{user}")));
         }
-        Ok(Self::Path(runtime_dir()?.join("daemon.sock")))
+        let runtime = if cfg!(target_os = "macos") {
+            std::env::var_os("TMPDIR")
+        } else {
+            std::env::var_os("XDG_RUNTIME_DIR")
+        };
+        let dir = match runtime {
+            Some(dir) if !dir.is_empty() => PathBuf::from(dir).join("musubi"),
+            _ => std::env::temp_dir().join(format!("musubi-{}", uid()?)),
+        };
+        Ok(Self::Path(dir.join("daemon.sock")))
     }
 
     /// Unix sockets' paths are limited to what fits in `sockaddr_un`.
     fn check(&self) -> anyhow::Result<()> {
-        let Self::Path(path) = self else {
-            return Ok(());
-        };
-        let limit = if cfg!(target_os = "linux") { 107 } else { 103 };
-        let len = path.as_os_str().len();
-        anyhow::ensure!(
-            len <= limit,
-            "the daemon's socket path {} is {len} bytes long, but this system allows {limit}; \
-             choose a shorter one with MUSUBI_SOCKET or `daemon.socket` in config.toml",
-            path.display()
-        );
+        if let Some(over) = self.too_long() {
+            anyhow::bail!(
+                "the daemon's socket path {self} is {over} bytes longer than this system allows; \
+                 choose a shorter one with MUSUBI_SOCKET or `daemon.socket` in config.toml"
+            );
+        }
         Ok(())
     }
 

@@ -114,6 +114,12 @@ impl MemoryNetwork {
             return Err(TransportError::Disconnected);
         }
         let faults = state.faults;
+        // Subscriptions whose subscribers have gone away, as the inbox of a request given up
+        // on does.
+        state.subscriptions.retain(|_, subs| {
+            subs.retain(|sub| !sub.sender.is_closed());
+            !subs.is_empty()
+        });
         let targets: Vec<mpsc::UnboundedSender<Message>> = state
             .subscriptions
             .iter()

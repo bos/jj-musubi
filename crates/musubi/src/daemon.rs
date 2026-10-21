@@ -428,6 +428,9 @@ async fn serve_async(
     let mut poll = tokio::time::interval(POLL_INTERVAL);
     let mut backoff = Duration::from_millis(500);
     let mut retry = false;
+    // Whether the connection coming back has cut short a wait to retry since the last sync
+    // that worked.
+    let mut woke_early = false;
     tracing::info!("serving in hive {}", hive.display_name());
     loop {
         // After a failure, try again once the backoff has passed, rather than waiting for
@@ -502,6 +505,7 @@ async fn serve_async(
             Ok(_) => {
                 backoff = Duration::from_millis(500);
                 retry = false;
+                woke_early = false;
             }
             Err(err) => {
                 tracing::warn!("{err:#}");
@@ -512,7 +516,18 @@ async fn serve_async(
                     driver.restart();
                 }
                 retry = true;
-                if pause(backoff, commands, waiting).await {
+                // The connection coming back while it waits, as after the machine slept, ends
+                // the wait, but only once: a sync that itself loses the connection would
+                // otherwise come straight back, again and again.
+                reconnections.seen();
+                let stopped = tokio::select! {
+                    stopped = pause(backoff, commands, waiting) => stopped,
+                    () = reconnections.next(), if !woke_early => {
+                        woke_early = true;
+                        false
+                    }
+                };
+                if stopped {
                     return Ok(());
                 }
                 backoff = (backoff * 2).min(MAX_BACKOFF);

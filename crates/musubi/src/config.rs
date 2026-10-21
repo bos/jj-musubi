@@ -219,7 +219,7 @@ impl UserConfig {
     /// The hub to use: `given`, or the saved default.
     pub fn hub(given: Option<&str>) -> anyhow::Result<String> {
         match given {
-            Some(hub) => Ok(hub.to_owned()),
+            Some(hub) => Ok(crate::hub::absolute(hub)),
             None => Self::load()?.hub.context(
                 "no hub given; pass --hub <host>, as `musubi hub` prints (the first join saves \
                  it as the default)",

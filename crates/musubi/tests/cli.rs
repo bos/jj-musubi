@@ -596,7 +596,8 @@ fn settings_are_shared_through_the_binary() {
 
 /// Machines reach a hub over ssh: joining creates the machine's key and adds it on the hub's
 /// machine, allowed only to run `musubi hub connect`, and the daemon syncs through that,
-/// which relays to the hub's socket.
+/// which relays to the hub's socket; and what the shell's startup files there print first,
+/// as some do for every shell, is no matter.
 #[cfg(unix)]
 #[test]
 fn machines_reach_the_hub_over_ssh() {
@@ -607,16 +608,17 @@ fn machines_reach_the_hub_over_ssh() {
     let hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
     let mut daemons = Daemons::default();
-    // Stands in for ssh to the hub's machine: runs what the machine's key may run there, and
-    // takes anything else to be adding a key.
+    // Stands in for ssh to the hub's machine: runs what the machine's key may run there, after
+    // a banner and a line with no newline, and takes anything else to be adding a key.
     let ssh = env.root().join("ssh");
     let args = env.root().join("ssh-args");
     let authorized = env.root().join("authorized_keys");
     fs::write(
         &ssh,
         format!(
-            "#!/bin/sh\necho \"$*\" >> '{args}'\ncase \"$*\" in\n  *'hub connect') exec '{musubi}' \
-             hub connect --dir '{dir}' ;;\n  *) cat >> '{authorized}' ;;\nesac\n",
+            "#!/bin/sh\necho \"$*\" >> '{args}'\ncase \"$*\" in\n  *'hub connect')\n    \
+             printf '  _))\\n > *\\\\  Welcome to hubhost\\n\\033[0mLast login: never'\n    \
+             exec '{musubi}' hub connect --dir '{dir}' ;;\n  *) cat >> '{authorized}' ;;\nesac\n",
             args = args.display(),
             musubi = musubi().display(),
             dir = hub.dir.display(),

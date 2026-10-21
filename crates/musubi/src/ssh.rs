@@ -35,6 +35,7 @@ use musubi_transport::stream::Connector;
 use musubi_transport::stream::GREETING;
 use musubi_transport::stream::Reader;
 use musubi_transport::stream::Writer;
+use musubi_transport::stream::await_greeting;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt as _;
 use tokio::io::AsyncWriteExt as _;
@@ -56,6 +57,9 @@ const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
 /// How often to look for the machine having slept.
 const WAKE_CHECK: Duration = Duration::from_secs(5);
+
+/// How much of what ssh says on stderr to keep: the end says why it failed.
+const MAX_SAID: usize = 16 * 1024;
 
 /// The ssh to run: `ssh`, or `$MUSUBI_SSH`, as tests set.
 fn program() -> OsString {
@@ -109,6 +113,8 @@ fn describe_failure(dest: &str, status: Option<ExitStatus>, stderr: &str) -> Str
              `{REMOTE_COMMAND}` line of ~/.ssh/authorized_keys on {dest}"
         ),
         Some(255) => format!("ssh to {dest} failed: {said}"),
+        // Finished, though the hub never greeted: it closed first, or didn't answer in time.
+        Some(0) => format!("the hub on {dest} ended the connection before greeting"),
         // musubi's own error leads with what went wrong; its causes follow.
         Some(_) => {
             let error = stderr
@@ -132,7 +138,7 @@ struct State {
     problem: Option<String>,
 }
 
-/// How a tunnel's ssh connections are going.
+/// How a link's ssh connections are going.
 #[derive(Clone, Default)]
 pub struct Health(Arc<Mutex<State>>);
 
@@ -172,6 +178,8 @@ pub struct Link {
     key: PathBuf,
     health: Health,
     woke: watch::Sender<u64>,
+    /// Whether how the last connection opened went is known yet (see [`Ssh::settled`]).
+    latest: Mutex<Option<Arc<AtomicBool>>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -195,6 +203,7 @@ impl Link {
             key: key_path()?,
             health,
             woke,
+            latest: Mutex::new(None),
             task,
         })
     }
@@ -220,24 +229,39 @@ impl Connector for Link {
         else {
             return Err(io::Error::other("ssh's pipes went missing"));
         };
-        let answered = Arc::new(AtomicBool::new(false));
+        let settled = Arc::new(AtomicBool::new(false));
+        *self.latest.lock().unwrap_or_else(PoisonError::into_inner) = Some(settled.clone());
         let (closed, let_go) = oneshot::channel();
         tokio::spawn(supervise(Ssh {
             child,
             stderr,
             dest: self.dest.clone(),
             health: self.health.clone(),
-            answered: answered.clone(),
+            settled: settled.clone(),
             woke: self.woke.subscribe(),
             let_go,
         }));
         let output = Output {
             stdout,
-            answered,
+            tail: vec![],
+            settled,
             health: self.health.clone(),
             _closed: closed,
         };
         Ok((Box::new(output), Box::new(stdin)))
+    }
+
+    fn not_hub(&self, why: &io::Error) {
+        let latest = self
+            .latest
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(settled) = latest {
+            settled.store(true, Ordering::Relaxed);
+        }
+        self.health
+            .failed(format!("ssh to {} worked, but {why}", self.dest));
     }
 }
 
@@ -266,25 +290,37 @@ async fn watch_for_waking(dest: String, health: Health, woke: watch::Sender<u64>
     }
 }
 
-/// ssh's standard output, which notes when the hub first answers through it, and whose
+/// ssh's standard output, which notes when the hub's greeting has come through it, and whose
 /// dropping tells the ssh's supervisor that the connection has been let go.
 struct Output {
     stdout: ChildStdout,
-    answered: Arc<AtomicBool>,
+    /// The end of what has come so far, until the greeting has: what a shell's startup files
+    /// print comes first, and isn't the hub answering.
+    tail: Vec<u8>,
+    settled: Arc<AtomicBool>,
     health: Health,
     _closed: oneshot::Sender<()>,
 }
 
 impl AsyncRead for Output {
     fn poll_read(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
         let before = buf.filled().len();
-        let poll = Pin::new(&mut self.stdout).poll_read(cx, buf);
-        if buf.filled().len() > before && !self.answered.swap(true, Ordering::Relaxed) {
-            self.health.worked();
+        let poll = Pin::new(&mut this.stdout).poll_read(cx, buf);
+        if !this.settled.load(Ordering::Relaxed) {
+            this.tail.extend_from_slice(&buf.filled()[before..]);
+            if this.tail.windows(GREETING.len()).any(|w| w == GREETING) {
+                this.settled.store(true, Ordering::Relaxed);
+                this.health.worked();
+                this.tail = vec![];
+            } else {
+                let passed = this.tail.len().saturating_sub(GREETING.len() - 1);
+                this.tail.drain(..passed);
+            }
         }
         poll
     }
@@ -296,22 +332,20 @@ struct Ssh {
     stderr: ChildStderr,
     dest: String,
     health: Health,
-    answered: Arc<AtomicBool>,
+    /// Whether how the connection went is known: the hub greeted through it, or the transport
+    /// gave up on it and said why.
+    settled: Arc<AtomicBool>,
     woke: watch::Receiver<u64>,
     /// Ends when the connection is let go.
     let_go: oneshot::Receiver<()>,
 }
 
 /// Waits for a connection's ssh to finish, ending it once the connection is let go, or at
-/// once when the machine wakes; and if the hub never answered, records why.
+/// once when the machine wakes; and if the hub never greeted, and the transport didn't say
+/// why, records what ssh says.
 async fn supervise(mut ssh: Ssh) {
-    let mut stderr = ssh.stderr;
-    // Read as it comes, so a chatty ssh never blocks on a full pipe.
-    let said = tokio::spawn(async move {
-        let mut said = String::new();
-        stderr.read_to_string(&mut said).await.ok();
-        said
-    });
+    let said = Arc::new(Mutex::new(vec![]));
+    let mut reading = tokio::spawn(read_stderr(ssh.stderr, said.clone()));
     enum Ended {
         Exited(Option<ExitStatus>),
         LetGo,
@@ -339,44 +373,113 @@ async fn supervise(mut ssh: Ssh) {
         Ended::Woke => {
             ssh.child.start_kill().ok();
             ssh.child.wait().await.ok();
+            reading.abort();
             return;
         }
     };
-    if !ssh.answered.load(Ordering::Relaxed) {
-        let said = said.await.unwrap_or_default();
+    if ssh.settled.load(Ordering::Relaxed) {
+        reading.abort();
+        return;
+    }
+    let said = said_so_far(&mut reading, &said).await;
+    // Settled meanwhile, perhaps by a greeting read just as ssh exited.
+    if !ssh.settled.load(Ordering::Relaxed) {
         ssh.health
             .failed(describe_failure(&ssh.dest, status, &said));
     }
 }
 
-/// How one try of the machine's key went.
+/// Reads ssh's stderr into `said` as it comes, so that a chatty ssh never blocks on a full
+/// pipe, keeping the end of it.
+async fn read_stderr(mut stderr: ChildStderr, said: Arc<Mutex<Vec<u8>>>) {
+    let mut buf = [0; 4096];
+    while let Ok(n) = stderr.read(&mut buf).await
+        && n > 0
+    {
+        let mut said = said.lock().unwrap_or_else(PoisonError::into_inner);
+        said.extend_from_slice(&buf[..n]);
+        if said.len() > MAX_SAID {
+            let cut = said.len() - MAX_SAID / 2;
+            said.drain(..cut);
+        }
+    }
+}
+
+/// What ssh has said on stderr, once it has exited. What it ran may hold stderr open after
+/// it has gone, as a `ProxyCommand` can, so this waits for the end only a moment.
+async fn said_so_far(reading: &mut tokio::task::JoinHandle<()>, said: &Mutex<Vec<u8>>) -> String {
+    tokio::time::timeout(Duration::from_secs(1), &mut *reading)
+        .await
+        .ok();
+    reading.abort();
+    let said = said.lock().unwrap_or_else(PoisonError::into_inner);
+    String::from_utf8_lossy(&said).into_owned()
+}
+
+/// How one try of the machine's key went wrong.
 struct Failure {
     status: Option<ExitStatus>,
     said: String,
+    /// Why what answered can't be talked to, when ssh worked but it isn't a hub of this
+    /// version.
+    not_hub: Option<String>,
+}
+
+impl Failure {
+    /// Whether ssh refused the key: most likely, it isn't on the hub's machine yet.
+    fn refused(&self) -> bool {
+        self.status.and_then(|status| status.code()) == Some(255)
+    }
+
+    fn describe(&self, dest: &str) -> String {
+        match &self.not_hub {
+            Some(why) => format!("ssh to {dest} worked, but {why}"),
+            None => describe_failure(dest, self.status, &self.said),
+        }
+    }
 }
 
 /// Runs `musubi hub connect` on `dest` with the machine's key, to see whether a hub answers.
 async fn probe(dest: &str, key: &Path) -> Result<(), Failure> {
-    let failure = |said: String| Failure { status: None, said };
+    let failure = |said: String| Failure {
+        status: None,
+        said,
+        not_hub: None,
+    };
     let mut child = connect_command(dest, key)
         .spawn()
         .map_err(|err| failure(format!("cannot run ssh: {err}")))?;
-    let (Some(mut stdout), Some(mut stderr)) = (child.stdout.take(), child.stderr.take()) else {
+    let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
         return Err(failure(String::new()));
     };
-    // A hub speaks first.
-    let mut first = [0; GREETING.len()];
-    let read = tokio::time::timeout(Duration::from_secs(60), stdout.read_exact(&mut first)).await;
-    if matches!(read, Ok(Ok(_))) && &first == GREETING {
-        return Ok(());
-    }
-    if read.is_err() {
+    let said = Arc::new(Mutex::new(vec![]));
+    let mut reading = tokio::spawn(read_stderr(stderr, said.clone()));
+    // A hub speaks first, after whatever the shell's startup files there print.
+    let mut stdout = tokio::io::BufReader::new(stdout);
+    let greeted = tokio::time::timeout(Duration::from_secs(60), await_greeting(&mut stdout)).await;
+    let not_hub = match greeted {
+        Ok(Ok(())) => {
+            reading.abort();
+            return Ok(());
+        }
+        Ok(Err(err)) if err.kind() == io::ErrorKind::InvalidData => Some(err.to_string()),
+        // ssh ended, and how it did says why.
+        Ok(Err(_)) => None,
+        Err(_) => {
+            child.start_kill().ok();
+            None
+        }
+    };
+    if not_hub.is_some() {
         child.start_kill().ok();
     }
     let status = child.wait().await.ok();
-    let mut said = String::new();
-    stderr.read_to_string(&mut said).await.ok();
-    Err(Failure { status, said })
+    let said = said_so_far(&mut reading, &said).await;
+    Err(Failure {
+        status,
+        said,
+        not_hub,
+    })
 }
 
 /// Makes sure this machine can reach the hub at `dest` with its own key: creating the key
@@ -387,9 +490,8 @@ pub async fn prepare(dest: &str) -> anyhow::Result<()> {
     if key.exists() {
         match probe(dest, &key).await {
             Ok(()) => return Ok(()),
-            // Most likely the key isn't on the hub's machine yet.
-            Err(failure) if failure.status.and_then(|status| status.code()) == Some(255) => {}
-            Err(failure) => anyhow::bail!(describe_failure(dest, failure.status, &failure.said)),
+            Err(failure) if failure.refused() => {}
+            Err(failure) => anyhow::bail!(failure.describe(dest)),
         }
     } else {
         create_key(&key)?;
@@ -398,7 +500,7 @@ pub async fn prepare(dest: &str) -> anyhow::Result<()> {
     authorize(dest, &key).await?;
     probe(dest, &key)
         .await
-        .map_err(|failure| anyhow::anyhow!(describe_failure(dest, failure.status, &failure.said)))
+        .map_err(|failure| anyhow::anyhow!(failure.describe(dest)))
 }
 
 fn create_key(key: &Path) -> anyhow::Result<()> {

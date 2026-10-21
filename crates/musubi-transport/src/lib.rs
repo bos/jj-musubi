@@ -71,7 +71,7 @@ impl Reconnections {
         Self { receiver: None }
     }
 
-    /// Counts reconnections from now on: a counter its connection callback increments.
+    /// Counts reconnections from now on: a counter the transport increments on each.
     pub(crate) fn watching(mut receiver: watch::Receiver<u64>) -> Self {
         receiver.borrow_and_update();
         Self {

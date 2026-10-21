@@ -4,8 +4,12 @@
 //! transport of its own, which reaches the hub's service. [`StreamTransport`] is the other
 //! side, opening a new connection through its [`Connector`] whenever one ends.
 //!
-//! Each side first sends [`GREETING`], the protocol's name and version, and the hub follows
-//! it with the largest payload it takes, as a big-endian `u32`. Each frame after that is its
+//! The hub first sends [`GREETING`], the protocol's name and version, followed by the largest
+//! payload it takes, as a big-endian `u32`, and the client answers with the same greeting.
+//! Over ssh, the hub's machine can print something first, as some shells' startup files do
+//! even for a command: the client passes over up to [`MAX_BEFORE_GREETING`] bytes of it, as
+//! Mercurial's ssh client passes over noise, and greets only after the hub has, so that none
+//! of what runs there before the hub can read the greeting. Each frame after that is its
 //! length as a big-endian `u32`, a kind, and its fields: integers are big-endian `u64`s,
 //! strings a big-endian `u16` length and UTF-8, and a payload whatever is left.
 //!
@@ -26,13 +30,17 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bytes::Buf as _;
 use bytes::Bytes;
+use tokio::io::AsyncBufRead;
+use tokio::io::AsyncBufReadExt as _;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt as _;
 use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt as _;
 use tokio::io::BufReader;
 use tokio::io::BufWriter;
+use tokio::sync::Notify;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
@@ -45,8 +53,18 @@ use crate::Transport;
 use crate::TransportError;
 use crate::check_size;
 
-/// What each side sends first: the protocol's name and version.
-pub const GREETING: &[u8; 8] = b"musubi1\n";
+/// What each side sends first: the protocol's name and version, after a NUL. A NUL is never
+/// part of text, so a banner passes for the greeting, as one naming a host `musubi1` would
+/// without it, only by printing it on purpose.
+pub const GREETING: &[u8; 9] = b"\0musubi1\n";
+
+/// The payload limits a hub may offer: what it says outside this is more likely to be noise
+/// than a hub.
+const PLAUSIBLE_PAYLOADS: std::ops::RangeInclusive<usize> = 1024..=64 << 20;
+
+/// The most the hub's machine may print before the hub greets: a banner of ASCII art, say,
+/// that a shell's startup files print for every shell.
+pub const MAX_BEFORE_GREETING: usize = 64 * 1024;
 
 /// How long the other side may take to greet, which over ssh includes logging in, through a
 /// tunnel's ProxyCommand perhaps.
@@ -54,6 +72,15 @@ const GREETING_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The longest wait between attempts to connect.
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(4);
+
+/// How long to wait before connecting again to a hub that answered but can't be talked to,
+/// which only another hub, started meanwhile, would change.
+const INCOMPATIBLE_RETRY_DELAY: Duration = Duration::from_secs(60);
+
+/// How many frames may wait to be written to a connection: few are large, since replies are
+/// only as many as the client's requests in flight. A connection with this many waiting,
+/// whose other side has stopped reading, as one that vanished without a word has, is ended.
+const MAX_QUEUED: usize = 1024;
 
 /// The longest a request relayed for a client may take, whatever the client asked for.
 const MAX_REQUEST_TIMEOUT: Duration = Duration::from_secs(3600);
@@ -301,7 +328,7 @@ async fn read_frame(
 /// Writes encoded frames as they come, until there are no more.
 async fn write_frames(
     writer: impl AsyncWrite + Unpin,
-    mut frames: mpsc::UnboundedReceiver<Vec<u8>>,
+    mut frames: mpsc::Receiver<Vec<u8>>,
 ) -> io::Result<()> {
     let mut writer = BufWriter::new(writer);
     while let Some(frame) = frames.recv().await {
@@ -334,6 +361,10 @@ pub type Writer = Box<dyn AsyncWrite + Send + Unpin>;
 #[async_trait]
 pub trait Connector: Send + Sync {
     async fn connect(&self) -> io::Result<(Reader, Writer)>;
+
+    /// Hears why the connection it opened last was given up on before the hub greeted: what
+    /// answered isn't a hub to talk to, which it may know no better.
+    fn not_hub(&self, _why: &io::Error) {}
 }
 
 /// A connection to a hub over the streams a [`Connector`] opens, opening another whenever
@@ -362,7 +393,9 @@ struct Shared {
 
 struct State {
     /// Where frames for the connection go, while there is one.
-    out: Option<mpsc::UnboundedSender<Vec<u8>>>,
+    out: Option<mpsc::Sender<Vec<u8>>>,
+    /// Ends the connection, when it falls too far behind.
+    stalled: Arc<Notify>,
     max_payload: usize,
     next_id: u64,
     subscriptions: HashMap<u64, (String, mpsc::UnboundedSender<Message>)>,
@@ -370,23 +403,38 @@ struct State {
     pending: HashMap<u64, (String, oneshot::Sender<Result<Bytes, TransportError>>)>,
 }
 
+impl State {
+    /// Queues a frame for the connection. One too far behind to take it is ended, and the
+    /// next one subscribes again to everything.
+    fn send(&self, frame: Vec<u8>) -> Result<(), TransportError> {
+        let out = self.out.as_ref().ok_or(TransportError::Disconnected)?;
+        out.try_send(frame).map_err(|err| {
+            if matches!(err, TrySendError::Full(_)) {
+                self.stalled.notify_one();
+            }
+            TransportError::Disconnected
+        })
+    }
+}
+
 impl Shared {
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Takes on a new connection, which carries the frames sent to `out`, subscribing again
-    /// to everything still subscribed to.
-    fn attach(&self, out: mpsc::UnboundedSender<Vec<u8>>, max_payload: usize) {
+    /// Takes on a new connection, which carries the frames sent to `out` and ends when
+    /// `stalled` is notified, subscribing again to everything still subscribed to.
+    fn attach(&self, out: mpsc::Sender<Vec<u8>>, stalled: Arc<Notify>, max_payload: usize) {
         let mut state = self.lock();
         state
             .subscriptions
             .retain(|_, (_, sender)| !sender.is_closed());
         for (&sid, (subject, _)) in &state.subscriptions {
             let subject = subject.clone();
-            out.send(Frame::Sub { sid, subject }.encode()).ok();
+            out.try_send(Frame::Sub { sid, subject }.encode()).ok();
         }
         state.out = Some(out);
+        state.stalled = stalled;
         state.max_payload = max_payload;
         drop(state);
         self.connected.send_replace(true);
@@ -460,6 +508,7 @@ impl StreamTransport {
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
                 out: None,
+                stalled: Arc::new(Notify::new()),
                 max_payload: 0,
                 next_id: 1,
                 subscriptions: HashMap::new(),
@@ -495,8 +544,11 @@ async fn run(
         match open(connector.as_ref()).await {
             Ok((reader, writer, max_payload)) => {
                 failures = 0;
-                let (out, frames) = mpsc::unbounded_channel();
-                shared.attach(out, max_payload);
+                // Room for subscribing again to everything, too.
+                let room = MAX_QUEUED + shared.lock().subscriptions.len();
+                let (out, frames) = mpsc::channel(room);
+                let stalled = Arc::new(Notify::new());
+                shared.attach(out, stalled.clone(), max_payload);
                 match first.take() {
                     Some(first) => {
                         first.send(Ok(())).ok();
@@ -506,6 +558,9 @@ async fn run(
                 let ended = tokio::select! {
                     result = receive(&shared, reader, max_payload) => result,
                     result = write_frames(writer, frames) => result,
+                    () = stalled.notified() => Err(io::Error::other(format!(
+                        "it fell {MAX_QUEUED} frames behind"
+                    ))),
                 };
                 shared.detach();
                 match ended {
@@ -513,14 +568,17 @@ async fn run(
                     Err(err) => tracing::debug!("lost the connection to the hub: {err}"),
                 }
             }
-            Err(err) => {
-                // The other side not speaking the protocol: trying again won't help.
-                if err.kind() == io::ErrorKind::InvalidData
-                    && let Some(first) = first.take()
-                {
+            // The other side not speaking the protocol: trying again won't help, not soon.
+            Err(err) if err.kind() == io::ErrorKind::InvalidData => {
+                if let Some(first) = first.take() {
                     first.send(Err(TransportError::Other(err.to_string()))).ok();
                     return;
                 }
+                tracing::warn!("cannot talk to the hub: {err}");
+                tokio::time::sleep(INCOMPATIBLE_RETRY_DELAY).await;
+                continue;
+            }
+            Err(err) => {
                 failures += 1;
                 tracing::debug!("could not connect to the hub: {err}");
             }
@@ -537,31 +595,97 @@ fn retry_delay(failures: u32) -> Duration {
         .min(MAX_RETRY_DELAY)
 }
 
-/// Opens a connection and greets the hub, returning the largest payload it takes.
-async fn open(connector: &dyn Connector) -> io::Result<(Reader, Writer, usize)> {
-    let (mut reader, mut writer) = connector.connect().await?;
-    writer.write_all(GREETING).await?;
-    writer.flush().await?;
-    let greeted = async {
-        let mut greeting = [0; GREETING.len()];
-        reader.read_exact(&mut greeting).await?;
-        if &greeting != GREETING {
-            return Err(invalid(if greeting.starts_with(b"musubi") {
-                "the hub speaks another version of musubi's protocol"
-            } else {
-                "what answered is not a musubi hub"
-            }));
+/// Reads through the hub's greeting, passing over up to [`MAX_BEFORE_GREETING`] bytes of
+/// whatever comes before it. Fails with [`io::ErrorKind::InvalidData`] if what answers is
+/// not a hub, or speaks another version of the protocol.
+pub async fn await_greeting(reader: &mut (impl AsyncBufRead + Unpin)) -> io::Result<()> {
+    let mut before = Vec::new();
+    loop {
+        let room = MAX_BEFORE_GREETING.saturating_sub(before.len()) + GREETING.len();
+        let mut line = Vec::new();
+        let n = (&mut *reader)
+            .take(room as u64)
+            .read_until(b'\n', &mut line)
+            .await?;
+        // Whatever came before on the same line, as when the last thing printed has no
+        // newline, is more of the same.
+        if line.ends_with(GREETING) {
+            return Ok(());
         }
-        reader.read_u32().await
-    };
-    let max_payload = tokio::time::timeout(GREETING_TIMEOUT, greeted)
-        .await
-        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "the hub did not answer"))??;
-    Ok((reader, writer, max_payload as usize))
+        if is_other_greeting(&line) {
+            return Err(invalid(
+                "the hub speaks another version of musubi's protocol",
+            ));
+        }
+        if n == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "the connection ended before the hub answered",
+            ));
+        }
+        before.extend_from_slice(&line);
+        if before.len() > MAX_BEFORE_GREETING {
+            let said = String::from_utf8_lossy(&before);
+            let first = said.lines().map(str::trim).find(|line| !line.is_empty());
+            let first: String = first.unwrap_or_default().chars().take(80).collect();
+            return Err(invalid(format!(
+                "what answered is not a musubi hub: it said {first:?}"
+            )));
+        }
+    }
 }
 
-async fn receive(shared: &Shared, reader: Reader, max_payload: usize) -> io::Result<()> {
+/// Whether `line` ends as another version's greeting would, `\0musubi<digits>\n`.
+fn is_other_greeting(line: &[u8]) -> bool {
+    let Some(line) = line.strip_suffix(b"\n") else {
+        return false;
+    };
+    let digits = line.iter().rev().take_while(|b| b.is_ascii_digit()).count();
+    digits > 0 && line[..line.len() - digits].ends_with(b"\0musubi")
+}
+
+/// Opens a connection and waits for the hub's greeting, returning the largest payload it
+/// takes; then greets it.
+async fn open(connector: &dyn Connector) -> io::Result<(BufReader<Reader>, Writer, usize)> {
+    let (reader, mut writer) = connector.connect().await?;
     let mut reader = BufReader::new(reader);
+    let greeted = async {
+        await_greeting(&mut reader).await?;
+        let max_payload = reader.read_u32().await? as usize;
+        if !PLAUSIBLE_PAYLOADS.contains(&max_payload) {
+            return Err(invalid(format!(
+                "what answered is not a musubi hub: it offered messages of up to \
+                 {max_payload} bytes"
+            )));
+        }
+        Ok(max_payload)
+    };
+    let max_payload = match tokio::time::timeout(GREETING_TIMEOUT, greeted).await {
+        Ok(Ok(max_payload)) => max_payload,
+        Ok(Err(err)) => {
+            if err.kind() == io::ErrorKind::InvalidData {
+                connector.not_hub(&err);
+            }
+            return Err(err);
+        }
+        Err(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "the hub did not answer",
+            ));
+        }
+    };
+    // Only now: what runs on the hub's machine before the hub could read it.
+    writer.write_all(GREETING).await?;
+    writer.flush().await?;
+    Ok((reader, writer, max_payload))
+}
+
+async fn receive(
+    shared: &Shared,
+    mut reader: BufReader<Reader>,
+    max_payload: usize,
+) -> io::Result<()> {
     while let Some(frame) = read_frame(&mut reader, max_payload + FRAME_OVERHEAD).await? {
         shared.receive(frame)?;
     }
@@ -583,9 +707,7 @@ impl Transport for StreamTransport {
         check_size(&payload, self.max_payload())?;
         let subject = subject.to_owned();
         let frame = Frame::Pub { subject, payload }.encode();
-        let state = self.shared.lock();
-        let out = state.out.as_ref().ok_or(TransportError::Disconnected)?;
-        out.send(frame).map_err(|_| TransportError::Disconnected)
+        self.shared.lock().send(frame)
     }
 
     async fn subscribe(&self, subject: &str) -> Result<Subscription, TransportError> {
@@ -594,11 +716,13 @@ impl Transport for StreamTransport {
         let mut state = self.shared.lock();
         let sid = state.next_id;
         state.next_id += 1;
-        // Without a connection now, the next one subscribes.
-        if let Some(out) = &state.out {
-            let subject = subject.to_owned();
-            out.send(Frame::Sub { sid, subject }.encode()).ok();
-        }
+        // Without a connection now, or with one too far behind to take it, the next one
+        // subscribes.
+        let frame = Frame::Sub {
+            sid,
+            subject: subject.to_owned(),
+        };
+        state.send(frame.encode()).ok();
         state
             .subscriptions
             .insert(sid, (subject.to_owned(), sender));
@@ -618,7 +742,7 @@ impl Transport for StreamTransport {
         let (id, replied) = loop {
             {
                 let mut state = self.shared.lock();
-                if let Some(out) = state.out.clone() {
+                if state.out.is_some() {
                     let id = state.next_id;
                     state.next_id += 1;
                     let (reply, replied) = oneshot::channel();
@@ -629,8 +753,10 @@ impl Transport for StreamTransport {
                         subject: subject.to_owned(),
                         payload: payload.clone(),
                     };
-                    // If the connection is ending, ending it fails the request.
-                    out.send(frame.encode()).ok();
+                    if let Err(err) = state.send(frame.encode()) {
+                        state.pending.remove(&id);
+                        return Err(err);
+                    }
                     break (id, replied);
                 }
             }
@@ -676,7 +802,8 @@ pub async fn serve(
             "what connected is not a musubi client, or speaks another version of its protocol",
         ));
     }
-    let (out, frames) = mpsc::unbounded_channel();
+    let (out, frames) = mpsc::channel(MAX_QUEUED);
+    let stopped_reading = Arc::new(Notify::new());
     // Subscriptions and requests in progress, which end with the connection.
     let mut tasks = JoinSet::new();
     let relay = async {
@@ -688,7 +815,7 @@ pub async fn serve(
                         .subscribe(&subject)
                         .await
                         .map_err(io::Error::other)?;
-                    let out = out.clone();
+                    let (out, stopped_reading) = (out.clone(), stopped_reading.clone());
                     tasks.spawn(async move {
                         while let Some(message) = subscription.next().await {
                             let frame = Frame::Msg {
@@ -697,7 +824,7 @@ pub async fn serve(
                                 reply: message.reply,
                                 payload: message.payload,
                             };
-                            if out.send(frame.encode()).is_err() {
+                            if !queue(&out, &stopped_reading, &frame) {
                                 break;
                             }
                         }
@@ -714,13 +841,14 @@ pub async fn serve(
                     payload,
                 } => {
                     let (transport, out) = (transport.clone(), out.clone());
+                    let stopped_reading = stopped_reading.clone();
                     tasks.spawn(async move {
                         let timeout = timeout.min(MAX_REQUEST_TIMEOUT);
                         let frame = match transport.request(&subject, payload, timeout).await {
                             Ok(payload) => Frame::Reply { id, payload },
                             Err(err) => failure(id, err),
                         };
-                        out.send(frame.encode()).ok();
+                        queue(&out, &stopped_reading, &frame);
                     });
                 }
                 frame => {
@@ -736,6 +864,22 @@ pub async fn serve(
     tokio::select! {
         result = relay => result,
         result = write_frames(writer, frames) => result,
+        () = stopped_reading.notified() => Err(io::Error::other(format!(
+            "the client fell {MAX_QUEUED} frames behind; it may have vanished"
+        ))),
+    }
+}
+
+/// Queues `frame` for the client, returning whether the connection carries on: it doesn't
+/// once it has closed, or once too many frames wait for the client.
+fn queue(out: &mpsc::Sender<Vec<u8>>, stopped_reading: &Notify, frame: &Frame) -> bool {
+    match out.try_send(frame.encode()) {
+        Ok(()) => true,
+        Err(TrySendError::Full(_)) => {
+            stopped_reading.notify_one();
+            false
+        }
+        Err(TrySendError::Closed(_)) => false,
     }
 }
 
@@ -833,6 +977,44 @@ mod tests {
         ]))
         .unwrap_err();
         assert!(err.to_string().contains("UTF-8"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn noise_before_the_greeting_is_passed_over() {
+        // On a host named as if it were the greeting, too.
+        let goat = b"\x1b[1;33m      _))\n     > *\\     _~\n  Welcome to musubi1\n\x1b[0m\
+                     Last login: never";
+        let stream = [&goat[..], GREETING, b"rest"].concat();
+        let mut reader = BufReader::new(stream.as_slice());
+        await_greeting(&mut reader).await.unwrap();
+        let mut rest = Vec::new();
+        reader.read_to_end(&mut rest).await.unwrap();
+        assert_eq!(rest, b"rest");
+    }
+
+    #[tokio::test]
+    async fn too_much_noise_and_other_versions_are_refused() {
+        let noise = "baa\n".repeat(MAX_BEFORE_GREETING);
+        let stream = [noise.as_bytes(), GREETING].concat();
+        let err = await_greeting(&mut BufReader::new(stream.as_slice()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("it said \"baa\""), "{err}");
+        // Noise with no newline in it at all.
+        let stream = [&vec![b'x'; 2 * MAX_BEFORE_GREETING][..], GREETING].concat();
+        let err = await_greeting(&mut BufReader::new(stream.as_slice()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let err = await_greeting(&mut BufReader::new(&b"motd\n\0musubi2\n"[..]))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("another version"), "{err}");
+        let err = await_greeting(&mut BufReader::new(&b"motd\n"[..]))
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
     }
 
     #[tokio::test]

@@ -475,6 +475,20 @@ data under a false id.
   connection ends partway through is never delivered. The client opens a new connection
   whenever one ends, subscribing again to what it had; requests in flight on the old one
   fail at once, and those made in between wait for the new one, up to their timeout.
+  Either side ends a connection that falls 1024 frames behind, as one whose other side
+  vanished without a word does. Once connected, a client tries a hub that then answers
+  with another version's greeting, more noise than it passes over, or an implausible
+  payload limit again only after a minute; connecting the first time, that fails at once,
+  and the daemon backs off as after any failure.
+- Over ssh, the hub's machine may print something before the hub greets: some shells'
+  startup files print for every shell, a banner in ASCII art, say. The client passes over
+  up to 64 KiB of it, as Mercurial's ssh client passes over noise before its handshake;
+  past that, it fails, quoting the first thing printed. The greeting starts with a NUL,
+  which is never part of text, so that a banner passes for it only by printing it on
+  purpose. The client greets the hub only after the hub has greeted it, so that nothing
+  that runs there first can read the greeting. Messages broadcast to terminals, as by
+  `wall` or `shutdown`, never reach the stream: the session has no terminal, so it isn't
+  among the logins they write to.
 
 ### Running a hub
 
@@ -487,14 +501,14 @@ hub serves `./musubi-hub`, or the current directory if it is a hub's, and takes 
 the user's state directory, so that a second hub started the same way says where the first
 one is instead of starting; `--dir` runs more hubs on purpose.
 
-The hub listens on a local socket that only its owner can reach, beside the daemon's
-control socket (`hub-<hash of its directory>.sock`, or a named pipe on Windows), and
-records where in the hub directory's `hub.toml`, which is how `musubi hub connect`, and
-commands on its machine, find it. It prints the commands other machines run, with this
-machine's host name, or the name `--advertise` gave it, which it keeps in `hub.toml` too: a
-machine doesn't always know a name others can reach it by. It also saves its directory as
-the machine's default hub, unless the machine has one, so that commands on the hub's
-machine need no `--hub`.
+The hub listens on a local socket that only its owner can reach, `run/hub.sock` in its
+directory, in a subdirectory only its owner can open (on Windows, a named pipe named after
+the directory), where no temp cleaner, or the end of the login that started the hub,
+removes it. `musubi hub connect`, and commands on its machine, find it there. It prints
+the commands other machines run, with this machine's host name, or the name `--advertise`
+gave it, which it keeps in `hub.toml` too: a machine doesn't always know a name others can
+reach it by. It also saves its directory as the machine's default hub, unless the machine
+has one, so that commands on the hub's machine need no `--hub`.
 
 ### Reaching a hub over ssh
 
@@ -518,14 +532,17 @@ passed to the user's own `ssh` (or `$MUSUBI_SSH`), so `~/.ssh/config` applies: a
   ssh's `ServerAliveInterval` gives up on a dead link within half a minute, but `Instant`
   stops while the machine sleeps and the wall clock doesn't, so a jump between them ends
   every connection at once, and the transport connects again within seconds of waking.
-- Once the transport reconnects, over ssh or not, the daemon syncs at once: the hub's
-  announcements while it was away are lost. A request in flight when the connection
-  dropped fails at once, so a sync it was part of starts again.
+- Once the transport reconnects, over ssh or not, the daemon syncs at once, even if it was
+  waiting to retry a sync that failed (once in a run of failures, since a sync could lose
+  the connection itself): the hub's announcements while it was away are lost.
+  A request in flight when the connection dropped fails at once, so a sync it was part of
+  starts again.
 - ssh doesn't compress (`Compression=no`): musubi already compresses what it sends.
 - A failing ssh backs off, up to a minute, and the transport's attempts to connect
   meanwhile fail at once: otherwise they would run ssh, and perhaps a tunnel's login page in
-  a browser, every few seconds. What ssh said, or that `musubi` isn't on the `PATH` there
-  (exit status 127), becomes part of the error `musubi list` shows.
+  a browser, every few seconds. Only the hub's greeting coming through counts as ssh
+  working, not whatever the shell printed first. What ssh said, or that `musubi` isn't on
+  the `PATH` there (exit status 127), becomes part of the error `musubi list` shows.
 
 The hub logic and the node sync logic are sans-IO state machines. They consume events and
 produce effects, which keeps them deterministic under test, and they correspond directly to

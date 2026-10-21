@@ -1,7 +1,7 @@
 //! Local sockets that only their owner can reach: a Unix domain socket, or a named pipe on
 //! Windows. The daemon's control socket is one (see [`crate::control`]). So is the socket a
-//! hub listens on, which `musubi hub connect` relays to and commands on the hub's machine
-//! connect to.
+//! hub listens on, in its directory, which `musubi hub connect` relays to and commands on
+//! the hub's machine connect to.
 //!
 //! A Unix socket's directory must belong to the user and be writable by no one else, or
 //! nothing listens there and nothing connects, as tmux and ssh-agent check theirs, so that
@@ -47,14 +47,29 @@ impl Socket {
         }
     }
 
-    /// The socket the hub serving `dir` listens on.
-    pub fn hub(dir: &Path) -> anyhow::Result<Self> {
-        let hash = fnv(dir.to_string_lossy().as_bytes()) as u32;
-        Ok(if cfg!(windows) {
-            Self::Pipe(format!("musubi-hub-{hash:08x}"))
+    /// The socket the hub serving `dir`, an absolute path, listens on: in the directory
+    /// itself, where no temp cleaner, or the end of a login, removes it.
+    pub fn hub(dir: &Path) -> Self {
+        if cfg!(windows) {
+            // However the directory is spelled: its case, a mapped drive, and the rest.
+            let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_owned());
+            let hash = fnv(dir.to_string_lossy().as_bytes());
+            Self::Pipe(format!("musubi-hub-{hash:016x}"))
         } else {
-            Self::Path(runtime_dir()?.join(format!("hub-{hash:08x}.sock")))
-        })
+            Self::Path(dir.join("run/hub.sock"))
+        }
+    }
+
+    /// How much longer a Unix socket's path is than fits in `sockaddr_un`, if it is.
+    pub fn too_long(&self) -> Option<usize> {
+        let Self::Path(path) = self else {
+            return None;
+        };
+        let limit = if cfg!(target_os = "linux") { 107 } else { 103 };
+        path.as_os_str()
+            .len()
+            .checked_sub(limit)
+            .filter(|&over| over > 0)
     }
 
     fn name(&self) -> std::io::Result<interprocess::local_socket::Name<'static>> {
@@ -113,24 +128,6 @@ impl Socket {
             Err(err) => Err(err).with_context(|| format!("connecting to {self}")),
         }
     }
-}
-
-/// The private directory this user's Unix sockets go in: `$MUSUBI_CONFIG_DIR` when that is
-/// set; else on Linux, `$XDG_RUNTIME_DIR/musubi` or `/tmp/musubi-<uid>`, and on macOS,
-/// `$TMPDIR/musubi`.
-pub fn runtime_dir() -> anyhow::Result<PathBuf> {
-    if let Some(dir) = std::env::var_os("MUSUBI_CONFIG_DIR") {
-        return Ok(PathBuf::from(dir));
-    }
-    let runtime = if cfg!(target_os = "macos") {
-        std::env::var_os("TMPDIR")
-    } else {
-        std::env::var_os("XDG_RUNTIME_DIR")
-    };
-    Ok(match runtime {
-        Some(dir) if !dir.is_empty() => PathBuf::from(dir).join("musubi"),
-        _ => std::env::temp_dir().join(format!("musubi-{}", uid()?)),
-    })
 }
 
 #[cfg(unix)]

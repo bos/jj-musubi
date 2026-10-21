@@ -64,7 +64,10 @@ use crate::canonical::strip_git_records;
 use crate::format_guard;
 use crate::format_guard::FormatError;
 use crate::hive_settings;
+use crate::hive_settings::Entry;
 use crate::hive_settings::HiveSettings;
+use crate::hive_settings::SettingValues;
+use crate::hive_settings::Stamp;
 use crate::objects;
 use crate::objects::GitObjects;
 use crate::objects::GitStore;
@@ -621,8 +624,8 @@ impl NodeRepo {
     }
 
     /// The hive's settings as of a canonical operation: what its nearest recording
-    /// ancestor recorded, merged three-way where concurrent operations met, or `None` if no
-    /// ancestor recorded any.
+    /// ancestor recorded, combined where concurrent operations met, the later write to each
+    /// setting winning, or `None` if no ancestor recorded any.
     pub fn settings_at(&mut self, op: &OperationId) -> Result<Option<HiveSettings>, NodeError> {
         let root = self.canonical.root_operation_id().clone();
         let mut stack = vec![op.clone()];
@@ -638,101 +641,98 @@ impl NodeRepo {
             }
             let operation = self.canonical.read_operation(&id)?;
             if let Some(text) = operation.metadata.attributes.get(hive_settings::ATTRIBUTE) {
-                let settings = HiveSettings::parse(text).map_err(|err| NodeError::Settings {
-                    op: id.hex(),
-                    message: err.to_string(),
-                })?;
+                let mut settings =
+                    HiveSettings::parse(text).map_err(|err| NodeError::Settings {
+                        op: id.hex(),
+                        message: err.to_string(),
+                    })?;
+                settings.date_untimed(operation.metadata.time.end.timestamp.0);
                 self.settings.insert(id, Some(settings));
                 stack.pop();
                 continue;
             }
-            // A merge needs its parents' settings and its merge bases'.
-            let parents = &operation.parents;
-            let mut bases = vec![];
-            for i in 1..parents.len() {
-                let base = self
-                    .canonical
-                    .closest_common_ancestors(&parents[..i], &parents[i..=i])?
-                    .into_iter()
-                    .next()
-                    .unwrap_or_else(|| root.clone());
-                bases.push(base);
-            }
-            let missing: Vec<OperationId> = parents
+            let missing: Vec<OperationId> = operation
+                .parents
                 .iter()
-                .chain(&bases)
-                .filter(|needed| !self.settings.contains_key(*needed))
+                .filter(|parent| !self.settings.contains_key(*parent))
                 .cloned()
                 .collect();
             if !missing.is_empty() {
                 stack.extend(missing);
                 continue;
             }
-            let mut merged = self.settings[&parents[0]].clone();
-            for (other, base) in parents[1..].iter().zip(&bases) {
-                let (theirs, base) = (&self.settings[other], &self.settings[base]);
-                merged = if merged.is_none() && theirs.is_none() && base.is_none() {
-                    None
-                } else {
-                    Some(HiveSettings::merge(
-                        &merged.unwrap_or_default(),
-                        &base.clone().unwrap_or_default(),
-                        &theirs.clone().unwrap_or_default(),
-                    ))
-                };
-            }
+            let merged = operation
+                .parents
+                .iter()
+                .filter_map(|parent| self.settings[parent].clone())
+                .reduce(|a, b| HiveSettings::merge(&a, &b));
             self.settings.insert(id, merged);
             stack.pop();
         }
         Ok(self.settings[op].clone())
     }
 
-    /// Brings this machine's settings and the hive's together, three-way against what they
-    /// agreed on last time: records this machine's changes for the hive, in an operation of
-    /// its own, and applies the hive's changes here. A machine that joins a hive with
-    /// settings adds its own remotes to the hive's, but takes the hive's where both have a
-    /// remote of the same name that point to different repositories; the first machine's
-    /// settings become the hive's. Remotes compare by the repositories they name
-    /// ([`hive_settings::Remote`]), so a machine's own spelling of one is never a change.
-    /// Returns whether it recorded a change, which then needs uploading.
+    /// Brings this machine's settings and the hive's together: records this machine's
+    /// changes for the hive, in an operation of its own, and applies the hive's here,
+    /// setting by setting, the later write winning (docs/settings-merge.md). A setting
+    /// that differs from what this machine last applied is a change, written when the file
+    /// holding it was last modified. A machine reconciling for the first time takes the
+    /// hive's value of every setting the hive has, and adds its own others. Remotes compare
+    /// by the repositories they name ([`hive_settings::Remote`]), so a machine's own
+    /// spelling of one is never a change. Returns whether it recorded a change, which then
+    /// needs uploading.
     pub fn reconcile_settings(&mut self) -> Result<bool, NodeError> {
         let head = self.merge_heads()?;
         let canonical = self.canonicalize(&head)?;
         let state = self.read_settings_state()?;
-        if let Some((op, hive, _)) = &state {
+        // A state from before writes were timed has no times to offer the cache.
+        if let Some((op, hive, _)) = &state
+            && hive.as_ref().is_none_or(HiveSettings::is_timed)
+        {
             self.settings
                 .entry(op.clone())
                 .or_insert_with(|| hive.clone());
         }
         let hive = self.settings_at(&canonical)?;
-        let mut extra: Vec<String> = hive
-            .as_ref()
-            .map(HiveSettings::extra_config_keys)
-            .unwrap_or_default();
-        if let Some((_, _, settings)) = &state {
-            extra.extend(settings.extra_config_keys());
+        let current = hive.clone().unwrap_or_default();
+        let mut extra = current.values().extra_config_keys();
+        if let Some((_, _, applied)) = &state {
+            extra.extend(applied.values().extra_config_keys());
         }
         let local = self.local_settings(&extra)?;
-        let base = match (&state, &hive) {
-            (Some((_, _, settings)), _) => settings.clone(),
-            (None, Some(hive)) => HiveSettings {
-                remotes: local
-                    .remotes
-                    .iter()
-                    .filter(|(name, _)| hive.remotes.contains_key(*name))
-                    .map(|(name, remote)| (name.clone(), remote.clone()))
-                    .collect(),
-                config: local
-                    .config
-                    .iter()
-                    .filter(|(key, _)| hive.config.contains_key(*key))
-                    .map(|(key, value)| (key.clone(), value.clone()))
-                    .collect(),
-            },
-            (None, None) => HiveSettings::default(),
+        let applied = state
+            .as_ref()
+            .map(|(_, _, applied)| applied.clone())
+            .unwrap_or_default();
+        let machine = self.machine.key().to_owned();
+        let remotes_time = self.git_objects().map(|git| modified(&git.config_path()));
+        let config_time = self.repo_config.as_deref().map(modified);
+        let mut ours = HiveSettings {
+            remotes: stamp_changes(&local.remotes, &applied.remotes, || Stamp {
+                time: remotes_time.unwrap_or_else(now),
+                machine: machine.clone(),
+            }),
+            config: stamp_changes(&local.config, &applied.config, || Stamp {
+                time: config_time.unwrap_or_else(now),
+                machine: machine.clone(),
+            }),
         };
-        let current = hive.clone().unwrap_or_default();
-        let merged = HiveSettings::merge(&local, &base, &current);
+        // What this machine last applied before writes were timed has no time, so it loses
+        // to the hive's value, and where the hive has none, the hive removed it.
+        ours.remotes
+            .retain(|name, entry| entry.stamp.time != 0 || current.remotes.contains_key(name));
+        ours.config
+            .retain(|key, entry| entry.stamp.time != 0 || current.config.contains_key(key));
+        if state.is_none() {
+            // Joining: the hive's values stand, whatever this machine has, but its own
+            // others join them, however recently the hive removed one by that name.
+            outlive_removals(&mut ours.remotes, &current.remotes);
+            outlive_removals(&mut ours.config, &current.config);
+            let present = current.without_removed();
+            ours.remotes.extend(present.remotes);
+            ours.config.extend(present.config);
+        }
+        let merged = HiveSettings::merge(&ours, &current);
         let (mut at, mut hive_now, mut recorded) = (canonical, hive, false);
         if merged != current {
             let op = self.record_settings(&head, &merged)?;
@@ -741,8 +741,10 @@ impl NodeRepo {
             hive_now = Some(merged.clone());
             recorded = true;
         }
-        if merged != local {
-            self.apply_settings(&local, &merged)?;
+        let values = merged.values();
+        if values != local {
+            log_replaced(&local, &merged);
+            self.apply_settings(&local, &values)?;
         }
         self.write_settings_state(&SettingsState {
             op: at.hex(),
@@ -759,8 +761,8 @@ impl NodeRepo {
 
     /// The settings this machine has now: its git remotes, and the shared keys of its repo
     /// config, including `extra` keys.
-    fn local_settings(&self, extra: &[String]) -> Result<HiveSettings, NodeError> {
-        Ok(HiveSettings {
+    fn local_settings(&self, extra: &[String]) -> Result<SettingValues, NodeError> {
+        Ok(SettingValues {
             remotes: match self.git_objects() {
                 Some(git) => git.remotes()?,
                 None => BTreeMap::new(),
@@ -769,7 +771,7 @@ impl NodeRepo {
         })
     }
 
-    fn apply_settings(&self, from: &HiveSettings, to: &HiveSettings) -> Result<(), NodeError> {
+    fn apply_settings(&self, from: &SettingValues, to: &SettingValues) -> Result<(), NodeError> {
         if let Some(git) = self.git_objects() {
             git.change_remotes(&from.remotes, &to.remotes)?;
         }
@@ -1818,4 +1820,81 @@ fn catch_jj_panic<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String>
             .or_else(|| panic.downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "jj panicked".to_owned())),
     }
+}
+
+/// This machine's settings as entries: as last applied where unchanged, and otherwise
+/// written now, as `stamp` says, including removals.
+fn stamp_changes<T: Clone + PartialEq>(
+    local: &BTreeMap<String, T>,
+    applied: &BTreeMap<String, Entry<T>>,
+    stamp: impl Fn() -> Stamp,
+) -> BTreeMap<String, Entry<T>> {
+    let names: BTreeSet<&String> = local.keys().chain(applied.keys()).collect();
+    names
+        .into_iter()
+        .filter_map(|name| {
+            let value = local.get(name);
+            match applied.get(name) {
+                Some(entry) if entry.value.as_ref() == value => Some(entry.clone()),
+                None if value.is_none() => None,
+                _ => Some(Entry {
+                    value: value.cloned(),
+                    stamp: stamp(),
+                }),
+            }
+            .map(|entry| (name.clone(), entry))
+        })
+        .collect()
+}
+
+/// Dates each of `ours` that `hive` removed later just after the removal, so that it stands.
+fn outlive_removals<T>(ours: &mut BTreeMap<String, Entry<T>>, hive: &BTreeMap<String, Entry<T>>) {
+    for (name, entry) in ours {
+        if let Some(removal) = hive.get(name).filter(|theirs| theirs.value.is_none())
+            && removal.stamp >= entry.stamp
+        {
+            entry.stamp.time = removal.stamp.time + 1;
+        }
+    }
+}
+
+/// When `path` was last modified, in milliseconds since the epoch, if it can tell.
+fn modified(path: &Path) -> i64 {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .map_or_else(|_| now(), millis)
+}
+
+fn now() -> i64 {
+    millis(std::time::SystemTime::now())
+}
+
+fn millis(time: std::time::SystemTime) -> i64 {
+    time.duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+        })
+}
+
+/// Logs each setting whose value here the hive's replaces, and whose write replaced it.
+fn log_replaced(local: &SettingValues, merged: &HiveSettings) {
+    fn each<T: PartialEq + std::fmt::Debug>(
+        kind: &str,
+        local: &BTreeMap<String, T>,
+        merged: &BTreeMap<String, Entry<T>>,
+    ) {
+        for (name, entry) in merged {
+            let old = local.get(name);
+            if old != entry.value.as_ref() {
+                tracing::info!(
+                    "{kind} {name}: {old:?} replaced by {:?}, written by {} at {}",
+                    entry.value,
+                    entry.stamp.machine,
+                    entry.stamp.time
+                );
+            }
+        }
+    }
+    each("remote", &local.remotes, &merged.remotes);
+    each("config", &local.config, &merged.config);
 }

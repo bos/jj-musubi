@@ -74,7 +74,7 @@ impl HiveIndex {
             if let Some(settings) = operation.metadata.attributes.get(hive_settings::ATTRIBUTE) {
                 // A malformed record names no URLs; the nodes complain about it.
                 for remote in HiveSettings::parse(settings)
-                    .map(|s| s.remotes)
+                    .map(|s| s.values().remotes)
                     .unwrap_or_default()
                     .into_values()
                 {

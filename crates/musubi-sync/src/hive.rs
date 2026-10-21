@@ -147,6 +147,12 @@ impl Hive {
         anyhow::bail!("node {node} did not settle")
     }
 
+    /// Has the node record its settings changes, as a sync starts by doing, without reaching
+    /// the hub, as a machine that is offline does. Returns whether it recorded one.
+    pub fn record_settings(&mut self, node: usize) -> anyhow::Result<bool> {
+        self.members[node].adapter.reconcile_settings(false)
+    }
+
     /// Syncs every node, repeatedly, until a whole round changes nothing.
     pub fn sync_all(&mut self) -> anyhow::Result<()> {
         for _ in 0..20 {

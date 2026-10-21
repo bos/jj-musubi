@@ -192,36 +192,41 @@ and any that the shared key `musubi.shared-config` names (`["aliases.l"]`, say).
 repo config outside the repository, so musubi finds the file as `jj` does.
 
 So musubi treats the remote definitions (each remote's name, URL, and push URL) and the
-shared config keys as hive settings. When a machine's settings change, musubi records the new settings in an
-attribute (`musubi.settings`) of an operation it writes, which changes nothing else. That
-operation replicates like any other, so settings changes are ordered by the hub, and where
-concurrent operations meet, the settings merge three-way, remote by remote, as jj merges
-workspaces. The hive's settings as of an operation are the nearest recording ancestor's,
-merged at merge operations.
+shared config keys as hive settings. When a machine's settings change, musubi records the
+new settings in an attribute (`musubi.settings`) of an operation it writes, which changes
+nothing else. That operation replicates like any other. Each remote and shared config key
+carries the time it was written, by the writing machine's clock (the modification time of
+the file holding it), and the machine that wrote it, and where machines disagree, the later
+write wins: the hive's settings as of an operation are the nearest recording ancestor's, and
+at a merge operation, for each setting, the parent whose write is later. Equal times go to
+the machine key that sorts last. Clock skew can make the wrong write win; that is accepted,
+for a rule anyone can predict ([settings-merge.md](settings-merge.md)). Settings recorded
+before writes were timed take their operation's time.
 
-At the start and end of every sync, a machine reconciles its settings three-way: what it
-has now, what the hive has as of its head, and what both had when they last agreed. It
-records its own changes, and applies the hive's: remotes with `git remote`, which also
-renames or deletes the remote-tracking refs, and config keys in its repo config file.
-Config values are compared as TOML, normalized, so that machines that write the same value
-differently agree on it. Remotes, likewise, are compared by the repositories they name:
-two are equal when their URLs have the same key (as for joining, under "Which hive"), and
-so do their push targets (the push URL, or else the URL). The merge, the checks for what
-changed, and the detection of renames all use that equality, so they work on where remotes
-point, not on how they are spelled, and the key is a pure function of the URL, so every
-machine agrees on it. A machine's own spelling of a shared remote, over https on one
-machine and ssh on another, is never a change, and respelling it records nothing. Applying
-a change writes only the URLs whose repository differs, and removes a push URL that no
-longer names where pushes go, so a machine keeps its spelling of whatever it still shares.
-For machines that don't have a remote yet, the settings hold the spelling of whichever
-machine last recorded settings; every spelling names the same repository. Merges are per
-remote: one machine changing a remote's URL while another changes its push URL conflict,
-and the change that reaches the hub first wins. A machine that joins adds its remotes to the hive's, but takes the hive's where both have a
-remote of the same name for different repositories; the first machine's settings become
-the hive's. A machine that needs another identity for a remote, an ssh key of its own,
-say, should keep the ordinary URL and rewrite it with git's `url.<base>.insteadOf` in its
-user config: a URL spelled with an ssh host alias names a host no other machine knows, so
-it doesn't count as the same repository, and a machine without the alias can't use it.
+At the start and end of every sync, a machine reconciles its settings: a setting that
+differs from what it last applied is a change of its own, written at the file's modification
+time, and the later write wins against the hive's. It records its own changes, and applies
+the hive's, logging each value it replaces: remotes with `git remote`, which also renames or
+deletes the remote-tracking refs, and config keys in its repo config file. Config values are
+compared as TOML, normalized, so that machines that write the same value differently agree
+on it. Remotes, likewise, are compared by the repositories they name: two are equal when
+their URLs have the same key (as for joining, under "Which hive"), and so do their push
+targets (the push URL, or else the URL). The merge, the checks for what changed, and the
+detection of renames all use that equality, so they work on where remotes point, not on how
+they are spelled, and the key is a pure function of the URL, so every machine agrees on it.
+A machine's own spelling of a shared remote, over https on one machine and ssh on another,
+is never a change, and respelling it records nothing. Applying a change writes only the URLs
+whose repository differs, and removes a push URL that no longer names where pushes go, so a
+machine keeps its spelling of whatever it still shares. For machines that don't have a
+remote yet, the settings hold the spelling of the machine that last wrote it; every spelling
+names the same repository. A remote is one setting: one machine changing its URL while
+another changes its push URL are two writes, and the later stands. A machine that joins adds
+its remotes to the hive's, but takes the hive's where both have a remote of the same name
+for different repositories; the first machine's settings become the hive's. A machine that
+needs another identity for a remote, an ssh key of its own, say, should keep the ordinary
+URL and rewrite it with git's `url.<base>.insteadOf` in its user config: a URL spelled with
+an ssh host alias names a host no other machine knows, so it doesn't count as the same
+repository, and a machine without the alias can't use it.
 
 ## Ordering: one hub, one canonical head
 

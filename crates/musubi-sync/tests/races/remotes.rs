@@ -108,7 +108,7 @@ fn remote_renamed_and_removed_everywhere() {
     assert_eq!(remotes(&hive, 0), "");
 }
 
-/// Two machines point a remote at different URLs at once: they end up agreeing.
+/// Two machines point a remote at different URLs at once: the later one wins everywhere.
 #[test]
 fn remote_changed_on_two_machines_at_once() {
     let mut hive = Fixture::new(&["alpha", "beta"]);
@@ -136,7 +136,139 @@ fn remote_changed_on_two_machines_at_once() {
     ]);
     hive.sync();
     hive.assert_converged();
+    let expected = "origin https://example.com/three.git\n";
+    assert_eq!(remotes(&hive, 0), expected);
+    assert_eq!(remotes(&hive, 1), expected);
+}
+
+/// A machine upgrading from before writes were timed, which last applied a remote that the
+/// hive has since removed (leaving no record of the removal, as the untimed version
+/// didn't), removes it too, rather than bringing it back, and keeps its own new ones.
+#[test]
+fn an_upgraded_machine_takes_removals_made_before_times() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.sync();
+    let beta = hive.repo(1);
+    beta.jj(&[
+        "git",
+        "remote",
+        "add",
+        "gone",
+        "https://example.com/gone.git",
+    ]);
+    // beta's settings state as the untimed version left it, having applied `gone`.
+    let state = beta.repo_path().join("musubi/settings.json");
+    let mut json: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&state).unwrap()).unwrap();
+    json["settings"]["remotes"] =
+        serde_json::json!({"gone": {"url": "https://example.com/gone.git"}});
+    std::fs::write(&state, serde_json::to_vec(&json).unwrap()).unwrap();
+    beta.jj(&[
+        "git",
+        "remote",
+        "add",
+        "mine",
+        "https://example.com/mine.git",
+    ]);
+    hive.sync();
+    hive.assert_converged();
+    let expected = "mine https://example.com/mine.git\n";
+    assert_eq!(remotes(&hive, 0), expected);
+    assert_eq!(remotes(&hive, 1), expected);
+}
+
+/// A joining machine keeps its own remotes, even one by a name the hive once removed.
+#[test]
+fn a_joining_machine_keeps_a_remote_the_hive_removed() {
+    let env = TestEnv::new();
+    let alpha = env.init_repo("alpha");
+    alpha.jj(&[
+        "git",
+        "remote",
+        "add",
+        "extra",
+        "https://example.com/old.git",
+    ]);
+    // beta has its remote from before the hive removed one by that name.
+    let beta = env.init_repo("beta");
+    beta.jj(&[
+        "git",
+        "remote",
+        "add",
+        "extra",
+        "https://example.com/new.git",
+    ]);
+    let mut hive = Fixture::join(env, vec![alpha]);
+    hive.repo(0).jj(&["git", "remote", "remove", "extra"]);
+    hive.sync();
+    hive.add(beta);
+    hive.sync();
+    hive.assert_converged();
+    let expected = "extra https://example.com/new.git\n";
+    assert_eq!(remotes(&hive, 0), expected);
+    assert_eq!(remotes(&hive, 1), expected);
+}
+
+/// One machine points a remote elsewhere while another gives it a push URL: two writes to
+/// the remote, and the later one wins, whichever reaches the hub first, whichever machine
+/// makes the merge, and whatever either does meanwhile.
+fn conflicting_changes_to_a_remote(beta_first: bool, beta_works_on: bool) -> String {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.repo(0).jj(&["git", "remote", "add", "origin", ONE]);
+    hive.sync();
+    let alpha_changes = |hive: &mut Fixture| {
+        hive.repo(0)
+            .jj(&["git", "remote", "set-url", "origin", MOVED]);
+        hive.hive.sync(0).unwrap();
+    };
+    if !beta_first {
+        alpha_changes(&mut hive);
+    }
+    // beta, offline, records its change, and reaches the hub last.
+    hive.repo(1)
+        .git(&["config", "remote.origin.pushurl", MIRROR]);
+    assert!(hive.hive.record_settings(1).unwrap());
+    if beta_first {
+        alpha_changes(&mut hive);
+    }
+    if beta_works_on {
+        hive.commit(1, "b", "beta works on");
+    }
+    hive.sync();
+    hive.assert_converged();
     assert_eq!(remotes(&hive, 0), remotes(&hive, 1));
+    remotes(&hive, 0)
+}
+
+const ONE: &str = "https://example.com/one.git";
+const MOVED: &str = "https://example.com/moved.git";
+const MIRROR: &str = "https://example.com/mirror.git";
+
+/// The later change wins, though it reaches the hub first.
+#[test]
+fn the_later_change_to_a_remote_wins() {
+    assert_eq!(
+        conflicting_changes_to_a_remote(true, false),
+        format!("origin {MOVED}\n")
+    );
+}
+
+/// The later change wins when it reaches the hub last, too.
+#[test]
+fn the_later_change_wins_reaching_the_hub_last() {
+    assert_eq!(
+        conflicting_changes_to_a_remote(false, false),
+        format!("origin {ONE} (push: {MIRROR})\n")
+    );
+}
+
+/// Working on after the earlier change doesn't make it win.
+#[test]
+fn working_on_after_the_earlier_change_makes_no_difference() {
+    assert_eq!(
+        conflicting_changes_to_a_remote(true, true),
+        format!("origin {MOVED}\n")
+    );
 }
 
 /// A machine that joins adds its own remotes to the hive's, but takes the hive's where

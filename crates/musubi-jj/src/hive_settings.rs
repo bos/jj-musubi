@@ -3,17 +3,16 @@
 //!
 //! Remote bookmarks replicate with the view, but which remotes exist, and where they point,
 //! is in each machine's git config. So musubi records the hive's settings in an attribute
-//! of an operation it makes whenever they change, and replicates them like any operation:
-//! ordered by the hub, and merged three-way, entry by entry, where operations ran
-//! concurrently.
+//! of an operation it makes whenever they change, and replicates them like any operation.
+//! Each setting carries the time it was written, by the writing machine's clock, and where
+//! machines disagree, the later write wins (docs/settings-merge.md). Clock skew can make
+//! the wrong one win; that is accepted, for a rule anyone can predict.
 
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::merge::merge_entry;
 use crate::remote_url::RemoteUrl;
 
 /// The operation attribute that records the hive's settings.
@@ -31,14 +30,37 @@ pub const SHARED_CONFIG: [&str; 4] = [
     SHARED_CONFIG_KEY,
 ];
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// The hive's settings: each remote and shared config key, with when it was last written.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "Wire", into = "Wire")]
 pub struct HiveSettings {
     /// Git remotes, by name.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub remotes: BTreeMap<String, Entry<Remote>>,
+    /// Shared repo config keys, with their values as TOML (see [`normalize_value`]).
+    pub config: BTreeMap<String, Entry<String>>,
+}
+
+/// One setting: its value, or that it was removed, and when it was written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Entry<T> {
+    pub value: Option<T>,
+    pub stamp: Stamp,
+}
+
+/// When a setting was written, and by which machine.
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Stamp {
+    /// Milliseconds since the epoch, by the writer's clock. Zero in settings recorded
+    /// before writes were timed, until [`HiveSettings::date_untimed`] dates them.
+    pub time: i64,
+    /// The writer's machine key, which breaks ties.
+    pub machine: String,
+}
+
+/// Settings as one machine has them: the remotes and shared config keys that are set.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SettingValues {
     pub remotes: BTreeMap<String, Remote>,
-    /// Shared repo config keys that are set, with their values as TOML (see
-    /// [`normalize_value`]).
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub config: BTreeMap<String, String>,
 }
 
@@ -67,14 +89,69 @@ impl HiveSettings {
         serde_json::to_string(self).expect("settings serialize")
     }
 
-    /// Merges three-way, remote by remote and key by key, as jj merges workspaces.
-    pub fn merge(ours: &Self, base: &Self, theirs: &Self) -> Self {
-        Self {
-            remotes: merge_maps(&ours.remotes, &base.remotes, &theirs.remotes),
-            config: merge_maps(&ours.config, &base.config, &theirs.config),
+    /// Dates the settings that were recorded without a time with `time`: the time of the
+    /// operation that recorded them.
+    pub fn date_untimed(&mut self, time: i64) {
+        let stamps = self
+            .remotes
+            .values_mut()
+            .map(|entry| &mut entry.stamp)
+            .chain(self.config.values_mut().map(|entry| &mut entry.stamp));
+        for stamp in stamps {
+            if stamp.time == 0 {
+                stamp.time = time;
+            }
         }
     }
 
+    /// Whether every setting has a time: none was recorded before writes were timed.
+    pub fn is_timed(&self) -> bool {
+        self.remotes
+            .values()
+            .map(|entry| &entry.stamp)
+            .chain(self.config.values().map(|entry| &entry.stamp))
+            .all(|stamp| stamp.time != 0)
+    }
+
+    /// Combines two sets of settings, setting by setting: the later write wins.
+    pub fn merge(a: &Self, b: &Self) -> Self {
+        Self {
+            remotes: merge_maps(&a.remotes, &b.remotes),
+            config: merge_maps(&a.config, &b.config),
+        }
+    }
+
+    /// These settings without the removed ones.
+    pub fn without_removed(&self) -> Self {
+        fn present<T: Clone>(entries: &BTreeMap<String, Entry<T>>) -> BTreeMap<String, Entry<T>> {
+            entries
+                .iter()
+                .filter(|(_, entry)| entry.value.is_some())
+                .map(|(name, entry)| (name.clone(), entry.clone()))
+                .collect()
+        }
+        Self {
+            remotes: present(&self.remotes),
+            config: present(&self.config),
+        }
+    }
+
+    /// The settings' values, without the removed ones.
+    pub fn values(&self) -> SettingValues {
+        fn present<T: Clone>(entries: &BTreeMap<String, Entry<T>>) -> BTreeMap<String, T> {
+            entries
+                .iter()
+                .filter_map(|(name, entry)| Some((name.clone(), entry.value.clone()?)))
+                .collect()
+        }
+        SettingValues {
+            remotes: present(&self.remotes),
+            config: present(&self.config),
+        }
+    }
+}
+
+impl SettingValues {
     /// The extra repo config keys these settings' `musubi.shared-config` names.
     pub fn extra_config_keys(&self) -> Vec<String> {
         self.config
@@ -121,23 +198,141 @@ pub fn repository(url: &str) -> String {
     RemoteUrl::parse(url).map_or_else(|| url.to_owned(), |url| url.key())
 }
 
-fn merge_maps<T: Clone + Eq + std::hash::Hash>(
-    ours: &BTreeMap<String, T>,
-    base: &BTreeMap<String, T>,
-    theirs: &BTreeMap<String, T>,
-) -> BTreeMap<String, T> {
-    let names: BTreeSet<&String> = ours
-        .keys()
-        .chain(base.keys())
-        .chain(theirs.keys())
-        .collect();
-    names
-        .into_iter()
-        .filter_map(|name| {
-            let value = merge_entry(ours.get(name), base.get(name), theirs.get(name))?;
-            Some((name.clone(), value.clone()))
-        })
-        .collect()
+fn merge_maps<T: Clone>(
+    a: &BTreeMap<String, Entry<T>>,
+    b: &BTreeMap<String, Entry<T>>,
+) -> BTreeMap<String, Entry<T>> {
+    let mut merged = a.clone();
+    for (name, theirs) in b {
+        match merged.get(name) {
+            Some(ours) if ours.stamp >= theirs.stamp => {}
+            _ => {
+                merged.insert(name.clone(), theirs.clone());
+            }
+        }
+    }
+    merged
+}
+
+/// The attribute as written: each remote's URLs, or `removed`, and each config key's value,
+/// with when and by whom it was written. Settings recorded before writes were timed have no
+/// time, and config values that are bare strings.
+#[derive(Default, Serialize, Deserialize)]
+struct Wire {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    remotes: BTreeMap<String, WireRemote>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    config: BTreeMap<String, WireConfig>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct WireRemote {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    push_url: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    removed: bool,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    time: i64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    machine: String,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum WireConfig {
+    Untimed(String),
+    Timed {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        value: Option<String>,
+        time: i64,
+        machine: String,
+    },
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
+fn is_zero(value: &i64) -> bool {
+    *value == 0
+}
+
+impl From<Wire> for HiveSettings {
+    fn from(wire: Wire) -> Self {
+        let remotes = wire
+            .remotes
+            .into_iter()
+            .map(|(name, remote)| {
+                let value = (!remote.removed).then_some(Remote {
+                    url: remote.url,
+                    push_url: remote.push_url,
+                });
+                let stamp = Stamp {
+                    time: remote.time,
+                    machine: remote.machine,
+                };
+                (name, Entry { value, stamp })
+            })
+            .collect();
+        let config = wire
+            .config
+            .into_iter()
+            .map(|(key, config)| {
+                let entry = match config {
+                    WireConfig::Untimed(value) => Entry {
+                        value: Some(value),
+                        stamp: Stamp::default(),
+                    },
+                    WireConfig::Timed {
+                        value,
+                        time,
+                        machine,
+                    } => Entry {
+                        value,
+                        stamp: Stamp { time, machine },
+                    },
+                };
+                (key, entry)
+            })
+            .collect();
+        Self { remotes, config }
+    }
+}
+
+impl From<HiveSettings> for Wire {
+    fn from(settings: HiveSettings) -> Self {
+        let remotes = settings
+            .remotes
+            .into_iter()
+            .map(|(name, entry)| {
+                let removed = entry.value.is_none();
+                let remote = entry.value.unwrap_or_default();
+                let wire = WireRemote {
+                    url: remote.url,
+                    push_url: remote.push_url,
+                    removed,
+                    time: entry.stamp.time,
+                    machine: entry.stamp.machine,
+                };
+                (name, wire)
+            })
+            .collect();
+        let config = settings
+            .config
+            .into_iter()
+            .map(|(key, entry)| {
+                let wire = WireConfig::Timed {
+                    value: entry.value,
+                    time: entry.stamp.time,
+                    machine: entry.stamp.machine,
+                };
+                (key, wire)
+            })
+            .collect();
+        Self { remotes, config }
+    }
 }
 
 /// A TOML value in canonical form, so that machines that write the same value differently
@@ -170,19 +365,24 @@ mod tests {
 
     use super::*;
 
-    fn with(remotes: &[(&str, &str)]) -> HiveSettings {
+    /// Remotes, each at a URL or removed, all written at `time` by `machine`.
+    fn with(time: i64, machine: &str, remotes: &[(&str, Option<&str>)]) -> HiveSettings {
         HiveSettings {
             config: BTreeMap::new(),
             remotes: remotes
                 .iter()
                 .map(|(name, url)| {
-                    (
-                        (*name).to_owned(),
-                        Remote {
-                            url: Some((*url).to_owned()),
+                    let entry = Entry {
+                        value: url.map(|url| Remote {
+                            url: Some(url.to_owned()),
                             push_url: None,
+                        }),
+                        stamp: Stamp {
+                            time,
+                            machine: machine.to_owned(),
                         },
-                    )
+                    };
+                    ((*name).to_owned(), entry)
                 })
                 .collect(),
         }
@@ -216,24 +416,51 @@ mod tests {
             hasher.finish()
         };
         assert_eq!(hash(&remote(https, ssh)), hash(&remote(ssh, None)));
-        // So merging three-way, a machine's own spelling is no change of its own.
-        let hive = with(&[("origin", "https://example.com/team/p.git")]);
-        let ours = with(&[("origin", "git@example.com:team/p")]);
-        let theirs = with(&[("origin", "https://example.com/team/moved.git")]);
-        let merged = HiveSettings::merge(&ours, &hive, &theirs);
-        assert_eq!(merged.remotes["origin"].url, theirs.remotes["origin"].url);
     }
 
     #[test]
-    fn merges_remote_by_remote() {
-        let base = with(&[("origin", "a"), ("old", "x")]);
-        let ours = with(&[("origin", "b"), ("old", "x"), ("mine", "m")]);
-        let theirs = with(&[("origin", "a"), ("theirs", "t")]);
-        let merged = HiveSettings::merge(&ours, &base, &theirs);
-        assert_eq!(
-            merged,
-            with(&[("origin", "b"), ("mine", "m"), ("theirs", "t")])
+    fn the_later_write_wins() {
+        let alpha = with(
+            1,
+            "alpha",
+            &[
+                ("origin", Some("a")),
+                ("old", Some("x")),
+                ("mine", Some("m")),
+            ],
         );
+        let beta = with(2, "beta", &[("origin", Some("b")), ("old", None)]);
+        let merged = with(2, "beta", &[("origin", Some("b")), ("old", None)]);
+        let mut expected = merged.clone();
+        expected
+            .remotes
+            .insert("mine".to_owned(), alpha.remotes["mine"].clone());
+        assert_eq!(HiveSettings::merge(&alpha, &beta), expected);
+        assert_eq!(HiveSettings::merge(&beta, &alpha), expected);
+        assert_eq!(
+            expected.values().remotes.keys().collect::<Vec<_>>(),
+            ["mine", "origin"]
+        );
+        // Equal times go to the machine whose key sorts last.
+        let gamma = with(2, "gamma", &[("origin", Some("c"))]);
+        for merged in [
+            HiveSettings::merge(&beta, &gamma),
+            HiveSettings::merge(&gamma, &beta),
+        ] {
+            assert_eq!(merged.remotes["origin"], gamma.remotes["origin"]);
+        }
+    }
+
+    #[test]
+    fn untimed_settings_take_their_operations_time() {
+        let mut settings = HiveSettings::parse(
+            r#"{"remotes":{"origin":{"url":"https://example.com/r.git"}},"config":{"k":"1"}}"#,
+        )
+        .unwrap();
+        settings.date_untimed(42);
+        assert_eq!(settings.remotes["origin"].stamp.time, 42);
+        assert_eq!(settings.config["k"].stamp.time, 42);
+        assert_eq!(settings.config["k"].value.as_deref(), Some("1"));
     }
 
     #[test]
@@ -253,11 +480,24 @@ mod tests {
     #[test]
     fn round_trips_through_the_attribute() {
         // Compared as written: remotes' equality ignores spelling, the attribute doesn't.
-        let settings = with(&[("origin", "git@example.com:repo.git")]);
-        let attribute = settings.to_attribute();
-        assert_eq!(
-            HiveSettings::parse(&attribute).unwrap().to_attribute(),
-            attribute
+        let mut settings = with(
+            7,
+            "alpha",
+            &[("origin", Some("git@example.com:repo.git")), ("gone", None)],
         );
+        settings.config.insert(
+            "k".to_owned(),
+            Entry {
+                value: Some("1".to_owned()),
+                stamp: Stamp {
+                    time: 8,
+                    machine: "beta".to_owned(),
+                },
+            },
+        );
+        let attribute = settings.to_attribute();
+        let parsed = HiveSettings::parse(&attribute).unwrap();
+        assert_eq!(parsed, settings);
+        assert_eq!(parsed.to_attribute(), attribute);
     }
 }

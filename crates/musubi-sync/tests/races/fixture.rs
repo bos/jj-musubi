@@ -45,6 +45,17 @@ impl Fixture {
         Self { env, repos, hive }
     }
 
+    /// Joins another repository to the hive, without syncing.
+    pub fn add(&mut self, repo: TestRepo) {
+        let mut node = NodeRepo::open(&repo.repo_path(), &repo.settings())
+            .unwrap()
+            .with_repo_config(Some(repo.repo_config_path()));
+        node.create_join_operation(&format!("musubi: {} joins", repo.machine()))
+            .unwrap();
+        self.hive.add(node).unwrap();
+        self.repos.push(repo);
+    }
+
     pub fn sync(&mut self) {
         self.try_sync().unwrap();
     }

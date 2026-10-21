@@ -64,6 +64,11 @@ impl GitObjects {
         Ok(objects)
     }
 
+    /// This repository's own git config file.
+    pub fn config_path(&self) -> PathBuf {
+        self.git_dir.join("config")
+    }
+
     /// The remotes in this repository's own git config, with their URLs.
     pub fn remotes(&self) -> Result<BTreeMap<String, Remote>, ObjectError> {
         let output = self.run(&["config", "--local", "--list"], None)?;

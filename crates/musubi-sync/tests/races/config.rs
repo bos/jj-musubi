@@ -67,8 +67,8 @@ fn shared_config_set_on_two_machines_at_once() {
         .jj(&["config", "set", "--repo", "git.private-commits", "'secret'"]);
     hive.sync();
     hive.assert_converged();
-    assert_eq!(
-        get(&hive, 0, "git.private-commits"),
-        get(&hive, 1, "git.private-commits")
-    );
+    // beta's write is the later.
+    let expected = Some("secret\n".to_owned());
+    assert_eq!(get(&hive, 0, "git.private-commits"), expected);
+    assert_eq!(get(&hive, 1, "git.private-commits"), expected);
 }

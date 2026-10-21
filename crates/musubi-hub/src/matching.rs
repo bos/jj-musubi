@@ -59,8 +59,8 @@ pub fn decide(joiner: &Joiner, hives: &[Candidate]) -> Decision {
             }
         } else {
             Decision::Refuse(format!(
-                "this repository shares no history with hive {}; use --new --name <name> to \
-                 start a hive of its own",
+                "this repository shares no history with hive {}; use --new <name> to start a \
+                 hive of its own",
                 hive.name
             ))
         };
@@ -115,7 +115,7 @@ fn ambiguous(hives: &[&Candidate]) -> Decision {
     names.sort_unstable();
     Decision::Refuse(format!(
         "this repository matches several hives: {}; choose one with --hive <name>, or start \
-         another with --new --name <name>",
+         another with --new <name>",
         names.join(", ")
     ))
 }

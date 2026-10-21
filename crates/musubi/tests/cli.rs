@@ -1,5 +1,6 @@
-//! The `musubi` binary end to end: a hub process, nodes joining, syncing, cloning, and a
-//! daemon picking up another machine's work by itself, all over a real `nats-server`.
+//! The `musubi` binary end to end: a hub process with the NATS server it starts, machines
+//! joining and matching hives, cloning, listing, and each machine's daemon, started by
+//! joining, picking up repositories and other machines' work by itself.
 
 #![allow(clippy::unwrap_used)]
 
@@ -18,7 +19,6 @@ use std::sync::mpsc;
 use std::time::Duration;
 use std::time::Instant;
 
-use musubi_testutil::NatsServer;
 use musubi_testutil::TestEnv;
 use musubi_testutil::TestRepo;
 
@@ -28,15 +28,6 @@ const DEADLINE: Duration = Duration::from_secs(45);
 
 fn musubi() -> &'static Path {
     Path::new(env!("CARGO_BIN_EXE_musubi"))
-}
-
-struct Killed(Child);
-
-impl Drop for Killed {
-    fn drop(&mut self) {
-        self.0.kill().ok();
-        self.0.wait().ok();
-    }
 }
 
 /// The logs of the background processes, for failure messages.
@@ -53,6 +44,11 @@ impl Logs {
         self.0.push(path);
     }
 
+    /// Includes the daemon log of `repo`'s machine in failure messages.
+    fn daemon_of(&mut self, env: &TestEnv, repo: &TestRepo) {
+        self.0.push(config_dir(env, repo).join("daemon.log"));
+    }
+
     fn dump(&self) -> String {
         let mut dump = String::new();
         for path in &self.0 {
@@ -63,8 +59,14 @@ impl Logs {
     }
 }
 
-/// Runs `command` to completion within the deadline, returning its stdout.
-fn run(env: &TestEnv, logs: &Logs, mut command: Command) -> String {
+/// Where `TestRepo::program` points musubi's config for the repository's machine.
+fn config_dir(env: &TestEnv, repo: &TestRepo) -> PathBuf {
+    env.root().join(format!("home/musubi-{}", repo.machine()))
+}
+
+/// Runs `command` to completion within the deadline, returning whether it succeeded, its
+/// stdout, and its stderr.
+fn try_run(logs: &Logs, env: &TestEnv, mut command: Command) -> (bool, String, String) {
     static RUNS: AtomicUsize = AtomicUsize::new(0);
     let n = RUNS.fetch_add(1, Ordering::Relaxed);
     let out = env.root().join(format!("run-{n}.out"));
@@ -74,21 +76,31 @@ fn run(env: &TestEnv, logs: &Logs, mut command: Command) -> String {
         .stderr(fs::File::create(&err).unwrap());
     let mut child = command.spawn().unwrap();
     let deadline = Instant::now() + DEADLINE;
-    let (status, outcome) = loop {
+    let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
-            break (status, "failed");
+            break status;
         }
         if Instant::now() > deadline {
             child.kill().ok();
-            break (child.wait().unwrap(), "did not finish in time");
+            child.wait().ok();
+            panic!("{command:?} did not finish in time:\n{}", logs.dump());
         }
         std::thread::sleep(Duration::from_millis(50));
     };
-    let stdout = fs::read_to_string(&out).unwrap();
-    assert!(
+    (
         status.success(),
-        "{command:?} {outcome}:\n{stdout}{}\n{}",
+        fs::read_to_string(&out).unwrap(),
         fs::read_to_string(&err).unwrap(),
+    )
+}
+
+/// Runs `command`, which must succeed, returning its stdout.
+fn run(env: &TestEnv, logs: &Logs, command: Command) -> String {
+    let description = format!("{command:?}");
+    let (ok, stdout, stderr) = try_run(logs, env, command);
+    assert!(
+        ok,
+        "{description} failed:\n{stdout}{stderr}\n{}",
         logs.dump()
     );
     stdout
@@ -100,36 +112,130 @@ fn musubi_in(env: &TestEnv, logs: &Logs, repo: &TestRepo, args: &[&str]) -> Stri
     run(env, logs, command)
 }
 
-/// Starts `musubi hub` and returns it with the hive id it prints once it is serving.
-fn start_hub(env: &TestEnv, logs: &mut Logs, nats: &str) -> (Killed, String) {
-    let mut command = Command::new(musubi());
-    command
-        .args([
-            "hub",
-            "--dir",
-            env.root().join("hub").to_str().unwrap(),
-            "--nats",
-            nats,
-        ])
-        .stdout(Stdio::piped());
-    logs.attach(env, "hub", &mut command);
-    let mut child = command.spawn().unwrap();
-    let stdout = child.stdout.take().unwrap();
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut line = String::new();
-        let mut stdout = BufReader::new(stdout);
-        stdout.read_line(&mut line).ok();
-        tx.send(line).ok();
-        // Keep reading, so the hub never writes to a closed pipe.
-        std::io::copy(&mut stdout, &mut std::io::sink()).ok();
-    });
-    let hub = Killed(child);
-    let line = rx
-        .recv_timeout(DEADLINE)
-        .unwrap_or_else(|_| panic!("the hub did not start serving:\n{}", logs.dump()));
-    assert!(!line.trim().is_empty(), "the hub exited:\n{}", logs.dump());
-    (hub, line.trim().to_owned())
+/// Runs musubi in `repo`, which must fail, returning its stderr.
+fn musubi_fails(env: &TestEnv, logs: &Logs, repo: &TestRepo, args: &[&str]) -> String {
+    let mut command = repo.program(musubi());
+    command.args(args);
+    let (ok, stdout, stderr) = try_run(logs, env, command);
+    assert!(!ok, "musubi {args:?} succeeded:\n{stdout}");
+    stderr
+}
+
+/// A `musubi hub` process serving `<root>/hub` with a NATS server of its own.
+struct Hub {
+    child: Child,
+    dir: PathBuf,
+    /// The URL it says to join with.
+    url: String,
+    /// The first line it printed.
+    greeting: String,
+}
+
+impl Hub {
+    fn start(env: &TestEnv, logs: &mut Logs) -> Self {
+        Self::start_with(env, logs, &[])
+    }
+
+    fn start_with(env: &TestEnv, logs: &mut Logs, args: &[&str]) -> Self {
+        let dir = env.root().join("hub");
+        let mut command = Command::new(musubi());
+        command
+            .args([
+                "hub",
+                "-d",
+                dir.to_str().unwrap(),
+                "--advertise",
+                "127.0.0.1",
+            ])
+            .args(args)
+            .env("MUSUBI_CONFIG_DIR", env.root().join("hub-config"))
+            .stdout(Stdio::piped());
+        logs.attach(env, "hub", &mut command);
+        let mut child = command.spawn().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut stdout = BufReader::new(stdout);
+            loop {
+                let mut line = String::new();
+                if stdout.read_line(&mut line).unwrap_or(0) == 0 {
+                    break;
+                }
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        let mut hub = Self {
+            child,
+            dir,
+            url: String::new(),
+            greeting: String::new(),
+        };
+        let deadline = Instant::now() + DEADLINE;
+        while hub.url.is_empty() {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let line = rx
+                .recv_timeout(left)
+                .unwrap_or_else(|_| panic!("the hub did not start serving:\n{}", logs.dump()));
+            if hub.greeting.is_empty() {
+                hub.greeting = line.trim().to_owned();
+            }
+            if let Some(url) = line
+                .trim()
+                .strip_prefix("To add a repository on any machine: musubi join --nats ")
+            {
+                hub.url = url.to_owned();
+            }
+        }
+        hub
+    }
+
+    /// Kills the hub the hard way, leaving its NATS server running.
+    fn kill(&mut self) {
+        self.child.kill().ok();
+        self.child.wait().ok();
+    }
+}
+
+impl Drop for Hub {
+    fn drop(&mut self) {
+        self.kill();
+        // The NATS server outlives a killed hub.
+        if let Ok(pid) = fs::read_to_string(self.dir.join("nats.pid")) {
+            let pid = pid.trim();
+            if cfg!(windows) {
+                Command::new("taskkill")
+                    .args(["/F", "/PID", pid])
+                    .output()
+                    .ok();
+            } else {
+                Command::new("kill").arg(pid).output().ok();
+            }
+        }
+    }
+}
+
+/// Stops the daemons of the machines it was given when dropped.
+#[derive(Default)]
+struct Daemons(Vec<Command>);
+
+impl Daemons {
+    fn of(&mut self, repo: &TestRepo) {
+        let mut stop = repo.program(musubi());
+        stop.args(["daemon", "stop"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        self.0.push(stop);
+    }
+}
+
+impl Drop for Daemons {
+    fn drop(&mut self) {
+        for stop in &mut self.0 {
+            stop.status().ok();
+        }
+    }
 }
 
 fn log(repo: &TestRepo) -> String {
@@ -167,50 +273,102 @@ fn wait_for(logs: &Logs, what: &str, mut done: impl FnMut() -> bool) {
     }
 }
 
+/// Gives `to` the history of `from`, as a clone would, without leaving a remote behind.
+fn fetch_history(from: &TestRepo, to: &TestRepo) {
+    to.jj(&[
+        "git",
+        "remote",
+        "add",
+        "seed",
+        from.path().to_str().unwrap(),
+    ]);
+    to.jj(&["git", "fetch", "--remote", "seed"]);
+    to.jj(&["git", "remote", "remove", "seed"]);
+}
+
 #[test]
-fn hub_join_sync_clone_and_daemon() {
-    let server = NatsServer::start(1024 * 1024);
+fn hub_join_sync_clone_and_list() {
     let env = TestEnv::new();
     let mut logs = Logs::default();
-    let (_hub, hive) = start_hub(&env, &mut logs, &server.url());
+    let hub = Hub::start(&env, &mut logs);
+    // Stopped before the hub.
+    let mut daemons = Daemons::default();
+    assert!(
+        hub.greeting.starts_with("Created a new hub in"),
+        "{}",
+        hub.greeting
+    );
+    // No token unless asked for.
+    assert!(hub.url.starts_with("nats://127.0.0.1:"), "{}", hub.url);
     let alpha = env.init_repo("alpha");
     let beta = env.init_repo("beta");
+    logs.daemon_of(&env, &alpha);
+    logs.daemon_of(&env, &beta);
+    daemons.of(&alpha);
+    daemons.of(&beta);
+
+    // Nothing to share yet.
+    let err = musubi_fails(&env, &logs, &alpha, &["join", "--nats", &hub.url]);
+    assert!(err.contains("commit something first"), "{err}");
 
     alpha.write_file("a", "from alpha");
     alpha.jj(&["commit", "-m", "from alpha"]);
-    musubi_in(
-        &env,
-        &logs,
-        &alpha,
-        &["join", &hive, "--nats", &server.url()],
-    );
-    musubi_in(
-        &env,
-        &logs,
-        &beta,
-        &["join", &hive, "--nats", &server.url()],
+    alpha.jj(&["bookmark", "create", "main", "-r", "@-"]);
+    alpha.jj(&[
+        "git",
+        "remote",
+        "add",
+        "origin",
+        "https://example.com/team/project.git",
+    ]);
+    let out = musubi_in(&env, &logs, &alpha, &["join", "--nats", &hub.url]);
+    assert!(out.contains("Created hive project"), "{out}");
+    assert!(out.contains("Synced with the hub"), "{out}");
+
+    // A copy of the same repository, with its remote spelled another way, joins it, and
+    // the daemon its join started brings it alpha's work.
+    fetch_history(&alpha, &beta);
+    beta.jj(&[
+        "git",
+        "remote",
+        "add",
+        "origin",
+        "git@example.com:team/project",
+    ]);
+    let out = musubi_in(&env, &logs, &beta, &["join", "--nats", &hub.url]);
+    assert!(
+        out.contains("Joined hive project (matched origin), 2 machines"),
+        "{out}"
     );
     assert!(log(&beta).contains("from alpha"));
 
-    let status = musubi_in(&env, &logs, &beta, &["status"]);
+    // The first join saved the hub: from now on no command needs --nats.
+    let list = musubi_in(&env, &logs, &beta, &[]);
+    assert!(list.contains("project  2 machines: alpha, beta"), "{list}");
     assert!(
-        status.contains(&hive) && status.contains("Machine:   beta"),
-        "{status}"
+        list.contains(&format!(
+            "here: {}",
+            beta.path().canonicalize().unwrap().display()
+        )),
+        "{list}"
+    );
+    assert!(
+        list.contains("Daemon: running, serving 1 repositories"),
+        "{list}"
     );
     // Every machine's workspaces are listed, by machine.
-    assert!(status.contains("alpha@alpha is at"), "{status}");
+    assert!(list.contains("alpha@alpha is at"), "{list}");
+    assert!(list.contains("Machine:   beta"), "{list}");
 
-    // The daemon keeps beta in sync on its own.
-    let mut daemon = beta.program(musubi());
-    daemon.arg("daemon").stdout(Stdio::null());
-    logs.attach(&env, "daemon", &mut daemon);
-    let _daemon = Killed(daemon.spawn().unwrap());
+    // Daemons keep the machines in sync on their own.
     alpha.write_file("b", "more");
     alpha.jj(&["commit", "-m", "picked up by the daemon"]);
-    musubi_in(&env, &logs, &alpha, &["sync"]);
     wait_for(&logs, "beta's daemon to fetch alpha's commit", || {
         try_log(&beta).is_some_and(|log| log.contains("picked up by the daemon"))
     });
+    // `musubi sync` goes through the daemon.
+    let out = musubi_in(&env, &logs, &alpha, &["sync"]);
+    assert!(out.contains("Synced (hive at #"), "{out}");
 
     // Operation ids translate between this machine's and the hive's.
     let local = beta.jj(&["op", "log", "--no-graph", "-n1", "-T", "id"]);
@@ -220,73 +378,156 @@ fn hub_join_sync_clone_and_daemon() {
         "{translated}"
     );
 
-    // A new machine clones the hive.
+    // A new machine clones the hive by a prefix of its name.
     let gamma = env.repo_handle("gamma");
     let mut clone = alpha.program(musubi());
+    // A relative destination, through a parent, lands where it says.
+    clone.args(["clone", "proj", "../gamma"]);
+    clone.current_dir(env.root().join("home"));
+    let out = run(&env, &logs, clone);
+    assert!(out.contains("Cloning hive project into"), "{out}");
+    assert!(log(&gamma).contains("picked up by the daemon"));
+
+    // Leaving stops the syncing.
+    let out = musubi_in(&env, &logs, &beta, &["leave"]);
+    assert!(out.contains("no longer syncs with hive project"), "{out}");
+    let list = musubi_in(&env, &logs, &beta, &["list"]);
+    assert!(!list.contains("here:"), "{list}");
+    assert!(
+        list.contains("Daemon: running, serving 0 repositories"),
+        "{list}"
+    );
+}
+
+/// A machine's daemon serves a repository joined after it started, without a restart,
+/// and a restarted hub serves its hives again on the same URL, token and all.
+#[test]
+fn the_daemon_picks_up_new_repositories() {
+    let env = TestEnv::new();
+    let mut logs = Logs::default();
+    let mut hub = Hub::start_with(&env, &mut logs, &["--token"]);
+    assert!(hub.url.contains("@127.0.0.1:"), "{}", hub.url);
+    let mut daemons = Daemons::default();
+    let alpha = env.init_repo("alpha");
+    let beta = env.init_repo("beta");
+    logs.daemon_of(&env, &alpha);
+    logs.daemon_of(&env, &beta);
+    daemons.of(&alpha);
+    daemons.of(&beta);
+    alpha.write_file("a", "a");
+    alpha.jj(&["commit", "-m", "first project"]);
+    musubi_in(&env, &logs, &alpha, &["join", "--nats", &hub.url]);
+
+    // A second repository on alpha: another hive, named after its directory, served by
+    // the daemon the first join started.
+    let second = env.root().join("second");
+    let mut init = alpha.program(Path::new("jj"));
+    init.args(["git", "init", "--colocate", second.to_str().unwrap()]);
+    run(&env, &logs, init);
+    let jj_in_second = |args: &[&str]| {
+        let mut command = alpha.program(Path::new("jj"));
+        command.args(args).current_dir(&second);
+        run(&env, &logs, command)
+    };
+    fs::write(second.join("s"), "s").unwrap();
+    jj_in_second(&["commit", "-m", "second project"]);
+    let mut join = alpha.program(musubi());
+    join.arg("join").current_dir(&second);
+    let out = run(&env, &logs, join);
+    assert!(out.contains("Created hive second"), "{out}");
+    let list = musubi_in(&env, &logs, &alpha, &["list"]);
+    assert!(
+        list.contains("Daemon: running, serving 2 repositories"),
+        "{list}"
+    );
+
+    let mut clone = beta.program(musubi());
     clone.args([
         "clone",
-        &hive,
-        env.root().join("gamma").to_str().unwrap(),
+        "second",
+        env.root().join("beta-second").to_str().unwrap(),
         "--nats",
-        &server.url(),
+        &hub.url,
     ]);
-    clone.current_dir(env.root());
     run(&env, &logs, clone);
-    assert!(log(&gamma).contains("picked up by the daemon"));
+    let beta_second = env.repo_handle("beta-second");
+    assert!(log(&beta_second).contains("second project"));
+
+    // Work in the second repository reaches beta with no command run: alpha's daemon
+    // serves it.
+    jj_in_second(&["describe", "@-", "-m", "second project, reworded"]);
+    wait_for(&logs, "the second repository's work to reach beta", || {
+        try_log(&beta_second).is_some_and(|log| log.contains("second project, reworded"))
+    });
+
+    // A restarted hub serves the same hives on the same URL, its NATS server and all.
+    hub.kill();
+    let restarted = Hub::start(&env, &mut logs);
+    assert_eq!(restarted.url, hub.url);
+    assert!(
+        restarted.greeting.starts_with("Serving 2 hives from"),
+        "{}",
+        restarted.greeting
+    );
+    let list = musubi_in(&env, &logs, &alpha, &["list"]);
+    assert!(list.contains("alpha  1 machine: alpha"), "{list}");
+    assert!(list.contains("second  2 machines: alpha, beta"), "{list}");
 }
 
 #[test]
 fn machines_whose_workspaces_are_all_default_can_join() {
-    let server = NatsServer::start(1024 * 1024);
     let env = TestEnv::new();
     let mut logs = Logs::default();
-    let (_hub, hive) = start_hub(&env, &mut logs, &server.url());
+    let hub = Hub::start(&env, &mut logs);
+    // Stopped before the hub.
+    let mut daemons = Daemons::default();
     let alpha = env.init_repo_with_workspace("alpha", "default");
     let beta = env.init_repo_with_workspace("beta", "default");
+    daemons.of(&alpha);
+    daemons.of(&beta);
     alpha.write_file("a", "from alpha");
     alpha.jj(&["commit", "-m", "from alpha"]);
-    musubi_in(
-        &env,
-        &logs,
-        &alpha,
-        &["join", &hive, "--nats", &server.url()],
-    );
-    musubi_in(
-        &env,
-        &logs,
-        &beta,
-        &["join", &hive, "--nats", &server.url()],
-    );
+    alpha.jj(&["bookmark", "create", "main", "-r", "@-"]);
+    musubi_in(&env, &logs, &alpha, &["join", "--nats", &hub.url]);
+    // Without remotes, a repository joins the one hive it shares history with.
+    fetch_history(&alpha, &beta);
+    let out = musubi_in(&env, &logs, &beta, &["join", "--nats", &hub.url]);
+    assert!(out.contains("Joined hive alpha (matched commits)"), "{out}");
     assert!(log(&beta).contains("from alpha"));
+}
+
+/// Two machines in one hive, with their daemons running.
+fn two_machines(
+    env: &TestEnv,
+    logs: &mut Logs,
+    daemons: &mut Daemons,
+    hub: &Hub,
+) -> (TestRepo, TestRepo) {
+    let alpha = env.init_repo("alpha");
+    let beta = env.init_repo("beta");
+    logs.daemon_of(env, &alpha);
+    logs.daemon_of(env, &beta);
+    daemons.of(&alpha);
+    daemons.of(&beta);
+    alpha.write_file("a", "a");
+    alpha.jj(&["commit", "-m", "start"]);
+    alpha.jj(&["bookmark", "create", "main", "-r", "@-"]);
+    musubi_in(env, logs, &alpha, &["join", "--nats", &hub.url]);
+    fetch_history(&alpha, &beta);
+    musubi_in(env, logs, &beta, &["join", "--nats", &hub.url]);
+    (alpha, beta)
 }
 
 /// The daemon reopens the repository after a failed sync, so it carries on after changes
 /// an open repository can't follow, such as turning colocation off.
 #[test]
 fn daemon_carries_on_after_colocation_changes() {
-    let server = NatsServer::start(1024 * 1024);
     let env = TestEnv::new();
     let mut logs = Logs::default();
-    let (_hub, hive) = start_hub(&env, &mut logs, &server.url());
-    let alpha = env.init_repo("alpha");
-    let beta = env.init_repo("beta");
-    musubi_in(
-        &env,
-        &logs,
-        &alpha,
-        &["join", &hive, "--nats", &server.url()],
-    );
-    musubi_in(
-        &env,
-        &logs,
-        &beta,
-        &["join", &hive, "--nats", &server.url()],
-    );
-
-    let mut daemon = beta.program(musubi());
-    daemon.arg("daemon").stdout(Stdio::null());
-    logs.attach(&env, "daemon", &mut daemon);
-    let _daemon = Killed(daemon.spawn().unwrap());
+    let hub = Hub::start(&env, &mut logs);
+    // Stopped before the hub.
+    let mut daemons = Daemons::default();
+    let (alpha, beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
     // On Windows, moving `.git` fails while the daemon has a file in it open (to read the
     // remotes, say), and jj then leaves it where it was: try again.
     wait_for(&logs, "jj to stop colocating beta", || {
@@ -294,7 +535,7 @@ fn daemon_carries_on_after_colocation_changes() {
             .status
             .success()
     });
-    alpha.write_file("a", "from alpha");
+    alpha.write_file("b", "from alpha");
     alpha.jj(&["commit", "-m", "after beta stopped colocating"]);
     musubi_in(&env, &logs, &alpha, &["sync"]);
     wait_for(&logs, "beta's daemon to fetch alpha's commit", || {
@@ -306,15 +547,12 @@ fn daemon_carries_on_after_colocation_changes() {
 /// repo config where jj keeps it.
 #[test]
 fn settings_are_shared_through_the_binary() {
-    let server = NatsServer::start(1024 * 1024);
     let env = TestEnv::new();
     let mut logs = Logs::default();
-    let (_hub, hive) = start_hub(&env, &mut logs, &server.url());
-    let alpha = env.init_repo("alpha");
-    let beta = env.init_repo("beta");
-    let join = ["join", &hive, "--nats", &server.url()];
-    musubi_in(&env, &logs, &alpha, &join);
-    musubi_in(&env, &logs, &beta, &join);
+    let hub = Hub::start(&env, &mut logs);
+    // Stopped before the hub.
+    let mut daemons = Daemons::default();
+    let (alpha, beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
     let key = r#"revset-aliases."trunk()""#;
     alpha.jj(&["config", "set", "--repo", key, "main@upstream"]);
     alpha.jj(&[

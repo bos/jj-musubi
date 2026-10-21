@@ -212,6 +212,10 @@ pub struct FakeRepo {
     /// Crash before writing the next objects to stage: a real repository writes operations
     /// and objects separately.
     pub crash_before_objects: bool,
+    /// Whether the objects the next `stage_objects` brings are lost: set by staging a fetch's
+    /// operations while `crash_before_objects` is armed, so an `Objects` reply, which stages
+    /// no operations, is not lost.
+    objects_lost: bool,
 }
 
 impl FakeRepo {
@@ -230,6 +234,7 @@ impl FakeRepo {
             staged_reads: Cell::new(0),
             object_checks: Cell::new(0),
             crash_before_objects: false,
+            objects_lost: false,
         }
     }
 
@@ -308,11 +313,12 @@ impl LocalRepo for FakeRepo {
         for entry in ops {
             self.sops.insert(entry.id, entry.parents.clone());
         }
+        self.objects_lost = self.crash_before_objects;
         Ok(())
     }
 
     fn stage_objects(&mut self, _: &[Op], objs: &Vec<Obj>) -> Result<(), Infallible> {
-        if !self.crash_before_objects {
+        if !std::mem::take(&mut self.objects_lost) {
             self.sobj.extend(objs.iter().copied());
         }
         Ok(())

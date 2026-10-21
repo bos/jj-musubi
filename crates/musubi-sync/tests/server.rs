@@ -55,6 +55,13 @@ fn join_request(repo: &TestRepo) -> JoinRequest {
     }
 }
 
+fn creating(request: JoinRequest) -> JoinRequest {
+    JoinRequest {
+        create: true,
+        ..request
+    }
+}
+
 async fn join(transport: &dyn Transport, request: JoinRequest) -> Result<Joined, String> {
     match hub_wide(transport, HubWideRequest::Join(request)).await {
         HubWideReply::Joined(joined) => Ok(joined),
@@ -93,7 +100,8 @@ async fn one_hub_many_hives() {
     let err = join(&*client, join_request(&alpha)).await.unwrap_err();
     assert!(err.contains("commit something first"), "{err}");
 
-    // The first copy creates a hive, named after its origin.
+    // The first copy creates a hive, named after its origin, but only when asked: joining
+    // alone never creates one.
     alpha.write_file("a", "a");
     alpha.jj(&["commit", "-m", "first"]);
     alpha.jj(&["bookmark", "create", "main", "-r", "@-"]);
@@ -104,7 +112,11 @@ async fn one_hub_many_hives() {
         "origin",
         "https://example.com/team/project.git",
     ]);
-    let created = join(&*client, join_request(&alpha)).await.unwrap();
+    let err = join(&*client, join_request(&alpha)).await.unwrap_err();
+    assert!(err.contains("musubi create"), "{err}");
+    let created = join(&*client, creating(join_request(&alpha)))
+        .await
+        .unwrap();
     assert!(created.created);
     assert_eq!(created.hive.name, "project");
     assert_eq!(created.hive.machines, ["alpha"]);
@@ -128,14 +140,22 @@ async fn one_hub_many_hives() {
         "origin",
         "git@example.com:team/project",
     ]);
+    // Created instead, it would sync with nothing: refused, unless named.
+    let err = join(&*client, creating(join_request(&beta)))
+        .await
+        .unwrap_err();
+    assert!(
+        err.contains("belongs in hive project (matched origin)"),
+        "{err}"
+    );
     let joined = join(&*client, join_request(&beta)).await.unwrap();
     assert!(!joined.created);
     assert_eq!(joined.hive.id, hive);
     assert_eq!(joined.reason, "matched origin");
     assert_eq!(joined.hive.machines, ["alpha", "beta"]);
 
-    // A fork, with history in common but a remote of its own, gets a hive of its own,
-    // named apart from the first.
+    // A fork, with history in common but a remote of its own, isn't taken for the first:
+    // joining it is refused, and created, it gets a hive of its own, named apart.
     let gamma = env.init_repo("gamma");
     gamma.jj(&[
         "git",
@@ -155,7 +175,11 @@ async fn one_hub_many_hives() {
     ]);
     gamma.write_file("g", "g");
     gamma.jj(&["commit", "-m", "gamma's own"]);
-    let fork = join(&*client, join_request(&gamma)).await.unwrap();
+    let err = join(&*client, join_request(&gamma)).await.unwrap_err();
+    assert!(err.contains("hive project shares history"), "{err}");
+    let fork = join(&*client, creating(join_request(&gamma)))
+        .await
+        .unwrap();
     assert!(fork.created);
     assert_eq!(fork.hive.name, "fork/project");
     sync(&gamma, client.clone(), &fork.hive.id).await;

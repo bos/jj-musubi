@@ -40,7 +40,11 @@ pub struct HiveMeta {
 pub struct JoinRequest {
     /// A hive to join, by name, name prefix, or id.
     pub hive: Option<String>,
-    /// Start a new hive with this name.
+    /// Start a new hive (`musubi create`), rather than join one that matches.
+    #[serde(default)]
+    pub create: bool,
+    /// The new hive's name, in place of one from the repository's remote or directory.
+    /// Implies `create`.
     pub new: Option<String>,
     /// `git` or `simple`.
     pub backend: String,
@@ -310,7 +314,7 @@ impl HubDir {
         self.hives.get(id).map(|hive| hive.index.clone())
     }
 
-    /// Decides which hive a repository joins, creating one if need be. See
+    /// Decides which hive a repository joins, or creates one if asked to. See
     /// [`crate::matching`].
     pub fn join(&mut self, request: &JoinRequest) -> Result<Joined, Refusal> {
         let backend = Backend::parse(&request.backend).map_err(refusal)?;
@@ -364,7 +368,8 @@ impl HubDir {
         let joiner = Joiner {
             has_commits: !request.roots.is_empty(),
             chosen,
-            new: request.new.is_some(),
+            create: request.create || request.new.is_some(),
+            named: request.new.is_some(),
             remotes: request
                 .remotes
                 .iter()
@@ -372,7 +377,7 @@ impl HubDir {
                 .collect(),
         };
         let (id, created, reason) = match matching::decide(&joiner, &candidates) {
-            Decision::Refuse(message) => return Err(message),
+            Decision::Refuse(message) | Decision::Ambiguous(message) => return Err(message),
             Decision::Join { id, reason } => (id, false, reason),
             Decision::Create => {
                 let name = match &request.new {
@@ -443,6 +448,13 @@ mod tests {
         }
     }
 
+    fn creating(request: JoinRequest) -> JoinRequest {
+        JoinRequest {
+            create: true,
+            ..request
+        }
+    }
+
     /// A second copy joining before the first has pushed finds the first's hive, but only
     /// for a while: a join that never pushes stops counting.
     #[test]
@@ -453,20 +465,21 @@ mod tests {
                 .unwrap()
                 .with_pending_lifetime(lifetime);
             let url = "https://example.com/team/project";
-            let first = hubs.join(&request("alpha", url)).unwrap();
+            let first = hubs.join(&creating(request("alpha", url))).unwrap();
             assert!(first.created);
-            let second = hubs.join(&request("beta", url)).unwrap();
-            assert_eq!(
-                second.hive.id == first.hive.id,
-                joins_the_same,
-                "{lifetime:?}"
-            );
+            match hubs.join(&request("beta", url)) {
+                Ok(second) => {
+                    assert!(joins_the_same, "{lifetime:?}");
+                    assert_eq!(second.hive.id, first.hive.id);
+                }
+                Err(message) => assert!(!joins_the_same, "{lifetime:?}: {message}"),
+            }
         }
         // An accepted push from the joining machine replaces its pending join.
         let dir = tempfile::tempdir().unwrap();
         let mut hubs = HubDir::open(dir.path()).unwrap();
         let first = hubs
-            .join(&request("alpha", "https://example.com/a"))
+            .join(&creating(request("alpha", "https://example.com/a")))
             .unwrap();
         let id = first.hive.id;
         assert_eq!(hubs.hives[&id].pending.len(), 1);

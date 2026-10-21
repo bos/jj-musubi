@@ -111,7 +111,7 @@ impl GitObjects {
                     self.run(&["remote", "add", name, url], None)?;
                 }
             }
-            self.set_remote_urls(name, remote)?;
+            self.set_remote_urls(name, from.get(name), remote)?;
         }
         for name in removed {
             self.run(&["remote", "remove", name], None)?;
@@ -119,8 +119,21 @@ impl GitObjects {
         Ok(())
     }
 
-    fn set_remote_urls(&self, name: &str, remote: &Remote) -> Result<(), ObjectError> {
-        for (variable, value) in [("url", &remote.url), ("pushurl", &remote.push_url)] {
+    /// Sets the URLs of remote `name` that differ from `old`'s, leaving the others as this
+    /// machine spells them.
+    fn set_remote_urls(
+        &self,
+        name: &str,
+        old: Option<&Remote>,
+        remote: &Remote,
+    ) -> Result<(), ObjectError> {
+        for (variable, value, was) in [
+            ("url", &remote.url, old.map(|old| &old.url)),
+            ("pushurl", &remote.push_url, old.map(|old| &old.push_url)),
+        ] {
+            if was == Some(value) {
+                continue;
+            }
             let key = format!("remote.{name}.{variable}");
             match value {
                 Some(value) => self.run(&["config", "--local", &key, value], None)?,

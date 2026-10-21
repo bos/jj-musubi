@@ -35,34 +35,42 @@ run on the other machines:
 
 ```text
 Created a new hub in /home/you/musubi-hub
-To add a repository on any machine: musubi join --nats nats://myhost:41234
-To make a new copy of a hive:       musubi clone <name> <dir> --nats nats://myhost:41234
+To share a repository:               musubi create --nats nats://myhost:41234
+To add another machine's copy of it: musubi join --nats nats://myhost:41234
+To make a new copy of a hive:        musubi clone <name> <dir> --nats nats://myhost:41234
 ```
 
-Then, in each machine's copy of the repository, run the join command it printed:
+Then, in one machine's copy of the repository, start a hive from it:
+
+```sh
+musubi create --nats nats://myhost:41234
+```
+
+The hive is named after the repository's `origin` remote (`jj-musubi`, say), or its
+directory; `musubi create <name>` names it yourself. In each other machine's copy, join it:
 
 ```sh
 musubi join --nats nats://myhost:41234
 ```
 
-That's all. The first copy to join creates a hive, named after its `origin` remote
-(`jj-musubi`, say); copies on other machines that share its history and a remote join that
-hive. Joining starts a daemon in the background that keeps every joined repository on the
-machine in sync, and remembers the hub, so later commands need no `--nats`.
+That's all. A copy joins the hive it shares history and a remote with, and is refused if
+there's none, rather than starting a hive of its own. `create` and `join` start a daemon in
+the background that keeps every repository on the machine in sync, and remember the hub, so
+later commands need no `--nats`.
 
 Anyone who can reach the hub's port can read and write every hive on it, so run it on a
 network you trust. `musubi hub --token` has its NATS server require a random token, which
 the URLs it prints then carry (`nats://<token>@myhost:41234`).
 
 A hub serves any number of repositories, each its own hive. A fork, which shares history
-but has a remote of its own, gets a hive of its own; `musubi join --hive <name>` joins a
-chosen hive instead, and `musubi join --new <name>` starts one. Run `musubi hub`
-again in the same place after a restart: it keeps its port (and token).
+but has a remote of its own, isn't joined to the original's hive: `musubi create` gives it
+one of its own, and `musubi join --hive <name>` joins a chosen hive whatever its remotes.
+Run `musubi hub` again in the same place after a restart: it keeps its port (and token).
 
 Workspaces stay per-machine: each machine keeps its own `default@`, and shows the other
 machines' working copies as workspaces named after them, so `jj log` shows
 `laptop/default@` and so on. A machine's name defaults to jj's `operation.hostname`;
-choose another with `musubi join --machine <name>`.
+choose another with `--machine <name>` to `create` or `join`.
 
 Or start a new machine from a hive:
 

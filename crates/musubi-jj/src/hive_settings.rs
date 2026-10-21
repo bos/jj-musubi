@@ -14,6 +14,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::merge::merge_entry;
+use crate::remote_url::RemoteUrl;
 
 /// The operation attribute that records the hive's settings.
 pub const ATTRIBUTE: &str = "musubi.settings";
@@ -68,12 +69,52 @@ impl HiveSettings {
         }
     }
 
+    /// These settings with each URL that names the repository `hive`'s URL for the same
+    /// remote names spelled as `hive` spells it. A machine's own spelling of a shared remote,
+    /// over another transport, say, is its own business, not a change for the hive.
+    pub fn in_terms_of(&self, hive: &Self) -> Self {
+        let mut ours = self.clone();
+        for (name, remote) in &mut ours.remotes {
+            if let Some(theirs) = hive.remotes.get(name) {
+                if same_url(remote.url.as_deref(), theirs.url.as_deref()) {
+                    remote.url.clone_from(&theirs.url);
+                }
+                // A push URL naming the repository the URL names is only spelling too.
+                if same_url(remote.push_target(), theirs.push_target()) {
+                    remote.push_url.clone_from(&theirs.push_url);
+                }
+            }
+        }
+        ours
+    }
+
     /// The extra repo config keys these settings' `musubi.shared-config` names.
     pub fn extra_config_keys(&self) -> Vec<String> {
         self.config
             .get(SHARED_CONFIG_KEY)
             .map(|value| config_keys(value))
             .unwrap_or_default()
+    }
+}
+
+impl Remote {
+    /// Where pushes go: the push URL, or else the URL.
+    fn push_target(&self) -> Option<&str> {
+        self.push_url.as_deref().or(self.url.as_deref())
+    }
+}
+
+fn same_url(a: Option<&str>, b: Option<&str>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => {
+            a == b
+                || matches!(
+                    (RemoteUrl::parse(a), RemoteUrl::parse(b)),
+                    (Some(a), Some(b)) if a.key() == b.key()
+                )
+        }
+        _ => false,
     }
 }
 
@@ -142,6 +183,51 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn a_remote_spelled_otherwise_is_no_change() {
+        let hive = with(&[
+            ("origin", "https://example.com/team/project.git"),
+            ("x", "a"),
+        ]);
+        let ours = with(&[("origin", "git@example.com:team/project"), ("x", "b")]);
+        assert_eq!(
+            ours.in_terms_of(&hive),
+            with(&[
+                ("origin", "https://example.com/team/project.git"),
+                ("x", "b")
+            ])
+        );
+        // A remote the hive doesn't have is left alone.
+        let only_ours = with(&[("mine", "git@example.com:team/mine")]);
+        assert_eq!(only_ours.in_terms_of(&hive), only_ours);
+        // Push URLs too, each URL on its own: one naming the repository the URL names is
+        // spelling, and one naming another isn't.
+        let remote = |url: &str, push_url: Option<&str>| HiveSettings {
+            config: BTreeMap::new(),
+            remotes: BTreeMap::from([(
+                "origin".to_owned(),
+                Remote {
+                    url: Some(url.to_owned()),
+                    push_url: push_url.map(str::to_owned),
+                },
+            )]),
+        };
+        let https = "https://example.com/p";
+        let ssh = "git@example.com:p";
+        let hive = remote(https, None);
+        assert_eq!(remote(https, Some(ssh)).in_terms_of(&hive), hive);
+        assert_eq!(remote(ssh, Some(ssh)).in_terms_of(&hive), hive);
+        let elsewhere = "git@example.com:q";
+        assert_eq!(
+            remote(ssh, Some(elsewhere)).in_terms_of(&hive),
+            remote(https, Some(elsewhere))
+        );
+        assert_eq!(
+            remote(ssh, None).in_terms_of(&remote(https, Some(elsewhere))),
+            remote(https, None)
+        );
     }
 
     #[test]

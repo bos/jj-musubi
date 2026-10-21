@@ -183,7 +183,7 @@ impl Hub {
             }
             if let Some(url) = line
                 .trim()
-                .strip_prefix("To add a repository on any machine: musubi join --nats ")
+                .strip_prefix("To share a repository:               musubi create --nats ")
             {
                 hub.url = url.to_owned();
             }
@@ -308,7 +308,7 @@ fn hub_join_sync_clone_and_list() {
     daemons.of(&beta);
 
     // Nothing to share yet.
-    let err = musubi_fails(&env, &logs, &alpha, &["join", "--nats", &hub.url]);
+    let err = musubi_fails(&env, &logs, &alpha, &["create", "--nats", &hub.url]);
     assert!(err.contains("commit something first"), "{err}");
 
     alpha.write_file("a", "from alpha");
@@ -321,7 +321,10 @@ fn hub_join_sync_clone_and_list() {
         "origin",
         "https://example.com/team/project.git",
     ]);
-    let out = musubi_in(&env, &logs, &alpha, &["join", "--nats", &hub.url]);
+    // Joining never starts a hive; creating does.
+    let err = musubi_fails(&env, &logs, &alpha, &["join", "--nats", &hub.url]);
+    assert!(err.contains("musubi create"), "{err}");
+    let out = musubi_in(&env, &logs, &alpha, &["create", "--nats", &hub.url]);
     assert!(out.contains("Created hive project"), "{out}");
     assert!(out.contains("Synced with the hub"), "{out}");
 
@@ -442,7 +445,7 @@ fn the_daemon_picks_up_new_repositories() {
     daemons.of(&beta);
     alpha.write_file("a", "a");
     alpha.jj(&["commit", "-m", "first project"]);
-    musubi_in(&env, &logs, &alpha, &["join", "--nats", &hub.url]);
+    musubi_in(&env, &logs, &alpha, &["create", "--nats", &hub.url]);
 
     // A second repository on alpha: another hive, named after its directory, served by
     // the daemon the first join started.
@@ -458,7 +461,7 @@ fn the_daemon_picks_up_new_repositories() {
     fs::write(second.join("s"), "s").unwrap();
     jj_in_second(&["commit", "-m", "second project"]);
     let mut join = alpha.program(musubi());
-    join.arg("join").current_dir(&second);
+    join.arg("create").current_dir(&second);
     let out = run(&env, &logs, join);
     assert!(out.contains("Created hive second"), "{out}");
     let list = musubi_in(&env, &logs, &alpha, &["list"]);
@@ -514,7 +517,7 @@ fn machines_whose_workspaces_are_all_default_can_join() {
     alpha.write_file("a", "from alpha");
     alpha.jj(&["commit", "-m", "from alpha"]);
     alpha.jj(&["bookmark", "create", "main", "-r", "@-"]);
-    musubi_in(&env, &logs, &alpha, &["join", "--nats", &hub.url]);
+    musubi_in(&env, &logs, &alpha, &["create", "--nats", &hub.url]);
     // Without remotes, a repository joins the one hive it shares history with.
     fetch_history(&alpha, &beta);
     let out = musubi_in(&env, &logs, &beta, &["join", "--nats", &hub.url]);
@@ -538,7 +541,7 @@ fn two_machines(
     alpha.write_file("a", "a");
     alpha.jj(&["commit", "-m", "start"]);
     alpha.jj(&["bookmark", "create", "main", "-r", "@-"]);
-    musubi_in(env, logs, &alpha, &["join", "--nats", &hub.url]);
+    musubi_in(env, logs, &alpha, &["create", "--nats", &hub.url]);
     fetch_history(&alpha, &beta);
     musubi_in(env, logs, &beta, &["join", "--nats", &hub.url]);
     (alpha, beta)

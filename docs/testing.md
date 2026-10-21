@@ -56,11 +56,12 @@ hub lacks failing, and listing, renaming, removing, and an index rebuilt after a
 case.
 
 `musubi/tests/cli.rs` runs the binary as a user would: `musubi hub` starting its own
-`nats-server`, `musubi join` creating and then matching a hive, `musubi clone` by a prefix
-of the hive's name, `musubi list`, `leave`, and each machine's daemon, which the first join
-starts in the background, serving a repository joined later without a restart. Each test
-machine has its own config directory, and so its own daemon and control socket; the tests
-stop the daemons, and kill the NATS server a killed hub leaves behind, when they finish.
+`nats-server`, `musubi create` starting a hive and `musubi join` matching it, `musubi
+clone` by a prefix of the hive's name, `musubi list`, `leave`, and each machine's daemon,
+which the first `create` or `join` starts in the background, serving a repository added
+later without a restart. Each test machine has its own config directory, and so its own
+daemon and control socket; the tests stop the daemons, and kill the NATS server a killed
+hub leaves behind, when they finish.
 
 One CLI test installs a real login service, and so runs only with
 `MUSUBI_TEST_LOGIN_SERVICE=1`, which CI sets on its throwaway runners: never set it where

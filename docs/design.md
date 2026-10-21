@@ -203,10 +203,21 @@ has now, what the hive has as of its head, and what both had when they last agre
 records its own changes, and applies the hive's: remotes with `git remote`, which also
 renames or deletes the remote-tracking refs, and config keys in its repo config file.
 Config values are compared as TOML, normalized, so that machines that write the same value
-differently agree on it. A machine that joins adds its remotes to
-the hive's, but takes the hive's where both have a remote of the same name; the first
-machine's settings become the hive's. A machine that needs another URL for the same remote
-can rewrite it with git's own `url.<base>.insteadOf` in its user config.
+differently agree on it. Remote URLs, likewise, are compared by the repository they name,
+their key as for joining (under "Which hive"): the merge works on keys, and each machine
+writes the result in its own spelling. The key is a pure function of the URL, so every
+machine agrees on which URLs are the same. Each URL is compared on its own (a push URL that
+names the repository the URL names is spelling too), and against both what the machines
+last agreed on and the hive's current settings, so that a machine's spelling of what they
+agreed on doesn't read as a change of its own when the hive has since moved on. So a
+machine keeps its own spelling of a shared remote, one over https and another over ssh,
+joining or later, and respelling it records nothing; pointing a URL at another repository
+replicates, and only the URLs that changed are written. A machine that joins adds its remotes to the hive's, but takes the hive's where both have a
+remote of the same name for different repositories; the first machine's settings become
+the hive's. A machine that needs another identity for a remote, an ssh key of its own,
+say, should keep the ordinary URL and rewrite it with git's `url.<base>.insteadOf` in its
+user config: a URL spelled with an ssh host alias names a host no other machine knows, so
+it doesn't count as the same repository, and a machine without the alias can't use it.
 
 ## Ordering: one hub, one canonical head
 
@@ -334,8 +345,9 @@ reconstructing each one. Stores keep views whole and uncompressed, as jj does.
 
 ## Joining
 
-`musubi join` makes an existing repository part of a hive. By default it replicates the
-repository's current state, not its operation history. It writes one canonical join
+`musubi create` starts a hive from an existing repository, and `musubi join` makes another
+copy of it part of that hive. By default each replicates the repository's current state,
+not its operation history. It writes one canonical join
 operation whose parent is the root operation and whose view is the current view, and records
 that the current local head canonicalizes to it. Earlier operations stay local. A repository
 that has been in use for years can have tens of thousands of operations, and every one of
@@ -357,24 +369,31 @@ what it uploaded.
 ### Which hive
 
 A hub holds many hives, and a joining repository doesn't say which it belongs to: the hub
-works it out, so that setting up a machine is one command. In one request the node sends
-its backend, its remotes' URLs, its root commits (the commits whose parent is the root
-commit, git's parentless commits, leaving out an empty, undescribed working-copy commit),
-and the commits its remote bookmarks point to. The hub decides under its lock, so two
-copies joining at once can't both create a hive:
+works it out, so that adding a machine is one command. Neither command guesses about
+creating a hive, though: `join` that matches nothing is refused, and so is `create` that
+matches a hive, unless it names the new one. A copy whose remote URL doesn't look like the
+others', behind an ssh host alias, say, would otherwise get a hive of its own and sync with
+nothing, with no sign anything was wrong. In one request the node sends its backend, its
+remotes' URLs, its root commits (the commits whose parent is the root commit, git's
+parentless commits, leaving out an empty, undescribed working-copy commit), and the
+commits its remote bookmarks point to. The hub decides under its lock, so a copy joining
+while another creates the hive finds it:
 
 1. A repository with no commits of its own is refused: there is nothing to match, and
    nothing to share.
 2. `--hive <name>` joins that hive, but only if the repository is related to it.
-3. `--new <name>` creates a hive.
+3. `musubi create <name>` creates a hive. `musubi create`, unnamed, creates one named as
+   below, unless the rules that follow would join a hive, when it is refused.
 4. Otherwise, a hive is *related* if it has stored one of the repository's root commits
    (ever: hidden ones count), or has a commit one of its remote bookmarks points to (which
    covers a shallow clone, whose roots are cut off). Among related hives, one that shares a
    remote URL with the repository, any remote and not only `origin`, is the one: exactly
    one is joined, and several are refused with their names, to choose from with `--hive`.
-   With none, the repository gets a new hive, so a fork, sharing history but with remotes
-   of its own, is a hive of its own. A repository without remotes joins its one related
-   hive, and one with remotes joins a single related hive that has none.
+   With none, joining is refused, naming the related hives, so a fork, sharing history but
+   with remotes of its own, isn't taken for the original; `musubi create` gives it a hive
+   of its own. A repository without remotes joins its one related hive, and one with
+   remotes joins a single related hive that has none. No related hive at all is refused
+   too.
 
 URLs match after normalization: https, ssh, scp-style, `file://`, and local paths reduce
 to a lowercase host, without any user or default port, and a path without trailing `/` or
@@ -474,9 +493,9 @@ the formal model.
   socket (`$XDG_RUNTIME_DIR/musubi/daemon.sock` on Linux, `$TMPDIR/musubi/daemon.sock` on
   macOS) or a Windows named pipe (`\\.\pipe\musubi-<user>`). It answers `version`, `add`
   (start serving a repository now, and reply after its first sync), `remove`, `sync`,
-  `status`, and `stop`. `musubi join` and `musubi clone` write the repository's membership
-  and the config file, then ask the daemon to add it, starting the daemon in the background
-  first if none is running. Only the user can reach the daemon: a Unix socket's directory
+  `status`, and `stop`. `musubi create`, `join`, and `clone` write the repository's
+  membership and the config file, then ask the daemon to add it, starting the daemon in the
+  background first if none is running. Only the user can reach the daemon: a Unix socket's directory
   must be theirs and writable by no one else, as tmux and ssh-agent check, or the daemon
   won't listen there and commands won't connect; a named pipe admits only its owner, and
   the daemon creates it as the first instance, so it can't start if another user took the

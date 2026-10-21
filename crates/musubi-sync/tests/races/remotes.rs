@@ -140,7 +140,7 @@ fn remote_changed_on_two_machines_at_once() {
 }
 
 /// A machine that joins adds its own remotes to the hive's, but takes the hive's where
-/// both have a remote of the same name.
+/// both have a remote of the same name pointing to different repositories.
 #[test]
 fn joining_machine_merges_its_remotes_with_the_hives() {
     let env = TestEnv::new();
@@ -171,6 +171,91 @@ fn joining_machine_merges_its_remotes_with_the_hives() {
     hive.sync();
     hive.assert_converged();
     let expected = "extra https://example.com/extra.git\norigin https://example.com/hive.git\n";
+    assert_eq!(remotes(&hive, 0), expected);
+    assert_eq!(remotes(&hive, 1), expected);
+}
+
+/// Machines that reach one repository by different URLs, over https and ssh, say, each
+/// keep their own, joining or later: only a change to where a remote points replicates.
+#[test]
+fn machines_keep_their_own_spelling_of_a_shared_remote() {
+    let env = TestEnv::new();
+    let alpha = env.init_repo("alpha");
+    let beta = env.init_repo("beta");
+    let https = "https://example.com/team/project.git";
+    let ssh = "git@example.com:team/project";
+    alpha.jj(&["git", "remote", "add", "origin", https]);
+    beta.jj(&["git", "remote", "add", "origin", ssh]);
+    let mut hive = Fixture::join(env, vec![alpha, beta]);
+    hive.sync();
+    hive.assert_converged();
+    assert_eq!(remotes(&hive, 0), format!("origin {https}\n"));
+    assert_eq!(remotes(&hive, 1), format!("origin {ssh}\n"));
+    // Respelling it is still nobody else's business.
+    let respelled = "ssh://git@example.com/team/project.git";
+    hive.repo(1)
+        .jj(&["git", "remote", "set-url", "origin", respelled]);
+    hive.sync();
+    hive.sync();
+    assert_eq!(remotes(&hive, 0), format!("origin {https}\n"));
+    assert_eq!(remotes(&hive, 1), format!("origin {respelled}\n"));
+    // Pointing it elsewhere is everybody's.
+    let moved = "https://example.com/team/moved.git";
+    hive.repo(1)
+        .jj(&["git", "remote", "set-url", "origin", moved]);
+    hive.sync();
+    hive.sync();
+    hive.assert_converged();
+    assert_eq!(remotes(&hive, 0), format!("origin {moved}\n"));
+    assert_eq!(remotes(&hive, 1), format!("origin {moved}\n"));
+}
+
+/// The same, when the machine whose spelling the hive has changes the remote: the other
+/// machine takes each change, keeping its own spelling of whatever still names the same
+/// repository.
+#[test]
+fn changes_to_a_remote_reach_machines_with_their_own_spelling() {
+    let env = TestEnv::new();
+    let alpha = env.init_repo("alpha");
+    let beta = env.init_repo("beta");
+    let https = "https://example.com/team/project.git";
+    let ssh = "git@example.com:team/project";
+    alpha.jj(&["git", "remote", "add", "origin", https]);
+    beta.jj(&["git", "remote", "add", "origin", ssh]);
+    let mut hive = Fixture::join(env, vec![alpha, beta]);
+    hive.sync();
+    // A push URL for another repository replicates; beta keeps its fetch URL.
+    let mirror = "git@example.com:team/mirror";
+    hive.repo(0)
+        .git(&["config", "remote.origin.pushurl", mirror]);
+    hive.sync();
+    hive.sync();
+    assert_eq!(
+        remotes(&hive, 1),
+        format!("origin {ssh} (push: {mirror})\n")
+    );
+    // A rename moves beta's remote, with its own spelling and remote-tracking refs.
+    // jj won't rename a remote with a push URL; git will.
+    hive.repo(0)
+        .git(&["remote", "rename", "origin", "upstream"]);
+    hive.sync();
+    hive.sync();
+    assert_eq!(
+        remotes(&hive, 0),
+        format!("upstream {https} (push: {mirror})\n")
+    );
+    assert_eq!(
+        remotes(&hive, 1),
+        format!("upstream {ssh} (push: {mirror})\n")
+    );
+    // Pointing it elsewhere moves beta too.
+    let moved = "https://example.com/team/moved.git";
+    hive.repo(0)
+        .jj(&["git", "remote", "set-url", "upstream", moved]);
+    hive.sync();
+    hive.sync();
+    hive.assert_converged();
+    let expected = format!("upstream {moved} (push: {mirror})\n");
     assert_eq!(remotes(&hive, 0), expected);
     assert_eq!(remotes(&hive, 1), expected);
 }

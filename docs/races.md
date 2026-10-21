@@ -70,7 +70,8 @@ named after the machine (`beta/default`) (docs/design.md).
 | Two machines change the same remote's URL at once | They end up agreeing: settings merge three-way, remote by remote, as jj merges workspaces. | `remote_changed_on_two_machines_at_once` |
 | A machine sets or unsets a shared repo config key (`revset-aliases."immutable_heads()"`, `revset-aliases."trunk()"`, `git.private-commits`, or one `musubi.shared-config` names) | Every machine does the same. Other repo config stays each machine's own. | `shared_config_reaches_every_machine`, `other_config_is_shared_only_when_named`, `settings_are_shared_through_the_binary` |
 | Two machines set a shared config key differently at once | They end up agreeing, as for remotes. | `shared_config_set_on_two_machines_at_once` |
-| A machine joins with remotes of its own | Its remotes join the hive's, but where both have a remote of the same name, the hive's wins. | `joining_machine_merges_its_remotes_with_the_hives` |
+| A machine joins with remotes of its own | Its remotes join the hive's, but where both have a remote of the same name pointing to different repositories, the hive's wins. | `joining_machine_merges_its_remotes_with_the_hives` |
+| Machines reach one remote by different URLs (https and ssh, say) | Each keeps its own, joining or later; only pointing the remote at another repository replicates. | `machines_keep_their_own_spelling_of_a_shared_remote` |
 | `jj git colocation disable` or `enable` while `musubi daemon` runs | The daemon's next sync fails, since the repository it had open moved its git store. The daemon reopens the repository after any failed sync and retries after its backoff, so it carries on. | `daemon_carries_on_after_colocation_changes` |
 
 ## Operation history

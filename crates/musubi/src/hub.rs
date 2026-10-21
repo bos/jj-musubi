@@ -204,9 +204,10 @@ pub fn serve(args: ServeArgs) -> anyhow::Result<()> {
                 })??,
         );
         let ready = || {
-            println!("To add a repository on any machine: musubi join --nats {public}");
+            println!("To share a repository:               musubi create --nats {public}");
+            println!("To add another machine's copy of it: musubi join --nats {public}");
             println!(
-                "To make a new copy of a hive:       musubi clone <name> <dir> --nats {public}"
+                "To make a new copy of a hive:        musubi clone <name> <dir> --nats {public}"
             );
             tracing::info!("serving {}", dir.display());
         };

@@ -64,25 +64,23 @@ enum Command {
         #[arg(long, conflicts_with = "nats")]
         token: bool,
     },
-    /// Make the repository in the current directory part of a hive: the one on the hub it
-    /// shares history and a remote with, or a new one.
+    /// Start a hive on the hub from the repository in the current directory, for other
+    /// copies of it to join.
+    Create {
+        /// The hive's name [default: the repository's name on its forge, from its `origin`
+        /// remote, else the directory's name].
+        name: Option<String>,
+        #[command(flatten)]
+        member: Member,
+    },
+    /// Make the repository in the current directory part of the hive on the hub it shares
+    /// history and a remote with.
     Join {
-        /// Join this hive (a name, a prefix of one, or an id).
-        #[arg(long, conflicts_with = "new")]
+        /// Join this hive (a name, a prefix of one, or an id), whatever its remotes.
+        #[arg(long)]
         hive: Option<String>,
-        /// Start a new hive with this name, even if one matches.
-        #[arg(long, value_name = "NAME")]
-        new: Option<String>,
-        /// This machine's name in the hive, which other machines show its workspaces under,
-        /// as in `laptop/default`. Defaults to jj's `operation.hostname`.
-        #[arg(long)]
-        machine: Option<String>,
-        /// Replicate the whole operation history, not just the current state.
-        #[arg(long)]
-        full_history: bool,
-        /// The hub's NATS URL, as `musubi hub` prints it [default: the one first joined].
-        #[arg(long)]
-        nats: Option<String>,
+        #[command(flatten)]
+        member: Member,
     },
     /// Create a new colocated repository from a hive.
     Clone {
@@ -112,6 +110,21 @@ enum Command {
     /// Tools for investigating a hive, not for everyday use.
     #[command(hide = true, subcommand)]
     Debug(Debug),
+}
+
+/// How a repository takes part in a hive, for `create` and `join`.
+#[derive(clap::Args)]
+struct Member {
+    /// This machine's name in the hive, which other machines show its workspaces under, as
+    /// in `laptop/default`. Defaults to jj's `operation.hostname`.
+    #[arg(long)]
+    machine: Option<String>,
+    /// Replicate the whole operation history, not just the current state.
+    #[arg(long)]
+    full_history: bool,
+    /// The hub's NATS URL, as `musubi hub` prints it [default: the one first joined].
+    #[arg(long)]
+    nats: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -212,26 +225,10 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }),
-        Command::Join {
-            hive,
-            new,
-            machine,
-            full_history,
-            nats,
-        } => {
-            let choice = match (hive, new) {
-                (Some(hive), _) => Choice::Hive(hive),
-                (None, Some(name)) => Choice::New(name),
-                (None, None) => Choice::Match,
-            };
-            join(
-                &cwd,
-                choice,
-                nats.as_deref(),
-                machine.as_deref(),
-                full_history,
-                &socket()?,
-            )
+        Command::Create { name, member } => join(&cwd, Choice::Create(name), &member, &socket()?),
+        Command::Join { hive, member } => {
+            let choice = hive.map_or(Choice::Match, Choice::Hive);
+            join(&cwd, choice, &member, &socket()?)
         }
         Command::Clone {
             hive,
@@ -316,24 +313,24 @@ fn block_on<T>(future: impl Future<Output = anyhow::Result<T>>) -> anyhow::Resul
         .block_on(future)
 }
 
-/// Which hive `musubi join` joins.
+/// Which hive `musubi join` or `musubi create` makes a repository part of.
 enum Choice {
-    /// Whichever matches, or a new one.
+    /// Whichever matches.
     Match,
     Hive(String),
-    New(String),
+    /// A new one, with this name or one the hub chooses.
+    Create(Option<String>),
 }
 
 /// Makes the repository at `start` part of a hive: the hub decides which (see
 /// `musubi_hub::matching`); then this records the membership and has the daemon serve it.
-fn join(
-    start: &Path,
-    choice: Choice,
-    nats: Option<&str>,
-    machine: Option<&str>,
-    full_history: bool,
-    socket: &Socket,
-) -> anyhow::Result<()> {
+fn join(start: &Path, choice: Choice, member: &Member, socket: &Socket) -> anyhow::Result<()> {
+    let Member {
+        machine,
+        full_history,
+        nats,
+    } = member;
+    let (nats, machine, full_history) = (nats.as_deref(), machine.as_deref(), *full_history);
     let located = Located::find(start)?;
     if let Some(hive) = HiveConfig::load(&located.repo_path)? {
         anyhow::bail!(
@@ -345,13 +342,14 @@ fn join(
     set_machine_name(&located, machine)?;
     let node = located.open()?;
     let summary = node.join_summary()?;
-    let (hive, new) = match choice {
-        Choice::Match => (None, None),
-        Choice::Hive(hive) => (Some(hive), None),
-        Choice::New(name) => (None, Some(name)),
+    let (hive, create, new) = match choice {
+        Choice::Match => (None, false, None),
+        Choice::Hive(hive) => (Some(hive), false, None),
+        Choice::Create(name) => (None, true, name),
     };
     let request = JoinRequest {
         hive,
+        create,
         new,
         backend: summary.backend.to_owned(),
         remotes: summary

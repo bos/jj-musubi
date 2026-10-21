@@ -6,5 +6,6 @@ pub mod hive_settings;
 pub mod merge;
 pub mod node;
 pub mod objects;
+pub mod remote_url;
 mod translation_map;
 pub mod workspaces;

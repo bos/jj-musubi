@@ -21,7 +21,11 @@ impl OpHeadsWatcher {
         let (sender, events) = mpsc::unbounded_channel();
         let mut watcher =
             notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                if event.is_ok() {
+                // On Linux, inotify reports reads too, and every sync reads the directory:
+                // only changes are news.
+                if let Ok(event) = event
+                    && !matches!(event.kind, notify::EventKind::Access(_))
+                {
                     // The daemon stopped listening; nothing to notify.
                     sender.send(()).ok();
                 }

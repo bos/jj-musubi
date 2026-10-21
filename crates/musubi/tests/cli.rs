@@ -154,6 +154,8 @@ impl Hub {
         let mut child = command.spawn().unwrap();
         let stdout = child.stdout.take().unwrap();
         let (tx, rx) = mpsc::channel();
+        // Reads to the end even once nobody listens: closing the pipe early would break the
+        // hub's later writes.
         std::thread::spawn(move || {
             let mut stdout = BufReader::new(stdout);
             loop {
@@ -161,9 +163,7 @@ impl Hub {
                 if stdout.read_line(&mut line).unwrap_or(0) == 0 {
                     break;
                 }
-                if tx.send(line).is_err() {
-                    break;
-                }
+                tx.send(line).ok();
             }
         });
         let mut hub = Self {

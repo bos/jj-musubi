@@ -2,6 +2,7 @@
 //! and asking a hub about its hives.
 
 use std::fs;
+use std::io::Write as _;
 use std::net::TcpStream;
 use std::path::Path;
 use std::path::PathBuf;
@@ -214,11 +215,17 @@ pub fn serve(args: ServeArgs) -> anyhow::Result<()> {
                 })??,
         );
         let ready = || {
-            println!("To share a repository:               musubi create --nats {public}");
-            println!("To add another machine's copy of it: musubi join --nats {public}");
-            println!(
-                "To make a new copy of a hive:        musubi clone <name> <dir> --nats {public}"
-            );
+            // Whoever reads stdout may stop before the end, as `musubi hub | head -1` does;
+            // println! would panic then, and the hub would stop serving.
+            let mut stdout = std::io::stdout().lock();
+            writeln!(
+                stdout,
+                "To share a repository:               musubi create --nats {public}\n\
+                 To add another machine's copy of it: musubi join --nats {public}\n\
+                 To make a new copy of a hive:        musubi clone <name> <dir> --nats {public}"
+            )
+            .and_then(|()| stdout.flush())
+            .ok();
             tracing::info!("serving {}", dir.display());
         };
         tokio::select! {

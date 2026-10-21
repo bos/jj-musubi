@@ -65,6 +65,8 @@ pub trait Transport: Send + Sync {
 
     async fn publish(&self, subject: &str, payload: Bytes) -> Result<(), TransportError>;
 
+    /// Subscribes to `subject`, which may hold NATS wildcards: `*` matches one token, and a
+    /// final `>` one or more.
     async fn subscribe(&self, subject: &str) -> Result<Subscription, TransportError>;
 
     /// Publishes `payload` with a fresh reply subject and waits for the first reply.
@@ -74,6 +76,21 @@ pub trait Transport: Send + Sync {
         payload: Bytes,
         timeout: Duration,
     ) -> Result<Bytes, TransportError>;
+}
+
+/// Whether `subject` matches the subscription `pattern`, as NATS matches them.
+pub fn subject_matches(pattern: &str, subject: &str) -> bool {
+    let mut pattern = pattern.split('.');
+    let mut subject = subject.split('.');
+    loop {
+        match (pattern.next(), subject.next()) {
+            (Some(">"), Some(_)) => return true,
+            (Some("*"), Some(_)) => {}
+            (Some(p), Some(s)) if p == s => {}
+            (None, None) => return true,
+            _ => return false,
+        }
+    }
 }
 
 pub(crate) fn check_size(payload: &Bytes, limit: usize) -> Result<(), TransportError> {

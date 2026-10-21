@@ -47,6 +47,29 @@ async fn check_contract(a: &dyn Transport, b: &dyn Transport) {
     let (reply, ()) = tokio::join!(request, respond);
     assert_eq!(reply.unwrap(), "pong");
 
+    // Wildcards match one token, or the rest.
+    let mut one = b.subscribe("wild.*.rpc").await.unwrap();
+    let mut rest = b.subscribe("wild.>").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    a.publish("wild.other.rpc", Bytes::from_static(b"wild"))
+        .await
+        .unwrap();
+    a.publish("wild.other.rpc.deeper", Bytes::from_static(b"deep"))
+        .await
+        .unwrap();
+    let received = tokio::time::timeout(Duration::from_secs(5), one.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(received.subject, "wild.other.rpc");
+    for expected in ["wild.other.rpc", "wild.other.rpc.deeper"] {
+        let received = tokio::time::timeout(Duration::from_secs(5), rest.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received.subject, expected);
+    }
+
     // A request nobody listens to fails promptly rather than timing out.
     let err = a
         .request("musubi.test.nobody", Bytes::new(), Duration::from_secs(30))

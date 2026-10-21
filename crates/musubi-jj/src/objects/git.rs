@@ -119,21 +119,17 @@ impl GitObjects {
         Ok(())
     }
 
-    /// Sets the URLs of remote `name` that differ from `old`'s, leaving the others as this
-    /// machine spells them.
+    /// Points remote `name`, which `old` describes as this repository has it, where `remote`
+    /// says. A URL that already names the repository `remote`'s does is left as this
+    /// machine spells it (see [`Remote`]'s equality), and a push URL is removed once it no
+    /// longer names where pushes should go.
     fn set_remote_urls(
         &self,
         name: &str,
         old: Option<&Remote>,
         remote: &Remote,
     ) -> Result<(), ObjectError> {
-        for (variable, value, was) in [
-            ("url", &remote.url, old.map(|old| &old.url)),
-            ("pushurl", &remote.push_url, old.map(|old| &old.push_url)),
-        ] {
-            if was == Some(value) {
-                continue;
-            }
+        let set = |variable: &str, value: Option<&str>| -> Result<(), ObjectError> {
             let key = format!("remote.{name}.{variable}");
             match value {
                 Some(value) => self.run(&["config", "--local", &key, value], None)?,
@@ -142,6 +138,15 @@ impl GitObjects {
                     .run(&["config", "--local", "--unset-all", &key], None)
                     .unwrap_or_default(),
             };
+            Ok(())
+        };
+        let mut now = old.cloned().unwrap_or_default();
+        if old.is_none() || now.url_repository() != remote.url_repository() {
+            set("url", remote.url.as_deref())?;
+            now.url.clone_from(&remote.url);
+        }
+        if old.is_none() || now.push_repository() != remote.push_repository() {
+            set("pushurl", remote.push_url.as_deref())?;
         }
         Ok(())
     }

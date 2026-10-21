@@ -690,9 +690,9 @@ impl NodeRepo {
     /// its own, and applies the hive's changes here. A machine that joins a hive with
     /// settings adds its own remotes to the hive's, but takes the hive's where both have a
     /// remote of the same name that point to different repositories; the first machine's
-    /// settings become the hive's. A remote that points where the hive's does keeps this
-    /// machine's own URLs, which aren't a change ([`HiveSettings::in_terms_of`]). Returns
-    /// whether it recorded a change, which then needs uploading.
+    /// settings become the hive's. Remotes compare by the repositories they name
+    /// ([`hive_settings::Remote`]), so a machine's own spelling of one is never a change.
+    /// Returns whether it recorded a change, which then needs uploading.
     pub fn reconcile_settings(&mut self) -> Result<bool, NodeError> {
         let head = self.merge_heads()?;
         let canonical = self.canonicalize(&head)?;
@@ -711,18 +711,6 @@ impl NodeRepo {
             extra.extend(settings.extra_config_keys());
         }
         let local = self.local_settings(&extra)?;
-        // What this machine has, but spelled as the hive spells it where that's only a
-        // matter of spelling: compared with the hive's settings, and changed into them. First
-        // as they agreed last time, so that a URL the hive has since changed still reads as
-        // unchanged here, not as a change of this machine's own.
-        let local = match &state {
-            Some((_, _, agreed)) => local.in_terms_of(agreed),
-            None => local,
-        };
-        let local = match &hive {
-            Some(hive) => local.in_terms_of(hive),
-            None => local,
-        };
         let base = match (&state, &hive) {
             (Some((_, _, settings)), _) => settings.clone(),
             (None, Some(hive)) => HiveSettings {

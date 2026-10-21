@@ -43,7 +43,13 @@ pub struct HiveSettings {
 }
 
 /// A git remote's URLs.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// Two remotes are equal when they name the same repositories, however their URLs are
+/// spelled: the URL's [`RemoteUrl::key`], and the push target's (the push URL, or else the
+/// URL). So settings merge, and changes are noticed, by where remotes point, and a machine's
+/// own spelling of a shared remote, over https on one machine and ssh on another, say, is
+/// never a change. The strings are kept as they were written, for machines that need them.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Remote {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
@@ -69,25 +75,6 @@ impl HiveSettings {
         }
     }
 
-    /// These settings with each URL that names the repository `hive`'s URL for the same
-    /// remote names spelled as `hive` spells it. A machine's own spelling of a shared remote,
-    /// over another transport, say, is its own business, not a change for the hive.
-    pub fn in_terms_of(&self, hive: &Self) -> Self {
-        let mut ours = self.clone();
-        for (name, remote) in &mut ours.remotes {
-            if let Some(theirs) = hive.remotes.get(name) {
-                if same_url(remote.url.as_deref(), theirs.url.as_deref()) {
-                    remote.url.clone_from(&theirs.url);
-                }
-                // A push URL naming the repository the URL names is only spelling too.
-                if same_url(remote.push_target(), theirs.push_target()) {
-                    remote.push_url.clone_from(&theirs.push_url);
-                }
-            }
-        }
-        ours
-    }
-
     /// The extra repo config keys these settings' `musubi.shared-config` names.
     pub fn extra_config_keys(&self) -> Vec<String> {
         self.config
@@ -98,24 +85,40 @@ impl HiveSettings {
 }
 
 impl Remote {
-    /// Where pushes go: the push URL, or else the URL.
-    fn push_target(&self) -> Option<&str> {
-        self.push_url.as_deref().or(self.url.as_deref())
+    /// The repository the URL names.
+    pub fn url_repository(&self) -> Option<String> {
+        self.url.as_deref().map(repository)
+    }
+
+    /// The repository pushes go to: the push URL's, or else the URL's.
+    pub fn push_repository(&self) -> Option<String> {
+        self.push_url
+            .as_deref()
+            .or(self.url.as_deref())
+            .map(repository)
     }
 }
 
-fn same_url(a: Option<&str>, b: Option<&str>) -> bool {
-    match (a, b) {
-        (None, None) => true,
-        (Some(a), Some(b)) => {
-            a == b
-                || matches!(
-                    (RemoteUrl::parse(a), RemoteUrl::parse(b)),
-                    (Some(a), Some(b)) if a.key() == b.key()
-                )
-        }
-        _ => false,
+impl PartialEq for Remote {
+    fn eq(&self, other: &Self) -> bool {
+        self.url_repository() == other.url_repository()
+            && self.push_repository() == other.push_repository()
     }
+}
+
+impl Eq for Remote {}
+
+impl std::hash::Hash for Remote {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.url_repository().hash(state);
+        self.push_repository().hash(state);
+    }
+}
+
+/// What identifies the repository `url` names: its [`RemoteUrl::key`], or the URL itself if
+/// it doesn't parse.
+pub fn repository(url: &str) -> String {
+    RemoteUrl::parse(url).map_or_else(|| url.to_owned(), |url| url.key())
 }
 
 fn merge_maps<T: Clone + Eq + std::hash::Hash>(
@@ -186,48 +189,39 @@ mod tests {
     }
 
     #[test]
-    fn a_remote_spelled_otherwise_is_no_change() {
-        let hive = with(&[
-            ("origin", "https://example.com/team/project.git"),
-            ("x", "a"),
-        ]);
-        let ours = with(&[("origin", "git@example.com:team/project"), ("x", "b")]);
-        assert_eq!(
-            ours.in_terms_of(&hive),
-            with(&[
-                ("origin", "https://example.com/team/project.git"),
-                ("x", "b")
-            ])
-        );
-        // A remote the hive doesn't have is left alone.
-        let only_ours = with(&[("mine", "git@example.com:team/mine")]);
-        assert_eq!(only_ours.in_terms_of(&hive), only_ours);
-        // Push URLs too, each URL on its own: one naming the repository the URL names is
-        // spelling, and one naming another isn't.
-        let remote = |url: &str, push_url: Option<&str>| HiveSettings {
-            config: BTreeMap::new(),
-            remotes: BTreeMap::from([(
-                "origin".to_owned(),
-                Remote {
-                    url: Some(url.to_owned()),
-                    push_url: push_url.map(str::to_owned),
-                },
-            )]),
+    fn remotes_are_equal_when_they_name_the_same_repositories() {
+        let remote = |url: Option<&str>, push_url: Option<&str>| Remote {
+            url: url.map(str::to_owned),
+            push_url: push_url.map(str::to_owned),
         };
-        let https = "https://example.com/p";
-        let ssh = "git@example.com:p";
-        let hive = remote(https, None);
-        assert_eq!(remote(https, Some(ssh)).in_terms_of(&hive), hive);
-        assert_eq!(remote(ssh, Some(ssh)).in_terms_of(&hive), hive);
-        let elsewhere = "git@example.com:q";
-        assert_eq!(
-            remote(ssh, Some(elsewhere)).in_terms_of(&hive),
-            remote(https, Some(elsewhere))
-        );
-        assert_eq!(
-            remote(ssh, None).in_terms_of(&remote(https, Some(elsewhere))),
-            remote(https, None)
-        );
+        let https = Some("https://example.com/team/p.git");
+        let ssh = Some("git@example.com:team/p");
+        let other = Some("git@example.com:team/q");
+        assert_eq!(remote(https, None), remote(ssh, None));
+        // A push URL to where the URL points is only spelling.
+        assert_eq!(remote(https, ssh), remote(ssh, None));
+        assert_eq!(remote(https, None), remote(https, https));
+        assert_ne!(remote(https, other), remote(https, None));
+        assert_ne!(remote(https, None), remote(other, None));
+        // Pushing to the repository the URL names, but with no URL, isn't fetching from it.
+        assert_ne!(remote(None, https), remote(https, None));
+        assert_eq!(remote(None, None), Remote::default());
+        // Unparsed URLs compare as written.
+        assert_eq!(remote(Some(" "), None), remote(Some(" "), None));
+        let hash = |remote: &Remote| {
+            use std::hash::Hash as _;
+            use std::hash::Hasher as _;
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            remote.hash(&mut hasher);
+            hasher.finish()
+        };
+        assert_eq!(hash(&remote(https, ssh)), hash(&remote(ssh, None)));
+        // So merging three-way, a machine's own spelling is no change of its own.
+        let hive = with(&[("origin", "https://example.com/team/p.git")]);
+        let ours = with(&[("origin", "git@example.com:team/p")]);
+        let theirs = with(&[("origin", "https://example.com/team/moved.git")]);
+        let merged = HiveSettings::merge(&ours, &hive, &theirs);
+        assert_eq!(merged.remotes["origin"].url, theirs.remotes["origin"].url);
     }
 
     #[test]

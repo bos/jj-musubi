@@ -260,6 +260,103 @@ fn changes_to_a_remote_reach_machines_with_their_own_spelling() {
     assert_eq!(remotes(&hive, 1), expected);
 }
 
+/// Two machines that reach one repository by different URLs, already synced.
+fn spelled_two_ways(beta_push_url: Option<&str>) -> Fixture {
+    let env = TestEnv::new();
+    let alpha = env.init_repo("alpha");
+    let beta = env.init_repo("beta");
+    alpha.jj(&["git", "remote", "add", "origin", HTTPS]);
+    beta.jj(&["git", "remote", "add", "origin", SSH]);
+    if let Some(push_url) = beta_push_url {
+        beta.git(&["config", "remote.origin.pushurl", push_url]);
+    }
+    let mut hive = Fixture::join(env, vec![alpha, beta]);
+    hive.sync();
+    hive
+}
+
+const HTTPS: &str = "https://example.com/team/project.git";
+const SSH: &str = "git@example.com:team/project";
+
+/// A machine that fetches over https and pushes over ssh to the same repository drops its
+/// push URL when the remote moves, rather than pushing to where it used to point.
+#[test]
+fn a_push_url_to_the_old_repository_goes_when_the_remote_moves() {
+    let mut hive = spelled_two_ways(Some(SSH));
+    let push_url = |hive: &Fixture| {
+        hive.repo(1)
+            .git(&["config", "--default", "", "--get", "remote.origin.pushurl"])
+            .trim()
+            .to_owned()
+    };
+    assert_eq!(push_url(&hive), SSH);
+    let moved = "https://example.com/team/moved.git";
+    hive.repo(0)
+        .jj(&["git", "remote", "set-url", "origin", moved]);
+    hive.sync();
+    hive.sync();
+    hive.assert_converged();
+    assert_eq!(remotes(&hive, 0), format!("origin {moved}\n"));
+    assert_eq!(remotes(&hive, 1), format!("origin {moved}\n"));
+    assert_eq!(push_url(&hive), "");
+}
+
+/// A rename on the machine whose spelling the hive doesn't have renames the others' remote,
+/// spelled as they spell it, rather than replacing it with the renamer's.
+#[test]
+fn a_rename_keeps_each_machines_spelling() {
+    let mut hive = spelled_two_ways(None);
+    hive.repo(1)
+        .jj(&["git", "remote", "rename", "origin", "upstream"]);
+    hive.sync();
+    hive.sync();
+    hive.assert_converged();
+    assert_eq!(remotes(&hive, 0), format!("upstream {HTTPS}\n"));
+    assert_eq!(remotes(&hive, 1), format!("upstream {SSH}\n"));
+}
+
+/// A machine that misses several changes, among them a respelling of what it last agreed
+/// to, takes them all rather than reverting the last.
+#[test]
+fn a_machine_that_lags_behind_respellings_takes_later_changes() {
+    let mut hive = spelled_two_ways(None);
+    let alpha = |hive: &mut Fixture, args: &[&str]| {
+        hive.repo(0).git(args);
+        hive.hive.sync(0).unwrap();
+    };
+    alpha(
+        &mut hive,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "https://example.com/team/q.git",
+        ],
+    );
+    alpha(
+        &mut hive,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            "ssh://git@example.com/team/project.git",
+        ],
+    );
+    let mirror = "git@example.com:team/mirror";
+    alpha(&mut hive, &["config", "remote.origin.pushurl", mirror]);
+    hive.sync();
+    hive.sync();
+    hive.assert_converged();
+    assert_eq!(
+        remotes(&hive, 0),
+        format!("origin ssh://git@example.com/team/project.git (push: {mirror})\n")
+    );
+    assert_eq!(
+        remotes(&hive, 1),
+        format!("origin {SSH} (push: {mirror})\n")
+    );
+}
+
 fn advance_origin(hive: &Fixture, seed: &std::path::Path, n: usize) {
     let origin = hive.env.root().join("origin.git");
     let run = |args: &[&str]| {

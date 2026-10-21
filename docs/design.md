@@ -476,7 +476,11 @@ the formal model.
   (start serving a repository now, and reply after its first sync), `remove`, `sync`,
   `status`, and `stop`. `musubi join` and `musubi clone` write the repository's membership
   and the config file, then ask the daemon to add it, starting the daemon in the background
-  first if none is running. A lock file in the state directory, named after the socket,
+  first if none is running. Only the user can reach the daemon: a Unix socket's directory
+  must be theirs and writable by no one else, as tmux and ssh-agent check, or the daemon
+  won't listen there and commands won't connect; a named pipe admits only its owner, and
+  the daemon creates it as the first instance, so it can't start if another user took the
+  name. A lock file in the state directory, named after the socket,
   keeps a second daemon from starting; the daemon holding it removes a socket a crashed
   daemon left behind. Commands check the daemon's version first, and suggest
   `musubi daemon restart` when it differs.

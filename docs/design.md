@@ -11,9 +11,10 @@ and, in git-backed repositories, the git object database and refs. A remote oper
 rewrite this machine's working-copy commit, for example by rebasing its parent. jj then
 treats the working copy as stale, exactly as after a `jj rebase` run from another workspace.
 By default the next `jj` command stops and suggests `jj workspace update-stale`. With
-`snapshot.auto-update-stale = true`, which musubi recommends for hive repositories, jj
-updates the files itself. If the working copy had edits not yet snapshotted, jj snapshots them
-first, and you get a divergent working-copy change instead of losing them.
+`snapshot.auto-update-stale = true`, jj updates the files itself, so `musubi create`, `join`
+and `clone` set it in the repo config unless the user or repo config already has it on. If
+the working copy had edits not yet snapshotted, jj snapshots them first, and you get a
+divergent working-copy change instead of losing them.
 
 This document targets jj-lib 0.46.0.
 

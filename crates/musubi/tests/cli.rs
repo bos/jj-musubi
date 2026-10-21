@@ -547,6 +547,37 @@ fn two_machines(
     (alpha, beta)
 }
 
+/// Adding a repository to a hive turns on `snapshot.auto-update-stale` where it is off, so
+/// another machine's rewrites don't stop this one's next command, keeping the rest of the
+/// repo config, and leaves the repo config alone where it is already on.
+#[test]
+fn adding_a_repository_turns_on_auto_update_stale() {
+    let env = TestEnv::new();
+    let mut logs = Logs::default();
+    let hub = Hub::start(&env, &mut logs);
+    // Stopped before the hub.
+    let mut daemons = Daemons::default();
+    let key = "snapshot.auto-update-stale";
+    let alpha = env.init_repo("alpha");
+    let beta = env.init_repo("beta");
+    daemons.of(&alpha);
+    daemons.of(&beta);
+    alpha.jj(&["config", "set", "--user", key, "false"]);
+    alpha.jj(&["config", "set", "--repo", "ui.default-command", "log"]);
+    alpha.write_file("a", "a");
+    alpha.jj(&["commit", "-m", "start"]);
+    alpha.jj(&["bookmark", "create", "main", "-r", "@-"]);
+    let out = musubi_in(&env, &logs, &alpha, &["create", "--nats", &hub.url]);
+    assert!(out.contains("Set snapshot.auto-update-stale"), "{out}");
+    assert_eq!(alpha.jj(&["config", "get", key]), "true\n");
+    assert_eq!(alpha.jj(&["config", "get", "ui.default-command"]), "log\n");
+    fetch_history(&alpha, &beta);
+    let out = musubi_in(&env, &logs, &beta, &["join", "--nats", &hub.url]);
+    assert!(!out.contains("auto-update-stale"), "{out}");
+    let repo_config = fs::read_to_string(beta.repo_config_path()).unwrap_or_default();
+    assert!(!repo_config.contains("auto-update-stale"), "{repo_config}");
+}
+
 /// The daemon reopens the repository after a failed sync, so it carries on after changes
 /// an open repository can't follow, such as turning colocation off.
 #[test]

@@ -28,6 +28,7 @@ use crate::wire::HUB_TOKEN;
 use crate::wire::HubReply;
 use crate::wire::HubWideReply;
 use crate::wire::HubWideRequest;
+use crate::wire::fit_error;
 
 pub struct HubServer {
     prefix: String,
@@ -80,7 +81,9 @@ impl HubServer {
                 .unwrap_or_default()
                 .to_owned();
             if token == HUB_TOKEN {
-                let reply = self.handle_hub_wide(&message.payload).await;
+                let reply = self
+                    .handle_hub_wide(&message.payload, transport.max_payload())
+                    .await;
                 let reply = Envelope::encode(reply)?;
                 if let Err(err) = transport.publish(&reply_to, Bytes::from(reply)).await {
                     tracing::warn!("could not reply: {err}");
@@ -89,7 +92,8 @@ impl HubServer {
             }
             let dir = self.lock().hive_dir(&token).map(Path::to_owned);
             let Some(dir) = dir else {
-                let reply = HubReply::Error(format!("this hub has no hive {token}"));
+                let error = format!("this hub has no hive {token}");
+                let reply = HubReply::Error(fit_error(error, transport.max_payload()));
                 if let Err(err) = transport
                     .publish(&reply_to, Bytes::from(Envelope::encode(reply)?))
                     .await
@@ -115,10 +119,10 @@ impl HubServer {
         Ok(())
     }
 
-    async fn handle_hub_wide(&mut self, bytes: &[u8]) -> HubWideReply {
+    async fn handle_hub_wide(&mut self, bytes: &[u8], max_payload: usize) -> HubWideReply {
         let request = match Envelope::<HubWideRequest>::decode(bytes) {
             Ok(request) => request,
-            Err(err) => return HubWideReply::Error(format!("{err:#}")),
+            Err(err) => return HubWideReply::Error(fit_error(format!("{err:#}"), max_payload)),
         };
         let result = match request {
             HubWideRequest::Join(request) => self.lock().join(&request).map(|joined| {
@@ -161,7 +165,7 @@ impl HubServer {
                 }
             }
         };
-        result.unwrap_or_else(HubWideReply::Error)
+        result.unwrap_or_else(|err| HubWideReply::Error(fit_error(err, max_payload)))
     }
 }
 
@@ -199,7 +203,7 @@ fn spawn_worker(
                     Ok(result) => result,
                     Err(err) => {
                         tracing::warn!("request failed: {err:#}");
-                        let error = HubReply::Error(format!("{err:#}"));
+                        let error = HubReply::Error(fit_error(format!("{err:#}"), limit));
                         match Envelope::encode(error) {
                             Ok(reply) => (reply, None),
                             Err(_) => continue,

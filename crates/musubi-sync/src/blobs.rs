@@ -123,7 +123,8 @@ impl BlobStore {
             .append(true)
             .open(&partial)?;
         let have = file.metadata()?.len();
-        let end = offset + data.len() as u64;
+        // A chunk at an offset near `u64::MAX`, which no honest sender uses, extends nothing.
+        let end = offset.saturating_add(data.len() as u64);
         if offset <= have && end > have {
             let skip = usize::try_from(have - offset).expect("chunks are small");
             file.write_all(&data[skip..])?;
@@ -187,6 +188,16 @@ mod tests {
         assert_eq!(inode(&file), inode(&stored));
         fs::remove_file(&file).unwrap();
         assert_eq!(store.read(&id, 0, 100).unwrap(), (8, b"contents".to_vec()));
+    }
+
+    /// A chunk whose offset and length add up past `u64::MAX` is ignored, not an overflow.
+    #[test]
+    fn chunk_past_the_largest_offset_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::open(dir.path()).unwrap();
+        let id = BlobId::of_bytes(b"blob");
+        let received = store.receive(&id, 4, u64::MAX - 1, b"ob").unwrap();
+        assert_eq!(received, Received::Prefix(0));
     }
 
     /// Chunks delivered in any order, duplicated, some corrupt, some lost and resent:

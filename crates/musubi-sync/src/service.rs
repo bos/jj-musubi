@@ -28,6 +28,8 @@ use crate::wire::HeadNotice;
 use crate::wire::HubReply;
 use crate::wire::HubRequest;
 use crate::wire::WireAttachment;
+use crate::wire::chunk_size;
+use crate::wire::fit_error;
 use crate::wire::inline_limit;
 use crate::wire::map_reply;
 use crate::wire::map_request;
@@ -105,7 +107,8 @@ impl HubService {
                 Ok(result) => result,
                 Err(err) => {
                     tracing::warn!("request failed: {err:#}");
-                    (Envelope::encode(HubReply::Error(format!("{err:#}")))?, None)
+                    let error = fit_error(format!("{err:#}"), transport.max_payload());
+                    (Envelope::encode(HubReply::Error(error))?, None)
                 }
             };
             if let Err(err) = transport.publish(&reply_to, Bytes::from(reply)).await {
@@ -162,7 +165,10 @@ impl HubService {
                 Ok((HubReply::ChunkAck { received, complete }, None))
             }
             HubRequest::GetChunk { blob, offset, len } => {
-                let len = usize::try_from(len)?;
+                // Not the whole of a large blob in memory, for a reply that couldn't carry it.
+                let len = usize::try_from(len)
+                    .unwrap_or(usize::MAX)
+                    .min(chunk_size(max_payload));
                 let (total, data) = self.blobs.read(&blob, offset, len)?;
                 if offset + data.len() as u64 >= total {
                     self.served.insert(blob, Instant::now());

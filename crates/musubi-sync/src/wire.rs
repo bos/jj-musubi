@@ -157,6 +157,17 @@ pub fn chunk_size(max_payload: usize) -> usize {
     max_payload.saturating_sub(1024).max(1024)
 }
 
+/// An error's message, cut short to fit in one reply: it can quote what the peer sent, and
+/// a reply too large to send leaves the peer waiting for its timeout.
+pub fn fit_error(mut message: String, max_payload: usize) -> String {
+    let limit = chunk_size(max_payload);
+    if message.len() > limit {
+        message.truncate(message.floor_char_boundary(limit));
+        message.push('…');
+    }
+    message
+}
+
 /// How many bytes of attachments one message carries inline, leaving room for the rest of
 /// it. Larger attachments travel as blobs.
 pub fn inline_limit(max_payload: usize) -> u64 {

@@ -35,6 +35,11 @@ use crate::wire::map_request;
 /// busy, without queueing much at the hub, which answers one request at a time.
 pub const WINDOW: usize = 8;
 
+/// How many times an upload may start over. The hub starts over only after discarding an
+/// abandoned upload, or when what it has fails the hash check; a blob that keeps failing it
+/// won't pass by being sent again.
+const RESTARTS: usize = 3;
+
 pub struct RemoteHub {
     transport: Arc<dyn Transport>,
     rpc_subject: String,
@@ -163,11 +168,13 @@ impl RemoteHub {
     }
 
     /// Uploads a blob in chunks, [`WINDOW`] at a time, resuming from whatever the hub
-    /// reports it has.
+    /// reports it has. That is less than before only if the hub started over, after a hash
+    /// mismatch or after discarding the upload as abandoned, and then so does the upload.
     async fn upload(&self, blob: &BlobId) -> anyhow::Result<()> {
         let chunk = chunk_size(self.transport.max_payload());
         let (total, _) = self.blobs.read(blob, 0, 0)?;
         let mut offset = 0;
+        let mut restarts = 0;
         loop {
             let mut acks = FuturesOrdered::new();
             let mut next = offset;
@@ -185,14 +192,27 @@ impl RemoteHub {
                     break;
                 }
             }
+            // The hub may take a window's chunks in any order, so go on from the furthest it
+            // reported. If it started over during the window, that is too far, and the next
+            // window, none of which it can take, finds out.
+            let mut furthest = 0;
             while let Some(ack) = acks.next().await {
                 match ack? {
                     HubReply::ChunkAck { complete: true, .. } => return Ok(()),
-                    HubReply::ChunkAck { received, .. } => offset = offset.max(received),
+                    HubReply::ChunkAck { received, .. } => furthest = furthest.max(received),
                     HubReply::Error(err) => anyhow::bail!("hub: {err}"),
                     other => anyhow::bail!("unexpected reply {other:?}"),
                 }
             }
+            // The chunk at `offset` takes the hub further, unless it started over.
+            if furthest <= offset {
+                restarts += 1;
+                anyhow::ensure!(
+                    restarts <= RESTARTS,
+                    "the hub started over on {blob:?} {restarts} times"
+                );
+            }
+            offset = furthest;
         }
     }
 

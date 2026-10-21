@@ -10,6 +10,7 @@ test belongs at the narrowest layer that can catch its bug.
 | Race catalogue | `crates/musubi-sync/tests/races` | Concurrent changes on different machines resolving differently from jj's local behavior (docs/races.md) | ~2 s per test |
 | Unit tests | `#[cfg(test)]` modules | Pure logic: URL normalization and hive names across forges, matching joining repositories to hives | Microseconds |
 | Example tests | each crate's `tests/` | jj integration details: translation, git refs, objects, joins, transports, the hub's hives, the CLI | ~1 s per test |
+| Fault tests | `crates/musubi-sync/tests/faults.rs` | Malformed requests reaching the hub's decoders, and links that die or stall partway through a sync | ~10–20 s per test |
 | Generated end-to-end tests | `crates/musubi-sync/tests/e2e_search` | Everything interacting: real `jj` commands, real repositories, faults | Seconds per case; opt-in |
 
 Run the default suite with `cargo nextest run`, or everything with `just check`. It needs `jj` 0.46.0, `git`, and `nats-server`
@@ -71,6 +72,44 @@ daemon stop`, and starts it for a command that needs it; on Windows it runs the 
 entry's command as a login would. CI's Linux runners have no systemd user manager without
 a login session, so the workflow enables lingering and starts one first. Logging in itself
 is the one step no test exercises.
+
+## Faults
+
+The protocol tests deliver well-formed messages, and lose, duplicate, or delay whole ones;
+docs/protocol.md assumes no message is corrupted. `musubi-sync/tests/faults.rs` tests the
+implementation where that doesn't hold. It records a real session over the in-memory
+transport, with a payload limit small enough that each commit's objects travel as a blob of
+several windows of chunks: one machine pushes a commit, another fetches it and pushes its
+own, and the first fetches that. It snapshots the hub's directory after each request, so
+that a case can start from any point in the session. Two Hegel tests use the session:
+
+- `hub_survives_malformed_requests` sends a hub requests no honest node sends: the session's
+  requests and bundles cut short, corrupted, or spliced; chunks at extreme offsets; requests
+  that arrive as blobs, and are themselves malformed or indirect; protocol requests with ids
+  and attachments taken from the session or made up; and envelopes from another version. The
+  hub answers each without panicking, with a reply, or an error, that fits the transport, and
+  its head moves only forward, to an operation whose closure it has (HubMonotone and
+  HubClosed). Afterwards it still answers a fetch from the root, which reads everything up to
+  its head.
+- `calls_finish_once_the_link_is_back` makes one of the session's calls, a push and its
+  uploads or a fetch and its downloads, through a link that fails at a chosen request. The
+  request and all later ones may be lost, as when the wifi goes off. The request may arrive
+  but its reply and all later requests be lost, as when a lid closes just after it went. Or
+  an hour may pass before it arrives, in which the hub sweeps away transfers in progress,
+  and then the link carries on, as when the lid opens. Meanwhile the hub may hear malformed
+  requests made from what the node sent, and an hour may pass. Once the link is back, the
+  call, made again, gets the reply it got in the session, unless a malformed request was a
+  valid push that moved the head, within a bound on requests that catches a node that never
+  starts over.
+
+A third, `node_recovers_when_its_link_fails_partway`, fails the link the same ways with real
+repositories and the node's driver, retrying as the daemon does, while another machine
+syncs. Afterwards both machines see the same commits. It is slow, so it runs few cases.
+
+A connection that dies partway through a message never delivers part of it: NATS frames
+each message with its length and drops an incomplete one. A killed connection reaches
+musubi as a lost request or reply, which the link faults model. The truncated messages
+stand for a buggy or mismatched peer.
 
 ## Generated end-to-end tests
 

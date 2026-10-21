@@ -82,6 +82,10 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         Some(&["forget_other_workspace", "rebase_revision"]),
     ),
     (
+        "forgotten_working_copies_follow_an_abandon_to_the_parent",
+        Some(&["forget_other_workspace", "abandon"]),
+    ),
+    (
         "secondary_workspaces_show_everywhere",
         Some(&["workspace_commit", "workspace_forget"]),
     ),

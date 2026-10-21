@@ -103,8 +103,9 @@ Replicating views verbatim corrupts the second kind.
   workspace, musubi merges it three-way exactly as jj does, so a machine's removal of its
   own workspace wins over another machine moving it meanwhile. If another machine
   abandons this machine's working-copy commit without moving its workspace (because it had
-  forgotten the workspace), this machine gives itself a fresh `@`, as jj does locally, on
-  the nearest visible ancestor.
+  forgotten the workspace), this machine gives itself a fresh `@` where jj would have put
+  it: on the nearest visible ancestor, or on the rewrite of an ancestor that was rewritten
+  rather than abandoned (the change's one visible commit).
 
   Which workspace made an operation is per-machine too. jj records it in the operation's
   metadata, and `jj undo` and `jj redo` refuse to undo another workspace's operation, telling

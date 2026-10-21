@@ -1458,10 +1458,19 @@ impl NodeRepo {
         let mut tx = repo.start_transaction();
         let mut moved = vec![];
         for (name, wc) in abandoned {
-            // The nearest visible ancestor along first parents: where jj would have put the
-            // new working copy had the abandon happened on this machine.
+            // Where jj would have put the new working copy had this happened on this machine:
+            // the nearest visible ancestor along first parents, except that an ancestor that
+            // was rewritten, not abandoned, is replaced by its rewrite. A rewrite keeps the
+            // change id, so it's the change's one visible commit; a change with none was
+            // abandoned, and one with several diverged, so neither says where to go.
             let mut parent = repo.store().get_commit_async(&wc).block_on()?;
             while !is_visible(&repo, parent.id())? {
+                if parent.id() != &wc
+                    && let Some(rewrite) = visible_rewrite(&repo, parent.change_id())?
+                {
+                    parent = repo.store().get_commit_async(&rewrite).block_on()?;
+                    break;
+                }
                 let Some(first) = parent.parent_ids().first().cloned() else {
                     break;
                 };
@@ -1564,6 +1573,25 @@ fn is_visible(repo: &ReadonlyRepo, commit: &CommitId) -> Result<bool, NodeError>
         }
     }
     Ok(false)
+}
+
+/// The visible commit of `change`, if it has exactly one.
+fn visible_rewrite(
+    repo: &ReadonlyRepo,
+    change: &jj_lib::backend::ChangeId,
+) -> Result<Option<CommitId>, NodeError> {
+    let Some(targets) = repo
+        .resolve_change_id(change)
+        .block_on()
+        .map_err(index_err)?
+    else {
+        return Ok(None);
+    };
+    let mut visible = targets.visible_with_offsets().map(|(_, id)| id.clone());
+    Ok(match (visible.next(), visible.next()) {
+        (Some(only), None) => Some(only),
+        _ => None,
+    })
 }
 
 fn index_err(err: impl std::fmt::Display) -> NodeError {

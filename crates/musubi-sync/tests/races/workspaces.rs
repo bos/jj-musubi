@@ -99,7 +99,8 @@ fn other_machines_workspaces_are_theirs() {
 /// A machine that forgot another machine's workspace no longer sees its empty working-copy
 /// commit, so jj leaves that commit behind when this machine rewrites its parent. The hive
 /// mustn't keep it, which would bring the old parent back as a divergent copy: the other
-/// machine gets a fresh `@` instead, as when this machine abandons its working copy.
+/// machine gets a fresh `@` instead, on the rewritten parent, where jj would have moved the
+/// working copy had it seen it.
 #[test]
 fn forgotten_working_copies_dont_keep_rewritten_parents() {
     let mut hive = Fixture::new(&["alpha", "beta"]);
@@ -124,6 +125,37 @@ fn forgotten_working_copies_dont_keep_rewritten_parents() {
     }
     hive.assert_converged();
     assert_eq!(names(&hive, 0), ["alpha", "beta/beta"]);
+    assert_eq!(parent_description(&hive, 1), "reworded by alpha");
+}
+
+/// As above, but abandoning the parent: the other machine's fresh `@` goes on the abandoned
+/// commit's parent, as jj puts a working copy whose parent it abandons.
+#[test]
+fn forgotten_working_copies_follow_an_abandon_to_the_parent() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(1, "a", "base on beta");
+    hive.commit(1, "b", "from beta");
+    hive.sync();
+    hive.repo(0).jj(&["workspace", "forget", "beta/beta"]);
+    let parent = hive.commit_id(0, "from beta");
+    hive.repo(0).jj(&["abandon", &parent]);
+    hive.sync();
+    hive.sync();
+    hive.assert_converged();
+    assert_eq!(parent_description(&hive, 1), "base on beta");
+}
+
+/// The description of machine `m`'s `@-`.
+fn parent_description(hive: &Fixture, m: usize) -> String {
+    hive.repo(m).jj(&["status"]);
+    hive.repo(m).jj(&[
+        "log",
+        "--no-graph",
+        "-r",
+        "@-",
+        "-T",
+        "description.first_line()",
+    ])
 }
 
 /// Each machine's view of the others' working copies follows them, including when this

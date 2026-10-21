@@ -111,6 +111,14 @@ A third, `node_recovers_when_its_link_fails_partway`, fails the link the same wa
 repositories and the node's driver, retrying as the daemon does, while another machine
 syncs. Afterwards both machines see the same commits. It is slow, so it runs few cases.
 
+An hour passing sweeps every blob at once, so those tests never meet a blob the hub
+prepares twice. `blobs_prepared_again_last_as_long_as_new_ones` makes a fetch of the
+session against the hub directly, downloads its blob, backdates the blob past the sweep's
+hour, and makes the fetch again, as another node would. The second fetch gets the same
+blob, and its download survives a sweep and outlasts the time the hub keeps a blob it has
+served. So does the download for a third fetch, made before the second download finishes
+and paced to span that time.
+
 A connection that dies partway through a message never delivers part of it: the stream
 transport frames each message with its length and drops an incomplete one. A killed connection reaches
 musubi as a lost request or reply, which the link faults model. The truncated messages

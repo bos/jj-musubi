@@ -19,6 +19,7 @@ use std::io::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::SystemTime;
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -112,10 +113,13 @@ impl BlobStore {
     /// Adds a file this side created, returning its id and length. The file is linked in
     /// rather than copied where the filesystem allows: a bundle can be gigabytes, and its
     /// creator deletes its own name for it. A blob of that id already here whole is kept:
-    /// renaming over it would make ext4 write the new one out to disk.
+    /// renaming over it would make ext4 write the new one out to disk. It is wanted again,
+    /// so it becomes as new as one just added.
     pub fn insert_file(&self, path: &Path) -> io::Result<(BlobId, u64)> {
         let (id, len) = BlobId::of_file(path)?;
-        if self.get(&id).is_none() {
+        if let Some(existing) = self.get(&id) {
+            renew(&existing)?;
+        } else {
             let linked = tempfile::Builder::new().make_in(self.dir.join("partial"), |tmp| {
                 fs::hard_link(path, tmp).or_else(|err| match err.kind() {
                     // Taken: tempfile tries another name.
@@ -134,7 +138,9 @@ impl BlobStore {
     /// [`Self::insert_file`] for bytes in memory.
     pub fn insert_bytes(&self, bytes: &[u8]) -> io::Result<(BlobId, u64)> {
         let id = BlobId::of_bytes(bytes);
-        if self.get(&id).is_none() {
+        if let Some(existing) = self.get(&id) {
+            renew(&existing)?;
+        } else {
             let mut tmp = tempfile::NamedTempFile::new_in(self.dir.join("partial"))?;
             tmp.write_all(bytes)?;
             tmp.persist(self.complete_path(&id))
@@ -202,6 +208,15 @@ impl BlobStore {
         fs::remove_file(self.complete_path(id)).ok();
         fs::remove_file(self.partial_path(id)).ok();
     }
+}
+
+/// Makes a blob's file as new as one just added, since the hub expires blobs by age.
+fn renew(path: &Path) -> io::Result<()> {
+    // Open for writing, which Windows needs to set the time; nothing is written.
+    OpenOptions::new()
+        .write(true)
+        .open(path)?
+        .set_modified(SystemTime::now())
 }
 
 #[cfg(test)]

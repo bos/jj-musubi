@@ -49,7 +49,9 @@ pub struct HubService {
     rpc_subject: String,
     head_subject: String,
     handled: u64,
-    /// Prepared blobs whose last chunk has been served, and when.
+    /// Prepared blobs whose last chunk has been served, and when a chunk of them was last
+    /// asked for. A blob prepared again, for another reply with the same content, is taken
+    /// out: that reply's download has only begun.
     served: HashMap<BlobId, Instant>,
     served_lifetime: Duration,
 }
@@ -141,6 +143,7 @@ impl HubService {
             return Ok((encoded, notice));
         }
         let (blob, len) = self.blobs.insert_bytes(&encoded)?;
+        self.served.remove(&blob);
         Ok((Envelope::encode(HubReply::Indirect { blob, len })?, notice))
     }
 
@@ -169,7 +172,9 @@ impl HubService {
                     .unwrap_or(usize::MAX)
                     .min(chunk_size(max_payload));
                 let (total, data) = self.blobs.read(&blob, offset, len)?;
-                if offset + data.len() as u64 >= total {
+                // Once one download has finished, another may still be going: the minute
+                // runs from the last chunk anyone asks for.
+                if offset + data.len() as u64 >= total || self.served.contains_key(&blob) {
                     self.served.insert(blob, Instant::now());
                 }
                 Ok((HubReply::Chunk { total, data }, None))
@@ -239,6 +244,7 @@ impl HubService {
                                     WireAttachment::Inline(std::fs::read(path)?)
                                 } else {
                                     let (blob, len) = self.blobs.insert_file(path)?;
+                                    self.served.remove(&blob);
                                     WireAttachment::Blob { blob, len }
                                 }
                             }

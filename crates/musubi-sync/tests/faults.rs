@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Duration;
+use std::time::SystemTime;
 
 use bytes::Bytes;
 use hegel::HealthCheck;
@@ -231,6 +232,59 @@ fn node_recovers_when_its_link_fails_partway(tc: TestCase) {
         assert_eq!(visible(&alpha), visible(&beta));
         assert!(visible(&beta).contains("from alpha"));
     });
+}
+
+/// A blob the hub prepares again, for another reply with the same content, lasts as long as
+/// one it prepares for the first time, however old it is, and whether another download of
+/// it finished just before or finishes during this one: the hub neither sweeps it as old
+/// nor forgets it as downloaded while a node downloads it again. The stalls above sweep
+/// every blob at once, so they never meet a blob prepared twice.
+#[test]
+fn blobs_prepared_again_last_as_long_as_new_ones() {
+    let session = session();
+    // A fetch with downloads: the objects it brings travel as a blob.
+    let call = session
+        .calls
+        .iter()
+        .find(|call| matches!(call.request, Request::Fetch { .. }) && call.requests > 1)
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let hub_dir = dir.path().join("hub");
+    // Short enough to wait out, as the minute the hub keeps a blob it has served.
+    let served_lifetime = Duration::from_secs(1);
+    let mut hub = session
+        .hub_after(call.start, &hub_dir)
+        .with_served_blob_lifetime(served_lifetime);
+    let fetch = encode(HubRequest::Protocol(call.request.clone()));
+    let (blob, len) = prepare(&mut hub, &fetch);
+    download(&mut hub, blob, len);
+
+    // Just after, another node's fetch gets the same blob, prepared long ago as far as the
+    // sweep can tell.
+    let file = hub_dir.join("blobs/complete").join(blob.hex());
+    std::fs::File::options()
+        .write(true)
+        .open(file)
+        .unwrap()
+        .set_modified(SystemTime::now() - Duration::from_secs(2 * 3600))
+        .unwrap();
+    assert_eq!(prepare(&mut hub, &fetch), (blob, len));
+    std::thread::sleep(served_lifetime);
+    // It downloads slowly enough that the hub sweeps, as it does every hundred requests.
+    for _ in 0..100 {
+        chunk(&mut hub, blob, 0);
+    }
+
+    // Before it finishes, a third node's fetch gets the same blob. Then the second node
+    // finishes, and the third downloads at a steady pace for longer than the hub keeps a
+    // blob after its last chunk is served.
+    assert_eq!(prepare(&mut hub, &fetch), (blob, len));
+    download(&mut hub, blob, len);
+    for _ in 0..11 {
+        std::thread::sleep(served_lifetime / 10);
+        chunk(&mut hub, blob, 0);
+    }
+    download(&mut hub, blob, len);
 }
 
 /// How a [`Link`] fails, from a given request on.
@@ -804,6 +858,57 @@ fn as_blob(bytes: &[u8]) -> Vec<Vec<u8>> {
         .collect();
     requests.push(encode(HubRequest::Indirect { blob }));
     requests
+}
+
+/// Makes `fetch`, returning the blob the objects it brings travel as.
+fn prepare(hub: &mut HubService, fetch: &[u8]) -> (BlobId, u64) {
+    let (reply, _) = hub.handle_bytes(fetch, MAX_PAYLOAD).unwrap();
+    let Ok(HubReply::Protocol(reply)) = Envelope::decode(&reply) else {
+        panic!("the fetch failed");
+    };
+    let mut blobs = vec![];
+    map_reply(
+        reply,
+        |id| id,
+        |attachment| {
+            if let WireAttachment::Blob { blob, len } = attachment {
+                blobs.push((blob, len));
+            }
+            Ok(())
+        },
+    )
+    .unwrap();
+    let [blob] = blobs.as_slice() else {
+        panic!("the fetch's reply has blobs {blobs:?}");
+    };
+    *blob
+}
+
+/// The chunk of `blob` at `offset`, as a node asks for it.
+fn chunk(hub: &mut HubService, blob: BlobId, offset: u64) -> Vec<u8> {
+    let request = encode(HubRequest::GetChunk {
+        blob,
+        offset,
+        len: chunk_size(MAX_PAYLOAD) as u64,
+    });
+    let (reply, _) = hub
+        .handle_bytes(&request, MAX_PAYLOAD)
+        .unwrap_or_else(|err| panic!("the chunk at {offset}: {err:#}"));
+    match Envelope::decode(&reply).unwrap() {
+        HubReply::Chunk { data, .. } => data,
+        other => panic!("asked for a chunk, got {other:?}"),
+    }
+}
+
+/// Downloads all of `blob`, a chunk at a time.
+fn download(hub: &mut HubService, blob: BlobId, len: u64) {
+    let mut content = vec![];
+    while (content.len() as u64) < len {
+        let data = chunk(hub, blob, content.len() as u64);
+        assert!(!data.is_empty(), "the blob ends early");
+        content.extend(data);
+    }
+    assert_eq!(BlobId::of_bytes(&content), blob);
 }
 
 /// The ids a malformed request most needs to get anywhere: the hub's head, the root, and

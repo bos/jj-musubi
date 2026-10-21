@@ -380,8 +380,10 @@ inline in the request or reply it belongs to when it fits in a quarter of that, 
 otherwise moves as a content-addressed blob in a resumable upload or download session. Each
 chunk carries its offset and fits under the negotiated limit, up to eight chunks are in
 flight at once, and the blob's hash is checked when the session finishes. An interrupted
-session resumes from the receiver's reported offset. The hub deletes a blob it prepared a
-minute after serving its last chunk, and unfinished sessions expire after an hour.
+session resumes from the receiver's reported offset. The hub deletes a blob it prepared
+once it has served the last chunk and a minute has passed without a request for any chunk
+of it, and unfinished sessions expire after an hour. A blob prepared again, for another
+reply with the same content, is kept as one prepared just now.
 
 A sync takes few round trips. A node's first request, which it also sends whenever it
 polls, asks for the hub's head together with every operation accepted since the newest

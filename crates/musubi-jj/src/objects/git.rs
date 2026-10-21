@@ -163,6 +163,25 @@ impl GitObjects {
             .collect())
     }
 
+    /// Parentless commits reachable from `wants` but not from `haves`.
+    pub fn roots(
+        &self,
+        wants: &[CommitId],
+        haves: &[CommitId],
+    ) -> Result<Vec<CommitId>, ObjectError> {
+        if wants.is_empty() {
+            return Ok(vec![]);
+        }
+        let output = self.run(
+            &["rev-list", "--max-parents=0", "--stdin"],
+            Some(revs_input(wants, haves)),
+        )?;
+        Ok(String::from_utf8_lossy(&output)
+            .lines()
+            .filter_map(CommitId::try_from_hex)
+            .collect())
+    }
+
     /// Writes a thin pack of everything reachable from `wants` but not from `haves` to
     /// `out`, as git produces it. The receiver must have every object reachable from
     /// `haves`.
@@ -540,6 +559,10 @@ impl ObjectStore for GitStore<'_> {
 
     fn check_connected(&self, wants: &[CommitId], haves: &[CommitId]) -> Result<(), ObjectError> {
         self.git.check_connected(wants, haves)
+    }
+
+    fn roots(&self, wants: &[CommitId], haves: &[CommitId]) -> Result<Vec<CommitId>, ObjectError> {
+        self.git.roots(wants, haves)
     }
 
     fn export(

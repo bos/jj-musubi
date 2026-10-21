@@ -151,6 +151,24 @@ impl CanonicalStore {
         }
     }
 
+    /// Every stored operation except the root, in no particular order.
+    pub fn operation_ids(&self) -> Result<Vec<OperationId>, CanonicalError> {
+        let dir = self.path.join("operations");
+        let entries = fs::read_dir(&dir).map_err(io_err(&dir))?;
+        let mut ids = vec![];
+        for entry in entries {
+            let entry = entry.map_err(io_err(&dir))?;
+            if let Some(id) = entry
+                .file_name()
+                .to_str()
+                .and_then(OperationId::try_from_hex)
+            {
+                ids.push(id);
+            }
+        }
+        Ok(ids)
+    }
+
     pub fn has_operation(&self, id: &OperationId) -> bool {
         id == self.root_operation_id() || self.op_path(id).exists()
     }

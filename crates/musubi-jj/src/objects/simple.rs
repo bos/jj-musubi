@@ -173,6 +173,33 @@ impl ObjectStore for SimpleStore {
         self.check_connected(wants, haves)
     }
 
+    fn roots(&self, wants: &[CommitId], haves: &[CommitId]) -> Result<Vec<CommitId>, ObjectError> {
+        let is_root = |id: &[u8]| id.iter().all(|&b| b == 0);
+        let mut seen: HashSet<Vec<u8>> = haves.iter().map(|id| id.to_bytes()).collect();
+        let mut stack: Vec<Vec<u8>> = wants.iter().map(|id| id.to_bytes()).collect();
+        let mut roots = vec![];
+        while let Some(id) = stack.pop() {
+            if is_root(&id) || !seen.insert(id.clone()) {
+                continue;
+            }
+            let Some(contents) = self.read(ObjectKind::Commit, &id)? else {
+                continue;
+            };
+            let commit = simple_store::Commit::decode(&*contents).map_err(|_| {
+                ObjectError::MalformedObject {
+                    kind: ObjectKind::Commit.dir(),
+                    id: jj_lib::hex_util::encode_hex(&id),
+                }
+            })?;
+            if commit.parents.iter().all(|parent| is_root(parent)) {
+                roots.push(CommitId::new(id));
+            } else {
+                stack.extend(commit.parents);
+            }
+        }
+        Ok(roots)
+    }
+
     fn check_connected(&self, wants: &[CommitId], haves: &[CommitId]) -> Result<(), ObjectError> {
         let missing = self.walk(wants, haves, |_, _, _| Ok(()))?;
         if missing.is_empty() {

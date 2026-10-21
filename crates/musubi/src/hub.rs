@@ -252,8 +252,20 @@ fn start_nats(dir: &Path, nats: &NatsSettings) -> anyhow::Result<Option<NatsChil
     let log = dir.join("nats.log");
     let mut command = Command::new("nats-server");
     command.args(["-a", "0.0.0.0", "-p", &nats.port.to_string()]);
-    if let Some(token) = &nats.token {
-        command.arg("--auth").arg(token);
+    // The token goes in a config file only its owner can read, not on the command line,
+    // where anyone on the machine could see it.
+    let conf = dir.join("nats.conf");
+    match &nats.token {
+        Some(token) => {
+            let text = format!("authorization {{\n  token: \"{token}\"\n}}\n");
+            config::write_private(&conf, text.as_bytes())?;
+            command.arg("-c").arg(&conf);
+        }
+        None => match fs::remove_file(&conf) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err).with_context(|| format!("removing {conf:?}")),
+        },
     }
     let child = command
         .arg("-l")

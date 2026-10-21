@@ -407,6 +407,32 @@ fn the_daemon_picks_up_new_repositories() {
     let mut logs = Logs::default();
     let mut hub = Hub::start_with(&env, &mut logs, &["--token"]);
     assert!(hub.url.contains("@127.0.0.1:"), "{}", hub.url);
+    // The token is in a config file only its owner can read, not on a command line.
+    let token = hub
+        .url
+        .strip_prefix("nats://")
+        .unwrap()
+        .split('@')
+        .next()
+        .unwrap();
+    let conf = hub.dir.join("nats.conf");
+    assert!(fs::read_to_string(&conf).unwrap().contains(token));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = fs::metadata(&conf).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let pid = fs::read_to_string(hub.dir.join("nats.pid")).unwrap();
+        let ps = Command::new("ps")
+            .args(["-o", "args=", "-p", pid.trim()])
+            .output()
+            .unwrap();
+        let args = String::from_utf8_lossy(&ps.stdout);
+        assert!(
+            args.contains("nats-server") && !args.contains(token),
+            "{args}"
+        );
+    }
     let mut daemons = Daemons::default();
     let alpha = env.init_repo("alpha");
     let beta = env.init_repo("beta");

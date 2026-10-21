@@ -454,7 +454,9 @@ one is instead of starting; `--dir` runs more hubs on purpose.
 Without `--nats`, the hub runs `nats-server` itself, listening on every interface, on a port
 chosen on the first run and kept in the hub directory's `hub.toml` so the URL never
 changes. With `--token` the server requires a random token, also kept there (delete it
-from `hub.toml` to turn it off again). It prints the commands other machines run, with this
+from `hub.toml` to turn it off again), which the hub gives the server in a config file only
+its owner can read, `nats.conf`, rather than on its command line. It prints the commands
+other machines run, with this
 machine's host name (or `--advertise`) in the URL. A hub that was killed leaves its NATS
 server running; the next one finds it on the port and uses it.
 - **In-memory** transport for tests. It can drop, delay, duplicate, and reorder messages, and

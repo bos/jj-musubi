@@ -54,7 +54,7 @@ def main():
     bench.HUB_RPC_SUBJECT = f"musubi.{hive}.rpc"
     time.sleep(0.5)
     cfgA = env(MUSUBI_CONFIG_DIR=f"{run}/cfgA")
-    sh([MUSUBI, "join", hive, "--nats", f"nats://127.0.0.1:{PORT_NATS}", "--machine", "A"], cwd=Am, e=cfgA)
+    sh([MUSUBI, "join", hive, "--hub", f"nats://127.0.0.1:{PORT_NATS}", "--machine", "A"], cwd=Am, e=cfgA)
     res = {"repo": repo, "points": []}
     git_clone = measure(
         "gitB",
@@ -77,7 +77,7 @@ def main():
         dest = f"{run}/D{n}"
         m = measure(
             "natsD",
-            lambda: sh([MUSUBI, "clone", hive, dest, "--nats",
+            lambda: sh([MUSUBI, "clone", hive, dest, "--hub",
                         f"nats://127.0.0.1:{ROUTES['natsD'][0]}", "--machine", f"D{n}"],
                        cwd=run, e=env(MUSUBI_CONFIG_DIR=f"{run}/cfgD{n}"))[0],
             musubi=True,

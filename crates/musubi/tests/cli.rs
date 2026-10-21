@@ -125,7 +125,7 @@ fn musubi_fails(env: &TestEnv, logs: &Logs, repo: &TestRepo, args: &[&str]) -> S
 struct Hub {
     child: Child,
     dir: PathBuf,
-    /// The URL it says to join with.
+    /// The URL of its NATS server, which machines here join with directly.
     url: String,
     /// The first line it printed.
     greeting: String,
@@ -181,14 +181,23 @@ impl Hub {
             if hub.greeting.is_empty() {
                 hub.greeting = line.trim().to_owned();
             }
-            if let Some(url) = line
-                .trim()
-                .strip_prefix("To share a repository:               musubi create --nats ")
-            {
-                hub.url = url.to_owned();
+            if line.starts_with("To share a repository:") {
+                hub.url = hub.nats_url();
             }
         }
         hub
+    }
+
+    /// Its NATS server's URL, from the settings it keeps.
+    fn nats_url(&self) -> String {
+        let text = fs::read_to_string(self.dir.join("hub.toml")).unwrap();
+        let settings: toml::Table = toml::from_str(&text).unwrap();
+        let nats = settings["nats"].as_table().unwrap();
+        let port = nats["port"].as_integer().unwrap();
+        match nats.get("token") {
+            Some(token) => format!("nats://{}@127.0.0.1:{port}", token.as_str().unwrap()),
+            None => format!("nats://127.0.0.1:{port}"),
+        }
     }
 
     /// Kills the hub the hard way, leaving its NATS server running.
@@ -308,7 +317,7 @@ fn hub_join_sync_clone_and_list() {
     daemons.of(&beta);
 
     // Nothing to share yet.
-    let err = musubi_fails(&env, &logs, &alpha, &["create", "--nats", &hub.url]);
+    let err = musubi_fails(&env, &logs, &alpha, &["create", "--hub", &hub.url]);
     assert!(err.contains("commit something first"), "{err}");
 
     alpha.write_file("a", "from alpha");
@@ -322,9 +331,9 @@ fn hub_join_sync_clone_and_list() {
         "https://example.com/team/project.git",
     ]);
     // Joining never starts a hive; creating does.
-    let err = musubi_fails(&env, &logs, &alpha, &["join", "--nats", &hub.url]);
+    let err = musubi_fails(&env, &logs, &alpha, &["join", "--hub", &hub.url]);
     assert!(err.contains("musubi create"), "{err}");
-    let out = musubi_in(&env, &logs, &alpha, &["create", "--nats", &hub.url]);
+    let out = musubi_in(&env, &logs, &alpha, &["create", "--hub", &hub.url]);
     assert!(out.contains("Created hive project"), "{out}");
     assert!(out.contains("Synced with the hub"), "{out}");
 
@@ -338,14 +347,14 @@ fn hub_join_sync_clone_and_list() {
         "origin",
         "git@example.com:team/project",
     ]);
-    let out = musubi_in(&env, &logs, &beta, &["join", "--nats", &hub.url]);
+    let out = musubi_in(&env, &logs, &beta, &["join", "--hub", &hub.url]);
     assert!(
         out.contains("Joined hive project (matched origin), 2 machines"),
         "{out}"
     );
     assert!(log(&beta).contains("from alpha"));
 
-    // The first join saved the hub: from now on no command needs --nats.
+    // The first join saved the hub: from now on no command needs --hub.
     let list = musubi_in(&env, &logs, &beta, &[]);
     assert!(list.contains("project  2 machines: alpha, beta"), "{list}");
     assert!(
@@ -445,7 +454,7 @@ fn the_daemon_picks_up_new_repositories() {
     daemons.of(&beta);
     alpha.write_file("a", "a");
     alpha.jj(&["commit", "-m", "first project"]);
-    musubi_in(&env, &logs, &alpha, &["create", "--nats", &hub.url]);
+    musubi_in(&env, &logs, &alpha, &["create", "--hub", &hub.url]);
 
     // A second repository on alpha: another hive, named after its directory, served by
     // the daemon the first join started.
@@ -475,7 +484,7 @@ fn the_daemon_picks_up_new_repositories() {
         "clone",
         "second",
         env.root().join("beta-second").to_str().unwrap(),
-        "--nats",
+        "--hub",
         &hub.url,
     ]);
     run(&env, &logs, clone);
@@ -517,10 +526,10 @@ fn machines_whose_workspaces_are_all_default_can_join() {
     alpha.write_file("a", "from alpha");
     alpha.jj(&["commit", "-m", "from alpha"]);
     alpha.jj(&["bookmark", "create", "main", "-r", "@-"]);
-    musubi_in(&env, &logs, &alpha, &["create", "--nats", &hub.url]);
+    musubi_in(&env, &logs, &alpha, &["create", "--hub", &hub.url]);
     // Without remotes, a repository joins the one hive it shares history with.
     fetch_history(&alpha, &beta);
-    let out = musubi_in(&env, &logs, &beta, &["join", "--nats", &hub.url]);
+    let out = musubi_in(&env, &logs, &beta, &["join", "--hub", &hub.url]);
     assert!(out.contains("Joined hive alpha (matched commits)"), "{out}");
     assert!(log(&beta).contains("from alpha"));
 }
@@ -541,9 +550,9 @@ fn two_machines(
     alpha.write_file("a", "a");
     alpha.jj(&["commit", "-m", "start"]);
     alpha.jj(&["bookmark", "create", "main", "-r", "@-"]);
-    musubi_in(env, logs, &alpha, &["create", "--nats", &hub.url]);
+    musubi_in(env, logs, &alpha, &["create", "--hub", &hub.url]);
     fetch_history(&alpha, &beta);
-    musubi_in(env, logs, &beta, &["join", "--nats", &hub.url]);
+    musubi_in(env, logs, &beta, &["join", "--hub", &hub.url]);
     (alpha, beta)
 }
 
@@ -567,12 +576,12 @@ fn adding_a_repository_turns_on_auto_update_stale() {
     alpha.write_file("a", "a");
     alpha.jj(&["commit", "-m", "start"]);
     alpha.jj(&["bookmark", "create", "main", "-r", "@-"]);
-    let out = musubi_in(&env, &logs, &alpha, &["create", "--nats", &hub.url]);
+    let out = musubi_in(&env, &logs, &alpha, &["create", "--hub", &hub.url]);
     assert!(out.contains("Set snapshot.auto-update-stale"), "{out}");
     assert_eq!(alpha.jj(&["config", "get", key]), "true\n");
     assert_eq!(alpha.jj(&["config", "get", "ui.default-command"]), "log\n");
     fetch_history(&alpha, &beta);
-    let out = musubi_in(&env, &logs, &beta, &["join", "--nats", &hub.url]);
+    let out = musubi_in(&env, &logs, &beta, &["join", "--hub", &hub.url]);
     assert!(!out.contains("auto-update-stale"), "{out}");
     let repo_config = fs::read_to_string(beta.repo_config_path()).unwrap_or_default();
     assert!(!repo_config.contains("auto-update-stale"), "{repo_config}");
@@ -628,6 +637,92 @@ fn settings_are_shared_through_the_binary() {
     assert_eq!(
         beta.jj(&["git", "remote", "list"]),
         "upstream https://example.com/up.git\n"
+    );
+}
+
+/// Machines reach a hub whose NATS server listens only on its own machine over ssh:
+/// joining creates the machine's key and adds it on the hub's machine, allowed only to run
+/// `musubi hub connect`, and the daemon syncs through that, which gives the hub's token
+/// itself.
+#[cfg(unix)]
+#[test]
+fn machines_reach_the_hub_over_ssh() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let env = TestEnv::new();
+    let mut logs = Logs::default();
+    let hub = Hub::start_with(&env, &mut logs, &["--token"]);
+    // Stopped before the hub.
+    let mut daemons = Daemons::default();
+    // Stands in for ssh to the hub's machine: runs what the machine's key may run there, and
+    // takes anything else to be adding a key.
+    let ssh = env.root().join("ssh");
+    let args = env.root().join("ssh-args");
+    let authorized = env.root().join("authorized_keys");
+    fs::write(
+        &ssh,
+        format!(
+            "#!/bin/sh\necho \"$*\" >> '{args}'\ncase \"$*\" in\n  *'hub connect') exec '{musubi}' \
+             hub connect --dir '{dir}' ;;\n  *) cat >> '{authorized}' ;;\nesac\n",
+            args = args.display(),
+            musubi = musubi().display(),
+            dir = hub.dir.display(),
+            authorized = authorized.display(),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&ssh, fs::Permissions::from_mode(0o755)).unwrap();
+    let alpha = env.init_repo("alpha");
+    let beta = env.init_repo("beta");
+    logs.daemon_of(&env, &alpha);
+    logs.daemon_of(&env, &beta);
+    daemons.of(&alpha);
+    daemons.of(&beta);
+    alpha.write_file("a", "a");
+    alpha.jj(&["commit", "-m", "start"]);
+    alpha.jj(&["bookmark", "create", "main", "-r", "@-"]);
+    let over_ssh = |repo: &TestRepo, args: &[&str]| {
+        let mut command = repo.program(musubi());
+        command.args(args).env("MUSUBI_SSH", &ssh);
+        run(&env, &logs, command)
+    };
+    let out = over_ssh(&alpha, &["create", "--hub", "hubhost"]);
+    assert!(out.contains("Created an ssh key for musubi"), "{out}");
+    assert!(
+        out.contains("Adding it to ~/.ssh/authorized_keys on hubhost"),
+        "{out}"
+    );
+    assert!(
+        out.contains("Saved hubhost as this machine's default hub"),
+        "{out}"
+    );
+    assert!(out.contains("Created hive alpha"), "{out}");
+    let keys = fs::read_to_string(&authorized).unwrap();
+    assert!(
+        keys.starts_with("restrict,command=\"musubi hub connect\" ssh-ed25519 "),
+        "{keys}"
+    );
+    // The daemon's ssh never prompts, and doesn't compress what musubi already has.
+    let args = fs::read_to_string(&args).unwrap();
+    assert!(
+        args.contains("BatchMode=yes") && args.contains("Compression=no"),
+        "{args}"
+    );
+
+    fetch_history(&alpha, &beta);
+    let out = over_ssh(&beta, &["join", "--hub", "hubhost"]);
+    assert!(out.contains("Joined hive alpha"), "{out}");
+    // Listing reaches the hub over ssh too.
+    let list = over_ssh(&beta, &["list"]);
+    assert!(list.contains("Hub hubhost:"), "{list}");
+    assert!(list.contains("alpha  2 machines: alpha, beta"), "{list}");
+
+    alpha.write_file("b", "more");
+    alpha.jj(&["commit", "-m", "over ssh"]);
+    wait_for(
+        &logs,
+        "beta's daemon to fetch alpha's commit over ssh",
+        || try_log(&beta).is_some_and(|log| log.contains("over ssh")),
     );
 }
 

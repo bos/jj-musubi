@@ -26,8 +26,8 @@ pub struct HiveConfig {
     /// reach.
     #[serde(default)]
     pub name: Option<String>,
-    /// The NATS server the hub listens on.
-    pub nats_url: String,
+    /// The hub: a NATS URL, or an ssh destination (see [`crate::ssh`]).
+    pub hub: String,
     /// Prefix of the NATS subjects for this hive.
     #[serde(default = "default_subject_prefix")]
     pub subject_prefix: String,
@@ -80,9 +80,10 @@ impl HiveConfig {
 /// The user's `config.toml`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserConfig {
-    /// The hub to use when a command isn't given `--nats`: the first one joined.
+    /// The hub to use when a command isn't given `--hub`: the first one joined, or on the
+    /// hub's own machine, that hub.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub nats: Option<String>,
+    pub hub: Option<String>,
     #[serde(default, skip_serializing_if = "DaemonSettings::is_default")]
     pub daemon: DaemonSettings,
     /// The workspace roots of the repositories the daemon serves.
@@ -212,12 +213,12 @@ impl UserConfig {
     }
 
     /// The hub to use: `given`, or the saved default.
-    pub fn nats(given: Option<&str>) -> anyhow::Result<String> {
+    pub fn hub(given: Option<&str>) -> anyhow::Result<String> {
         match given {
-            Some(url) => Ok(url.to_owned()),
-            None => Self::load()?.nats.context(
-                "no hub given; pass --nats <url>, the URL `musubi hub` prints (the first join \
-                 saves it as the default)",
+            Some(hub) => Ok(hub.to_owned()),
+            None => Self::load()?.hub.context(
+                "no hub given; pass --hub <host>, as `musubi hub` prints (the first join saves \
+                 it as the default)",
             ),
         }
     }

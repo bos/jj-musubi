@@ -401,7 +401,7 @@ def main():
     init["musubi_seed_A"] = measure(
         "natsA",
         lambda: sh(
-            [MUSUBI, "join", hive, "--nats", natsurl("natsA"), "--machine", "A"],
+            [MUSUBI, "join", hive, "--hub", natsurl("natsA"), "--machine", "A"],
             cwd=Am,
             e=cfg("A"),
         )[0],
@@ -416,7 +416,7 @@ def main():
         m = measure(
             "natsB",
             lambda: sh(
-                [MUSUBI, "clone", hive, dest, "--nats", natsurl("natsB"), "--machine", f"B{k}"],
+                [MUSUBI, "clone", hive, dest, "--hub", natsurl("natsB"), "--machine", f"B{k}"],
                 cwd=RUN,
                 e=cfg(f"B{k}"),
             )[0],
@@ -437,7 +437,7 @@ def main():
     init["musubi_join_existing_C"] = measure(
         "natsC",
         lambda: sh(
-            [MUSUBI, "join", hive, "--nats", natsurl("natsC"), "--machine", "C"],
+            [MUSUBI, "join", hive, "--hub", natsurl("natsC"), "--machine", "C"],
             cwd=Cm,
             e=cfg("C"),
         )[0],
@@ -647,7 +647,7 @@ def main():
         m = measure(
             "natsD",
             lambda: sh(
-                [MUSUBI, "clone", hive, dest, "--nats", natsurl("natsD"), "--machine", "D"],
+                [MUSUBI, "clone", hive, dest, "--hub", natsurl("natsD"), "--machine", "D"],
                 cwd=RUN,
                 e=cfg("D", GIT_TRACE2_EVENT=f"{RUN}/trace-D-clone.json"),
             )[0],

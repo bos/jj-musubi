@@ -13,6 +13,9 @@ use crate::Transport;
 use crate::TransportError;
 use crate::check_size;
 
+const PING_INTERVAL: Duration = Duration::from_secs(10);
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
+
 pub struct NatsTransport {
     client: async_nats::Client,
 }
@@ -33,6 +36,12 @@ impl NatsTransport {
         };
         let client = options
             .retry_on_initial_connect()
+            // Notices a connection that died while the machine slept within seconds of
+            // waking, rather than minutes.
+            .ping_interval(PING_INTERVAL)
+            // Connecting covers the server's INFO, which over ssh (see musubi's `ssh`) waits
+            // for an ssh login, through a tunnel's ProxyCommand perhaps.
+            .connection_timeout(CONNECTION_TIMEOUT)
             .connect(url.as_str())
             .await
             .map_err(|err| other(&err))?;

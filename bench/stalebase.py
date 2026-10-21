@@ -48,9 +48,9 @@ def main():
     cfgA, cfgB = env(MUSUBI_CONFIG_DIR=f"{run}/cfgA"), env(MUSUBI_CONFIG_DIR=f"{run}/cfgB")
     res = {"repo": repo, "pushes": pushes, "file_kb": kb}
     res["seed_A"] = measure("natsA", lambda: sh(
-        [MUSUBI, "join", hive, "--nats", natsA, "--machine", "A"], cwd=Am, e=cfgA)[0], musubi=True)
+        [MUSUBI, "join", hive, "--hub", natsA, "--machine", "A"], cwd=Am, e=cfgA)[0], musubi=True)
     res["clone_B"] = measure("natsB", lambda: sh(
-        [MUSUBI, "clone", hive, Bm, "--nats", natsB, "--machine", "B"], cwd=run, e=cfgB)[0],
+        [MUSUBI, "clone", hive, Bm, "--hub", natsB, "--machine", "B"], cwd=run, e=cfgB)[0],
         musubi=True)
     res["A_catchup_after_B_joined"] = measure(
         "natsA", lambda: sh([MUSUBI, "sync"], cwd=Am, e=cfgA)[0], musubi=True)

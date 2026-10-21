@@ -19,11 +19,12 @@ in anger.
 You need:
 
 - `jj` 0.46.0 and `git` on every machine;
-- [`nats-server`](https://docs.nats.io/running-a-nats-service/introduction/installation) on
-  the machine that runs the hub (`brew install nats-server`, or a release binary);
+- `musubi` and [`nats-server`](https://docs.nats.io/running-a-nats-service/introduction/installation)
+  on the machine that runs the hub (`brew install nats-server`, or a release binary), with
+  `musubi` on the `PATH` of non-interactive shells there;
 - a repository with at least one commit;
-- every machine able to reach the hub's machine. On macOS, allow incoming connections when
-  the firewall asks about `nats-server`.
+- ssh access to the hub's machine from every other machine: if `ssh devbox` works, so does
+  musubi.
 
 On the machine that will run the hub (any machine that is usually on):
 
@@ -36,32 +37,47 @@ run on the other machines:
 
 ```text
 Created a new hub in /home/you/musubi-hub
-To share a repository:               musubi create --nats nats://myhost:41234
-To add another machine's copy of it: musubi join --nats nats://myhost:41234
-To make a new copy of a hive:        musubi clone <name> <dir> --nats nats://myhost:41234
+Saved this hub as this machine's default (/home/you/.config/musubi/config.toml).
+To share a repository:               musubi create --hub devbox
+To add another machine's copy of it: musubi join --hub devbox
+To make a new copy of a hive:        musubi clone <name> <dir> --hub devbox
+Other machines reach this hub over ssh: use the name they ssh to this machine by, if it isn't devbox.
+On this machine, leave out --hub.
 ```
 
 Then, in one machine's copy of the repository, start a hive from it:
 
 ```sh
-musubi create --nats nats://myhost:41234
+musubi create --hub devbox
 ```
 
 The hive is named after the repository's `origin` remote (`jj-musubi`, say), or its
 directory; `musubi create <name>` names it yourself. In each other machine's copy, join it:
 
 ```sh
-musubi join --nats nats://myhost:41234
+musubi join --hub devbox
 ```
 
 That's all. A copy joins the hive it shares history and a remote with, and is refused if
 there's none, rather than starting a hive of its own. `create` and `join` start a daemon in
 the background that keeps every repository on the machine in sync, and remember the hub, so
-later commands need no `--nats`.
+later commands need no `--hub`.
 
-Anyone who can reach the hub's port can read and write every hive on it, so run it on a
-network you trust. `musubi hub --token` has its NATS server require a random token, which
-the URLs it prints then carry (`nats://<token>@myhost:41234`).
+The first time a machine uses a hub, musubi creates an ssh key of its own for the machine
+and adds it to `~/.ssh/authorized_keys` on the hub's machine, allowed only to run `musubi
+hub connect`; ssh may ask for your password that once. The daemon then reaches the hub
+through ssh, your `~/.ssh/config` and all, reconnecting by itself, as after the machine
+sleeps. If it says `musubi` isn't on the hub machine's `PATH`, put it there for
+non-interactive shells (`~/.zshenv`, or near the top of `~/.bashrc`), or give its absolute
+path in that line of `~/.ssh/authorized_keys`.
+
+The hub's NATS server listens only on its own machine's loopback, and anyone who can reach
+it can read and write every hive on the hub. `musubi hub --listen 0.0.0.0` lets other
+machines connect to it directly, with `--hub nats://myhost:41234`, which only a network you
+trust should allow; on macOS, allow incoming connections when the firewall asks about
+`nats-server`. `musubi hub --token` has the server require a random token, which the URLs
+it prints then carry (`nats://<token>@myhost:41234`), and which `musubi hub connect` gives
+the server itself, so machines reaching the hub over ssh never need it.
 
 A hub serves any number of repositories, each its own hive. A fork, which shares history
 but has a remote of its own, isn't joined to the original's hive: `musubi create` gives it

@@ -1,6 +1,7 @@
 //! `musubi hub`: serving a hub directory, with a NATS server of its own unless given one;
 //! and asking a hub about its hives.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::io::Write as _;
 use std::net::TcpStream;
@@ -27,6 +28,7 @@ use serde::Serialize;
 
 use crate::config;
 use crate::config::default_subject_prefix;
+use crate::ssh;
 
 /// What marks a directory as a hub's, and holds its own NATS server's settings.
 const HUB_FILE: &str = "hub.toml";
@@ -51,7 +53,51 @@ struct NatsSettings {
     /// machine's own name for itself isn't always one they can use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     advertise: Option<String>,
+    /// The address it listens on, once `--listen` has given one; else only this machine's
+    /// loopback, which other machines reach over ssh (see [`crate::ssh`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    listen: Option<String>,
 }
+
+impl NatsSettings {
+    fn listen(&self) -> &str {
+        self.listen.as_deref().unwrap_or(LOOPBACK)
+    }
+
+    /// Where this machine reaches the server.
+    fn local_host(&self) -> &str {
+        match self.listen() {
+            "0.0.0.0" | "::" => LOOPBACK,
+            listen => listen,
+        }
+    }
+
+    /// Whether only this machine can reach the server.
+    fn loopback_only(&self) -> bool {
+        self.listen()
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+            || self.listen() == "localhost"
+    }
+
+    /// Its URL on this machine, with its token if it has one.
+    fn local_url(&self) -> String {
+        format!(
+            "nats://{}{}:{}",
+            self.credentials(),
+            self.local_host(),
+            self.port
+        )
+    }
+
+    fn credentials(&self) -> String {
+        self.token
+            .as_ref()
+            .map_or(String::new(), |token| format!("{token}@"))
+    }
+}
+
+const LOOPBACK: &str = "127.0.0.1";
 
 impl HubSettings {
     fn load(dir: &Path) -> anyhow::Result<Self> {
@@ -69,6 +115,7 @@ pub struct ServeArgs {
     pub dir: Option<PathBuf>,
     pub nats: Option<String>,
     pub advertise: Option<String>,
+    pub listen: Option<String>,
     /// Have the NATS server it starts require a token.
     pub token: bool,
 }
@@ -141,6 +188,7 @@ pub fn serve(args: ServeArgs) -> anyhow::Result<()> {
     } else {
         HubSettings::load(&dir)?
     };
+    let was_local = settings.nats.as_ref().map(NatsSettings::local_url);
     if args.nats.is_none() {
         let nats = match settings.nats.take() {
             Some(nats) => nats,
@@ -148,6 +196,7 @@ pub fn serve(args: ServeArgs) -> anyhow::Result<()> {
                 port: free_port()?,
                 token: None,
                 advertise: None,
+                listen: None,
             },
         };
         let token = match nats.token {
@@ -155,9 +204,11 @@ pub fn serve(args: ServeArgs) -> anyhow::Result<()> {
             token => token,
         };
         let advertise = args.advertise.clone().or(nats.advertise);
+        let listen = args.listen.clone().or(nats.listen);
         settings.nats = Some(NatsSettings {
             token,
             advertise,
+            listen,
             ..nats
         });
     }
@@ -172,13 +223,15 @@ pub fn serve(args: ServeArgs) -> anyhow::Result<()> {
         .enable_all()
         .build()?;
     runtime.block_on(async {
-        let (local, public, _child) = match (&args.nats, &settings.nats) {
-            (Some(url), _) => (url.clone(), url.clone(), None),
+        // What other machines pass as --hub: over ssh, the name they reach this machine by,
+        // unless they can reach its NATS server themselves.
+        let (local, public, over_ssh, _child) = match (&args.nats, &settings.nats) {
+            (Some(url), _) => (url.clone(), url.clone(), false, None),
             (None, Some(nats)) => {
                 let child = start_nats(&dir, nats)?;
                 if child.is_none() && nats.token.is_some() {
                     // A server left by a hub that ran without a token would let anyone in.
-                    let open = format!("nats://127.0.0.1:{}", nats.port);
+                    let open = format!("nats://{}:{}", nats.local_host(), nats.port);
                     if connect(&open, Duration::from_secs(2)).await.is_ok() {
                         anyhow::bail!(
                             "the NATS server already on port {} doesn't require the hub's \
@@ -192,18 +245,25 @@ pub fn serve(args: ServeArgs) -> anyhow::Result<()> {
                     Some(host) => host.clone(),
                     None => whoami::hostname().unwrap_or_else(|_| "localhost".to_owned()),
                 };
-                let credentials = nats
-                    .token
-                    .as_ref()
-                    .map_or(String::new(), |token| format!("{token}@"));
-                (
-                    format!("nats://{credentials}127.0.0.1:{}", nats.port),
-                    format!("nats://{credentials}{host}:{}", nats.port),
-                    child,
-                )
+                let public = if nats.loopback_only() {
+                    host
+                } else {
+                    format!("nats://{}{host}:{}", nats.credentials(), nats.port)
+                };
+                (nats.local_url(), public, nats.loopback_only(), child)
             }
             (None, None) => unreachable!("chosen above"),
         };
+        // Commands on this machine need no --hub. A default that was this hub's URL before
+        // --listen or --token changed it follows it.
+        let mut saved = false;
+        let user = config::UserConfig::update(|user| {
+            if user.hub.is_none() || user.hub == was_local {
+                saved = user.hub.as_deref() != Some(local.as_str());
+                user.hub = Some(local.clone());
+            }
+        })?;
+        let default_here = user.hub.as_deref() == Some(local.as_str());
         let transport: Arc<dyn Transport> = Arc::new(
             tokio::time::timeout(Duration::from_secs(10), NatsTransport::connect(&local))
                 .await
@@ -218,14 +278,35 @@ pub fn serve(args: ServeArgs) -> anyhow::Result<()> {
             // Whoever reads stdout may stop before the end, as `musubi hub | head -1` does;
             // println! would panic then, and the hub would stop serving.
             let mut stdout = std::io::stdout().lock();
+            let mut text = String::new();
+            if saved {
+                let path = config::UserConfig::path()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default();
+                writeln!(text, "Saved this hub as this machine's default ({path}).").ok();
+            }
             writeln!(
-                stdout,
-                "To share a repository:               musubi create --nats {public}\n\
-                 To add another machine's copy of it: musubi join --nats {public}\n\
-                 To make a new copy of a hive:        musubi clone <name> <dir> --nats {public}"
+                text,
+                "To share a repository:               musubi create --hub {public}\n\
+                 To add another machine's copy of it: musubi join --hub {public}\n\
+                 To make a new copy of a hive:        musubi clone <name> <dir> --hub {public}"
             )
-            .and_then(|()| stdout.flush())
             .ok();
+            if over_ssh {
+                writeln!(
+                    text,
+                    "Other machines reach this hub over ssh: use the name they ssh to this \
+                     machine by, if it isn't {public}."
+                )
+                .ok();
+            }
+            if default_here {
+                writeln!(text, "On this machine, leave out --hub.").ok();
+            }
+            stdout
+                .write_all(text.as_bytes())
+                .and_then(|()| stdout.flush())
+                .ok();
             tracing::info!("serving {}", dir.display());
         };
         tokio::select! {
@@ -264,13 +345,13 @@ fn free_port() -> anyhow::Result<u16> {
 /// Starts `nats-server` on the hub's port, with its token if it has one, unless one is already listening
 /// there, as when a hub was killed and its server lived on.
 fn start_nats(dir: &Path, nats: &NatsSettings) -> anyhow::Result<Option<NatsChild>> {
-    if TcpStream::connect(("127.0.0.1", nats.port)).is_ok() {
+    if TcpStream::connect((nats.local_host(), nats.port)).is_ok() {
         tracing::info!("using the NATS server already on port {}", nats.port);
         return Ok(None);
     }
     let log = dir.join("nats.log");
     let mut command = Command::new("nats-server");
-    command.args(["-a", "0.0.0.0", "-p", &nats.port.to_string()]);
+    command.args(["-a", nats.listen(), "-p", &nats.port.to_string()]);
     // The token goes in a config file only its owner can read, not on the command line,
     // where anyone on the machine could see it.
     let conf = dir.join("nats.conf");
@@ -306,7 +387,7 @@ fn start_nats(dir: &Path, nats: &NatsSettings) -> anyhow::Result<Option<NatsChil
     };
     let mut child = child;
     let deadline = Instant::now() + Duration::from_secs(10);
-    while TcpStream::connect(("127.0.0.1", nats.port)).is_err() {
+    while TcpStream::connect((nats.local_host(), nats.port)).is_err() {
         if let Some(status) = child.0.try_wait()? {
             let log = fs::read_to_string(&log).unwrap_or_default();
             let tail: Vec<&str> = log.lines().rev().take(5).collect();
@@ -341,42 +422,194 @@ pub fn without_credentials(url: &str) -> String {
     }
 }
 
-/// Connects to the hub at `nats`, giving up after `limit`.
-pub async fn connect(nats: &str, limit: Duration) -> anyhow::Result<Arc<dyn Transport>> {
-    let transport = tokio::time::timeout(limit, NatsTransport::connect(nats))
-        .await
-        .map_err(|_| {
-            anyhow::anyhow!("the hub at {} is out of reach", without_credentials(nats))
-        })??;
-    Ok(Arc::new(transport))
+/// A connection to a hub, and over ssh, what keeps it from working while it doesn't.
+pub struct Connection {
+    pub transport: Arc<dyn Transport>,
+    health: Option<ssh::Health>,
 }
 
-/// Asks the hub at `nats` about its hives; a refusal is an error.
-pub async fn ask(nats: &str, request: HubWideRequest) -> anyhow::Result<HubWideReply> {
-    let transport = connect(nats, Duration::from_secs(10)).await?;
-    ask_over(&*transport, nats, request).await
+impl Connection {
+    /// Why the hub can't be reached now, as far as ssh says.
+    pub fn problem(&self) -> Option<String> {
+        self.health.as_ref().and_then(ssh::Health::problem)
+    }
+
+    /// `err`, with why the hub can't be reached, if ssh says.
+    pub fn explain(&self, err: anyhow::Error) -> anyhow::Error {
+        match self.problem() {
+            Some(problem) => err.context(problem),
+            None => err,
+        }
+    }
+}
+
+/// Whether `hub`, as given to --hub, is a NATS URL rather than an ssh destination, which
+/// may be an `ssh://` URL.
+pub fn is_nats_url(hub: &str) -> bool {
+    hub.contains("://") && !hub.starts_with("ssh://")
+}
+
+/// Connects to `hub`, a NATS URL or an ssh destination, giving up after `limit`.
+pub async fn connect(hub: &str, limit: Duration) -> anyhow::Result<Connection> {
+    let out_of_reach = |problem: Option<String>| {
+        let shown = without_credentials(hub);
+        match problem {
+            Some(problem) => anyhow::anyhow!("the hub at {shown} is out of reach: {problem}"),
+            None => anyhow::anyhow!("the hub at {shown} is out of reach"),
+        }
+    };
+    if is_nats_url(hub) {
+        let transport = tokio::time::timeout(limit, NatsTransport::connect(hub))
+            .await
+            .map_err(|_| out_of_reach(None))??;
+        return Ok(Connection {
+            transport: Arc::new(transport),
+            health: None,
+        });
+    }
+    let tunnel = ssh::Tunnel::open(hub).await?;
+    let health = tunnel.health();
+    let url = format!("nats://{LOOPBACK}:{}", tunnel.port());
+    let nats = tokio::time::timeout(limit, NatsTransport::connect(&url))
+        .await
+        .map_err(|_| out_of_reach(health.problem()))??;
+    Ok(Connection {
+        transport: Arc::new(ssh::SshTransport::new(nats, tunnel)),
+        health: Some(health),
+    })
+}
+
+/// Asks `hub` about its hives; a refusal is an error.
+pub async fn ask(hub: &str, request: HubWideRequest) -> anyhow::Result<HubWideReply> {
+    // Over ssh, longer than ssh's own ConnectTimeout.
+    let limit = Duration::from_secs(if is_nats_url(hub) { 10 } else { 30 });
+    let connection = connect(hub, limit).await?;
+    ask_over(&connection, hub, request).await
 }
 
 pub async fn ask_over(
-    transport: &dyn Transport,
-    nats: &str,
+    connection: &Connection,
+    hub: &str,
     request: HubWideRequest,
 ) -> anyhow::Result<HubWideReply> {
     let subject = format!("{}.{HUB_TOKEN}.rpc", default_subject_prefix());
     let payload = Bytes::from(Envelope::encode(request)?);
-    let reply = match transport
+    let reply = match connection
+        .transport
         .request(&subject, payload, Duration::from_secs(60))
         .await
     {
         Ok(reply) => reply,
         Err(TransportError::NoResponders(_)) => anyhow::bail!(
             "no hub is serving at {}; is `musubi hub` running?",
-            without_credentials(nats)
+            without_credentials(hub)
         ),
-        Err(err) => return Err(err).context("asking the hub"),
+        Err(err) => {
+            return Err(connection.explain(anyhow::Error::new(err).context("asking the hub")));
+        }
     };
     match Envelope::decode(&reply)? {
         HubWideReply::Error(message) => anyhow::bail!("{message}"),
         reply => Ok(reply),
+    }
+}
+
+/// `musubi hub connect`: relays stdin and stdout to the NATS server of the hub serving `dir`
+/// (by default, this user's hub), as the command a machine's daemon runs over ssh to reach
+/// it. A token the server requires goes into the client's `CONNECT`, so it never leaves
+/// this machine.
+pub fn relay(dir: Option<PathBuf>) -> anyhow::Result<()> {
+    let dir = match dir {
+        Some(dir) => dir,
+        None => {
+            let path = config::state_dir()?.join("hub.path");
+            let text = fs::read_to_string(&path)
+                .context("no hub has run on this machine; start one with `musubi hub`")?;
+            PathBuf::from(text.trim())
+        }
+    };
+    let settings = HubSettings::load(&dir)?;
+    let nats = settings.nats.with_context(|| {
+        format!(
+            "the hub in {} serves on a NATS server it doesn't run; connect to that directly",
+            dir.display()
+        )
+    })?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let result = runtime.block_on(async {
+        use tokio::io::AsyncBufReadExt as _;
+        use tokio::io::AsyncWriteExt as _;
+        let stream = tokio::net::TcpStream::connect((nats.local_host(), nats.port))
+            .await
+            .with_context(|| {
+                format!(
+                    "no hub is serving {} here (nothing listens on port {}); is `musubi hub` \
+                     running?",
+                    dir.display(),
+                    nats.port
+                )
+            })?;
+        stream.set_nodelay(true)?;
+        let (mut from_hub, mut to_hub) = stream.into_split();
+        let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
+        let mut stdout = tokio::io::stdout();
+        let up = async {
+            if let Some(token) = &nats.token {
+                let mut line = String::new();
+                stdin.read_line(&mut line).await?;
+                to_hub
+                    .write_all(with_token(&line, token).as_bytes())
+                    .await?;
+            }
+            tokio::io::copy_buf(&mut stdin, &mut to_hub).await?;
+            to_hub.shutdown().await
+        };
+        let down = tokio::io::copy(&mut from_hub, &mut stdout);
+        // Either side closing ends the relay.
+        tokio::select! {
+            result = up => result?,
+            result = down => {
+                result?;
+            }
+        }
+        Ok(())
+    });
+    // Dropping the runtime would wait for the read of stdin in progress, keeping the ssh
+    // open after the server closed the connection.
+    runtime.shutdown_background();
+    result
+}
+
+/// A client's `CONNECT` line, giving `token`.
+fn with_token(line: &str, token: &str) -> String {
+    let Some(json) = line.strip_prefix("CONNECT ") else {
+        return line.to_owned();
+    };
+    let Ok(serde_json::Value::Object(mut fields)) = serde_json::from_str(json.trim_end()) else {
+        return line.to_owned();
+    };
+    fields.insert("auth_token".to_owned(), token.into());
+    format!("CONNECT {}\r\n", serde_json::Value::Object(fields))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_relay_gives_the_token() {
+        let line = with_token(
+            "CONNECT {\"verbose\":false,\"pedantic\":false}\r\n",
+            "s3cret",
+        );
+        let json = line.strip_prefix("CONNECT ").unwrap().trim_end();
+        let fields: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(fields["auth_token"], "s3cret");
+        assert_eq!(fields["verbose"], false);
+        assert!(line.ends_with("\r\n"));
+        // Anything else passes through.
+        assert_eq!(with_token("PING\r\n", "s3cret"), "PING\r\n");
     }
 }

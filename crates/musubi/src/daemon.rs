@@ -22,8 +22,6 @@ use musubi_sync::driver::NodeDriver;
 use musubi_sync::remote::RemoteHub;
 use musubi_sync::wire::Envelope;
 use musubi_sync::wire::HeadNotice;
-use musubi_transport::NatsTransport;
-use musubi_transport::Transport;
 use serde::Deserialize;
 use serde::Serialize;
 use tarpc::server::Channel as _;
@@ -419,16 +417,8 @@ async fn serve_async(
     let located = Located::find(workspace)?;
     let hive = HiveConfig::load(&located.repo_path)?
         .with_context(|| format!("{} is not part of a hive", workspace.display()))?;
-    let transport: Arc<dyn Transport> = Arc::new(
-        tokio::time::timeout(REQUEST_TIMEOUT, NatsTransport::connect(&hive.nats_url))
-            .await
-            .with_context(|| {
-                format!(
-                    "the hub at {} is out of reach",
-                    crate::hub::without_credentials(&hive.nats_url)
-                )
-            })??,
-    );
+    let connection = crate::hub::connect(&hive.hub, REQUEST_TIMEOUT).await?;
+    let transport = connection.transport.clone();
     let mut notices = transport.subscribe(&hive.head_subject()).await?;
     let mut watcher = OpHeadsWatcher::new(&located.repo_path)?;
     let blobs = located.repo_path.join("musubi/blobs");
@@ -481,6 +471,8 @@ async fn serve_async(
             seq: *seq,
             head: head.hex(),
         };
+        // Over ssh, why the hub is out of reach says more than a timeout.
+        let result = result.map_err(|err| connection.explain(err));
         let reply = match &result {
             Ok(_) => Ok(synced.clone()),
             Err(err) => Err(format!("{err:#}")),

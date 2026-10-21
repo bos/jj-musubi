@@ -267,7 +267,8 @@ pulls, merges, and pushes. That is the same path as any concurrent update.
 
 A hub is just a store. Every node holds every operation it has seen, so a new, empty hub fills
 up as soon as nodes connect: the first node fast-forwards it to its head, and the others
-fast-forward or merge as usual. A hub location is a NATS URL and a subject prefix. The old hub
+fast-forward or merge as usual. A hub location is a NATS URL or an ssh destination, and a
+subject prefix. The old hub
 can publish a signed-by-config `hub-moved` advertisement carrying the new location and a
 higher epoch. Nodes then reconnect there and ignore lower-epoch hubs from then on.
 
@@ -464,7 +465,9 @@ limit. Subscriptions carry hub notifications.
   for a hive the hub doesn't have is an error: only a join creates hives. Core NATS is
   enough: the hub is the durable store, so JetStream is not needed. NATS credentials
   authenticate machines, carried in the URL (`nats://<token>@host:port`, or a user and
-  password), and TLS can protect them in transit. Every operation and object is verified
+  password), and TLS can protect them in transit. By default, though, machines reach a hub
+  over ssh (see [Reaching a hub over ssh](#reaching-a-hub-over-ssh)), and ssh authenticates
+  them. Every operation and object is verified
   against its content hash on receipt, so a misbehaving peer cannot inject data under a
   false id.
 
@@ -479,16 +482,48 @@ hub serves `./musubi-hub`, or the current directory if it is a hub's, and takes 
 the user's state directory, so that a second hub started the same way says where the first
 one is instead of starting; `--dir` runs more hubs on purpose.
 
-Without `--nats`, the hub runs `nats-server` itself, listening on every interface, on a port
-chosen on the first run and kept in the hub directory's `hub.toml` so the URL never
-changes. With `--token` the server requires a random token, also kept there (delete it
+Without `--nats`, the hub runs `nats-server` itself, on a port chosen on the first run and
+kept in the hub directory's `hub.toml` so the URL never changes, listening only on the
+machine's loopback, unless `--listen` gave it another address, which it keeps there too. With `--token` the server requires a random token, also kept there (delete it
 from `hub.toml` to turn it off again), which the hub gives the server in a config file only
 its owner can read, `nats.conf`, rather than on its command line. It prints the commands
-other machines run, with this machine's host name in the URL, or the name `--advertise`
-gave it, which it keeps in `hub.toml` too: a machine doesn't always know a name others can
-reach it by. A hub that was killed leaves its NATS server running; the next one finds it on
+other machines run, with this machine's host name, or the name `--advertise` gave it, which
+it keeps in `hub.toml` too: a machine doesn't always know a name others can reach it by.
+Listening on loopback, that name is an ssh destination; otherwise, the host of a NATS URL.
+It also saves its own URL as the machine's default hub, unless the machine has one, so that
+commands on the hub's machine need no `--hub`. A hub that was killed leaves its NATS server running; the next one finds it on
 the port and uses it. The hub logs what it does at info, but not the NATS client's notices
 of each connection.
+
+### Reaching a hub over ssh
+
+Often ssh is the only way one machine can reach another, as when a laptop reaches a devbox
+through a zero-trust tunnel, and the protocol trusts whoever can reach the hub, so its NATS
+server can't simply be exposed. A `--hub` that isn't a URL is an ssh destination instead,
+passed to the user's own `ssh` (or `$MUSUBI_SSH`), so `~/.ssh/config` applies: aliases,
+`ProxyCommand`, and the rest.
+
+- Each machine has a key of its own, `hub_key` in its state directory. Joining a hub over
+  ssh first tries it, and if ssh refuses it (or there's no key yet, when it creates one),
+  adds it to `~/.ssh/authorized_keys` on the hub's machine, through the user's ordinary ssh,
+  which can prompt then, since the user is at the terminal: `restrict,command="musubi hub
+  connect"`, so a stolen key reaches the hub and nothing else. The daemon needs no ssh agent
+  and never prompts (`BatchMode=yes`), which a process started at login couldn't answer.
+- `musubi hub connect` relays its stdin and stdout to the NATS server of the user's hub (the
+  one `musubi hub` last served without `--dir`). If the server requires a token, it adds it
+  to the client's `CONNECT`, so the token never leaves the hub's machine.
+- On the other machine, the NATS client connects to a port on loopback, and each connection
+  it makes there runs an ssh of its own and relays through it. Nothing outlives a
+  connection: an `ssh -L` forward that lasts goes dead when the machine sleeps, while here,
+  the NATS client reconnecting is a new ssh. The client pings every 10 seconds, and ssh's
+  `ServerAliveInterval` gives up on a dead link as quickly, but `Instant` stops while the
+  machine sleeps and the wall clock doesn't, so a jump between them ends every connection at
+  once, and the client reconnects within seconds of waking.
+- ssh doesn't compress (`Compression=no`): musubi already compresses what it sends.
+- A failing ssh backs off, up to a minute, refusing the client's connections meanwhile:
+  otherwise the client's retries would run ssh, and perhaps a tunnel's login page in a
+  browser, every few seconds. What ssh said, or that `musubi` isn't on the `PATH` there
+  (exit status 127), becomes part of the error `musubi list` shows.
 - **In-memory** transport for tests. It can drop, delay, duplicate, and reorder messages, and
   disconnect peers.
 

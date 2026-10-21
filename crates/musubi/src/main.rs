@@ -7,6 +7,7 @@ mod hub;
 mod login;
 mod repo;
 mod settings;
+mod ssh;
 mod watch;
 
 use std::collections::BTreeMap;
@@ -59,8 +60,14 @@ enum Command {
         /// [default: this machine's host name]. Once given, the hub keeps it (in hub.toml).
         #[arg(long)]
         advertise: Option<String>,
-        /// Have the NATS server it starts require a token, which the URLs it prints then
-        /// carry. Once chosen, the hub keeps it (in hub.toml).
+        /// The address the NATS server it starts listens on [default: 127.0.0.1, so that
+        /// other machines reach it over ssh]. 0.0.0.0 lets them connect to it directly,
+        /// which only a trusted network should. Once given, the hub keeps it (in hub.toml).
+        #[arg(long, conflicts_with = "nats")]
+        listen: Option<String>,
+        /// Have the NATS server it starts require a token. Machines reaching the hub over
+        /// ssh never need it; the URLs it prints for others carry it. Once chosen, the hub
+        /// keeps it (in hub.toml).
         #[arg(long, conflicts_with = "nats")]
         token: bool,
     },
@@ -87,9 +94,9 @@ enum Command {
         /// The hive: a name, a prefix of one, or an id.
         hive: String,
         destination: PathBuf,
-        /// The hub's NATS URL [default: the one first joined].
+        /// The hub, as `musubi hub` prints it [default: the one first joined].
         #[arg(long)]
-        nats: Option<String>,
+        hub: Option<String>,
         /// This machine's name in the hive. Defaults to jj's `operation.hostname`.
         #[arg(long)]
         machine: Option<String>,
@@ -122,9 +129,10 @@ struct Member {
     /// Replicate the whole operation history, not just the current state.
     #[arg(long)]
     full_history: bool,
-    /// The hub's NATS URL, as `musubi hub` prints it [default: the one first joined].
+    /// The hub, as `musubi hub` prints it: the name this machine ssh-es to the hub's machine
+    /// by, or a NATS URL [default: the one first joined].
     #[arg(long)]
-    nats: Option<String>,
+    hub: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -139,14 +147,21 @@ enum HubAction {
     Rm {
         hive: String,
         #[arg(long)]
-        nats: Option<String>,
+        hub: Option<String>,
     },
     /// Rename a hive.
     Rename {
         hive: String,
         new_name: String,
         #[arg(long)]
-        nats: Option<String>,
+        hub: Option<String>,
+    },
+    /// Relay stdin and stdout to this machine's hub: what other machines run over ssh to
+    /// reach it.
+    Connect {
+        /// The hub's directory [default: the one `musubi hub` last served without --dir].
+        #[arg(short, long)]
+        dir: Option<PathBuf>,
     },
 }
 
@@ -193,19 +208,25 @@ fn main() -> anyhow::Result<()> {
             dir,
             nats,
             advertise,
+            listen,
             token,
         } => hub::serve(hub::ServeArgs {
             dir,
             nats,
             advertise,
+            listen,
             token,
         }),
         Command::Hub {
-            action: Some(HubAction::Rm { hive, nats }),
+            action: Some(HubAction::Connect { dir }),
+            ..
+        } => hub::relay(dir),
+        Command::Hub {
+            action: Some(HubAction::Rm { hive, hub }),
             ..
         } => block_on(async {
-            let nats = UserConfig::nats(nats.as_deref())?;
-            let reply = hub::ask(&nats, HubWideRequest::Remove { name: hive }).await?;
+            let hub = UserConfig::hub(hub.as_deref())?;
+            let reply = hub::ask(&hub, HubWideRequest::Remove { name: hive }).await?;
             if let HubWideReply::Hive(info) = reply {
                 println!("Removed hive {}", info.name);
             }
@@ -216,16 +237,16 @@ fn main() -> anyhow::Result<()> {
                 Some(HubAction::Rename {
                     hive,
                     new_name,
-                    nats,
+                    hub,
                 }),
             ..
         } => block_on(async {
-            let nats = UserConfig::nats(nats.as_deref())?;
+            let hub = UserConfig::hub(hub.as_deref())?;
             let request = HubWideRequest::Rename {
                 name: hive.clone(),
                 to: new_name,
             };
-            if let HubWideReply::Hive(info) = hub::ask(&nats, request).await? {
+            if let HubWideReply::Hive(info) = hub::ask(&hub, request).await? {
                 println!("Renamed hive {hive} to {}", info.name);
             }
             Ok(())
@@ -238,12 +259,12 @@ fn main() -> anyhow::Result<()> {
         Command::Clone {
             hive,
             destination,
-            nats,
+            hub,
             machine,
         } => clone(
             &destination,
             &hive,
-            nats.as_deref(),
+            hub.as_deref(),
             machine.as_deref(),
             &socket()?,
         ),
@@ -333,9 +354,9 @@ fn join(start: &Path, choice: Choice, member: &Member, socket: &Socket) -> anyho
     let Member {
         machine,
         full_history,
-        nats,
+        hub,
     } = member;
-    let (nats, machine, full_history) = (nats.as_deref(), machine.as_deref(), *full_history);
+    let (hub, machine, full_history) = (hub.as_deref(), machine.as_deref(), *full_history);
     let located = Located::find(start)?;
     if let Some(hive) = HiveConfig::load(&located.repo_path)? {
         anyhow::bail!(
@@ -343,7 +364,7 @@ fn join(start: &Path, choice: Choice, member: &Member, socket: &Socket) -> anyho
             hive.display_name()
         );
     }
-    let nats = UserConfig::nats(nats)?;
+    let hub = UserConfig::hub(hub)?;
     set_machine_name(&located, machine)?;
     let node = located.open()?;
     let summary = node.join_summary()?;
@@ -372,11 +393,11 @@ fn join(start: &Path, choice: Choice, member: &Member, socket: &Socket) -> anyho
         machine: node.machine().key().to_owned(),
     };
     drop(node);
-    let joined = match block_on(hub::ask(&nats, HubWideRequest::Join(request)))? {
+    let joined = match block_on(ask_preparing(&hub, HubWideRequest::Join(request)))? {
         HubWideReply::Joined(joined) => joined,
         other => anyhow::bail!("unexpected reply from the hub: {other:?}"),
     };
-    become_node(&located, &joined.hive, &nats, full_history)?;
+    become_node(&located, &joined.hive, &hub, full_history)?;
     let count = joined.hive.machines.len();
     let machines = if count == 1 {
         "1 machine".to_owned()
@@ -392,6 +413,14 @@ fn join(start: &Path, choice: Choice, member: &Member, socket: &Socket) -> anyho
         );
     }
     start_serving(&located, socket)
+}
+
+/// Asks `hub`, over ssh first making sure this machine's key works there.
+async fn ask_preparing(hub: &str, request: HubWideRequest) -> anyhow::Result<HubWideReply> {
+    if !hub::is_nats_url(hub) {
+        ssh::prepare(hub).await?;
+    }
+    hub::ask(hub, request).await
 }
 
 fn set_machine_name(located: &Located, machine: Option<&str>) -> anyhow::Result<()> {
@@ -414,7 +443,7 @@ fn set_machine_name(located: &Located, machine: Option<&str>) -> anyhow::Result<
 fn become_node(
     located: &Located,
     hive: &HiveInfo,
-    nats: &str,
+    hub: &str,
     full_history: bool,
 ) -> anyhow::Result<()> {
     let mut node = located.open()?;
@@ -428,15 +457,26 @@ fn become_node(
             .parse()
             .context("the hub sent a malformed hive id")?,
         name: Some(hive.name.clone()),
-        nats_url: nats.to_owned(),
+        hub: hub.to_owned(),
         subject_prefix: config::default_subject_prefix(),
         node: machine,
     };
     config.save(&located.repo_path)?;
     UserConfig::add_repo(&located.workspace_root)?;
+    let mut saved = false;
     UserConfig::update(|config| {
-        config.nats.get_or_insert_with(|| nats.to_owned());
+        if config.hub.is_none() {
+            config.hub = Some(hub.to_owned());
+            saved = true;
+        }
     })?;
+    if saved {
+        println!(
+            "Saved {} as this machine's default hub ({}).",
+            hub::without_credentials(hub),
+            UserConfig::path()?.display()
+        );
+    }
     // A convenience, so failing to set it doesn't undo joining.
     match settings::enable_auto_update_stale(&located.repo_path) {
         Ok(true) => println!(
@@ -496,13 +536,13 @@ fn start_serving(located: &Located, socket: &Socket) -> anyhow::Result<()> {
 fn clone(
     destination: &Path,
     hive: &str,
-    nats: Option<&str>,
+    hub: Option<&str>,
     machine: Option<&str>,
     socket: &Socket,
 ) -> anyhow::Result<()> {
-    let nats = UserConfig::nats(nats)?;
-    let reply = block_on(hub::ask(
-        &nats,
+    let hub = UserConfig::hub(hub)?;
+    let reply = block_on(ask_preparing(
+        &hub,
         HubWideRequest::Resolve {
             name: hive.to_owned(),
         },
@@ -519,7 +559,7 @@ fn clone(
     anyhow::ensure!(status.success(), "`jj {} {dest}` failed", init.join(" "));
     let located = Located::find(destination)?;
     set_machine_name(&located, machine)?;
-    become_node(&located, &info, &nats, false)?;
+    become_node(&located, &info, &hub, false)?;
     println!("Cloning hive {} into {}", info.name, destination.display());
     start_serving(&located, socket)
 }
@@ -529,16 +569,16 @@ fn sync_directly(located: &Located) -> anyhow::Result<()> {
     let hive =
         HiveConfig::load(&located.repo_path)?.context("this repository is not part of a hive")?;
     block_on(async {
-        let transport = hub::connect(&hive.nats_url, Duration::from_secs(30)).await?;
+        let connection = hub::connect(&hive.hub, Duration::from_secs(30)).await?;
         let blobs = located.repo_path.join("musubi/blobs");
         let remote = musubi_sync::remote::RemoteHub::new(
-            transport,
+            connection.transport.clone(),
             hive.rpc_subject(),
             &blobs,
             Duration::from_secs(60),
         )?;
         let mut driver = musubi_sync::driver::NodeDriver::new(located.open()?, remote)?;
-        driver.sync().await?;
+        driver.sync().await.map_err(|err| connection.explain(err))?;
         Ok(())
     })
 }
@@ -647,22 +687,19 @@ fn list(start: &Path, socket: anyhow::Result<Socket>) -> anyhow::Result<()> {
         });
     }
     // Every hub this machine knows of, the default first.
-    let mut hubs: Vec<String> = config.nats.iter().cloned().collect();
+    let mut hubs: Vec<String> = config.hub.iter().cloned().collect();
     for copy in &copies {
-        if !hubs.contains(&copy.hive.nats_url) {
-            hubs.push(copy.hive.nats_url.clone());
+        if !hubs.contains(&copy.hive.hub) {
+            hubs.push(copy.hive.hub.clone());
         }
     }
     if hubs.is_empty() {
         println!("No hubs yet: run `musubi hub` on one machine, then the join command it prints.");
     }
-    for nats in &hubs {
-        let here: Vec<&Copy> = copies
-            .iter()
-            .filter(|copy| &copy.hive.nats_url == nats)
-            .collect();
-        let shown = hub::without_credentials(nats);
-        match block_on(list_hub(nats)) {
+    for hub in &hubs {
+        let here: Vec<&Copy> = copies.iter().filter(|copy| &copy.hive.hub == hub).collect();
+        let shown = hub::without_credentials(hub);
+        match block_on(list_hub(hub)) {
             Ok(hives) => {
                 println!("Hub {shown}:");
                 if hives.is_empty() {
@@ -717,9 +754,11 @@ fn list(start: &Path, socket: anyhow::Result<Socket>) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn list_hub(nats: &str) -> anyhow::Result<Vec<HiveInfo>> {
-    let transport = hub::connect(nats, Duration::from_secs(3)).await?;
-    match hub::ask_over(&*transport, nats, HubWideRequest::List).await? {
+async fn list_hub(hub: &str) -> anyhow::Result<Vec<HiveInfo>> {
+    // Over ssh, through a ProxyCommand, connecting takes a while.
+    let limit = Duration::from_secs(if hub::is_nats_url(hub) { 3 } else { 15 });
+    let connection = hub::connect(hub, limit).await?;
+    match hub::ask_over(&connection, hub, HubWideRequest::List).await? {
         HubWideReply::Hives(hives) => Ok(hives),
         other => anyhow::bail!("unexpected reply from the hub: {other:?}"),
     }
@@ -751,7 +790,7 @@ fn print_details(located: &Located, hive: &HiveConfig) -> anyhow::Result<()> {
     println!();
     println!("This repository:");
     println!("  Hive:      {} ({})", hive.display_name(), hive.hive);
-    println!("  Hub:       {}", hub::without_credentials(&hive.nats_url));
+    println!("  Hub:       {}", hub::without_credentials(&hive.hub));
     println!("  Machine:   {}", hive.node);
     let mut node = located.open()?;
     for (machine, workspace, commit) in node.machine_workspaces()? {

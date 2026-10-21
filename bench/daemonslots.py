@@ -48,8 +48,8 @@ def main():
     time.sleep(0.5)
     nats = f"nats://127.0.0.1:{PORT_NATS}"
     cfgA, cfgB = env(MUSUBI_CONFIG_DIR=f"{run}/cfgA"), env(MUSUBI_CONFIG_DIR=f"{run}/cfgB")
-    sh([MUSUBI, "join", hive, "--nats", nats, "--machine", "A"], cwd=Am, e=cfgA)
-    sh([MUSUBI, "clone", hive, Bm, "--nats", nats, "--machine", "B"], cwd=run, e=cfgB)
+    sh([MUSUBI, "join", hive, "--hub", nats, "--machine", "A"], cwd=Am, e=cfgA)
+    sh([MUSUBI, "clone", hive, Bm, "--hub", nats, "--machine", "B"], cwd=run, e=cfgB)
     sh([MUSUBI, "sync"], cwd=Am, e=cfgA)
     sh([MUSUBI, "sync"], cwd=Bm, e=cfgB)
     res = {"repo": repo, "packs_at_daemon_start": packs(Bm), "iterations": []}

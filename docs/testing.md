@@ -119,7 +119,10 @@ blob, and its download survives a sweep and outlasts the time the hub keeps a bl
 served. So does the download for a third fetch, made before the second download finishes
 and paced to span that time. `uploads_leave_prepared_blobs_alone` downloads a fetch's
 blob, then uploads the same content and pushes it, as another node would push what the
-first fetched, and downloads the blob again.
+first fetched, and downloads the blob again. `calls_leave_no_uploads_behind` makes a push
+of the session through a link that fails partway through its upload, and again with the
+call dropped partway, as the daemon drops a sync when the connection comes back; either
+way the node's blob store is left empty.
 
 A connection that dies partway through a message never delivers part of it: the stream
 transport frames each message with its length and drops an incomplete one. A killed connection reaches

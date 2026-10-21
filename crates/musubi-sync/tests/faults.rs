@@ -333,6 +333,51 @@ fn uploads_leave_prepared_blobs_alone() {
     download(&mut hub, blob, len);
 }
 
+/// A node removes what it put in its blob store to upload, however the call ends: when the
+/// link fails partway through the upload, and when the call is dropped partway, as the
+/// daemon drops a sync when the connection to the hub comes back.
+#[test]
+fn calls_leave_no_uploads_behind() {
+    let session = session();
+    // A push that uploads its objects.
+    let call = session
+        .calls
+        .iter()
+        .find(|call| matches!(call.request, Request::Push { .. }) && call.requests > 1)
+        .unwrap();
+    run_local(async {
+        let dir = tempfile::tempdir().unwrap();
+        let hub_dir = dir.path().join("hub");
+        let network = MemoryNetwork::new(1, MAX_PAYLOAD);
+        serve(
+            session.hub_after(call.start, &hub_dir),
+            Arc::new(network.connect()),
+        )
+        .await;
+        let blobs = dir.path().join("node");
+        let stored = || std::fs::read_dir(blobs.join("complete")).unwrap().count();
+
+        let link = Link::new(
+            Arc::new(network.connect()),
+            &hub_dir,
+            Some((1, Fault::Lost)),
+        );
+        let remote = RemoteHub::new(link, RPC.into(), &blobs, TIMEOUT).unwrap();
+        let reply = remote.call(call.request(&session.seen, &blobs)).await;
+        assert!(reply.is_err());
+        assert_eq!(stored(), 0);
+
+        let remote =
+            RemoteHub::new(Arc::new(network.connect()), RPC.into(), &blobs, TIMEOUT).unwrap();
+        let mut reply = Box::pin(remote.call(call.request(&session.seen, &blobs)));
+        // The hub can't answer until this yields, so the upload has begun and waits.
+        assert!(futures::poll!(reply.as_mut()).is_pending());
+        assert!(stored() > 0);
+        drop(reply);
+        assert_eq!(stored(), 0);
+    });
+}
+
 /// How a [`Link`] fails, from a given request on.
 #[derive(Clone, Copy, Debug)]
 enum Fault {

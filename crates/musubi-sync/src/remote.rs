@@ -70,7 +70,10 @@ impl RemoteHub {
         request: Request<OpId, Attachment>,
     ) -> anyhow::Result<Reply<OpId, Attachment>> {
         let mut inline_left = inline_limit(self.transport.max_payload());
-        let mut uploads = vec![];
+        let mut uploads = Uploads {
+            blobs: &self.blobs,
+            ids: vec![],
+        };
         let request = map_request(
             request,
             |id| id.to_bytes(),
@@ -85,7 +88,7 @@ impl RemoteHub {
                             WireAttachment::Inline(std::fs::read(path)?)
                         } else {
                             let (blob, len) = self.blobs.insert_file(path)?;
-                            uploads.push(blob);
+                            uploads.ids.push(blob);
                             WireAttachment::Blob { blob, len }
                         }
                     }
@@ -95,13 +98,11 @@ impl RemoteHub {
                 })
             },
         )?;
-        for blob in &uploads {
+        for blob in &uploads.ids {
             self.upload(blob).await?;
         }
         let reply = self.send(HubRequest::Protocol(request)).await;
-        for blob in &uploads {
-            self.blobs.remove(blob);
-        }
+        drop(uploads);
         let reply = match reply? {
             HubReply::Protocol(reply) => reply,
             HubReply::Error(err) => anyhow::bail!("hub: {err}"),
@@ -146,8 +147,12 @@ impl RemoteHub {
         let mut bytes = Envelope::encode(request)?;
         if bytes.len() > self.transport.max_payload() {
             let (blob, _) = self.blobs.insert_bytes(&bytes)?;
+            let upload = Uploads {
+                blobs: &self.blobs,
+                ids: vec![blob],
+            };
             self.upload(&blob).await?;
-            self.blobs.remove(&blob);
+            drop(upload);
             bytes = Envelope::encode(HubRequest::Indirect { blob })?;
         }
         let reply = self.exchange(bytes).await?;
@@ -252,6 +257,22 @@ impl RemoteHub {
                     Received::Prefix(have) => have,
                 };
             }
+        }
+    }
+}
+
+/// Blobs put in the store to upload, removed when this is dropped: once the hub has them,
+/// and however else the call ends, as when it fails, or when it is dropped partway, as the
+/// daemon drops a sync when the connection to the hub comes back.
+struct Uploads<'a> {
+    blobs: &'a BlobStore,
+    ids: Vec<BlobId>,
+}
+
+impl Drop for Uploads<'_> {
+    fn drop(&mut self) {
+        for id in &self.ids {
+            self.blobs.remove(id);
         }
     }
 }

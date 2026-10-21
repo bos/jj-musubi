@@ -3,6 +3,11 @@
 //! Each [`TestEnv`] has its own home directory and per-machine jj config, so tests never read
 //! the developer's configuration. The `jj` on `PATH` must be the version musubi's jj-lib is
 //! pinned to; [`TestEnv::new`] checks.
+//!
+//! jj makes up a random change id for each new change. Here each command, and each set of
+//! [`TestRepo::settings`], gets the next seed from a counter that the environment's
+//! repositories share, so that a test that runs the same commands makes the same changes,
+//! and a generated test case replays exactly.
 
 // Test helpers fail the test on any unexpected error; that is what unwrap is for here.
 #![allow(clippy::unwrap_used)]
@@ -12,7 +17,10 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::process::Output;
+use std::sync::Arc;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use jj_lib::config::ConfigLayer;
 use jj_lib::config::ConfigSource;
@@ -25,6 +33,7 @@ pub const JJ_VERSION: &str = "0.46.0";
 
 pub struct TestEnv {
     root: TempDir,
+    seeds: Arc<AtomicU64>,
 }
 
 impl Default for TestEnv {
@@ -45,7 +54,10 @@ impl TestEnv {
             root.disable_cleanup(true);
         }
         fs::create_dir_all(root.path().join("home/.config")).unwrap();
-        Self { root }
+        Self {
+            root,
+            seeds: Arc::new(AtomicU64::new(1)),
+        }
     }
 
     pub fn root(&self) -> &Path {
@@ -89,6 +101,7 @@ impl TestEnv {
             path: self.root().join(machine),
             machine: machine.to_owned(),
             hostname: machine.to_owned(),
+            seeds: self.seeds.clone(),
         }
     }
 
@@ -144,6 +157,8 @@ pub struct TestRepo {
     machine: String,
     /// jj's `operation.hostname`, which musubi takes as the machine's name.
     hostname: String,
+    /// The environment's counter of seeds for jj's change ids.
+    seeds: Arc<AtomicU64>,
 }
 
 impl TestRepo {
@@ -160,12 +175,16 @@ impl TestRepo {
         self.path.join(".jj/repo")
     }
 
-    /// Settings equivalent to the ones the `jj` CLI uses in this repository.
+    /// Settings equivalent to the ones the `jj` CLI uses in this repository, with a seed of
+    /// their own for change ids.
     pub fn settings(&self) -> UserSettings {
         let mut config = StackedConfig::with_defaults();
-        config.add_layer(
-            ConfigLayer::parse(ConfigSource::User, &machine_config(&self.hostname)).unwrap(),
+        let text = format!(
+            "{}debug.randomness-seed = {}\n",
+            machine_config(&self.hostname),
+            self.next_seed()
         );
+        config.add_layer(ConfigLayer::parse(ConfigSource::User, &text).unwrap());
         UserSettings::from_config_and_home_dir(config, Some(self.home.clone())).unwrap()
     }
 
@@ -212,12 +231,22 @@ impl TestRepo {
         command
     }
 
+    fn next_seed(&self) -> u64 {
+        self.seeds.fetch_add(1, Ordering::Relaxed)
+    }
+
     fn command(&self, program: &str, dir: &Path) -> Command {
         let mut command = Command::new(program);
         command
             .current_dir(dir)
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("JJ_RANDOMNESS_SEED", self.next_seed().to_string())
+            // Windows's equivalents of `HOME`, where jj keeps each repository's config:
+            // without them it would use the real user's, which every test would share.
+            .env("USERPROFILE", &self.home)
+            .env("APPDATA", self.home.join("AppData/Roaming"))
+            .env("LOCALAPPDATA", self.home.join("AppData/Local"))
             .env("HOME", &self.home)
             .env("XDG_CONFIG_HOME", self.home.join(".config"))
             .env("JJ_CONFIG", &self.config_path)

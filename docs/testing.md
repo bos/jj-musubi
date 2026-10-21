@@ -86,6 +86,13 @@ As in jj-stack:
 - a rule is eligible only when it has work to do, and its candidates are computed by a helper
   that its precondition shares;
 - each seeded search shard has its own Hegel example database;
+- a case replays exactly, so that Hegel can shrink a failure and a stored example finds it
+  again: jj's change ids, random otherwise, come from a counter that each test
+  environment's repositories share (musubi-testutil), origin's upstream commits carry
+  change ids of their own, and rules choose among commits in change-id order, since commit
+  ids and `jj log`'s order depend on when jj made the commits.
+  `MUSUBI_SEARCH_FINGERPRINTS` writes each case's trace without the ids that differ between
+  runs, for checking that two runs of a case did the same;
 - the search run ends by listing rules that never fired. An unreached rule is a search
   problem: give it a richer starting state or fix its precondition.
 

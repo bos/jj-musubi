@@ -108,6 +108,8 @@ pub struct World {
     /// Those operations, and the ones reverting them wrote, which reverting again would
     /// only undo the recovery: hex ids.
     recovery_ops: BTreeSet<String>,
+    /// The change of every commit seen so far, for `fingerprint`.
+    change_of: BTreeMap<String, String>,
     counter: usize,
     pub trace: Vec<String>,
 }
@@ -187,6 +189,7 @@ impl World {
             touched: BTreeSet::new(),
             unmergeable_reverts: 0,
             recovery_ops: BTreeSet::new(),
+            change_of: BTreeMap::new(),
             counter: 0,
             trace: vec![],
         };
@@ -224,6 +227,37 @@ impl World {
 
     pub fn fail(&self, message: &str) -> ! {
         panic!("{message}\ntrace:\n{}", self.trace.join("\n"));
+    }
+
+    fn learn(&mut self, view: &View) {
+        for commit in &view.commits {
+            self.change_of
+                .insert(commit.id.clone(), commit.change.clone());
+        }
+    }
+
+    /// The trace without what differs from run to run even when a case replays exactly:
+    /// commit ids, which depend on when jj made the commits, become change ids; operation
+    /// ids are masked, and so is the test's directory.
+    pub fn fingerprint(&self) -> String {
+        let root = self.fx.env.root().to_string_lossy().into_owned();
+        let mut out = String::new();
+        for line in &self.trace {
+            let line = line.replace(&root, "<root>");
+            let words: Vec<String> = line
+                .split(' ')
+                .map(|word| match self.change_of.get(word) {
+                    Some(change) => change.clone(),
+                    None if word.len() >= 12 && word.chars().all(|c| c.is_ascii_hexdigit()) => {
+                        "<id>".to_owned()
+                    }
+                    None => word.to_owned(),
+                })
+                .collect();
+            out.push_str(&words.join(" "));
+            out.push('\n');
+        }
+        out
     }
 
     /// Runs `jj`, which must succeed, recording nothing.
@@ -285,6 +319,9 @@ impl World {
             return seen.clone();
         }
         let views: Vec<View> = heads.iter().map(|h| self.view_at(m, h)).collect();
+        for view in &views {
+            self.learn(view);
+        }
         let seen = Seen::of(&views);
         self.seen[m] = Some((heads, seen.clone()));
         seen
@@ -298,6 +335,7 @@ impl World {
         self.dirty[m] = false;
         let view =
             View::parse(&self.raw_jj(m, &["log", "--no-graph", "-r", "all()", "-T", TEMPLATE]));
+        self.learn(&view);
         let after = Seen::of(std::slice::from_ref(&view));
         let what = format!("{}: (looking)", self.machine(m));
         self.ledger.record(m, &what, &before, &after, false);

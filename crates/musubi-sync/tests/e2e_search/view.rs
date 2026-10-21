@@ -85,39 +85,23 @@ impl View {
 
     /// Every visible commit but the root: targets for bookmarks, tags, git branches.
     pub fn targets(&self) -> Vec<String> {
-        self.commits
-            .iter()
-            .filter(|c| c.id != ROOT)
-            .map(|c| c.id.clone())
-            .collect()
+        self.select(|c| c.id != ROOT)
     }
 
     /// Commits that may be rewritten.
     pub fn mutable(&self) -> Vec<String> {
-        self.commits
-            .iter()
-            .filter(|c| c.mutable)
-            .map(|c| c.id.clone())
-            .collect()
+        self.select(|c| c.mutable)
     }
 
     /// Mutable commits with conflicts, for `jj resolve`.
     pub fn conflicted(&self) -> Vec<String> {
-        self.commits
-            .iter()
-            .filter(|c| c.mutable && c.conflict)
-            .map(|c| c.id.clone())
-            .collect()
+        self.select(|c| c.mutable && c.conflict)
     }
 
     /// Commits that `jj squash -r` can fold into their single, mutable parent.
     pub fn squashable(&self) -> Vec<String> {
         let mutable: BTreeSet<String> = self.mutable().into_iter().collect();
-        self.commits
-            .iter()
-            .filter(|c| c.mutable && c.parents.len() == 1 && mutable.contains(&c.parents[0]))
-            .map(|c| c.id.clone())
-            .collect()
+        self.select(|c| c.mutable && c.parents.len() == 1 && mutable.contains(&c.parents[0]))
     }
 
     pub fn bookmarks(&self) -> Vec<String> {
@@ -227,13 +211,42 @@ impl View {
         self.ordered(&found)
     }
 
-    /// `ids` in log order, so that draws do not depend on commit hashes.
+    /// `ids` in a stable order (see `select`).
     fn ordered(&self, ids: &BTreeSet<String>) -> Vec<String> {
-        self.commits
+        self.select(|c| ids.contains(&c.id))
+    }
+
+    /// The commits that `keep` keeps, in an order that is the same on every run, so that a
+    /// test case's draws pick the same commits when it replays: by change id, which
+    /// musubi-testutil seeds, and then by description and by the parents' change ids.
+    /// Commit ids, which depend on when jj made a commit, would not do, nor would `jj log`'s
+    /// order, which follows commit ids where nothing else orders commits.
+    fn select(&self, keep: impl Fn(&Commit) -> bool) -> Vec<String> {
+        let change_of: BTreeMap<&str, &str> = self
+            .commits
             .iter()
-            .filter(|c| ids.contains(&c.id))
-            .map(|c| c.id.clone())
-            .collect()
+            .map(|c| (c.id.as_str(), c.change.as_str()))
+            .collect();
+        let mut kept: Vec<(&str, &str, Vec<&str>, &str)> = self
+            .commits
+            .iter()
+            .filter(|c| keep(c))
+            .map(|c| {
+                let parents = c
+                    .parents
+                    .iter()
+                    .map(|p| change_of.get(p.as_str()).copied().unwrap_or(p))
+                    .collect();
+                (
+                    c.change.as_str(),
+                    c.subject.as_str(),
+                    parents,
+                    c.id.as_str(),
+                )
+            })
+            .collect();
+        kept.sort();
+        kept.into_iter().map(|(.., id)| id.to_owned()).collect()
     }
 
     /// `id` and everything descending from it.

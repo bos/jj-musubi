@@ -26,6 +26,9 @@
 //!   smoke test's;
 //! - `MUSUBI_SEARCH_MASK`: known bugs to look past, comma-separated (see `checks::masked`);
 //! - `MUSUBI_SEARCH_TIMING`: print how long each case took;
+//! - `MUSUBI_SEARCH_FINGERPRINTS`: a file to append each case's trace to, without what
+//!   differs between runs of the same case (`World::fingerprint`): comparing two runs'
+//!   files shows whether a case replays exactly;
 //! - `HEGEL_STOP_ON_FIRST_FAILURE=false`: keep searching after a failure (for coverage).
 
 #![allow(clippy::unwrap_used)]
@@ -43,6 +46,7 @@ mod view;
 mod world;
 
 use std::cell::RefCell;
+use std::io::Write as _;
 use std::rc::Rc;
 
 use hegel::HealthCheck;
@@ -161,6 +165,14 @@ fn search(tc: TestCase, config: Config) {
     .run(tc);
     let walked = started.elapsed();
     world.borrow_mut().converge();
+    if let Some(path) = std::env::var_os("MUSUBI_SEARCH_FINGERPRINTS") {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        writeln!(file, "case {setup:?}\n{}", world.borrow().fingerprint()).unwrap();
+    }
     if std::env::var_os("MUSUBI_SEARCH_TIMING").is_some() {
         eprintln!(
             "case: {setup:?}, setup {set_up:?}, steps {:?}, converge {:?}",

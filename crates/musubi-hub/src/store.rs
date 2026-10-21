@@ -54,10 +54,26 @@ pub enum Backend {
 }
 
 impl Backend {
-    fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             Self::Git => "git",
             Self::Simple => "simple",
+        }
+    }
+
+    pub fn parse(name: &str) -> Result<Self, StoreError> {
+        match name {
+            "git" => Ok(Self::Git),
+            "simple" => Ok(Self::Simple),
+            name => Err(StoreError::UnknownBackend(name.to_owned())),
+        }
+    }
+
+    /// The object store of the hub store in `dir`, without opening the rest of it.
+    pub fn object_store(self, dir: &Path) -> Box<dyn ObjectStore + 'static> {
+        match self {
+            Self::Git => Box::new(GitStore::for_hub(&dir.join("git"), &dir.join("extras"))),
+            Self::Simple => Box::new(SimpleStore::new(&dir.join("simple"))),
         }
     }
 
@@ -116,11 +132,8 @@ impl HubStore {
 
     pub fn open(dir: &Path) -> Result<Self, StoreError> {
         let backend_path = dir.join("backend");
-        let backend = match fs::read_to_string(&backend_path).map_err(io_err(&backend_path))? {
-            name if name == Backend::Git.name() => Backend::Git,
-            name if name == Backend::Simple.name() => Backend::Simple,
-            name => return Err(StoreError::UnknownBackend(name)),
-        };
+        let backend =
+            Backend::parse(&fs::read_to_string(&backend_path).map_err(io_err(&backend_path))?)?;
         let canonical = CanonicalStore::open(&dir.join("canonical"), backend.root_commit())?;
         let history = read_heads(dir)?;
         let seq = history.len() as u64 - 1;
@@ -154,13 +167,11 @@ impl HubStore {
     }
 
     pub fn object_store(&self) -> Box<dyn ObjectStore + '_> {
-        match self.backend {
-            Backend::Git => Box::new(GitStore::for_hub(
-                &self.dir.join("git"),
-                &self.dir.join("extras"),
-            )),
-            Backend::Simple => Box::new(SimpleStore::new(&self.dir.join("simple"))),
-        }
+        self.backend.object_store(&self.dir)
+    }
+
+    pub fn dir(&self) -> &Path {
+        &self.dir
     }
 
     /// Whether `op` is in `anc*(head)`.

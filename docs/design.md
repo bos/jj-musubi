@@ -8,20 +8,20 @@ within a second or so. A machine that was offline catches up when it reconnects.
 
 musubi never touches working copies. It writes only to the operation log, the commit store,
 and, in git-backed repositories, the git object database and refs. A remote operation can
-rewrite this machine's working-copy commit, for example by rebasing its parent. jj then
-treats the working copy as stale, exactly as after a `jj rebase` run from another workspace.
-By default the next `jj` command stops and suggests `jj workspace update-stale`. With
-`snapshot.auto-update-stale = true`, jj updates the files itself, so `musubi create`, `join`
-and `clone` set it in the repo config unless the user or repo config already has it on. If
-the working copy had edits not yet snapshotted, jj snapshots them first, and you get a
-divergent working-copy change instead of losing them.
+rewrite this machine's working-copy commit, exactly as an operation in another workspace can, for
+example by rebasing its parent. jj then treats the working copy as stale, exactly as after a `jj
+rebase` run from another workspace. By default the next `jj` command stops and suggests `jj
+workspace update-stale`. With `snapshot.auto-update-stale = true`, jj updates the files itself,
+so `musubi create`, `join` and `clone` set it in the repo config unless the user or repo config
+already has it on. If the working copy had edits not yet snapshotted, jj snapshots them first,
+and you get a divergent working-copy change instead of losing them.
 
 This document targets jj-lib 0.46.0.
 
 ## Vocabulary
 
 - **Hive**: one logical repository replicated by musubi. It has a hive id, a UUID that musubi
-  generates, a name for people (`jj-musubi`), and one hub. jj repositories have no identity
+  generates, a human-readable name (`jj-musubi`), and one hub. jj repositories have no identity
   of their own: every repository shares the same all-zero root operation and root commit,
   and `.jj/repo/config-id` is a machine-local pointer that jj regenerates when it detects a
   copy. Which hive a repository belongs to is therefore decided by its history, when it

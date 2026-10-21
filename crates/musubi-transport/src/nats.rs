@@ -1,13 +1,17 @@
 //! NATS transport, using core NATS (no JetStream): the hub is the durable store.
 
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::StreamExt as _;
 use tokio::sync::mpsc;
+use tokio::sync::watch;
 
 use crate::Message;
+use crate::Reconnections;
 use crate::Subscription;
 use crate::Transport;
 use crate::TransportError;
@@ -18,6 +22,8 @@ const CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct NatsTransport {
     client: async_nats::Client,
+    /// How many times it has connected again after losing its connection.
+    reconnections: watch::Receiver<u64>,
 }
 
 impl NatsTransport {
@@ -34,7 +40,20 @@ impl NatsTransport {
                 async_nats::ConnectOptions::with_user_and_password(user, password)
             }
         };
+        let (reconnected, reconnections) = watch::channel(0);
+        let lost = AtomicBool::new(false);
         let client = options
+            .event_callback(move |event| {
+                match event {
+                    async_nats::Event::Disconnected => lost.store(true, Ordering::Relaxed),
+                    // Not the first connection.
+                    async_nats::Event::Connected if lost.swap(false, Ordering::Relaxed) => {
+                        reconnected.send_modify(|n| *n += 1);
+                    }
+                    _ => {}
+                }
+                std::future::ready(())
+            })
             .retry_on_initial_connect()
             // Notices a connection that died while the machine slept within seconds of
             // waking, rather than minutes.
@@ -48,11 +67,10 @@ impl NatsTransport {
         // With retries, `connect` returns before the server's INFO (and so its payload
         // limit) has arrived; a flush round-trips to the server.
         client.flush().await.map_err(|err| other(&err))?;
-        Ok(Self { client })
-    }
-
-    pub fn from_client(client: async_nats::Client) -> Self {
-        Self { client }
+        Ok(Self {
+            client,
+            reconnections,
+        })
     }
 }
 
@@ -82,6 +100,10 @@ fn split_credentials(url: &str) -> (String, Credentials) {
 
 #[async_trait]
 impl Transport for NatsTransport {
+    fn reconnections(&self) -> Reconnections {
+        Reconnections::watching(self.reconnections.clone())
+    }
+
     fn max_payload(&self) -> usize {
         self.client.server_info().max_payload
     }

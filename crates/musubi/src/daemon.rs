@@ -420,6 +420,7 @@ async fn serve_async(
     let connection = crate::hub::connect(&hive.hub, REQUEST_TIMEOUT).await?;
     let transport = connection.transport.clone();
     let mut notices = transport.subscribe(&hive.head_subject()).await?;
+    let mut reconnections = transport.reconnections();
     let mut watcher = OpHeadsWatcher::new(&located.repo_path)?;
     let blobs = located.repo_path.join("musubi/blobs");
     let remote = RemoteHub::new(transport, hive.rpc_subject(), &blobs, REQUEST_TIMEOUT)?;
@@ -439,6 +440,9 @@ async fn serve_async(
             tokio::select! {
                 _ = poll.tick() => "the poll interval".to_owned(),
                 () = watcher.changed() => "a local operation".to_owned(),
+                // Announcements made while it was disconnected, as while the machine
+                // slept, are lost.
+                () = reconnections.next() => "reconnecting to the hub".to_owned(),
                 notice = notices.next() => {
                     let Some(notice) = notice else { anyhow::bail!("lost the head subscription") };
                     match Envelope::<HeadNotice>::decode(&notice.payload) {
@@ -464,7 +468,16 @@ async fn serve_async(
         };
         tracing::debug!("syncing after {trigger}");
         let started = std::time::Instant::now();
-        let result = driver.sync().await;
+        // A request in flight when the connection drops waits for its timeout: once the
+        // connection is back, start the sync again instead. A sync stopped partway is a
+        // crash the protocol recovers from.
+        reconnections.seen();
+        let result = tokio::select! {
+            result = driver.sync() => result,
+            () = reconnections.next() => {
+                Err(anyhow::anyhow!("the connection to the hub dropped during the sync"))
+            }
+        };
         tracing::debug!("sync took {:?}", started.elapsed());
         let (seq, head) = driver.known();
         let synced = Synced {

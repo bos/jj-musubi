@@ -519,6 +519,10 @@ passed to the user's own `ssh` (or `$MUSUBI_SSH`), so `~/.ssh/config` applies: a
   `ServerAliveInterval` gives up on a dead link as quickly, but `Instant` stops while the
   machine sleeps and the wall clock doesn't, so a jump between them ends every connection at
   once, and the client reconnects within seconds of waking.
+- Once the NATS client reconnects, over ssh or not, the daemon syncs at once: the hub's
+  announcements while it was away are lost. If it was in the middle of a sync, it starts
+  that again, since a request in flight when the connection dropped would otherwise wait
+  out its timeout.
 - ssh doesn't compress (`Compression=no`): musubi already compresses what it sends.
 - A failing ssh backs off, up to a minute, refusing the client's connections meanwhile:
   otherwise the client's retries would run ssh, and perhaps a tunnel's login page in a

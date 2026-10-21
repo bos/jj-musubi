@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use thiserror::Error;
 use tokio::sync::mpsc;
+use tokio::sync::watch;
 
 mod memory;
 mod nats;
@@ -58,8 +59,52 @@ impl Subscription {
     }
 }
 
+/// A transport's reconnections, each time it connects again after losing its connection,
+/// when announcements made meanwhile may have been missed.
+pub struct Reconnections {
+    receiver: Option<watch::Receiver<u64>>,
+}
+
+impl Reconnections {
+    /// For a transport that never loses its connection.
+    pub fn never() -> Self {
+        Self { receiver: None }
+    }
+
+    /// Counts reconnections from now on: a counter its connection callback increments.
+    pub(crate) fn watching(mut receiver: watch::Receiver<u64>) -> Self {
+        receiver.borrow_and_update();
+        Self {
+            receiver: Some(receiver),
+        }
+    }
+
+    /// Forgets reconnections so far, as when starting a sync, which covers them.
+    pub fn seen(&mut self) {
+        if let Some(receiver) = &mut self.receiver {
+            receiver.borrow_and_update();
+        }
+    }
+
+    /// Waits for the next reconnection.
+    pub async fn next(&mut self) {
+        if let Some(receiver) = &mut self.receiver
+            && receiver.changed().await.is_ok()
+        {
+            return;
+        }
+        // The transport is gone, or never reconnects.
+        std::future::pending::<()>().await;
+    }
+}
+
 #[async_trait]
 pub trait Transport: Send + Sync {
+    /// Its reconnections from now on.
+    fn reconnections(&self) -> Reconnections {
+        Reconnections::never()
+    }
+
     /// The largest payload the transport accepts.
     fn max_payload(&self) -> usize;
 

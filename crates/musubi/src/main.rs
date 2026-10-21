@@ -207,7 +207,12 @@ fn log_filter(cli: &Cli) -> anyhow::Result<tracing_subscriber::EnvFilter> {
         return parse_filter(&filter)
             .with_context(|| format!("bad log filter {filter:?} under [daemon] in the config"));
     }
-    parse_filter(if daemon || hub { "info" } else { "warn" })
+    if daemon || hub {
+        return parse_filter("info");
+    }
+    // Commands say why a hub is out of reach in their error; the NATS client and the ssh
+    // tunnel would say it again at every retry.
+    parse_filter("warn,async_nats=off,musubi::ssh=off")
 }
 
 /// Parses a filter in `RUST_LOG`'s syntax, quieting async_nats, which announces every

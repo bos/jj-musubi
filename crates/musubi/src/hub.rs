@@ -545,8 +545,8 @@ pub fn relay(dir: Option<PathBuf>) -> anyhow::Result<()> {
             .await
             .with_context(|| {
                 format!(
-                    "no hub is serving {} here (nothing listens on port {}); is `musubi hub` \
-                     running?",
+                    "no hub is serving {} here (nothing listens on port {}); start one with \
+                     `musubi hub`",
                     dir.display(),
                     nats.port
                 )

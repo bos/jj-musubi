@@ -30,6 +30,7 @@ use anyhow::Context as _;
 use async_trait::async_trait;
 use bytes::Bytes;
 use musubi_transport::NatsTransport;
+use musubi_transport::Reconnections;
 use musubi_transport::Subscription;
 use musubi_transport::Transport;
 use musubi_transport::TransportError;
@@ -103,7 +104,14 @@ fn describe_failure(dest: &str, status: Option<ExitStatus>, stderr: &str) -> Str
              `{REMOTE_COMMAND}` line of ~/.ssh/authorized_keys on {dest}"
         ),
         Some(255) => format!("ssh to {dest} failed: {said}"),
-        Some(_) => format!("`{REMOTE_COMMAND}` on {dest} failed: {said}"),
+        // musubi's own error leads with what went wrong; its causes follow.
+        Some(_) => {
+            let error = stderr
+                .lines()
+                .find_map(|line| line.strip_prefix("Error: "))
+                .unwrap_or(said);
+            format!("`{REMOTE_COMMAND}` on {dest} failed: {error}")
+        }
         None if said.is_empty() => format!("ssh to {dest} did not connect"),
         None => format!("ssh to {dest} did not connect: {said}"),
     }
@@ -318,6 +326,10 @@ impl SshTransport {
 
 #[async_trait]
 impl Transport for SshTransport {
+    fn reconnections(&self) -> Reconnections {
+        self.nats.reconnections()
+    }
+
     fn max_payload(&self) -> usize {
         self.nats.max_payload()
     }

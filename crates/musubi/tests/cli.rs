@@ -353,7 +353,7 @@ fn hub_join_sync_clone_and_list() {
         "{list}"
     );
     assert!(
-        list.contains("Daemon: running, serving 1 repositories"),
+        list.contains("Daemon: running, serving 1 repositories;"),
         "{list}"
     );
     // Every machine's workspaces are listed, by machine.
@@ -394,7 +394,7 @@ fn hub_join_sync_clone_and_list() {
     let list = musubi_in(&env, &logs, &beta, &["list"]);
     assert!(!list.contains("here:"), "{list}");
     assert!(
-        list.contains("Daemon: running, serving 0 repositories"),
+        list.contains("Daemon: running, serving 0 repositories;"),
         "{list}"
     );
 }
@@ -463,7 +463,7 @@ fn the_daemon_picks_up_new_repositories() {
     assert!(out.contains("Created hive second"), "{out}");
     let list = musubi_in(&env, &logs, &alpha, &["list"]);
     assert!(
-        list.contains("Daemon: running, serving 2 repositories"),
+        list.contains("Daemon: running, serving 2 repositories;"),
         "{list}"
     );
 
@@ -595,4 +595,133 @@ fn settings_are_shared_through_the_binary() {
         beta.jj(&["git", "remote", "list"]),
         "upstream https://example.com/up.git\n"
     );
+}
+
+/// A `musubi` command with this process's environment, so the real user's service manager
+/// (launchd, systemd, the registry), but its own config directory.
+fn musubi_as_user(config: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new(musubi());
+    command
+        .args(args)
+        .env("MUSUBI_CONFIG_DIR", config)
+        .env_remove("MUSUBI_SOCKET");
+    command
+}
+
+/// The running daemon's pid, from the file it writes beside its lock.
+fn daemon_pid(config: &Path) -> Option<String> {
+    fs::read_dir(config)
+        .ok()?
+        .flatten()
+        .find(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with("daemon-") && name.ends_with(".pid")
+        })
+        .and_then(|entry| fs::read_to_string(entry.path()).ok())
+        .map(|pid| pid.trim().to_owned())
+}
+
+/// `musubi list`, which says whether the daemon runs.
+fn daemon_line(env: &TestEnv, logs: &Logs, config: &Path) -> String {
+    let out = run(env, logs, musubi_as_user(config, &["list"]));
+    out.lines()
+        .find(|line| line.starts_with("Daemon:"))
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// `musubi daemon install` hands the daemon to the platform's service manager, which then
+/// starts it, restarts it after a crash but not after `musubi daemon stop`, and starts it
+/// for commands that need it. This installs a real login service for the user running the
+/// test, so it runs only when `MUSUBI_TEST_LOGIN_SERVICE` is set, as CI does: don't set it
+/// where musubi is installed for real.
+#[test]
+fn the_daemon_starts_through_the_login_service() {
+    if std::env::var_os("MUSUBI_TEST_LOGIN_SERVICE").is_none() {
+        eprintln!("skipped: set MUSUBI_TEST_LOGIN_SERVICE=1 to install a login service");
+        return;
+    }
+    let env = TestEnv::new();
+    let logs = Logs(vec![env.root().join("config/daemon.log")]);
+    let config = env.root().join("config");
+    // Make sure no list shows a hub it can't reach.
+    fs::create_dir_all(&config).unwrap();
+    // Uninstalls, and so stops the daemon, whatever happens below.
+    let mut uninstall = musubi_as_user(&config, &["daemon", "uninstall"]);
+    uninstall.stdout(Stdio::null()).stderr(Stdio::null());
+    let _uninstall = Daemons(vec![uninstall]);
+    let out = run(&env, &logs, musubi_as_user(&config, &["daemon", "install"]));
+    assert!(out.contains("starts at login from now on"), "{out}");
+    let line = daemon_line(&env, &logs, &config);
+    assert!(
+        line.contains("running") && line.contains("starts at login"),
+        "{line}"
+    );
+    let first = daemon_pid(&config).unwrap();
+
+    if cfg!(windows) {
+        // Windows runs the Run entry's command at login: run it as Windows would. A
+        // daemon is already running, so it starts no other.
+        let query = Command::new("reg")
+            .args([
+                "query",
+                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+                "/v",
+                "musubi",
+            ])
+            .output()
+            .unwrap();
+        let entry = String::from_utf8_lossy(&query.stdout).into_owned();
+        assert!(entry.contains("daemon start"), "{entry}");
+        run(&env, &logs, musubi_as_user(&config, &["daemon", "stop"]));
+        run(&env, &logs, musubi_as_user(&config, &["daemon", "start"]));
+        let started = daemon_pid(&config).unwrap();
+        run(&env, &logs, musubi_as_user(&config, &["daemon", "start"]));
+        assert_eq!(daemon_pid(&config).unwrap(), started);
+    } else {
+        // A crash: the service manager starts it again.
+        Command::new("kill").args(["-9", &first]).status().unwrap();
+        wait_for(&logs, "the service manager to restart the daemon", || {
+            daemon_pid(&config).is_some_and(|pid| pid != first)
+                && daemon_line(&env, &logs, &config).contains("running,")
+        });
+        // A clean stop: it stays stopped.
+        run(&env, &logs, musubi_as_user(&config, &["daemon", "stop"]));
+        std::thread::sleep(Duration::from_secs(12));
+        let line = daemon_line(&env, &logs, &config);
+        assert!(line.contains("not running"), "{line}");
+        // A command that needs it starts it through the service manager.
+        run(&env, &logs, musubi_as_user(&config, &["daemon", "start"]));
+        let managed = if cfg!(target_os = "macos") {
+            let uid =
+                String::from_utf8(Command::new("id").arg("-u").output().unwrap().stdout).unwrap();
+            ["gui", "user"].iter().any(|domain| {
+                let print = Command::new("launchctl")
+                    .args([
+                        "print",
+                        &format!("{domain}/{}/io.github.bos.musubi", uid.trim()),
+                    ])
+                    .output()
+                    .unwrap();
+                String::from_utf8_lossy(&print.stdout).contains("state = running")
+            })
+        } else {
+            Command::new("systemctl")
+                .args(["--user", "is-active", "--quiet", "musubi.service"])
+                .status()
+                .unwrap()
+                .success()
+        };
+        assert!(managed, "the service manager isn't running the daemon");
+    }
+
+    let out = run(
+        &env,
+        &logs,
+        musubi_as_user(&config, &["daemon", "uninstall"]),
+    );
+    assert!(out.contains("no longer starts at login"), "{out}");
+    let line = daemon_line(&env, &logs, &config);
+    assert!(line.contains("not running"), "{line}");
 }

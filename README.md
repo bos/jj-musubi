@@ -75,8 +75,9 @@ Day to day:
 - `musubi` (or `musubi list`) shows the hub's hives, this machine's copies of them, and how
   their syncing goes, and in a hive's repository, its details.
 - `musubi sync` syncs the current repository now; `musubi leave` stops syncing it.
-- `musubi daemon stop` and `musubi daemon restart` control the daemon. It doesn't start at
-  login yet: after a reboot, run `musubi daemon restart`.
+- `musubi daemon install` starts the daemon at login from now on: a launchd agent on macOS,
+  a systemd user unit on Linux, a `Run` registry entry on Windows. `musubi daemon
+  uninstall` undoes it, and `musubi daemon start`, `stop` and `restart` control the daemon.
 - `musubi hub rename <name> <new-name>` and `musubi hub rm <name>` manage the hub's hives.
 - Each machine records its own git refs and workspaces in its operations, so the same
   operation has a different id on each machine and in the hive; `musubi debug op-id <id>`

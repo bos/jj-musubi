@@ -302,7 +302,7 @@ fn create_private_dir(dir: &Path) -> anyhow::Result<()> {
 }
 
 #[cfg(unix)]
-fn uid() -> anyhow::Result<u32> {
+pub fn uid() -> anyhow::Result<u32> {
     use std::os::unix::fs::MetadataExt as _;
     // This process's own entry is owned by its user (Linux), and so is a file it creates.
     if let Ok(metadata) = std::fs::metadata("/proc/self") {
@@ -313,7 +313,7 @@ fn uid() -> anyhow::Result<u32> {
 }
 
 #[cfg(not(unix))]
-fn uid() -> anyhow::Result<u32> {
+pub fn uid() -> anyhow::Result<u32> {
     Ok(0)
 }
 

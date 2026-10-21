@@ -4,6 +4,7 @@ mod config;
 mod control;
 mod daemon;
 mod hub;
+mod login;
 mod repo;
 mod settings;
 mod watch;
@@ -138,10 +139,17 @@ enum HubAction {
 
 #[derive(Subcommand)]
 enum DaemonAction {
+    /// Start the daemon in the background, unless it is running.
+    Start,
     /// Stop the running daemon.
     Stop,
     /// Stop the running daemon, if any, and start a new one in the background.
     Restart,
+    /// Start the daemon at login from now on (a launchd agent on macOS, a systemd user
+    /// unit on Linux, a Run registry entry on Windows), and now.
+    Install,
+    /// Stop starting the daemon at login, and stop it.
+    Uninstall,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -240,6 +248,43 @@ fn main() -> anyhow::Result<()> {
         Command::List => list(&cwd, socket()),
         Command::Leave => leave(&cwd, &socket()?),
         Command::Daemon { action: None } => daemon::run(&socket()?),
+        Command::Daemon {
+            action: Some(DaemonAction::Start),
+        } => block_on(async {
+            daemon::ensure(&socket()?).await?;
+            Ok(())
+        }),
+        Command::Daemon {
+            action: Some(DaemonAction::Install),
+        } => block_on(async {
+            let socket = socket()?;
+            // The service manager starts the daemon from now on, so stop one started
+            // otherwise.
+            daemon::stop(&socket).await?;
+            let described = login::install()?;
+            daemon::ensure(&socket).await?;
+            println!("The daemon starts at login from now on, through {described}.");
+            if cfg!(target_os = "linux") {
+                println!(
+                    "To keep it running while you're logged out, as on a server: \
+                     loginctl enable-linger"
+                );
+            }
+            Ok(())
+        }),
+        Command::Daemon {
+            action: Some(DaemonAction::Uninstall),
+        } => block_on(async {
+            let socket = socket()?;
+            let was = login::uninstall()?;
+            daemon::stop(&socket).await?;
+            if was {
+                println!("The daemon no longer starts at login, and is stopped.");
+            } else {
+                println!("The daemon wasn't set to start at login.");
+            }
+            Ok(())
+        }),
         Command::Daemon {
             action: Some(DaemonAction::Stop),
         } => block_on(async {
@@ -421,6 +466,9 @@ fn start_serving(located: &Located, socket: &Socket) -> anyhow::Result<()> {
                 "Synced with the hub (hive at #{}). The daemon keeps it in sync from now on.",
                 synced.seq
             );
+            if !login::installed() {
+                println!("To start the daemon at login too: musubi daemon install");
+            }
             Ok(())
         }
         Ok(Err(message)) => anyhow::bail!(
@@ -633,10 +681,17 @@ fn list(start: &Path, socket: anyhow::Result<Socket>) -> anyhow::Result<()> {
             }
         }
     }
+    let at_login = if login::installed() {
+        "starts at login"
+    } else {
+        "doesn't start at login; `musubi daemon install` makes it"
+    };
     match daemon {
-        Ok(true) => println!("Daemon: running, serving {} repositories", statuses.len()),
-        Ok(false) if copies.is_empty() => {}
-        Ok(false) => println!("Daemon: not running; `musubi daemon restart` starts it"),
+        Ok(true) => println!(
+            "Daemon: running, serving {} repositories; {at_login}",
+            statuses.len()
+        ),
+        Ok(false) => println!("Daemon: not running ({at_login}); `musubi daemon start` starts it"),
         Err(err) => println!("Daemon: {err:#}"),
     }
     if let Ok(located) = Located::find(start)

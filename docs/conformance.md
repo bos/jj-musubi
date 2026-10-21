@@ -148,11 +148,13 @@ created operation except the root.
 ## Running it
 
 ```sh
-just oracle                          # lake build oracle
 cargo nextest run -p musubi-core     # protocol_invariants and conformance
 ```
 
-The oracle binary is `formal/.lake/build/bin/oracle`; `MUSUBI_ORACLE` overrides the path.
+The conformance test runs `lake build oracle` first, so that the oracle matches the model;
+it does nothing when the oracle is up to date. The oracle binary is
+`formal/.lake/build/bin/oracle`. Setting `MUSUBI_ORACLE` to another binary skips the build,
+as CI does with the one it has just built.
 `formal/test/run_smoke.sh` replays a fixed two-node run through it.
 
 ## Evidence that the check has teeth

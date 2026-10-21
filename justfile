@@ -33,8 +33,9 @@ oracle:
 property:
     cargo nextest run --workspace --profile search
 
-# Mutation testing of the protocol core against its property and conformance tests.
-mutants:
+# Mutation testing of the protocol core against its property and conformance tests. Each
+# mutant runs against the oracle built here, not one it builds for itself.
+mutants: oracle
     MUSUBI_ORACLE=$PWD/formal/.lake/build/bin/oracle cargo mutants --package musubi-core \
         --file crates/musubi-core/src/hub.rs --file crates/musubi-core/src/node.rs \
         --test-tool nextest --timeout 600

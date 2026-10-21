@@ -10,27 +10,18 @@
 //! - macOS: `$TMPDIR/musubi/daemon.sock`;
 //! - Windows: `\\.\pipe\musubi-<user>`.
 //!
-//! Only the user may reach the daemon. A Unix socket's directory must belong to the user and
-//! be writable by no one else, or the daemon won't listen there and commands won't connect,
-//! as tmux and ssh-agent check theirs, so that nobody else can put a socket of their own in
-//! its place. A named pipe admits only its owner, and the daemon creates it as the pipe's
-//! first instance, so it can't start if someone else has taken the name.
+//! Only the user may reach the daemon (see [`crate::socket`]).
 //!
 //! A lock file in the state directory, named after the socket, keeps a second daemon from
 //! starting; the daemon holding it removes any socket a crashed one left behind. (Not beside
 //! the socket: temp cleaners would delete it there.)
 
-use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 use std::time::Instant;
 
 use anyhow::Context as _;
-use interprocess::local_socket::GenericFilePath;
-use interprocess::local_socket::ListenerOptions;
-use interprocess::local_socket::tokio::Listener;
 use interprocess::local_socket::tokio::Stream;
-use interprocess::local_socket::tokio::prelude::*;
 use serde::Deserialize;
 use serde::Serialize;
 use tarpc::serde_transport;
@@ -40,6 +31,9 @@ use tarpc::tokio_util::codec::LengthDelimitedCodec;
 use crate::config;
 use crate::config::UserConfig;
 use crate::daemon::Status;
+use crate::socket::Socket;
+use crate::socket::fnv;
+use crate::socket::runtime_dir;
 
 /// Changes whenever the control service does, so that a command and a daemon from
 /// different builds notice each other.
@@ -75,23 +69,6 @@ pub trait Control {
     async fn stop();
 }
 
-/// Where the control socket is.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Socket {
-    Path(PathBuf),
-    /// A Windows named pipe, `\\.\pipe\<name>`.
-    Pipe(String),
-}
-
-impl std::fmt::Display for Socket {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Path(path) => write!(f, "{}", path.display()),
-            Self::Pipe(name) => write!(f, r"\\.\pipe\{name}"),
-        }
-    }
-}
-
 impl Socket {
     /// The socket to use, given `--socket`.
     pub fn locate(given: Option<&str>) -> anyhow::Result<Self> {
@@ -110,15 +87,6 @@ impl Socket {
         Ok(socket)
     }
 
-    fn named(socket: &str) -> Self {
-        if cfg!(windows) {
-            let name = socket.strip_prefix(r"\\.\pipe\").unwrap_or(socket);
-            Self::Pipe(name.to_owned())
-        } else {
-            Self::Path(PathBuf::from(socket))
-        }
-    }
-
     fn usual() -> anyhow::Result<Self> {
         if let Some(dir) = std::env::var_os("MUSUBI_CONFIG_DIR") {
             let dir = PathBuf::from(dir);
@@ -135,16 +103,7 @@ impl Socket {
             let user = std::env::var("USERNAME").unwrap_or_else(|_| "user".to_owned());
             return Ok(Self::Pipe(format!("musubi-{user}")));
         }
-        let runtime = if cfg!(target_os = "macos") {
-            std::env::var_os("TMPDIR")
-        } else {
-            std::env::var_os("XDG_RUNTIME_DIR")
-        };
-        let dir = match runtime {
-            Some(dir) if !dir.is_empty() => PathBuf::from(dir).join("musubi"),
-            _ => std::env::temp_dir().join(format!("musubi-{}", uid()?)),
-        };
-        Ok(Self::Path(dir.join("daemon.sock")))
+        Ok(Self::Path(runtime_dir()?.join("daemon.sock")))
     }
 
     /// Unix sockets' paths are limited to what fits in `sockaddr_un`.
@@ -183,61 +142,9 @@ impl Socket {
         ))
     }
 
-    fn name(&self) -> std::io::Result<interprocess::local_socket::Name<'static>> {
-        match self {
-            Self::Path(path) => path.clone().to_fs_name::<GenericFilePath>(),
-            Self::Pipe(name) => format!(r"\\.\pipe\{name}").to_fs_name::<GenericFilePath>(),
-        }
-    }
-
-    /// Binds the socket. The caller holds the lock, so any socket file is a dead daemon's.
-    pub fn listen(&self) -> anyhow::Result<Listener> {
-        if let Self::Path(path) = self {
-            if let Some(dir) = path.parent() {
-                create_private_dir(dir)?;
-                check_private_dir(dir)?;
-            }
-            match std::fs::remove_file(path) {
-                Ok(()) => tracing::info!("removed a stale socket {}", path.display()),
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-                Err(err) => return Err(err).with_context(|| format!("removing {path:?}")),
-            }
-        }
-        let options = ListenerOptions::new().name(self.name()?);
-        #[cfg(windows)]
-        let options = {
-            use interprocess::os::windows::local_socket::ListenerOptionsExt as _;
-            use interprocess::os::windows::security_descriptor::SecurityDescriptor;
-            // Full access for the pipe's owner and the system, and no one else.
-            let sddl = widestring::u16cstr!("D:P(A;;GA;;;OW)(A;;GA;;;SY)");
-            options.security_descriptor(SecurityDescriptor::deserialize(sddl)?)
-        };
-        options
-            .create_tokio()
-            .with_context(|| format!("listening on {self}"))
-    }
-
     /// Connects to a running daemon, or returns `None` if there is none.
     pub async fn connect(&self) -> anyhow::Result<Option<ControlClient>> {
-        if let Self::Path(path) = self
-            && let Some(dir) = path.parent()
-            && dir.exists()
-        {
-            check_private_dir(dir)?;
-        }
-        let stream = match Stream::connect(self.name()?).await {
-            Ok(stream) => stream,
-            Err(err)
-                if matches!(
-                    err.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
-                ) =>
-            {
-                return Ok(None);
-            }
-            Err(err) => return Err(err).with_context(|| format!("connecting to {self}")),
-        };
-        Ok(Some(client(stream)))
+        Ok(self.connect_stream().await?.map(client))
     }
 }
 
@@ -262,87 +169,4 @@ pub fn context(limit: Duration) -> tarpc::context::Context {
     let mut context = tarpc::context::current();
     context.deadline = Instant::now() + limit;
     context
-}
-
-#[cfg(unix)]
-fn create_private_dir(dir: &Path) -> anyhow::Result<()> {
-    use std::os::unix::fs::DirBuilderExt as _;
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)
-        .with_context(|| format!("creating {dir:?}"))
-}
-
-/// Fails unless `dir` is a directory, not a symbolic link, that belongs to this user and
-/// that no one else can write to.
-#[cfg(unix)]
-fn check_private_dir(dir: &Path) -> anyhow::Result<()> {
-    use std::os::unix::fs::MetadataExt as _;
-    let metadata = std::fs::symlink_metadata(dir).with_context(|| format!("checking {dir:?}"))?;
-    let uid = uid()?;
-    anyhow::ensure!(
-        metadata.is_dir() && metadata.uid() == uid && metadata.mode() & 0o022 == 0,
-        "{} is not a private directory of this user's (it must be owned by uid {uid}, not a \
-         symbolic link, and writable by no one else), so the daemon's socket can't be trusted \
-         there; remove it, or choose another place with MUSUBI_SOCKET",
-        dir.display()
-    );
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn check_private_dir(_: &Path) -> anyhow::Result<()> {
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn create_private_dir(dir: &Path) -> anyhow::Result<()> {
-    std::fs::create_dir_all(dir).with_context(|| format!("creating {dir:?}"))
-}
-
-#[cfg(unix)]
-pub fn uid() -> anyhow::Result<u32> {
-    use std::os::unix::fs::MetadataExt as _;
-    // This process's own entry is owned by its user (Linux), and so is a file it creates.
-    if let Ok(metadata) = std::fs::metadata("/proc/self") {
-        return Ok(metadata.uid());
-    }
-    let probe = tempfile::NamedTempFile::new()?;
-    Ok(probe.as_file().metadata()?.uid())
-}
-
-#[cfg(not(unix))]
-pub fn uid() -> anyhow::Result<u32> {
-    Ok(0)
-}
-
-/// FNV-1a, for naming a pipe after a directory.
-fn fnv(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &byte| {
-        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
-    })
-}
-
-#[cfg(all(test, unix))]
-mod tests {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    use super::*;
-
-    #[test]
-    fn sockets_live_only_in_private_directories() {
-        let root = tempfile::tempdir().unwrap();
-        let dir = root.path().join("musubi");
-        create_private_dir(&dir).unwrap();
-        check_private_dir(&dir).unwrap();
-        // Writable by others: someone else could swap in a socket of their own.
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
-        assert!(check_private_dir(&dir).is_err());
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        // A symbolic link could point anywhere.
-        let link = root.path().join("link");
-        std::os::unix::fs::symlink(&dir, &link).unwrap();
-        assert!(check_private_dir(&link).is_err());
-    }
 }

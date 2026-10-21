@@ -640,10 +640,10 @@ fn settings_are_shared_through_the_binary() {
     );
 }
 
-/// Machines reach a hub whose NATS server listens only on its own machine over ssh:
-/// joining creates the machine's key and adds it on the hub's machine, allowed only to run
-/// `musubi hub connect`, and the daemon syncs through that, which gives the hub's token
-/// itself.
+/// Machines reach a hub that listens only on its own machine over ssh: joining creates the
+/// machine's key and adds it on the hub's machine, allowed only to run `musubi hub connect`,
+/// and the daemon syncs through that, which relays to the hub's socket, needing none of the
+/// token its NATS server requires.
 #[cfg(unix)]
 #[test]
 fn machines_reach_the_hub_over_ssh() {

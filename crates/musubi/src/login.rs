@@ -116,7 +116,7 @@ mod platform {
     /// over SSH), the user's background domain, which launchd keeps while they have any
     /// session. The agent may load in either (`LimitLoadToSessionType`).
     fn domain() -> anyhow::Result<String> {
-        let uid = crate::control::uid()?;
+        let uid = crate::socket::uid()?;
         let gui = format!("gui/{uid}");
         let has_gui = Command::new("launchctl")
             .args(["print", &gui])

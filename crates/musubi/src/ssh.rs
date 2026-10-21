@@ -1,11 +1,11 @@
-//! Reaching a hub over ssh, for a hub whose NATS server listens only on its own machine.
+//! Reaching a hub over ssh, for a hub that listens only on its own machine.
 //!
 //! The machine gets a key of its own (`hub_key` in the state directory), which joining
 //! adds to `~/.ssh/authorized_keys` on the hub's machine, allowed only to run
-//! `musubi hub connect`. A [`Tunnel`] listens on this machine's loopback, and for each
-//! connection the NATS client makes, runs `ssh <hub> musubi hub connect` and relays the
-//! connection through it. Nothing lasts longer than a connection, so after the machine
-//! sleeps, the NATS client's reconnecting is a fresh ssh.
+//! `musubi hub connect`. Each connection to the hub is an ssh of its own running that, and
+//! the [`StreamTransport`](musubi_transport::StreamTransport) speaks to the hub through its
+//! standard input and output. Nothing lasts longer than a connection, so after the machine
+//! sleeps, connecting again is a fresh ssh.
 //!
 //! The ssh is the user's own `ssh` (or `$MUSUBI_SSH`), so `~/.ssh/config` applies: host
 //! aliases, `ProxyCommand`, and the rest.
@@ -15,6 +15,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::process::ExitStatus;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -22,23 +23,27 @@ use std::sync::Mutex;
 use std::sync::PoisonError;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::task::Context;
+use std::task::Poll;
 use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 
 use anyhow::Context as _;
 use async_trait::async_trait;
-use bytes::Bytes;
-use musubi_transport::NatsTransport;
-use musubi_transport::Reconnections;
-use musubi_transport::Subscription;
-use musubi_transport::Transport;
-use musubi_transport::TransportError;
+use musubi_transport::stream::Connector;
+use musubi_transport::stream::GREETING;
+use musubi_transport::stream::Reader;
+use musubi_transport::stream::Writer;
+use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt as _;
 use tokio::io::AsyncWriteExt as _;
-use tokio::net::TcpListener;
-use tokio::net::TcpStream;
+use tokio::io::ReadBuf;
+use tokio::process::Child;
+use tokio::process::ChildStderr;
+use tokio::process::ChildStdout;
 use tokio::process::Command;
+use tokio::sync::oneshot;
 use tokio::sync::watch;
 
 use crate::config;
@@ -159,35 +164,39 @@ impl Health {
     }
 }
 
-/// A loopback port whose connections go to a hub over ssh, one ssh for each.
-pub struct Tunnel {
-    port: u16,
+/// Opens connections to a hub over ssh, each through an ssh of its own; and after the
+/// machine sleeps, ends them all, since their links are likely dead, and forgets past
+/// failures.
+pub struct Link {
+    dest: String,
+    key: PathBuf,
     health: Health,
+    woke: watch::Sender<u64>,
     task: tokio::task::JoinHandle<()>,
 }
 
-impl Drop for Tunnel {
+impl Drop for Link {
     fn drop(&mut self) {
         self.task.abort();
     }
 }
 
-impl Tunnel {
-    pub async fn open(dest: &str) -> anyhow::Result<Self> {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
-        let port = listener.local_addr()?.port();
+impl Link {
+    pub fn new(dest: &str) -> anyhow::Result<Self> {
         let health = Health::default();
-        let task = tokio::spawn(serve(
-            listener,
+        let woke = watch::channel(0).0;
+        let task = tokio::spawn(watch_for_waking(
             dest.to_owned(),
-            key_path()?,
             health.clone(),
+            woke.clone(),
         ));
-        Ok(Self { port, health, task })
-    }
-
-    pub fn port(&self) -> u16 {
-        self.port
+        Ok(Self {
+            dest: dest.to_owned(),
+            key: key_path()?,
+            health,
+            woke,
+            task,
+        })
     }
 
     pub fn health(&self) -> Health {
@@ -195,160 +204,148 @@ impl Tunnel {
     }
 }
 
-/// Accepts connections, each relayed through an ssh of its own; and after the machine
-/// sleeps, ends them all, since their links are likely dead, and forgets past failures.
-async fn serve(listener: TcpListener, dest: String, key: PathBuf, health: Health) {
-    let (woke, _) = watch::channel(0u64);
-    let mut check = tokio::time::interval(WAKE_CHECK);
-    let (mut wall, mut clock) = (SystemTime::now(), Instant::now());
-    loop {
-        tokio::select! {
-            accepted = listener.accept() => {
-                let Ok((stream, _)) = accepted else {
-                    // Out of file descriptors, say: don't spin.
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    continue;
-                };
-                // After failures, the NATS client's own retries would run ssh, and maybe
-                // a login prompt in a browser, every few seconds.
-                if health.refusing() {
-                    continue;
-                }
-                tokio::spawn(relay(
-                    stream,
-                    dest.clone(),
-                    key.clone(),
-                    health.clone(),
-                    woke.subscribe(),
-                ));
-            }
-            _ = check.tick() => {
-                // `Instant` stops while the machine sleeps; the wall clock doesn't.
-                let (now_wall, now_clock) = (SystemTime::now(), Instant::now());
-                let slept = now_wall
-                    .duration_since(wall)
-                    .unwrap_or_default()
-                    .saturating_sub(now_clock - clock);
-                if slept > 2 * WAKE_CHECK {
-                    tracing::info!(
-                        "woke after about {}s asleep; reconnecting to {dest}",
-                        slept.as_secs()
-                    );
-                    health.worked();
-                    woke.send_modify(|n| *n += 1);
-                }
-                (wall, clock) = (now_wall, now_clock);
-            }
+#[async_trait]
+impl Connector for Link {
+    async fn connect(&self) -> io::Result<(Reader, Writer)> {
+        // After failures, trying again at once would run ssh, and maybe a login prompt in a
+        // browser, every few seconds.
+        if self.health.refusing() {
+            return Err(io::Error::other("waiting to try ssh again"));
         }
+        let mut child = connect_command(&self.dest, &self.key)
+            .spawn()
+            .inspect_err(|err| self.health.failed(format!("cannot run ssh: {err}")))?;
+        let (Some(stdin), Some(stdout), Some(stderr)) =
+            (child.stdin.take(), child.stdout.take(), child.stderr.take())
+        else {
+            return Err(io::Error::other("ssh's pipes went missing"));
+        };
+        let answered = Arc::new(AtomicBool::new(false));
+        let (closed, let_go) = oneshot::channel();
+        tokio::spawn(supervise(Ssh {
+            child,
+            stderr,
+            dest: self.dest.clone(),
+            health: self.health.clone(),
+            answered: answered.clone(),
+            woke: self.woke.subscribe(),
+            let_go,
+        }));
+        let output = Output {
+            stdout,
+            answered,
+            health: self.health.clone(),
+            _closed: closed,
+        };
+        Ok((Box::new(output), Box::new(stdin)))
     }
 }
 
-/// Relays `stream` through an ssh to `dest`, until either end closes or the machine wakes.
-async fn relay(
-    stream: TcpStream,
-    dest: String,
-    key: PathBuf,
-    health: Health,
-    mut woke: watch::Receiver<u64>,
-) {
-    let mut child = match connect_command(&dest, &key).spawn() {
-        Ok(child) => child,
-        Err(err) => {
-            health.failed(format!("cannot run ssh: {err}"));
-            return;
+/// After the machine sleeps, ends every connection, since their links are likely dead, and
+/// forgets past failures.
+async fn watch_for_waking(dest: String, health: Health, woke: watch::Sender<u64>) {
+    let mut check = tokio::time::interval(WAKE_CHECK);
+    let (mut wall, mut clock) = (SystemTime::now(), Instant::now());
+    loop {
+        check.tick().await;
+        // `Instant` stops while the machine sleeps; the wall clock doesn't.
+        let (now_wall, now_clock) = (SystemTime::now(), Instant::now());
+        let slept = now_wall
+            .duration_since(wall)
+            .unwrap_or_default()
+            .saturating_sub(now_clock - clock);
+        if slept > 2 * WAKE_CHECK {
+            tracing::info!(
+                "woke after about {}s asleep; reconnecting to {dest}",
+                slept.as_secs()
+            );
+            health.worked();
+            woke.send_modify(|n| *n += 1);
         }
-    };
-    let (Some(mut stdin), Some(mut stdout), Some(mut stderr)) =
-        (child.stdin.take(), child.stdout.take(), child.stderr.take())
-    else {
-        return;
-    };
+        (wall, clock) = (now_wall, now_clock);
+    }
+}
+
+/// ssh's standard output, which notes when the hub first answers through it, and whose
+/// dropping tells the ssh's supervisor that the connection has been let go.
+struct Output {
+    stdout: ChildStdout,
+    answered: Arc<AtomicBool>,
+    health: Health,
+    _closed: oneshot::Sender<()>,
+}
+
+impl AsyncRead for Output {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let before = buf.filled().len();
+        let poll = Pin::new(&mut self.stdout).poll_read(cx, buf);
+        if buf.filled().len() > before && !self.answered.swap(true, Ordering::Relaxed) {
+            self.health.worked();
+        }
+        poll
+    }
+}
+
+/// One connection's ssh, and what its supervisor needs to know.
+struct Ssh {
+    child: Child,
+    stderr: ChildStderr,
+    dest: String,
+    health: Health,
+    answered: Arc<AtomicBool>,
+    woke: watch::Receiver<u64>,
+    /// Ends when the connection is let go.
+    let_go: oneshot::Receiver<()>,
+}
+
+/// Waits for a connection's ssh to finish, ending it once the connection is let go, or at
+/// once when the machine wakes; and if the hub never answered, records why.
+async fn supervise(mut ssh: Ssh) {
+    let mut stderr = ssh.stderr;
     // Read as it comes, so a chatty ssh never blocks on a full pipe.
     let said = tokio::spawn(async move {
         let mut said = String::new();
         stderr.read_to_string(&mut said).await.ok();
         said
     });
-    stream.set_nodelay(true).ok();
-    let (mut from_client, mut to_client) = stream.into_split();
-    let answered = AtomicBool::new(false);
-    let up = tokio::io::copy(&mut from_client, &mut stdin);
-    let down = async {
-        let mut buf = vec![0; 64 * 1024];
-        loop {
-            let n = stdout.read(&mut buf).await?;
-            if n == 0 {
-                return Ok::<_, io::Error>(());
-            }
-            if !answered.swap(true, Ordering::Relaxed) {
-                health.worked();
-            }
-            to_client.write_all(&buf[..n]).await?;
-        }
-    };
-    let mut slept = false;
-    tokio::select! {
-        _ = up => {}
-        _ = down => {}
-        _ = woke.changed() => slept = true,
+    enum Ended {
+        Exited(Option<ExitStatus>),
+        LetGo,
+        Woke,
     }
-    drop(to_client);
-    drop(stdin);
-    // An ssh still going is one the client gave up on, or one the machine's sleeping broke.
-    let status = match tokio::time::timeout(Duration::from_secs(1), child.wait()).await {
-        Ok(status) => status.ok(),
-        Err(_) => {
-            child.start_kill().ok();
-            child.wait().await.ok();
-            None
+    let ended = tokio::select! {
+        status = ssh.child.wait() => Ended::Exited(status.ok()),
+        _ = ssh.let_go => Ended::LetGo,
+        _ = ssh.woke.changed() => Ended::Woke,
+    };
+    let status = match ended {
+        Ended::Exited(status) => status,
+        // Its standard input closed with the connection, so it should finish by itself; one
+        // still going is one the machine's sleeping broke.
+        Ended::LetGo => {
+            match tokio::time::timeout(Duration::from_secs(1), ssh.child.wait()).await {
+                Ok(status) => status.ok(),
+                Err(_) => {
+                    ssh.child.start_kill().ok();
+                    ssh.child.wait().await.ok();
+                    None
+                }
+            }
+        }
+        Ended::Woke => {
+            ssh.child.start_kill().ok();
+            ssh.child.wait().await.ok();
+            return;
         }
     };
-    if !answered.load(Ordering::Relaxed) && !slept {
+    if !ssh.answered.load(Ordering::Relaxed) {
         let said = said.await.unwrap_or_default();
-        health.failed(describe_failure(&dest, status, &said));
-    }
-}
-
-/// The NATS transport over a tunnel, which lives as long as it.
-pub struct SshTransport {
-    nats: NatsTransport,
-    _tunnel: Tunnel,
-}
-
-impl SshTransport {
-    pub fn new(nats: NatsTransport, tunnel: Tunnel) -> Self {
-        Self {
-            nats,
-            _tunnel: tunnel,
-        }
-    }
-}
-
-#[async_trait]
-impl Transport for SshTransport {
-    fn reconnections(&self) -> Reconnections {
-        self.nats.reconnections()
-    }
-
-    fn max_payload(&self) -> usize {
-        self.nats.max_payload()
-    }
-
-    async fn publish(&self, subject: &str, payload: Bytes) -> Result<(), TransportError> {
-        self.nats.publish(subject, payload).await
-    }
-
-    async fn subscribe(&self, subject: &str) -> Result<Subscription, TransportError> {
-        self.nats.subscribe(subject).await
-    }
-
-    async fn request(
-        &self,
-        subject: &str,
-        payload: Bytes,
-        timeout: Duration,
-    ) -> Result<Bytes, TransportError> {
-        self.nats.request(subject, payload, timeout).await
+        ssh.health
+            .failed(describe_failure(&ssh.dest, status, &said));
     }
 }
 
@@ -367,10 +364,10 @@ async fn probe(dest: &str, key: &Path) -> Result<(), Failure> {
     let (Some(mut stdout), Some(mut stderr)) = (child.stdout.take(), child.stderr.take()) else {
         return Err(failure(String::new()));
     };
-    // A NATS server speaks first.
-    let mut first = [0; 4];
+    // A hub speaks first.
+    let mut first = [0; GREETING.len()];
     let read = tokio::time::timeout(Duration::from_secs(60), stdout.read_exact(&mut first)).await;
-    if matches!(read, Ok(Ok(_))) && &first == b"INFO" {
+    if matches!(read, Ok(Ok(_))) && &first == GREETING {
         return Ok(());
     }
     if read.is_err() {

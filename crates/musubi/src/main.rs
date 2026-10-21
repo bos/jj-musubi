@@ -7,6 +7,7 @@ mod hub;
 mod login;
 mod repo;
 mod settings;
+mod socket;
 mod ssh;
 mod watch;
 
@@ -27,9 +28,9 @@ use musubi_sync::wire::HubWideRequest;
 
 use crate::config::HiveConfig;
 use crate::config::UserConfig;
-use crate::control::Socket;
 use crate::daemon::Status;
 use crate::repo::Located;
+use crate::socket::Socket;
 
 #[derive(Parser)]
 #[command(version, about = "Replicate jj repositories between machines")]

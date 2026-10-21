@@ -106,8 +106,8 @@ A third, `node_recovers_when_its_link_fails_partway`, fails the link the same wa
 repositories and the node's driver, retrying as the daemon does, while another machine
 syncs. Afterwards both machines see the same commits. It is slow, so it runs few cases.
 
-A connection that dies partway through a message never delivers part of it: NATS frames
-each message with its length and drops an incomplete one. A killed connection reaches
+A connection that dies partway through a message never delivers part of it: NATS and the
+stream transport both frame each message with its length and drop an incomplete one. A killed connection reaches
 musubi as a lost request or reply, which the link faults model. The truncated messages
 stand for a buggy or mismatched peer.
 

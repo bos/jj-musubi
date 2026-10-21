@@ -36,10 +36,10 @@ use crate::control;
 use crate::control::Control;
 use crate::control::ControlClient;
 use crate::control::RepoStatus;
-use crate::control::Socket;
 use crate::control::Synced;
 use crate::login;
 use crate::repo::Located;
+use crate::socket::Socket;
 use crate::watch::OpHeadsWatcher;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(30);

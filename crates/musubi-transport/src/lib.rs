@@ -15,11 +15,13 @@ use tokio::sync::watch;
 
 mod memory;
 mod nats;
+pub mod stream;
 
 pub use memory::Faults;
 pub use memory::MemoryNetwork;
 pub use memory::MemoryTransport;
 pub use nats::NatsTransport;
+pub use stream::StreamTransport;
 
 #[derive(Debug, Error)]
 pub enum TransportError {

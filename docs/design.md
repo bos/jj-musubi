@@ -470,6 +470,14 @@ limit. Subscriptions carry hub notifications.
   them. Every operation and object is verified
   against its content hash on receipt, so a misbehaving peer cannot inject data under a
   false id.
+- **Streams** carry the same subjects over a byte stream: the hub's local socket, and over
+  ssh, the standard input and output of `musubi hub connect`. Each frame is its length,
+  a kind, and its fields: `SUB`, `PUB` and `REQ` from the client, and `MSG` for its
+  subscriptions, and `REPLY` or `FAIL` for its requests, from the hub, which relays each
+  connection through its own transport, every request as it comes. A frame the connection
+  ends partway through is never delivered. The client opens a new connection whenever one
+  ends, subscribing again to what it had; requests in flight on the old one fail at once,
+  and those made in between wait for the new one, up to their timeout.
 
 ### Running a hub
 
@@ -495,11 +503,15 @@ commands on the hub's machine need no `--hub`. A hub that was killed leaves its 
 the port and uses it. The hub logs what it does at info, but not the NATS client's notices
 of each connection.
 
+The hub also listens on a local socket that only its owner can reach, beside the daemon's
+control socket (`hub-<hash of its directory>.sock`, or a named pipe on Windows), and records
+where in `hub.toml`, which is how `musubi hub connect` finds it.
+
 ### Reaching a hub over ssh
 
 Often ssh is the only way one machine can reach another, as when a laptop reaches a devbox
-through a zero-trust tunnel, and the protocol trusts whoever can reach the hub, so its NATS
-server can't simply be exposed. A `--hub` that isn't a URL is an ssh destination instead,
+through a zero-trust tunnel, and the protocol trusts whoever can reach the hub, so it can't
+simply be exposed. A `--hub` that isn't a URL is an ssh destination instead,
 passed to the user's own `ssh` (or `$MUSUBI_SSH`), so `~/.ssh/config` applies: aliases,
 `ProxyCommand`, and the rest.
 
@@ -509,24 +521,22 @@ passed to the user's own `ssh` (or `$MUSUBI_SSH`), so `~/.ssh/config` applies: a
   which can prompt then, since the user is at the terminal: `restrict,command="musubi hub
   connect"`, so a stolen key reaches the hub and nothing else. The daemon needs no ssh agent
   and never prompts (`BatchMode=yes`), which a process started at login couldn't answer.
-- `musubi hub connect` relays its stdin and stdout to the NATS server of the user's hub (the
-  one `musubi hub` last served without `--dir`). If the server requires a token, it adds it
-  to the client's `CONNECT`, so the token never leaves the hub's machine.
-- On the other machine, the NATS client connects to a port on loopback, and each connection
-  it makes there runs an ssh of its own and relays through it. Nothing outlives a
-  connection: an `ssh -L` forward that lasts goes dead when the machine sleeps, while here,
-  the NATS client reconnecting is a new ssh. The client pings every 10 seconds, and ssh's
-  `ServerAliveInterval` gives up on a dead link as quickly, but `Instant` stops while the
-  machine sleeps and the wall clock doesn't, so a jump between them ends every connection at
-  once, and the client reconnects within seconds of waking.
-- Once the NATS client reconnects, over ssh or not, the daemon syncs at once: the hub's
+- `musubi hub connect` relays its stdin and stdout to the socket of the user's hub (the one
+  `musubi hub` last served without `--dir`).
+- On the other machine, each connection is an ssh of its own, and the stream transport
+  speaks through its stdin and stdout. Nothing outlives a connection: an `ssh -L` forward
+  that lasts goes dead when the machine sleeps, while here, connecting again is a new ssh.
+  ssh's `ServerAliveInterval` gives up on a dead link within half a minute, but `Instant`
+  stops while the machine sleeps and the wall clock doesn't, so a jump between them ends
+  every connection at once, and the transport connects again within seconds of waking.
+- Once the transport reconnects, over ssh or not, the daemon syncs at once: the hub's
   announcements while it was away are lost. If it was in the middle of a sync, it starts
-  that again, since a request in flight when the connection dropped would otherwise wait
-  out its timeout.
+  that again, since over NATS, a request in flight when the connection dropped would
+  otherwise wait out its timeout.
 - ssh doesn't compress (`Compression=no`): musubi already compresses what it sends.
-- A failing ssh backs off, up to a minute, refusing the client's connections meanwhile:
-  otherwise the client's retries would run ssh, and perhaps a tunnel's login page in a
-  browser, every few seconds. What ssh said, or that `musubi` isn't on the `PATH` there
+- A failing ssh backs off, up to a minute, and the transport's attempts to connect
+  meanwhile fail at once: otherwise they would run ssh, and perhaps a tunnel's login page in
+  a browser, every few seconds. What ssh said, or that `musubi` isn't on the `PATH` there
   (exit status 127), becomes part of the error `musubi list` shows.
 - **In-memory** transport for tests. It can drop, delay, duplicate, and reorder messages, and
   disconnect peers.

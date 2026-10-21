@@ -1,5 +1,6 @@
-//! `musubi hub`: serving a hub directory, with a NATS server of its own unless given one;
-//! and asking a hub about its hives.
+//! `musubi hub`: serving a hub directory, with a NATS server of its own unless given one,
+//! and on a local socket, which `musubi hub connect` relays to; and asking a hub about its
+//! hives.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -15,19 +16,24 @@ use std::time::Instant;
 
 use anyhow::Context as _;
 use bytes::Bytes;
+use interprocess::local_socket::tokio::Listener;
+use interprocess::local_socket::traits::tokio::Listener as _;
 use musubi_sync::server::HubServer;
 use musubi_sync::wire::Envelope;
 use musubi_sync::wire::HUB_TOKEN;
 use musubi_sync::wire::HubWideReply;
 use musubi_sync::wire::HubWideRequest;
 use musubi_transport::NatsTransport;
+use musubi_transport::StreamTransport;
 use musubi_transport::Transport;
 use musubi_transport::TransportError;
 use serde::Deserialize;
 use serde::Serialize;
+use tokio::sync::oneshot;
 
 use crate::config;
 use crate::config::default_subject_prefix;
+use crate::socket::Socket;
 use crate::ssh;
 
 /// What marks a directory as a hub's, and holds its own NATS server's settings.
@@ -41,6 +47,9 @@ struct HubSettings {
     /// The NATS server the hub runs, chosen the first time it runs without `--nats`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     nats: Option<NatsSettings>,
+    /// The local socket it listens on, for `musubi hub connect`, as it last started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    socket: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -212,6 +221,8 @@ pub fn serve(args: ServeArgs) -> anyhow::Result<()> {
             ..nats
         });
     }
+    let socket = Socket::hub(&dir)?;
+    settings.socket = Some(socket.to_string());
     settings.save(&dir)?;
     let server = HubServer::open(&dir, &default_subject_prefix())?;
     match (created, server.hive_count()) {
@@ -222,7 +233,7 @@ pub fn serve(args: ServeArgs) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(async {
+    let result = runtime.block_on(async {
         // What other machines pass as --hub: over ssh, the name they reach this machine by,
         // unless they can reach its NATS server themselves.
         let (local, public, over_ssh, _child) = match (&args.nats, &settings.nats) {
@@ -274,7 +285,12 @@ pub fn serve(args: ServeArgs) -> anyhow::Result<()> {
                     )
                 })??,
         );
+        // Holding the hub directory's lock, nothing else listens here.
+        let listener = socket.listen()?;
+        let (answering, answers) = oneshot::channel();
+        let accepting = accept(listener, transport.clone(), answers);
         let ready = || {
+            answering.send(()).ok();
             // Whoever reads stdout may stop before the end, as `musubi hub | head -1` does;
             // println! would panic then, and the hub would stop serving.
             let mut stdout = std::io::stdout().lock();
@@ -311,9 +327,38 @@ pub fn serve(args: ServeArgs) -> anyhow::Result<()> {
         };
         tokio::select! {
             result = server.run(transport, ready) => result,
+            () = accepting => Ok(()),
             () = interrupted() => Ok(()),
         }
-    })
+    });
+    if let Socket::Path(path) = &socket {
+        fs::remove_file(path).ok();
+    }
+    result
+}
+
+/// Serves each connection to the hub's socket, once the hub answers requests, relaying what
+/// comes through `transport`.
+async fn accept(listener: Listener, transport: Arc<dyn Transport>, answers: oneshot::Receiver<()>) {
+    answers.await.ok();
+    loop {
+        let stream = match listener.accept().await {
+            Ok(stream) => stream,
+            Err(err) => {
+                tracing::warn!("accepting a connection: {err}");
+                // Out of file descriptors, say: don't spin.
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+        };
+        let transport = transport.clone();
+        tokio::spawn(async move {
+            let (reader, writer) = tokio::io::split(stream);
+            if let Err(err) = musubi_transport::stream::serve(transport, reader, writer).await {
+                tracing::debug!("a connection ended: {err}");
+            }
+        });
+    }
 }
 
 /// Waits for ^C, or on Unix, SIGTERM, as service managers stop what they run.
@@ -467,14 +512,13 @@ pub async fn connect(hub: &str, limit: Duration) -> anyhow::Result<Connection> {
             health: None,
         });
     }
-    let tunnel = ssh::Tunnel::open(hub).await?;
-    let health = tunnel.health();
-    let url = format!("nats://{LOOPBACK}:{}", tunnel.port());
-    let nats = tokio::time::timeout(limit, NatsTransport::connect(&url))
+    let link = ssh::Link::new(hub)?;
+    let health = link.health();
+    let transport = tokio::time::timeout(limit, StreamTransport::connect(Arc::new(link)))
         .await
         .map_err(|_| out_of_reach(health.problem()))??;
     Ok(Connection {
-        transport: Arc::new(ssh::SshTransport::new(nats, tunnel)),
+        transport: Arc::new(transport),
         health: Some(health),
     })
 }
@@ -514,10 +558,8 @@ pub async fn ask_over(
     }
 }
 
-/// `musubi hub connect`: relays stdin and stdout to the NATS server of the hub serving `dir`
-/// (by default, this user's hub), as the command a machine's daemon runs over ssh to reach
-/// it. A token the server requires goes into the client's `CONNECT`, so it never leaves
-/// this machine.
+/// `musubi hub connect`: relays stdin and stdout to the socket of the hub serving `dir` (by
+/// default, this user's hub), as the command a machine's daemon runs over ssh to reach it.
 pub fn relay(dir: Option<PathBuf>) -> anyhow::Result<()> {
     let dir = match dir {
         Some(dir) => dir,
@@ -528,42 +570,28 @@ pub fn relay(dir: Option<PathBuf>) -> anyhow::Result<()> {
             PathBuf::from(text.trim())
         }
     };
-    let settings = HubSettings::load(&dir)?;
-    let nats = settings.nats.with_context(|| {
+    let not_serving = || {
         format!(
-            "the hub in {} serves on a NATS server it doesn't run; connect to that directly",
+            "no hub is serving {} here; start one with `musubi hub`",
             dir.display()
         )
-    })?;
+    };
+    let socket = HubSettings::load(&dir)?
+        .socket
+        .as_deref()
+        .map(Socket::named)
+        .with_context(not_serving)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     let result = runtime.block_on(async {
-        use tokio::io::AsyncBufReadExt as _;
         use tokio::io::AsyncWriteExt as _;
-        let stream = tokio::net::TcpStream::connect((nats.local_host(), nats.port))
-            .await
-            .with_context(|| {
-                format!(
-                    "no hub is serving {} here (nothing listens on port {}); start one with \
-                     `musubi hub`",
-                    dir.display(),
-                    nats.port
-                )
-            })?;
-        stream.set_nodelay(true)?;
-        let (mut from_hub, mut to_hub) = stream.into_split();
-        let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
+        let stream = socket.connect_stream().await?.with_context(not_serving)?;
+        let (mut from_hub, mut to_hub) = tokio::io::split(stream);
+        let mut stdin = tokio::io::stdin();
         let mut stdout = tokio::io::stdout();
         let up = async {
-            if let Some(token) = &nats.token {
-                let mut line = String::new();
-                stdin.read_line(&mut line).await?;
-                to_hub
-                    .write_all(with_token(&line, token).as_bytes())
-                    .await?;
-            }
-            tokio::io::copy_buf(&mut stdin, &mut to_hub).await?;
+            tokio::io::copy(&mut stdin, &mut to_hub).await?;
             to_hub.shutdown().await
         };
         let down = tokio::io::copy(&mut from_hub, &mut stdout);
@@ -574,42 +602,10 @@ pub fn relay(dir: Option<PathBuf>) -> anyhow::Result<()> {
                 result?;
             }
         }
-        Ok(())
+        anyhow::Ok(())
     });
     // Dropping the runtime would wait for the read of stdin in progress, keeping the ssh
-    // open after the server closed the connection.
+    // open after the hub closed the connection.
     runtime.shutdown_background();
     result
-}
-
-/// A client's `CONNECT` line, giving `token`.
-fn with_token(line: &str, token: &str) -> String {
-    let Some(json) = line.strip_prefix("CONNECT ") else {
-        return line.to_owned();
-    };
-    let Ok(serde_json::Value::Object(mut fields)) = serde_json::from_str(json.trim_end()) else {
-        return line.to_owned();
-    };
-    fields.insert("auth_token".to_owned(), token.into());
-    format!("CONNECT {}\r\n", serde_json::Value::Object(fields))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_relay_gives_the_token() {
-        let line = with_token(
-            "CONNECT {\"verbose\":false,\"pedantic\":false}\r\n",
-            "s3cret",
-        );
-        let json = line.strip_prefix("CONNECT ").unwrap().trim_end();
-        let fields: serde_json::Value = serde_json::from_str(json).unwrap();
-        assert_eq!(fields["auth_token"], "s3cret");
-        assert_eq!(fields["verbose"], false);
-        assert!(line.ends_with("\r\n"));
-        // Anything else passes through.
-        assert_eq!(with_token("PING\r\n", "s3cret"), "PING\r\n");
-    }
 }

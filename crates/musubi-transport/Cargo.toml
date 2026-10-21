@@ -1,6 +1,6 @@
 [package]
 name = "musubi-transport"
-description = "Pluggable message transports for jj-musubi: NATS and an in-memory network for tests"
+description = "Pluggable message transports for jj-musubi: NATS, byte streams, and an in-memory network"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,7 +13,8 @@ async-trait.workspace = true
 bytes.workspace = true
 futures.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros"] }
+tracing.workspace = true
 
 [dev-dependencies]
 musubi-testutil.workspace = true

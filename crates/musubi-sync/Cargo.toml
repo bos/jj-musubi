@@ -27,7 +27,7 @@ tracing.workspace = true
 async-trait.workspace = true
 hegeltest.workspace = true
 musubi-testutil.workspace = true
-tokio = { workspace = true, features = ["rt", "time", "macros"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time", "macros"] }
 
 [lints]
 workspace = true

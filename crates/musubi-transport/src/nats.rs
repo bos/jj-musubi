@@ -19,12 +19,21 @@ pub struct NatsTransport {
 
 impl NatsTransport {
     /// Connects to `url`, retrying until the server answers, and reconnecting automatically
-    /// afterwards.
+    /// afterwards. Credentials in the URL authenticate: `nats://<token>@host:port` with a
+    /// token, `nats://<user>:<password>@host:port` with a user and password.
     pub async fn connect(url: &str) -> Result<Self, TransportError> {
         let other = |err: &dyn std::fmt::Display| TransportError::Other(err.to_string());
-        let client = async_nats::ConnectOptions::new()
+        let (url, credentials) = split_credentials(url);
+        let options = match credentials {
+            Credentials::None => async_nats::ConnectOptions::new(),
+            Credentials::Token(token) => async_nats::ConnectOptions::with_token(token),
+            Credentials::User(user, password) => {
+                async_nats::ConnectOptions::with_user_and_password(user, password)
+            }
+        };
+        let client = options
             .retry_on_initial_connect()
-            .connect(url)
+            .connect(url.as_str())
             .await
             .map_err(|err| other(&err))?;
         // With retries, `connect` returns before the server's INFO (and so its payload
@@ -36,6 +45,30 @@ impl NatsTransport {
     pub fn from_client(client: async_nats::Client) -> Self {
         Self { client }
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Credentials {
+    None,
+    Token(String),
+    User(String, String),
+}
+
+/// Takes the credentials out of a NATS URL. async-nats ignores them there.
+fn split_credentials(url: &str) -> (String, Credentials) {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return (url.to_owned(), Credentials::None);
+    };
+    let authority_end = rest.find('/').unwrap_or(rest.len());
+    let Some(at) = rest[..authority_end].rfind('@') else {
+        return (url.to_owned(), Credentials::None);
+    };
+    let (userinfo, host) = (&rest[..at], &rest[at + 1..]);
+    let credentials = match userinfo.split_once(':') {
+        Some((user, password)) => Credentials::User(user.to_owned(), password.to_owned()),
+        None => Credentials::Token(userinfo.to_owned()),
+    };
+    (format!("{scheme}://{host}"), credentials)
 }
 
 #[async_trait]
@@ -94,5 +127,36 @@ impl Transport for NatsTransport {
                 _ => TransportError::Other(err.to_string()),
             }),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn credentials_come_out_of_the_url() {
+        assert_eq!(
+            split_credentials("nats://s3cret@hub.local:4222"),
+            (
+                "nats://hub.local:4222".to_owned(),
+                Credentials::Token("s3cret".to_owned())
+            )
+        );
+        assert_eq!(
+            split_credentials("tls://me:pw@hub.local:4222"),
+            (
+                "tls://hub.local:4222".to_owned(),
+                Credentials::User("me".to_owned(), "pw".to_owned())
+            )
+        );
+        assert_eq!(
+            split_credentials("nats://hub.local:4222"),
+            ("nats://hub.local:4222".to_owned(), Credentials::None)
+        );
+        assert_eq!(
+            split_credentials("hub.local:4222"),
+            ("hub.local:4222".to_owned(), Credentials::None)
+        );
     }
 }

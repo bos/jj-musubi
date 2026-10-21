@@ -20,6 +20,7 @@ use crate::Subscription;
 use crate::Transport;
 use crate::TransportError;
 use crate::check_size;
+use crate::subject_matches;
 
 /// Per-message fault probabilities, in parts per million.
 #[derive(Clone, Copy, Debug, Default)]
@@ -115,9 +116,9 @@ impl MemoryNetwork {
         let faults = state.faults;
         let targets: Vec<mpsc::UnboundedSender<Message>> = state
             .subscriptions
-            .get(&message.subject)
-            .into_iter()
-            .flatten()
+            .iter()
+            .filter(|(pattern, _)| subject_matches(pattern, &message.subject))
+            .flat_map(|(_, subs)| subs)
             .filter(|sub| !state.partitioned.contains_key(&sub.client))
             .map(|sub| sub.sender.clone())
             .collect();
@@ -151,8 +152,9 @@ impl MemoryNetwork {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state
             .subscriptions
-            .get(subject)
-            .is_some_and(|subs| subs.iter().any(|sub| !sub.sender.is_closed()))
+            .iter()
+            .filter(|(pattern, _)| subject_matches(pattern, subject))
+            .any(|(_, subs)| subs.iter().any(|sub| !sub.sender.is_closed()))
     }
 }
 

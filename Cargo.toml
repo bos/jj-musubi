@@ -33,7 +33,7 @@ postcard = { version = "1", default-features = false, features = ["use-std"] }
 tempfile = "3"
 gix = { version = "=0.88.0", default-features = false }
 hegeltest = "=0.50.2"
-prost = "=0.14.3"
+prost = "=0.14.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

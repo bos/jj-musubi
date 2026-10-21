@@ -480,10 +480,11 @@ the formal model.
   must be theirs and writable by no one else, as tmux and ssh-agent check, or the daemon
   won't listen there and commands won't connect; a named pipe admits only its owner, and
   the daemon creates it as the first instance, so it can't start if another user took the
-  name. A lock file in the state directory, named after the socket,
-  keeps a second daemon from starting; the daemon holding it removes a socket a crashed
-  daemon left behind. Commands check the daemon's version first, and suggest
-  `musubi daemon restart` when it differs.
+  name. A lock file in the state directory, named after the socket, keeps a second daemon
+  from starting; the daemon holding it removes a socket a crashed daemon left behind.
+  Commands check the daemon's version first, and suggest `musubi daemon restart` when it
+  differs. Commands change `config.toml` holding a lock beside it, and write it whole, so
+  that concurrent joins keep each other's changes and a crash never leaves half a file.
 - The daemon watches `.jj/repo/op_heads/heads` with filesystem notifications and also polls
   slowly. It reads operations through jj-lib's op store and never parses jj files itself.
 - Loads and merges go through jj-lib's repo loader, which takes jj's op heads lock. musubi

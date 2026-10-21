@@ -172,8 +172,20 @@ impl UserConfig {
         write_private(&path, toml::to_string(self)?.as_bytes())
     }
 
-    /// Changes the saved config.
+    /// Changes the saved config, holding a lock meanwhile so that two commands changing it
+    /// at once (two joins, say) don't lose either's change.
     pub fn update(change: impl FnOnce(&mut Self)) -> anyhow::Result<Self> {
+        let dir = config_dir()?;
+        fs::create_dir_all(&dir)?;
+        let lock_path = dir.join("config.lock");
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .with_context(|| format!("opening {lock_path:?}"))?;
+        lock.lock()
+            .with_context(|| format!("locking {lock_path:?}"))?;
         let mut config = Self::load()?;
         let before = config.clone();
         change(&mut config);

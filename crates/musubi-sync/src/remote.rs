@@ -7,6 +7,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::SystemTime;
 
 use bytes::Bytes;
 use futures::StreamExt as _;
@@ -40,6 +41,11 @@ pub const WINDOW: usize = 8;
 /// won't pass by being sent again.
 const RESTARTS: usize = 3;
 
+/// How long a node keeps a blob nothing has touched: a partial download, which a later call
+/// can resume if the hub prepares the same blob again, as after a night asleep, or a blob a
+/// crash left behind.
+const UNUSED_BLOB_LIFETIME: Duration = Duration::from_secs(24 * 3600);
+
 pub struct RemoteHub {
     transport: Arc<dyn Transport>,
     rpc_subject: String,
@@ -64,11 +70,15 @@ impl RemoteHub {
         })
     }
 
-    /// Sends one protocol request and returns the reply, with any bundle in it downloaded.
+    /// Sends one protocol request and returns the reply, with any bundle in it downloaded,
+    /// and deleted once nothing refers to it. A download the call leaves partway stays for a
+    /// later call to resume, for a day. Be done with one reply before a call that may
+    /// download the same blob: the two would share its file.
     pub async fn call(
         &self,
         request: Request<OpId, Attachment>,
     ) -> anyhow::Result<Reply<OpId, Attachment>> {
+        self.blobs.sweep(SystemTime::now() - UNUSED_BLOB_LIFETIME);
         let mut inline_left = inline_limit(self.transport.max_payload());
         let mut uploads = Uploads {
             blobs: &self.blobs,
@@ -108,9 +118,16 @@ impl RemoteHub {
             HubReply::Error(err) => anyhow::bail!("hub: {err}"),
             other => anyhow::bail!("unexpected reply {other:?}"),
         };
+        // Deleted here if a later download fails or the call is dropped, and otherwise once
+        // the caller is done with the reply.
         let mut downloads = vec![];
         for (blob, len) in reply_blobs(&reply) {
-            downloads.push((blob, self.download(&blob, len).await?));
+            // Once, though the reply names it twice: each path deletes its file.
+            if downloads.iter().any(|(id, _)| *id == blob) {
+                continue;
+            }
+            let path = tempfile::TempPath::try_from_path(self.download(&blob, len).await?)?;
+            downloads.push((blob, Arc::new(path)));
         }
         map_reply(reply, OpId::new, |attachment| {
             Ok(match attachment {
@@ -119,9 +136,9 @@ impl RemoteHub {
                     let path = downloads
                         .iter()
                         .find(|(id, _)| *id == blob)
-                        .map(|(_, path)| path.clone())
+                        .map(|(_, path)| Arc::clone(path))
                         .expect("downloaded above");
-                    Attachment::File(path)
+                    Attachment::Bundle(path)
                 }
                 WireAttachment::Inline(bytes) => {
                     // Not reopened truncating (see `BundleWriter::create`).
@@ -134,13 +151,6 @@ impl RemoteHub {
                 }
             })
         })
-    }
-
-    /// Releases a downloaded bundle once its contents have been imported.
-    pub fn release(&self, attachment: &Attachment) {
-        if let Attachment::File(path) = attachment {
-            std::fs::remove_file(path).ok();
-        }
     }
 
     async fn send(&self, request: HubRequest) -> anyhow::Result<HubReply> {
@@ -157,10 +167,8 @@ impl RemoteHub {
         }
         let reply = self.exchange(bytes).await?;
         if let HubReply::Indirect { blob, len } = reply {
-            let path = self.download(&blob, len).await?;
-            let reply = Envelope::<HubReply>::decode(&std::fs::read(&path)?)?;
-            self.blobs.remove(&blob);
-            return Ok(reply);
+            let path = tempfile::TempPath::try_from_path(self.download(&blob, len).await?)?;
+            return Envelope::<HubReply>::decode(&std::fs::read(&path)?);
         }
         Ok(reply)
     }

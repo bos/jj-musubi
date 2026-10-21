@@ -122,7 +122,10 @@ blob, then uploads the same content and pushes it, as another node would push wh
 first fetched, and downloads the blob again. `calls_leave_no_uploads_behind` makes a push
 of the session through a link that fails partway through its upload, and again with the
 call dropped partway, as the daemon drops a sync when the connection comes back; either
-way the node's blob store is left empty.
+way the node's blob store is left empty. `calls_leave_no_downloads_behind` does the same
+partway through the second of a fetch's two downloads, which leaves only the partial
+download, for a later call to resume until it has gone a day untouched; and when the
+fetch succeeds, its downloads go once its reply is dropped.
 
 A connection that dies partway through a message never delivers part of it: the stream
 transport frames each message with its length and drops an incomplete one. A killed connection reaches

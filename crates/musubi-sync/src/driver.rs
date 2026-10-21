@@ -123,20 +123,8 @@ impl NodeDriver {
             }
         };
         let reply = self.remote.call(request).await?;
-        let attachments = match &reply {
-            Reply::Fetched {
-                ops_attachment,
-                objects,
-                ..
-            } => vec![ops_attachment.clone(), objects.clone()],
-            Reply::Objects { attachment, .. } => vec![attachment.clone()],
-            Reply::Head { .. } => vec![],
-        };
-        let result = self.core.handle(&mut self.adapter, reply);
-        for attachment in &attachments {
-            self.remote.release(attachment);
-        }
-        let handled = result?;
+        // Handling the reply imports its bundles, which go once it is dropped.
+        let handled = self.core.handle(&mut self.adapter, reply)?;
         if let Handled::Learned {
             kind: HeadKind::Accepted,
             ..

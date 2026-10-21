@@ -378,6 +378,98 @@ fn calls_leave_no_uploads_behind() {
     });
 }
 
+/// A node deletes what it downloads once it is done with it, however the call ends: when
+/// the link fails partway through the call's second download, when the call is dropped
+/// there, and when it succeeds, once the reply is dropped. A partial download stays for a
+/// later call to resume, until it has gone a day untouched.
+#[test]
+fn calls_leave_no_downloads_behind() {
+    let session = session();
+    // A fetch with two downloads, and the request that begins the second.
+    let (call, second) = session
+        .calls
+        .iter()
+        .find_map(|call| {
+            let requests = &session.seen.requests[call.start..call.start + call.requests];
+            let mut downloads = requests.iter().enumerate().filter_map(|(n, bytes)| {
+                match Envelope::decode(bytes) {
+                    Ok(HubRequest::GetChunk { blob, .. }) => Some((n, blob)),
+                    _ => None,
+                }
+            });
+            let (_, first) = downloads.next()?;
+            let (second, _) = downloads.find(|(_, blob)| *blob != first)?;
+            Some((call, second))
+        })
+        .unwrap();
+    run_local(async {
+        let dir = tempfile::tempdir().unwrap();
+        let hub_dir = dir.path().join("hub");
+        let network = MemoryNetwork::new(1, MAX_PAYLOAD);
+        serve(
+            session.hub_after(call.start, &hub_dir),
+            Arc::new(network.connect()),
+        )
+        .await;
+        let blobs = dir.path().join("node");
+        let stored = |sub: &str| std::fs::read_dir(blobs.join(sub)).unwrap().count();
+        let failing = |at| {
+            let link = Link::new(
+                Arc::new(network.connect()),
+                &hub_dir,
+                Some((at, Fault::Lost)),
+            );
+            RemoteHub::new(link, RPC.into(), &blobs, TIMEOUT).unwrap()
+        };
+
+        // The link fails just after the second download's first chunk.
+        let reply = failing(second + 1)
+            .call(call.request(&session.seen, &blobs))
+            .await;
+        assert!(reply.is_err());
+        assert_eq!(stored("complete"), 0);
+        assert_eq!(stored("partial"), 1);
+        // A later call keeps the partial download until it has gone a day untouched.
+        let request = call.request(&session.seen, &blobs);
+        assert!(failing(0).call(request).await.is_err());
+        assert_eq!(stored("partial"), 1);
+        let partial = std::fs::read_dir(blobs.join("partial"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        std::fs::File::options()
+            .write(true)
+            .open(partial)
+            .unwrap()
+            .set_modified(SystemTime::now() - Duration::from_secs(2 * 24 * 3600))
+            .unwrap();
+        let request = call.request(&session.seen, &blobs);
+        assert!(failing(0).call(request).await.is_err());
+        assert_eq!(stored("partial"), 0);
+
+        let remote =
+            RemoteHub::new(Arc::new(network.connect()), RPC.into(), &blobs, TIMEOUT).unwrap();
+        let mut reply = Box::pin(remote.call(call.request(&session.seen, &blobs)));
+        // Until the first download is done, and the second waits on the hub.
+        while stored("complete") == 0 {
+            assert!(futures::poll!(reply.as_mut()).is_pending());
+            tokio::task::yield_now().await;
+        }
+        drop(reply);
+        assert_eq!(stored("complete"), 0);
+
+        let reply = remote
+            .call(call.request(&session.seen, &blobs))
+            .await
+            .unwrap();
+        assert_eq!(stored("complete"), 2);
+        drop(reply);
+        assert_eq!(stored("complete"), 0);
+    });
+}
+
 /// How a [`Link`] fails, from a given request on.
 #[derive(Clone, Copy, Debug)]
 enum Fault {

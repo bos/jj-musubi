@@ -1,6 +1,32 @@
 # The full local check. Run before finishing any change.
 check: fmt-check lint oracle test docs deny machete typos
 
+# Build musubi: target/debug/musubi.
+dev:
+    cargo build --locked -p musubi
+
+# Build musubi optimized: target/release/musubi.
+release:
+    cargo build --locked -p musubi --release
+
+# Install musubi (`just install dev` for a dev build) and restart a running daemon.
+install profile="release":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    root="${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}"
+    musubi="$root/bin/musubi"
+    cargo build --locked -p musubi --profile {{profile}}
+    # A running daemon keeps the old binary (and on Windows locks it): stop it, install, and
+    # start the new one.
+    running=false
+    if [[ -x $musubi ]]; then
+        out=$("$musubi" daemon stop)
+        echo "$out"
+        if [[ $out == Stopped* ]]; then running=true; fi
+    fi
+    cargo install --locked --path crates/musubi --profile {{profile}} --root "$root"
+    if $running; then "$musubi" daemon restart; fi
+
 fmt:
     cargo fmt --all
 

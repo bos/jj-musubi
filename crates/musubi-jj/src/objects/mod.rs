@@ -99,6 +99,11 @@ pub trait ObjectStore {
     /// reachable from `haves` is.
     fn check_connected(&self, wants: &[CommitId], haves: &[CommitId]) -> Result<(), ObjectError>;
 
+    /// The commits reachable from `wants` but not from `haves` whose only parent is the
+    /// root commit: in git terms, the parentless commits. Two repositories that share one
+    /// share history.
+    fn roots(&self, wants: &[CommitId], haves: &[CommitId]) -> Result<Vec<CommitId>, ObjectError>;
+
     /// Stores a bundle's objects, then fails unless everything reachable from `wants` is
     /// present, given that everything reachable from `haves` was.
     fn import(

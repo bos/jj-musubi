@@ -38,6 +38,7 @@ use jj_lib::repo::Repo as _;
 use jj_lib::repo::RepoLoader;
 use jj_lib::repo::RepoLoaderError;
 use jj_lib::repo::StoreLoadError;
+use jj_lib::revset::RevsetExpression;
 use jj_lib::settings::UserSettings;
 use jj_lib::simple_op_store::SimpleOpStore;
 use pollster::FutureExt as _;
@@ -71,6 +72,19 @@ use crate::objects::SimpleStore;
 use crate::translation_map::TranslationMap;
 use crate::workspaces;
 use crate::workspaces::Machine;
+
+/// What a hub matches a joining repository against: see [`NodeRepo::join_summary`].
+#[derive(Clone, Debug)]
+pub struct JoinSummary {
+    /// `git` or `simple`.
+    pub backend: &'static str,
+    pub remotes: BTreeMap<String, hive_settings::Remote>,
+    /// Visible commits whose parent is the root commit, other than an empty working-copy
+    /// commit with no description.
+    pub roots: Vec<CommitId>,
+    /// The commits remote bookmarks point to.
+    pub remote_targets: Vec<CommitId>,
+}
 
 /// The operation attribute naming the canonical operation a realization represents.
 pub const CANONICAL_ATTRIBUTE: &str = "musubi.canonical";
@@ -350,6 +364,50 @@ impl NodeRepo {
     /// This machine's identity in the hive.
     pub fn machine(&self) -> &Machine {
         &self.machine
+    }
+
+    /// What a hub needs to know to decide which hive this repository belongs to.
+    pub fn join_summary(&self) -> Result<JoinSummary, NodeError> {
+        let repo = self.load_at_head()?;
+        let view = repo.view();
+        let working_copies: BTreeSet<&CommitId> = view.wc_commit_ids().values().collect();
+        let empty_tree = repo.store().empty_merged_tree().tree_ids().clone();
+        let children: Vec<CommitId> = RevsetExpression::root()
+            .children()
+            .evaluate(repo.as_ref())
+            .map_err(|err| NodeError::Index(err.to_string()))?
+            .stream()
+            .try_collect()
+            .block_on()
+            .map_err(|err| NodeError::Index(err.to_string()))?;
+        let mut roots = vec![];
+        for id in children {
+            let commit = repo.store().get_commit(&id)?;
+            // A new repository's working-copy commit is no history to share.
+            let placeholder = working_copies.contains(&id)
+                && commit.description().is_empty()
+                && *commit.tree_ids() == empty_tree;
+            if !placeholder {
+                roots.push(id);
+            }
+        }
+        let remote_targets = view
+            .all_remote_bookmarks()
+            .filter(|(symbol, _)| symbol.remote != REMOTE_NAME_FOR_LOCAL_GIT_REPO)
+            .flat_map(|(_, remote)| remote.target.adds().flatten().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let git = self.git_objects();
+        Ok(JoinSummary {
+            backend: if git.is_some() { "git" } else { "simple" },
+            remotes: match git {
+                Some(git) => git.remotes()?,
+                None => BTreeMap::new(),
+            },
+            roots,
+            remote_targets,
+        })
     }
 
     /// The canonical form of a local view: no records of this machine's `.git`, and every

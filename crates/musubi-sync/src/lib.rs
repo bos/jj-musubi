@@ -19,6 +19,7 @@ pub mod hive;
 pub mod hub;
 pub mod node;
 pub mod remote;
+pub mod server;
 pub mod service;
 pub mod wire;
 

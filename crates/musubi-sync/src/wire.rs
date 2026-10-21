@@ -13,6 +13,9 @@
 use musubi_core::message::OpEntry;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
+use musubi_hub::hub_dir::HiveInfo;
+use musubi_hub::hub_dir::JoinRequest;
+use musubi_hub::hub_dir::Joined;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -73,6 +76,37 @@ pub enum HubReply {
         total: u64,
         data: Vec<u8>,
     },
+    Error(String),
+}
+
+/// What stands in for a hive id in the subject of requests to the hub as a whole:
+/// `musubi.hub.rpc`.
+pub const HUB_TOKEN: &str = "hub";
+
+/// A request about the hub's hives rather than within one.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HubWideRequest {
+    /// Find the hive a repository belongs to, creating it if need be.
+    Join(JoinRequest),
+    List,
+    /// Look up a hive by name, name prefix, or id.
+    Resolve {
+        name: String,
+    },
+    Rename {
+        name: String,
+        to: String,
+    },
+    Remove {
+        name: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HubWideReply {
+    Joined(Joined),
+    Hives(Vec<HiveInfo>),
+    Hive(HiveInfo),
     Error(String),
 }
 

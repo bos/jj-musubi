@@ -217,7 +217,8 @@ pub fn serve(args: ServeArgs) -> anyhow::Result<()> {
     })
 }
 
-async fn interrupted() {
+/// Waits for ^C, or on Unix, SIGTERM, as service managers stop what they run.
+pub async fn interrupted() {
     #[cfg(unix)]
     {
         let Ok(mut terminate) =

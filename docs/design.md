@@ -483,7 +483,16 @@ the formal model.
   name. A lock file in the state directory, named after the socket, keeps a second daemon
   from starting; the daemon holding it removes a socket a crashed daemon left behind.
   Commands check the daemon's version first, and suggest `musubi daemon restart` when it
-  differs. Commands change `config.toml` holding a lock beside it, and write it whole, so
+  differs.
+- `musubi daemon install` hands the daemon to the platform's service manager, to start at
+  login: a launchd agent on macOS and a systemd user unit on Linux, which restart it after
+  a crash but not after `musubi daemon stop`, and an entry in the user's `Run` registry key
+  on Windows, which runs `musubi daemon start`. Where launchd or systemd runs it, commands
+  that need the daemon ask the service manager to start it rather than starting one
+  themselves, so there is never a second. The service gets the installing shell's `PATH`
+  (the daemon runs `git`) and `MUSUBI_*` settings, and a marker in the state directory
+  records it, so commands with another `MUSUBI_CONFIG_DIR` (tests) leave it alone.
+- Commands change `config.toml` holding a lock beside it, and write it whole, so
   that concurrent joins keep each other's changes and a crash never leaves half a file.
 - The daemon watches `.jj/repo/op_heads/heads` with filesystem notifications and also polls
   slowly. It reads operations through jj-lib's op store and never parses jj files itself.
@@ -552,4 +561,5 @@ across incompatible ones. musubi is pinned to jj-lib 0.46.0.
    and a daemon controlled over a local socket.
 5. Generated end-to-end tests and multi-process NATS tests.
 6. Supersede records for `jj op abandon`, hub garbage collection.
-7. Starting the daemon at login, as a launchd, systemd, or Windows login service.
+7. Starting the daemon at login, as a launchd agent, systemd user unit, or Windows `Run`
+   entry.

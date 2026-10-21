@@ -80,8 +80,20 @@ jobs:
           .github/scripts/install-release.sh jj-vcs/jj v0.46.0 "${{ matrix.jj }}" "${{ matrix.jj-sha256 }}" jj
           .github/scripts/install-release.sh nats-io/nats-server v2.15.1 "${{ matrix.nats }}" "${{ matrix.nats-sha256 }}" nats-server
       - run: jj --version && nats-server --version && git --version
+      # The login service test installs the daemon with systemd's user manager, which a
+      # runner doesn't start without a login session.
+      - name: Start a systemd user manager
+        if: runner.os == 'Linux'
+        run: |
+          sudo loginctl enable-linger "$USER"
+          sudo systemctl start "user@$(id -u).service"
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
       # The conformance test needs the Lean oracle; the conformance job runs it.
       - run: cargo nextest run --workspace --locked -E "not test(=conformance)"
+        env:
+          # Runners are thrown away, so the test may install a login service for real.
+          MUSUBI_TEST_LOGIN_SERVICE: "1"
 
   conformance:
     name: Lean model and conformance

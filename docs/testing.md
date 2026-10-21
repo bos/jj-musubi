@@ -62,6 +62,15 @@ starts in the background, serving a repository joined later without a restart. E
 machine has its own config directory, and so its own daemon and control socket; the tests
 stop the daemons, and kill the NATS server a killed hub leaves behind, when they finish.
 
+One CLI test installs a real login service, and so runs only with
+`MUSUBI_TEST_LOGIN_SERVICE=1`, which CI sets on its throwaway runners: never set it where
+musubi is installed for real. It installs the daemon with launchd or systemd and checks
+that the service manager starts it, restarts it after it is killed but not after `musubi
+daemon stop`, and starts it for a command that needs it; on Windows it runs the `Run`
+entry's command as a login would. CI's Linux runners have no systemd user manager without
+a login session, so the workflow enables lingering and starts one first. Logging in itself
+is the one step no test exercises.
+
 ## Generated end-to-end tests
 
 Modeled on jj-stack's generated integration tests. A Hegel state machine drives two or three

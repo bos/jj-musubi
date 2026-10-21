@@ -40,6 +40,7 @@ use crate::control::ControlClient;
 use crate::control::RepoStatus;
 use crate::control::Socket;
 use crate::control::Synced;
+use crate::login;
 use crate::repo::Located;
 use crate::watch::OpHeadsWatcher;
 
@@ -250,6 +251,9 @@ pub fn run(socket: &Socket) -> anyhow::Result<()> {
             }
         }
     }
+    // Beside the lock, for finding the daemon's process.
+    let pid_path = lock_path.with_extension("pid");
+    fs::write(&pid_path, std::process::id().to_string())?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -257,6 +261,7 @@ pub fn run(socket: &Socket) -> anyhow::Result<()> {
     if let Socket::Path(path) = socket {
         fs::remove_file(path).ok();
     }
+    fs::remove_file(&pid_path).ok();
     drop(lock);
     result
 }
@@ -289,7 +294,7 @@ async fn listen(socket: &Socket, lock_path: &Path) -> anyhow::Result<()> {
                 Err(err) => tracing::warn!("accepting a connection: {err}"),
             },
             () = daemon.stop.notified() => break,
-            _ = tokio::signal::ctrl_c() => break,
+            () = crate::hub::interrupted() => break,
             _ = check.tick() => if !lock_path.exists() {
                 tracing::warn!("{} is gone; stopping", lock_path.display());
                 break;
@@ -528,7 +533,14 @@ pub async fn ensure(socket: &Socket) -> anyhow::Result<ControlClient> {
     if let Some(client) = running(socket).await? {
         return Ok(client);
     }
-    let (mut child, log) = spawn(socket)?;
+    // Where a service manager runs the daemon, it starts it, so that there is only one.
+    let (mut child, log) = if login::managed() {
+        login::start()?;
+        (None, login::log_hint())
+    } else {
+        let (child, log) = spawn(socket)?;
+        (Some(child), log.display().to_string())
+    };
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     // A child that exits may have lost a race with another command's daemon, which is as
     // good: keep looking for one until the deadline.
@@ -537,22 +549,20 @@ pub async fn ensure(socket: &Socket) -> anyhow::Result<ControlClient> {
         if let Some(client) = running(socket).await? {
             return Ok(client);
         }
-        if exited.is_none() {
+        if exited.is_none()
+            && let Some(child) = &mut child
+        {
             exited = child.try_wait()?;
         }
         if std::time::Instant::now() >= deadline {
             let Some(status) = exited else {
-                anyhow::bail!(
-                    "the daemon did not start listening on {socket}; see {}",
-                    log.display()
-                );
+                anyhow::bail!("the daemon did not start listening on {socket}; see {log}");
             };
             let tail = fs::read_to_string(&log).unwrap_or_default();
             let tail: Vec<&str> = tail.lines().rev().take(5).collect();
             let tail: Vec<&str> = tail.into_iter().rev().collect();
             anyhow::bail!(
-                "the daemon exited ({status}) before it was ready; from {}:\n{}",
-                log.display(),
+                "the daemon exited ({status}) before it was ready; from {log}:\n{}",
                 tail.join("\n")
             );
         }

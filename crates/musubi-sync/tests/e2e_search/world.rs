@@ -344,6 +344,16 @@ impl World {
         view
     }
 
+    /// Has each machine with edits no `jj` command has snapshotted look, snapshotting them.
+    /// Returns whether any did.
+    pub fn snapshot_pending(&mut self) -> bool {
+        let pending: Vec<usize> = (0..self.nodes()).filter(|&m| self.dirty[m]).collect();
+        for &m in &pending {
+            self.observe(m);
+        }
+        !pending.is_empty()
+    }
+
     // Local work.
 
     /// Runs a `jj` command as a user would, in workspace `ws` of machine `m`; it must

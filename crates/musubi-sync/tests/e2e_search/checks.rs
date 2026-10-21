@@ -20,6 +20,13 @@ impl World {
     pub fn converge(&mut self) {
         self.record("converge".to_owned());
         self.sync_everything();
+        // A machine with edits it hasn't snapshotted snapshots them with its next `jj`
+        // command, rewriting its working copy, possibly at an older operation and so
+        // concurrently with another machine's rewrite of it. Have it look, as rules do, so
+        // the ledger records who rewrote it, then sync that.
+        if self.snapshot_pending() {
+            self.sync_everything();
+        }
         if masked("export-after-merge") {
             // Masks found::bookmark_moved_by_a_node_merge_is_exported: a node's own merge
             // can leave its `.git` behind its bookmarks. Any `jj` command that writes an

@@ -243,14 +243,14 @@ impl Ledger {
 
     /// The divergent changes in `view` that nothing explains, and those that look like the
     /// same rebase done twice: two visible commits of a change with the same parents,
-    /// description and contents (as `same_contents` says of two commit ids), which is what
-    /// two nodes merging the same concurrent operations would produce, and which the hub's
-    /// sequencing exists to prevent. (Two machines' commands can do that too, by rewriting
-    /// a commit the same way, which explains it.)
+    /// description and contents, neither rewritten from the other (as `copy_of` says of two
+    /// commit ids), which is what two nodes merging the same concurrent operations would
+    /// produce, and which the hub's sequencing exists to prevent. (Two machines' commands can
+    /// do that too, by rewriting a commit the same way, which explains it.)
     pub fn spurious_divergence(
         &self,
         view: &View,
-        same_contents: impl Fn(&str, &str) -> bool,
+        copy_of: impl Fn(&str, &str) -> bool,
     ) -> Vec<String> {
         let explained = self.explained_divergence(view);
         let mut spurious = vec![];
@@ -269,7 +269,7 @@ impl Ledger {
             let twice = copies.values().any(|ids| {
                 ids.iter()
                     .enumerate()
-                    .any(|(i, a)| ids[i + 1..].iter().any(|b| same_contents(a, b)))
+                    .any(|(i, a)| ids[i + 1..].iter().any(|b| copy_of(a, b)))
             });
             let commanded = self.rewrites.get(&change).map_or(0, BTreeSet::len);
             if twice

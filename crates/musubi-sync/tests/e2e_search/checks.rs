@@ -201,7 +201,27 @@ impl World {
                     b,
                 ],
             );
-            diff.is_empty()
+            // A commit and its own rewrite can match too, when the rewrite changed nothing
+            // (squashing an empty commit into it): the original stays visible under a
+            // descendant jj leaves in place, as it leaves the children of a divergently
+            // rewritten commit. That is no copy.
+            let rewritten_from = |new: &str, old: &str| {
+                self.raw_jj(
+                    0,
+                    &[
+                        "--ignore-working-copy",
+                        "evolog",
+                        "--no-graph",
+                        "-r",
+                        new,
+                        "-T",
+                        "commit.commit_id() ++ \"\\n\"",
+                    ],
+                )
+                .lines()
+                .any(|id| id == old)
+            };
+            diff.is_empty() && !rewritten_from(a, b) && !rewritten_from(b, a)
         });
         if !spurious.is_empty() {
             let details: Vec<String> = spurious

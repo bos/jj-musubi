@@ -105,7 +105,10 @@ Replicating views verbatim corrupts the second kind.
   abandons this machine's working-copy commit without moving its workspace (because it had
   forgotten the workspace), this machine gives itself a fresh `@` where jj would have put
   it: on the nearest visible ancestor, or on the rewrite of an ancestor that was rewritten
-  rather than abandoned (the change's one visible commit).
+  rather than abandoned (the change's one visible commit). Much as when jj merges
+  concurrent operations, a commit moved with `jj rebase -r` counts as rewritten, so the
+  fresh `@` follows it, where a local `jj rebase -r` would have left the working copy
+  behind.
 
   Which workspace made an operation is per-machine too. jj records it in the operation's
   metadata, and `jj undo` and `jj redo` refuse to undo another workspace's operation, telling

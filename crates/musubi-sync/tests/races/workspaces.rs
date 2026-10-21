@@ -145,6 +145,67 @@ fn forgotten_working_copies_follow_an_abandon_to_the_parent() {
     assert_eq!(parent_description(&hive, 1), "base on beta");
 }
 
+/// The same, when something below the parent is abandoned: jj rebases the parent onto
+/// what's left, and the fresh `@` follows it.
+#[test]
+fn forgotten_working_copies_follow_a_parent_rebased_by_an_abandon() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(1, "a", "base on beta");
+    hive.commit(1, "b", "from beta");
+    hive.sync();
+    hive.repo(0).jj(&["workspace", "forget", "beta/beta"]);
+    let base = hive.commit_id(0, "base on beta");
+    hive.repo(0).jj(&["abandon", &base]);
+    hive.sync();
+    hive.sync();
+    hive.assert_converged();
+    assert_eq!(parent_description(&hive, 1), "from beta");
+    // Not the old commit kept alive as a divergent copy: `commit_id` wants just one.
+    assert_eq!(revision_id(&hive, 1, "@-"), hive.commit_id(1, "from beta"));
+}
+
+/// The same, when the parent's whole branch is rebased elsewhere: the fresh `@` follows it.
+/// Since a rewrite keeps the change id, it follows the moved parent after `jj rebase -r` too,
+/// as jj does when it merges concurrent operations, though a local `jj rebase -r` would have
+/// left the working copy behind. The commits alone can't tell the two apart.
+#[test]
+fn forgotten_working_copies_follow_a_moved_parent() {
+    // `-b` moves "base on beta" along with the parent; `-r` moves the parent alone.
+    for (how, below) in [("-b", "base on beta"), ("-r", "elsewhere")] {
+        let mut hive = Fixture::new(&["alpha", "beta"]);
+        hive.commit(1, "a", "base on beta");
+        hive.commit(1, "b", "from beta");
+        hive.sync();
+        hive.repo(0).jj(&["workspace", "forget", "beta/beta"]);
+        hive.repo(0)
+            .jj(&["new", "--no-edit", "root()", "-m", "elsewhere"]);
+        let elsewhere = hive.commit_id(0, "elsewhere");
+        let parent = hive.commit_id(0, "from beta");
+        hive.repo(0).jj(&["rebase", how, &parent, "-o", &elsewhere]);
+        hive.sync();
+        hive.sync();
+        hive.assert_converged();
+        assert_eq!(parent_description(&hive, 1), "from beta", "rebase {how}");
+        assert_eq!(
+            revision_id(&hive, 1, "@-"),
+            hive.commit_id(1, "from beta"),
+            "rebase {how}"
+        );
+        assert_eq!(
+            revision_id(&hive, 1, "@--"),
+            hive.commit_id(1, below),
+            "rebase {how}"
+        );
+    }
+}
+
+/// The commit id of `revision` on machine `m`.
+fn revision_id(hive: &Fixture, m: usize, revision: &str) -> String {
+    hive.repo(m).jj(&["status"]);
+    hive.repo(m)
+        .jj(&["log", "--no-graph", "-r", revision, "-T", "commit_id"])
+}
+
 /// The description of machine `m`'s `@-`.
 fn parent_description(hive: &Fixture, m: usize) -> String {
     hive.repo(m).jj(&["status"]);

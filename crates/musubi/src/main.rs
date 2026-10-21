@@ -37,6 +37,11 @@ struct Cli {
     /// The daemon's control socket, in place of the usual one.
     #[arg(long, global = true, env = "MUSUBI_SOCKET", hide_env = true)]
     socket: Option<String>,
+    /// What to log, as a filter in `RUST_LOG`'s syntax: `debug`, or `info,musubi_sync=debug`.
+    /// It applies to this command, not to a daemon it starts, which uses `[daemon] log` in
+    /// the user config.
+    #[arg(long, global = true, value_name = "FILTER")]
+    log: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -180,24 +185,46 @@ enum DaemonAction {
     Uninstall,
 }
 
+/// What to log: `--log`, else `RUST_LOG`, else for the daemon `[daemon] log` in the user
+/// config. Otherwise the hub and the daemon log what they do, and other commands only
+/// warn, since they say what they did themselves.
+fn log_filter(cli: &Cli) -> anyhow::Result<tracing_subscriber::EnvFilter> {
+    let daemon = matches!(cli.command, Some(Command::Daemon { action: None }));
+    let hub = matches!(cli.command, Some(Command::Hub { action: None, .. }));
+    if let Some(filter) = &cli.log {
+        return parse_filter(filter).with_context(|| format!("bad log filter {filter:?}"));
+    }
+    // Other programs read RUST_LOG too, so one this can't read is passed over, not fatal.
+    if let Ok(filter) = std::env::var("RUST_LOG")
+        && !filter.is_empty()
+    {
+        match parse_filter(&filter) {
+            Ok(filter) => return Ok(filter),
+            Err(err) => eprintln!("Ignoring RUST_LOG={filter:?} ({err})."),
+        }
+    }
+    if daemon && let Some(filter) = UserConfig::load()?.daemon.log {
+        return parse_filter(&filter)
+            .with_context(|| format!("bad log filter {filter:?} under [daemon] in the config"));
+    }
+    parse_filter(if daemon || hub { "info" } else { "warn" })
+}
+
+/// Parses a filter in `RUST_LOG`'s syntax, quieting async_nats, which announces every
+/// connection at info, unless the filter names it.
+fn parse_filter(filter: &str) -> anyhow::Result<tracing_subscriber::EnvFilter> {
+    let quieted = if filter.contains("async_nats") {
+        filter.to_owned()
+    } else {
+        format!("{filter},async_nats=warn")
+    };
+    Ok(tracing_subscriber::EnvFilter::try_new(quieted)?)
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    // The hub and the daemon log what they do; other commands say it themselves.
-    let serving = matches!(
-        cli.command,
-        Some(Command::Hub { action: None, .. } | Command::Daemon { action: None })
-    );
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                tracing_subscriber::EnvFilter::new(if serving {
-                    // async_nats announces every connection at info.
-                    "info,async_nats=warn"
-                } else {
-                    "warn"
-                })
-            }),
-        )
+        .with_env_filter(log_filter(&cli)?)
         .with_writer(std::io::stderr)
         .init();
     let cwd = std::env::current_dir()?;

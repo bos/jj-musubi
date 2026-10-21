@@ -1,6 +1,5 @@
 //! Runs a node's policy against a remote hub.
 
-use jj_lib::object_id::ObjectId as _;
 use musubi_core::message::HeadKind;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
@@ -13,6 +12,7 @@ use musubi_jj::node::NodeRepo;
 use crate::OpId;
 use crate::node::NodeAdapter;
 use crate::remote::RemoteHub;
+use crate::short;
 use crate::wire::HeadNotice;
 
 pub struct NodeDriver {
@@ -197,10 +197,4 @@ fn log_handled(handled: &Handled<OpId>) {
         }
         Handled::Ignored => tracing::debug!("nothing new"),
     }
-}
-
-/// An abbreviated id. Ids from the wire are not checked for length.
-fn short(op: &OpId) -> String {
-    let hex = op.hex();
-    hex.get(..12).unwrap_or(&hex).to_owned()
 }

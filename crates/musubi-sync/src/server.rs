@@ -179,9 +179,13 @@ fn spawn_worker(
     let thread = std::thread::Builder::new()
         .name(format!("hive {id}"))
         .spawn(move || {
+            // Everything this thread logs is about this hive. At error level, the span stays
+            // on under any filter that shows anything.
+            let _span = tracing::error_span!("hive", id = %id).entered();
             let mut service = None;
             while let Ok(message) = receiver.recv() {
                 let limit = transport.max_payload();
+                let started = std::time::Instant::now();
                 let reply = serve_one(
                     &id,
                     &dir,
@@ -194,7 +198,7 @@ fn spawn_worker(
                 let (reply, notice) = match reply {
                     Ok(result) => result,
                     Err(err) => {
-                        tracing::warn!("hive {id}: request failed: {err:#}");
+                        tracing::warn!("request failed: {err:#}");
                         let error = HubReply::Error(format!("{err:#}"));
                         match Envelope::encode(error) {
                             Ok(reply) => (reply, None),
@@ -202,16 +206,22 @@ fn spawn_worker(
                         }
                     }
                 };
+                tracing::trace!(
+                    "answered {} bytes with {} in {:?}",
+                    message.payload.len(),
+                    reply.len(),
+                    started.elapsed()
+                );
                 let reply_to = message.reply.as_deref().unwrap_or_default();
                 if let Err(err) = runtime.block_on(transport.publish(reply_to, Bytes::from(reply)))
                 {
-                    tracing::warn!("hive {id}: could not reply: {err}");
+                    tracing::warn!("could not reply: {err}");
                 }
                 if let Some(notice) = notice
                     && let Err(err) =
                         runtime.block_on(transport.publish(&head, Bytes::from(notice)))
                 {
-                    tracing::warn!("hive {id}: could not announce the new head: {err}");
+                    tracing::warn!("could not announce the new head: {err}");
                 }
             }
         })
@@ -235,7 +245,7 @@ fn serve_one(
         Some(service) => service,
         None => {
             let adapter = HubAdapter::open(dir)?;
-            tracing::info!("opened hive {id}");
+            tracing::info!("opened");
             service.insert(HubService::new(
                 adapter,
                 dir,
@@ -257,10 +267,10 @@ fn serve_one(
                 .unwrap_or_else(PoisonError::into_inner)
                 .update_index(id, index)
             {
-                tracing::warn!("hive {id}: could not save its index: {err:#}");
+                tracing::warn!("could not save its index: {err:#}");
             }
         }
-        Err(err) => tracing::warn!("hive {id}: could not index the new head: {err:#}"),
+        Err(err) => tracing::warn!("could not index the new head: {err:#}"),
     }
     Ok((reply, Some(Envelope::encode(notice)?)))
 }

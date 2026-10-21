@@ -96,6 +96,10 @@ pub struct DaemonSettings {
     /// Where the daemon's control socket is, in place of the usual place.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub socket: Option<String>,
+    /// What the daemon logs, as a filter in `RUST_LOG`'s syntax; `--log` and `RUST_LOG`
+    /// take its place when given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log: Option<String>,
 }
 
 impl DaemonSettings {

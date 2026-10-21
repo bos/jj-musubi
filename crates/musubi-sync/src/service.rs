@@ -11,6 +11,8 @@ use bytes::Bytes;
 use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
 use musubi_core::hub;
+use musubi_core::message::Reply;
+use musubi_core::message::Request;
 use musubi_transport::Transport;
 
 use crate::Attachment;
@@ -19,6 +21,7 @@ use crate::blobs::BlobId;
 use crate::blobs::BlobStore;
 use crate::blobs::Received;
 use crate::hub::HubAdapter;
+use crate::short;
 use crate::temp_bundle;
 use crate::wire::Envelope;
 use crate::wire::HeadNotice;
@@ -201,12 +204,20 @@ impl HubService {
                         }
                     })
                 })?;
+                let pushed = log_request(&request);
                 let handled = hub::handle(&mut self.hub, request);
                 // Uploaded bundles are imported (or rejected) now; either way they are done.
                 for blob in uploaded {
                     self.blobs.remove(&blob);
                 }
                 let handled = handled?;
+                log_reply(&handled.reply);
+                if let Some((seq, head)) = &handled.publish {
+                    tracing::info!(
+                        "accepted {pushed} operations; the head is now {seq} ({})",
+                        short(head)
+                    );
+                }
                 let mut inline_left = inline_limit(max_payload);
                 let reply = map_reply(
                     handled.reply,
@@ -269,6 +280,48 @@ impl HubService {
                     std::fs::remove_file(entry.path()).ok();
                 }
             }
+        }
+    }
+}
+
+/// Logs a protocol request, returning how many operations it pushes.
+fn log_request(request: &Request<OpId, Attachment>) -> usize {
+    match request {
+        Request::Fetch { base, .. } => {
+            tracing::debug!("asked for what follows {}", short(base));
+            0
+        }
+        Request::GetObjects { for_ops, .. } => {
+            tracing::debug!("asked for the objects of {} operations", for_ops.len());
+            0
+        }
+        Request::Push {
+            ops, expected, new, ..
+        } => {
+            tracing::debug!(
+                "asked to store {} operations and move the head from {} to {}",
+                ops.len(),
+                short(expected),
+                short(new)
+            );
+            ops.len()
+        }
+    }
+}
+
+fn log_reply(reply: &Reply<OpId, Attachment>) {
+    match reply {
+        Reply::Head { kind, seq, head } => {
+            let kind = format!("{kind:?}").to_lowercase();
+            tracing::debug!("answered {kind}: {seq} ({})", short(head));
+        }
+        Reply::Fetched { seq, head, ops, .. } => tracing::debug!(
+            "sent {} operations, up to {seq} ({})",
+            ops.len(),
+            short(head)
+        ),
+        Reply::Objects { for_ops, .. } => {
+            tracing::debug!("sent the objects of {} operations", for_ops.len());
         }
     }
 }

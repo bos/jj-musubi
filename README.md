@@ -109,6 +109,20 @@ Day to day:
   translates between them. (`musubi debug` holds tools for investigating a hive, and is
   left out of `musubi --help`.)
 
+Logs:
+
+- The hub and the daemon log what they do; other commands only warn. The hub logs to its
+  terminal, and the daemon to `daemon.log` in musubi's state directory
+  (`~/.local/state/musubi` on Linux and macOS), or under systemd to
+  `journalctl --user -u musubi`.
+- `--log <filter>` on any command chooses what it logs, as a filter in `RUST_LOG`'s
+  syntax: `musubi --log debug hub`, or `musubi --log musubi_sync=debug sync` to see each
+  request a sync makes. Without it, `RUST_LOG` does the same.
+- A daemon started for you, at login or by another command, is given no `--log`: give it a
+  filter as `log` under `[daemon]` in musubi's config, `~/.config/musubi/config.toml`, and
+  restart it (`musubi daemon restart`). One started by another command also inherits that
+  command's `RUST_LOG`, which takes the config's place.
+
 ## How it works
 
 - [docs/design.md](docs/design.md): the design, and why.

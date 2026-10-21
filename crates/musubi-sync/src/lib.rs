@@ -25,6 +25,13 @@ pub mod wire;
 
 pub type OpId = jj_lib::op_store::OperationId;
 
+/// An abbreviated id, for logs. Ids from the wire are not checked for length.
+pub(crate) fn short(op: &OpId) -> String {
+    use jj_lib::object_id::ObjectId as _;
+    let hex = op.hex();
+    hex.get(..12).unwrap_or(&hex).to_owned()
+}
+
 /// Content accompanying a protocol message.
 #[derive(Clone, Debug, Default)]
 pub enum Attachment {

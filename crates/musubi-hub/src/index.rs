@@ -93,13 +93,6 @@ impl HiveIndex {
         }
         Ok(())
     }
-
-    /// Records what a joining repository brings before it has pushed it, so that another
-    /// copy of the same repository joining meanwhile finds this hive.
-    pub fn expect(&mut self, urls: &[String], roots: &[String]) {
-        self.urls.extend(urls.iter().cloned());
-        self.roots.extend(roots.iter().cloned());
-    }
 }
 
 fn head_machines(store: &HubStore) -> Result<BTreeSet<String>, StoreError> {

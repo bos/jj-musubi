@@ -161,7 +161,9 @@ impl NodeAdapter {
         Ok(false)
     }
 
-    fn ancestry_of(&self, base: &OpId) -> anyhow::Result<HashSet<OpId>> {
+    /// Makes `base_ancestry` hold `anc*(base)`, extending what it held where `base` descends
+    /// from that.
+    fn cache_ancestry(&self, base: &OpId) -> anyhow::Result<()> {
         let store = self.repo.canonical_store();
         let mut cache = self.base_ancestry.borrow_mut();
         let set = match cache.take() {
@@ -181,8 +183,8 @@ impl NodeAdapter {
                 set
             }
         };
-        *cache = Some((base.clone(), set.clone()));
-        Ok(set)
+        *cache = Some((base.clone(), set));
+        Ok(())
     }
 
     fn required_commits(&self, ops: &[OpId]) -> anyhow::Result<Vec<CommitId>> {
@@ -310,7 +312,10 @@ impl LocalRepo for NodeAdapter {
     }
 
     fn ops_between(&self, head: &OpId, base: &OpId) -> anyhow::Result<Vec<OpId>> {
-        let excluded = self.ancestry_of(base)?;
+        // Borrowed, not copied: it is the whole accepted history.
+        self.cache_ancestry(base)?;
+        let cache = self.base_ancestry.borrow();
+        let (_, excluded) = cache.as_ref().expect("cached above");
         let store = self.repo.canonical_store();
         Ok(store.ancestors_until(std::slice::from_ref(head), |id| excluded.contains(id))?)
     }

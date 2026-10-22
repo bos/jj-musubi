@@ -6,7 +6,6 @@ pub mod canonical;
 pub mod format_guard;
 pub mod git_command;
 pub mod hive_settings;
-pub mod merge;
 pub mod node;
 pub mod objects;
 mod protobuf;

@@ -63,7 +63,6 @@ use jj_lib::ref_name::WorkspaceNameBuf;
 
 use crate::canonical::CanonicalError;
 use crate::canonical::CanonicalStore;
-use crate::canonical::strip_git_records;
 use crate::format_guard;
 use crate::format_guard::FormatError;
 use crate::git_command::GitError;
@@ -219,9 +218,16 @@ impl PerMachine {
         }
     }
 
+    /// Removes these fields from `view`.
+    fn strip(view: &mut View) {
+        view.git_refs.clear();
+        view.remote_views.remove(REMOTE_NAME_FOR_LOCAL_GIT_REPO);
+        view.git_heads.clear();
+    }
+
     /// Gives `view` these fields, in place of any it has.
     fn apply_to(&self, view: &mut View) {
-        strip_git_records(view);
+        Self::strip(view);
         view.git_refs = self.git_refs.clone();
         if let Some(remote) = &self.git_remote {
             view.remote_views
@@ -644,7 +650,7 @@ impl NodeRepo {
                 commit,
             );
         }
-        strip_git_records(&mut view);
+        PerMachine::strip(&mut view);
         view.wc_commit_ids = workspaces_by_key;
         Ok(view)
     }

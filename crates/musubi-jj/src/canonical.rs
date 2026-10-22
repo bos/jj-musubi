@@ -17,7 +17,6 @@ use std::collections::HashSet;
 
 use jj_lib::backend::CommitId;
 use jj_lib::content_hash::blake2b_hash;
-use jj_lib::git::REMOTE_NAME_FOR_LOCAL_GIT_REPO;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::OpStore as _;
 use jj_lib::op_store::OpStoreError;
@@ -754,15 +753,6 @@ fn top_level_fields(mut bytes: &[u8]) -> Option<Vec<(u32, &[u8])>> {
         fields.push((number, &start[..start.len() - bytes.len()]));
     }
     Some(fields)
-}
-
-/// Removes this machine's records of its own `.git` from a view: `git_refs`, the `git`
-/// pseudo-remote, and each workspace's git HEAD. (Workspaces themselves are handled in
-/// `NodeRepo`, which replaces them with machine-qualified entries.)
-pub fn strip_git_records(view: &mut View) {
-    view.git_refs.clear();
-    view.remote_views.remove(REMOTE_NAME_FOR_LOCAL_GIT_REPO);
-    view.git_heads.clear();
 }
 
 #[cfg(test)]

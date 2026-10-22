@@ -253,14 +253,10 @@ struct Wire {
 
 #[derive(Serialize, Deserialize)]
 struct WireRemote {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    push_url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    expanded_url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    expanded_push_url: Option<String>,
+    /// First, so that its fields come first, as they always have: a canonical operation's
+    /// id is a hash of the attribute this is in.
+    #[serde(flatten)]
+    remote: Remote,
     #[serde(default, skip_serializing_if = "is_false")]
     removed: bool,
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -295,12 +291,7 @@ impl From<Wire> for HiveSettings {
             .remotes
             .into_iter()
             .map(|(name, remote)| {
-                let value = (!remote.removed).then_some(Remote {
-                    url: remote.url,
-                    push_url: remote.push_url,
-                    expanded_url: remote.expanded_url,
-                    expanded_push_url: remote.expanded_push_url,
-                });
+                let value = (!remote.removed).then_some(remote.remote);
                 let stamp = Stamp {
                     time: remote.time,
                     machine: remote.machine,
@@ -340,12 +331,8 @@ impl From<HiveSettings> for Wire {
             .into_iter()
             .map(|(name, entry)| {
                 let removed = entry.value.is_none();
-                let remote = entry.value.unwrap_or_default();
                 let wire = WireRemote {
-                    url: remote.url,
-                    push_url: remote.push_url,
-                    expanded_url: remote.expanded_url,
-                    expanded_push_url: remote.expanded_push_url,
+                    remote: entry.value.unwrap_or_default(),
                     removed,
                     time: entry.stamp.time,
                     machine: entry.stamp.machine,
@@ -535,5 +522,39 @@ mod tests {
         let parsed = HiveSettings::parse(&attribute).unwrap();
         assert_eq!(parsed, settings);
         assert_eq!(parsed.to_attribute(), attribute);
+    }
+
+    /// The attribute is written exactly as it always has been: canonical operation ids are
+    /// hashes of it.
+    #[test]
+    fn the_attribute_is_as_it_was() {
+        let stamp = Stamp {
+            time: 7,
+            machine: "alpha#0".to_owned(),
+        };
+        let remote = |url: &str| Remote {
+            url: Some(url.to_owned()),
+            ..Remote::default()
+        };
+        let full = Remote {
+            push_url: Some("p".to_owned()),
+            expanded_url: Some("eu".to_owned()),
+            expanded_push_url: Some("ep".to_owned()),
+            ..remote("u")
+        };
+        let mut settings = HiveSettings::default();
+        for (name, value, stamp) in [
+            ("bare", Some(remote("u")), Stamp::default()),
+            ("full", Some(full), stamp.clone()),
+            ("gone", None, stamp),
+        ] {
+            settings
+                .remotes
+                .insert(name.to_owned(), Entry { value, stamp });
+        }
+        assert_eq!(
+            settings.to_attribute(),
+            r#"{"remotes":{"bare":{"url":"u"},"full":{"url":"u","push_url":"p","expanded_url":"eu","expanded_push_url":"ep","time":7,"machine":"alpha#0"},"gone":{"removed":true,"time":7,"machine":"alpha#0"}}}"#
+        );
     }
 }

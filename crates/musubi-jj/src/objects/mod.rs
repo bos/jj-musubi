@@ -98,9 +98,6 @@ pub enum ObjectError {
     MalformedObject { kind: &'static str, id: String },
     #[error("backend error")]
     Backend(#[from] jj_lib::backend::BackendError),
-    /// An error from a caller's record handler, passed through [`bundle::read`].
-    #[error(transparent)]
-    Nested(Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// A store of commits and everything they reach, able to exchange bundles with another

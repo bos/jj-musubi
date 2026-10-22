@@ -14,6 +14,7 @@ use musubi_hub::store::HubStore;
 use musubi_hub::store::StoreError;
 use musubi_jj::node::NodeRepo;
 use musubi_jj::objects::Backend;
+use musubi_jj::objects::ObjectError;
 use musubi_jj::objects::bundle;
 use musubi_jj::objects::bundle::Record;
 use musubi_testutil::TestEnv;
@@ -191,7 +192,7 @@ fn unpack_loose(bundle_path: &Path, git_dir: &Path) {
             drop(child.stdin.take());
             assert!(child.wait().unwrap().success());
         }
-        Ok(())
+        Ok::<_, ObjectError>(())
     })
     .unwrap();
 }

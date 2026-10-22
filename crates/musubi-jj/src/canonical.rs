@@ -38,10 +38,6 @@ use crate::objects::bundle::BundleWriter;
 use crate::objects::bundle::Record;
 use crate::protobuf::next_field;
 
-fn boxed(err: CanonicalError) -> ObjectError {
-    ObjectError::Nested(Box::new(err))
-}
-
 #[derive(Debug, Error)]
 pub enum CanonicalError {
     #[error(transparent)]
@@ -456,8 +452,7 @@ impl CanonicalStore {
         bundle::read(bundle_path, |record| {
             match record {
                 Record::View { id, contents } => {
-                    self.import_view(&ViewId::new(id), &contents)
-                        .map_err(boxed)?;
+                    self.import_view(&ViewId::new(id), &contents)?;
                 }
                 Record::ViewDelta { id, base, delta } => {
                     let (id, base) = (ViewId::new(id), ViewId::new(base));
@@ -465,36 +460,31 @@ impl CanonicalStore {
                         let base = match last.take() {
                             Some((last_id, bytes)) if last_id == base => bytes,
                             _ if !self.has_view(&base) => {
-                                return Err(boxed(CanonicalError::MissingDeltaBase {
+                                return Err(CanonicalError::MissingDeltaBase {
                                     view: id.hex(),
                                     base: base.hex(),
-                                }));
+                                });
                             }
-                            _ => self.normal_view_bytes(&base).map_err(boxed)?,
+                            _ => self.normal_view_bytes(&base)?,
                         };
                         let contents = bundle::apply_view_delta(&base, &delta)?;
-                        self.import_view(&id, &contents).map_err(boxed)?;
+                        self.import_view(&id, &contents)?;
                         last = Some((id, contents));
                     }
                 }
                 Record::Operation { id, contents } => {
                     let id = OperationId::new(id);
-                    let parents = self
-                        .import_operation_parents(&id, &contents)
-                        .map_err(boxed)?;
+                    let parents = self.import_operation_parents(&id, &contents)?;
                     ops.push((id, parents));
                 }
                 _ => {
                     return Err(ObjectError::MalformedBundle(
                         "unexpected record in an operation bundle".to_owned(),
-                    ));
+                    )
+                    .into());
                 }
             }
             Ok(())
-        })
-        .map_err(|err| match err {
-            ObjectError::Nested(inner) => *inner.downcast::<CanonicalError>().expect("boxed by us"),
-            other => CanonicalError::Bundle(other),
         })?;
         Ok(ops)
     }

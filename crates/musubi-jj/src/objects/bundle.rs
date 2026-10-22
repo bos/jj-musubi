@@ -330,12 +330,44 @@ fn malformed(what: &str) -> ObjectError {
     ObjectError::MalformedBundle(what.to_owned())
 }
 
-/// Reads every record of the bundle at `path`, in order. Compressed records are read as
-/// the records they hold. A pack is not read at all: its record says where it is.
-pub fn read(
+/// Reads every record of the bundle at `path`, in order, stopping at the first error
+/// `on_record` returns. Compressed records are read as the records they hold. A pack is not
+/// read at all: its record says where it is.
+pub fn read<E: From<ObjectError>>(
     path: &Path,
-    mut on_record: impl FnMut(Record) -> Result<(), ObjectError>,
-) -> Result<(), ObjectError> {
+    mut on_record: impl FnMut(Record) -> Result<(), E>,
+) -> Result<(), E> {
+    read_records(path, &mut |record| {
+        on_record(record).map_err(Failure::Caller)
+    })
+    .map_err(|failure| match failure {
+        Failure::Bundle(err) => err.into(),
+        Failure::Caller(err) => err,
+    })
+}
+
+/// What stopped reading a bundle: the bundle, or the caller's handling of a record in it.
+enum Failure<E> {
+    Bundle(ObjectError),
+    Caller(E),
+}
+
+impl<E> From<ObjectError> for Failure<E> {
+    fn from(err: ObjectError) -> Self {
+        Self::Bundle(err)
+    }
+}
+
+impl<E> From<io::Error> for Failure<E> {
+    fn from(err: io::Error) -> Self {
+        Self::Bundle(err.into())
+    }
+}
+
+/// A caller's record handler, its failures told apart from the bundle's.
+type OnRecord<'a, E> = dyn FnMut(Record) -> Result<(), Failure<E>> + 'a;
+
+fn read_records<E>(path: &Path, on_record: &mut OnRecord<'_, E>) -> Result<(), Failure<E>> {
     let file = File::open(path)?;
     let file_len = file.metadata()?.len();
     let mut input = BufReader::new(file);
@@ -344,14 +376,14 @@ pub fn read(
         .read_exact(&mut magic)
         .map_err(|_| malformed("missing header"))?;
     if magic != MAGIC {
-        return Err(malformed("bad header"));
+        return Err(malformed("bad header").into());
     }
     while let Some((tag, len)) = read_header(&mut input)? {
         match tag {
             TAG_PACK => {
                 let offset = input.stream_position()?;
                 if offset.checked_add(len).is_none_or(|end| end > file_len) {
-                    return Err(malformed("truncated pack"));
+                    return Err(malformed("truncated pack").into());
                 }
                 input.seek(SeekFrom::Start(offset + len))?;
                 on_record(Record::Pack(PackRecord {
@@ -364,13 +396,17 @@ pub fn read(
                 let mut body = (&mut input).take(len);
                 let mut decoder = zstd::stream::read::Decoder::new(&mut body)
                     .map_err(|_| malformed("bad compressed record"))?;
-                read_compressed(&mut decoder, &mut on_record).map_err(|err| match err {
-                    ObjectError::Io(_) => malformed("bad compressed record"),
+                // An I/O error reading it, rather than handling a record from it, means the
+                // record is badly compressed.
+                read_compressed(&mut decoder, on_record).map_err(|failure| match failure {
+                    Failure::Bundle(ObjectError::Io(_)) => {
+                        malformed("bad compressed record").into()
+                    }
                     other => other,
                 })?;
                 drop(decoder);
                 if io::copy(&mut body, &mut io::sink())? != 0 {
-                    return Err(malformed("trailing data in a compressed record"));
+                    return Err(malformed("trailing data in a compressed record").into());
                 }
             }
             _ => on_record(read_small(tag, &mut (&mut input).take(len), len)?)?,
@@ -393,13 +429,13 @@ fn read_header(input: &mut dyn Read) -> Result<Option<(u8, u64)>, ObjectError> {
 }
 
 /// The records of a compressed record: neither packs nor compressed records.
-fn read_compressed(
+fn read_compressed<E>(
     input: &mut dyn Read,
-    on_record: &mut dyn FnMut(Record) -> Result<(), ObjectError>,
-) -> Result<(), ObjectError> {
+    on_record: &mut OnRecord<'_, E>,
+) -> Result<(), Failure<E>> {
     while let Some((tag, len)) = read_header(input)? {
         if len > MAX_COMPRESSED_RECORD || matches!(tag, TAG_PACK | TAG_COMPRESSED) {
-            return Err(malformed("bad record in a compressed record"));
+            return Err(malformed("bad record in a compressed record").into());
         }
         on_record(read_small(tag, &mut input.take(len), len)?)?;
     }
@@ -513,7 +549,7 @@ mod tests {
                     unreachable!()
                 }
             });
-            Ok(())
+            Ok::<_, ObjectError>(())
         })
         .unwrap();
         assert_eq!(
@@ -564,7 +600,7 @@ mod tests {
                     unreachable!()
                 }
             });
-            Ok(())
+            Ok::<_, ObjectError>(())
         })
         .unwrap();
         assert_eq!(seen, ["extras", "pack", "after"]);
@@ -631,7 +667,7 @@ mod tests {
                 Record::Pack(pack) => (b"pack".to_vec(), pack_bytes(&pack)),
                 Record::Extras { .. } | Record::Object { .. } => unreachable!(),
             });
-            Ok(())
+            Ok::<_, ObjectError>(())
         })
         .unwrap();
         assert_eq!(
@@ -699,5 +735,22 @@ mod tests {
             read(&bundle, |_| Ok(())),
             Err(ObjectError::MalformedBundle(_))
         ));
+    }
+
+    /// The handler's own failure, writing what a record holds to a full disk, say, is
+    /// reported as it is, though the record came compressed, and not as a bad bundle.
+    #[test]
+    fn a_handlers_failure_is_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundle = dir.path().join("bundle");
+        let mut writer = BundleWriter::create(&bundle).unwrap();
+        writer.begin_compressed().unwrap();
+        writer.object(ObjectKind::Tree, b"tree-id", b"").unwrap();
+        writer.finish().unwrap();
+        let err = read(&bundle, |_| {
+            Err::<(), _>(ObjectError::Io(io::Error::other("disk full")))
+        })
+        .unwrap_err();
+        assert!(matches!(err, ObjectError::Io(_)), "{err:?}");
     }
 }

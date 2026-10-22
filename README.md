@@ -6,9 +6,11 @@ within a second or so. A machine that was offline catches up when it reconnects.
 
 musubi replicates jj's operation log, not just branches, so `jj undo`, `jj op log`, and
 divergence all behave across machines as they do between workspaces on one machine. It
-never touches working copies: when another machine rewrites the commit under your `@`, jj
-updates your files on your next command (musubi turns on `snapshot.auto-update-stale` in each
-repository it adds to a hive, unless your user or repo config already has it on).
+never touches working copies: when another machine rewrites the commit under your `@`, your
+next `jj` command stops and suggests `jj workspace update-stale`, which updates your files.
+With `snapshot.auto-update-stale = true`, the next command updates them itself. To set it on
+every machine at once, set it in the repo config (`jj config set --repo`) and name it there in
+`musubi.shared-config`.
 
 Status: early. The protocol is verified in Lean (`formal/`), and the implementation is
 tested against that model and against real repositories, but musubi has not yet been used

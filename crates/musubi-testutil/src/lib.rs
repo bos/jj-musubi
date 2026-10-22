@@ -126,6 +126,9 @@ impl TestEnv {
     }
 }
 
+/// jj's user config for a test machine. It turns on `snapshot.auto-update-stale`, which
+/// musubi leaves off, because the tests expect a machine's next `jj` command to update the
+/// files another machine's rewrite left stale.
 fn machine_config(machine: &str) -> String {
     format!(
         r#"

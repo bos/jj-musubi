@@ -462,7 +462,7 @@ fn set_machine_name(located: &Located, machine: Option<&str>) -> anyhow::Result<
 
 /// Records that the repository is part of `hive`: the join operation (unless replicating
 /// full history), its hive config, and its place in the user's config. The first hub joined
-/// becomes the user's default. Then turns on `snapshot.auto-update-stale` if it is off.
+/// becomes the user's default.
 fn become_node(
     located: &Located,
     hive: &HiveInfo,
@@ -498,18 +498,6 @@ fn become_node(
             "Saved {hub} as this machine's default hub ({}).",
             UserConfig::path()?.display()
         );
-    }
-    // A convenience, so failing to set it doesn't undo joining.
-    match settings::enable_auto_update_stale(&located.repo_path) {
-        Ok(true) => println!(
-            "Set snapshot.auto-update-stale in this repository's jj config, so jj updates files \
-             that another machine's changes leave stale."
-        ),
-        Ok(false) => {}
-        Err(err) => eprintln!(
-            "Could not set snapshot.auto-update-stale ({err:#}); set it yourself, or the next \
-             `jj` command after another machine rewrites this one's working copy will stop."
-        ),
     }
     Ok(())
 }

@@ -437,8 +437,8 @@ impl Search {
         self.note(&tc);
     }
 
-    /// Any `jj` command: snapshots, imports git refs, merges concurrent operations, and
-    /// updates a stale working copy.
+    /// Any `jj` command: snapshots, imports git refs, merges concurrent operations, and,
+    /// with auto-update-stale as the tests set it, updates a stale working copy.
     #[rule]
     fn status(&mut self, tc: TestCase) {
         let m = self.machine(&tc);

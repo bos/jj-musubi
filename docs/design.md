@@ -11,10 +11,13 @@ and, in git-backed repositories, the git object database and refs. A remote oper
 rewrite this machine's working-copy commit, exactly as an operation in another workspace can, for
 example by rebasing its parent. jj then treats the working copy as stale, exactly as after a `jj
 rebase` run from another workspace. By default the next `jj` command stops and suggests `jj
-workspace update-stale`. With `snapshot.auto-update-stale = true`, jj updates the files itself,
-so `musubi create`, `join` and `clone` set it in the repo config unless the user or repo config
-already has it on. If the working copy had edits not yet snapshotted, jj snapshots them first,
-and you get a divergent working-copy change instead of losing them.
+workspace update-stale`, which updates the files. With `snapshot.auto-update-stale = true`, jj
+updates them itself, but then any `jj` command, even `jj log`, can change files under a running
+build or an editor, so musubi doesn't turn it on. Either way, if the working copy had edits not
+yet snapshotted, jj snapshots them first, and you get a divergent working-copy change instead
+of losing them. Each machine can set `snapshot.auto-update-stale` for itself; to set it for the
+whole hive, set it in the repo config and name it in `musubi.shared-config` (see
+[hive settings](#hive-settings)). The hive's value then overrides each machine's user config.
 
 This document targets jj-lib 0.46.0.
 
@@ -95,10 +98,11 @@ Replicating views verbatim corrupts the second kind.
   commit, its workspace follows (to the second half of a split, say), and when it abandons
   it, the workspace gets a new empty commit on the parents. Restoring an older view,
   through `jj undo`, `jj redo` or `jj op restore`, restores every workspace's position.
-  Canonicalization takes those moves, and the machine that owns the workspace adopts them,
-  as a second workspace does on one machine: its working copy becomes stale, and its next
-  command updates the files (with `snapshot.auto-update-stale`). Nothing else a machine
-  does to another machine's workspaces counts: adding, forgetting or renaming them stays
+  Canonicalization takes those moves, and the machine that owns the workspace adopts
+  them, as a second workspace does on one machine: its working copy becomes stale,
+  and `jj workspace update-stale` updates the files (or its next command does, with
+  `snapshot.auto-update-stale = true`). Nothing else a machine does to another
+  machine's workspaces counts: adding, forgetting or renaming them stays
   local (forgetting one doesn't even abandon its empty working-copy commit, as
   `jj workspace forget` otherwise would, unless this machine then rewrites or abandons
   that commit's parents: jj, no longer seeing the commit, leaves it behind, and keeping it

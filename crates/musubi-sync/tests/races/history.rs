@@ -105,7 +105,7 @@ fn undo_and_redo_of_another_machines_undo() {
 /// Restoring an older view on one machine restores every machine's working copy, as
 /// `jj op restore` restores every workspace's on one machine: the other machine's working
 /// copy goes back to where it was then, and its working copy is stale until its next
-/// command updates the files.
+/// command updates the files (with auto-update-stale, as the tests set it).
 #[test]
 fn op_restore_restores_other_machines_working_copies() {
     let mut hive = Fixture::new(&["alpha", "beta"]);

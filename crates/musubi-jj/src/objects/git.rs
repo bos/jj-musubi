@@ -226,6 +226,15 @@ impl GitObjects {
             "--delta-base-offset",
             "-q",
         ]);
+        if !haves.is_empty() {
+            // git otherwise leaves out only what the parents of `wants` reach, and makes
+            // deltas only against that. A jj rewrite is a sibling of the commit it replaces,
+            // with much the same tree, so a `jj commit` or `jj describe` after a snapshot
+            // would send every file the snapshot did again, whole. `--shallow`, meant for
+            // shallow clients, does both for everything `haves` reach, for a walk of their
+            // trees: a few milliseconds for hundreds of haves in jj's own repository.
+            args.push("--shallow");
+        }
         let mut child = self
             .command(&args)
             .stdin(Stdio::piped())
@@ -965,6 +974,54 @@ mod tests {
                 .unwrap(),
             [absent, CommitId::from_bytes(&[0; 20])]
         );
+    }
+
+    /// A jj rewrite is a sibling of the commit it replaces, with much the same tree. A pack
+    /// with the replaced commit as a have leaves out what that reaches, and sends a file
+    /// edited since as a delta against its version there.
+    #[test]
+    fn packs_leave_out_what_a_replaced_sibling_reaches() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = init(dir.path());
+        run(&["init", "--quiet", "--initial-branch=main"]);
+        let path = |name: &str| dir.path().join(name);
+        let mut big = String::new();
+        for i in 0..20_000 {
+            writeln!(big, "line {i}").unwrap();
+        }
+        fs::write(path("big"), &big).unwrap();
+        run(&["add", "."]);
+        run(&["commit", "--quiet", "-m", "parent"]);
+        // The snapshot: new files, and a large edit that compresses badly.
+        let mut x: u64 = 1;
+        let noise: String = (0..20_000)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                char::from(b'a' + u8::try_from(x % 26).unwrap())
+            })
+            .collect();
+        for i in 0..20 {
+            fs::write(path(&format!("new{i}")), format!("new file {i}\n")).unwrap();
+        }
+        fs::write(path("big"), format!("{noise}\n{big}")).unwrap();
+        run(&["add", "."]);
+        run(&["commit", "--quiet", "-m", "snapshot"]);
+        let snapshot = run(&["rev-parse", "HEAD"]);
+        // Its rewrite, on the same parent, with one more small edit.
+        fs::write(path("big"), format!("{noise}\n{big}one more line\n")).unwrap();
+        run(&["commit", "--quiet", "--all", "--amend", "-m", "described"]);
+        let rewrite = run(&["rev-parse", "HEAD"]);
+        let objects = GitObjects::new(Path::new("git"), &path(".git"));
+        let id = |hex: &str| CommitId::try_from_hex(hex).unwrap();
+        let mut pack = vec![];
+        objects
+            .write_pack(&[id(&rewrite)], &[id(&snapshot)], &mut pack)
+            .unwrap();
+        // The commit, its tree, and the big file's new version.
+        assert_eq!(u32::from_be_bytes(pack[8..12].try_into().unwrap()), 3);
+        assert!(pack.len() < noise.len() / 4, "{} bytes", pack.len());
     }
 
     #[test]

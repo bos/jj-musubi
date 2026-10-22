@@ -1,12 +1,11 @@
 [package]
 name = "musubi-transport"
-description = "Pluggable message transports for jj-musubi: byte streams, and an in-memory network"
+description = "Internal to jj-musubi (no stable API): message transports, over byte streams or in memory"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
 
 [dependencies]
 async-trait.workspace = true

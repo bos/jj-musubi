@@ -22,3 +22,4 @@ its operation log, through a hub on one machine that the others reach over ssh.
   newer `jj` wrote with fields jj 0.46.0 doesn't know.
 - Builds for Linux (static, x86_64 and aarch64), macOS (x86_64 and aarch64), and Windows
   (x86_64 and aarch64).
+- Published on crates.io as `jj-musubi`.

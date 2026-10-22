@@ -1,5 +1,7 @@
 //! Transport- and storage-independent core of the jj-musubi sync protocol.
 //!
+//! Internal to jj-musubi, with no stable API.
+//!
 //! The protocol is specified in docs/protocol.md and modeled in Lean in `formal/`;
 //! docs/conformance.md describes how this crate is checked against that model.
 

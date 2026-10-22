@@ -1,6 +1,8 @@
 //! The protocol core (`musubi-core`) bound to real jj repositories (`musubi-jj`) and hub
 //! storage (`musubi-hub`).
 //!
+//! Internal to jj-musubi, with no stable API.
+//!
 //! - [`node::NodeAdapter`] implements the core's `LocalRepo` over a jj repository.
 //! - [`hub::HubAdapter`] implements the core's `HubStorage` over a hub store.
 //! - [`hive::Hive`] runs a hub and nodes in one process with direct delivery, for tests.

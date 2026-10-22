@@ -33,10 +33,14 @@ On macOS, a browser marks what it downloads as quarantined, and macOS then refus
 Or build it from source, with Rust 1.97.1 or later:
 
 ```sh
-cargo install --locked --git https://github.com/bos/jj-musubi --tag v0.1.0 musubi
+cargo install --locked jj-musubi
 ```
 
-Without `--tag`, that builds the latest code, which may not talk to a hub running a release.
+Or build the latest code, which may not talk to a hub running a release:
+
+```sh
+cargo install --locked --git https://github.com/bos/jj-musubi jj-musubi
+```
 
 ## Quick start
 
@@ -176,8 +180,10 @@ Windows, and the Lean proofs and conformance test on Linux.
 
 ## Releasing
 
-Set the version in `Cargo.toml`, give it to `CHANGELOG.md`'s Unreleased section as its
-heading if there is one, and update the `--tag` under Install. Once that's on main, push a matching tag:
+Set the version in `Cargo.toml`, both the workspace's and the one its own crates require of
+each other, run `cargo update --workspace` to put it in `Cargo.lock`, and give it to
+`CHANGELOG.md`'s Unreleased section as its heading if there is one. Once that's on main, push
+a matching tag:
 
 ```sh
 jj tag set v0.1.0 -r main
@@ -188,5 +194,17 @@ jj git push --remote origin --tag v0.1.0
 macOS (x86_64 and aarch64), and Windows (x86_64 and aarch64), with build provenance
 attestations, and attaches the archives and their checksums to a draft GitHub release.
 Review the draft, put the version's section of `CHANGELOG.md` at the top of its notes, and
-publish it. Running the workflow by hand from the Actions tab builds
-the same archives without releasing anything.
+publish it. Running the workflow by hand from the Actions tab builds the same archives without
+releasing anything.
+
+Then, once the release has built, publish the crates from the tagged commit, with a crates.io
+token (`cargo login`). Publishing can't be undone, only yanked:
+
+```sh
+jj new v0.1.0
+cargo publish --workspace --locked
+```
+
+## License
+
+Copyright 2026 Voxel Labs, Inc. Licensed under the [Apache License, Version 2.0](LICENSE).

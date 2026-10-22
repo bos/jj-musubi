@@ -8,15 +8,16 @@ edition = "2024"
 rust-version = "1.97.1"
 license = "Apache-2.0"
 repository = "https://github.com/bos/jj-musubi"
-publish = false
 
 [workspace.dependencies]
-musubi-core = { path = "crates/musubi-core" }
-musubi-hub = { path = "crates/musubi-hub" }
-musubi-jj = { path = "crates/musubi-jj" }
-musubi-sync = { path = "crates/musubi-sync" }
+# Exact versions: these crates are released together, and a later one of them may speak
+# another protocol.
+musubi-core = { path = "crates/musubi-core", version = "=0.1.0" }
+musubi-hub = { path = "crates/musubi-hub", version = "=0.1.0" }
+musubi-jj = { path = "crates/musubi-jj", version = "=0.1.0" }
+musubi-sync = { path = "crates/musubi-sync", version = "=0.1.0" }
 musubi-testutil = { path = "crates/musubi-testutil" }
-musubi-transport = { path = "crates/musubi-transport" }
+musubi-transport = { path = "crates/musubi-transport", version = "=0.1.0" }
 
 anyhow = "1"
 async-trait = "0.1.89"

@@ -35,7 +35,11 @@ use crate::repo::Located;
 use crate::socket::Socket;
 
 #[derive(Parser)]
-#[command(version, about = "Replicate jj repositories between machines")]
+#[command(
+    name = "musubi",
+    version,
+    about = "Replicate jj repositories between machines"
+)]
 struct Cli {
     /// The daemon's control socket, in place of the usual one.
     #[arg(long, global = true, env = "MUSUBI_SOCKET", hide_env = true)]

@@ -34,7 +34,7 @@ daemons themselves.
 ## Running
 
 ```sh
-cargo build --release -p musubi
+cargo build --release -p jj-musubi
 bench/setup_sources.sh jj=$HOME/dev/jj git=https://github.com/git/git
 /usr/bin/python3 -I bench/bench.py jj 5
 /usr/bin/python3 -I bench/stalebase.py jj 5 200

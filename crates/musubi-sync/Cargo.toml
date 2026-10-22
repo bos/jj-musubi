@@ -1,12 +1,11 @@
 [package]
 name = "musubi-sync"
-description = "jj-musubi's protocol core bound to real repositories and hub storage"
+description = "Internal to jj-musubi (no stable API): the protocol core, bound to repositories and hub storage"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true

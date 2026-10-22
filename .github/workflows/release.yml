@@ -30,12 +30,12 @@ jobs:
         with:
           persist-credentials: false
       - id: version
-        name: Check the tag matches musubi's version
+        name: Check the tag matches jj-musubi's version
         run: |
           version=$(cargo metadata --no-deps --format-version 1 |
-            jq -r '.packages[] | select(.name == "musubi") | .version')
+            jq -r '.packages[] | select(.name == "jj-musubi") | .version')
           if [[ $GITHUB_REF == refs/tags/* && $GITHUB_REF_NAME != "v$version" ]]; then
-            echo "::error::Tag $GITHUB_REF_NAME does not match musubi's version, $version."
+            echo "::error::Tag $GITHUB_REF_NAME does not match jj-musubi's version, $version."
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -66,7 +66,7 @@ jobs:
           - target: aarch64-pc-windows-msvc
             os: windows-11-arm
     env:
-      NAME: musubi-${{ needs.version.outputs.version }}-${{ matrix.target }}
+      NAME: jj-musubi-${{ needs.version.outputs.version }}-${{ matrix.target }}
       BIN: target/${{ matrix.target }}/dist/musubi${{ contains(matrix.target, 'windows') && '.exe' || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -75,7 +75,7 @@ jobs:
       - run: rustup toolchain install stable --profile minimal --target ${{ matrix.target }} && rustup default stable
       - if: contains(matrix.target, 'musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - run: cargo build --profile dist --locked -p musubi --target ${{ matrix.target }}
+      - run: cargo build --profile dist --locked -p jj-musubi --target ${{ matrix.target }}
       - if: ${{ !matrix.cross }}
         shell: bash
         run: '"$BIN" --version'
@@ -83,7 +83,7 @@ jobs:
         if: runner.os != 'Windows'
         run: |
           mkdir -p "dist/$NAME"
-          cp "$BIN" README.md LICENSE "dist/$NAME/"
+          cp "$BIN" README.md LICENSE NOTICE "dist/$NAME/"
           tar -czf "dist/$NAME.tar.gz" -C dist "$NAME"
           echo "ARCHIVE=dist/$NAME.tar.gz" >> "$GITHUB_ENV"
       - name: Package
@@ -91,7 +91,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path "dist/$env:NAME" | Out-Null
-          Copy-Item $env:BIN, README.md, LICENSE -Destination "dist/$env:NAME"
+          Copy-Item $env:BIN, README.md, LICENSE, NOTICE -Destination "dist/$env:NAME"
           Compress-Archive -Path "dist/$env:NAME" -DestinationPath "dist/$env:NAME.zip"
           "ARCHIVE=dist/$env:NAME.zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - if: startsWith(github.ref, 'refs/tags/')
@@ -121,6 +121,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          sha256sum musubi-* > SHA256SUMS
+          sha256sum jj-musubi-* > SHA256SUMS
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft --verify-tag \
-            --title "musubi $GITHUB_REF_NAME" --generate-notes musubi-* SHA256SUMS
+            --title "jj-musubi $GITHUB_REF_NAME" --generate-notes jj-musubi-* SHA256SUMS

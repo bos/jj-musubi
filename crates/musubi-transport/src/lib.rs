@@ -1,5 +1,7 @@
 //! Message transports for jj-musubi.
 //!
+//! Internal to jj-musubi, with no stable API.
+//!
 //! musubi needs very little from a transport: publish to a subject, subscribe to a subject,
 //! and request/reply with a timeout, all with payloads up to a size limit the transport
 //! reports. Delivery is best-effort; the protocol tolerates lost, duplicated, and reordered

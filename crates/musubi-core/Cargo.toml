@@ -1,12 +1,11 @@
 [package]
 name = "musubi-core"
-description = "Transport- and storage-independent sync protocol for jj-musubi"
+description = "Internal to jj-musubi (no stable API): the sync protocol, independent of transport and storage"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-publish.workspace = true
 
 [dependencies]
 serde.workspace = true

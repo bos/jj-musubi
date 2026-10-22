@@ -1,4 +1,6 @@
 //! jj-lib integration for jj-musubi: canonical operations, translation, and objects.
+//!
+//! Internal to jj-musubi, with no stable API.
 
 pub mod canonical;
 pub mod format_guard;

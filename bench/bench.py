@@ -552,7 +552,7 @@ def main():
             lambda: member(
                 ["clone", R, dest, "--hub", hub_route("hubB"), "--machine", f"B{k}"],
                 cwd=RUN,
-                e=machine(f"B{k}"),
+                e=machine(f"B{k}", GIT_TRACE2_EVENT=f"{RUN}/trace-B-clone-{k}.json"),
             ),
         )
         m["hub_store"] = stats_delta(h0, hub_stats(hub))
@@ -710,7 +710,12 @@ def main():
         wk["git_fetch"] = measure("gitB", lambda: sh(["jj", "git", "fetch"], cwd=Bg)[0])
         wk["plain_git_fetch"] = measure("gitB", lambda: sh(["git", "fetch", "-q"], cwd=Bp)[0])
         wk["musubi_fetch"] = measure(
-            "hubB", lambda: sh([MUSUBI, "sync"], cwd=Bm, e=machine(nameB))[0]
+            "hubB",
+            lambda: sh(
+                [MUSUBI, "sync"],
+                cwd=Bm,
+                e=machine(nameB, GIT_TRACE2_EVENT=f"{RUN}/trace-B-week.json"),
+            )[0],
         )
         for repo in (A, Am):
             assert rev(repo, "main") == days[-1], f"{repo} didn't bring in upstream's week"

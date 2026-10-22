@@ -84,6 +84,7 @@ use crate::workspaces;
 use crate::workspaces::Machine;
 
 mod git;
+mod git_config;
 
 use git::Colocation;
 use git::NodeGit;

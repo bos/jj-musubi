@@ -42,7 +42,7 @@ fn a_missing_configured_git_is_not_replaced_by_one_on_path() {
     let mut node = NodeRepo::open(&repo.repo_path(), &with_git(&repo, &missing)).unwrap();
     let err = node.check_complete().unwrap_err();
     assert!(
-        matches!(&err, NodeError::Objects(ObjectError::Git(err)) if not_found(err)),
+        matches!(&err, NodeError::Git(err) if not_found(err)),
         "{err:?}"
     );
     let err = node.reconcile_settings().unwrap_err();
@@ -88,11 +88,7 @@ fn a_configured_git_is_run() {
         .missing(&[CommitId::from_bytes(&[1; 20])])
         .unwrap();
     let ran = fs::read_to_string(&ran).unwrap();
-    for asked in [
-        "config --local --list",
-        "remote -v",
-        "cat-file --batch-check",
-    ] {
+    for asked in ["config --list", "remote -v", "cat-file --batch-check"] {
         assert!(ran.contains(asked), "{asked} isn't in:\n{ran}");
     }
 }

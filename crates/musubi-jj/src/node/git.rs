@@ -25,6 +25,7 @@ use jj_lib::store::Store;
 use pollster::FutureExt as _;
 
 use super::NodeError;
+use super::git_config::ConfigCache;
 use crate::git_command::GitError;
 use crate::git_command::GitRepo;
 use crate::hive_settings::Remote;
@@ -32,13 +33,13 @@ use crate::hive_settings::repository;
 use crate::hive_settings::same_repository;
 use crate::objects::GitObjects;
 use crate::objects::Incompleteness;
-use crate::objects::ObjectError;
 use crate::remote_url::without_credentials;
 
 /// A node's git repository, when its backend is git.
 pub(super) struct NodeGit {
     repo: GitRepo,
     colocation: Option<Colocation>,
+    config: ConfigCache,
 }
 
 /// A colocated repository's git repository is a working copy's `.git`, so every `jj`
@@ -61,6 +62,7 @@ impl NodeGit {
             colocation: colocated.then(|| Colocation {
                 lock_path: repo_path.join("git_import_export.lock"),
             }),
+            config: ConfigCache::default(),
         })
     }
 
@@ -73,9 +75,23 @@ impl NodeGit {
         self.colocation.as_ref()
     }
 
-    /// What this repository lacks of its history, if anything.
-    pub fn incompleteness(&self) -> Result<Option<Incompleteness>, ObjectError> {
-        GitObjects::new(self.repo.executable(), self.repo.git_dir()).incompleteness()
+    /// What this repository lacks of its history, if anything: a shallow clone has a
+    /// `shallow` file listing its shallow commits, and a partial clone a promisor remote.
+    pub fn incompleteness(&self) -> Result<Option<Incompleteness>, GitError> {
+        if GitObjects::new(self.repo.executable(), self.repo.git_dir()).is_shallow() {
+            return Ok(Some(Incompleteness::Shallow));
+        }
+        let config = self.config.read(&self.repo)?;
+        let partial = config.local().any(|entry| {
+            // A boolean with no value is true.
+            let value = entry.value.as_deref().unwrap_or("true");
+            entry.key == "extensions.partialclone"
+                || entry.key.starts_with("remote.")
+                    && entry.key.ends_with(".promisor")
+                    && !["false", "no", "off", "0", ""]
+                        .contains(&value.to_ascii_lowercase().as_str())
+        });
+        Ok(partial.then_some(Incompleteness::Partial))
     }
 
     /// This repository's own git config file.
@@ -88,13 +104,14 @@ impl NodeGit {
     /// since another machine needn't have the same rules. Unless `share_credentials`, the
     /// URLs go [without the credentials](without_credentials) an http(s) URL may carry.
     pub fn remotes(&self, share_credentials: bool) -> Result<BTreeMap<String, Remote>, GitError> {
-        let output = self.repo.run(&["config", "--local", "--list"], None)?;
+        let config = self.config.read(&self.repo)?;
         let mut remotes: BTreeMap<String, Remote> = BTreeMap::new();
-        for line in String::from_utf8_lossy(&output).lines() {
-            let Some((key, value)) = line.split_once('=') else {
+        for entry in config.own() {
+            let Some(value) = entry.value.as_deref() else {
                 continue;
             };
-            let Some((name, variable)) = key
+            let Some((name, variable)) = entry
+                .key
                 .strip_prefix("remote.")
                 .and_then(|rest| rest.rsplit_once('.'))
             else {
@@ -111,10 +128,8 @@ impl NodeGit {
         // Each remote's URLs as git uses them: its first URL, followed by a partial clone's
         // filter, then where it pushes. Only a push URL in the config is expanded; where
         // `pushInsteadOf` sends pushes is this machine's own business, as aliases are.
-        let output = self.repo.run(&["remote", "-v"], None)?;
-        let output = String::from_utf8_lossy(&output);
         let mut used: BTreeMap<&str, (Option<&str>, Option<&str>)> = BTreeMap::new();
-        for line in output.lines() {
+        for line in config.remotes.lines() {
             let Some((name, url)) = line.split_once('\t') else {
                 continue;
             };
@@ -396,8 +411,74 @@ fn export_conflicted_remote_bookmarks(mut_repo: &mut MutableRepo) -> Result<(), 
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
     use crate::git_command::git;
+
+    #[test]
+    fn shallow_and_partial_clones_are_incomplete() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = |args: &[&str]| {
+            let output = git(Path::new("git"))
+                .current_dir(dir.path())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?}: {output:?}");
+        };
+        run(&["init", "--quiet", "--initial-branch=main", "origin"]);
+        for n in ["1", "2"] {
+            fs::write(dir.path().join("origin/f"), n).unwrap();
+            run(&["-C", "origin", "add", "f"]);
+            let identity = ["-c", "user.name=t", "-c", "user.email=t@example.com"];
+            run(&[
+                &identity[..],
+                &["-C", "origin", "commit", "--quiet", "-m", n],
+            ]
+            .concat());
+        }
+        run(&["-C", "origin", "config", "uploadpack.allowFilter", "true"]);
+        // git takes a local path for a local clone, which can be neither shallow nor partial.
+        let path = dir
+            .path()
+            .join("origin")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let url = format!(
+            "file://{}{path}",
+            if path.starts_with('/') { "" } else { "/" }
+        );
+        run(&["clone", "--quiet", &url, "full"]);
+        run(&["clone", "--quiet", "--depth=1", &url, "shallow"]);
+        // Checking files out would need the blobs it left out.
+        run(&[
+            "clone",
+            "--quiet",
+            "--no-checkout",
+            "--filter=blob:none",
+            &url,
+            "partial",
+        ]);
+        let of = |clone: &str| {
+            NodeGit {
+                repo: GitRepo::new(Path::new("git"), &dir.path().join(clone).join(".git")),
+                colocation: None,
+                config: ConfigCache::default(),
+            }
+            .incompleteness()
+            .unwrap()
+        };
+        assert_eq!(of("full"), None);
+        assert_eq!(of("shallow"), Some(Incompleteness::Shallow));
+        assert_eq!(of("partial"), Some(Incompleteness::Partial));
+        // A promisor remote alone, written as git takes a boolean with no value.
+        run(&["clone", "--quiet", &url, "promisor"]);
+        let config = dir.path().join("promisor/.git/config");
+        let text = fs::read_to_string(&config).unwrap();
+        fs::write(&config, format!("{text}[remote \"origin\"]\n\tpromisor\n")).unwrap();
+        assert_eq!(of("promisor"), Some(Incompleteness::Partial));
+    }
 
     #[test]
     fn remotes_go_as_written_and_as_expanded() {
@@ -433,6 +514,7 @@ mod tests {
         let repo = NodeGit {
             repo: GitRepo::new(Path::new("git"), &dir.path().join(".git")),
             colocation: None,
+            config: ConfigCache::default(),
         };
         let remotes = repo.remotes(false).unwrap();
         let urls = |name: &str| {

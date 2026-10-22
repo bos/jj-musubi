@@ -53,7 +53,7 @@ fn a_missing_configured_git_is_not_replaced_by_one_on_path() {
     let err = node
         .object_store()
         .unwrap()
-        .missing(&[CommitId::from_bytes(&[1; 20])])
+        .check_connected(&[CommitId::from_bytes(&[1; 20])], &[])
         .unwrap_err();
     assert!(
         matches!(&err, ObjectError::Git(err) if not_found(err)),
@@ -83,12 +83,13 @@ fn a_configured_git_is_run() {
     fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
     let node = NodeRepo::open(&repo.repo_path(), &with_git(&repo, &wrapper)).unwrap();
     node.join_summary().unwrap();
+    // Fails, the commit being absent, once git has looked.
     node.object_store()
         .unwrap()
-        .missing(&[CommitId::from_bytes(&[1; 20])])
-        .unwrap();
+        .check_connected(&[CommitId::from_bytes(&[1; 20])], &[])
+        .unwrap_err();
     let ran = fs::read_to_string(&ran).unwrap();
-    for asked in ["config --list", "remote -v", "cat-file --batch-check"] {
+    for asked in ["config --list", "remote -v", "rev-list --objects"] {
         assert!(ran.contains(asked), "{asked} isn't in:\n{ran}");
     }
 }

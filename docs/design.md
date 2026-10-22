@@ -319,9 +319,14 @@ the receiver's known commits as exclusions, and `git index-pack --fix-thin` to r
 already needs `git` for fetch and push, and this gets delta compression and bitmaps for free,
 the latter for clones. A node runs the git jj is configured to use (`git.executable-path`),
 the one its fetches and pushes use; a hub, which has no jj config, runs `git` from its
-`PATH`.
+`PATH`. What only needs an answer musubi asks gix, which jj uses too, in-process: which
+commits exist, which commits a transfer covers and which of them have no parents, and which
+refs the hub has. Starting git for each would cost more than the answer, on Windows most of
+all. Each question opens the repository afresh, so that gix sees what git
+has just written, and holds no pack open that git's gc would delete, which Windows forbids.
 
-- The hub stores objects in a bare git repository. Its only refs are under
+- The hub stores objects in a bare git repository, in the files ref format whatever git's
+  default, since gix reads no other. Its only refs are under
   `refs/musubi/head/`, naming the visible heads of its accepted head's view, so that git can
   keep a bitmap index of what they reach: with one, counting what a clone needs takes a
   fraction of the time. Nodes never see them, since what the hub sends is bundles, not refs.
@@ -345,7 +350,10 @@ the one its fetches and pushes use; a hub, which has no jj config, runs `git` fr
 - As `git fetch` does, a received pack of fewer than 100 objects is unpacked into loose
   objects, and a larger one kept as a pack. After receiving, the hub and nodes run
   `git gc --auto`, which consolidates packs and loose objects once there are enough of them
-  (by git's thresholds, or the repository's), in the background as git does
+  (by git's thresholds, or the repository's), but only once musubi, measuring as git does,
+  finds that there are: more than `gc.autoPackLimit` packs not kept, or more than `gc.auto`
+  loose objects, estimated from one of the 256 directories they spread across. It runs in
+  the background as git does
   (`gc.autoDetach`, including on Windows, where git can't detach itself), but with pruning
   disabled: musubi never deletes an object, reachable or not. On the hub, what its head's
   refs don't reach goes to a cruft pack. On battery, musubi defers the gc until an import

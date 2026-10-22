@@ -39,6 +39,10 @@ use crate::git_command::run_err;
 /// [`GitObjects::mark_head`]).
 const HEAD_REFS: &str = "refs/musubi/head/";
 
+/// git's defaults for `gc.auto` and `gc.autoPackLimit`.
+const GC_AUTO: i64 = 6700;
+const GC_AUTO_PACK_LIMIT: i64 = 50;
+
 /// How many objects a hub's repository holds before a bitmap index is worth writing.
 const BITMAP_AFTER: u64 = 10_000;
 
@@ -88,7 +92,15 @@ impl GitObjects {
     /// [`Self::maintain`] and [`Self::mark_head`] consolidate it.
     pub fn init_bare(executable: &Path, git_dir: &Path) -> Result<Self, ObjectError> {
         // Not through `run`: GIT_DIR must not be set when the repository does not exist yet.
-        let args = ["init", "--quiet", "--bare"];
+        // In the files ref format, whatever git's default, since gix reads the hub's refs
+        // ([`Self::gix`]) and knows no other.
+        let args = [
+            "-c",
+            "init.defaultRefFormat=files",
+            "init",
+            "--quiet",
+            "--bare",
+        ];
         let output = git(executable)
             .args(args)
             .arg(git_dir)
@@ -110,18 +122,53 @@ impl GitObjects {
         fs::metadata(common.join("shallow")).is_ok_and(|shallow| shallow.len() > 0)
     }
 
+    /// This repository as gix opens it, to answer what needn't start git: which objects
+    /// exist, which commits a walk reaches, and which refs there are. Starting git takes
+    /// longer than any of these, on Windows most of all. Opened afresh each time, so that it
+    /// sees what git has written since, and holds no pack open that git's gc would delete,
+    /// which Windows forbids.
+    fn gix(&self) -> Result<gix::Repository, ObjectError> {
+        gix::open_opts(self.git_dir(), gix::open::Options::isolated()).map_err(gix_err)
+    }
+
     /// The subset of `ids` not present in the object database.
     pub fn missing(&self, ids: &[CommitId]) -> Result<Vec<CommitId>, ObjectError> {
         if ids.is_empty() {
             return Ok(vec![]);
         }
-        let input = hex_lines(ids.iter(), "");
-        let output = self.run(&["cat-file", "--batch-check=%(objectname)"], Some(input))?;
-        Ok(String::from_utf8_lossy(&output)
-            .lines()
-            .filter_map(|line| line.strip_suffix(" missing"))
-            .filter_map(CommitId::try_from_hex)
+        let repo = self.gix()?;
+        Ok(ids
+            .iter()
+            .filter(|id| !object_id(id).is_ok_and(|id| repo.has_object(id)))
+            .cloned()
             .collect())
+    }
+
+    /// The commits reachable from `wants` but not from `haves`, each with whether it has a
+    /// parent, as `git rev-list` would find them.
+    fn walk(
+        &self,
+        wants: &[CommitId],
+        haves: &[CommitId],
+    ) -> Result<Vec<(CommitId, bool)>, ObjectError> {
+        if wants.is_empty() {
+            return Ok(vec![]);
+        }
+        let repo = self.gix()?;
+        let wants: Vec<gix::ObjectId> = wants.iter().map(object_id).collect::<Result<_, _>>()?;
+        let haves: Vec<gix::ObjectId> = haves.iter().map(object_id).collect::<Result<_, _>>()?;
+        repo.rev_walk(wants)
+            .with_hidden(haves)
+            .all()
+            .map_err(gix_err)?
+            .map(|info| {
+                let info = info.map_err(gix_err)?;
+                Ok((
+                    CommitId::from_bytes(info.id.as_bytes()),
+                    !info.parent_ids.is_empty(),
+                ))
+            })
+            .collect()
     }
 
     /// Commits reachable from `wants` but not from `haves`.
@@ -130,13 +177,10 @@ impl GitObjects {
         wants: &[CommitId],
         haves: &[CommitId],
     ) -> Result<Vec<CommitId>, ObjectError> {
-        if wants.is_empty() {
-            return Ok(vec![]);
-        }
-        let output = self.run(&["rev-list", "--stdin"], Some(revs_input(wants, haves)))?;
-        Ok(String::from_utf8_lossy(&output)
-            .lines()
-            .filter_map(CommitId::try_from_hex)
+        Ok(self
+            .walk(wants, haves)?
+            .into_iter()
+            .map(|(commit, _)| commit)
             .collect())
     }
 
@@ -146,16 +190,10 @@ impl GitObjects {
         wants: &[CommitId],
         haves: &[CommitId],
     ) -> Result<Vec<CommitId>, ObjectError> {
-        if wants.is_empty() {
-            return Ok(vec![]);
-        }
-        let output = self.run(
-            &["rev-list", "--max-parents=0", "--stdin"],
-            Some(revs_input(wants, haves)),
-        )?;
-        Ok(String::from_utf8_lossy(&output)
-            .lines()
-            .filter_map(CommitId::try_from_hex)
+        Ok(self
+            .walk(wants, haves)?
+            .into_iter()
+            .filter_map(|(commit, parented)| (!parented).then_some(commit))
             .collect())
     }
 
@@ -255,10 +293,53 @@ impl GitObjects {
     /// every commit an operation refers to, and a hub's refs cover only its head. git may
     /// finish in the background. On battery it waits for an import on mains power.
     pub fn maintain(&self, hub: bool) -> Result<(), ObjectError> {
-        if power::on_battery() {
+        if power::on_battery() || !self.gc_due(hub) {
             return Ok(());
         }
         self.gc_auto(hub)
+    }
+
+    /// Whether `git gc --auto` would find work, by git's own measures, so that git starts
+    /// only when it would: more than `gc.autoPackLimit` packs that aren't kept, or more than
+    /// `gc.auto` loose objects, which git estimates from `objects/17`, one of the 256
+    /// directories they spread across. A hub's `gc.auto` is git's default, as
+    /// [`Self::gc_auto`] sets it. Where the config can't be read, git decides.
+    fn gc_due(&self, hub: bool) -> bool {
+        let Ok(repo) = gix::open(self.git_dir()) else {
+            return true;
+        };
+        let config = repo.config_snapshot();
+        let threshold = if hub {
+            GC_AUTO
+        } else {
+            config.integer("gc.auto").unwrap_or(GC_AUTO)
+        };
+        if threshold <= 0 {
+            return false;
+        }
+        let objects = self.git_dir().join("objects");
+        let entries = |dir: &Path| fs::read_dir(dir).into_iter().flatten().flatten();
+        let pack_limit = config
+            .integer("gc.autoPackLimit")
+            .unwrap_or(GC_AUTO_PACK_LIMIT);
+        let packs = entries(&objects.join("pack"))
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension().is_some_and(|ext| ext == "pack")
+                    && !path.with_extension("keep").exists()
+            })
+            .count();
+        if pack_limit > 0 && i64::try_from(packs).unwrap_or(i64::MAX) > pack_limit {
+            return true;
+        }
+        let loose = entries(&objects.join("17"))
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.as_encoded_bytes();
+                name.len() == 38 && name.iter().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+            })
+            .count();
+        i64::try_from(loose).unwrap_or(i64::MAX) > (threshold + 255) / 256
     }
 
     fn gc_auto(&self, hub: bool) -> Result<(), ObjectError> {
@@ -336,11 +417,14 @@ impl GitObjects {
     /// [`Self::maintain`], the gc never deletes an object: what no ref reaches goes to a
     /// cruft pack.
     pub fn mark_head(&self, commits: &[CommitId]) -> Result<(), ObjectError> {
-        let listed = self.run(&["for-each-ref", "--format=%(refname)", HEAD_REFS], None)?;
-        let existing: BTreeSet<String> = String::from_utf8_lossy(&listed)
-            .lines()
-            .map(str::to_owned)
-            .collect();
+        let repo = self.gix()?;
+        let existing: BTreeSet<String> = repo
+            .references()
+            .map_err(gix_err)?
+            .prefixed(HEAD_REFS)
+            .map_err(gix_err)?
+            .map(|reference| Ok(reference.map_err(gix_err)?.name().as_bstr().to_string()))
+            .collect::<Result<_, ObjectError>>()?;
         // The root commit isn't a git object.
         let wanted: BTreeSet<String> = commits
             .iter()
@@ -521,6 +605,17 @@ fn hex_lines<'a>(ids: impl Iterator<Item = &'a CommitId>, prefix: &str) -> Vec<u
         writeln!(lines, "{prefix}{}", id.hex()).expect("writing to a String");
     }
     lines.into_bytes()
+}
+
+fn object_id(id: &CommitId) -> Result<gix::ObjectId, ObjectError> {
+    gix::ObjectId::try_from(id.as_bytes()).map_err(|_| ObjectError::MalformedObject {
+        kind: "commit",
+        id: id.hex(),
+    })
+}
+
+fn gix_err(err: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> ObjectError {
+    ObjectError::Gix(err.into())
 }
 
 fn revs_input(wants: &[CommitId], haves: &[CommitId]) -> Vec<u8> {
@@ -776,6 +871,134 @@ impl ObjectStore for GitStore<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn init(dir: &Path) -> impl Fn(&[&str]) -> String {
+        let dir = dir.to_owned();
+        move |args: &[&str]| {
+            let output = git(Path::new("git"))
+                .current_dir(&dir)
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?}: {output:?}");
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        }
+    }
+
+    #[test]
+    fn walks_find_what_rev_list_finds() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = init(dir.path());
+        run(&["init", "--quiet", "--initial-branch=main"]);
+        let commit = |message: &str| {
+            run(&["commit", "--quiet", "--allow-empty", "-m", message]);
+            run(&["rev-parse", "HEAD"])
+        };
+        let a = commit("a");
+        let b = commit("b");
+        run(&["checkout", "--quiet", "--orphan", "other"]);
+        let c = commit("c");
+        run(&[
+            "merge",
+            "--quiet",
+            "--allow-unrelated-histories",
+            "-m",
+            "d",
+            "main",
+        ]);
+        let d = run(&["rev-parse", "HEAD"]);
+        let e = commit("e");
+        let objects = GitObjects::new(Path::new("git"), &dir.path().join(".git"));
+        let ids = |hexes: &[&String]| -> Vec<CommitId> {
+            hexes
+                .iter()
+                .map(|hex| CommitId::try_from_hex(hex).unwrap())
+                .collect()
+        };
+        let sorted = |mut ids: Vec<CommitId>| {
+            ids.sort();
+            ids
+        };
+        let rev_list = |args: &[&str], wants: &[&String], haves: &[&String]| -> Vec<CommitId> {
+            let mut args = args.to_vec();
+            let haves: Vec<String> = haves.iter().map(|have| format!("^{have}")).collect();
+            args.extend(wants.iter().map(|want| want.as_str()));
+            args.extend(haves.iter().map(String::as_str));
+            let out = run(&args);
+            sorted(
+                out.lines()
+                    .map(|line| CommitId::try_from_hex(line).unwrap())
+                    .collect(),
+            )
+        };
+        for (wants, haves) in [
+            (vec![&e], vec![]),
+            (vec![&e], vec![&b]),
+            (vec![&e], vec![&c]),
+            (vec![&e], vec![&d]),
+            (vec![&d, &a], vec![&c]),
+            (vec![&b], vec![&e]),
+        ] {
+            assert_eq!(
+                sorted(objects.commits_between(&ids(&wants), &ids(&haves)).unwrap()),
+                rev_list(&["rev-list"], &wants, &haves),
+                "{wants:?} ^{haves:?}"
+            );
+            assert_eq!(
+                sorted(objects.roots(&ids(&wants), &ids(&haves)).unwrap()),
+                rev_list(&["rev-list", "--max-parents=0"], &wants, &haves),
+                "{wants:?} ^{haves:?}"
+            );
+        }
+        let absent = CommitId::try_from_hex("1".repeat(40)).unwrap();
+        assert_eq!(
+            objects.missing(&ids(&[&a, &e])).unwrap(),
+            Vec::<CommitId>::new()
+        );
+        assert_eq!(
+            objects
+                .missing(&[absent.clone(), CommitId::from_bytes(&[0; 20])])
+                .unwrap(),
+            [absent, CommitId::from_bytes(&[0; 20])]
+        );
+    }
+
+    #[test]
+    fn gc_starts_only_where_git_would_collect() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = init(dir.path());
+        run(&["init", "--quiet"]);
+        let git_dir = dir.path().join(".git");
+        let objects = GitObjects::new(Path::new("git"), &git_dir);
+        assert!(!objects.gc_due(false));
+        // git estimates loose objects from one directory of the 256: here, more than 2 in it
+        // stand for more than 512.
+        run(&["config", "gc.auto", "512"]);
+        let seventeen = git_dir.join("objects/17");
+        fs::create_dir_all(&seventeen).unwrap();
+        for name in ["0".repeat(38), "1".repeat(38), "not-an-object".to_owned()] {
+            fs::write(seventeen.join(name), "").unwrap();
+        }
+        assert!(!objects.gc_due(false));
+        fs::write(seventeen.join("2".repeat(38)), "").unwrap();
+        assert!(objects.gc_due(false));
+        // A hub's own `gc.auto` gives way to git's default.
+        assert!(!objects.gc_due(true));
+        run(&["config", "gc.auto", "0"]);
+        assert!(!objects.gc_due(false));
+        // Packs past `gc.autoPackLimit`, unless kept.
+        fs::remove_dir_all(&seventeen).unwrap();
+        run(&["config", "--unset", "gc.auto"]);
+        run(&["config", "gc.autoPackLimit", "1"]);
+        let packs = git_dir.join("objects/pack");
+        fs::write(packs.join("pack-a.pack"), "").unwrap();
+        assert!(!objects.gc_due(false));
+        fs::write(packs.join("pack-b.pack"), "").unwrap();
+        assert!(objects.gc_due(false));
+        fs::write(packs.join("pack-b.keep"), "").unwrap();
+        assert!(!objects.gc_due(false));
+    }
 
     /// musubi's git runs no hooks: here, `gc --auto`'s `pre-auto-gc`, with a second pack
     /// making a gc due.

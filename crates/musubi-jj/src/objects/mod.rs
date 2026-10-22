@@ -83,6 +83,8 @@ impl Backend {
 pub enum ObjectError {
     #[error(transparent)]
     Git(#[from] GitError),
+    #[error("reading the git repository")]
+    Gix(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("I/O error")]
     Io(#[from] io::Error),
     #[error("missing objects after receiving bundle: {0}")]

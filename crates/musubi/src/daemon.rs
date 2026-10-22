@@ -586,6 +586,7 @@ pub async fn ensure(socket: &Socket) -> anyhow::Result<ControlClient> {
     // A child that exits may have lost a race with another command's daemon, which is as
     // good: keep looking for one until the deadline.
     let mut exited = None;
+    let mut pause = FIRST_POLL;
     loop {
         if let Some(client) = running(socket).await? {
             return Ok(client);
@@ -607,9 +608,16 @@ pub async fn ensure(socket: &Socket) -> anyhow::Result<ControlClient> {
                 tail.join("\n")
             );
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(pause).await;
+        pause = (pause * 2).min(LAST_POLL);
     }
 }
+
+/// How long to wait before looking again for a daemon starting or stopping, at first and at
+/// most: one is ready in a few milliseconds, which a fixed 50 would add to every command
+/// that starts it.
+const FIRST_POLL: Duration = Duration::from_millis(2);
+const LAST_POLL: Duration = Duration::from_millis(50);
 
 /// Starts `musubi daemon` in the background, detached from this terminal, logging to the
 /// state directory.
@@ -682,13 +690,15 @@ pub async fn stop(socket: &Socket) -> anyhow::Result<bool> {
         .await
         .ok();
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut pause = FIRST_POLL;
     // Gone once it has let go of its lock, which it does after closing its socket.
     while socket.connect().await?.is_some() || socket.is_locked()? {
         anyhow::ensure!(
             std::time::Instant::now() < deadline,
             "the daemon on {socket} did not stop"
         );
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(pause).await;
+        pause = (pause * 2).min(LAST_POLL);
     }
     Ok(true)
 }

@@ -353,6 +353,21 @@ mod tests {
         postcard::to_stdvec(&envelope).unwrap()
     }
 
+    /// Messages carry the jj-lib version musubi is built with, as the workspace pins it, and
+    /// tests run the jj of that version: peers on different ones must refuse each other,
+    /// since canonical operation ids are hashes of jj-lib's structs.
+    #[test]
+    fn jj_lib_version_is_the_pinned_one() {
+        let manifest = concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml");
+        let manifest = std::fs::read_to_string(manifest).unwrap();
+        let pin = format!(r#"jj-lib = {{ version = "={JJ_LIB_VERSION}""#);
+        assert!(
+            manifest.contains(&pin),
+            "jj-lib isn't pinned to {JJ_LIB_VERSION}"
+        );
+        assert_eq!(musubi_testutil::JJ_VERSION, JJ_LIB_VERSION);
+    }
+
     #[test]
     fn a_reply_decodes() {
         let reply = HubReply::Error("no".to_owned());

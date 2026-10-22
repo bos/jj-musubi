@@ -1,0 +1,10 @@
+extensions:
+  # CodeQL takes anything named `uid` for account information, and taints every `Result` that
+  # a `?` could pass socket::uid's error up through, so the name of a hive in a hub's reply,
+  # once printed, reads as the uid logged. A uid isn't secret, so stop its taint where it
+  # starts. (Cleartext logging takes its barriers from those of log injection.)
+  - addsTo:
+      pack: codeql/rust-all
+      extensible: barrierModel
+    data:
+      - ["musubi::socket::uid", "ReturnValue", "log-injection", "manual"]

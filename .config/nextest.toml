@@ -1,3 +1,6 @@
+# For test priorities (below); an older nextest would ignore them, saying only that it does.
+nextest-version = "0.9.148"
+
 [profile.default]
 fail-fast = false
 slow-timeout = { period = "30s", terminate-after = 4 }
@@ -9,3 +12,9 @@ default-filter = "not test(/^e2e_search_/)"
 [profile.search]
 default-filter = "test(/^e2e_search_/)"
 slow-timeout = { period = "300s", terminate-after = 12 }
+
+# The conformance test is the longest by far, and longer still while the rest run: start it
+# first, so that it doesn't finish alone at the end.
+[[profile.default.overrides]]
+filter = "test(=conformance)"
+priority = 100

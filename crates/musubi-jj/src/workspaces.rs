@@ -90,9 +90,11 @@ pub fn machine_name(key: &str) -> &str {
     key.split_once('#').map_or(key, |(name, _)| name)
 }
 
+/// The start of a machine key's suffix. Keys come from other machines, whose `musubi/machine`
+/// may have been edited by hand: whatever follows the `#`, this cuts it between characters.
 fn short_id(key: &str) -> &str {
     key.split_once('#')
-        .map_or("", |(_, id)| &id[..id.len().min(4)])
+        .map_or("", |(_, id)| &id[..id.floor_char_boundary(4)])
 }
 
 /// The canonical key of `workspace` on `machine`.
@@ -196,6 +198,16 @@ mod tests {
         assert_eq!(names["mac#bbbb0000"], "mac-bbbb");
         assert_eq!(names["git#cccc0000"], "git");
         assert_eq!(names["origin#dddd0000"], "origin-dddd");
+    }
+
+    /// A suffix edited by hand to start with characters of more than one byte is cut between
+    /// characters.
+    #[test]
+    fn names_qualify_with_any_suffix() {
+        let machines: BTreeSet<String> = ["mac#abcé", "mac#ü"].map(str::to_owned).into();
+        let names = display_names(&machines, |_| false);
+        assert_eq!(names["mac#abcé"], "mac-abc");
+        assert_eq!(names["mac#ü"], "mac-ü");
     }
 
     /// jj's RNG, as `debug.randomness-seed = seed` makes it.

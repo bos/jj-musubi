@@ -583,14 +583,29 @@ impl NodeRepo {
         workspaces::follow_rewrites(&mut forgotten, predecessors);
         // Forgetting a workspace abandons its working-copy commit if it's empty, as
         // `jj workspace forget` does. Forgetting another machine's workspace here mustn't
-        // abandon that machine's working copy: keep the commit visible. But only while its
+        // abandon that machine's working copy: keep the commit visible, in the operation
+        // that forgot the workspace and in every later one. But not once this machine
+        // abandons the commit itself, as it can while the commit is visible here: had the
+        // workspace been here, jj would have given it a new commit. And only while its
         // parents are visible here: jj, no longer seeing the commit, doesn't rebase it when
         // this machine rewrites or abandons them, and keeping it would bring them back.
-        // Its machine then replaces it, as if jj had abandoned it here
+        // Either way, its machine then replaces it, as if jj had abandoned it here
         // (`replace_abandoned_working_copies`).
         let mut repo = None;
-        for commit in forgotten.values() {
+        let mut before = None;
+        for (key, commit) in &forgotten {
             if !parent_heads.contains(commit) || view.head_ids.contains(commit) {
+                continue;
+            }
+            let (names, heads) = match &before {
+                Some(before) => before,
+                None => before.insert(self.parents_names_and_heads(local_op)?),
+            };
+            let forgotten_here = others
+                .iter()
+                .any(|(name, other)| other == key && names.contains(name));
+            // Forgotten before, and visible until this operation abandoned it.
+            if !forgotten_here && heads.contains(commit) {
                 continue;
             }
             let repo = match &repo {
@@ -620,6 +635,24 @@ impl NodeRepo {
         strip_git_records(&mut view);
         view.wc_commit_ids = workspaces_by_key;
         Ok(view)
+    }
+
+    /// The workspaces, by local name, and the heads of the views of a local operation's
+    /// parents, all together.
+    fn parents_names_and_heads(
+        &self,
+        local_op: &OperationId,
+    ) -> Result<(BTreeSet<WorkspaceNameBuf>, BTreeSet<CommitId>), NodeError> {
+        let op_store = self.loader.op_store();
+        let mut names = BTreeSet::new();
+        let mut heads = BTreeSet::new();
+        for parent in op_store.read_operation(local_op).block_on()?.parents {
+            let parent = op_store.read_operation(&parent).block_on()?;
+            let view = op_store.read_view(&parent.view_id).block_on()?;
+            names.extend(view.wc_commit_ids.into_keys());
+            heads.extend(view.head_ids);
+        }
+        Ok((names, heads))
     }
 
     fn is_own_key(&self, key: &WorkspaceName) -> bool {

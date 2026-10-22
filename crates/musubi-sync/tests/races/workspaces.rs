@@ -83,9 +83,10 @@ fn other_machines_workspaces_are_theirs() {
     hive.sync();
     let beta_wc = working_copy(&hive, 1);
     // jj abandons an empty working-copy commit when it forgets the workspace, but not
-    // another machine's.
+    // another machine's, there or in the operations that follow.
     hive.repo(0).jj(&["workspace", "forget", "beta/beta"]);
     assert_eq!(names(&hive, 0), ["alpha"]);
+    hive.commit(0, "a", "from alpha");
     hive.sync();
     assert_eq!(names(&hive, 0), ["alpha", "beta/beta"]);
     assert_eq!(names(&hive, 1), ["alpha/alpha", "beta"]);
@@ -200,9 +201,36 @@ fn forgotten_working_copies_follow_a_moved_parent() {
 }
 
 /// A machine forgets another machine's workspace, then, before it syncs, abandons that
-/// machine's `@`, which another commit is built on. musubi keeps a forgotten `@` visible
-/// only if it was a head, the only kind jj's forget abandons, so the abandon stands, and
-/// the other machine gets a fresh `@` on the parent.
+/// machine's `@`, which has edits, so the forget left it. The abandon stands, as it would
+/// had the workspace still been there, and the other machine gets a fresh `@` on the
+/// parent. musubi keeps visible a forgotten `@` that the forget abandoned, not one that a
+/// later operation did.
+#[test]
+fn forgotten_working_copies_can_be_abandoned() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(1, "a", "base on beta");
+    hive.repo(1).write_file("work", "beta's work");
+    hive.repo(1).jj(&["status"]);
+    hive.sync();
+    let beta_wc = working_copy(&hive, 1);
+    hive.repo(0).jj(&["workspace", "forget", "beta/beta"]);
+    hive.repo(0).jj(&["abandon", &beta_wc]);
+    hive.sync();
+    hive.sync();
+    hive.assert_converged();
+    for m in 0..2 {
+        assert!(
+            !hive.visible(m).iter().any(|c| c.starts_with(&beta_wc)),
+            "abandoned @ visible on {}",
+            hive.repo(m).machine()
+        );
+    }
+    assert_ne!(revision_id(&hive, 1, "@"), beta_wc);
+    assert_eq!(parent_description(&hive, 1), "base on beta");
+}
+
+/// As [`forgotten_working_copies_can_be_abandoned`], but with a commit built on the `@`,
+/// so that it isn't a head.
 #[test]
 fn forgotten_working_copies_built_on_can_be_abandoned() {
     let mut hive = Fixture::new(&["alpha", "beta"]);

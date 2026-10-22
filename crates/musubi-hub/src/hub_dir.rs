@@ -254,7 +254,7 @@ impl HubDir {
             name: hive.meta.name.clone(),
             backend: hive.meta.backend,
             urls: hive.index.urls.iter().cloned().collect(),
-            machines: machine_names(&hive.index.machines),
+            machines: display_names(&hive.index.machines),
         })
     }
 
@@ -410,10 +410,9 @@ impl HubDir {
             until: now + self.pending_lifetime,
         });
         let mut info = self.info(&id).expect("chosen or created");
-        let joining = workspaces::machine_name(&request.machine).to_owned();
-        let mut machines: BTreeSet<String> = info.machines.into_iter().collect();
-        machines.insert(joining);
-        info.machines = machines.into_iter().collect();
+        let mut machines = self.hives[&id].index.machines.clone();
+        machines.insert(request.machine.clone());
+        info.machines = display_names(&machines);
         Ok(Joined {
             hive: info,
             created,
@@ -422,9 +421,11 @@ impl HubDir {
     }
 }
 
-fn machine_names(keys: &BTreeSet<String>) -> Vec<String> {
-    keys.iter()
-        .map(|key| workspaces::machine_name(key).to_owned())
+/// Machines' names, as `musubi list` shows them: told apart by their keys where they are
+/// alike.
+fn display_names(keys: &BTreeSet<String>) -> Vec<String> {
+    workspaces::display_names(keys, |_| false)
+        .into_values()
         .collect()
 }
 
@@ -503,5 +504,29 @@ mod tests {
         };
         hubs.update_index(&id, pushed).unwrap();
         assert!(hubs.hives[&id].pending.is_empty());
+    }
+
+    /// Machines of one name, which their keys tell apart, are listed apart, and a joining
+    /// machine is listed as it will be once it has pushed.
+    #[test]
+    fn machines_of_one_name_are_told_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut hubs = HubDir::open(dir.path()).unwrap();
+        let url = "https://example.com/a";
+        let id = hubs.join(&creating(request("mac", url))).unwrap().hive.id;
+        let pushed = HiveIndex {
+            machines: BTreeSet::from(["mac#00000000".to_owned(), "mac#11111111".to_owned()]),
+            roots: BTreeSet::from(["11".repeat(20)]),
+            ..HiveIndex::default()
+        };
+        hubs.update_index(&id, pushed).unwrap();
+        assert_eq!(hubs.info(&id).unwrap().machines, ["mac-0000", "mac-1111"]);
+        let third = JoinRequest {
+            hive: Some(id.clone()),
+            machine: "mac#22222222".to_owned(),
+            ..request("mac", url)
+        };
+        let joined = hubs.join(&third).unwrap();
+        assert_eq!(joined.hive.machines, ["mac-0000", "mac-1111", "mac-2222"]);
     }
 }

@@ -30,12 +30,7 @@ fn canonical_ancestry(node: &NodeRepo, head: &OperationId) -> Vec<OperationId> {
 
 fn sync(from: &NodeRepo, to: &mut NodeRepo, head: &OperationId) {
     let ops = canonical_ancestry(from, head);
-    let wants: Vec<_> = ops
-        .iter()
-        .flat_map(|id| from.required_commits(id).unwrap())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
+    let wants: Vec<_> = from.required_commits(&ops).unwrap().into_iter().collect();
     let to_store = to.object_store().unwrap();
     let missing = to_store.missing(&wants).unwrap();
     let haves: Vec<_> = wants

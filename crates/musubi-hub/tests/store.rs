@@ -64,12 +64,7 @@ fn closure_and_head_persist() {
         "{missing:?}"
     );
 
-    let wants: Vec<_> = ops
-        .iter()
-        .flat_map(|id| node.required_commits(id).unwrap())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
+    let wants: Vec<_> = node.required_commits(&ops).unwrap().into_iter().collect();
     let bundle = tempfile::NamedTempFile::new().unwrap();
     node.object_store()
         .unwrap()
@@ -151,11 +146,7 @@ fn upload_ops(node: &NodeRepo, hub: &HubStore, head: &OperationId) {
 }
 
 fn required(node: &NodeRepo, ops: &[OperationId]) -> Vec<CommitId> {
-    ops.iter()
-        .flat_map(|id| node.required_commits(id).unwrap())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
+    node.required_commits(ops).unwrap().into_iter().collect()
 }
 
 /// Writes the objects of a bundle into `git_dir` as loose objects.

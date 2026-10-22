@@ -70,7 +70,6 @@ use crate::hive_settings::Entry;
 use crate::hive_settings::HiveSettings;
 use crate::hive_settings::SettingValues;
 use crate::hive_settings::Stamp;
-use crate::objects;
 use crate::objects::GitObjects;
 use crate::objects::GitStore;
 use crate::objects::ObjectError;
@@ -992,19 +991,12 @@ impl NodeRepo {
         self.colocated
     }
 
-    /// The commits a stored canonical operation requires, excluding the root commit.
+    /// The commits the stored canonical operations `ops` require, excluding the root commit.
     pub fn required_commits(
         &self,
-        canonical: &OperationId,
+        canonical: &[OperationId],
     ) -> Result<BTreeSet<CommitId>, NodeError> {
-        if canonical == self.canonical.root_operation_id() {
-            return Ok(BTreeSet::new());
-        }
-        let op = self.canonical.read_operation(canonical)?;
-        let view = self.canonical.read_view(&op.view_id)?;
-        let mut commits = objects::referenced_commits(&op, &view);
-        commits.remove(self.loader.store().root_commit_id());
-        Ok(commits)
+        Ok(self.canonical.required_commits(canonical)?)
     }
 
     /// The object store of this repository's backend.

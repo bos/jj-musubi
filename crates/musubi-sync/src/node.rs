@@ -1,7 +1,6 @@
 //! The core's `LocalRepo` over a jj repository.
 
 use std::cell::RefCell;
-use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
@@ -161,11 +160,7 @@ impl NodeAdapter {
     }
 
     fn required_commits(&self, ops: &[OpId]) -> anyhow::Result<Vec<CommitId>> {
-        let mut commits = BTreeSet::new();
-        for op in ops {
-            commits.extend(self.repo.required_commits(op)?);
-        }
-        Ok(commits.into_iter().collect())
+        Ok(self.repo.required_commits(ops)?.into_iter().collect())
     }
 
     /// The local operations nearest to `ops` among their ancestors: where a walk up from
@@ -410,7 +405,7 @@ impl LocalRepo for NodeAdapter {
         for op in ops {
             if self
                 .repo
-                .required_commits(op)?
+                .required_commits(std::slice::from_ref(op))?
                 .iter()
                 .any(|commit| absent.contains(commit))
             {

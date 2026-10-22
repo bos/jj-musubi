@@ -5,13 +5,10 @@
 //! file format for every backend (see [`bundle`]), so the transfer layer never needs to know
 //! which backend a hive uses. See "Objects" in docs/design.md.
 
-use std::collections::BTreeSet;
 use std::io;
 use std::path::Path;
 
 use jj_lib::backend::CommitId;
-use jj_lib::op_store::Operation;
-use jj_lib::op_store::View;
 use jj_lib::stacked_table::TableStoreError;
 use thiserror::Error;
 
@@ -52,36 +49,6 @@ pub enum ObjectError {
     /// An error from a caller's record handler, passed through [`bundle::read`].
     #[error(transparent)]
     Nested(Box<dyn std::error::Error + Send + Sync>),
-}
-
-/// Every commit `op` requires: those its view refers to, and its recorded predecessors.
-/// The caller excludes the backend's root commit, which no store contains.
-pub fn referenced_commits(op: &Operation, view: &View) -> BTreeSet<CommitId> {
-    let mut ids: BTreeSet<CommitId> = view.head_ids.iter().cloned().collect();
-    let targets = view
-        .local_bookmarks
-        .values()
-        .chain(view.local_tags.values())
-        .chain(view.git_refs.values())
-        .chain(view.git_heads.values())
-        .chain(view.remote_views.values().flat_map(|remote| {
-            remote
-                .bookmarks
-                .values()
-                .chain(remote.tags.values())
-                .map(|r| &r.target)
-        }));
-    for target in targets {
-        ids.extend(target.iter().flatten().cloned());
-    }
-    ids.extend(view.wc_commit_ids.values().cloned());
-    if let Some(predecessors) = &op.commit_predecessors {
-        for (commit, preds) in predecessors {
-            ids.insert(commit.clone());
-            ids.extend(preds.iter().cloned());
-        }
-    }
-    ids
 }
 
 /// A store of commits and everything they reach, able to exchange bundles with another

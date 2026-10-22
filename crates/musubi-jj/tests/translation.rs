@@ -24,7 +24,7 @@ fn ship_objects(from: &NodeRepo, to: &NodeRepo, head: &OperationId) {
         if !seen.insert(id.clone()) || id == *from.canonical_store().root_operation_id() {
             continue;
         }
-        wants.extend(from.required_commits(&id).unwrap());
+        wants.extend(from.required_commits(std::slice::from_ref(&id)).unwrap());
         stack.extend(from.canonical_store().read_operation(&id).unwrap().parents);
     }
     let wants: Vec<_> = wants.into_iter().collect();

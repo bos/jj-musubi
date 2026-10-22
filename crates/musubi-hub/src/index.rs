@@ -56,7 +56,10 @@ impl HiveIndex {
     /// Adds what the operations accepted since `since` brought.
     pub fn update(&mut self, store: &HubStore, since: &OperationId) -> Result<(), StoreError> {
         let ops = store.ops_since(store.head().1, since)?;
-        let haves: Vec<CommitId> = store.required_commits(since)?.into_iter().collect();
+        let haves: Vec<CommitId> = store
+            .required_commits(std::slice::from_ref(since))?
+            .into_iter()
+            .collect();
         self.add(store, &ops, &haves)?;
         self.machines = head_machines(store)?;
         Ok(())
@@ -68,7 +71,6 @@ impl HiveIndex {
         ops: &[OperationId],
         haves: &[CommitId],
     ) -> Result<(), StoreError> {
-        let mut wants = BTreeSet::new();
         for id in ops {
             let operation = store.canonical().read_operation(id)?;
             if let Some(settings) = operation.metadata.attributes.get(hive_settings::ATTRIBUTE) {
@@ -82,9 +84,8 @@ impl HiveIndex {
                     self.urls.extend(remote.push_url);
                 }
             }
-            wants.extend(store.required_commits(id)?);
         }
-        let wants: Vec<CommitId> = wants.into_iter().collect();
+        let wants: Vec<CommitId> = store.required_commits(ops)?.into_iter().collect();
         let objects = store.object_store();
         let absent = objects.missing(&wants)?;
         let present: Vec<CommitId> = wants.into_iter().filter(|c| !absent.contains(c)).collect();

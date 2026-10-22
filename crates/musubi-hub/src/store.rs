@@ -24,7 +24,6 @@ use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::OperationId;
 use musubi_jj::canonical::CanonicalError;
 use musubi_jj::canonical::CanonicalStore;
-use musubi_jj::objects;
 use musubi_jj::objects::GitObjects;
 use musubi_jj::objects::GitStore;
 use musubi_jj::objects::ObjectError;
@@ -281,16 +280,9 @@ impl HubStore {
         Ok(false)
     }
 
-    /// The commits a stored operation requires, excluding the root commit.
-    pub fn required_commits(&self, op: &OperationId) -> Result<BTreeSet<CommitId>, StoreError> {
-        if op == self.canonical.root_operation_id() {
-            return Ok(BTreeSet::new());
-        }
-        let operation = self.canonical.read_operation(op)?;
-        let view = self.canonical.read_view(&operation.view_id)?;
-        let mut commits = objects::referenced_commits(&operation, &view);
-        commits.remove(&self.backend.root_commit());
-        Ok(commits)
+    /// The commits the stored operations `ops` require, excluding the root commit.
+    pub fn required_commits(&self, ops: &[OperationId]) -> Result<BTreeSet<CommitId>, StoreError> {
+        Ok(self.canonical.required_commits(ops)?)
     }
 
     /// Whether `closure(op)` is stored: every operation in `anc*(op)`, its view, and every
@@ -301,7 +293,7 @@ impl HubStore {
     /// commits of those it reached and of the head.
     pub fn missing_closure(&self, op: &OperationId) -> Result<Vec<String>, StoreError> {
         let mut missing = vec![];
-        let mut wanted_commits = BTreeSet::new();
+        let mut reached = vec![];
         let mut boundary = BTreeSet::from([self.head.clone()]);
         let mut seen = HashSet::new();
         let mut stack = vec![op.clone()];
@@ -322,23 +314,18 @@ impl HubStore {
                 missing.push(format!("view {}", operation.view_id.hex()));
                 continue;
             }
-            let view = self.canonical.read_view(&operation.view_id)?;
-            wanted_commits.extend(objects::referenced_commits(&operation, &view));
             stack.extend(operation.parents);
+            reached.push(id);
         }
-        wanted_commits.remove(&self.backend.root_commit());
-        let wanted: Vec<CommitId> = wanted_commits.into_iter().collect();
+        let wanted: Vec<CommitId> = self.required_commits(&reached)?.into_iter().collect();
         let objects = self.object_store();
         let absent = objects.missing(&wanted)?;
         missing.extend(absent.iter().map(|id| format!("commit {}", id.hex())));
         if absent.is_empty() && missing.is_empty() {
             // Imports check connectivity, but verify anyway: a head is accepted at most
             // once, and accepting one with a hole would break every node that adopts it.
-            let mut haves = BTreeSet::new();
-            for id in &boundary {
-                haves.extend(self.required_commits(id)?);
-            }
-            let haves: Vec<CommitId> = haves.into_iter().collect();
+            let boundary: Vec<OperationId> = boundary.into_iter().collect();
+            let haves: Vec<CommitId> = self.required_commits(&boundary)?.into_iter().collect();
             if let Err(err) = objects.check_connected(&wanted, &haves) {
                 missing.push(err.to_string());
             }

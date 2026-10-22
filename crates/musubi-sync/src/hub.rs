@@ -104,12 +104,12 @@ impl HubStorage for HubAdapter {
         base: &OpId,
         haves: &Attachment,
     ) -> anyhow::Result<Attachment> {
-        let mut wants = BTreeSet::new();
-        for op in for_ops {
-            if self.store.canonical().has_operation(op) {
-                wants.extend(self.store.required_commits(op)?);
-            }
-        }
+        let stored: Vec<OpId> = for_ops
+            .iter()
+            .filter(|op| self.store.canonical().has_operation(op))
+            .cloned()
+            .collect();
+        let wants = self.store.required_commits(&stored)?;
         if wants.is_empty() {
             return Ok(Attachment::None);
         }
@@ -120,7 +120,7 @@ impl HubStorage for HubAdapter {
         // The node has `closure(base)`, and what it says it has.
         let mut haves: BTreeSet<CommitId> = haves.haves().iter().cloned().collect();
         if self.store.canonical().has_operation(base) {
-            haves.extend(self.store.required_commits(base)?);
+            haves.extend(self.store.required_commits(std::slice::from_ref(base))?);
         }
         let haves: Vec<CommitId> = haves.into_iter().collect();
         let bundle = temp_bundle(&self.tmp)?;

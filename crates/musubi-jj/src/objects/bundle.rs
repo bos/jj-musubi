@@ -49,6 +49,9 @@ const LEVEL: i32 = 3;
 
 /// The largest window a view delta may use, 2^27 bytes: what every zstd decoder accepts.
 const MAX_WINDOW_LOG: u32 = 27;
+/// How much of a view delta's base zstd's usual match finding indexes at `LEVEL`: the last
+/// 2^(hashLog + 3) bytes, a megabyte. Long-distance matching, slower, indexes all of it.
+const INDEXED_BASE: usize = 1 << 20;
 
 /// The largest record a compressed record may decompress to. Views of this size are far
 /// beyond any repository's; anything larger is malformed, not a view.
@@ -444,15 +447,14 @@ fn parse_small(tag: u8, bytes: Vec<u8>) -> Option<Record> {
 /// that differs from its parent's in a few bookmarks, a few hundred bytes.
 pub fn view_delta(base: &[u8], contents: &[u8]) -> io::Result<Vec<u8>> {
     let mut encoder = zstd::stream::write::Encoder::with_ref_prefix(Vec::new(), LEVEL, base)?;
-    // The window must reach back over the whole base, and beyond a few megabytes, zstd
-    // finds matches that far back only with long-distance matching.
+    // The window must reach back over the whole base.
     let span = (base.len() + contents.len()).max(1);
     let window_log = span
         .next_power_of_two()
         .trailing_zeros()
         .clamp(10, MAX_WINDOW_LOG);
     encoder.window_log(window_log)?;
-    encoder.long_distance_matching(true)?;
+    encoder.long_distance_matching(base.len() > INDEXED_BASE)?;
     encoder.include_contentsize(true)?;
     encoder.set_pledged_src_size(Some(contents.len() as u64))?;
     encoder.write_all(contents)?;
@@ -635,7 +637,8 @@ mod tests {
     /// for each of zstd's 128 KiB blocks.
     #[test]
     fn view_delta_is_about_the_size_of_the_change() {
-        for lines in [10, 1_000, 100_000] {
+        // Without long-distance matching, up to a base of a megabyte, and with it beyond.
+        for lines in [10, 1_000, 17_000, 18_500, 100_000] {
             let base = view_like(lines, None);
             let view = view_like(lines, Some(lines / 2));
             let delta = view_delta(&base, &view).unwrap();

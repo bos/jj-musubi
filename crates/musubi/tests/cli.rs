@@ -76,6 +76,8 @@ fn try_run(logs: &Logs, env: &TestEnv, mut command: Command) -> (bool, String, S
         .stderr(fs::File::create(&err).unwrap());
     let mut child = command.spawn().unwrap();
     let deadline = Instant::now() + DEADLINE;
+    // Most commands finish in milliseconds: look again soon, then less often.
+    let mut pause = Duration::from_millis(1);
     let status = loop {
         if let Some(status) = child.try_wait().unwrap() {
             break status;
@@ -85,7 +87,8 @@ fn try_run(logs: &Logs, env: &TestEnv, mut command: Command) -> (bool, String, S
             child.wait().ok();
             panic!("{command:?} did not finish in time:\n{}", logs.dump());
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(pause);
+        pause = (pause * 2).min(Duration::from_millis(50));
     };
     (
         status.success(),

@@ -573,9 +573,7 @@ fn clone(
         Backend::Simple => &["debug", "init-simple"],
     };
     let mut jj = Process::new("jj");
-    for name in musubi_jj::git_command::REPOSITORY_ENV {
-        jj.env_remove(name);
-    }
+    musubi_jj::git_command::without_repository_env(&mut jj);
     let status = jj.args(init).arg(dest).status()?;
     anyhow::ensure!(status.success(), "`jj {} {dest}` failed", init.join(" "));
     let located = Located::find(destination)?;

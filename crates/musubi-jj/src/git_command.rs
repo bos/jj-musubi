@@ -51,13 +51,19 @@ pub enum GitError {
 /// [`Incompleteness`]: crate::objects::Incompleteness
 pub(crate) fn git(executable: &Path) -> Command {
     let mut command = Command::new(executable);
-    for name in REPOSITORY_ENV {
-        command.env_remove(name);
-    }
+    without_repository_env(&mut command);
     command.env("GIT_NO_LAZY_FETCH", "1");
     // A path under which no hook can exist.
     command.args(["-c", "core.hooksPath=/dev/null"]);
     command
+}
+
+/// Keeps `command` from [`REPOSITORY_ENV`], which would name the repository of whatever ran
+/// musubi.
+pub fn without_repository_env(command: &mut Command) {
+    for name in REPOSITORY_ENV {
+        command.env_remove(name);
+    }
 }
 
 /// The empty tree's id, which git knows without storing it.

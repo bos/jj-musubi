@@ -695,9 +695,7 @@ fn spawn(socket: &Socket) -> anyhow::Result<(std::process::Child, PathBuf)> {
 /// hook has, and not the command's ssh agent, but `agent_link`, which commands keep pointed
 /// at a live one ([`agent`]).
 fn isolate(command: &mut std::process::Command, agent_link: Option<&Path>) {
-    for name in musubi_jj::git_command::REPOSITORY_ENV {
-        command.env_remove(name);
-    }
+    musubi_jj::git_command::without_repository_env(command);
     if let Some(link) = agent_link {
         command.env("SSH_AUTH_SOCK", link);
     }

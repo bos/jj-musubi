@@ -24,6 +24,7 @@ use clap::Parser;
 use clap::Subcommand;
 use jj_lib::object_id::ObjectId as _;
 use musubi_hub::hub_dir::HiveInfo;
+use musubi_hub::hub_dir::JoinChoice;
 use musubi_hub::hub_dir::JoinRequest;
 use musubi_jj::node::NodeRepo;
 use musubi_jj::objects::Backend;
@@ -279,9 +280,11 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }),
-        Command::Create { name, member } => join(&cwd, Choice::Create(name), &member, &socket()?),
+        Command::Create { name, member } => {
+            join(&cwd, JoinChoice::Create(name), &member, &socket()?)
+        }
         Command::Join { hive, member } => {
-            let choice = hive.map_or(Choice::Match, Choice::Hive);
+            let choice = hive.map_or(JoinChoice::Match, JoinChoice::Hive);
             join(&cwd, choice, &member, &socket()?)
         }
         Command::Clone {
@@ -367,18 +370,9 @@ fn block_on<T>(future: impl Future<Output = anyhow::Result<T>>) -> anyhow::Resul
         .block_on(future)
 }
 
-/// Which hive `musubi join` or `musubi create` makes a repository part of.
-enum Choice {
-    /// Whichever matches.
-    Match,
-    Hive(String),
-    /// A new one, with this name or one the hub chooses.
-    Create(Option<String>),
-}
-
 /// Makes the repository at `start` part of a hive: the hub decides which (see
 /// `musubi_hub::matching`); then this records the membership and has the daemon serve it.
-fn join(start: &Path, choice: Choice, member: &Member, socket: &Socket) -> anyhow::Result<()> {
+fn join(start: &Path, choice: JoinChoice, member: &Member, socket: &Socket) -> anyhow::Result<()> {
     let Member {
         machine,
         full_history,
@@ -396,15 +390,8 @@ fn join(start: &Path, choice: Choice, member: &Member, socket: &Socket) -> anyho
     set_machine_name(&located, machine)?;
     let node = located.open()?;
     let summary = node.join_summary()?;
-    let (hive, create, new) = match choice {
-        Choice::Match => (None, false, None),
-        Choice::Hive(hive) => (Some(hive), false, None),
-        Choice::Create(name) => (None, true, name),
-    };
     let request = JoinRequest {
-        hive,
-        create,
-        new,
+        choice,
         backend: summary.backend,
         remotes: summary
             .remotes

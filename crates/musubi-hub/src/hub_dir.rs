@@ -37,17 +37,22 @@ struct HiveMeta {
     backend: Backend,
 }
 
+/// Which hive a joining repository asks for.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum JoinChoice {
+    /// The one that matches it (`musubi join`).
+    Match,
+    /// This one, by name, name prefix, or id.
+    Hive(String),
+    /// A new one (`musubi create`), with this name if given, else one from the repository's
+    /// remote or directory.
+    Create(Option<String>),
+}
+
 /// What a joining repository tells the hub.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JoinRequest {
-    /// A hive to join, by name, name prefix, or id.
-    pub hive: Option<String>,
-    /// Start a new hive (`musubi create`), rather than join one that matches.
-    #[serde(default)]
-    pub create: bool,
-    /// The new hive's name, in place of one from the repository's remote or directory.
-    /// Implies `create`.
-    pub new: Option<String>,
+    pub choice: JoinChoice,
     pub backend: Backend,
     /// Names and URLs of its remotes: a remote's name once for each of its URLs, as git
     /// expands it and as written.
@@ -366,14 +371,17 @@ impl HubDir {
     /// [`crate::matching`].
     pub fn join(&mut self, request: &JoinRequest) -> Result<Joined, Refusal> {
         let backend = request.backend;
-        let chosen = request
-            .hive
-            .as_deref()
-            .map(|name| self.resolve(name))
-            .transpose()?;
-        if let Some(name) = &request.new {
-            self.check_new_name(name)?;
-        }
+        let chosen = match &request.choice {
+            JoinChoice::Hive(name) => Some(self.resolve(name)?),
+            JoinChoice::Match | JoinChoice::Create(_) => None,
+        };
+        let new_name = match &request.choice {
+            JoinChoice::Create(Some(name)) => {
+                self.check_new_name(name)?;
+                Some(name)
+            }
+            _ => None,
+        };
         let now = Instant::now();
         for hive in self.hives.values_mut() {
             hive.pending.retain(|pending| pending.until > now);
@@ -382,8 +390,8 @@ impl HubDir {
         let joiner = Joiner {
             has_commits: !request.roots.is_empty(),
             chosen,
-            create: request.create || request.new.is_some(),
-            named: request.new.is_some(),
+            create: matches!(request.choice, JoinChoice::Create(_)),
+            named: new_name.is_some(),
             remotes: request
                 .remotes
                 .iter()
@@ -394,7 +402,7 @@ impl HubDir {
             Decision::Refuse(message) | Decision::Ambiguous(message) => return Err(message),
             Decision::Join { id, reason } => (id, false, reason),
             Decision::Create => {
-                let name = match &request.new {
+                let name = match new_name {
                     Some(name) => name.clone(),
                     None => names::choose_name(
                         &names::name_candidates(&request.remotes, &request.dir_name),
@@ -459,16 +467,14 @@ mod tests {
             dir_name: "project".to_owned(),
             roots: vec!["11".repeat(20)],
             machine: format!("{machine}#00000000"),
-            hive: None,
-            create: false,
-            new: None,
+            choice: JoinChoice::Match,
             remote_targets: vec![],
         }
     }
 
     fn creating(request: JoinRequest) -> JoinRequest {
         JoinRequest {
-            create: true,
+            choice: JoinChoice::Create(None),
             ..request
         }
     }
@@ -509,6 +515,24 @@ mod tests {
         assert!(hubs.hives[&id].pending.is_empty());
     }
 
+    /// A hive created with a name has it, and no second hive can be created with it.
+    #[test]
+    fn a_new_hive_takes_the_name_asked_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut hubs = HubDir::open(dir.path()).unwrap();
+        let named = |name: &str, url: &str| JoinRequest {
+            choice: JoinChoice::Create(Some(name.to_owned())),
+            ..request("alpha", url)
+        };
+        let joined = hubs.join(&named("work", "https://example.com/a")).unwrap();
+        assert!(joined.created);
+        assert_eq!(joined.hive.name, "work");
+        let err = hubs
+            .join(&named("work", "https://example.com/b"))
+            .unwrap_err();
+        assert!(err.contains("already a hive named work"), "{err}");
+    }
+
     /// Machines of one name, which their keys tell apart, are listed apart, and a joining
     /// machine is listed as it will be once it has pushed.
     #[test]
@@ -525,7 +549,7 @@ mod tests {
         hubs.update_index(&id, pushed).unwrap();
         assert_eq!(hubs.info(&id).unwrap().machines, ["mac-0000", "mac-1111"]);
         let third = JoinRequest {
-            hive: Some(id.clone()),
+            choice: JoinChoice::Hive(id.clone()),
             machine: "mac#22222222".to_owned(),
             ..request("mac", url)
         };

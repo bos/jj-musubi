@@ -10,6 +10,7 @@ use bytes::Bytes;
 use jj_lib::object_id::ObjectId as _;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
+use musubi_hub::hub_dir::JoinChoice;
 use musubi_hub::hub_dir::JoinRequest;
 use musubi_hub::hub_dir::Joined;
 use musubi_jj::node::NodeRepo;
@@ -59,15 +60,13 @@ fn join_request(repo: &TestRepo) -> JoinRequest {
         roots: summary.roots.iter().map(|id| id.hex()).collect(),
         remote_targets: summary.remote_targets.iter().map(|id| id.hex()).collect(),
         machine: node.machine().key().to_owned(),
-        hive: None,
-        create: false,
-        new: None,
+        choice: JoinChoice::Match,
     }
 }
 
 fn creating(request: JoinRequest) -> JoinRequest {
     JoinRequest {
-        create: true,
+        choice: JoinChoice::Create(None),
         ..request
     }
 }
@@ -219,13 +218,13 @@ async fn one_hub_many_hives() {
     // Asked for by a prefix of its name, the first hive takes gamma too, since they share
     // history; an unrelated repository can't join it.
     let mut asking = join_request(&gamma);
-    asking.hive = Some("pro".to_owned());
+    asking.choice = JoinChoice::Hive("pro".to_owned());
     assert_eq!(join(&*client, asking).await.unwrap().hive.id, hive);
     let delta = env.init_repo("delta");
     delta.write_file("d", "d");
     delta.jj(&["commit", "-m", "unrelated"]);
     let mut asking = join_request(&delta);
-    asking.hive = Some("project".to_owned());
+    asking.choice = JoinChoice::Hive("project".to_owned());
     let err = join(&*client, asking).await.unwrap_err();
     assert!(err.contains("shares no history"), "{err}");
 

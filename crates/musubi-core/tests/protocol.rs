@@ -182,13 +182,30 @@ fn protocol_invariants(tc: TestCase) {
     run(tc, None);
 }
 
-#[hegel::test(test_cases = 150)]
+#[hegel::test(test_cases = conformance_cases())]
 fn conformance(tc: TestCase) {
     // One oracle for each case after one that passed, reset by `World::new`: starting one
     // took longer than most cases. One whose case failed goes, in whatever state it was.
     thread_local!(static ORACLE: Cell<Option<Oracle>> = const { Cell::new(None) });
     let oracle = ORACLE.take().unwrap_or_else(Oracle::spawn);
     ORACLE.set(run(tc, Some(oracle)));
+}
+
+/// How many cases the conformance test makes: 150 on CI, where it runs as a job of its own,
+/// and 50 elsewhere, where it would otherwise take most of `just test`'s time.
+/// `MUSUBI_CONFORMANCE_CASES` sets it, as `just mutants` does.
+fn conformance_cases() -> u64 {
+    if let Some(cases) = std::env::var("MUSUBI_CONFORMANCE_CASES")
+        .ok()
+        .and_then(|cases| cases.parse().ok())
+    {
+        return cases;
+    }
+    if std::env::var_os("CI").is_some() {
+        150
+    } else {
+        50
+    }
 }
 
 /// A hub may drop uploads it stored but never accepted (the model's `hubForget`), such as

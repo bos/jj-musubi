@@ -159,6 +159,10 @@ it does nothing when the oracle is up to date. The oracle binary is
 as CI does with the one it has just built.
 `formal/test/run_smoke.sh` replays a fixed two-node run through it.
 
+The test makes 150 cases on CI, where it runs as a job of its own, and 50 elsewhere, where
+it would otherwise take most of `just test`'s time. `MUSUBI_CONFORMANCE_CASES` sets the
+number; `just mutants` sets 150.
+
 ## Evidence that the check has teeth
 
 Deliberately broken versions of the core, each caught:

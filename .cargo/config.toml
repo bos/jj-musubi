@@ -1,0 +1,6 @@
+# Tests, and the musubi they run in-process, run git, which must read none of the
+# developer's own git config, as musubi-testutil's hermetic environment promises, even
+# where these are set already. This applies to `cargo run` too.
+[env]
+GIT_CONFIG_GLOBAL = { value = "/dev/null", force = true }
+GIT_CONFIG_NOSYSTEM = { value = "1", force = true }

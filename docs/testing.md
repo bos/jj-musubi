@@ -15,7 +15,9 @@ test belongs at the narrowest layer that can catch its bug.
 
 Run the default suite with `cargo nextest run`, or everything with `just check`. It needs `jj` 0.46.0 and `git`
 on `PATH`. Run the generated end-to-end search with `cargo nextest run --profile search`. Check
-the formal model with `lake build` in `formal/`.
+the formal model with `lake build` in `formal/`. `.cargo/config.toml` hides the developer's
+global and system git config from the git that tests, and the musubi they run in-process,
+start; the `jj` and `git` they run as commands get musubi-testutil's own home directory.
 
 CI runs the default suite on Linux, macOS and Windows, and checks the Lean model and runs
 the conformance test against its oracle on Linux. It doesn't run the end-to-end search.

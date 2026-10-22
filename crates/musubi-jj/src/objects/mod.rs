@@ -20,6 +20,7 @@ mod simple;
 pub use git::ExtrasEntry;
 pub use git::GitObjects;
 pub use git::GitStore;
+pub use git::Incompleteness;
 pub use git::REPOSITORY_ENV;
 pub use git::extras_to_ship;
 pub use git::import_extras;

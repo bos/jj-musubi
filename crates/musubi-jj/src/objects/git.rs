@@ -54,14 +54,18 @@ pub const REPOSITORY_ENV: &[&str] = &[
     "GIT_COMMON_DIR",
 ];
 
-/// `git` as musubi runs it: without [`REPOSITORY_ENV`], and running no hooks. jj runs none
-/// when it writes to `.git`; musubi's `update-ref` and `git remote` would run the
-/// repository's `reference-transaction`, and its `gc --auto` `pre-auto-gc`.
+/// `git` as musubi runs it: without [`REPOSITORY_ENV`], running no hooks, and, where git
+/// knows `GIT_NO_LAZY_FETCH`, fetching nothing. jj runs no hooks when it writes to `.git`;
+/// musubi's `update-ref` and `git remote` would run the repository's
+/// `reference-transaction`, and its `gc --auto` `pre-auto-gc`. In a partial clone, which
+/// musubi refuses ([`Incompleteness`]), git would fetch what it lacks from the promisor
+/// remote.
 fn git() -> Command {
     let mut command = Command::new("git");
     for name in REPOSITORY_ENV {
         command.env_remove(name);
     }
+    command.env("GIT_NO_LAZY_FETCH", "1");
     // A path under which no hook can exist.
     command.args(["-c", "core.hooksPath=/dev/null"]);
     command
@@ -79,6 +83,25 @@ const BITMAP_AFTER: u64 = 10_000;
 
 /// How long a hub without a bitmap index waits before looking into writing one again.
 const BITMAP_RETRY: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Why a repository lacks history that musubi would need to send: everything an operation
+/// requires, which the hub accepts only whole.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Incompleteness {
+    /// A shallow clone, without the history below its shallow commits.
+    Shallow,
+    /// A partial clone, which leaves objects for its promisor remote to supply on demand.
+    Partial,
+}
+
+impl std::fmt::Display for Incompleteness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Shallow => "a shallow clone",
+            Self::Partial => "a partial clone",
+        })
+    }
+}
 
 /// A git object database, driven through the `git` binary.
 pub struct GitObjects {
@@ -113,6 +136,30 @@ impl GitObjects {
         let objects = Self::new(git_dir);
         objects.run(&["config", "gc.auto", "0"], None)?;
         Ok(objects)
+    }
+
+    /// What this repository lacks of its history, if anything: a shallow clone has a
+    /// `shallow` file listing its shallow commits, in the common directory of a linked
+    /// worktree, and a partial clone a promisor remote.
+    pub fn incompleteness(&self) -> Result<Option<Incompleteness>, ObjectError> {
+        let common = match fs::read_to_string(self.git_dir.join("commondir")) {
+            Ok(dir) => self.git_dir.join(dir.trim()),
+            Err(_) => self.git_dir.clone(),
+        };
+        if fs::metadata(common.join("shallow")).is_ok_and(|shallow| shallow.len() > 0) {
+            return Ok(Some(Incompleteness::Shallow));
+        }
+        let output = self.run(&["config", "--local", "--list"], None)?;
+        let partial = String::from_utf8_lossy(&output).lines().any(|line| {
+            // A boolean with no value is true.
+            let (key, value) = line.split_once('=').unwrap_or((line, "true"));
+            key == "extensions.partialclone"
+                || key.starts_with("remote.")
+                    && key.ends_with(".promisor")
+                    && !["false", "no", "off", "0", ""]
+                        .contains(&value.to_ascii_lowercase().as_str())
+        });
+        Ok(partial.then_some(Incompleteness::Partial))
     }
 
     /// This repository's own git config file.
@@ -956,6 +1003,62 @@ mod tests {
         for name in String::from_utf8(output.stdout).unwrap().lines() {
             assert!(REPOSITORY_ENV.contains(&name), "{name} is missing");
         }
+    }
+
+    #[test]
+    fn shallow_and_partial_clones_are_incomplete() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = |args: &[&str]| {
+            let output = git().current_dir(dir.path()).args(args).output().unwrap();
+            assert!(output.status.success(), "git {args:?}: {output:?}");
+        };
+        run(&["init", "--quiet", "--initial-branch=main", "origin"]);
+        for n in ["1", "2"] {
+            fs::write(dir.path().join("origin/f"), n).unwrap();
+            run(&["-C", "origin", "add", "f"]);
+            let identity = ["-c", "user.name=t", "-c", "user.email=t@example.com"];
+            run(&[
+                &identity[..],
+                &["-C", "origin", "commit", "--quiet", "-m", n],
+            ]
+            .concat());
+        }
+        run(&["-C", "origin", "config", "uploadpack.allowFilter", "true"]);
+        // git takes a local path for a local clone, which can be neither shallow nor partial.
+        let path = dir
+            .path()
+            .join("origin")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let url = format!(
+            "file://{}{path}",
+            if path.starts_with('/') { "" } else { "/" }
+        );
+        run(&["clone", "--quiet", &url, "full"]);
+        run(&["clone", "--quiet", "--depth=1", &url, "shallow"]);
+        // Checking files out would need the blobs it left out.
+        run(&[
+            "clone",
+            "--quiet",
+            "--no-checkout",
+            "--filter=blob:none",
+            &url,
+            "partial",
+        ]);
+        let of = |clone: &str| {
+            GitObjects::new(&dir.path().join(clone).join(".git"))
+                .incompleteness()
+                .unwrap()
+        };
+        assert_eq!(of("full"), None);
+        assert_eq!(of("shallow"), Some(Incompleteness::Shallow));
+        assert_eq!(of("partial"), Some(Incompleteness::Partial));
+        // A promisor remote alone, written as git takes a boolean with no value.
+        run(&["clone", "--quiet", &url, "promisor"]);
+        let config = dir.path().join("promisor/.git/config");
+        let text = fs::read_to_string(&config).unwrap();
+        fs::write(&config, format!("{text}[remote \"origin\"]\n\tpromisor\n")).unwrap();
+        assert_eq!(of("promisor"), Some(Incompleteness::Partial));
     }
 
     /// musubi's git runs no hooks: here, `gc --auto`'s `pre-auto-gc`, with a second pack

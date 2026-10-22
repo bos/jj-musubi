@@ -74,6 +74,7 @@ use crate::hive_settings::SettingValues;
 use crate::hive_settings::Stamp;
 use crate::objects::GitObjects;
 use crate::objects::GitStore;
+use crate::objects::Incompleteness;
 use crate::objects::ObjectError;
 use crate::objects::ObjectStore;
 use crate::objects::SimpleStore;
@@ -159,6 +160,14 @@ pub enum NodeError {
          paused for this repository"
     )]
     RewrittenRealization { op: String, canonical: String },
+    /// The hub accepts an operation only with everything it requires, which a shallow or
+    /// partial clone can't send.
+    #[error(
+        "musubi needs all of a repository's history, and this one is {0}. `musubi clone <hive> \
+         <dir>` makes a full copy of a hive from its hub, and `jj git clone`, without \
+         `--depth`, a full clone of a remote"
+    )]
+    Incomplete(Incompleteness),
     #[error(transparent)]
     Objects(#[from] ObjectError),
     #[error(transparent)]
@@ -444,8 +453,20 @@ impl NodeRepo {
         &self.machine
     }
 
+    /// Fails if this repository lacks history that musubi would need to send.
+    pub fn check_complete(&self) -> Result<(), NodeError> {
+        match self.git_objects() {
+            Some(git) => match git.incompleteness()? {
+                Some(incompleteness) => Err(NodeError::Incomplete(incompleteness)),
+                None => Ok(()),
+            },
+            None => Ok(()),
+        }
+    }
+
     /// What a hub needs to know to decide which hive this repository belongs to.
     pub fn join_summary(&self) -> Result<JoinSummary, NodeError> {
+        self.check_complete()?;
         let repo = self.load_at_head()?;
         let view = repo.view();
         let working_copies: BTreeSet<&CommitId> = view.wc_commit_ids().values().collect();

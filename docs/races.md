@@ -89,6 +89,7 @@ Not races: kinds of repository and history a hive carries.
 | --- | --- | --- |
 | A machine's repository isn't colocated | Fine: its git store is inside `.jj`, where musubi reads and writes objects, with no `.git` to keep in step. Its work and bookmarks reach colocated machines, whose `.git` gets the branches, theirs reach it, and it merges concurrent work like any other machine. | `colocated_and_non_colocated_repositories_share_a_hive` |
 | History has a submodule | Fine: trees name the submodule's commit, which no machine needs, and nothing transfers it or asks for it. | `history_with_a_submodule_replicates` |
+| A shallow or partial clone | Refused, at once, with a pointer to `musubi clone`: starting a hive, joining one, and syncing a repository that has become one since it joined. Neither can send everything an operation requires, which the hub accepts only whole. musubi's git also sets `GIT_NO_LAZY_FETCH`, so a git that knows it never fetches from a promisor remote. | `shallow_clones_are_refused`, `shallow_and_partial_clones_are_incomplete` |
 
 ## Operation history
 

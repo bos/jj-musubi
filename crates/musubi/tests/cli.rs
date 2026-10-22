@@ -617,6 +617,45 @@ fn the_daemon_ignores_the_git_repository_it_was_started_in() {
     });
 }
 
+/// A `file://` URL for `path`, which git, unlike for a plain path, fetches from as from any
+/// other remote: shallowly, if asked.
+fn file_url(path: &Path) -> String {
+    let path = path.to_string_lossy().replace('\\', "/");
+    format!(
+        "file://{}{path}",
+        if path.starts_with('/') { "" } else { "/" }
+    )
+}
+
+/// A shallow clone can't send the history below its shallow commits, which the hub needs
+/// with everything else an operation requires, so musubi refuses one at once, saying what
+/// to do instead: to start a hive, to join one, and to sync a repository that has become
+/// shallow since it joined.
+#[test]
+fn shallow_clones_are_refused() {
+    let env = TestEnv::new();
+    let mut logs = Logs::default();
+    let hub = Hub::start(&env, &mut logs);
+    // Stopped before the hub.
+    let mut daemons = Daemons::default();
+    let (alpha, beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
+    alpha.write_file("b", "b");
+    alpha.jj(&["commit", "-m", "second"]);
+    alpha.jj(&["bookmark", "move", "main", "--to", "@-"]);
+    let url = file_url(alpha.path());
+    let gamma = env.init_repo("gamma");
+    daemons.of(&gamma);
+    gamma.git(&["fetch", "--quiet", "--depth=1", &url, "main:alpha"]);
+    for command in ["create", "join"] {
+        let err = musubi_fails(&env, &logs, &gamma, &[command, "--hub", &hub.url]);
+        assert!(err.contains("this one is a shallow clone"), "{err}");
+        assert!(err.contains("musubi clone"), "{err}");
+    }
+    beta.git(&["fetch", "--quiet", "--depth=1", &url, "main"]);
+    let err = musubi_fails(&env, &logs, &beta, &["sync"]);
+    assert!(err.contains("this one is a shallow clone"), "{err}");
+}
+
 /// The hive shares remotes and chosen repo config through the binary, which finds jj's
 /// repo config where jj keeps it.
 #[test]

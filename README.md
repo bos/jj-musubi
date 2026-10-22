@@ -20,7 +20,8 @@ You need:
 
 - `jj` 0.46.0 and `git` on every machine;
 - `musubi` on the machine that runs the hub, on the `PATH` of non-interactive shells there;
-- a repository with at least one commit;
+- a repository with at least one commit, and all of its history: not a shallow or partial
+  clone;
 - ssh access to the hub's machine from every other machine: if `ssh devbox` works, so does
   musubi.
 

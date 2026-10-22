@@ -51,6 +51,9 @@ impl NodeDriver {
     /// Asks the hub for its head and anything new, then runs the policy until there is
     /// nothing left to do. Returns how many steps that took.
     pub async fn sync(&mut self) -> anyhow::Result<usize> {
+        // A repository made shallow or partial since it joined can't send what its new work
+        // requires, and the hub would refuse it.
+        self.adapter.repo().check_complete()?;
         // Settings changed here go up with this sync, and once the node has the hive's head,
         // the hive's settings apply here.
         self.adapter.reconcile_settings(true)?;

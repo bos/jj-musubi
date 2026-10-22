@@ -1,11 +1,10 @@
 //! Which hive a joining repository belongs to.
 //!
 //! A repository is *related* to a hive when they share history: a root commit, or a commit
-//! one of the repository's remote bookmarks points to (which covers shallow clones, whose
-//! roots are cut off). Among related hives, a remote URL in common decides, so that a fork
-//! with history in common but a remote of its own isn't mistaken for the original. Joining
-//! never starts a hive: when nothing matches, the joiner is told so, and `musubi create`
-//! starts one.
+//! one of the repository's remote bookmarks points to. Among related hives, a remote URL in
+//! common decides, so that a fork with history in common but a remote of its own isn't
+//! mistaken for the original. Joining never starts a hive: when nothing matches, the joiner
+//! is told so, and `musubi create` starts one.
 
 use std::collections::BTreeSet;
 

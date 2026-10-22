@@ -413,7 +413,9 @@ nothing, with no sign anything was wrong. In one request the node sends its back
 remotes' URLs, its root commits (the commits whose parent is the root commit, git's
 parentless commits, leaving out an empty, undescribed working-copy commit), and the
 commits its remote bookmarks point to. The hub decides under its lock, so a copy joining
-while another creates the hive finds it:
+while another creates the hive finds it. (musubi refuses a shallow or partial clone before
+asking the hub, and won't sync one: the hub accepts an operation only with everything it
+requires, which such a clone can't send.)
 
 1. A repository with no commits of its own is refused: there is nothing to match, and
    nothing to share.
@@ -421,10 +423,10 @@ while another creates the hive finds it:
 3. `musubi create <name>` creates a hive. `musubi create`, unnamed, creates one named as
    below, unless the rules that follow would join a hive, when it is refused.
 4. Otherwise, a hive is *related* if it has stored one of the repository's root commits
-   (ever: hidden ones count), or has a commit one of its remote bookmarks points to (which
-   covers a shallow clone, whose roots are cut off). Among related hives, one that shares a
-   remote URL with the repository, any remote and not only `origin`, is the one: exactly
-   one is joined, and several are refused with their names, to choose from with `--hive`.
+   (ever: hidden ones count), or has a commit one of its remote bookmarks points to. Among
+   related hives, one that shares a remote URL with the repository, any remote and not
+   only `origin`, is the one: exactly one is joined, and several are refused with their
+   names, to choose from with `--hive`.
    With none, joining is refused, naming the related hives, so a fork, sharing history but
    with remotes of its own, isn't taken for the original; `musubi create` gives it a hive
    of its own. A repository without remotes joins its one related hive, and one with

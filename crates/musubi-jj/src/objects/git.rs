@@ -43,6 +43,14 @@ const HEAD_REFS: &str = "refs/musubi/head/";
 const GC_AUTO: i64 = 6700;
 const GC_AUTO_PACK_LIMIT: i64 = 50;
 
+/// For a gc that deletes nothing, reachable or not (see [`GitObjects::maintain`]).
+const NEVER_PRUNE: [&str; 4] = [
+    "-c",
+    "gc.pruneExpire=never",
+    "-c",
+    "gc.worktreePruneExpire=never",
+];
+
 /// How many objects a hub's repository holds before a bitmap index is worth writing.
 const BITMAP_AFTER: u64 = 10_000;
 
@@ -267,7 +275,8 @@ impl GitObjects {
     /// every commit an operation refers to, and a hub's refs cover only its head. git may
     /// finish in the background. On battery it waits for an import on mains power.
     pub fn maintain(&self, hub: bool) -> Result<(), ObjectError> {
-        if power::on_battery() || !self.gc_due(hub) {
+        // Asked last: on macOS, it starts a process.
+        if !self.gc_due(hub) || power::on_battery() {
             return Ok(());
         }
         self.gc_auto(hub)
@@ -317,16 +326,12 @@ impl GitObjects {
     }
 
     fn gc_auto(&self, hub: bool) -> Result<(), ObjectError> {
-        let mut args = vec![
-            "-c",
-            "gc.pruneExpire=never",
-            "-c",
-            "gc.worktreePruneExpire=never",
-        ];
+        let mut args = NEVER_PRUNE.to_vec();
+        let gc_auto = format!("gc.auto={GC_AUTO}");
         if hub {
             // Much of a hub's history is unreachable to git: keep it in a cruft pack rather
             // than loose, and override the hub's own `gc.auto 0`.
-            args.extend(["-c", "gc.cruftPacks=true", "-c", "gc.auto=6700"]);
+            args.extend(["-c", "gc.cruftPacks=true", "-c", &gc_auto]);
         }
         args.extend(["gc", "--auto", "--quiet"]);
         // git finishes `gc --auto` in the background (`gc.autoDetach`, true by default), but
@@ -467,18 +472,15 @@ impl GitObjects {
     /// tries again after [`BITMAP_RETRY`]. What git says goes to a file, not a pipe, so that
     /// the hub's exiting doesn't stop it partway.
     fn gc_for_bitmap(&self) -> Result<(), ObjectError> {
-        let args = [
-            "-c",
-            "gc.pruneExpire=never",
-            "-c",
-            "gc.worktreePruneExpire=never",
+        let mut args = NEVER_PRUNE.to_vec();
+        args.extend([
             "-c",
             "gc.cruftPacks=true",
             "-c",
             "repack.writeBitmaps=true",
             "gc",
             "--quiet",
-        ];
+        ]);
         let log = self.git_dir().join("musubi-bitmap-gc.log");
         let mut command = self.command(&args);
         command

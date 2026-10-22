@@ -195,8 +195,8 @@ pub fn without_credentials(text: &str) -> String {
     while let Some(at) = rest.find("://") {
         let before = &rest[..at];
         let scheme = &before[before
-            .rfind(|c: char| !c.is_ascii_alphanumeric())
-            .map_or(0, |i| i + 1)..];
+            .trim_end_matches(|c: char| c.is_ascii_alphanumeric())
+            .len()..];
         let http = scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https");
         out.push_str(&rest[..at + "://".len()]);
         rest = &rest[at + "://".len()..];
@@ -219,6 +219,16 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    /// Text before a URL may end in a character of more than one byte, `«` say: the scheme
+    /// starts after it.
+    #[test]
+    fn urls_follow_any_text() {
+        assert_eq!(
+            without_credentials("voir «https://bryan:secret@example.com/x»"),
+            "voir «https://example.com/x»"
+        );
+    }
 
     #[test]
     fn credentials_go_from_http_urls_only() {

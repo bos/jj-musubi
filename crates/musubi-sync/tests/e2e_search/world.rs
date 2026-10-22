@@ -854,11 +854,33 @@ impl World {
     }
 
     /// Crashes node `m`'s daemon: it reopens the repository, losing every in-memory cache,
-    /// and with `lose_cache` also the on-disk translation cache.
-    pub fn crash(&mut self, m: usize, lose_cache: bool) {
+    /// and with `lose_cache` also the on-disk translation cache. The realizations it was
+    /// still writing stay unrecorded, and those `stopped` picks, by bit, lose their operation
+    /// files, as if it crashed between a view and its operation. Returns how many it was
+    /// writing.
+    pub fn crash(&mut self, m: usize, lose_cache: bool, stopped: u64) -> usize {
+        let in_flight = self.fx.hive.members[m]
+            .adapter
+            .repo_mut()
+            .crash_before_settling();
+        let stopped: Vec<_> = in_flight
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| (stopped >> (i % 64)) & 1 == 1)
+            .map(|(_, local)| local)
+            .collect();
         self.record(format!(
-            "{}: crash{}",
+            "{}: crash{}{}",
             self.machine(m),
+            if in_flight.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    ", writing {} operations, {} stopped before their files",
+                    in_flight.len(),
+                    stopped.len()
+                )
+            },
             if lose_cache {
                 ", losing the translation cache"
             } else {
@@ -866,6 +888,15 @@ impl World {
             }
         ));
         let repo = self.fx.repo(m);
+        for local in stopped {
+            let path = repo
+                .repo_path()
+                .join("op_store/operations")
+                .join(local.hex());
+            if path.exists() {
+                fs::remove_file(path).unwrap();
+            }
+        }
         if lose_cache {
             let path = repo.repo_path().join("musubi/translation");
             if path.exists() {
@@ -880,6 +911,7 @@ impl World {
         self.fx.hive.members[m].adapter = adapter;
         self.fx.hive.restart(m);
         self.touched.insert(m);
+        in_flight.len()
     }
 
     // Invariants after every rule.

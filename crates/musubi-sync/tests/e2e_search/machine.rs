@@ -613,14 +613,20 @@ impl Search {
     #[rule]
     fn crash(&mut self, tc: TestCase) {
         let m = self.fault(&tc, "crash");
-        self.world.borrow_mut().crash(m, false);
+        let stopped = tc.draw(gs::integers::<u64>());
+        if self.world.borrow_mut().crash(m, false, stopped) > 0 {
+            fired("crash:writes_in_flight");
+        }
         self.note(&tc);
     }
 
     #[rule]
     fn lose_cache(&mut self, tc: TestCase) {
         let m = self.fault(&tc, "lose_cache");
-        self.world.borrow_mut().crash(m, true);
+        let stopped = tc.draw(gs::integers::<u64>());
+        if self.world.borrow_mut().crash(m, true, stopped) > 0 {
+            fired("crash:writes_in_flight");
+        }
         self.note(&tc);
     }
 

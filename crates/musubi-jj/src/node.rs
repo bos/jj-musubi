@@ -1621,6 +1621,27 @@ impl NodeRepo {
         Ok(())
     }
 
+    /// For tests of crashes: waits for the realizations being written, then, as a crash
+    /// before [`Self::settle`] would, records none of them, and forgets them as if their
+    /// writes had failed. Returns their local ids.
+    pub fn crash_before_settling(&mut self) -> Vec<OperationId> {
+        let mut locals = vec![];
+        for Unwritten {
+            write,
+            local,
+            canonical,
+        } in std::mem::take(&mut self.unwritten)
+        {
+            // Whether it wrote everything or failed, a crash would leave it unrecorded.
+            drop(write.join());
+            self.map.forget(&local, &canonical);
+            locals.push(local);
+        }
+        self.last_realized = None;
+        self.prepared = None;
+        locals
+    }
+
     /// Realizes one canonical operation whose parents are realized, as `parents`, without
     /// writing it, from its local view.
     fn realize_one(

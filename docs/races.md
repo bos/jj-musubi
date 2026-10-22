@@ -108,6 +108,7 @@ Not races: kinds of repository and history a hive carries.
 | `jj op abandon` of operations the hub accepted, whether this machine's latest operation is its own or another machine's | **Replication pauses** for that repository, with an error, rather than reintroducing the abandoned operations or duplicating history. Planned: replicate it as a supersede record (docs/design.md). | `op_abandon_pauses_replication`, `op_abandon_under_a_realized_head_pauses_replication` |
 | `jj op abandon` of only the history from before the machine joined, then `jj util gc` | Nothing changes for the other machines, and replication carries on: the rewritten join point maps to the same canonical join operation, by its view and metadata. | `op_abandon_of_pre_join_history_is_harmless` |
 | Restart that loses the translation cache | Recovered from operation attributes and the join records; no duplicate realizations. | `restart_with_lost_cache`, `lost_cache_does_not_duplicate_realizations` |
+| A crash while realized operations are still being written, some in full, some only as far as their views | None of them was recorded, so they are realized again after the restart, as the same operations; no duplicate realizations. | `crash_with_writes_in_flight` |
 | Colocated git state replicated verbatim | Would silently move bookmarks back. Translation exists to prevent this. | `verbatim_replication_reverts_bookmarks` (negative control) |
 
 ## Known jj limitations

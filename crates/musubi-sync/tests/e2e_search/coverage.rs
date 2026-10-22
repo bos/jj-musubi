@@ -63,6 +63,7 @@ pub const EVENTS: &[&str] = &[
     "setup:prejoin",
     "setup:empty",
     "push:accepted",
+    "crash:writes_in_flight",
 ];
 
 /// Each catalogue row, by test name, with the rules and events that together exercise it
@@ -179,6 +180,10 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
     (
         "lost_cache_does_not_duplicate_realizations",
         Some(&["lose_cache"]),
+    ),
+    (
+        "crash_with_writes_in_flight",
+        Some(&["crash:writes_in_flight"]),
     ),
     // A negative control of a design musubi does not use.
     ("verbatim_replication_reverts_bookmarks", None),

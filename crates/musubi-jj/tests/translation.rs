@@ -2,6 +2,7 @@
 
 #![allow(clippy::unwrap_used)]
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -335,6 +336,60 @@ fn lost_cache_does_not_duplicate_realizations() {
         );
     }
     assert_eq!(representing_first, BTreeSet::from([first_local]));
+    b.jj(&["status"]);
+}
+
+/// A crash while realized operations are still being written leaves them unrecorded, some
+/// written in full and some only as far as their views. After the restart they are realized
+/// again, as the same operations, and each canonical operation once.
+#[test]
+fn crash_with_writes_in_flight() {
+    let env = TestEnv::new();
+    let a = env.init_repo("alpha");
+    let b = env.init_repo("beta");
+    for i in 0..4 {
+        commit(&a, &format!("f{i}"), &format!("in flight {i}"));
+    }
+    let mut a_node = open(&a);
+    let mut b_node = open(&b);
+    let head = single_canonical_head(&mut a_node);
+    ship_objects(&a_node, &b_node, &head);
+    ship_operations(&a_node, &b_node, &head);
+    b_node.realize_pending(&head, &[]).unwrap();
+    let in_flight = b_node.crash_before_settling();
+    assert!(in_flight.len() >= 4, "{in_flight:?}");
+    // Every other one stopped between its view and itself.
+    let operations = b.repo_path().join("op_store/operations");
+    for local in in_flight.iter().step_by(2) {
+        std::fs::remove_file(operations.join(local.hex())).unwrap();
+    }
+    drop(b_node);
+
+    let mut b_node = open(&b);
+    let head_local = b_node.advance(&head).unwrap();
+    let op_store = b_node.loader().op_store().clone();
+    let mut realizations: BTreeMap<OperationId, BTreeSet<OperationId>> = BTreeMap::new();
+    let mut seen = BTreeSet::new();
+    let mut stack = vec![head_local];
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id.clone()) || id == *op_store.root_operation_id() {
+            continue;
+        }
+        let canonical = b_node.canonicalize(&id).unwrap();
+        realizations
+            .entry(canonical)
+            .or_default()
+            .insert(id.clone());
+        stack.extend(
+            pollster::block_on(op_store.read_operation(&id))
+                .unwrap()
+                .parents,
+        );
+    }
+    for local in &in_flight {
+        let canonical = b_node.canonicalize(local).unwrap();
+        assert_eq!(realizations[&canonical], BTreeSet::from([local.clone()]));
+    }
     b.jj(&["status"]);
 }
 

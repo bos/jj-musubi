@@ -36,7 +36,22 @@ fmt-check:
 lint:
     cargo clippy --workspace --all-targets -- -D warnings
 
+# On macOS the tests' directories go on a RAM disk made for the run, unless
+# MUSUBI_KEEP_TEST_DIRS keeps them: jj syncs what it writes, and on the SSD the suite takes
+# three times as long.
 test *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ $OSTYPE == darwin* && -z ${MUSUBI_KEEP_TEST_DIRS:-} ]]; then
+        # 128 MiB, in 512-byte sectors: a run on 14 cores uses at most about 25. Before
+        # macOS 26, only hdiutil attaches one.
+        ram=ram://262144
+        dev=$(diskutil image attach --noMount $ram 2>/dev/null || hdiutil attach -nomount $ram)
+        dev=${dev%%[[:space:]]*}
+        trap 'diskutil eject "$dev" > /dev/null' EXIT
+        diskutil erasevolume APFS "musubi-test-$$" "$dev" > /dev/null
+        export TMPDIR="/Volumes/musubi-test-$$/"
+    fi
     cargo nextest run --workspace {{args}}
 
 docs:

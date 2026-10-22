@@ -16,9 +16,14 @@ test belongs at the narrowest layer that can catch its bug.
 The costs are for one test among the rest of the suite on Linux, on 32 cores.
 
 Run the default suite with `cargo nextest run`, or everything with `just check`. It needs `jj` 0.46.0 and `git`
-on `PATH`. On Linux the tests make their directories in `/dev/shm`, in memory, unless
-`TMPDIR` is set or `/dev/shm` is mounted `noexec`: jj syncs what it writes to disk, and
-waiting for that took most of the suite's time on a disk. Run the generated end-to-end search with `cargo nextest run --profile search`. Check
+on `PATH`. jj syncs what it writes to disk, and on a disk waiting for that takes most of the
+suite's time, so the tests' directories are in memory where possible. On Linux they are in
+`/dev/shm`, unless `TMPDIR` is set or `/dev/shm` is mounted `noexec`. On macOS `just test`
+(and so `just check`) makes a RAM disk for the run and sets `TMPDIR` to it, which makes the
+suite three times as fast; `cargo nextest run` alone leaves them on the disk. Neither OS puts
+them in memory when `MUSUBI_KEEP_TEST_DIRS` keeps them for inspecting a failure, and what a
+test binary records once per build stays under `target/`. Run the generated end-to-end
+search with `cargo nextest run --profile search`. Check
 the formal model with `lake build` in `formal/`. `.cargo/config.toml` hides the developer's
 global and system git config from the git that tests, and the musubi they run in-process,
 start; the `jj` and `git` they run as commands get musubi-testutil's own home directory.

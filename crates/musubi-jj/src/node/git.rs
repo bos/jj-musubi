@@ -173,13 +173,9 @@ impl NodeGit {
     /// `expanded`: as written where this machine's git expands it to the same repository, so
     /// that an alias they share stays one, even where its rule holds a token, and otherwise
     /// as expanded.
-    fn spelling(
-        &self,
-        written: Option<&str>,
-        expanded: Option<&str>,
-    ) -> Result<Option<String>, GitError> {
+    fn spelling(&self, written: Option<&str>, expanded: Option<&str>) -> Option<String> {
         let (Some(written), Some(expanded)) = (written, expanded) else {
-            return Ok(written.map(str::to_owned));
+            return written.map(str::to_owned);
         };
         let same = self
             .repo
@@ -187,7 +183,7 @@ impl NodeGit {
             .is_ok_and(|here| {
                 repository(String::from_utf8_lossy(&here).trim_end()) == repository(expanded)
             });
-        Ok(Some(if same { written } else { expanded }.to_owned()))
+        Some(if same { written } else { expanded }.to_owned())
     }
 
     /// Changes this repository's git remotes from `from` to `to`, as `git remote` does:
@@ -209,8 +205,7 @@ impl NodeGit {
                         self.repo.run(&["remote", "rename", old, name], None)?;
                         continue;
                     }
-                    let url =
-                        self.spelling(remote.url.as_deref(), remote.expanded_url.as_deref())?;
+                    let url = self.spelling(remote.url.as_deref(), remote.expanded_url.as_deref());
                     self.repo.run(
                         &["remote", "add", "--", name, &url.unwrap_or_default()],
                         None,
@@ -249,7 +244,7 @@ impl NodeGit {
         };
         let mut now = old.cloned().unwrap_or_default();
         if old.is_none() || !same_repository(&now.url_repositories(), &remote.url_repositories()) {
-            let url = self.spelling(remote.url.as_deref(), remote.expanded_url.as_deref())?;
+            let url = self.spelling(remote.url.as_deref(), remote.expanded_url.as_deref());
             set("url", url.as_deref())?;
             now.url.clone_from(&remote.url);
             now.expanded_url.clone_from(&remote.expanded_url);
@@ -259,7 +254,7 @@ impl NodeGit {
             let push = self.spelling(
                 remote.push_url.as_deref(),
                 remote.expanded_push_url.as_deref(),
-            )?;
+            );
             set("pushurl", push.as_deref())?;
         }
         Ok(())
@@ -556,7 +551,7 @@ mod tests {
         assert_eq!(shared["token"].url.as_deref(), Some(token));
 
         // Another machine's alias is kept where this one expands it the same way.
-        let spelling = |written, expanded| repo.spelling(Some(written), Some(expanded)).unwrap();
+        let spelling = |written, expanded| repo.spelling(Some(written), Some(expanded));
         assert_eq!(
             spelling(aliased[0], aliased[1]).as_deref(),
             Some(aliased[0])

@@ -2075,7 +2075,6 @@ impl NodeRepo {
     }
 }
 
-/// Whether `commit` is visible: reachable from the view's heads.
 /// Whether `commit` is one of `heads` or an ancestor of one.
 fn is_ancestor_of_any(
     repo: &ReadonlyRepo,
@@ -2099,6 +2098,7 @@ fn is_ancestor_of_any(
     Ok(false)
 }
 
+/// Whether `commit` is visible: reachable from the view's heads.
 fn is_visible(repo: &ReadonlyRepo, commit: &CommitId) -> Result<bool, NodeError> {
     if commit == repo.store().root_commit_id() {
         return Ok(true);

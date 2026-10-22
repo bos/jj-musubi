@@ -22,8 +22,7 @@ pub enum HeadKind {
     Notify,
 }
 
-/// A request. Each takes one round trip: `Fetch` and `Push` each do what used to take
-/// several.
+/// A request. Each takes one round trip.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Request<O, A> {
     /// The hub's head, with the stored operations in `anc*(head) \ anc*(base)` and the

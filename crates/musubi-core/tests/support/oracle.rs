@@ -1,6 +1,5 @@
 //! The Lean model as an oracle: a child process speaking docs/conformance.md's JSON lines.
 
-use std::io;
 use std::io::BufRead as _;
 use std::io::BufReader;
 use std::io::Write as _;
@@ -91,24 +90,15 @@ impl Drop for Oracle {
 
 /// Runs `lake build oracle` in `formal`, which does nothing if the oracle is up to date.
 fn build(formal: &Path) {
-    let run = |lake: &Path| {
-        Command::new(lake)
-            .args(["build", "oracle"])
-            .current_dir(formal)
-            // Progress, such as elan downloading the toolchain, shows as it happens.
-            .stderr(Stdio::inherit())
-            .output()
-    };
-    // elan puts `lake` on the PATH, but not of every shell.
-    let output = match run(Path::new("lake")) {
-        Err(err) if err.kind() == io::ErrorKind::NotFound => std::env::var_os("HOME")
-            .map(|home| run(&Path::new(&home).join(".elan/bin/lake")))
-            .unwrap_or(Err(err)),
-        output => output,
-    }
-    .unwrap_or_else(|err| {
-        panic!("cannot run `lake build oracle` ({err}): install elan, or set MUSUBI_ORACLE")
-    });
+    let output = Command::new("lake")
+        .args(["build", "oracle"])
+        .current_dir(formal)
+        // Progress, such as elan downloading the toolchain, shows as it happens.
+        .stderr(Stdio::inherit())
+        .output()
+        .unwrap_or_else(|err| {
+            panic!("cannot run `lake build oracle` ({err}): put lake on PATH, or set MUSUBI_ORACLE")
+        });
     assert!(
         output.status.success(),
         "`lake build oracle` failed:\n{}",

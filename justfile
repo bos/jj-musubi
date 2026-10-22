@@ -53,7 +53,7 @@ typos:
 
 # Check the Lean proofs and build the oracle the conformance tests run against.
 oracle:
-    cd formal && ~/.elan/bin/lake build && test/run_smoke.sh
+    cd formal && lake build && test/run_smoke.sh
 
 # Run every benchmark script once, as briefly as each allows, against a debug build, so that
 # they keep up with the CLI (see bench/README.md). It measures nothing.

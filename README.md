@@ -172,8 +172,8 @@ just check      # fmt, clippy, Lean proofs and oracle, tests, docs, cargo-deny, 
 just property   # the generated end-to-end search (slow)
 ```
 
-Needs `cargo-nextest`, `cargo-deny`, `cargo-machete`, `typos`, and Lean via
-`elan` (`~/.elan/bin`).
+Needs `cargo-nextest`, `cargo-deny`, `cargo-machete`, `typos`, and Lean with `lake` on
+`PATH` (for example, installed via `elan`).
 
 CI (`.github/workflows/ci.yml`) runs the same lints on Linux, the tests on Linux, macOS and
 Windows, and the Lean proofs and conformance test on Linux.

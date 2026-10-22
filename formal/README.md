@@ -8,9 +8,11 @@ the exact list.
 
 ## Checking
 
+Install Lean (for example, via `elan`) and put `lake` on `PATH`.
+
 ```sh
 cd formal
-~/.elan/bin/lake build
+lake build
 ```
 
 The toolchain is pinned to `leanprover/lean4:v4.35.0` in `lean-toolchain`. The model uses
@@ -22,7 +24,7 @@ To build and run only the conformance oracle:
 
 ```sh
 cd formal
-~/.elan/bin/lake build oracle
+lake build oracle
 .lake/build/bin/oracle < test/smoke.jsonl
 ./test/run_smoke.sh   # replays test/smoke.jsonl and diffs against test/smoke.expected
 ```

@@ -260,12 +260,29 @@ impl Control for Daemon {
     }
 }
 
+/// How large the daemon's log grows before a daemon starting starts it over.
+const LOG_LIMIT: u64 = 10 << 20;
+
+/// Starts the daemon's log at `path` over if it has grown large: whether a command started
+/// this daemon or launchd did at login, which never would. In place, since whatever started
+/// it holds it open to append to: one deleted would take the rest of the log with it.
+fn trim_log(path: &Path) {
+    if fs::metadata(path).is_ok_and(|m| m.len() > LOG_LIMIT)
+        && let Ok(file) = fs::OpenOptions::new().write(true).open(path)
+    {
+        file.set_len(0).ok();
+    }
+}
+
 /// Runs the daemon until it is stopped or interrupted.
 pub fn run(socket: &Socket) -> anyhow::Result<()> {
     let lock_path = socket.lock_path()?;
     let Some(lock) = crate::lock::try_lock(&lock_path)? else {
         anyhow::bail!("a musubi daemon is already running (its socket is {socket})")
     };
+    if let Ok(log) = config::daemon_log() {
+        trim_log(&log);
+    }
     // Beside the lock, for finding the daemon's process.
     let pid_path = lock_path.with_extension("pid");
     fs::write(&pid_path, std::process::id().to_string())?;
@@ -648,10 +665,6 @@ const LAST_POLL: Duration = Duration::from_millis(50);
 fn spawn(socket: &Socket) -> anyhow::Result<(std::process::Child, PathBuf)> {
     fs::create_dir_all(config::state_dir()?)?;
     let log = config::daemon_log()?;
-    // A log that has grown large starts over.
-    if fs::metadata(&log).is_ok_and(|m| m.len() > 10 << 20) {
-        fs::remove_file(&log).ok();
-    }
     let file = fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -730,6 +743,29 @@ mod tests {
     use std::ffi::OsStr;
 
     use super::*;
+
+    /// A large log starts over, in place, so that a daemon launchd started, which writes to
+    /// it through its own handle, goes on logging to it.
+    #[test]
+    fn a_large_log_starts_over_in_place() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.log");
+        let mut appending = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        appending.write_all(b"small\n").unwrap();
+        trim_log(&path);
+        assert_eq!(fs::metadata(&path).unwrap().len(), 6);
+        appending
+            .write_all(&vec![b'x'; usize::try_from(LOG_LIMIT).unwrap()])
+            .unwrap();
+        trim_log(&path);
+        appending.write_all(b"after\n").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "after\n");
+    }
 
     #[test]
     fn a_started_daemon_takes_nothing_of_where_it_was_started() {

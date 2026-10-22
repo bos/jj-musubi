@@ -143,6 +143,11 @@ pub fn state_dir() -> anyhow::Result<PathBuf> {
     Ok(base.join("musubi"))
 }
 
+/// Where a daemon started in the background, or at login, logs.
+pub fn daemon_log() -> anyhow::Result<PathBuf> {
+    Ok(state_dir()?.join("daemon.log"))
+}
+
 impl UserConfig {
     pub fn path() -> anyhow::Result<PathBuf> {
         Ok(config_dir()?.join("config.toml"))

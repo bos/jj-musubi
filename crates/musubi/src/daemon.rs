@@ -646,9 +646,8 @@ const LAST_POLL: Duration = Duration::from_millis(50);
 /// Starts `musubi daemon` in the background, detached from this terminal, logging to the
 /// state directory.
 fn spawn(socket: &Socket) -> anyhow::Result<(std::process::Child, PathBuf)> {
-    let dir = config::state_dir()?;
-    fs::create_dir_all(&dir)?;
-    let log = dir.join("daemon.log");
+    fs::create_dir_all(config::state_dir()?)?;
+    let log = config::daemon_log()?;
     // A log that has grown large starts over.
     if fs::metadata(&log).is_ok_and(|m| m.len() > 10 << 20) {
         fs::remove_file(&log).ok();

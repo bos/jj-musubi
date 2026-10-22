@@ -75,7 +75,7 @@ fn run(program: &str, args: &[&str]) -> anyhow::Result<()> {
 /// daemon it started itself.
 pub fn install() -> anyhow::Result<String> {
     let exe = std::env::current_exe()?;
-    let log = config::state_dir()?.join("daemon.log");
+    let log = config::daemon_log()?;
     fs::create_dir_all(config::state_dir()?)?;
     let described = platform::install(&exe, &log)?;
     fs::write(marker()?, &described)?;
@@ -101,6 +101,15 @@ pub fn start() -> anyhow::Result<()> {
 /// Where the service manager logs the daemon's output.
 pub fn log_hint() -> String {
     platform::log_hint()
+}
+
+/// Where the daemon logs, where it logs to a file.
+#[cfg(any(target_os = "macos", windows))]
+fn file_log_hint() -> String {
+    config::daemon_log().map_or_else(
+        |_| "the daemon's log".to_owned(),
+        |log| log.display().to_string(),
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -161,10 +170,7 @@ mod platform {
     }
 
     pub fn log_hint() -> String {
-        config::state_dir().map_or_else(
-            |_| "the daemon's log".to_owned(),
-            |dir| dir.join("daemon.log").display().to_string(),
-        )
+        super::file_log_hint()
     }
 }
 
@@ -240,10 +246,7 @@ mod platform {
     }
 
     pub fn log_hint() -> String {
-        config::state_dir().map_or_else(
-            |_| "the daemon's log".to_owned(),
-            |dir| dir.join("daemon.log").display().to_string(),
-        )
+        super::file_log_hint()
     }
 }
 

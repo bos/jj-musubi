@@ -553,6 +553,11 @@ impl GitObjects {
         if wants.is_empty() {
             return Ok(());
         }
+        // Commits that `haves` all reach are connected already, by the assumption: git need
+        // walk no trees. A want missing here fails the walk, and git says why.
+        if self.walk(wants, haves).is_ok_and(|new| new.is_empty()) {
+            return Ok(());
+        }
         match self.run(
             &["rev-list", "--objects", "--quiet", "--stdin"],
             Some(revs_input(wants, haves)),
@@ -829,7 +834,11 @@ impl ObjectStore for GitStore<'_> {
         for entry in self.extras_for(&commits)? {
             writer.extras(entry.commit.as_bytes(), &entry.value)?;
         }
-        writer.pack_from(|out| self.git.write_pack(wants, &haves, out))?;
+        // With no commit to send, as for an operation that only moves bookmarks, git would
+        // be started to make a pack of nothing, and the receiver's to unpack it.
+        if !commits.is_empty() {
+            writer.pack_from(|out| self.git.write_pack(wants, &haves, out))?;
+        }
         writer.finish()
     }
 
@@ -976,6 +985,29 @@ mod tests {
                 .unwrap(),
             [absent, CommitId::from_bytes(&[0; 20])]
         );
+    }
+
+    /// Commits that the haves reach are connected without starting git, which would walk
+    /// their trees; anything else is git's to answer.
+    #[test]
+    fn commits_the_haves_reach_are_connected_without_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = init(dir.path());
+        run(&["init", "--quiet", "--initial-branch=main"]);
+        let commit = |message: &str| {
+            run(&["commit", "--quiet", "--allow-empty", "-m", message]);
+            CommitId::try_from_hex(run(&["rev-parse", "HEAD"])).unwrap()
+        };
+        let a = commit("a");
+        let b = commit("b");
+        // A git that can't be started: what goes to git fails.
+        let objects = GitObjects::new(Path::new("no-such-git"), &dir.path().join(".git"));
+        let (a, b) = (std::slice::from_ref(&a), std::slice::from_ref(&b));
+        objects.check_connected(a, b).unwrap();
+        objects.check_connected(b, b).unwrap();
+        assert!(objects.check_connected(b, a).is_err());
+        let missing = CommitId::from_bytes(&[1; 20]);
+        assert!(objects.check_connected(&[missing], b).is_err());
     }
 
     /// A jj rewrite is a sibling of the commit it replaces, with much the same tree. A pack

@@ -11,6 +11,7 @@ use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::OperationId;
 use musubi_hub::store::HubStore;
+use musubi_hub::store::StoreError;
 use musubi_jj::node::NodeRepo;
 use musubi_jj::objects::Backend;
 use musubi_jj::objects::bundle;
@@ -107,6 +108,33 @@ fn closure_and_head_persist() {
     let hub = HubStore::open(&hub_dir).unwrap();
     assert_eq!(hub.head(), (1, &head));
     assert!(ops.iter().all(|id| hub.is_accepted(id)));
+}
+
+/// A heads file with a torn line, as a power cut can leave it, is corrupt: the hub is made
+/// again rather than recovered, and skipping the line would lose every head appended after
+/// it.
+#[test]
+fn torn_heads_are_corrupt() {
+    let env = TestEnv::new();
+    let hub_dir = env.root().join("hub");
+    let root = HubStore::init(&hub_dir, Backend::Git)
+        .unwrap()
+        .head()
+        .1
+        .hex();
+    let heads = hub_dir.join("heads");
+    let whole = std::fs::read_to_string(&heads).unwrap();
+    for torn in [
+        "1 0123456789a",
+        "1 0123456789ab",
+        &format!("1 0123456789a1 {root}\n"),
+    ] {
+        std::fs::write(&heads, format!("{whole}{torn}")).unwrap();
+        assert!(
+            matches!(HubStore::open(&hub_dir), Err(StoreError::CorruptHead(_))),
+            "{torn:?} was taken"
+        );
+    }
 }
 
 #[test]

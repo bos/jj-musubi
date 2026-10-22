@@ -316,22 +316,22 @@ impl HubStore {
     }
 }
 
-/// Reads the log of accepted heads. A torn last line, from a crash during an append that
-/// was therefore never acknowledged, is ignored.
+/// Reads the log of accepted heads. A line torn by a power cut makes it corrupt: the hub
+/// is made again rather than recovered (see "Moving the hub" in docs/design.md).
 fn read_heads(dir: &Path) -> Result<Vec<OperationId>, StoreError> {
     let path = dir.join("heads");
     let text = fs::read_to_string(&path).map_err(io_err(&path))?;
     let mut heads = vec![];
-    for line in text.lines() {
+    for line in text.split_terminator('\n') {
         let parsed = line.split_once(' ').and_then(|(seq, id)| {
             Some((seq.parse::<usize>().ok()?, OperationId::try_from_hex(id)?))
         });
         match parsed {
             Some((seq, id)) if seq == heads.len() => heads.push(id),
-            _ => break,
+            _ => return Err(StoreError::CorruptHead(path)),
         }
     }
-    if heads.is_empty() {
+    if heads.is_empty() || !text.ends_with('\n') {
         return Err(StoreError::CorruptHead(path));
     }
     Ok(heads)
@@ -344,5 +344,7 @@ fn append_head(dir: &Path, seq: u64, head: &OperationId) -> Result<(), StoreErro
         .append(true)
         .open(&path)
         .map_err(io_err(&path))?;
-    writeln!(file, "{seq} {}", head.hex()).map_err(io_err(&path))
+    // In one write, not writeln!'s four, so that a process killed partway seldom tears it.
+    file.write_all(format!("{seq} {}\n", head.hex()).as_bytes())
+        .map_err(io_err(&path))
 }

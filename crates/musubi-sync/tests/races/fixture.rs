@@ -144,7 +144,8 @@ impl Fixture {
     /// own git HEAD after a rebase, which replicates once, but nothing ping-pongs); then
     /// every machine agrees on visible commits and bookmarks, each machine shows the other
     /// machines' working copies where they are, each colocated repository's git branches
-    /// match its bookmarks that are not conflicted, and `jj status` changes nothing.
+    /// match its bookmarks that are not conflicted or on the root commit, and `jj status`
+    /// changes nothing.
     pub fn assert_converged(&mut self) {
         let mut settled = false;
         for _ in 0..3 {
@@ -229,7 +230,10 @@ impl Fixture {
             let Some(local) = name.strip_suffix('@') else {
                 continue;
             };
-            if target.starts_with("conflict:") {
+            // git has no root commit, so jj leaves a branch where it was when its bookmark
+            // moves there, as when concurrent operations abandon the commit under it.
+            let root = !target.is_empty() && target.bytes().all(|b| b == b'0');
+            if target.starts_with("conflict:") || root {
                 continue;
             }
             assert_eq!(

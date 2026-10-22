@@ -156,7 +156,8 @@ After each rule, every repository must still load, and `jj status` must succeed.
 - all repositories agree on visible commits, change ids, bookmarks, tags, and remote
   bookmarks;
 - in every colocated repository, `refs/heads` matches the local bookmarks that are not
-  conflicted, and a further `jj status` imports nothing;
+  conflicted or on the root commit, which git can't hold, and a further `jj status`
+  imports nothing;
 - every operation made on any machine appears in every machine's `jj op log`;
 - no change diverges, and no bookmark or tag conflicts, unless jj would do the same with
   the same concurrent operations on one machine. A ledger of which machine's commands

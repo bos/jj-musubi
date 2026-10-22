@@ -7,11 +7,13 @@ test belongs at the narrowest layer that can catch its bug.
 | --- | --- | --- | --- |
 | Formal model | `formal/` (Lean) | Protocol design errors: lost operations, dangling references, duplicate merges, livelock | Proof effort, no runtime |
 | Protocol property tests | `crates/musubi-core/tests` | The Rust state machines departing from the model | Milliseconds per case |
-| Race catalogue | `crates/musubi-sync/tests/races` | Concurrent changes on different machines resolving differently from jj's local behavior (docs/races.md) | ~2 s per test |
+| Race catalogue | `crates/musubi-sync/tests/races` | Concurrent changes on different machines resolving differently from jj's local behavior (docs/races.md) | ~0.3 s per test |
 | Unit tests | `#[cfg(test)]` modules | Pure logic: URL normalization and hive names across forges, matching joining repositories to hives | Microseconds |
-| Example tests | each crate's `tests/` | jj integration details: translation, git refs, objects, joins, transports, the hub's hives, the CLI | ~1 s per test |
-| Fault tests | `crates/musubi-sync/tests/it/faults.rs` | Malformed requests reaching the hub's decoders, and links that die or stall partway through a sync | ~10–20 s per test |
+| Example tests | each crate's `tests/` | jj integration details: translation, git refs, objects, joins, transports, the hub's hives, the CLI | ~0.2–0.5 s per test |
+| Fault tests | `crates/musubi-sync/tests/it/faults.rs` | Malformed requests reaching the hub's decoders, and links that die or stall partway through a sync | ~0.2–1.5 s per test |
 | Generated end-to-end tests | `crates/musubi-sync/tests/e2e_search` | Everything interacting: real `jj` commands, real repositories, faults | Seconds per case; opt-in |
+
+The costs are for one test among the rest of the suite on Linux, on 32 cores.
 
 Run the default suite with `cargo nextest run`, or everything with `just check`. It needs `jj` 0.46.0 and `git`
 on `PATH`. On Linux the tests make their directories in `/dev/shm`, in memory, unless

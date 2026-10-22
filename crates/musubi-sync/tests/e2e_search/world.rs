@@ -773,7 +773,32 @@ impl World {
         ));
         self.merge_local_heads(m);
         // Progress stops here either way: a partial sync that pauses has nothing to retry.
-        if let Err(err) = self.try_sync_partial(m, steps, lose) {
+        if let Err(err) = self.try_sync_partial(m, steps, lose, None) {
+            self.recover_unmergeable(m, "partial sync", &err);
+        }
+        self.record_merges(m);
+    }
+
+    /// Whether node `m` has yet to realize the hub's head.
+    pub fn behind_hub(&self, m: usize) -> bool {
+        let head = self.fx.hive.hub.store().head().1;
+        self.fx.hive.members[m]
+            .adapter
+            .repo()
+            .local_of(head)
+            .is_none()
+    }
+
+    /// Lets node `m` sync until it has realized `count` operations, or has nothing more to
+    /// realize, and stops there, with what it realized perhaps still being written.
+    pub fn sync_realizing(&mut self, m: usize, count: usize) {
+        self.touched.insert(m);
+        self.record(format!(
+            "{}: sync until {count} operation(s) realized",
+            self.machine(m)
+        ));
+        self.merge_local_heads(m);
+        if let Err(err) = self.try_sync_partial(m, usize::MAX, None, Some(count)) {
             self.recover_unmergeable(m, "partial sync", &err);
         }
         self.record_merges(m);
@@ -784,6 +809,7 @@ impl World {
         m: usize,
         steps: usize,
         lose: Option<usize>,
+        realizing: Option<usize>,
     ) -> anyhow::Result<()> {
         let mut sent = 0;
         let mut deliver = |world: &mut Self, request| {
@@ -797,6 +823,7 @@ impl World {
             member.core.poll(&member.adapter)?
         };
         deliver(self, poll)?;
+        let mut realized = 0;
         for _ in 0..steps {
             let member = &mut self.fx.hive.members[m];
             match member.core.step(&mut member.adapter)? {
@@ -806,7 +833,15 @@ impl World {
                         deliver(self, request)?;
                     }
                 }
-                Step::Merged | Step::Realized(_) | Step::Advanced(_) => {}
+                Step::Realized(_) => {
+                    realized += 1;
+                    if realizing == Some(realized) {
+                        break;
+                    }
+                }
+                // Advancing finishes writing what was realized.
+                Step::Advanced(_) if realizing.is_some() => break,
+                Step::Merged | Step::Advanced(_) => {}
             }
         }
         Ok(())

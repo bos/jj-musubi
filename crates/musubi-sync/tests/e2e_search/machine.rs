@@ -620,6 +620,25 @@ impl Search {
         self.note(&tc);
     }
 
+    /// A crash partway through realizing what a sync fetched, with realizations still being
+    /// written.
+    #[rule]
+    fn crash_while_syncing(&mut self, tc: TestCase) {
+        tc.assume(self.faults < MAX_FAULTS);
+        let m = self.machine(&tc);
+        // Only a machine with something to realize can crash while writing it.
+        tc.assume(self.world.borrow().behind_hub(m));
+        self.faults += 1;
+        fired("crash_while_syncing");
+        let count = tc.draw(gs::integers::<usize>().min_value(1).max_value(4));
+        let stopped = tc.draw(gs::integers::<u64>());
+        self.world.borrow_mut().sync_realizing(m, count);
+        if self.world.borrow_mut().crash(m, false, stopped) > 0 {
+            fired("crash:writes_in_flight");
+        }
+        self.note(&tc);
+    }
+
     #[rule]
     fn lose_cache(&mut self, tc: TestCase) {
         let m = self.fault(&tc, "lose_cache");

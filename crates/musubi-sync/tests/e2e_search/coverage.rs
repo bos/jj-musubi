@@ -50,6 +50,7 @@ pub const RULES: &[&str] = &[
     "converge",
     "restart",
     "crash",
+    "crash_while_syncing",
     "lose_cache",
     "restart_hub",
     "lose_reply",

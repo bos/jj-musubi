@@ -1,0 +1,65 @@
+name: Search
+
+# The generated end-to-end search (docs/testing.md), which CI's test job leaves out for its
+# quick sibling `e2e_smoke`: nightly, and by hand. Each run searches from a seed of its own,
+# shard n from seed + n, one shard per runner. A case replays exactly, so a failure
+# reproduces locally from the `reproduce_failure` attribute its output gives, or from the
+# shard's example database, which a failing run uploads.
+on:
+  schedule:
+    - cron: "23 6 * * *"
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: Base seed (default the run's id)
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: search
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  search:
+    name: Search (shard ${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-nextest
+      - name: Install jj
+        run: |
+          .github/scripts/install-release.sh jj-vcs/jj v0.46.0 \
+            jj-v0.46.0-x86_64-unknown-linux-musl.tar.gz \
+            fce0271158e665ceb82dc66c5eb95b1728649094e9133074f3b5baece345fc08 jj
+      - name: Search
+        run: |
+          echo "MUSUBI_SEARCH_SEED=$MUSUBI_SEARCH_SEED"
+          cargo nextest run -p musubi-sync --profile search --locked --no-capture \
+            -E "test(=e2e_search_shard_${{ matrix.shard }})"
+        env:
+          MUSUBI_SEARCH_SEED: ${{ inputs.seed || github.run_id }}
+          MUSUBI_SEARCH_TIMING: "1"
+      - if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-search-shard-${{ matrix.shard }}
+          path: target/tmp/e2e_search/
+          if-no-files-found: ignore

@@ -20,7 +20,10 @@ global and system git config from the git that tests, and the musubi they run in
 start; the `jj` and `git` they run as commands get musubi-testutil's own home directory.
 
 CI runs the default suite on Linux, macOS and Windows, and checks the Lean model and runs
-the conformance test against its oracle on Linux. It doesn't run the end-to-end search.
+the conformance test against its oracle on Linux. The Search workflow runs the end-to-end
+search nightly on Linux, each shard on a runner of its own, with a seed that changes from
+run to run. A failing shard uploads its example database; its output gives the seed and a
+`reproduce_failure` attribute for replaying the failure locally.
 
 ## Protocol property tests
 

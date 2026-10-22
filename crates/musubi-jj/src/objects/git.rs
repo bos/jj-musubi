@@ -110,7 +110,7 @@ impl GitObjects {
             .arg(git_dir)
             .output()
             .map_err(|source| run_err(&args, source))?;
-        check_status(&args, &output)?;
+        check_status(&args, output.status, &output.stderr)?;
         let objects = Self::new(executable, git_dir);
         objects.run(&["config", "gc.auto", "0"], None)?;
         objects.run(&["config", "core.fsync", "none"], None)?;
@@ -237,34 +237,8 @@ impl GitObjects {
             // trees: a few milliseconds for hundreds of haves in jj's own repository.
             args.push("--shallow");
         }
-        let mut child = self
-            .command(&args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|source| run_err(&args, source))?;
-        let mut stdin = child.stdin.take().expect("stdin is piped");
-        let input = revs_input(wants, haves);
-        let writer = thread::spawn(move || stdin.write_all(&input));
-        let mut stderr = child.stderr.take().expect("stderr is piped");
-        let errors = thread::spawn(move || {
-            let mut bytes = vec![];
-            io::Read::read_to_end(&mut stderr, &mut bytes).map(|_| bytes)
-        });
-        let copied = io::copy(&mut child.stdout.take().expect("stdout is piped"), out);
-        let status = child.wait().map_err(|source| run_err(&args, source))?;
-        writer.join().expect("stdin writer panicked")?;
-        let stderr = errors.join().expect("stderr reader panicked")?;
-        copied?;
-        check_status(
-            &args,
-            &std::process::Output {
-                status,
-                stdout: vec![],
-                stderr,
-            },
-        )?;
+        let input = io::Cursor::new(revs_input(wants, haves));
+        self.repo.stream(&args, input, out)?;
         Ok(())
     }
 
@@ -282,22 +256,8 @@ impl GitObjects {
         } else {
             &["index-pack", "--stdin", "--fix-thin"]
         };
-        let mut input = io::Read::chain(io::Cursor::new(header), reader);
-        let mut child = self
-            .command(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|source| run_err(args, source))?;
-        let mut stdin = child.stdin.take().expect("stdin is piped");
-        let writer = thread::spawn(move || io::copy(&mut input, &mut stdin));
-        let output = child
-            .wait_with_output()
-            .map_err(|source| run_err(args, source))?;
-        // A failing git may close stdin early; its exit status explains why.
-        writer.join().expect("stdin writer panicked").ok();
-        check_status(args, &output)?;
+        let input = io::Read::chain(io::Cursor::new(header), reader);
+        self.repo.stream(args, input, &mut io::sink())?;
         Ok(())
     }
 

@@ -1,11 +1,11 @@
 //! The `git` binary as musubi runs it, for a git repository's objects and its remotes.
 
 use std::io;
-use std::io::Write as _;
+use std::io::Read as _;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
-use std::process::Output;
+use std::process::ExitStatus;
 use std::process::Stdio;
 use std::thread;
 
@@ -110,30 +110,50 @@ impl GitRepo {
     /// Runs `git args` in this repository with `input` on its stdin, and returns its
     /// stdout.
     pub fn run(&self, args: &[&str], input: Option<Vec<u8>>) -> Result<Vec<u8>, GitError> {
+        let mut out = vec![];
+        self.stream(args, io::Cursor::new(input.unwrap_or_default()), &mut out)?;
+        Ok(out)
+    }
+
+    /// Runs `git args` in this repository, copying `input` to its stdin, and its stdout to
+    /// `out`, as it goes: a pack needn't fit in memory.
+    pub fn stream(
+        &self,
+        args: &[&str],
+        mut input: impl io::Read + Send + 'static,
+        out: &mut dyn io::Write,
+    ) -> Result<(), GitError> {
         let mut child = self
             .command(args)
-            .stdin(if input.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|source| run_err(args, source))?;
-        let writer = input.map(|input| {
-            let mut stdin = child.stdin.take().expect("stdin is piped");
-            thread::spawn(move || stdin.write_all(&input))
+        let mut stdin = child.stdin.take().expect("stdin is piped");
+        let writer = thread::spawn(move || io::copy(&mut input, &mut stdin));
+        let mut stderr = child.stderr.take().expect("stderr is piped");
+        let errors = thread::spawn(move || {
+            let mut bytes = vec![];
+            stderr.read_to_end(&mut bytes).map(|_| bytes)
         });
-        let output = child
-            .wait_with_output()
-            .map_err(|source| run_err(args, source))?;
-        if let Some(writer) = writer {
-            // A failing git may close stdin early; its exit status explains why.
-            writer.join().expect("stdin writer panicked").ok();
-        }
-        check_status(args, &output)?;
-        Ok(output.stdout)
+        let mut stdout = child.stdout.take().expect("stdout is piped");
+        let copied = io::copy(&mut stdout, out);
+        // Closed, so that git, if the copy failed, fails writing more rather than waiting.
+        drop(stdout);
+        let status = child.wait().map_err(|source| run_err(args, source))?;
+        let written = writer.join().expect("stdin writer panicked");
+        let stderr = errors.join().expect("stderr reader panicked");
+        // The copy's error says why git failed, if it did.
+        copied.map_err(|source| run_err(args, source))?;
+        // A failing git may close stdin early; its exit status explains why.
+        check_status(
+            args,
+            status,
+            &stderr.map_err(|source| run_err(args, source))?,
+        )?;
+        written.map_err(|source| run_err(args, source))?;
+        Ok(())
     }
 }
 
@@ -144,13 +164,17 @@ pub(crate) fn run_err(args: &[&str], source: io::Error) -> GitError {
     }
 }
 
-pub(crate) fn check_status(args: &[&str], output: &Output) -> Result<(), GitError> {
-    if output.status.success() {
+pub(crate) fn check_status(
+    args: &[&str],
+    status: ExitStatus,
+    stderr: &[u8],
+) -> Result<(), GitError> {
+    if status.success() {
         Ok(())
     } else {
         Err(GitError::Failed {
             args: args.join(" "),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            stderr: String::from_utf8_lossy(stderr).into_owned(),
         })
     }
 }

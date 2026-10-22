@@ -199,6 +199,39 @@ fn forgotten_working_copies_follow_a_moved_parent() {
     }
 }
 
+/// A machine forgets another machine's workspace, then, before it syncs, abandons that
+/// machine's `@`, which another commit is built on. musubi keeps a forgotten `@` visible
+/// only if it was a head, the only kind jj's forget abandons, so the abandon stands, and
+/// the other machine gets a fresh `@` on the parent.
+#[test]
+fn forgotten_working_copies_built_on_can_be_abandoned() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(1, "a", "base on beta");
+    hive.repo(1)
+        .jj(&["new", "--no-edit", "-m", "built on beta's @"]);
+    hive.sync();
+    let beta_wc = working_copy(&hive, 1);
+    hive.repo(0).jj(&["workspace", "forget", "beta/beta"]);
+    hive.repo(0).jj(&["abandon", &beta_wc]);
+    hive.sync();
+    hive.sync();
+    hive.assert_converged();
+    for m in 0..2 {
+        let visible = hive.visible(m);
+        assert!(
+            !visible.iter().any(|c| c.starts_with(&beta_wc)),
+            "abandoned @ visible on {}",
+            hive.repo(m).machine()
+        );
+        assert!(
+            visible.iter().any(|c| c.ends_with("built on beta's @")),
+            "{visible:?}"
+        );
+    }
+    assert_ne!(revision_id(&hive, 1, "@"), beta_wc);
+    assert_eq!(parent_description(&hive, 1), "base on beta");
+}
+
 /// The commit id of `revision` on machine `m`.
 fn revision_id(hive: &Fixture, m: usize, revision: &str) -> String {
     hive.repo(m).jj(&["status"]);

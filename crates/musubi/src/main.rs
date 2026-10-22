@@ -512,28 +512,42 @@ fn become_node(
 /// Has the daemon, started if need be, serve the repository, and reports its first sync.
 /// Without a daemon, syncs once.
 fn start_serving(located: &Located, socket: &Socket) -> anyhow::Result<()> {
+    /// How asking the daemon to serve the repository went.
+    enum Served {
+        /// There was no daemon to ask, nor could one be started.
+        NoDaemon(anyhow::Error),
+        Synced(Synced),
+        /// The daemon serves it, but its first sync failed, saying this.
+        Failed(String),
+    }
     let workspace = located.workspace_root.clone();
     // The client lives on the runtime that made it, so one runtime does it all.
-    let synced = block_on(async {
+    let served = block_on(async {
         let client = match daemon::ensure(socket).await {
             Ok(client) => client,
-            Err(err) => return Ok(Err(err)),
+            Err(err) => return Ok(Served::NoDaemon(err)),
         };
         println!("Syncing...");
-        let synced = client
+        let first = client
             .add(control::context(Duration::from_secs(3600)), workspace)
             .await
             .context("asking the daemon to serve this repository")?;
-        Ok(Ok(synced))
+        Ok::<_, anyhow::Error>(match first {
+            Ok(synced) => Served::Synced(synced),
+            Err(message) => Served::Failed(message),
+        })
     })?;
-    match synced {
-        Err(err) => {
+    match served {
+        Served::NoDaemon(err) => {
             eprintln!("Could not start the daemon ({err:#}); syncing once instead.");
-            sync_directly(located)?;
-            println!("Synced. Run `musubi daemon` to keep it in sync.");
+            let synced = sync_directly(located)?;
+            println!(
+                "Synced (hive at #{}). Run `musubi daemon` to keep it in sync.",
+                synced.seq
+            );
             Ok(())
         }
-        Ok(Ok(synced)) => {
+        Served::Synced(synced) => {
             println!(
                 "Synced with the hub (hive at #{}). The daemon keeps it in sync from now on.",
                 synced.seq
@@ -543,7 +557,7 @@ fn start_serving(located: &Located, socket: &Socket) -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Ok(Err(message)) => anyhow::bail!(
+        Served::Failed(message) => anyhow::bail!(
             "the first sync failed: {message}\nThe daemon keeps trying; `musubi list` shows how \
              it goes."
         ),

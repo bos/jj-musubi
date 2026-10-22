@@ -3,7 +3,17 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::sync::Arc;
 
+use futures::TryStreamExt as _;
+use futures::executor::block_on;
+use jj_lib::backend::CommitId;
+use jj_lib::default_backend_factories::default_backend_factories;
+use jj_lib::object_id::ObjectId as _;
+use jj_lib::repo::ReadonlyRepo;
+use jj_lib::repo::Repo as _;
+use jj_lib::repo::RepoLoader;
+use jj_lib::revset::RevsetExpression;
 use musubi_jj::node::NodeRepo;
 use musubi_jj::objects::Backend;
 use musubi_sync::hive::Hive;
@@ -28,18 +38,36 @@ impl Fixture {
         let saved = musubi_testutil::recorded(base, &name, |dir| {
             let env = TestEnv::new();
             let repos = names.iter().map(|name| env.init_repo(name)).collect();
-            let Self { env, hive, .. } = Self::join(env, repos);
+            let Self { env, repos, hive } = Self::join(env, repos);
             // Its nodes finish writing what they realized as they close.
             drop(hive);
+            // Where jj keeps each repository's config, which a copy keeps in the same place
+            // in its own environment: asking jj for each test's copy would start it again.
+            let configs: Vec<String> = repos
+                .iter()
+                .map(|repo| {
+                    let path = repo.repo_config_path();
+                    let path = path
+                        .strip_prefix(env.root())
+                        .expect("jj keeps repo config in the environment's home");
+                    path.to_str().unwrap().to_owned()
+                })
+                .collect();
             env.save(dir);
+            std::fs::write(dir.join("configs"), configs.join("\n")).unwrap();
+            // Gone even where MUSUBI_KEEP_TEST_DIRS keeps the rest: jj takes a repository
+            // whose recorded path is still there for a copy, and gives a copy a config of its
+            // own.
+            std::fs::remove_dir_all(env.root()).unwrap();
         });
         let env = TestEnv::restore(&saved);
         let repos: Vec<TestRepo> = names.iter().map(|name| env.repo_handle(name)).collect();
+        let configs = std::fs::read_to_string(saved.join("configs")).unwrap();
         let mut hive = Hive::open(&env.root().join("hub")).unwrap();
-        for repo in &repos {
+        for (repo, config) in repos.iter().zip(configs.lines()) {
             let node = NodeRepo::open(&repo.repo_path(), &repo.settings())
                 .unwrap()
-                .with_repo_config(Some(repo.repo_config_path()));
+                .with_repo_config(Some(env.root().join(config)));
             hive.add(node).unwrap();
         }
         Self { env, repos, hive }
@@ -152,12 +180,17 @@ impl Fixture {
             .collect()
     }
 
-    /// The number of operations in the repository's op log.
-    pub fn op_count(&self, index: usize) -> usize {
-        self.repo(index)
-            .jj(&["op", "log", "--no-graph", "-T", "id ++ \"\\n\""])
-            .lines()
-            .count()
+    /// The repository at its head, read in process: unlike a `jj` command, reading it
+    /// snapshots nothing and imports nothing from git.
+    fn load(&self, index: usize) -> Arc<ReadonlyRepo> {
+        let repo = self.repo(index);
+        let loader = RepoLoader::init_from_file_system(
+            &repo.settings(),
+            &repo.repo_path(),
+            &default_backend_factories(),
+        )
+        .unwrap();
+        block_on(loader.load_at_head()).unwrap()
     }
 
     /// The hive's invariants once synced: running `jj` everywhere and syncing again
@@ -184,8 +217,20 @@ impl Fixture {
             settled,
             "the hive keeps changing: running jj and syncing never settles"
         );
-        let workspaces: Vec<BTreeMap<String, String>> =
-            (0..self.repos.len()).map(|i| self.workspaces(i)).collect();
+        // Read in process, which spares a few hundred `jj` commands over the catalogue:
+        // every machine has run `jj status` since the hive last changed, so a command would
+        // snapshot and import nothing first.
+        let repos: Vec<Arc<ReadonlyRepo>> = (0..self.repos.len()).map(|i| self.load(i)).collect();
+        let workspaces: Vec<BTreeMap<String, String>> = repos
+            .iter()
+            .map(|repo| {
+                repo.view()
+                    .wc_commit_ids()
+                    .iter()
+                    .map(|(name, id)| (name.as_str().to_owned(), id.hex()))
+                    .collect()
+            })
+            .collect();
         let own = |ws: &BTreeMap<String, String>| -> Vec<String> {
             ws.iter()
                 .filter(|(name, _)| !name.contains('/'))
@@ -206,26 +251,22 @@ impl Fixture {
             actual.sort();
             assert_eq!(shown, actual, "other machines' working copies on {index}");
         }
-        let first_visible = self.visible(0);
-        let first_bookmarks = local_bookmarks(&self.bookmarks(0));
+        let visible: Vec<BTreeSet<String>> = repos.iter().map(visible).collect();
+        let bookmarks: Vec<BTreeMap<String, String>> = repos.iter().map(local_bookmarks).collect();
         for index in 0..self.repos.len() {
             assert_eq!(
-                self.visible(index),
-                first_visible,
+                visible[index], visible[0],
                 "visible commits differ on {index}"
             );
-            let bookmarks = self.bookmarks(index);
             assert_eq!(
-                local_bookmarks(&bookmarks),
-                first_bookmarks,
+                bookmarks[index], bookmarks[0],
                 "bookmarks differ on {index}"
             );
-            self.assert_git_matches(index, &bookmarks);
-            let before = self.op_count(index);
+            self.assert_git_matches(index, &bookmarks[index]);
             self.repo(index).jj(&["status"]);
             assert_eq!(
-                self.op_count(index),
-                before,
+                self.load(index).op_id(),
+                repos[index].op_id(),
                 "`jj status` on {index} created an operation"
             );
         }
@@ -247,10 +288,7 @@ impl Fixture {
             .filter_map(|line| line.split_once(' '))
             .map(|(name, id)| (name.to_owned(), id.to_owned()))
             .collect();
-        for (name, target) in bookmarks {
-            let Some(local) = name.strip_suffix('@') else {
-                continue;
-            };
+        for (local, target) in bookmarks {
             // git has no root commit, so jj leaves a branch where it was when its bookmark
             // moves there, as when concurrent operations abandon the commit under it.
             let root = !target.is_empty() && target.bytes().all(|b| b == b'0');
@@ -266,10 +304,35 @@ impl Fixture {
     }
 }
 
-/// Local bookmarks only (`name@` with an empty remote).
-pub fn local_bookmarks(all: &BTreeMap<String, String>) -> BTreeMap<String, String> {
-    all.iter()
-        .filter(|(name, _)| name.ends_with('@'))
-        .map(|(k, v)| (k.clone(), v.clone()))
+/// Visible commits with their change ids and descriptions' first lines.
+fn visible(repo: &Arc<ReadonlyRepo>) -> BTreeSet<String> {
+    let revset = RevsetExpression::visible_heads()
+        .ancestors()
+        .evaluate(repo.as_ref())
+        .unwrap();
+    let ids: Vec<CommitId> = block_on(revset.stream().try_collect()).unwrap();
+    ids.iter()
+        .map(|id| {
+            let commit = repo.store().get_commit(id).unwrap();
+            let subject = commit.description().lines().next().unwrap_or_default();
+            format!("{} {} {subject}", id.hex(), commit.change_id().hex())
+        })
+        .collect()
+}
+
+/// Local bookmarks with their targets: a commit id, or `conflict:` and the ids it adds.
+fn local_bookmarks(repo: &Arc<ReadonlyRepo>) -> BTreeMap<String, String> {
+    repo.view()
+        .local_bookmarks()
+        .map(|(name, target)| {
+            let target = match target.as_normal() {
+                Some(id) => id.hex(),
+                None => {
+                    let added: Vec<String> = target.adds().flatten().map(|id| id.hex()).collect();
+                    format!("conflict:{}", added.join(","))
+                }
+            };
+            (name.as_str().to_owned(), target)
+        })
         .collect()
 }

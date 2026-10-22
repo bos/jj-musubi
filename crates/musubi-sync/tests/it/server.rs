@@ -96,7 +96,7 @@ async fn one_hub_many_hives() {
     let dir = env.root().join("hub");
     std::fs::create_dir(&dir).unwrap();
     let network = MemoryNetwork::new(1, 1024 * 1024);
-    let server = HubServer::open(&dir, "musubi").unwrap();
+    let server = HubServer::open(&dir).unwrap();
     let transport: Arc<dyn Transport> = Arc::new(network.connect());
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(server.run(transport, move || {
@@ -287,7 +287,7 @@ async fn one_hub_many_hives() {
 
     // A restarted hub reads its hives back, rebuilding a lost index.
     std::fs::remove_file(dir.join(&hive).join("index.json")).unwrap();
-    let reopened = HubServer::open(&dir, "musubi").unwrap();
+    let reopened = HubServer::open(&dir).unwrap();
     assert_eq!(reopened.hive_count(), 1);
     let index = musubi_hub::index::HiveIndex::load(&dir.join(&hive)).unwrap();
     assert_eq!(index.roots.len(), 1, "{index:?}");
@@ -321,7 +321,7 @@ async fn a_request_that_panics_the_hub_gets_an_error() {
     let dir = env.root().join("hub");
     std::fs::create_dir(&dir).unwrap();
     let network = MemoryNetwork::new(1, 1024 * 1024);
-    let server = HubServer::open(&dir, "musubi").unwrap();
+    let server = HubServer::open(&dir).unwrap();
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     tokio::spawn(server.run(Arc::new(network.connect()), move || {
         ready_tx.send(()).ok();

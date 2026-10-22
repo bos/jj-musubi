@@ -22,6 +22,7 @@ use musubi_sync::wire::Envelope;
 use musubi_sync::wire::HUB_TOKEN;
 use musubi_sync::wire::HubWideReply;
 use musubi_sync::wire::HubWideRequest;
+use musubi_sync::wire::rpc_subject;
 use musubi_transport::MemoryNetwork;
 use musubi_transport::StreamTransport;
 use musubi_transport::Transport;
@@ -34,7 +35,6 @@ use serde::Serialize;
 use tokio::sync::oneshot;
 
 use crate::config;
-use crate::config::default_subject_prefix;
 use crate::socket;
 use crate::socket::Socket;
 use crate::ssh;
@@ -143,7 +143,7 @@ pub fn serve(args: ServeArgs) -> anyhow::Result<()> {
         );
     }
     settings.save(&dir)?;
-    let server = HubServer::open(&dir, &default_subject_prefix())?;
+    let server = HubServer::open(&dir)?;
     match (created, server.hive_count()) {
         (true, _) => println!("Created a new hub in {}", dir.display()),
         (false, 1) => println!("Serving 1 hive from {}", dir.display()),
@@ -376,7 +376,7 @@ pub async fn ask_over(
     hub: &str,
     request: HubWideRequest,
 ) -> anyhow::Result<HubWideReply> {
-    let subject = format!("{}.{HUB_TOKEN}.rpc", default_subject_prefix());
+    let subject = rpc_subject(HUB_TOKEN);
     let payload = Bytes::from(Envelope::encode(request)?);
     let reply = match connection
         .transport

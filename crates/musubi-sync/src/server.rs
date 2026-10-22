@@ -1,9 +1,9 @@
 //! A hub serving every hive in its directory (see `musubi_hub::hub_dir`).
 //!
-//! One subscription, `<prefix>.*.rpc`, takes every request. Those for a hive go to that
+//! One subscription, `musubi.*.rpc`, takes every request. Those for a hive go to that
 //! hive's own thread, which opens its store on the first request and then answers its
 //! requests one at a time, as [`HubService`] does; different hives never wait for each
-//! other. Requests to `<prefix>.hub.rpc` ([`HUB_TOKEN`]) are about the hub as a whole:
+//! other. Requests to `musubi.hub.rpc` ([`HUB_TOKEN`]) are about the hub as a whole:
 //! joining, listing, renaming, and removing hives. A request for a hive the hub doesn't
 //! have gets an error: only a join creates a hive.
 
@@ -30,9 +30,11 @@ use crate::wire::HubReply;
 use crate::wire::HubWideReply;
 use crate::wire::HubWideRequest;
 use crate::wire::fit_error;
+use crate::wire::head_subject;
+use crate::wire::rpc_subject;
+use crate::wire::rpc_token;
 
 pub struct HubServer {
-    prefix: String,
     hubs: Arc<Mutex<HubDir>>,
     workers: HashMap<String, Worker>,
 }
@@ -44,9 +46,8 @@ struct Worker {
 
 impl HubServer {
     /// Opens the hub directory `dir`, which must exist.
-    pub fn open(dir: &Path, prefix: &str) -> anyhow::Result<Self> {
+    pub fn open(dir: &Path) -> anyhow::Result<Self> {
         Ok(Self {
-            prefix: prefix.to_owned(),
             hubs: Arc::new(Mutex::new(HubDir::open(dir)?)),
             workers: HashMap::new(),
         })
@@ -67,20 +68,13 @@ impl HubServer {
         transport: Arc<dyn Transport>,
         ready: impl FnOnce(),
     ) -> anyhow::Result<()> {
-        let mut requests = transport
-            .subscribe(&format!("{}.*.rpc", self.prefix))
-            .await?;
+        let mut requests = transport.subscribe(&rpc_subject("*")).await?;
         ready();
         while let Some(message) = requests.next().await {
             let Some(reply_to) = message.reply.clone() else {
                 continue;
             };
-            let token = message
-                .subject
-                .strip_prefix(&format!("{}.", self.prefix))
-                .and_then(|rest| rest.strip_suffix(".rpc"))
-                .unwrap_or_default()
-                .to_owned();
+            let token = rpc_token(&message.subject).unwrap_or_default().to_owned();
             if token == HUB_TOKEN {
                 let reply = self
                     .handle_hub_wide(&message.payload, transport.max_payload())
@@ -107,7 +101,6 @@ impl HubServer {
                 spawn_worker(
                     token.clone(),
                     dir.clone(),
-                    &self.prefix,
                     self.hubs.clone(),
                     transport.clone(),
                 )
@@ -180,14 +173,12 @@ impl HubServer {
 fn spawn_worker(
     id: String,
     dir: PathBuf,
-    prefix: &str,
     hubs: Arc<Mutex<HubDir>>,
     transport: Arc<dyn Transport>,
 ) -> Worker {
     let (requests, receiver) = mpsc::channel();
     let runtime = tokio::runtime::Handle::current();
-    let rpc = format!("{prefix}.{id}.rpc");
-    let head = format!("{prefix}.{id}.head");
+    let (rpc, head) = (rpc_subject(&id), head_subject(&id));
     let thread = std::thread::Builder::new()
         .name(format!("hive {id}"))
         .spawn(move || {

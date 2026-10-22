@@ -489,7 +489,6 @@ fn become_node(
             .context("the hub sent a malformed hive id")?,
         name: Some(hive.name.clone()),
         hub: hub.to_owned(),
-        subject_prefix: config::default_subject_prefix(),
         node: machine,
     };
     config.save(&located.repo_path)?;

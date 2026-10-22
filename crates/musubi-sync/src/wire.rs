@@ -84,9 +84,31 @@ pub enum HubReply {
     Error(String),
 }
 
+/// The first token of every subject the hub serves (docs/design.md, "Transport").
+const SUBJECT_PREFIX: &str = "musubi";
+
 /// What stands in for a hive id in the subject of requests to the hub as a whole:
 /// `musubi.hub.rpc`.
 pub const HUB_TOKEN: &str = "hub";
+
+/// The subject of requests to the hive `hive`; with [`HUB_TOKEN`], to the hub as a whole,
+/// and with `*`, a pattern for all of them.
+pub fn rpc_subject(hive: &str) -> String {
+    format!("{SUBJECT_PREFIX}.{hive}.rpc")
+}
+
+/// The subject the hub announces the hive `hive`'s new heads on.
+pub fn head_subject(hive: &str) -> String {
+    format!("{SUBJECT_PREFIX}.{hive}.head")
+}
+
+/// What a request's subject names in place of a hive id (see [`rpc_subject`]).
+pub fn rpc_token(subject: &str) -> Option<&str> {
+    subject
+        .strip_prefix(SUBJECT_PREFIX)?
+        .strip_prefix('.')?
+        .strip_suffix(".rpc")
+}
 
 /// A request about the hub's hives rather than within one.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -29,15 +29,8 @@ pub struct HiveConfig {
     /// The hub: an ssh destination (see [`crate::ssh`]), or on the hub's machine, its
     /// directory.
     pub hub: String,
-    /// Prefix of the subjects of this hive's requests and announcements.
-    #[serde(default = "default_subject_prefix")]
-    pub subject_prefix: String,
     /// This node's name, used in status output.
     pub node: String,
-}
-
-pub fn default_subject_prefix() -> String {
-    "musubi".to_owned()
 }
 
 impl HiveConfig {
@@ -64,12 +57,12 @@ impl HiveConfig {
 
     /// The subject the hub serves requests on.
     pub fn rpc_subject(&self) -> String {
-        format!("{}.{}.rpc", self.subject_prefix, self.hive)
+        musubi_sync::wire::rpc_subject(&self.hive.to_string())
     }
 
     /// The subject the hub announces new canonical heads on.
     pub fn head_subject(&self) -> String {
-        format!("{}.{}.head", self.subject_prefix, self.hive)
+        musubi_sync::wire::head_subject(&self.hive.to_string())
     }
 
     /// The name to show for the hive.

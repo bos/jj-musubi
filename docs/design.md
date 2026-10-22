@@ -295,9 +295,9 @@ pulls, merges, and pushes. That is the same path as any concurrent update.
 A hub is just a store. Every node holds every operation it has seen, so a new, empty hub fills
 up as soon as nodes connect: the first node fast-forwards it to its head, and the others
 fast-forward or merge as usual. A hub location is an ssh destination, or on the hub's
-machine its directory, and a subject prefix. The old hub can publish a signed-by-config
-`hub-moved` advertisement carrying the new location and a higher epoch. Nodes then
-reconnect there and ignore lower-epoch hubs from then on.
+machine its directory. The old hub can publish a signed-by-config `hub-moved`
+advertisement carrying the new location and a higher epoch. Nodes then reconnect there
+and ignore lower-epoch hubs from then on.
 
 Since an empty hub fills up this way, a hub needn't be durable, and it syncs nothing to disk:
 one that loses its state, to a power cut say, is deleted and made again, and the machines'

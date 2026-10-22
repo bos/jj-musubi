@@ -8,6 +8,11 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+# No tests of its own: a test binary would only be linked with jj-lib for nothing.
+[lib]
+test = false
+doctest = false
+
 [dependencies]
 jj-lib.workspace = true
 reflink-copy.workspace = true

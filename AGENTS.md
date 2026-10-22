@@ -12,8 +12,8 @@ This is a jj repository: use jj, never git.
 two minutes, so each check runs once, run by whoever owns it.
 
 - While working, run only what the change touches: typically one test, one test file
-  (`cargo nextest run -p musubi-jj --test join`), or one crate (`cargo nextest run -p
-  musubi-jj`).
+  (`cargo nextest run -p musubi-jj -E 'test(/^join::/)'`), or one crate
+  (`cargo nextest run -p musubi-jj`).
 - Don't ask for a review if any checks fail. Fix them first.
 - Once the change is final, its author runs `just check`, and says in any request for review
   either exactly which checks passed if a subset, or otherwise that all of them did.

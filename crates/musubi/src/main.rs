@@ -454,7 +454,9 @@ async fn ask_preparing(hub: &str, request: HubWideRequest) -> anyhow::Result<Hub
 fn set_machine_name(located: &Located, machine: Option<&str>) -> anyhow::Result<()> {
     if let Some(name) = machine {
         let path = located.repo_path.join("musubi/machine");
-        let machine = musubi_jj::workspaces::Machine::load_or_create(&path, name)?;
+        let settings = settings::load(&located.workspace_root, &located.repo_path)?;
+        let machine =
+            musubi_jj::workspaces::Machine::load_or_create(&path, name, &settings.get_rng())?;
         // The same name again, as when retrying a refused join, is no change.
         anyhow::ensure!(
             machine.name() == musubi_jj::workspaces::sanitize(name),

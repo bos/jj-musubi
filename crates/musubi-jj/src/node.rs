@@ -370,6 +370,7 @@ impl NodeRepo {
             machine: Machine::load_or_create(
                 &musubi_dir.join("machine"),
                 settings.operation_hostname(),
+                &settings.get_rng(),
             )
             .map_err(|source| NodeError::Io {
                 path: musubi_dir.join("machine"),

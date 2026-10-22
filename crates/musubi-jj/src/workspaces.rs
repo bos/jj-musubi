@@ -18,7 +18,9 @@ use std::io::Write as _;
 use std::path::Path;
 
 use jj_lib::backend::CommitId;
+use jj_lib::object_id::ObjectId as _;
 use jj_lib::ref_name::WorkspaceNameBuf;
+use jj_lib::settings::JJRng;
 
 /// This machine's identity in the hive: a readable name plus a random suffix, `name#1a2b3c4d`,
 /// so that two machines with the same hostname are never confused. Stored on first use,
@@ -29,7 +31,10 @@ pub struct Machine {
 }
 
 impl Machine {
-    pub fn load_or_create(path: &Path, default_name: &str) -> io::Result<Self> {
+    /// The suffix comes from `rng`, jj's, which `debug.randomness-seed` makes repeatable, as
+    /// it does jj's change ids: so a test that names two machines alike names them the same
+    /// way every time it runs.
+    pub fn load_or_create(path: &Path, default_name: &str, rng: &JJRng) -> io::Result<Self> {
         match fs::read_to_string(path) {
             Ok(key) if !key.trim().is_empty() => {
                 return Ok(Self {
@@ -40,8 +45,8 @@ impl Machine {
             Err(err) if err.kind() == io::ErrorKind::NotFound => {}
             Err(err) => return Err(err),
         }
-        let suffix: u32 = rand_suffix();
-        let key = format!("{}#{suffix:08x}", sanitize(default_name));
+        let suffix = rng.new_change_id(4).hex();
+        let key = format!("{}#{suffix}", sanitize(default_name));
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;
         }
@@ -58,14 +63,6 @@ impl Machine {
     pub fn name(&self) -> &str {
         machine_name(&self.key)
     }
-}
-
-fn rand_suffix() -> u32 {
-    // Uniqueness, not secrecy: the clock and the process id are plenty.
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.subsec_nanos());
-    nanos ^ std::process::id().rotate_left(16)
 }
 
 /// A name usable as a jj remote name and a git ref component.
@@ -173,6 +170,13 @@ pub fn follow_rewrites<K>(
 mod tests {
     #![allow(clippy::unwrap_used)]
 
+    use std::sync::Arc;
+
+    use jj_lib::config::ConfigLayer;
+    use jj_lib::config::ConfigSource;
+    use jj_lib::config::StackedConfig;
+    use jj_lib::settings::UserSettings;
+
     use super::*;
 
     #[test]
@@ -194,17 +198,42 @@ mod tests {
         assert_eq!(names["origin#dddd0000"], "origin-dddd");
     }
 
+    /// jj's RNG, as `debug.randomness-seed = seed` makes it.
+    fn rng(seed: u64) -> Arc<JJRng> {
+        let mut config = StackedConfig::with_defaults();
+        let text = format!("debug.randomness-seed = {seed}");
+        config.add_layer(ConfigLayer::parse(ConfigSource::User, &text).unwrap());
+        UserSettings::from_config_and_home_dir(config, None)
+            .unwrap()
+            .get_rng()
+    }
+
     #[test]
     fn identity_is_kept() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("machine");
-        let first = Machine::load_or_create(&path, "Bryan's MacBook Pro").unwrap();
+        let first = Machine::load_or_create(&path, "Bryan's MacBook Pro", &rng(1)).unwrap();
         assert!(
             first.key().starts_with("bryan-s-macbook-pro#"),
             "{}",
             first.key()
         );
-        let again = Machine::load_or_create(&path, "something else").unwrap();
+        let again = Machine::load_or_create(&path, "something else", &rng(2)).unwrap();
         assert_eq!(first, again);
+    }
+
+    /// The e2e search replays a case with machines named alike only if their suffixes come
+    /// out the same again.
+    #[test]
+    fn a_seed_repeats_the_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = |file: &str, seed| {
+            let path = dir.path().join(file);
+            Machine::load_or_create(&path, "mac", &rng(seed))
+                .unwrap()
+                .key
+        };
+        assert_eq!(key("a", 1), key("b", 1));
+        assert_ne!(key("c", 1), key("d", 2));
     }
 }

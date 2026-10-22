@@ -579,6 +579,44 @@ fn daemon_carries_on_after_colocation_changes() {
     });
 }
 
+/// A daemon started where git's repository variables are set, as in a git hook, ignores
+/// them: they name some other repository, and the daemon serves every repository on the
+/// machine for as long as it runs.
+#[test]
+fn the_daemon_ignores_the_git_repository_it_was_started_in() {
+    let env = TestEnv::new();
+    let mut logs = Logs::default();
+    let hub = Hub::start(&env, &mut logs);
+    // Stopped before the hub.
+    let mut daemons = Daemons::default();
+    let alpha = env.init_repo("alpha");
+    let beta = env.init_repo("beta");
+    logs.daemon_of(&env, &alpha);
+    logs.daemon_of(&env, &beta);
+    daemons.of(&alpha);
+    daemons.of(&beta);
+    alpha.write_file("a", "a");
+    alpha.jj(&["commit", "-m", "start"]);
+    alpha.jj(&["bookmark", "create", "main", "-r", "@-"]);
+    let elsewhere = env.root().join("elsewhere.git");
+    alpha.git(&["init", "--quiet", "--bare", elsewhere.to_str().unwrap()]);
+    let mut create = alpha.program(musubi());
+    create
+        .args(["create", "--hub", &hub.url])
+        .env("GIT_DIR", &elsewhere)
+        .env("GIT_OBJECT_DIRECTORY", elsewhere.join("objects"))
+        .env("GIT_INDEX_FILE", elsewhere.join("index"))
+        .env("GIT_WORK_TREE", env.root());
+    run(&env, &logs, create);
+    fetch_history(&alpha, &beta);
+    musubi_in(&env, &logs, &beta, &["join", "--hub", &hub.url]);
+    alpha.write_file("b", "b");
+    alpha.jj(&["commit", "-m", "later from alpha"]);
+    wait_for(&logs, "alpha's daemon to sync alpha's later commit", || {
+        try_log(&beta).is_some_and(|log| log.contains("later from alpha"))
+    });
+}
+
 /// The hive shares remotes and chosen repo config through the binary, which finds jj's
 /// repo config where jj keeps it.
 #[test]

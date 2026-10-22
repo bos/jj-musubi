@@ -29,6 +29,7 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
 
+use crate::agent;
 use crate::config;
 use crate::config::HiveConfig;
 use crate::config::UserConfig;
@@ -617,9 +618,27 @@ fn spawn(socket: &Socket) -> anyhow::Result<(std::process::Child, PathBuf)> {
         .stdin(std::process::Stdio::null())
         .stdout(file.try_clone()?)
         .stderr(file);
+    // Now that the state directory exists.
+    if let Err(err) = agent::refresh() {
+        tracing::debug!("not pointing the daemon at this ssh agent: {err:#}");
+    }
+    isolate(&mut command, agent::link()?.as_deref());
     detach(&mut command);
     let child = command.spawn().context("starting the daemon")?;
     Ok((child, log))
+}
+
+/// What a daemon takes from the command that starts it, which it outlives, serving every
+/// repository on the machine: not git's variables naming the command's repository, as a git
+/// hook has, and not the command's ssh agent, but `agent_link`, which commands keep pointed
+/// at a live one ([`agent`]).
+fn isolate(command: &mut std::process::Command, agent_link: Option<&Path>) {
+    for name in musubi_jj::objects::REPOSITORY_ENV {
+        command.env_remove(name);
+    }
+    if let Some(link) = agent_link {
+        command.env("SSH_AUTH_SOCK", link);
+    }
 }
 
 #[cfg(unix)]
@@ -658,4 +677,26 @@ pub async fn stop(socket: &Socket) -> anyhow::Result<bool> {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::ffi::OsStr;
+
+    use super::*;
+
+    #[test]
+    fn a_started_daemon_takes_nothing_of_where_it_was_started() {
+        let mut command = std::process::Command::new("musubi");
+        isolate(&mut command, Some(Path::new("/state/ssh-agent")));
+        let envs: BTreeMap<&OsStr, Option<&OsStr>> = command.get_envs().collect();
+        for name in musubi_jj::objects::REPOSITORY_ENV {
+            assert_eq!(envs.get(OsStr::new(name)), Some(&None), "{name}");
+        }
+        assert_eq!(
+            envs.get(OsStr::new("SSH_AUTH_SOCK")),
+            Some(&Some(OsStr::new("/state/ssh-agent")))
+        );
+    }
 }

@@ -30,6 +30,41 @@ use super::bundle::PackRecord;
 use super::bundle::Record;
 use crate::hive_settings::Remote;
 
+/// The variables git sets, for what it runs in a repository such as a hook, to name that
+/// repository: the ones `git rev-parse --local-env-vars` lists. No git musubi runs gets
+/// them, nor does a daemon a command starts, which serves every repository on the machine;
+/// musubi run from a hook would otherwise hand them on.
+pub const REPOSITORY_ENV: &[&str] = &[
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
+];
+
+/// `git` as musubi runs it: without [`REPOSITORY_ENV`], and running no hooks. jj runs none
+/// when it writes to `.git`; musubi's `update-ref` and `git remote` would run the
+/// repository's `reference-transaction`, and its `gc --auto` `pre-auto-gc`.
+fn git() -> Command {
+    let mut command = Command::new("git");
+    for name in REPOSITORY_ENV {
+        command.env_remove(name);
+    }
+    // A path under which no hook can exist.
+    command.args(["-c", "core.hooksPath=/dev/null"]);
+    command
+}
+
 /// A git object database, driven through the `git` binary.
 pub struct GitObjects {
     git_dir: PathBuf,
@@ -53,7 +88,7 @@ impl GitObjects {
     pub fn init_bare(git_dir: &Path) -> Result<Self, ObjectError> {
         // Not through `run`: GIT_DIR must not be set when the repository does not exist yet.
         let args = ["init", "--quiet", "--bare"];
-        let output = Command::new("git")
+        let output = git()
             .args(args)
             .arg(git_dir)
             .output()
@@ -389,7 +424,7 @@ impl GitObjects {
     }
 
     fn command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new("git");
+        let mut command = git();
         // Running inside the repository as well as naming it keeps a mistake from ever
         // touching the caller's working directory.
         command
@@ -701,5 +736,58 @@ impl ObjectStore for GitStore<'_> {
             backend.import_head_commits(wants)?;
         }
         self.git.maintain(matches!(self.extras, Extras::Files(_)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The list is git's own, so that a variable a newer git adds is noticed here.
+    #[test]
+    fn repository_env_is_what_git_lists() {
+        let output = Command::new("git")
+            .args(["rev-parse", "--local-env-vars"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        for name in String::from_utf8(output.stdout).unwrap().lines() {
+            assert!(REPOSITORY_ENV.contains(&name), "{name} is missing");
+        }
+    }
+
+    /// musubi's git runs no hooks: here, `gc --auto`'s `pre-auto-gc`, with a second pack
+    /// making a gc due.
+    #[cfg(unix)]
+    #[test]
+    fn git_runs_no_hooks() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let objects = GitObjects::init_bare(&dir.path().join("repo.git")).unwrap();
+        let hooks = dir.path().join("repo.git/hooks");
+        // Here, whatever the developer's own git config says.
+        objects
+            .run(&["config", "core.hooksPath", hooks.to_str().unwrap()], None)
+            .unwrap();
+        objects
+            .run(&["config", "gc.autoPackLimit", "1"], None)
+            .unwrap();
+        objects.run(&["config", "gc.auto", "1"], None).unwrap();
+        let pack = dir.path().join("repo.git/objects/pack/pack");
+        for content in ["one", "two"] {
+            let id = objects
+                .run(&["hash-object", "-w", "--stdin"], Some(content.into()))
+                .unwrap();
+            objects
+                .run(&["pack-objects", "-q", pack.to_str().unwrap()], Some(id))
+                .unwrap();
+        }
+        let ran = dir.path().join("ran");
+        let hook = hooks.join("pre-auto-gc");
+        fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", ran.display())).unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        objects.maintain(false).unwrap();
+        assert!(!ran.exists(), "git ran the pre-auto-gc hook");
     }
 }

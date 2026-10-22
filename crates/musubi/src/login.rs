@@ -184,7 +184,12 @@ mod platform {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;
         }
-        fs::write(&path, unit(exe, &environment()))?;
+        let mut environment = environment();
+        // A user's service manager rarely has an ssh agent: reach commands' agents instead.
+        if let Some(link) = crate::agent::link()? {
+            environment.push(("SSH_AUTH_SOCK".to_owned(), link.display().to_string()));
+        }
+        fs::write(&path, unit(exe, &environment))?;
         run("systemctl", &["--user", "daemon-reload"])?;
         run("systemctl", &["--user", "enable", "--now", UNIT])?;
         Ok(format!("a systemd user unit, {}", path.display()))

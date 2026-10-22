@@ -523,7 +523,8 @@ passed to the user's own `ssh` (or `$MUSUBI_SSH`), so `~/.ssh/config` applies: a
   adds it to `~/.ssh/authorized_keys` on the hub's machine, through the user's ordinary ssh,
   which can prompt then, since the user is at the terminal: `restrict,command="musubi hub
   connect"`, so a stolen key reaches the hub and nothing else. The daemon needs no ssh agent
-  and never prompts (`BatchMode=yes`), which a process started at login couldn't answer.
+  to reach the hub, and never prompts (`BatchMode=yes`), which a process started at login
+  couldn't answer.
 - `musubi hub connect` relays its stdin and stdout to the socket of the user's hub (the one
   `musubi hub` last served without `--dir`).
 - On the other machine, each connection is an ssh of its own, and the stream transport
@@ -574,6 +575,16 @@ the formal model.
   themselves, so there is never a second. The service gets the installing shell's `PATH`
   (the daemon runs `git`) and `MUSUBI_*` settings, and a marker in the state directory
   records it, so commands with another `MUSUBI_CONFIG_DIR` (tests) leave it alone.
+- A daemon that a command starts outlives it, so it takes nothing from the command's
+  environment that only says where the command ran. git's variables naming a repository
+  (`git rev-parse --local-env-vars`), which a git hook has, reach neither the daemon nor
+  any git musubi runs, and that git runs no hooks, as jj runs none when it writes `.git`.
+  The daemon's `SSH_AUTH_SOCK`, for signing with a key an agent holds or for a `ProxyJump`
+  host, names `ssh-agent` in the state directory: a link that every command points at its
+  own agent when that answers, so the daemon uses the agent of the latest session to run
+  musubi, and outlives the session it started in, such as an ssh login with a forwarded
+  agent. The systemd unit names the link too, since a user's service manager rarely has an
+  agent; launchd has one of its own.
 - Commands change `config.toml` holding a lock beside it, and write it whole, so
   that concurrent joins keep each other's changes and a crash never leaves half a file.
 - The daemon watches `.jj/repo/op_heads/heads` with filesystem notifications and also polls

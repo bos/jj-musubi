@@ -1,5 +1,6 @@
 //! `musubi`: replicate jj repositories between machines.
 
+mod agent;
 mod config;
 mod control;
 mod daemon;
@@ -214,6 +215,20 @@ fn main() -> anyhow::Result<()> {
         .with_env_filter(log_filter(&cli)?)
         .with_writer(std::io::stderr)
         .init();
+    // Serving a hub, and `hub connect`, are for other machines, whose agents aren't this
+    // machine's; the daemon itself has the link, or the service manager's agent.
+    if !matches!(
+        cli.command,
+        Some(
+            Command::Hub {
+                action: None | Some(HubAction::Connect { .. }),
+                ..
+            } | Command::Daemon { action: None }
+        )
+    ) && let Err(err) = agent::refresh()
+    {
+        tracing::debug!("not pointing the daemon at this ssh agent: {err:#}");
+    }
     let cwd = std::env::current_dir()?;
     let socket = || Socket::locate(cli.socket.as_deref());
     match cli.command.unwrap_or(Command::List) {
@@ -559,7 +574,11 @@ fn clone(
         "git" => &["git", "init", "--colocate"],
         _ => &["debug", "init-simple"],
     };
-    let status = Process::new("jj").args(init).arg(dest).status()?;
+    let mut jj = Process::new("jj");
+    for name in musubi_jj::objects::REPOSITORY_ENV {
+        jj.env_remove(name);
+    }
+    let status = jj.args(init).arg(dest).status()?;
     anyhow::ensure!(status.success(), "`jj {} {dest}` failed", init.join(" "));
     let located = Located::find(destination)?;
     set_machine_name(&located, machine)?;

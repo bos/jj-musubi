@@ -11,13 +11,11 @@ Results: $WORK/results/stalebase-REPO.json.
 import json
 import os
 import shutil
-import subprocess
 import sys
-import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bench  # noqa: E402
-from bench import B, MUSUBI, WORK, PORT_GIT, PORT_MONITOR, PORT_NATS, ROUTES, CONTROL, env, measure, sh, start
+from bench import B, MUSUBI, WORK, PORT_GIT, ROUTES, CONTROL, hub_route, machine, measure, member, sh, start
 
 
 def main():
@@ -28,46 +26,37 @@ def main():
     os.makedirs(run)
     bench.RUN = run
     bench.LOG = open(f"{run}/log.txt", "w")
-    start(["nats-server", "-a", "127.0.0.1", "-p", str(PORT_NATS), "-m", str(PORT_MONITOR)], name="nats")
     start(["git", "daemon", "--reuseaddr", "--listen=127.0.0.1", f"--port={PORT_GIT}",
            f"--base-path={run}", "--export-all", run], name="gitdaemon")
     start(["/usr/bin/python3", "-I", f"{B}/proxy.py", str(CONTROL)]
           + [f"{n}:{lp}:{tp}" for n, (lp, tp) in ROUTES.items()], name="proxy")
-    for port in (PORT_NATS, PORT_MONITOR, PORT_GIT, CONTROL):
+    bench.start_hub(f"{run}/hub")
+    for port in (PORT_GIT, CONTROL):
         bench.wait_port(port)
     shutil.copytree(f"{WORK}/srv/{repo}.git", f"{run}/srv/{repo}.git")
     Am, Bm = f"{run}/Am", f"{run}/Bm"
     sh(["jj", "git", "clone", "--colocate", f"git://127.0.0.1:{PORT_GIT}/srv/{repo}.git", Am], cwd=run)
-    hubp = start([MUSUBI, "hub", "--dir", f"{run}/hub", "--nats", f"nats://127.0.0.1:{PORT_NATS}"],
-                 stdout=subprocess.PIPE, name="hub")
-    hive = hubp.stdout.readline().decode().strip()
-    bench.HUB_RPC_SUBJECT = f"musubi.{hive}.rpc"
-    time.sleep(0.5)
-    natsA = f"nats://127.0.0.1:{ROUTES['natsA'][0]}"
-    natsB = f"nats://127.0.0.1:{ROUTES['natsB'][0]}"
-    cfgA, cfgB = env(MUSUBI_CONFIG_DIR=f"{run}/cfgA"), env(MUSUBI_CONFIG_DIR=f"{run}/cfgB")
+    cfgA, cfgB = machine("A"), machine("B")
     res = {"repo": repo, "pushes": pushes, "file_kb": kb}
-    res["seed_A"] = measure("natsA", lambda: sh(
-        [MUSUBI, "join", hive, "--hub", natsA, "--machine", "A"], cwd=Am, e=cfgA)[0], musubi=True)
-    res["clone_B"] = measure("natsB", lambda: sh(
-        [MUSUBI, "clone", hive, Bm, "--hub", natsB, "--machine", "B"], cwd=run, e=cfgB)[0],
-        musubi=True)
+    res["seed_A"] = measure("hubA", lambda: member(
+        ["create", repo, "--hub", hub_route("hubA"), "--machine", "A"], cwd=Am, e=cfgA))
+    res["clone_B"] = measure("hubB", lambda: member(
+        ["clone", repo, Bm, "--hub", hub_route("hubB"), "--machine", "B"], cwd=run, e=cfgB))
     res["A_catchup_after_B_joined"] = measure(
-        "natsA", lambda: sh([MUSUBI, "sync"], cwd=Am, e=cfgA)[0], musubi=True)
-    res["B_settle"] = measure("natsB", lambda: sh([MUSUBI, "sync"], cwd=Bm, e=cfgB)[0], musubi=True)
+        "hubA", lambda: sh([MUSUBI, "sync"], cwd=Am, e=cfgA)[0])
+    res["B_settle"] = measure("hubB", lambda: sh([MUSUBI, "sync"], cwd=Bm, e=cfgB)[0])
     res["A_pushes"] = []
     for i in range(pushes):
         with open(f"{Am}/blob-{i}.bin", "wb") as f:
             f.write(os.urandom(kb * 1024))
         sh(["jj", "commit", "-m", f"A: add blob {i}"], cwd=Am)
         res["A_pushes"].append(measure(
-            "natsA", lambda: sh([MUSUBI, "sync"], cwd=Am, e=cfgA)[0], musubi=True))
+            "hubA", lambda: sh([MUSUBI, "sync"], cwd=Am, e=cfgA)[0]))
     res["accepted_base_A_before"] = open(f"{Am}/.jj/repo/musubi/accepted_base").read().strip()
     sh(["jj", "describe", "-m", "B: a small change"], cwd=Bm)
-    res["B_sync"] = measure("natsB", lambda: sh([MUSUBI, "sync"], cwd=Bm, e=cfgB)[0], musubi=True)
-    res["A_pull"] = measure("natsA", lambda: sh([MUSUBI, "sync"], cwd=Am, e=cfgA)[0], musubi=True)
-    res["A_pull_again"] = measure("natsA", lambda: sh([MUSUBI, "sync"], cwd=Am, e=cfgA)[0],
-                                  musubi=True)
+    res["B_sync"] = measure("hubB", lambda: sh([MUSUBI, "sync"], cwd=Bm, e=cfgB)[0])
+    res["A_pull"] = measure("hubA", lambda: sh([MUSUBI, "sync"], cwd=Am, e=cfgA)[0])
+    res["A_pull_again"] = measure("hubA", lambda: sh([MUSUBI, "sync"], cwd=Am, e=cfgA)[0])
     packs = sorted(
         (e.stat().st_size, e.name) for e in os.scandir(f"{Am}/.git/objects/pack")
         if e.name.endswith(".pack"))

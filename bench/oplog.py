@@ -11,13 +11,12 @@ which does not depend on the operation count. Results: $WORK/results/oplog-REPO.
 import json
 import os
 import shutil
-import subprocess
 import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bench  # noqa: E402
-from bench import B, MUSUBI, WORK, PORT_GIT, PORT_MONITOR, PORT_NATS, ROUTES, CONTROL, env, http_json, measure, sh, start
+from bench import B, MUSUBI, WORK, PORT_GIT, ROUTES, CONTROL, hub_route, machine, measure, member, sh, start
 
 
 def main():
@@ -29,7 +28,6 @@ def main():
     os.makedirs(run)
     bench.RUN = run
     bench.LOG = open(f"{run}/log.txt", "w")
-    start(["nats-server", "-a", "127.0.0.1", "-p", str(PORT_NATS), "-m", str(PORT_MONITOR)], name="nats")
     start(
         ["git", "daemon", "--reuseaddr", "--listen=127.0.0.1", f"--port={PORT_GIT}",
          f"--base-path={run}", "--export-all", run],
@@ -40,21 +38,16 @@ def main():
         + [f"{n}:{lp}:{tp}" for n, (lp, tp) in ROUTES.items()],
         name="proxy",
     )
-    for port in (PORT_NATS, PORT_MONITOR, PORT_GIT, CONTROL):
+    hub = f"{run}/hub"
+    bench.start_hub(hub)
+    for port in (PORT_GIT, CONTROL):
         bench.wait_port(port)
     shutil.copytree(f"{WORK}/srv/{repo}.git", f"{run}/srv/{repo}.git")
     Am = f"{run}/Am"
     sh(["jj", "git", "clone", "--colocate", f"git://127.0.0.1:{PORT_GIT}/srv/{repo}.git", Am], cwd=run)
-    hubp = start(
-        [MUSUBI, "hub", "--dir", f"{run}/hub", "--nats", f"nats://127.0.0.1:{PORT_NATS}"],
-        stdout=subprocess.PIPE,
-        name="hub",
-    )
-    hive = hubp.stdout.readline().decode().strip()
-    bench.HUB_RPC_SUBJECT = f"musubi.{hive}.rpc"
-    time.sleep(0.5)
-    cfgA = env(MUSUBI_CONFIG_DIR=f"{run}/cfgA")
-    sh([MUSUBI, "join", hive, "--hub", f"nats://127.0.0.1:{PORT_NATS}", "--machine", "A"], cwd=Am, e=cfgA)
+    cfgA = machine("A")
+    # A' reaches the hub through its directory, as on the hub's machine, outside the proxy.
+    member(["create", repo, "--hub", hub, "--machine", "A"], cwd=Am, e=cfgA)
     res = {"repo": repo, "points": []}
     git_clone = measure(
         "gitB",
@@ -73,17 +66,15 @@ def main():
                 sh([MUSUBI, "sync"], cwd=Am, e=cfgA)
         sh([MUSUBI, "sync"], cwd=Am, e=cfgA)
         build = time.perf_counter() - t0
-        n_ops, _ = bench.dir_stats(f"{run}/hub/canonical/operations")
+        n_ops = bench.hub_stats(hub)["n_ops"]
         dest = f"{run}/D{n}"
         m = measure(
-            "natsD",
-            lambda: sh([MUSUBI, "clone", hive, dest, "--hub",
-                        f"nats://127.0.0.1:{ROUTES['natsD'][0]}", "--machine", f"D{n}"],
-                       cwd=run, e=env(MUSUBI_CONFIG_DIR=f"{run}/cfgD{n}"))[0],
-            musubi=True,
+            "hubD",
+            lambda: member(["clone", repo, dest, "--hub", hub_route("hubD"), "--machine", f"D{n}"],
+                           cwd=run, e=machine(f"D{n}")),
         )
         m["hub_ops"] = n_ops
-        m["hub_store"] = bench.hub_stats(f"{run}/hub")
+        m["hub_store"] = bench.hub_stats(hub)
         m["added_ops"] = done
         m["build_seconds"] = build
         m["disk_jj"] = bench.du(f"{dest}/.jj")

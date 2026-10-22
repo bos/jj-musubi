@@ -12,13 +12,12 @@ import json
 import os
 import shutil
 import signal
-import subprocess
 import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bench  # noqa: E402
-from bench import B, MUSUBI, WORK, PORT_GIT, PORT_MONITOR, PORT_NATS, env, rev, sh, start  # noqa: E402
+from bench import MUSUBI, WORK, PORT_GIT, machine, member, rev, sh, start  # noqa: E402
 
 
 def packs(repo):
@@ -33,30 +32,24 @@ def main():
     os.makedirs(run)
     bench.RUN = run
     bench.LOG = open(f"{run}/log.txt", "w")
-    start(["nats-server", "-a", "127.0.0.1", "-p", str(PORT_NATS), "-m", str(PORT_MONITOR)], name="nats")
     start(["git", "daemon", "--reuseaddr", "--listen=127.0.0.1", f"--port={PORT_GIT}",
            f"--base-path={run}", "--export-all", run], name="gitdaemon")
-    for port in (PORT_NATS, PORT_GIT):
-        bench.wait_port(port)
+    hub = f"{run}/hub"
+    bench.start_hub(hub)
+    bench.wait_port(PORT_GIT)
     shutil.copytree(f"{WORK}/srv/{repo}.git", f"{run}/srv/{repo}.git")
     Am, Bm = f"{run}/Am", f"{run}/Bm"
     sh(["jj", "git", "clone", "--colocate", f"git://127.0.0.1:{PORT_GIT}/srv/{repo}.git", Am], cwd=run)
     sh(["jj", "bookmark", "track", "feature@origin"], cwd=Am)
-    hubp = start([MUSUBI, "hub", "--dir", f"{run}/hub", "--nats", f"nats://127.0.0.1:{PORT_NATS}"],
-                 stdout=subprocess.PIPE, name="hub")
-    hive = hubp.stdout.readline().decode().strip()
-    time.sleep(0.5)
-    nats = f"nats://127.0.0.1:{PORT_NATS}"
-    cfgA, cfgB = env(MUSUBI_CONFIG_DIR=f"{run}/cfgA"), env(MUSUBI_CONFIG_DIR=f"{run}/cfgB")
-    sh([MUSUBI, "join", hive, "--hub", nats, "--machine", "A"], cwd=Am, e=cfgA)
-    sh([MUSUBI, "clone", hive, Bm, "--hub", nats, "--machine", "B"], cwd=run, e=cfgB)
+    # Both reach the hub through its directory, as on the hub's machine: no ssh, no proxy.
+    cfgA, cfgB = machine("A"), machine("B")
+    member(["create", repo, "--hub", hub, "--machine", "A"], cwd=Am, e=cfgA)
+    member(["clone", repo, Bm, "--hub", hub, "--machine", "B"], cwd=run, e=cfgB)
     sh([MUSUBI, "sync"], cwd=Am, e=cfgA)
     sh([MUSUBI, "sync"], cwd=Bm, e=cfgB)
     res = {"repo": repo, "packs_at_daemon_start": packs(Bm), "iterations": []}
-    da = start([MUSUBI, "daemon"], cwd=Am, e=env(MUSUBI_CONFIG_DIR=f"{run}/cfgA", RUST_LOG="warn"),
-               name="daemonA")
-    db = start([MUSUBI, "daemon"], cwd=Bm, e=env(MUSUBI_CONFIG_DIR=f"{run}/cfgB", RUST_LOG="warn"),
-               name="daemonB")
+    da = start([MUSUBI, "daemon"], cwd=Am, e=machine("A", RUST_LOG="warn"), name="daemonA")
+    db = start([MUSUBI, "daemon"], cwd=Bm, e=machine("B", RUST_LOG="warn"), name="daemonB")
     time.sleep(3)
     for i in range(iterations):
         sh(["jj", "new", "feature"], cwd=Am)

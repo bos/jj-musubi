@@ -2,4 +2,5 @@
 /formal/.lake
 .hegel/
 /bench/work
+__pycache__/
 /mutants.out*

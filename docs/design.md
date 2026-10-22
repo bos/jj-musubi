@@ -200,16 +200,31 @@ and any that the shared key `musubi.shared-config` names (`["aliases.l"]`, say).
 repo config outside the repository, so musubi finds the file as `jj` does.
 
 So musubi treats the remote definitions (each remote's name, URL, and push URL) and the
-shared config keys as hive settings. When a machine's settings change, musubi records the
-new settings in an attribute (`musubi.settings`) of an operation it writes, which changes
-nothing else. That operation replicates like any other. Each remote and shared config key
-carries the time it was written, by the writing machine's clock (the modification time of
-the file holding it), and the machine that wrote it, and where machines disagree, the later
-write wins: the hive's settings as of an operation are the nearest recording ancestor's, and
-at a merge operation, for each setting, the parent whose write is later. Equal times go to
-the machine key that sorts last. Clock skew can make the wrong write win; that is accepted,
-for a rule anyone can predict ([settings-merge.md](settings-merge.md)). Settings recorded
-before writes were timed take their operation's time.
+shared config keys as hive settings. A remote's URLs go as written and, where the
+machine's `url.<base>.insteadOf` rules change them, as its git expands them, since other
+machines needn't have the same rules. A machine writes a URL it receives as written where
+its own git expands it the same way, so that an alias they share stays one, and otherwise
+as expanded. Unless `musubi.share-credentials` is set in jj's config, the URLs go without
+the user and password an http(s) URL may carry, a token meant for that machine, and so
+does the command line jj records with each operation. Remotes compare by where they point,
+as written or as expanded, so each machine keeps its own spelling. When a machine's settings
+change, musubi records the new settings in an attribute (`musubi.settings`) of an operation
+it writes, which changes nothing else. That operation replicates like any other. Each
+remote and shared config key carries the time it was written, by the writing machine's
+clock (the modification time of the file holding it), and the machine that wrote it, and
+where machines disagree, the later write wins: the hive's settings as of an operation are
+the nearest recording ancestor's, and at a merge operation, for each setting, the parent
+whose write is later. Equal times go to the machine key that sorts last. Clock skew can
+make the wrong write win; that is accepted, for a rule anyone can predict
+([settings-merge.md](settings-merge.md)). Settings recorded before writes were timed take
+their operation's time.
+
+Since remotes compare as written or as expanded, an expansion once shared stays until the
+remote points somewhere else: a machine that drops a redirect to a mirror doesn't take the
+mirror's URL back from the others, though any of them can respell its own copy, which
+musubi leaves alone. And an alias is keyed as a host, `gh:team/p` as `gh/team/p`, so two
+machines' aliases of the same name compare as one repository, whatever they expand to;
+joining a hive takes shared history too.
 
 At the start and end of every sync, a machine reconciles its settings: a setting that
 differs from what it last applied is a change of its own, written at the file's modification
@@ -433,11 +448,12 @@ requires, which such a clone can't send.)
    remotes joins a single related hive that has none. No related hive at all is refused
    too.
 
-URLs match after normalization: https, ssh, scp-style, `file://`, and local paths reduce
-to a lowercase host, without any user or default port, and a path without trailing `/` or
-`.git`, and the host and path are what is compared. Azure DevOps' https and ssh forms are
-made one. Each hive keeps every URL it has ever had, so renaming a remote or moving a
-repository doesn't orphan it.
+URLs match as written or as the joining machine's `insteadOf` rules expand them, and after
+normalization: https, ssh, scp-style, `file://`, and local paths reduce to a lowercase
+host, without any user or default port, and a path without trailing `/` or `.git`, and the
+host and path are what is compared. Azure DevOps' https and ssh forms are made one. Each
+hive keeps every URL it has ever had, so renaming a remote or moving a repository doesn't
+orphan it.
 
 For this the hub keeps an index for each hive: every remote URL its settings have recorded,
 every root commit it has stored, and the machines with workspaces at its head. The index is

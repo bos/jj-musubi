@@ -595,6 +595,96 @@ fn untracking_a_remote_bookmark_reaches_every_machine() {
     }
 }
 
+/// A `file://` URL for `path`, as git takes one on any platform.
+fn file_url(path: &std::path::Path) -> String {
+    let path = path.to_string_lossy().replace('\\', "/");
+    format!(
+        "file://{}{path}",
+        if path.starts_with('/') { "" } else { "/" }
+    )
+}
+
+/// Whether any file under `dir` holds `needle`.
+fn holds(dir: &std::path::Path, needle: &[u8]) -> bool {
+    std::fs::read_dir(dir).unwrap().flatten().any(|entry| {
+        let path = entry.path();
+        if path.is_dir() {
+            holds(&path, needle)
+        } else {
+            let bytes = std::fs::read(&path).unwrap_or_default();
+            bytes.windows(needle.len()).any(|window| window == needle)
+        }
+    })
+}
+
+/// Remotes reach other machines as written and as git expands them through the writing
+/// machine's `url.<base>.insteadOf` aliases (#34). A machine with the same alias keeps the
+/// alias, one without it gets the expansion, and the writing machine keeps its own spelling.
+/// Credentials in an https URL stay on their machine, and never reach the hub or another
+/// machine (#33).
+#[test]
+fn remotes_go_as_written_and_as_expanded() {
+    let mut hive = Fixture::new(&["alpha", "beta", "gamma"]);
+    let _seed = create_origin(&hive);
+    let root = file_url(hive.env.root());
+    // An alias alpha and beta have, in their own repositories' git config, and gamma lacks.
+    for index in [0, 1] {
+        hive.repo(index)
+            .git(&["config", &format!("url.{root}/.insteadOf"), "musubi-test:"]);
+    }
+    let alpha = hive.repo(0);
+    alpha.jj(&["git", "remote", "add", "origin", "musubi-test:origin.git"]);
+    alpha.git(&["config", "remote.origin.pushurl", "musubi-test:origin.git"]);
+    let token = "https://alpha:secret@example.com/team/backup.git";
+    alpha.jj(&["git", "remote", "add", "backup", token]);
+    // A redirect only alpha has, to a mirror: the others go where alpha's git does.
+    alpha.git(&[
+        "config",
+        "url.https://mirror.example/.insteadOf",
+        "https://example.com/",
+    ]);
+    alpha.jj(&[
+        "git",
+        "remote",
+        "add",
+        "upstream",
+        "https://example.com/team/real",
+    ]);
+    hive.sync();
+    hive.assert_converged();
+    // As their git config spells them: jj shows URLs after git's aliases.
+    let url = |index: usize, name: &str| {
+        hive.repo(index)
+            .git(&["config", &format!("remote.{name}.url")])
+    };
+    assert_eq!(url(0, "origin"), "musubi-test:origin.git\n");
+    assert_eq!(url(0, "backup"), format!("{token}\n"));
+    assert_eq!(url(1, "origin"), "musubi-test:origin.git\n");
+    assert_eq!(url(2, "origin"), format!("{root}/origin.git\n"));
+    let push = |index: usize| hive.repo(index).git(&["config", "remote.origin.pushurl"]);
+    assert_eq!(push(1), "musubi-test:origin.git\n");
+    assert_eq!(push(2), format!("{root}/origin.git\n"));
+    let mirror = "https://mirror.example/team/real\n";
+    assert_eq!(url(0, "upstream"), "https://example.com/team/real\n");
+    assert_eq!(
+        (url(1, "upstream"), url(2, "upstream")),
+        (mirror.into(), mirror.into())
+    );
+    let stripped = "https://example.com/team/backup.git\n";
+    assert_eq!(
+        (url(1, "backup"), url(2, "backup")),
+        (stripped.into(), stripped.into())
+    );
+    for index in [1, 2] {
+        hive.repo(index).jj(&["git", "fetch", "--remote", "origin"]);
+    }
+    // Nor in the command that added the remote, which jj records with the operation.
+    assert!(!holds(&hive.env.root().join("hub"), b"secret"));
+    for index in [1, 2] {
+        assert!(!holds(&hive.repo(index).path().join(".jj"), b"secret"));
+    }
+}
+
 /// Two repositories created independently, each with a `main` at a different commit,
 /// joining one hive: jj merges the histories at the root, and `main` is conflicted until
 /// someone resolves it.

@@ -64,19 +64,27 @@ pub struct SettingValues {
     pub config: BTreeMap<String, String>,
 }
 
-/// A git remote's URLs.
+/// A git remote's URLs: as written, and as the writing machine's git expands them through
+/// its `url.<base>.insteadOf` rules, where that differs, since another machine needn't have
+/// the same rules ([`GitObjects::remotes`]).
 ///
-/// Two remotes are equal when they name the same repositories, however their URLs are
-/// spelled: the URL's [`RemoteUrl::key`], and the push target's (the push URL, or else the
-/// URL). So settings merge, and changes are noticed, by where remotes point, and a machine's
-/// own spelling of a shared remote, over https on one machine and ssh on another, say, is
-/// never a change. The strings are kept as they were written, for machines that need them.
+/// Two remotes are equal when they share a repository, however their URLs are spelled: by
+/// [`RemoteUrl::key`], as written or as expanded, of the URL, and of the push target (the
+/// push URL, or else the URL). So settings merge, and changes are noticed, by
+/// where remotes point, and a machine's own spelling of a shared remote, over https on one
+/// machine and ssh on another, say, or through an alias, is never a change.
+///
+/// [`GitObjects::remotes`]: crate::objects::GitObjects::remotes
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Remote {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub push_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expanded_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expanded_push_url: Option<String>,
 }
 
 impl HiveSettings {
@@ -162,35 +170,55 @@ impl SettingValues {
 }
 
 impl Remote {
-    /// The repository the URL names.
-    pub fn url_repository(&self) -> Option<String> {
-        self.url.as_deref().map(repository)
+    /// The URL, as expanded, and so naming a real host, and as written.
+    pub fn urls(&self) -> impl Iterator<Item = &str> {
+        self.expanded_url
+            .iter()
+            .chain(&self.url)
+            .map(String::as_str)
     }
 
-    /// The repository pushes go to: the push URL's, or else the URL's.
-    pub fn push_repository(&self) -> Option<String> {
-        self.push_url
-            .as_deref()
-            .or(self.url.as_deref())
-            .map(repository)
+    /// The repositories the URL names, as written and as expanded.
+    pub fn url_repositories(&self) -> Vec<String> {
+        self.urls().map(repository).collect()
+    }
+
+    /// The repositories pushes go to: the push URL's, or else the URL's.
+    pub fn push_repositories(&self) -> Vec<String> {
+        let push: Vec<String> = self
+            .push_url
+            .iter()
+            .chain(&self.expanded_push_url)
+            .map(|url| repository(url))
+            .collect();
+        if push.is_empty() {
+            self.url_repositories()
+        } else {
+            push
+        }
+    }
+}
+
+/// Whether two remotes' URLs name the same repository, as written or as expanded; no URL is
+/// the same only as no URL.
+pub fn same_repository(a: &[String], b: &[String]) -> bool {
+    if a.is_empty() || b.is_empty() {
+        a.is_empty() && b.is_empty()
+    } else {
+        a.iter().any(|repository| b.contains(repository))
     }
 }
 
 impl PartialEq for Remote {
     fn eq(&self, other: &Self) -> bool {
-        self.url_repository() == other.url_repository()
-            && self.push_repository() == other.push_repository()
+        same_repository(&self.url_repositories(), &other.url_repositories())
+            && same_repository(&self.push_repositories(), &other.push_repositories())
     }
 }
 
+/// Not transitive: `a` and `c` can each share a repository with `b`, as written and as
+/// expanded, but not with each other. Only pairs are ever compared.
 impl Eq for Remote {}
-
-impl std::hash::Hash for Remote {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.url_repository().hash(state);
-        self.push_repository().hash(state);
-    }
-}
 
 /// What identifies the repository `url` names: its [`RemoteUrl::key`], or the URL itself if
 /// it doesn't parse.
@@ -231,6 +259,10 @@ struct WireRemote {
     url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     push_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expanded_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expanded_push_url: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     removed: bool,
     #[serde(default, skip_serializing_if = "is_zero")]
@@ -268,6 +300,8 @@ impl From<Wire> for HiveSettings {
                 let value = (!remote.removed).then_some(Remote {
                     url: remote.url,
                     push_url: remote.push_url,
+                    expanded_url: remote.expanded_url,
+                    expanded_push_url: remote.expanded_push_url,
                 });
                 let stamp = Stamp {
                     time: remote.time,
@@ -312,6 +346,8 @@ impl From<HiveSettings> for Wire {
                 let wire = WireRemote {
                     url: remote.url,
                     push_url: remote.push_url,
+                    expanded_url: remote.expanded_url,
+                    expanded_push_url: remote.expanded_push_url,
                     removed,
                     time: entry.stamp.time,
                     machine: entry.stamp.machine,
@@ -375,7 +411,7 @@ mod tests {
                     let entry = Entry {
                         value: url.map(|url| Remote {
                             url: Some(url.to_owned()),
-                            push_url: None,
+                            ..Remote::default()
                         }),
                         stamp: Stamp {
                             time,
@@ -393,6 +429,7 @@ mod tests {
         let remote = |url: Option<&str>, push_url: Option<&str>| Remote {
             url: url.map(str::to_owned),
             push_url: push_url.map(str::to_owned),
+            ..Remote::default()
         };
         let https = Some("https://example.com/team/p.git");
         let ssh = Some("git@example.com:team/p");
@@ -408,14 +445,15 @@ mod tests {
         assert_eq!(remote(None, None), Remote::default());
         // Unparsed URLs compare as written.
         assert_eq!(remote(Some(" "), None), remote(Some(" "), None));
-        let hash = |remote: &Remote| {
-            use std::hash::Hash as _;
-            use std::hash::Hasher as _;
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            remote.hash(&mut hasher);
-            hasher.finish()
+        // An alias, as written or as expanded, names the repository its expansion does.
+        let alias = Remote {
+            url: Some("gh:team/p".to_owned()),
+            expanded_url: ssh.map(str::to_owned),
+            ..Remote::default()
         };
-        assert_eq!(hash(&remote(https, ssh)), hash(&remote(ssh, None)));
+        assert_eq!(alias, remote(https, None));
+        assert_eq!(alias, remote(Some("gh:team/p"), None));
+        assert_ne!(alias, remote(other, None));
     }
 
     #[test]

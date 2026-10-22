@@ -82,6 +82,8 @@ impl HiveIndex {
                 {
                     self.urls.extend(remote.url);
                     self.urls.extend(remote.push_url);
+                    self.urls.extend(remote.expanded_url);
+                    self.urls.extend(remote.expanded_push_url);
                 }
             }
         }

@@ -401,7 +401,10 @@ fn join(start: &Path, choice: Choice, member: &Member, socket: &Socket) -> anyho
         remotes: summary
             .remotes
             .into_iter()
-            .filter_map(|(name, remote)| Some((name, remote.url?)))
+            .flat_map(|(name, remote)| {
+                let urls: Vec<String> = remote.urls().map(str::to_owned).collect();
+                urls.into_iter().map(move |url| (name.clone(), url))
+            })
             .collect(),
         dir_name: located
             .workspace_root

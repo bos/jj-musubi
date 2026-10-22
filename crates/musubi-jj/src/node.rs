@@ -78,6 +78,7 @@ use crate::objects::Incompleteness;
 use crate::objects::ObjectError;
 use crate::objects::ObjectStore;
 use crate::objects::SimpleStore;
+use crate::remote_url::without_credentials;
 use crate::translation_map::TranslationMap;
 use crate::workspaces;
 use crate::workspaces::Machine;
@@ -501,7 +502,7 @@ impl NodeRepo {
         Ok(JoinSummary {
             backend: if git.is_some() { "git" } else { "simple" },
             remotes: match git {
-                Some(git) => git.remotes()?,
+                Some(git) => git.remotes(self.share_credentials())?,
                 None => BTreeMap::new(),
             },
             roots,
@@ -848,6 +849,15 @@ impl NodeRepo {
         Ok(recorded)
     }
 
+    /// Whether this machine shares the credentials an http(s) remote URL may carry, as
+    /// `musubi.share-credentials` in jj's config says; by default it doesn't.
+    fn share_credentials(&self) -> bool {
+        self.loader
+            .settings()
+            .get_bool("musubi.share-credentials")
+            .unwrap_or(false)
+    }
+
     fn git_objects(&self) -> Option<GitObjects> {
         let backend = jj_lib::git::get_git_backend(self.loader.store()).ok()?;
         Some(GitObjects::new(backend.git_repo_path()))
@@ -858,7 +868,7 @@ impl NodeRepo {
     fn local_settings(&self, extra: &[String]) -> Result<SettingValues, NodeError> {
         Ok(SettingValues {
             remotes: match self.git_objects() {
-                Some(git) => git.remotes()?,
+                Some(git) => git.remotes(self.share_credentials())?,
                 None => BTreeMap::new(),
             },
             config: self.read_shared_config(extra)?,
@@ -1234,6 +1244,13 @@ impl NodeRepo {
             && self.canonical.is_ancestor(&canonical, &parents)?
         {
             metadata.description = format!("{prefix}{}", canonical.hex());
+        }
+        // jj records the command that made an operation, which may name an http(s) URL with
+        // a token meant for this machine only.
+        if !self.share_credentials()
+            && let Some(args) = metadata.attributes.get_mut("args")
+        {
+            *args = without_credentials(args);
         }
         // Which workspace made an operation is per-machine, like the view's working copies:
         // qualify it, so that each machine can tell its own workspaces' operations from

@@ -48,7 +48,8 @@ pub struct JoinRequest {
     pub new: Option<String>,
     /// `git` or `simple`.
     pub backend: String,
-    /// Names and URLs of its remotes.
+    /// Names and URLs of its remotes: a remote's name once for each of its URLs, as git
+    /// expands it and as written.
     pub remotes: Vec<(String, String)>,
     /// The name of the repository's directory, to name a hive after when it has no
     /// remotes.

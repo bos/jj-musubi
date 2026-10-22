@@ -45,7 +45,10 @@ fn join_request(repo: &TestRepo) -> JoinRequest {
         remotes: summary
             .remotes
             .into_iter()
-            .filter_map(|(name, remote)| Some((name, remote.url?)))
+            .flat_map(|(name, remote)| {
+                let urls: Vec<String> = remote.urls().map(str::to_owned).collect();
+                urls.into_iter().map(move |url| (name.clone(), url))
+            })
             .collect(),
         dir_name: repo.machine().to_owned(),
         roots: summary.roots.iter().map(|id| id.hex()).collect(),
@@ -153,6 +156,28 @@ async fn one_hub_many_hives() {
     assert_eq!(joined.hive.id, hive);
     assert_eq!(joined.reason, "matched origin");
     assert_eq!(joined.hive.machines, ["alpha", "beta"]);
+
+    // So does one that spells it through a `url.<base>.insteadOf` alias of its own: the hub
+    // matches the URL git uses.
+    let aliased = env.init_repo("aliased");
+    aliased.jj(&[
+        "git",
+        "remote",
+        "add",
+        "alpha",
+        alpha.path().to_str().unwrap(),
+    ]);
+    aliased.jj(&["git", "fetch", "--remote", "alpha"]);
+    aliased.jj(&["git", "remote", "remove", "alpha"]);
+    aliased.git(&[
+        "config",
+        "url.https://example.com/.insteadOf",
+        "musubi-test:",
+    ]);
+    aliased.jj(&["git", "remote", "add", "origin", "musubi-test:team/project"]);
+    let joined = join(&*client, join_request(&aliased)).await.unwrap();
+    assert_eq!(joined.hive.id, hive);
+    assert_eq!(joined.reason, "matched origin");
 
     // A fork, with history in common but a remote of its own, isn't taken for the first:
     // joining it is refused, and created, it gets a hive of its own, named apart.

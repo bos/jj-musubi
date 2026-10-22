@@ -186,11 +186,67 @@ fn clean_path(path: &str) -> String {
     cleaned.trim_end_matches('/').to_owned()
 }
 
+/// `text`, a URL or something naming URLs such as a command line, without the user and
+/// password that an http(s) URL may carry, often a token meant for one machine. Other URLs'
+/// users, such as ssh's `git@`, are no secret.
+pub fn without_credentials(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("://") {
+        let before = &rest[..at];
+        let scheme = &before[before
+            .rfind(|c: char| !c.is_ascii_alphanumeric())
+            .map_or(0, |i| i + 1)..];
+        let http = scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https");
+        out.push_str(&rest[..at + "://".len()]);
+        rest = &rest[at + "://".len()..];
+        if http {
+            // The authority ends where the path does, or the URL.
+            let end = rest
+                .find(|c: char| "/?#'\"`".contains(c) || c.is_whitespace())
+                .unwrap_or(rest.len());
+            if let Some(user) = rest[..end].rfind('@') {
+                rest = &rest[user + 1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    #[test]
+    fn credentials_go_from_http_urls_only() {
+        assert_eq!(
+            without_credentials("https://bryan:ghp_secret@github.com/bos/jj-musubi.git"),
+            "https://github.com/bos/jj-musubi.git"
+        );
+        assert_eq!(
+            without_credentials("HTTP://ghp_secret@example.com:8080/a?x=y@z"),
+            "HTTP://example.com:8080/a?x=y@z"
+        );
+        assert_eq!(
+            without_credentials(
+                "jj git remote add b https://a:s@example.com/x 'https://t@example.org/y' x@y"
+            ),
+            "jj git remote add b https://example.com/x 'https://example.org/y' x@y"
+        );
+        for kept in [
+            "https://github.com/bos/jj-musubi.git",
+            "https://example.com/path/with@sign",
+            "ssh://git@github.com/bos/jj-musubi",
+            "git@github.com:bos/jj-musubi.git",
+            "/srv/repos/project",
+            "",
+        ] {
+            assert_eq!(without_credentials(kept), kept);
+        }
+    }
 
     fn key(url: &str) -> String {
         RemoteUrl::parse(url)

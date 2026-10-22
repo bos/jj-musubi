@@ -7,6 +7,7 @@
 //! has the blob reports it complete at once. This is the protocol `formal/Musubi/Chunks.lean`
 //! verifies.
 
+use std::collections::HashSet;
 use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
@@ -17,6 +18,7 @@ use std::io::SeekFrom;
 use std::io::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -55,8 +57,15 @@ pub enum Received {
 }
 
 /// Blobs in a directory: `complete/<id>` and `partial/<id>`.
+///
+/// Blobs are not synced to disk: they only carry transfers, and syncing a clone's takes
+/// seconds. So a blob this store did not write or check itself, as since a crash, is
+/// checked before it is trusted, since one left torn would otherwise fail its hash check at
+/// every receiver, every time it was sent.
 pub struct BlobStore {
     dir: PathBuf,
+    /// The complete blobs this store wrote or checked.
+    whole: Mutex<HashSet<BlobId>>,
 }
 
 impl BlobStore {
@@ -65,7 +74,14 @@ impl BlobStore {
         fs::create_dir_all(dir.join("partial"))?;
         Ok(Self {
             dir: dir.to_owned(),
+            whole: Mutex::new(HashSet::new()),
         })
+    }
+
+    fn whole(&self) -> std::sync::MutexGuard<'_, HashSet<BlobId>> {
+        self.whole
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn complete_path(&self, id: &BlobId) -> PathBuf {
@@ -76,31 +92,54 @@ impl BlobStore {
         self.dir.join("partial").join(id.hex())
     }
 
-    /// The finished blob's file, if this store has it.
+    /// The finished blob's file, if this store has it whole. One it did not write or check
+    /// is checked now, and removed if torn.
     pub fn get(&self, id: &BlobId) -> Option<PathBuf> {
         let path = self.complete_path(id);
-        path.exists().then_some(path)
+        if !path.exists() {
+            return None;
+        }
+        if !self.whole().contains(id) {
+            if !BlobId::of_file(&path).is_ok_and(|(actual, _)| actual == *id) {
+                fs::remove_file(&path).ok();
+                return None;
+            }
+            self.whole().insert(*id);
+        }
+        Some(path)
     }
 
     /// Adds a file this side created, returning its id and length. The file is linked in
     /// rather than copied where the filesystem allows: a bundle can be gigabytes, and its
-    /// creator deletes its own name for it.
+    /// creator deletes its own name for it. A blob of that id already here whole is kept:
+    /// renaming over it would make ext4 write the new one out to disk.
     pub fn insert_file(&self, path: &Path) -> io::Result<(BlobId, u64)> {
         let (id, len) = BlobId::of_file(path)?;
-        let dest = self.complete_path(&id);
-        if !dest.exists() && fs::hard_link(path, &dest).is_err() {
-            fs::copy(path, &dest)?;
+        if self.get(&id).is_none() {
+            let linked = tempfile::Builder::new().make_in(self.dir.join("partial"), |tmp| {
+                fs::hard_link(path, tmp).or_else(|err| match err.kind() {
+                    // Taken: tempfile tries another name.
+                    io::ErrorKind::AlreadyExists => Err(err),
+                    _ => fs::copy(path, tmp).map(drop),
+                })
+            })?;
+            linked
+                .persist(self.complete_path(&id))
+                .map_err(|err| err.error)?;
+            self.whole().insert(id);
         }
         Ok((id, len))
     }
 
+    /// [`Self::insert_file`] for bytes in memory.
     pub fn insert_bytes(&self, bytes: &[u8]) -> io::Result<(BlobId, u64)> {
         let id = BlobId::of_bytes(bytes);
-        let dest = self.complete_path(&id);
-        if !dest.exists() {
-            let tmp = tempfile::NamedTempFile::new_in(self.dir.join("partial"))?;
-            fs::write(tmp.path(), bytes)?;
-            tmp.persist(&dest).map_err(|err| err.error)?;
+        if self.get(&id).is_none() {
+            let mut tmp = tempfile::NamedTempFile::new_in(self.dir.join("partial"))?;
+            tmp.write_all(bytes)?;
+            tmp.persist(self.complete_path(&id))
+                .map_err(|err| err.error)?;
+            self.whole().insert(id);
         }
         Ok((id, bytes.len() as u64))
     }
@@ -141,6 +180,7 @@ impl BlobStore {
             return Ok(Received::Prefix(0));
         }
         fs::rename(&partial, self.complete_path(id))?;
+        self.whole().insert(*id);
         Ok(Received::Complete)
     }
 
@@ -158,6 +198,7 @@ impl BlobStore {
     }
 
     pub fn remove(&self, id: &BlobId) {
+        self.whole().remove(id);
         fs::remove_file(self.complete_path(id)).ok();
         fs::remove_file(self.partial_path(id)).ok();
     }
@@ -187,6 +228,28 @@ mod tests {
         let inode = |path: &Path| fs::metadata(path).unwrap().ino();
         assert_eq!(inode(&file), inode(&stored));
         fs::remove_file(&file).unwrap();
+        assert_eq!(store.read(&id, 0, 100).unwrap(), (8, b"contents".to_vec()));
+    }
+
+    /// A blob that a crash left torn, before the store opened, is neither served nor kept.
+    #[test]
+    fn a_torn_blob_is_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let blobs = dir.path().join("blobs");
+        let file = dir.path().join("bundle");
+        fs::write(&file, b"contents").unwrap();
+        let (id, _) = BlobId::of_file(&file).unwrap();
+        let torn = || {
+            let store = BlobStore::open(&blobs).unwrap();
+            fs::write(store.complete_path(&id), b"cont").unwrap();
+            store
+        };
+        assert!(torn().read(&id, 0, 100).is_err());
+        let store = torn();
+        store.insert_file(&file).unwrap();
+        assert_eq!(store.read(&id, 0, 100).unwrap(), (8, b"contents".to_vec()));
+        let store = torn();
+        store.insert_bytes(b"contents").unwrap();
         assert_eq!(store.read(&id, 0, 100).unwrap(), (8, b"contents".to_vec()));
     }
 

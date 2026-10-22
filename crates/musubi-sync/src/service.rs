@@ -22,7 +22,6 @@ use crate::blobs::BlobStore;
 use crate::blobs::Received;
 use crate::hub::HubAdapter;
 use crate::short;
-use crate::temp_bundle;
 use crate::wire::Envelope;
 use crate::wire::HeadNotice;
 use crate::wire::HubReply;
@@ -201,9 +200,10 @@ impl HubService {
                             Attachment::File(path)
                         }
                         WireAttachment::Inline(bytes) => {
-                            let path = temp_bundle(&self.tmp)?;
-                            std::fs::write(&path, bytes)?;
-                            Attachment::bundle(path)
+                            // Not reopened truncating (see `BundleWriter::create`).
+                            let mut file = tempfile::NamedTempFile::new_in(&self.tmp)?;
+                            std::io::Write::write_all(&mut file, &bytes)?;
+                            Attachment::bundle(file.into_temp_path())
                         }
                         WireAttachment::Haves(ids) => {
                             Attachment::Haves(ids.into_iter().map(CommitId::new).collect())

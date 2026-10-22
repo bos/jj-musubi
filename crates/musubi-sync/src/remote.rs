@@ -123,8 +123,9 @@ impl RemoteHub {
                     Attachment::File(path)
                 }
                 WireAttachment::Inline(bytes) => {
-                    let file = tempfile::NamedTempFile::new_in(&self.dir)?;
-                    std::fs::write(file.path(), bytes)?;
+                    // Not reopened truncating (see `BundleWriter::create`).
+                    let mut file = tempfile::NamedTempFile::new_in(&self.dir)?;
+                    std::io::Write::write_all(&mut file, &bytes)?;
                     Attachment::bundle(file.into_temp_path())
                 }
                 WireAttachment::Haves(ids) => {

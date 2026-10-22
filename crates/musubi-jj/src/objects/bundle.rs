@@ -22,6 +22,7 @@
 //! one in place, never through memory or a copy.
 
 use std::fs::File;
+use std::fs::OpenOptions;
 use std::io;
 use std::io::BufReader;
 use std::io::BufWriter;
@@ -94,8 +95,20 @@ pub struct BundleWriter {
 }
 
 impl BundleWriter {
+    /// Starts a bundle at `path`, usually an empty temporary file, truncating the file only
+    /// if it has contents: ext4 writes out any file truncated to nothing as it is closed,
+    /// even one empty already, taking it for one that replaces another, and for a clone's
+    /// bundle that blocks for seconds on a slow disk.
     pub fn create(path: &Path) -> Result<Self, ObjectError> {
-        let mut out = BufWriter::new(File::create(path)?);
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)?;
+        if file.metadata()?.len() > 0 {
+            file.set_len(0)?;
+        }
+        let mut out = BufWriter::new(file);
         out.write_all(MAGIC)?;
         Ok(Self {
             out,
@@ -232,13 +245,12 @@ impl BundleWriter {
         Ok(())
     }
 
+    /// Finishes the bundle, without syncing it to disk: a bundle only carries a transfer,
+    /// and syncing a clone's takes seconds. A blob store checks a blob it did not write or
+    /// check itself before trusting it.
     pub fn finish(mut self) -> Result<(), ObjectError> {
         self.end_compressed()?;
         self.out.flush()?;
-        self.out
-            .into_inner()
-            .map_err(|err| err.into_error())?
-            .sync_all()?;
         Ok(())
     }
 }

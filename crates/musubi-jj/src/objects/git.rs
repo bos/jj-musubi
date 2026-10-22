@@ -815,8 +815,10 @@ impl<'a> GitStore<'a> {
                 for entry in entries {
                     let path = dir.join(entry.commit.hex());
                     if !path.exists() {
-                        let tmp = tempfile::NamedTempFile::new_in(dir)?;
-                        fs::write(tmp.path(), &entry.value)?;
+                        // Through its own handle: reopened truncating, ext4 would write it
+                        // out as it closed (see `BundleWriter::create`), once per commit.
+                        let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+                        tmp.write_all(&entry.value)?;
                         tmp.persist(&path).map_err(|err| err.error)?;
                     }
                 }

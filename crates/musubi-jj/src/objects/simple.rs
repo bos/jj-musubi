@@ -164,8 +164,8 @@ impl ObjectStore for SimpleStore {
             };
             let path = self.path(kind, &id);
             if !path.exists() {
-                let tmp = tempfile::NamedTempFile::new_in(self.dir.join(kind.dir()))?;
-                fs::write(tmp.path(), &contents)?;
+                let mut tmp = tempfile::NamedTempFile::new_in(self.dir.join(kind.dir()))?;
+                io::Write::write_all(&mut tmp, &contents)?;
                 tmp.persist(&path).map_err(|err| err.error)?;
             }
             Ok(())

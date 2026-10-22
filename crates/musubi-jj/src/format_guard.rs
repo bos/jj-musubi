@@ -9,6 +9,8 @@ use std::fmt::Write as _;
 
 use thiserror::Error;
 
+use crate::protobuf::varint;
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum FormatError {
     #[error("unknown field {field} in {path} (written by a newer jj?)")]
@@ -139,7 +141,7 @@ fn walk(mut bytes: &[u8], msg: Msg, path: &mut String) -> Result<(), FormatError
         path: path.to_owned(),
     };
     while !bytes.is_empty() {
-        let tag = read_varint(&mut bytes).ok_or_else(|| malformed(path))?;
+        let tag = varint(&mut bytes).ok_or_else(|| malformed(path))?;
         let field = u32::try_from(tag >> 3).map_err(|_| malformed(path))?;
         let wire_type = (tag & 7) as u8;
         let kind = msg.field(field).ok_or_else(|| FormatError::UnknownField {
@@ -158,10 +160,10 @@ fn walk(mut bytes: &[u8], msg: Msg, path: &mut String) -> Result<(), FormatError
         }
         match kind {
             Kind::Varint => {
-                read_varint(&mut bytes).ok_or_else(|| malformed(path))?;
+                varint(&mut bytes).ok_or_else(|| malformed(path))?;
             }
             Kind::Bytes | Kind::Message(_) => {
-                let len = read_varint(&mut bytes).ok_or_else(|| malformed(path))?;
+                let len = varint(&mut bytes).ok_or_else(|| malformed(path))?;
                 let len = usize::try_from(len).map_err(|_| malformed(path))?;
                 if len > bytes.len() {
                     return Err(malformed(path));
@@ -178,19 +180,6 @@ fn walk(mut bytes: &[u8], msg: Msg, path: &mut String) -> Result<(), FormatError
         }
     }
     Ok(())
-}
-
-fn read_varint(bytes: &mut &[u8]) -> Option<u64> {
-    let mut value = 0u64;
-    for shift in (0..64).step_by(7) {
-        let (&byte, rest) = bytes.split_first()?;
-        *bytes = rest;
-        value |= u64::from(byte & 0x7f) << shift;
-        if byte & 0x80 == 0 {
-            return Some(value);
-        }
-    }
-    None
 }
 
 #[cfg(test)]

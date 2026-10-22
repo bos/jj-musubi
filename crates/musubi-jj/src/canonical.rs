@@ -36,6 +36,7 @@ use crate::objects::ObjectError;
 use crate::objects::bundle;
 use crate::objects::bundle::BundleWriter;
 use crate::objects::bundle::Record;
+use crate::protobuf::next_field;
 
 fn boxed(err: CanonicalError) -> ObjectError {
     ObjectError::Nested(Box::new(err))
@@ -539,20 +540,6 @@ fn is_root_view(id: &ViewId) -> bool {
     id.as_bytes().iter().all(|&b| b == 0)
 }
 
-/// Takes a protobuf varint off the front of `bytes`.
-fn varint(bytes: &mut &[u8]) -> Option<u64> {
-    let mut value = 0;
-    for shift in (0..64).step_by(7) {
-        let (&byte, rest) = bytes.split_first()?;
-        *bytes = rest;
-        value |= u64::from(byte & 0x7f) << shift;
-        if byte & 0x80 == 0 {
-            return Some(value);
-        }
-    }
-    None
-}
-
 /// Calls `each` with the number and payload of every length-delimited field of an encoded
 /// message, in order; fields of other wire types hold no id or message. `None` if the
 /// message, or `each`, finds it malformed.
@@ -561,20 +548,9 @@ fn each_field<'a>(
     mut each: impl FnMut(u32, &'a [u8]) -> Option<()>,
 ) -> Option<()> {
     while !bytes.is_empty() {
-        let key = varint(&mut bytes)?;
-        match key & 7 {
-            0 => {
-                varint(&mut bytes)?;
-            }
-            1 => bytes = bytes.get(8..)?,
-            2 => {
-                let len = usize::try_from(varint(&mut bytes)?).ok()?;
-                let (payload, rest) = bytes.split_at_checked(len)?;
-                bytes = rest;
-                each(u32::try_from(key >> 3).ok()?, payload)?;
-            }
-            5 => bytes = bytes.get(4..)?,
-            _ => return None,
+        let (key, payload) = next_field(&mut bytes)?;
+        if key & 7 == 2 {
+            each(u32::try_from(key >> 3).ok()?, payload)?;
         }
     }
     Some(())
@@ -778,18 +754,7 @@ fn top_level_fields(mut bytes: &[u8]) -> Option<Vec<(u32, &[u8])>> {
     let mut fields = vec![];
     while !bytes.is_empty() {
         let start = bytes;
-        let key = varint(&mut bytes)?;
-        let len = match key & 7 {
-            0 => {
-                varint(&mut bytes)?;
-                0
-            }
-            1 => 8,
-            2 => usize::try_from(varint(&mut bytes)?).ok()?,
-            5 => 4,
-            _ => return None,
-        };
-        bytes = bytes.get(len..)?;
+        let (key, _) = next_field(&mut bytes)?;
         let number = u32::try_from(key >> 3).ok()?;
         fields.push((number, &start[..start.len() - bytes.len()]));
     }

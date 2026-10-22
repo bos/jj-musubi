@@ -145,7 +145,7 @@ impl HubService {
         }
         let request = Envelope::<HubRequest>::decode(bytes)?;
         let (reply, notice) = self.handle(request, max_payload)?;
-        let encoded = Envelope::encode(reply.clone())?;
+        let encoded = Envelope::encode(reply)?;
         if encoded.len() <= max_payload {
             return Ok((encoded, notice));
         }

@@ -628,6 +628,26 @@ fn shallow_clones_are_refused() {
     assert!(err.contains("this one is a shallow clone"), "{err}");
 }
 
+/// Without a daemon, `musubi sync` syncs in its own process, and records how it went for
+/// `musubi list`, as the daemon would.
+#[test]
+fn syncing_without_the_daemon_shows_in_the_list() {
+    let env = TestEnv::new();
+    let mut logs = Logs::default();
+    let hub = Hub::start(&env, &mut logs);
+    // Stopped before the hub.
+    let mut daemons = Daemons::default();
+    let (alpha, _beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
+    musubi_in(&env, &logs, &alpha, &["daemon", "stop"]);
+    // As the daemon left it when its last sync failed.
+    let status = alpha.repo_path().join("musubi/status.json");
+    fs::write(&status, r#"{"error": "the hub was out of reach"}"#).unwrap();
+    musubi_in(&env, &logs, &alpha, &["sync"]);
+    let list = musubi_in(&env, &logs, &alpha, &["list"]);
+    assert!(list.contains("Daemon: not running"), "{list}");
+    assert!(list.contains("  synced "), "{list}");
+}
+
 /// The hive shares remotes and chosen repo config through the binary, which finds jj's
 /// repo config where jj keeps it.
 #[test]

@@ -30,6 +30,7 @@ use musubi_sync::wire::HubWideRequest;
 
 use crate::config::HiveConfig;
 use crate::config::UserConfig;
+use crate::control::Synced;
 use crate::daemon::Status;
 use crate::repo::Located;
 use crate::socket::Socket;
@@ -586,22 +587,10 @@ fn clone(
 }
 
 /// Syncs once, in this process.
-fn sync_directly(located: &Located) -> anyhow::Result<()> {
+fn sync_directly(located: &Located) -> anyhow::Result<Synced> {
     let hive =
         HiveConfig::load(&located.repo_path)?.context("this repository is not part of a hive")?;
-    block_on(async {
-        let connection = hub::connect(&hive.hub, Duration::from_secs(30)).await?;
-        let blobs = located.repo_path.join("musubi/blobs");
-        let remote = musubi_sync::remote::RemoteHub::new(
-            connection.transport.clone(),
-            hive.rpc_subject(),
-            &blobs,
-            Duration::from_secs(60),
-        )?;
-        let mut driver = musubi_sync::driver::NodeDriver::new(located.open()?, remote)?;
-        driver.sync().await.map_err(|err| connection.explain(err))?;
-        Ok(())
-    })
+    block_on(daemon::sync_once(located, &hive))
 }
 
 /// Syncs through the daemon when it serves the repository, else directly.
@@ -622,11 +611,12 @@ fn sync(start: &Path, socket: &Socket) -> anyhow::Result<()> {
             .await?;
         Ok::<_, anyhow::Error>(Some(synced))
     })?;
-    match through_daemon {
-        Some(Ok(synced)) => println!("Synced (hive at #{}).", synced.seq),
+    let synced = match through_daemon {
+        Some(Ok(synced)) => synced,
         Some(Err(message)) => anyhow::bail!("{message}"),
         None => sync_directly(&located)?,
-    }
+    };
+    println!("Synced (hive at #{}).", synced.seq);
     Ok(())
 }
 

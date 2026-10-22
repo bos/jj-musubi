@@ -47,7 +47,8 @@ const POLL_INTERVAL: Duration = Duration::from_secs(30);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
-/// A repository's replication state, written by the daemon after every sync attempt.
+/// A repository's replication state, written after every sync attempt, by the daemon or by
+/// `musubi sync` without one.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Status {
     pub last_attempt: Option<u64>,
@@ -64,6 +65,24 @@ impl Status {
 
     pub fn load(repo_path: &Path) -> Option<Self> {
         serde_json::from_slice(&fs::read(Self::path(repo_path)).ok()?).ok()
+    }
+
+    /// Records a sync: its error, if it failed, and the hive's head as it left the node
+    /// knowing it.
+    fn synced(&mut self, error: Option<String>, known: &Synced) {
+        self.last_attempt = Some(now());
+        if error.is_none() {
+            self.last_success = self.last_attempt;
+        }
+        self.error = error;
+        self.known_seq = Some(known.seq);
+        self.known_head = Some(known.head.clone());
+    }
+
+    /// Records an attempt that failed before it could sync, as to reach the hub.
+    fn failed(&mut self, error: String) {
+        self.last_attempt = Some(now());
+        self.error = Some(error);
     }
 
     /// Overwrites the status in place: it changes at every sync attempt, and ext4 writes out
@@ -365,10 +384,7 @@ async fn serve_retrying(
             Err(err) => {
                 let message = format!("{err:#}");
                 tracing::error!("{message}; retrying in {backoff:?}");
-                record(workspace, status, |status| {
-                    status.last_attempt = Some(now());
-                    status.error = Some(message.clone());
-                });
+                record(workspace, status, |status| status.failed(message.clone()));
                 for waiter in waiting.drain(..) {
                     waiter.send(Err(message.clone())).ok();
                 }
@@ -427,14 +443,11 @@ async fn serve_async(
     let located = Located::find(workspace)?;
     let hive = HiveConfig::load(&located.repo_path)?
         .with_context(|| format!("{} is not part of a hive", workspace.display()))?;
-    let connection = crate::hub::connect(&hive.hub, REQUEST_TIMEOUT).await?;
+    let (connection, mut driver) = open_driver(&located, &hive).await?;
     let transport = connection.transport.clone();
     let mut notices = transport.subscribe(&hive.head_subject()).await?;
     let mut reconnections = transport.reconnections();
     let mut watcher = OpHeadsWatcher::new(&located.repo_path)?;
-    let blobs = located.repo_path.join("musubi/blobs");
-    let remote = RemoteHub::new(transport, hive.rpc_subject(), &blobs, REQUEST_TIMEOUT)?;
-    let mut driver = NodeDriver::new(located.open()?, remote)?;
     let mut poll = tokio::time::interval(POLL_INTERVAL);
     let mut backoff = Duration::from_millis(500);
     let mut retry = false;
@@ -485,11 +498,7 @@ async fn serve_async(
         reconnections.seen();
         let result = driver.sync().await;
         tracing::debug!("sync took {:?}", started.elapsed());
-        let (seq, head) = driver.known();
-        let synced = Synced {
-            seq: *seq,
-            head: head.hex(),
-        };
+        let synced = known(&driver);
         // Over ssh, why the hub is out of reach says more than a timeout.
         let result = result.map_err(|err| connection.explain(err));
         let reply = match &result {
@@ -497,16 +506,7 @@ async fn serve_async(
             Err(err) => Err(format!("{err:#}")),
         };
         record(workspace, status, |status| {
-            status.last_attempt = Some(now());
-            match &result {
-                Ok(_) => {
-                    status.last_success = Some(now());
-                    status.error = None;
-                }
-                Err(err) => status.error = Some(format!("{err:#}")),
-            }
-            status.known_seq = Some(synced.seq);
-            status.known_head = Some(synced.head.clone());
+            status.synced(reply.as_ref().err().cloned(), &synced);
         });
         for waiter in waiting.drain(..) {
             waiter.send(reply.clone()).ok();
@@ -544,6 +544,51 @@ async fn serve_async(
             }
         }
     }
+}
+
+/// Connects to the hive's hub, and opens the repository to sync with it there.
+async fn open_driver(
+    located: &Located,
+    hive: &HiveConfig,
+) -> anyhow::Result<(crate::hub::Connection, NodeDriver)> {
+    let connection = crate::hub::connect(&hive.hub, REQUEST_TIMEOUT).await?;
+    let blobs = located.repo_path.join("musubi/blobs");
+    let remote = RemoteHub::new(
+        connection.transport.clone(),
+        hive.rpc_subject(),
+        &blobs,
+        REQUEST_TIMEOUT,
+    )?;
+    let driver = NodeDriver::new(located.open()?, remote)?;
+    Ok((connection, driver))
+}
+
+/// The hive's head as `driver` knows it.
+fn known(driver: &NodeDriver) -> Synced {
+    let (seq, head) = driver.known();
+    Synced {
+        seq: *seq,
+        head: head.hex(),
+    }
+}
+
+/// Syncs once, in this process, as the daemon would, and records how it went for
+/// `musubi list`.
+pub async fn sync_once(located: &Located, hive: &HiveConfig) -> anyhow::Result<Synced> {
+    let mut status = Status::load(&located.repo_path).unwrap_or_default();
+    let (connection, mut driver) = match open_driver(located, hive).await {
+        Ok(opened) => opened,
+        Err(err) => {
+            status.failed(format!("{err:#}"));
+            status.save(&located.repo_path);
+            return Err(err);
+        }
+    };
+    let result = driver.sync().await.map_err(|err| connection.explain(err));
+    let synced = known(&driver);
+    status.synced(result.as_ref().err().map(|err| format!("{err:#}")), &synced);
+    status.save(&located.repo_path);
+    result.map(|_| synced)
 }
 
 /// A running daemon that speaks this build's control protocol, if there is one.

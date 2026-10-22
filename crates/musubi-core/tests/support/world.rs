@@ -704,7 +704,7 @@ fn canonical_state(state: &Value) -> Value {
         .flatten()
         .map(|msg| with_sets(msg, &["ops", "objs"]))
         .collect();
-    net.sort_by_key(Value::to_string);
+    net.sort_by_cached_key(Value::to_string);
     net.dedup();
     json!({
         "next": state["next"],

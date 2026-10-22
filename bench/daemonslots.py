@@ -3,9 +3,12 @@
 Usage: /usr/bin/python3 -I daemonslots.py REPO ITERATIONS
 
 Starts musubi daemons on A' and a fresh clone B', then makes one new commit at a time on
-A' and waits for it to reach B'. Every received update with new objects adds one pack to
-B's .git (index-pack, never consolidated); the daemon's gix object store has a fixed number
-of index slots, max(1.1 x packs at open, 32). Results: $WORK/results/daemonslots-REPO.json.
+A' and waits for it to reach B'. Each commit adds FILES new files, so that B receives at
+least 100 objects (`fetch.unpackLimit`) and keeps them as a pack rather than unpacking
+them: every update adds a pack to B's .git, until `gc --auto` consolidates them at 50
+(`gc.autoPackLimit`). A gix object store has a fixed number of index slots,
+max(1.1 x packs at open, 32), so run past 32 packs. Results:
+$WORK/results/daemonslots-REPO.json.
 """
 
 import json
@@ -18,6 +21,9 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bench  # noqa: E402
 from bench import MUSUBI, WORK, PORT_GIT, machine, member, rev, sh, start  # noqa: E402
+
+
+FILES = 100
 
 
 def packs(repo):
@@ -53,8 +59,10 @@ def main():
     time.sleep(3)
     for i in range(iterations):
         sh(["jj", "new", "feature"], cwd=Am)
-        with open(f"{Am}/slot-{i}.txt", "w") as f:
-            f.write(f"change {i}\n")
+        os.makedirs(f"{Am}/slots/{i}")
+        for k in range(FILES):
+            with open(f"{Am}/slots/{i}/{k}.txt", "w") as f:
+                f.write(f"change {i}, file {k}\n")
         sh(["jj", "commit", "-m", f"slots {i}"], cwd=Am)
         sh(["jj", "bookmark", "set", "feature", "-r", "@-"], cwd=Am)
         want = rev(Am, "feature")

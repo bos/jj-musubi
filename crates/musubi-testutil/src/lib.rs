@@ -48,7 +48,7 @@ impl Default for TestEnv {
 impl TestEnv {
     pub fn new() -> Self {
         check_jj_version();
-        let root = temp_root();
+        let root = tempdir();
         fs::create_dir_all(root.path().join("home/.config")).unwrap();
         Self {
             root,
@@ -70,7 +70,7 @@ impl TestEnv {
     /// in the repository, and takes one whose recorded path is gone for one that moved.
     pub fn restore(dir: &Path) -> Self {
         check_jj_version();
-        let root = temp_root();
+        let root = tempdir();
         // A clone wants a path with nothing there.
         fs::remove_dir(root.path()).unwrap();
         copy_tree(&dir.join("root"), root.path());
@@ -147,17 +147,47 @@ impl TestEnv {
     }
 }
 
-/// A test environment's directory, kept with `MUSUBI_KEEP_TEST_DIRS` for inspecting a
-/// failure's repositories afterwards.
-fn temp_root() -> TempDir {
-    let mut root = tempfile::Builder::new()
-        .prefix("musubi-test-")
-        .tempdir()
-        .unwrap();
-    if std::env::var_os("MUSUBI_KEEP_TEST_DIRS").is_some() {
+/// A new directory for a test, kept with `MUSUBI_KEEP_TEST_DIRS` for inspecting a failure's
+/// repositories afterwards.
+///
+/// On Linux it is in `/dev/shm`, in memory, unless `TMPDIR` is set, the directory is to be
+/// kept, or `/dev/shm` is mounted `noexec`, as in a Docker container, since some tests run
+/// scripts they write. jj syncs what it writes to disk, and on a disk, waiting for that took
+/// most of the suite's time. Nothing a test writes needs to survive a power cut. Where
+/// `/dev/shm` is too small, as Docker's 64 MB may be for a run on many cores, set `TMPDIR`.
+pub fn tempdir() -> TempDir {
+    let keep = std::env::var_os("MUSUBI_KEEP_TEST_DIRS").is_some();
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("musubi-test-");
+    let mut root = match in_memory() {
+        Some(dir) if !keep => builder
+            .tempdir_in(dir)
+            .or_else(|_| builder.tempdir())
+            .unwrap(),
+        _ => builder.tempdir().unwrap(),
+    };
+    if keep {
         root.disable_cleanup(true);
     }
     root
+}
+
+/// `/dev/shm`, on Linux, unless `TMPDIR` is set or it is mounted `noexec`.
+fn in_memory() -> Option<&'static Path> {
+    static IN_MEMORY: OnceLock<Option<&'static Path>> = OnceLock::new();
+    *IN_MEMORY.get_or_init(|| {
+        if !cfg!(target_os = "linux") || std::env::var_os("TMPDIR").is_some() {
+            return None;
+        }
+        // Each line: device, mount point, type, options, ...; the last mount there counts.
+        let mounts = fs::read_to_string("/proc/self/mounts").ok()?;
+        let options = mounts.lines().rev().find_map(|line| {
+            let fields: Vec<&str> = line.split(' ').collect();
+            (fields.get(1) == Some(&"/dev/shm")).then(|| fields.get(3).copied())?
+        })?;
+        let exec = !options.split(',').any(|option| option == "noexec");
+        exec.then_some(Path::new("/dev/shm"))
+    })
 }
 
 /// Copies the directory `from` to `to`. On macOS that is one clonefile(2) of the whole

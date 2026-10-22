@@ -141,7 +141,7 @@ fn operation(tc: &TestCase) -> Operation {
 }
 
 fn store() -> (tempfile::TempDir, SimpleOpStore) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = musubi_testutil::tempdir();
     let root_commit_id = CommitId::new(vec![0; 20]);
     let store = SimpleOpStore::init(dir.path(), RootOperationData { root_commit_id }).unwrap();
     (dir, store)

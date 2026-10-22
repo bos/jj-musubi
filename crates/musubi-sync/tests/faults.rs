@@ -73,7 +73,7 @@ const RUNAWAY: usize = 2000;
 #[hegel::test(test_cases = 50, suppress_health_check = [HealthCheck::TooSlow])]
 fn hub_survives_malformed_requests(tc: TestCase) {
     let session = session();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = musubi_testutil::tempdir();
     // Partway through a real session: blobs half uploaded, the head moved or not.
     let replayed = tc.draw(gs::integers::<usize>().max_value(session.seen.requests.len()));
     let mut hub = session.hub_after(replayed, &dir.path().join("hub"));
@@ -127,7 +127,7 @@ fn calls_finish_once_the_link_is_back(tc: TestCase) {
         Fault::Stall,
     ]));
     run_local(async {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = musubi_testutil::tempdir();
         let hub_dir = dir.path().join("hub");
         let network = MemoryNetwork::new(1, MAX_PAYLOAD);
         let hub = session.hub_after(call.start, &hub_dir);
@@ -250,7 +250,7 @@ fn blobs_prepared_again_last_as_long_as_new_ones() {
         .iter()
         .find(|call| matches!(call.request, Request::Fetch { .. }) && call.requests > 1)
         .unwrap();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = musubi_testutil::tempdir();
     let hub_dir = dir.path().join("hub");
     // Short enough to wait out, as the minute the hub keeps a blob it has served.
     let served_lifetime = Duration::from_secs(1);
@@ -306,7 +306,7 @@ fn uploads_leave_prepared_blobs_alone() {
         .iter()
         .find(|call| matches!(call.request, Request::Push { .. }) && call.requests > 1)
         .unwrap();
-    let dir = tempfile::tempdir().unwrap();
+    let dir = musubi_testutil::tempdir();
     let mut hub = session.hub_after(fetch_call.start, &dir.path().join("hub"));
     let fetch = encode(HubRequest::Protocol(fetch_call.request.clone()));
     let (blob, len) = prepare(&mut hub, &fetch);
@@ -348,7 +348,7 @@ fn calls_leave_no_uploads_behind() {
         .find(|call| matches!(call.request, Request::Push { .. }) && call.requests > 1)
         .unwrap();
     run_local(async {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = musubi_testutil::tempdir();
         let hub_dir = dir.path().join("hub");
         let network = MemoryNetwork::new(1, MAX_PAYLOAD);
         serve(
@@ -405,7 +405,7 @@ fn calls_leave_no_downloads_behind() {
         })
         .unwrap();
     run_local(async {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = musubi_testutil::tempdir();
         let hub_dir = dir.path().join("hub");
         let network = MemoryNetwork::new(1, MAX_PAYLOAD);
         serve(
@@ -760,7 +760,7 @@ fn record(dir: &Path) {
     // state the hub really passes through.
     let snapshots = dir.join("snapshots");
     let calls = Session::load(dir).calls;
-    let hub_dir = tempfile::tempdir().unwrap();
+    let hub_dir = musubi_testutil::tempdir();
     let hub_dir = hub_dir.path().join("hub");
     let mut hub = fresh_hub(&hub_dir);
     let starts: BTreeSet<usize> = calls.iter().map(|call| call.start).collect();

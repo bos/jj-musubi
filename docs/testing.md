@@ -14,7 +14,9 @@ test belongs at the narrowest layer that can catch its bug.
 | Generated end-to-end tests | `crates/musubi-sync/tests/e2e_search` | Everything interacting: real `jj` commands, real repositories, faults | Seconds per case; opt-in |
 
 Run the default suite with `cargo nextest run`, or everything with `just check`. It needs `jj` 0.46.0 and `git`
-on `PATH`. Run the generated end-to-end search with `cargo nextest run --profile search`. Check
+on `PATH`. On Linux the tests make their directories in `/dev/shm`, in memory, unless
+`TMPDIR` is set or `/dev/shm` is mounted `noexec`: jj syncs what it writes to disk, and
+waiting for that took most of the suite's time on a disk. Run the generated end-to-end search with `cargo nextest run --profile search`. Check
 the formal model with `lake build` in `formal/`. `.cargo/config.toml` hides the developer's
 global and system git config from the git that tests, and the musubi they run in-process,
 start; the `jj` and `git` they run as commands get musubi-testutil's own home directory.

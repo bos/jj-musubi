@@ -13,6 +13,7 @@ use jj_lib::object_id::ObjectId as _;
 use musubi_core::message::OpEntry;
 use musubi_core::node::LocalRepo;
 use musubi_jj::node::NodeRepo;
+use musubi_jj::node::REALIZE_AT_ONCE;
 
 use crate::Attachment;
 use crate::OpId;
@@ -31,6 +32,8 @@ pub struct NodeAdapter {
     /// realized, so that planning their realization needn't read each one again. A
     /// canonical operation never changes, so neither does an entry.
     staged: HashMap<OpId, Vec<OpId>>,
+    /// The staged operations by parent, to find which are likely realized after one.
+    staged_children: HashMap<OpId, Vec<OpId>>,
     /// The operations whose objects were staged last, with every commit they require:
     /// what checking that those objects are all here asks about next.
     staged_commits: Option<(HashSet<OpId>, Vec<CommitId>)>,
@@ -48,6 +51,7 @@ impl NodeAdapter {
             generations: RefCell::new(HashMap::new()),
             base_ancestry: RefCell::new(None),
             staged: HashMap::new(),
+            staged_children: HashMap::new(),
             staged_commits: None,
         })
     }
@@ -341,7 +345,13 @@ impl LocalRepo for NodeAdapter {
                     entry.id.hex()
                 );
             }
-            if self.repo.local_of(&entry.id).is_none() {
+            if self.repo.local_of(&entry.id).is_none() && !self.staged.contains_key(&entry.id) {
+                for parent in parents.iter().filter(|p| self.repo.local_of(p).is_none()) {
+                    self.staged_children
+                        .entry(parent.clone())
+                        .or_default()
+                        .push(entry.id.clone());
+                }
                 self.staged.insert(entry.id.clone(), parents);
             }
         }
@@ -416,10 +426,25 @@ impl LocalRepo for NodeAdapter {
     }
 
     fn realize(&mut self, op: &OpId) -> anyhow::Result<()> {
+        // The operations likely realized after it, whose views can be made local with its:
+        // each the only staged child of the one before.
+        let mut next = vec![];
+        let mut last = op;
+        while next.len() < REALIZE_AT_ONCE - 1 {
+            let Some([child]) = self.staged_children.get(last).map(Vec::as_slice) else {
+                break;
+            };
+            if self.staged.get(child).map(Vec::as_slice) != Some(std::slice::from_ref(last)) {
+                break;
+            }
+            next.push(child.clone());
+            last = child;
+        }
         // Written meanwhile: `advance` waits for them, and so does anything else here that
         // reads local operations.
-        self.repo.realize_pending(op)?;
+        self.repo.realize_pending(op, &next)?;
         self.staged.remove(op);
+        self.staged_children.remove(op);
         Ok(())
     }
 

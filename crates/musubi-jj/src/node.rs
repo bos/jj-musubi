@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::io::Write as _;
@@ -194,13 +195,15 @@ impl PerMachine {
         }
     }
 
-    fn apply_to(self, view: &mut View) {
-        view.git_refs = self.git_refs;
-        if let Some(remote) = self.git_remote {
+    /// Gives `view` these fields, in place of any it has.
+    fn apply_to(&self, view: &mut View) {
+        strip_git_records(view);
+        view.git_refs = self.git_refs.clone();
+        if let Some(remote) = &self.git_remote {
             view.remote_views
-                .insert(REMOTE_NAME_FOR_LOCAL_GIT_REPO.to_owned(), remote);
+                .insert(REMOTE_NAME_FOR_LOCAL_GIT_REPO.to_owned(), remote.clone());
         }
-        view.git_heads = self.git_heads;
+        view.git_heads = self.git_heads.clone();
     }
 }
 
@@ -222,15 +225,23 @@ pub struct NodeRepo {
     repo_config: Option<PathBuf>,
     /// The last operation realized here, with its per-machine fields: usually the next
     /// one's parent, which then needn't be read back.
-    last_realized: Option<(OperationId, PerMachine)>,
+    last_realized: Option<(OperationId, Arc<PerMachine>)>,
     /// Realized operations still being written (see [`Self::realize_pending`]).
     unwritten: Vec<Unwritten>,
+    /// Local views made ahead of their operations' realization, by canonical operation, with
+    /// the per-machine fields they were made with: used only while those are what the
+    /// operations inherit (see [`Self::realize_pending`]).
+    prepared: Option<(Arc<PerMachine>, HashMap<OperationId, LocalView>)>,
 }
 
 /// How many realized operations may be written at once. jj's op store syncs each file it
 /// writes to disk, which takes milliseconds on a cloud disk, so realizing many operations
 /// one write at a time mostly waits.
 const MAX_UNWRITTEN: usize = 32;
+
+/// How many operations, each the only parent of the next, have their views made local at
+/// once (see [`NodeRepo::realize_pending`]).
+pub const REALIZE_AT_ONCE: usize = MAX_UNWRITTEN;
 
 /// A realized operation being written, and the canonical operation it realizes.
 struct Unwritten {
@@ -244,7 +255,15 @@ struct Realization {
     id: OperationId,
     op: StoreOperation,
     view: View,
-    per_machine: PerMachine,
+    per_machine: Arc<PerMachine>,
+}
+
+/// A canonical operation's view made local, with its id and the local names of the
+/// canonical view's workspaces.
+struct LocalView {
+    view: View,
+    id: ViewId,
+    names: BTreeMap<WorkspaceNameBuf, WorkspaceNameBuf>,
 }
 
 /// The settings this machine and the hive agreed on when they were last reconciled.
@@ -301,6 +320,7 @@ impl NodeRepo {
             colocated,
             heads_mapped: false,
             last_realized: None,
+            prepared: None,
             unwritten: vec![],
             joins: BTreeMap::new(),
             settings: HashMap::new(),
@@ -1230,7 +1250,7 @@ impl NodeRepo {
     /// Realizes a stored canonical operation, and any unrealized ancestors, without
     /// publishing it. Returns the local operation id.
     pub fn realize(&mut self, canonical: &OperationId) -> Result<OperationId, NodeError> {
-        let local = self.realize_pending(canonical)?;
+        let local = self.realize_pending(canonical, &[])?;
         self.settle()?;
         Ok(local)
     }
@@ -1239,7 +1259,18 @@ impl NodeRepo {
     /// lack them until [`Self::settle`], which [`Self::realize`], [`Self::advance`] and
     /// dropping this call, and so must anything else that reads them before then.
     /// [`Self::local_of`] knows them at once.
-    pub fn realize_pending(&mut self, canonical: &OperationId) -> Result<OperationId, NodeError> {
+    ///
+    /// `next` are the operations likely realized after this one, in order. Making a view
+    /// local is most of realizing an operation, and it takes several at once to keep up with
+    /// writing them, so the views of the operations that follow on, from this one's
+    /// unrealized ancestors and then `next`, each with the one before as its only parent and
+    /// so inheriting the same per-machine fields, are made with this one's, in parallel, and
+    /// kept until they are realized.
+    pub fn realize_pending(
+        &mut self,
+        canonical: &OperationId,
+        next: &[OperationId],
+    ) -> Result<OperationId, NodeError> {
         // Map everything reachable from the op heads first. Otherwise, after losing the
         // translation cache, an operation that already has a reachable realization would be
         // realized again, and two reachable local operations would share a canonical form.
@@ -1247,9 +1278,87 @@ impl NodeRepo {
             self.canonical_heads()?;
             self.heads_mapped = true;
         }
+        let order = self.unrealized(canonical)?;
+        for (i, (id, op)) in order.iter().enumerate() {
+            let parents: Vec<OperationId> = op
+                .parents
+                .iter()
+                .map(|parent| self.local_of(parent).expect("parents realized first"))
+                .collect();
+            // Realizing it reads its parents from the store, unless its only parent is the
+            // operation realized last.
+            if !matches!(
+                (parents.as_slice(), &self.last_realized),
+                ([parent], Some((last, _))) if parent == last
+            ) {
+                self.settle()?;
+            }
+            let per_machine = self.inherited_per_machine(&parents)?;
+            let prepared = match &mut self.prepared {
+                Some((inherited, views)) if Arc::ptr_eq(inherited, &per_machine) => {
+                    views.remove(id)
+                }
+                _ => None,
+            };
+            let view = match prepared {
+                Some(view) => view,
+                None => {
+                    let later = order[i + 1..].iter().map(|(id, _)| id).chain(next);
+                    let run = self.run_after(id, op, later)?;
+                    let mut views = self.local_views(&run, &per_machine).into_iter();
+                    let view = views
+                        .next()
+                        .expect("a run starts with its first operation")?;
+                    // One that failed is made again when its turn comes.
+                    let ahead = run[1..]
+                        .iter()
+                        .zip(views)
+                        .filter_map(|((id, _), view)| Some((id.clone(), view.ok()?)))
+                        .collect();
+                    self.prepared = Some((per_machine.clone(), ahead));
+                    view
+                }
+            };
+            let realization = self.realize_one(id, op, parents, view, per_machine)?;
+            self.write_later(realization, id.clone())?;
+        }
+        Ok(self.local_of(canonical).expect("realized above"))
+    }
+
+    /// `first`, and the stored, unrealized operations of `later` that follow it, each with
+    /// the one before as its only parent, up to [`REALIZE_AT_ONCE`] in all.
+    fn run_after<'a>(
+        &self,
+        first: &OperationId,
+        op: &StoreOperation,
+        later: impl Iterator<Item = &'a OperationId>,
+    ) -> Result<Vec<(OperationId, StoreOperation)>, NodeError> {
+        let mut run = vec![(first.clone(), op.clone())];
+        for id in later.take(REALIZE_AT_ONCE - 1) {
+            if !self.canonical.has_operation(id) || self.local_of(id).is_some() {
+                break;
+            }
+            let op = self.canonical.read_operation(id)?;
+            let (last, _) = run.last().expect("a run is never empty");
+            if op.parents != std::slice::from_ref(last) {
+                break;
+            }
+            run.push((id.clone(), op));
+        }
+        Ok(run)
+    }
+
+    /// The canonical operations to realize for `canonical`: it and its unrealized ancestors,
+    /// parents first, each with its stored form.
+    fn unrealized(
+        &self,
+        canonical: &OperationId,
+    ) -> Result<Vec<(OperationId, StoreOperation)>, NodeError> {
+        let mut order = vec![];
+        let mut ordered = HashSet::new();
         let mut stack: Vec<(OperationId, Option<StoreOperation>)> = vec![(canonical.clone(), None)];
         while let Some((id, loaded)) = stack.pop() {
-            if self.local_of(&id).is_some() {
+            if self.local_of(&id).is_some() || ordered.contains(&id) {
                 continue;
             }
             if !self.canonical.has_operation(&id) {
@@ -1262,7 +1371,7 @@ impl NodeRepo {
             let missing: Vec<_> = op
                 .parents
                 .iter()
-                .filter(|p| self.local_of(p).is_none())
+                .filter(|p| self.local_of(p).is_none() && !ordered.contains(*p))
                 .cloned()
                 .collect();
             if !missing.is_empty() {
@@ -1270,19 +1379,72 @@ impl NodeRepo {
                 stack.extend(missing.into_iter().map(|parent| (parent, None)));
                 continue;
             }
-            // Realizing it reads its parents from the store, unless its only parent is the
-            // operation realized last.
-            let follows_last = match (op.parents.as_slice(), &self.last_realized) {
-                ([parent], Some((last, _))) => self.local_of(parent).as_ref() == Some(last),
-                _ => false,
-            };
-            if !follows_last {
-                self.settle()?;
-            }
-            let realization = self.realize_one(&id, &op)?;
-            self.write_later(realization, id)?;
+            ordered.insert(id.clone());
+            order.push((id, op));
         }
-        Ok(self.local_of(canonical).expect("realized above"))
+        Ok(order)
+    }
+
+    /// The local views of `ops`, which all inherit `per_machine`, made in parallel.
+    fn local_views(
+        &self,
+        ops: &[(OperationId, StoreOperation)],
+        per_machine: &PerMachine,
+    ) -> Vec<Result<LocalView, NodeError>> {
+        let make = |part: &[(OperationId, StoreOperation)]| -> Vec<_> {
+            part.iter()
+                .map(|(_, op)| self.local_view(op, per_machine))
+                .collect()
+        };
+        if ops.len() == 1 {
+            return make(ops);
+        }
+        let threads = thread::available_parallelism().map_or(1, |n| n.get());
+        thread::scope(|scope| {
+            let parts: Vec<_> = ops
+                .chunks(ops.len().div_ceil(threads))
+                .map(|part| {
+                    let made = thread::Builder::new()
+                        .name("make views local".to_owned())
+                        .spawn_scoped(scope, move || make(part));
+                    (part, made)
+                })
+                .collect();
+            let mut views = Vec::with_capacity(ops.len());
+            for (part, made) in parts {
+                views.extend(match made {
+                    Ok(made) => made
+                        .join()
+                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+                    // No thread to spare: here, then.
+                    Err(_) => make(part),
+                });
+            }
+            views
+        })
+    }
+
+    /// A canonical operation's view, made local with `per_machine`.
+    fn local_view(
+        &self,
+        op: &StoreOperation,
+        per_machine: &PerMachine,
+    ) -> Result<LocalView, NodeError> {
+        let mut view = self.canonical.read_view(&op.view_id)?;
+        // Every machine's working copies become workspaces here: this machine's under their
+        // own names, the others' as `beta/default`. This machine's own may have moved: when
+        // another machine rewrites, abandons or restores a working-copy commit, its jj moves
+        // the workspace, and the canonical view records where to.
+        let names = self.local_names(&view);
+        view.wc_commit_ids = std::mem::take(&mut view.wc_commit_ids)
+            .into_iter()
+            .filter_map(|(key, commit)| Some((names.get(&key)?.clone(), commit)))
+            .collect();
+        per_machine.apply_to(&mut view);
+        debug_assert_eq!(PerMachine::of(&view), *per_machine);
+        // The id the op store gives it, worked out as it does.
+        let id = ViewId::new(blake2b_hash(&view).to_vec());
+        Ok(LocalView { view, id, names })
     }
 
     /// Starts writing a realization, after waiting for those being written if there are
@@ -1357,6 +1519,7 @@ impl NodeRepo {
                 self.map.forget(local, canonical);
             }
             self.last_realized = None;
+            self.prepared = None;
             std::panic::resume_unwind(panic);
         }
         if let Some(err) = failed {
@@ -1364,6 +1527,7 @@ impl NodeRepo {
                 self.map.forget(local, canonical);
             }
             self.last_realized = None;
+            self.prepared = None;
             return Err(err);
         }
         for (local, canonical) in &translations {
@@ -1377,28 +1541,17 @@ impl NodeRepo {
         Ok(())
     }
 
-    /// Realizes one canonical operation whose parents are realized, without writing it.
+    /// Realizes one canonical operation whose parents are realized, as `parents`, without
+    /// writing it, from its local view.
     fn realize_one(
         &self,
         canonical_id: &OperationId,
         op: &StoreOperation,
+        parents: Vec<OperationId>,
+        local: LocalView,
+        per_machine: Arc<PerMachine>,
     ) -> Result<Realization, NodeError> {
-        let parents: Vec<OperationId> = op
-            .parents
-            .iter()
-            .map(|parent| self.local_of(parent).expect("parents realized first"))
-            .collect();
-        let mut view = self.canonical.read_view(&op.view_id)?;
-        // Every machine's working copies become workspaces here: this machine's under their
-        // own names, the others' as `beta/default`. This machine's own may have moved: when
-        // another machine rewrites, abandons or restores a working-copy commit, its jj moves
-        // the workspace, and the canonical view records where to.
-        let names = self.local_names(&view);
-        view.wc_commit_ids = std::mem::take(&mut view.wc_commit_ids)
-            .into_iter()
-            .filter_map(|(key, commit)| Some((names.get(&key)?.clone(), commit)))
-            .collect();
-        self.inherited_per_machine(&parents)?.apply_to(&mut view);
+        let LocalView { view, id, names } = local;
         let mut metadata = op.metadata.clone();
         if let Some((prefix, target)) = target_of(&metadata.description)
             && self.canonical.is_ancestor(&target, &op.parents)?
@@ -1412,9 +1565,9 @@ impl NodeRepo {
         metadata
             .attributes
             .insert(CANONICAL_ATTRIBUTE.to_owned(), canonical_id.hex());
-        // The ids the op store gives them, worked out as it does.
+        // The id the op store gives it, worked out as it does.
         let local_op = StoreOperation {
-            view_id: ViewId::new(blake2b_hash(&view).to_vec()),
+            view_id: id,
             parents,
             metadata,
             commit_predecessors: op.commit_predecessors.clone(),
@@ -1422,7 +1575,7 @@ impl NodeRepo {
         Ok(Realization {
             id: OperationId::new(blake2b_hash(&local_op).to_vec()),
             op: local_op,
-            per_machine: PerMachine::of(&view),
+            per_machine,
             view,
         })
     }
@@ -1452,7 +1605,7 @@ impl NodeRepo {
 
     /// The per-machine fields a realization starts from: its parent's, or for a merge, the
     /// parents' merged three-way by jj, as a local merge of the same operations would.
-    fn inherited_per_machine(&self, parents: &[OperationId]) -> Result<PerMachine, NodeError> {
+    fn inherited_per_machine(&self, parents: &[OperationId]) -> Result<Arc<PerMachine>, NodeError> {
         if let ([parent], Some((last, per_machine))) = (parents, &self.last_realized)
             && parent == last
         {
@@ -1461,9 +1614,9 @@ impl NodeRepo {
         let (first, rest) = parents.split_first().expect("operations have parents");
         let first_op = self.loader.load_operation(first).block_on()?;
         if rest.is_empty() {
-            return Ok(PerMachine::of(
-                &first_op.view().block_on()?.store_view().clone(),
-            ));
+            return Ok(Arc::new(PerMachine::of(
+                first_op.view().block_on()?.store_view(),
+            )));
         }
         let repo = self.loader.load_at(&first_op).block_on()?;
         let mut tx = repo.start_transaction();
@@ -1482,7 +1635,7 @@ impl NodeRepo {
             tx.merge_operation(&base, &other_op).block_on()?;
             merged.push(other_op);
         }
-        Ok(PerMachine::of(tx.repo().view().store_view()))
+        Ok(Arc::new(PerMachine::of(tx.repo().view().store_view())))
     }
 
     /// Realizes a canonical operation and publishes it as an op head, in place of the op
@@ -1492,6 +1645,8 @@ impl NodeRepo {
     /// it.
     pub fn advance(&mut self, canonical: &OperationId) -> Result<OperationId, NodeError> {
         let realized = self.realize(canonical)?;
+        // Views made ahead inherit what this changes, in a colocated repository.
+        self.prepared = None;
         let superseded = self.check_mergeable(&realized)?;
         let _lock = if self.colocated {
             Some(FileLock::lock(

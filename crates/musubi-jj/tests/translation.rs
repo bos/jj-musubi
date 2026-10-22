@@ -3,6 +3,7 @@
 #![allow(clippy::unwrap_used)]
 
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::OperationId;
@@ -363,4 +364,82 @@ fn simple_backend_round_trips() {
     assert_eq!(show(&a), "one");
     assert_eq!(show(&b), "one");
     assert_eq!(a.jj(&["file", "show", "-r", "main", "dir/other"]), "two");
+}
+
+fn copy_dir(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let to = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &to);
+        } else {
+            std::fs::copy(entry.path(), to).unwrap();
+        }
+    }
+}
+
+/// Realizing an operation makes the views of those likely realized next ready, which must
+/// change nothing: a history with a merge, realized one operation at a time with the rest
+/// as the hint, as the sync adapter does, and published partway, which changes the
+/// per-machine fields the rest inherit, gives the same operations as without the hint.
+#[test]
+fn realizing_ahead_changes_nothing() {
+    let env = TestEnv::new();
+    let a = env.init_repo("alpha");
+    let b = env.init_repo("beta");
+    // Per-machine fields of B's own, for its realizations to inherit.
+    commit(&b, "b0", "b0");
+    b.jj(&["bookmark", "create", "beta", "-r", "@-"]);
+    for i in 0..4 {
+        commit(&a, &format!("one-{i}"), &format!("one {i}"));
+        a.jj(&["bookmark", "set", "main", "-r", "@-"]);
+    }
+    // Concurrent operations, which the next command merges.
+    let fork = a.jj(&["op", "log", "--no-graph", "-n1", "-T", "id"]);
+    a.jj(&["bookmark", "create", "side", "-r", "@-"]);
+    a.jj(&[
+        "--at-op",
+        fork.trim(),
+        "bookmark",
+        "create",
+        "other",
+        "-r",
+        "@-",
+    ]);
+    for i in 0..4 {
+        commit(&a, &format!("two-{i}"), &format!("two {i}"));
+        a.jj(&["bookmark", "set", "main", "-r", "@-"]);
+    }
+    let mut a_node = open(&a);
+    let head = single_canonical_head(&mut a_node);
+    let b_node = open(&b);
+    ship_objects(&a_node, &b_node, &head);
+    ship_operations(&a_node, &b_node, &head);
+    drop(b_node);
+    let copy = env.root().join("beta-copy");
+    copy_dir(b.path(), &copy);
+    let realize = |repo_path: &Path, hinted: bool| {
+        let mut node = NodeRepo::open(repo_path, &b.settings()).unwrap();
+        let ops = node
+            .canonical_store()
+            .ancestors_until(std::slice::from_ref(&head), |id| {
+                node.local_of(id).is_some()
+            })
+            .unwrap();
+        let mut locals = vec![];
+        for (i, op) in ops.iter().enumerate() {
+            let next = if hinted { &ops[i + 1..] } else { &[] };
+            locals.push(node.realize_pending(op, next).unwrap());
+            if i == 4 {
+                locals.push(node.advance(op).unwrap());
+            }
+        }
+        node.settle().unwrap();
+        locals
+    };
+    assert_eq!(
+        realize(&b.repo_path(), true),
+        realize(&copy.join(".jj/repo"), false)
+    );
 }

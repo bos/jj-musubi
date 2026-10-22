@@ -153,8 +153,10 @@ The per-machine fields therefore stay per-machine.
   reproduce another machine's metadata, so musubi writes these operations through jj-lib's
   `OpStore`, as `jj op integrate` does, and lets jj build the index lazily. The op store
   syncs each file it writes to disk, which takes milliseconds on a cloud disk, so a node
-  catching up writes its realizations in parallel. Nothing reads them, and no op head or
-  translation names them, until they are all written.
+  catching up writes its realizations in parallel. Making their views is most of the rest,
+  so it makes those of a run of operations, each the only parent of the next, in parallel
+  too. Nothing reads the realizations, and no op head or translation names them, until they
+  are all written.
   - An operation that will not be an op head inherits its parent realization's per-machine
     fields, merging them three-way with jj's `merge_ref_targets` for a merge. That makes it
     deterministic, so re-realizing after a crash rewrites identical files.

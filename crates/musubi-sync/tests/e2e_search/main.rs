@@ -50,6 +50,7 @@ use std::io::Write as _;
 use std::rc::Rc;
 
 use hegel::HealthCheck;
+use hegel::NondeterminismStrictness;
 use hegel::Phase;
 use hegel::Settings;
 use hegel::TestCase;
@@ -92,9 +93,14 @@ impl Config {
     }
 
     fn settings(self) -> Settings {
+        // Cases replay exactly, so a failure that doesn't replay fails the run at once,
+        // saying where the replay went another way. By default Hegel would replay it in
+        // batches, for minutes, pass the run if that didn't confirm it, and could keep it to
+        // replay in batches again in later runs.
         let settings = Settings::new()
             .test_cases(self.cases)
-            .suppress_health_check([HealthCheck::TooSlow, HealthCheck::TestCasesTooLarge]);
+            .suppress_health_check([HealthCheck::TooSlow, HealthCheck::TestCasesTooLarge])
+            .nondeterminism_strictness(NondeterminismStrictness::Error);
         let shrink = std::env::var("MUSUBI_SEARCH_SHRINK").ok();
         let settings = match self.shard {
             // The smoke test is the same on every run, and by default reports its first

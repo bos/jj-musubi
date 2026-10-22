@@ -182,7 +182,10 @@ As in jj-stack:
   change ids of their own, and rules choose among commits in change-id order, since commit
   ids and `jj log`'s order depend on when jj made the commits.
   `MUSUBI_SEARCH_FINGERPRINTS` writes each case's trace without the ids that differ between
-  runs, for checking that two runs of a case did the same;
+  runs, for checking that two runs of a case did the same. A failure that doesn't replay
+  exactly fails the run at once, saying where the replay went another way. By default
+  Hegel would replay it in batches, for minutes, pass the run if that didn't confirm it,
+  and could keep it to replay in batches again in later runs;
 - the search run ends by listing rules that never fired. An unreached rule is a search
   problem: give it a richer starting state or fix its precondition.
 

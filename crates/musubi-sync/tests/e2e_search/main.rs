@@ -177,7 +177,9 @@ fn search(tc: TestCase, config: Config) {
             .append(true)
             .open(path)
             .unwrap();
-        writeln!(file, "case {setup:?}\n{}", world.borrow().fingerprint()).unwrap();
+        // In one write, so that shards running at once don't interleave their records.
+        let record = format!("case {setup:?}\n{}\n", world.borrow().fingerprint());
+        file.write_all(record.as_bytes()).unwrap();
     }
     if std::env::var_os("MUSUBI_SEARCH_TIMING").is_some() {
         eprintln!(

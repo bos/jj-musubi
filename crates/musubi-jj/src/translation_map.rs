@@ -3,7 +3,8 @@
 //! Everything here can be recomputed: canonicalizing an original local operation is
 //! deterministic, and every realization names its canonical operation in an attribute. The
 //! file only saves re-walking the operation log on startup, so it is append-only, written
-//! without fsync, and a torn last line is ignored.
+//! without fsync, and a line that a power cut tore, or that the next line was appended to,
+//! is ignored.
 
 use std::collections::HashMap;
 use std::fs;
@@ -18,10 +19,19 @@ use std::path::Path;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::OperationId;
 
+/// The length of an operation id in hex, local or canonical: 64 bytes, as jj's simple op
+/// store, the only one musubi opens, makes them. jj takes hex of any even length for an id,
+/// so a torn line could otherwise name one.
+const ID_HEX_LEN: usize = 128;
+
 pub struct TranslationMap {
     file: File,
     to_canonical: HashMap<OperationId, OperationId>,
     to_local: HashMap<OperationId, OperationId>,
+    /// Whether the file's last line, torn, has no newline: the next line ends it first, so
+    /// that it isn't lost with it. A lost line wouldn't be canonicalized again, since
+    /// canonicalizing stops at operations it knows.
+    unended: bool,
 }
 
 impl TranslationMap {
@@ -33,18 +43,16 @@ impl TranslationMap {
             file: OpenOptions::new().create(true).append(true).open(path)?,
             to_canonical: HashMap::new(),
             to_local: HashMap::new(),
+            unended: false,
         };
-        for line in BufReader::new(File::open(path)?).lines() {
-            let line = line?;
-            let parsed = line.split_once(' ').and_then(|(local, canonical)| {
-                Some((
-                    OperationId::try_from_hex(local)?,
-                    OperationId::try_from_hex(canonical)?,
-                ))
-            });
-            if let Some((local, canonical)) = parsed {
+        let mut reader = BufReader::new(File::open(path)?);
+        let mut line = vec![];
+        while reader.read_until(b'\n', &mut line)? > 0 {
+            map.unended = line.pop_if(|b| *b == b'\n').is_none();
+            if let Some((local, canonical)) = parse(&line) {
                 map.remember(local, canonical);
             }
+            line.clear();
         }
         Ok(map)
     }
@@ -65,7 +73,7 @@ impl TranslationMap {
         {
             return Ok(());
         }
-        writeln!(self.file, "{} {}", local.hex(), canonical.hex())?;
+        self.write(&local, &canonical)?;
         self.remember(local, canonical);
         Ok(())
     }
@@ -79,7 +87,13 @@ impl TranslationMap {
 
     /// Adds a translation [`Self::insert_unwritten`] recorded to the file.
     pub fn write(&mut self, local: &OperationId, canonical: &OperationId) -> io::Result<()> {
-        writeln!(self.file, "{} {}", local.hex(), canonical.hex())
+        // In one write, not writeln!'s several, so that two processes appending at once
+        // don't interleave their lines.
+        let start = if self.unended { "\n" } else { "" };
+        let line = format!("{start}{} {}\n", local.hex(), canonical.hex());
+        self.file.write_all(line.as_bytes())?;
+        self.unended = false;
+        Ok(())
     }
 
     /// Forgets a translation [`Self::insert_unwritten`] recorded, whose operation was never
@@ -96,5 +110,51 @@ impl TranslationMap {
     fn remember(&mut self, local: OperationId, canonical: OperationId) {
         self.to_canonical.insert(local.clone(), canonical.clone());
         self.to_local.insert(canonical, local);
+    }
+}
+
+/// A line's local and canonical ids, if it is whole.
+fn parse(line: &[u8]) -> Option<(OperationId, OperationId)> {
+    let (local, canonical) = std::str::from_utf8(line).ok()?.split_once(' ')?;
+    let id = |hex: &str| {
+        (hex.len() == ID_HEX_LEN)
+            .then(|| OperationId::try_from_hex(hex))
+            .flatten()
+    };
+    Some((id(local)?, id(canonical)?))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    fn id(byte: u8) -> OperationId {
+        OperationId::new(vec![byte; 64])
+    }
+
+    /// A line torn by a power cut names nothing, and the next line is not lost with it.
+    #[test]
+    fn a_torn_line_names_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("translation");
+        let [a, b, c, d, e, f] = [0xa, 0xb, 0xc, 0xd, 0xe, 0xf].map(id);
+        // Torn within the canonical id, at an even length, which jj would take for an id.
+        fs::write(
+            &path,
+            format!("{} {}\n{} {}", a.hex(), b.hex(), c.hex(), &d.hex()[..40]),
+        )
+        .unwrap();
+        let mut map = TranslationMap::open(&path).unwrap();
+        assert_eq!(map.local_of(&b), Some(&a));
+        assert_eq!(map.canonical_of(&c), None);
+        map.insert(c.clone(), d.clone()).unwrap();
+        map.insert(e.clone(), f.clone()).unwrap();
+        drop(map);
+        let map = TranslationMap::open(&path).unwrap();
+        assert_eq!(map.local_of(&b), Some(&a));
+        assert_eq!(map.local_of(&d), Some(&c));
+        assert_eq!(map.local_of(&f), Some(&e));
     }
 }

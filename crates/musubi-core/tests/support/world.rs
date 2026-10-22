@@ -464,6 +464,10 @@ impl World {
         self.act(json!({"kind": "crashHub"}));
     }
 
+    pub fn take_oracle(&mut self) -> Option<Oracle> {
+        self.oracle.take()
+    }
+
     pub fn has_oracle(&self) -> bool {
         self.oracle.is_some()
     }

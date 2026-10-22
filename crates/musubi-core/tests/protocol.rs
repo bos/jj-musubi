@@ -9,6 +9,7 @@
 
 mod support;
 
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -147,7 +148,8 @@ impl Machine {
     }
 }
 
-fn run(tc: TestCase, oracle: Option<Oracle>) {
+/// Runs a case, returning its oracle, if it has one, for the next case once this one passes.
+fn run(tc: TestCase, oracle: Option<Oracle>) -> Option<Oracle> {
     let nodes = tc.draw(gs::integers::<usize>().min_value(2).max_value(3));
     let world = Rc::new(RefCell::new(World::new(nodes, oracle)));
     hegel::stateful::machine(Machine {
@@ -172,6 +174,7 @@ fn run(tc: TestCase, oracle: Option<Oracle>) {
             .unwrap();
         std::io::Write::write_all(&mut file, format!("{}\n", kinds.join(" ")).as_bytes()).unwrap();
     }
+    world.take_oracle()
 }
 
 #[hegel::test(test_cases = 300)]
@@ -181,7 +184,11 @@ fn protocol_invariants(tc: TestCase) {
 
 #[hegel::test(test_cases = 150)]
 fn conformance(tc: TestCase) {
-    run(tc, Some(Oracle::spawn()));
+    // One oracle for each case after one that passed, reset by `World::new`: starting one
+    // took longer than most cases. One whose case failed goes, in whatever state it was.
+    thread_local!(static ORACLE: Cell<Option<Oracle>> = const { Cell::new(None) });
+    let oracle = ORACLE.take().unwrap_or_else(Oracle::spawn);
+    ORACLE.set(run(tc, Some(oracle)));
 }
 
 /// A hub may drop uploads it stored but never accepted (the model's `hubForget`), such as

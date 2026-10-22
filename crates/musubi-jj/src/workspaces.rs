@@ -34,7 +34,7 @@ impl Machine {
     /// The suffix comes from `rng`, jj's, which `debug.randomness-seed` makes repeatable, as
     /// it does jj's change ids: so a test that names two machines alike names them the same
     /// way every time it runs.
-    pub fn load_or_create(path: &Path, default_name: &str, rng: &JJRng) -> io::Result<Self> {
+    pub(crate) fn load_or_create(path: &Path, default_name: &str, rng: &JJRng) -> io::Result<Self> {
         match fs::read_to_string(path) {
             Ok(key) if !key.trim().is_empty() => {
                 return Ok(Self {

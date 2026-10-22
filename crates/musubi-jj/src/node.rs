@@ -369,21 +369,24 @@ impl NodeRepo {
             joins: BTreeMap::new(),
             settings: HashMap::new(),
             repo_config: None,
-            machine: Machine::load_or_create(
-                &musubi_dir.join("machine"),
-                settings.operation_hostname(),
-                &settings.get_rng(),
-            )
-            .map_err(|source| NodeError::Io {
-                path: musubi_dir.join("machine"),
-                source,
-            })?,
+            machine: load_machine(repo_path, settings.operation_hostname(), settings)?,
         };
         for (local, canonical, fingerprint) in node.read_joins()? {
             node.joins.insert(fingerprint, canonical.clone());
             node.insert_map(local, canonical)?;
         }
         Ok(node)
+    }
+
+    /// Names this machine `name` in the repository whose `.jj/repo` directory is
+    /// `repo_path`, before it is first opened, which would name it after the host. Returns the
+    /// machine as named, which, if it had a name already, keeps it.
+    pub fn name_machine(
+        repo_path: &Path,
+        name: &str,
+        settings: &UserSettings,
+    ) -> Result<Machine, NodeError> {
+        load_machine(repo_path, name, settings)
     }
 
     fn joins_path(&self) -> PathBuf {
@@ -2174,6 +2177,18 @@ fn config_err(path: &Path, err: impl std::fmt::Display) -> NodeError {
         path: path.to_owned(),
         message: err.to_string(),
     }
+}
+
+/// This machine's identity in the repository whose `.jj/repo` directory is `repo_path`,
+/// named `name` if it has none yet.
+fn load_machine(
+    repo_path: &Path,
+    name: &str,
+    settings: &UserSettings,
+) -> Result<Machine, NodeError> {
+    let path = repo_path.join("musubi/machine");
+    Machine::load_or_create(&path, name, &settings.get_rng())
+        .map_err(|source| NodeError::Io { path, source })
 }
 
 /// Runs `f`, turning a panic in jj-lib into an error with the panic's message. jj 0.46

@@ -1171,20 +1171,26 @@ impl NodeRepo {
     /// becoming the op head, under jj's import/export lock, like every other op head musubi
     /// publishes. The exported copy has the same canonical form as the merge.
     pub fn merge_heads(&self) -> Result<OperationId, NodeError> {
+        Ok(self.merged_repo()?.op_id().clone())
+    }
+
+    /// The repository at the single head [`Self::merge_heads`] leaves.
+    fn merged_repo(&self) -> Result<Arc<ReadonlyRepo>, NodeError> {
         let colocation = match self.colocation() {
             Some(colocation) if self.local_heads()?.len() > 1 => colocation,
-            _ => return Ok(self.load_at_head()?.op_id().clone()),
+            _ => return self.load_at_head(),
         };
         let _lock = colocation.lock()?;
-        let merged = self.load_at_head()?.op_id().clone();
-        let exported = colocation.export_refs(&self.loader, &merged)?;
-        if exported != merged {
-            self.loader
-                .op_heads_store()
-                .update_op_heads(std::slice::from_ref(&merged), &exported)
-                .block_on()?;
+        let merged = self.load_at_head()?;
+        let exported = colocation.export_refs(&self.loader, merged.op_id())?;
+        if exported == *merged.op_id() {
+            return Ok(merged);
         }
-        Ok(exported)
+        self.loader
+            .op_heads_store()
+            .update_op_heads(std::slice::from_ref(merged.op_id()), &exported)
+            .block_on()?;
+        self.repo_at(&exported)
     }
 
     /// The repository as of its local operation `id`.
@@ -1959,14 +1965,13 @@ impl NodeRepo {
     /// changes to them never count (see `canonical_view`), and the canonical view still has
     /// them. Returns whether it wrote an operation, which then needs uploading.
     pub fn show_other_workspaces(&mut self) -> Result<bool, NodeError> {
-        let head = self.merge_heads()?;
-        let canonical = self.canonicalize(&head)?;
+        let repo = self.merged_repo()?;
+        let canonical = self.canonicalize(repo.op_id())?;
         if canonical == *self.canonical.root_operation_id() {
             return Ok(false);
         }
         let view = self.canonical.read_operation_view(&canonical)?;
         let names = self.local_names(&view);
-        let repo = self.repo_at(&head)?;
         let hive_heads: Vec<CommitId> = view.head_ids.iter().cloned().collect();
         let mut tx = repo.start_transaction();
         let mut shown = false;
@@ -2008,17 +2013,16 @@ impl NodeRepo {
     /// as an abandon on a machine that had forgotten this machine's workspace. Returns the
     /// workspaces it moved.
     pub fn replace_abandoned_working_copies(&mut self) -> Result<Vec<String>, NodeError> {
-        // Merge through `merge_heads`, which exports to `.git`: a bare `load_at_head` would
+        // Merge through `merged_repo`, which exports to `.git`: a bare `load_at_head` would
         // merge without exporting the bookmarks the merge moves.
-        let head = self.merge_heads()?;
-        let canonical = self.canonicalize(&head)?;
+        let repo = self.merged_repo()?;
+        let canonical = self.canonicalize(repo.op_id())?;
         let own: BTreeSet<String> = self
             .workspaces_of(&canonical)?
             .into_keys()
             .filter(|key| self.is_own_key(key))
             .map(|key| key_workspace(&key).to_owned())
             .collect();
-        let repo = self.repo_at(&head)?;
         let mut abandoned = vec![];
         for (name, wc) in repo.view().wc_commit_ids() {
             // Other machines replace their own.

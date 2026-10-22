@@ -185,11 +185,7 @@ impl HubDir {
 
     /// Creates an empty hive.
     pub fn create(&mut self, name: &str, backend: Backend) -> anyhow::Result<String> {
-        names::check_name(name).map_err(anyhow::Error::msg)?;
-        anyhow::ensure!(
-            !self.name_taken(name),
-            "there is already a hive named {name}"
-        );
+        self.check_new_name(name).map_err(anyhow::Error::msg)?;
         let id = Uuid::new_v4().to_string();
         let dir = self.dir.join(&id);
         HubStore::init(&dir, backend)?;
@@ -214,6 +210,15 @@ impl HubDir {
 
     fn name_taken(&self, name: &str) -> bool {
         self.hives.values().any(|hive| hive.meta.name == name)
+    }
+
+    /// Whether `name` will do for a hive about to be given it: valid, and no hive's yet.
+    fn check_new_name(&self, name: &str) -> Result<(), Refusal> {
+        names::check_name(name)?;
+        if self.name_taken(name) {
+            return Err(format!("there is already a hive named {name}"));
+        }
+        Ok(())
     }
 
     /// The id of the hive `name` names: its name, its id, or a prefix of exactly one
@@ -265,20 +270,16 @@ impl HubDir {
     }
 
     pub fn rename(&mut self, name: &str, to: &str) -> Result<HiveInfo, Refusal> {
-        names::check_name(to)?;
         let id = self.resolve(name)?;
-        if self.hives[&id].meta.name == to {
-            return self.info(&id).ok_or_else(|| "vanished".to_owned());
+        if self.hives[&id].meta.name != to {
+            self.check_new_name(to)?;
+            let hive = self.hives.get_mut(&id).expect("resolved");
+            let mut meta = hive.meta.clone();
+            meta.name = to.to_owned();
+            write_meta(&hive.dir, &meta).map_err(refusal)?;
+            hive.meta = meta;
         }
-        if self.name_taken(to) {
-            return Err(format!("there is already a hive named {to}"));
-        }
-        let hive = self.hives.get_mut(&id).expect("resolved");
-        let mut meta = hive.meta.clone();
-        meta.name = to.to_owned();
-        write_meta(&hive.dir, &meta).map_err(refusal)?;
-        hive.meta = meta;
-        self.info(&id).ok_or_else(|| "vanished".to_owned())
+        Ok(self.info(&id).expect("resolved"))
     }
 
     /// Takes a hive out of the hub, keeping its store under `removed/`. The caller has
@@ -335,10 +336,7 @@ impl HubDir {
             .map(|name| self.resolve(name))
             .transpose()?;
         if let Some(name) = &request.new {
-            names::check_name(name)?;
-            if self.name_taken(name) {
-                return Err(format!("there is already a hive named {name}"));
-            }
+            self.check_new_name(name)?;
         }
         let now = Instant::now();
         for hive in self.hives.values_mut() {

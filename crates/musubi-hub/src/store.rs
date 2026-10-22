@@ -55,7 +55,7 @@ pub enum StoreError {
 const GIT: &str = "git";
 
 /// The object store of the hub store in `dir`, without opening the rest of it.
-pub fn object_store(backend: Backend, dir: &Path) -> Box<dyn ObjectStore + 'static> {
+pub(crate) fn object_store(backend: Backend, dir: &Path) -> Box<dyn ObjectStore + 'static> {
     match backend {
         Backend::Git => Box::new(GitStore::for_hub(
             Path::new(GIT),
@@ -203,7 +203,7 @@ impl HubStore {
     }
 
     /// The sequence number at which `head` was the accepted head, if it ever was.
-    pub fn head_seq(&self, head: &OperationId) -> Option<u64> {
+    fn head_seq(&self, head: &OperationId) -> Option<u64> {
         self.history
             .iter()
             .rposition(|h| h == head)

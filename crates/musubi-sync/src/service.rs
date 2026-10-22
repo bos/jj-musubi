@@ -314,8 +314,3 @@ fn log_reply(reply: &Reply<OpId, Attachment>) {
         }
     }
 }
-
-/// Re-exported for tests that drive the service directly.
-pub fn blob_of(bytes: &[u8]) -> BlobId {
-    BlobId::of_bytes(bytes)
-}

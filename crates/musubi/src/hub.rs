@@ -242,7 +242,7 @@ pub struct Connection {
 
 impl Connection {
     /// Why the hub can't be reached now, as far as ssh says.
-    pub fn problem(&self) -> Option<String> {
+    fn problem(&self) -> Option<String> {
         self.health.as_ref().and_then(ssh::Health::problem)
     }
 

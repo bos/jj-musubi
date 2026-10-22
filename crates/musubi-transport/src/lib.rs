@@ -126,7 +126,7 @@ pub trait Transport: Send + Sync {
 }
 
 /// Whether `subject` matches the subscription `pattern`, wildcards and all.
-pub fn subject_matches(pattern: &str, subject: &str) -> bool {
+pub(crate) fn subject_matches(pattern: &str, subject: &str) -> bool {
     let mut pattern = pattern.split('.');
     let mut subject = subject.split('.');
     loop {

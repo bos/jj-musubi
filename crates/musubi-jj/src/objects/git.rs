@@ -177,7 +177,7 @@ impl GitObjects {
     }
 
     /// Commits reachable from `wants` but not from `haves`.
-    pub fn commits_between(
+    fn commits_between(
         &self,
         wants: &[CommitId],
         haves: &[CommitId],
@@ -530,17 +530,6 @@ impl GitObjects {
         }
     }
 
-    /// Protects commits from `git gc` with refs under `namespace`, the way jj's
-    /// `refs/jj/keep/` refs do.
-    pub fn keep(&self, namespace: &str, ids: &[CommitId]) -> Result<(), ObjectError> {
-        let mut input = String::new();
-        for id in ids {
-            writeln!(input, "update {namespace}{0} {0}", id.hex()).expect("writing to a String");
-        }
-        self.run(&["update-ref", "--stdin"], Some(input.into_bytes()))?;
-        Ok(())
-    }
-
     fn command(&self, args: &[&str]) -> Command {
         self.repo.command(args)
     }
@@ -605,7 +594,7 @@ fn revs_input(wants: &[CommitId], haves: &[CommitId]) -> Vec<u8> {
 
 /// A backend extras entry that a receiver could not derive from the commit object alone.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ExtrasEntry {
+pub(crate) struct ExtrasEntry {
     pub commit: CommitId,
     /// The encoded `git_store.Commit` from the sender's extras table.
     pub value: Vec<u8>,
@@ -614,7 +603,7 @@ pub struct ExtrasEntry {
 /// Returns the extras entries for `commits` that differ from what jj would derive from the
 /// commit objects: change ids of commits without a `change-id` header that were not derived
 /// from the commit id, and conflicts written before the `jj:trees` header existed.
-pub fn extras_to_ship(
+pub(crate) fn extras_to_ship(
     store_path: &Path,
     git_repo: &gix::Repository,
     commits: &[CommitId],
@@ -650,7 +639,7 @@ pub fn extras_to_ship(
 
 /// Writes received extras entries that are not already present. Call this before jj first
 /// reads the commits, because jj derives and saves its own entries on first read.
-pub fn import_extras(
+pub(crate) fn import_extras(
     store_path: &Path,
     git_repo: &gix::Repository,
     entries: &[ExtrasEntry],
@@ -712,10 +701,6 @@ impl<'a> GitStore<'a> {
             git: GitObjects::new(executable, git_dir),
             extras: Extras::Files(extras_dir.to_owned()),
         }
-    }
-
-    pub fn git(&self) -> &GitObjects {
-        &self.git
     }
 
     fn extras_for(&self, commits: &[CommitId]) -> Result<Vec<ExtrasEntry>, ObjectError> {

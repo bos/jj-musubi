@@ -94,7 +94,6 @@ impl WireAttachment {
 
 pub type WireRequest = Request<WireId, WireAttachment>;
 pub type WireReply = Reply<WireId, WireAttachment>;
-pub type WireOpEntry = OpEntry<WireId>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HubRequest {

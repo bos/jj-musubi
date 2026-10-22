@@ -780,7 +780,7 @@ impl NodeRepo {
     /// The hive's settings as of a canonical operation: what its nearest recording
     /// ancestor recorded, combined where concurrent operations met, the later write to each
     /// setting winning, or `None` if no ancestor recorded any.
-    pub fn settings_at(&mut self, op: &OperationId) -> Result<Option<HiveSettings>, NodeError> {
+    fn settings_at(&mut self, op: &OperationId) -> Result<Option<HiveSettings>, NodeError> {
         let root = self.canonical.root_operation_id().clone();
         let mut stack = vec![op.clone()];
         while let Some(id) = stack.last().cloned() {
@@ -1113,10 +1113,6 @@ impl NodeRepo {
         Ok(())
     }
 
-    pub fn is_colocated(&self) -> bool {
-        self.colocation().is_some()
-    }
-
     /// How the repository shares its git repository with a working copy, if it does.
     fn colocation(&self) -> Option<&Colocation> {
         self.git.as_ref()?.colocation()
@@ -1219,16 +1215,6 @@ impl NodeRepo {
             return Some(self.root_op_id().clone());
         }
         self.map.local_of(canonical).cloned()
-    }
-
-    /// Records that `local` canonicalizes to `canonical` without deriving it, as `musubi
-    /// join` does for the operation it replicates in place of the local history.
-    pub fn record_translation(
-        &mut self,
-        local: OperationId,
-        canonical: OperationId,
-    ) -> Result<(), NodeError> {
-        self.insert_map(local, canonical)
     }
 
     /// Returns the canonical id of a local operation, canonicalizing it and any

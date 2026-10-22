@@ -28,13 +28,13 @@ use crate::names::RemoteUrl;
 use crate::store;
 use crate::store::HubStore;
 
-pub const HIVE_FILE: &str = "hive.toml";
+const HIVE_FILE: &str = "hive.toml";
 
 /// A hive's `hive.toml`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HiveMeta {
-    pub name: String,
-    pub backend: Backend,
+struct HiveMeta {
+    name: String,
+    backend: Backend,
 }
 
 /// What a joining repository tells the hub.
@@ -165,7 +165,8 @@ impl HubDir {
     }
 
     /// How long a join counts for matching before its first push, for tests.
-    pub fn with_pending_lifetime(mut self, lifetime: Duration) -> Self {
+    #[cfg(test)]
+    fn with_pending_lifetime(mut self, lifetime: Duration) -> Self {
         self.pending_lifetime = lifetime;
         self
     }
@@ -319,11 +320,6 @@ impl HubDir {
             hive.index.save(&hive.dir)?;
         }
         Ok(())
-    }
-
-    /// The hive's current index, to update from its store.
-    pub fn index(&self, id: &str) -> Option<HiveIndex> {
-        self.hives.get(id).map(|hive| hive.index.clone())
     }
 
     /// Decides which hive a repository joins, or creates one if asked to. See

@@ -222,7 +222,8 @@ impl BundleWriter {
         Ok(())
     }
 
-    pub fn pack(&mut self, pack: &Path) -> Result<(), ObjectError> {
+    #[cfg(test)]
+    fn pack(&mut self, pack: &Path) -> Result<(), ObjectError> {
         let mut file = File::open(pack)?;
         self.pack_from(|out| {
             io::copy(&mut file, out)?;

@@ -94,7 +94,7 @@ impl RemoteUrl {
     /// The repository's name as its forge shows it: `owner/repo` on GitHub and its kind,
     /// the full group path on GitLab, `org/project/repo` on Azure DevOps, and otherwise the
     /// last two components of the path.
-    pub fn forge_name(&self) -> String {
+    fn forge_name(&self) -> String {
         let host = self.host.as_str();
         let parts: Vec<&str> = self.path.split('/').filter(|p| !p.is_empty()).collect();
         let joined = |parts: &[&str]| parts.join("/");

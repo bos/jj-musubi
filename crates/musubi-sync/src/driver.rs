@@ -39,10 +39,6 @@ impl NodeDriver {
         })
     }
 
-    pub fn adapter(&self) -> &NodeAdapter {
-        &self.adapter
-    }
-
     pub fn known(&self) -> &(u64, OpId) {
         self.core.known()
     }

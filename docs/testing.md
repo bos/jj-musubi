@@ -13,7 +13,7 @@ test belongs at the narrowest layer that can catch its bug.
 | Fault tests | `crates/musubi-sync/tests/faults.rs` | Malformed requests reaching the hub's decoders, and links that die or stall partway through a sync | ~10–20 s per test |
 | Generated end-to-end tests | `crates/musubi-sync/tests/e2e_search` | Everything interacting: real `jj` commands, real repositories, faults | Seconds per case; opt-in |
 
-Run the default suite with `cargo nextest run`, or everything with `just check`. It needs `jj` 0.46.0, `git`, and `nats-server`
+Run the default suite with `cargo nextest run`, or everything with `just check`. It needs `jj` 0.46.0 and `git`
 on `PATH`. Run the generated end-to-end search with `cargo nextest run --profile search`. Check
 the formal model with `lake build` in `formal/`.
 
@@ -56,13 +56,12 @@ hub lacks failing, and listing, renaming, removing, and an index rebuilt after a
 `musubi-hub`'s unit tests cover URL normalization, naming, and the matching rules case by
 case.
 
-`musubi/tests/cli.rs` runs the binary as a user would: `musubi hub` starting its own
-`nats-server`, `musubi create` starting a hive and `musubi join` matching it, `musubi
+`musubi/tests/cli.rs` runs the binary as a user would: `musubi hub`, `musubi create`
+starting a hive and `musubi join` matching it, over the hub's socket and over ssh, `musubi
 clone` by a prefix of the hive's name, `musubi list`, `leave`, and each machine's daemon,
 which the first `create` or `join` starts in the background, serving a repository added
 later without a restart. Each test machine has its own config directory, and so its own
-daemon and control socket; the tests stop the daemons, and kill the NATS server a killed
-hub leaves behind, when they finish.
+daemon and control socket; the tests stop the daemons when they finish.
 
 One CLI test installs a real login service, and so runs only with
 `MUSUBI_TEST_LOGIN_SERVICE=1`, which CI sets on its throwaway runners: never set it where
@@ -106,8 +105,8 @@ A third, `node_recovers_when_its_link_fails_partway`, fails the link the same wa
 repositories and the node's driver, retrying as the daemon does, while another machine
 syncs. Afterwards both machines see the same commits. It is slow, so it runs few cases.
 
-A connection that dies partway through a message never delivers part of it: NATS and the
-stream transport both frame each message with its length and drop an incomplete one. A killed connection reaches
+A connection that dies partway through a message never delivers part of it: the stream
+transport frames each message with its length and drops an incomplete one. A killed connection reaches
 musubi as a lost request or reply, which the link faults model. The truncated messages
 stand for a buggy or mismatched peer.
 
@@ -115,8 +114,7 @@ stand for a buggy or mismatched peer.
 
 Modeled on jj-stack's generated integration tests. A Hegel state machine drives two or three
 real colocated repositories, each served by a real musubi node, through an in-process hub
-over the in-memory transport. A smaller set of scenarios also runs across processes against
-`nats-server`.
+over the in-memory transport.
 
 Rules fall into separate groups, and are kept separate so that the inconsistent states
 between them get explored:

@@ -1,7 +1,7 @@
-//! An in-process network with fault injection, for tests.
+//! An in-process network: what a hub's service and the connections it serves meet on, and,
+//! with faults injected, what tests run nodes and hubs over.
 //!
-//! Subjects match exactly; there are no wildcards. Faults are drawn from a seeded generator,
-//! so a failing run can be replayed from its seed.
+//! Faults are drawn from a seeded generator, so a failing run can be replayed from its seed.
 
 use std::collections::HashMap;
 use std::sync::Arc;

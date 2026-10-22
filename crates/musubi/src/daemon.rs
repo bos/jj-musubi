@@ -468,16 +468,9 @@ async fn serve_async(
         };
         tracing::debug!("syncing after {trigger}");
         let started = std::time::Instant::now();
-        // A request in flight when the connection drops waits for its timeout: once the
-        // connection is back, start the sync again instead. A sync stopped partway is a
-        // crash the protocol recovers from.
+        // Reconnecting during the sync, which may miss announcements, calls for another.
         reconnections.seen();
-        let result = tokio::select! {
-            result = driver.sync() => result,
-            () = reconnections.next() => {
-                Err(anyhow::anyhow!("the connection to the hub dropped during the sync"))
-            }
-        };
+        let result = driver.sync().await;
         tracing::debug!("sync took {:?}", started.elapsed());
         let (seq, head) = driver.known();
         let synced = Synced {

@@ -1,6 +1,6 @@
 //! Nodes and a hub talking over real transports: the in-memory network (with a tiny payload
-//! limit, so every bundle is chunked and large messages go indirect, and with faults) and a
-//! real `nats-server`.
+//! limit, so every bundle is chunked and large messages go indirect, and with faults), and
+//! streams to a hub that relays them through it, as a hub's socket does.
 
 #![allow(clippy::unwrap_used)]
 
@@ -20,15 +20,17 @@ use musubi_sync::remote::RemoteHub;
 use musubi_sync::service::HubService;
 use musubi_sync::wire::Envelope;
 use musubi_sync::wire::HeadNotice;
-use musubi_testutil::NatsServer;
 use musubi_testutil::TestEnv;
 use musubi_testutil::TestRepo;
 use musubi_transport::Faults;
 use musubi_transport::MemoryNetwork;
-use musubi_transport::NatsTransport;
+use musubi_transport::StreamTransport;
 use musubi_transport::Subscription;
 use musubi_transport::Transport;
 use musubi_transport::TransportError;
+use musubi_transport::stream::Connector;
+use musubi_transport::stream::Reader;
+use musubi_transport::stream::Writer;
 
 const RPC: &str = "musubi.test.rpc";
 const HEAD: &str = "musubi.test.head";
@@ -157,19 +159,44 @@ async fn memory_transport_with_faults() {
         .await;
 }
 
+/// Connects to a hub in this process over an in-memory pipe, the hub's side of each
+/// connection relaying through `hub`.
+struct Pipe {
+    hub: Arc<dyn Transport>,
+}
+
+#[async_trait::async_trait]
+impl Connector for Pipe {
+    async fn connect(&self) -> std::io::Result<(Reader, Writer)> {
+        let (ours, theirs) = tokio::io::duplex(64 * 1024);
+        let (reader, writer) = tokio::io::split(theirs);
+        tokio::spawn(musubi_transport::stream::serve(
+            self.hub.clone(),
+            reader,
+            writer,
+        ));
+        let (reader, writer) = tokio::io::split(ours);
+        Ok((Box::new(reader), Box::new(writer)))
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
-async fn nats_with_head_notifications() {
+async fn streams_with_head_notifications() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let server = NatsServer::start(64 * 1024);
+            let network = MemoryNetwork::new(13, 64 * 1024);
+            let pipe = Arc::new(Pipe {
+                hub: Arc::new(network.connect()),
+            });
             let connect = || async {
-                Arc::new(NatsTransport::connect(&server.url()).await.unwrap()) as Arc<dyn Transport>
+                Arc::new(StreamTransport::connect(pipe.clone()).await.unwrap())
+                    as Arc<dyn Transport>
             };
             let env = TestEnv::new();
             let alpha = env.init_repo("alpha");
             let beta = env.init_repo("beta");
-            spawn_hub(&env, connect().await);
+            spawn_hub(&env, Arc::new(network.connect()));
             let beta_transport = connect().await;
             let mut notices = beta_transport.subscribe(HEAD).await.unwrap();
             let mut alpha_driver = driver(&alpha, connect().await, Duration::from_secs(10));

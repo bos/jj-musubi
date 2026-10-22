@@ -9,9 +9,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use musubi_testutil::NatsServer;
 use musubi_transport::MemoryNetwork;
-use musubi_transport::NatsTransport;
 use musubi_transport::StreamTransport;
 use musubi_transport::Transport;
 use musubi_transport::TransportError;
@@ -98,14 +96,6 @@ async fn check_contract(a: &dyn Transport, b: &dyn Transport) {
 async fn memory_transport_meets_contract() {
     let network = MemoryNetwork::new(1, LIMIT);
     check_contract(&network.connect(), &network.connect()).await;
-}
-
-#[tokio::test]
-async fn nats_transport_meets_contract() {
-    let server = NatsServer::start(LIMIT);
-    let a = NatsTransport::connect(&server.url()).await.unwrap();
-    let b = NatsTransport::connect(&server.url()).await.unwrap();
-    check_contract(&a, &b).await;
 }
 
 /// Connects to a hub in this process, whose side of each connection relays through the hub's

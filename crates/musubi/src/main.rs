@@ -50,7 +50,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Run a hub, which stores hives and orders their updates. Serves every hive in its
-    /// directory, and starts a NATS server for them unless given one.
+    /// directory, to other machines over ssh.
     #[command(args_conflicts_with_subcommands = true)]
     Hub {
         #[command(subcommand)]
@@ -59,23 +59,10 @@ enum Command {
         /// hub's].
         #[arg(short, long)]
         dir: Option<PathBuf>,
-        /// A NATS server to serve on, in place of starting one.
-        #[arg(long)]
-        nats: Option<String>,
-        /// The host name other machines reach this one by, for the commands it prints
+        /// The host name other machines ssh to this one by, for the commands it prints
         /// [default: this machine's host name]. Once given, the hub keeps it (in hub.toml).
         #[arg(long)]
         advertise: Option<String>,
-        /// The address the NATS server it starts listens on [default: 127.0.0.1, so that
-        /// other machines reach it over ssh]. 0.0.0.0 lets them connect to it directly,
-        /// which only a trusted network should. Once given, the hub keeps it (in hub.toml).
-        #[arg(long, conflicts_with = "nats")]
-        listen: Option<String>,
-        /// Have the NATS server it starts require a token. Machines reaching the hub over
-        /// ssh never need it; the URLs it prints for others carry it. Once chosen, the hub
-        /// keeps it (in hub.toml).
-        #[arg(long, conflicts_with = "nats")]
-        token: bool,
     },
     /// Start a hive on the hub from the repository in the current directory, for other
     /// copies of it to join.
@@ -136,7 +123,7 @@ struct Member {
     #[arg(long)]
     full_history: bool,
     /// The hub, as `musubi hub` prints it: the name this machine ssh-es to the hub's machine
-    /// by, or a NATS URL [default: the one first joined].
+    /// by, or on that machine, the hub's directory [default: the one first joined].
     #[arg(long)]
     hub: Option<String>,
 }
@@ -211,20 +198,14 @@ fn log_filter(cli: &Cli) -> anyhow::Result<tracing_subscriber::EnvFilter> {
     if daemon || hub {
         return parse_filter("info");
     }
-    // Commands say why a hub is out of reach in their error; the NATS client and the ssh
-    // tunnel would say it again at every retry.
-    parse_filter("warn,async_nats=off,musubi::ssh=off")
+    // Commands say why a hub is out of reach in their error; the ssh link would say it
+    // again at every retry.
+    parse_filter("warn,musubi::ssh=off")
 }
 
-/// Parses a filter in `RUST_LOG`'s syntax, quieting async_nats, which announces every
-/// connection at info, unless the filter names it.
+/// Parses a filter in `RUST_LOG`'s syntax.
 fn parse_filter(filter: &str) -> anyhow::Result<tracing_subscriber::EnvFilter> {
-    let quieted = if filter.contains("async_nats") {
-        filter.to_owned()
-    } else {
-        format!("{filter},async_nats=warn")
-    };
-    Ok(tracing_subscriber::EnvFilter::try_new(quieted)?)
+    Ok(tracing_subscriber::EnvFilter::try_new(filter)?)
 }
 
 fn main() -> anyhow::Result<()> {
@@ -239,17 +220,8 @@ fn main() -> anyhow::Result<()> {
         Command::Hub {
             action: None,
             dir,
-            nats,
             advertise,
-            listen,
-            token,
-        } => hub::serve(hub::ServeArgs {
-            dir,
-            nats,
-            advertise,
-            listen,
-            token,
-        }),
+        } => hub::serve(hub::ServeArgs { dir, advertise }),
         Command::Hub {
             action: Some(HubAction::Connect { dir }),
             ..
@@ -450,7 +422,7 @@ fn join(start: &Path, choice: Choice, member: &Member, socket: &Socket) -> anyho
 
 /// Asks `hub`, over ssh first making sure this machine's key works there.
 async fn ask_preparing(hub: &str, request: HubWideRequest) -> anyhow::Result<HubWideReply> {
-    if !hub::is_nats_url(hub) {
+    if !hub::is_local(hub) {
         ssh::prepare(hub).await?;
     }
     hub::ask(hub, request).await
@@ -505,8 +477,7 @@ fn become_node(
     })?;
     if saved {
         println!(
-            "Saved {} as this machine's default hub ({}).",
-            hub::without_credentials(hub),
+            "Saved {hub} as this machine's default hub ({}).",
             UserConfig::path()?.display()
         );
     }
@@ -731,10 +702,9 @@ fn list(start: &Path, socket: anyhow::Result<Socket>) -> anyhow::Result<()> {
     }
     for hub in &hubs {
         let here: Vec<&Copy> = copies.iter().filter(|copy| &copy.hive.hub == hub).collect();
-        let shown = hub::without_credentials(hub);
         match block_on(list_hub(hub)) {
             Ok(hives) => {
-                println!("Hub {shown}:");
+                println!("Hub {hub}:");
                 if hives.is_empty() {
                     println!("  no hives yet");
                 }
@@ -758,7 +728,7 @@ fn list(start: &Path, socket: anyhow::Result<Socket>) -> anyhow::Result<()> {
                 }
             }
             Err(err) => {
-                println!("Hub {shown}: {err:#}. This machine's copies:");
+                println!("Hub {hub}: {err:#}. This machine's copies:");
                 for copy in &here {
                     println!("  {}", copy.hive.display_name());
                     print_copy(copy);
@@ -789,7 +759,7 @@ fn list(start: &Path, socket: anyhow::Result<Socket>) -> anyhow::Result<()> {
 
 async fn list_hub(hub: &str) -> anyhow::Result<Vec<HiveInfo>> {
     // Over ssh, through a ProxyCommand, connecting takes a while.
-    let limit = Duration::from_secs(if hub::is_nats_url(hub) { 3 } else { 15 });
+    let limit = Duration::from_secs(if hub::is_local(hub) { 3 } else { 15 });
     let connection = hub::connect(hub, limit).await?;
     match hub::ask_over(&connection, hub, HubWideRequest::List).await? {
         HubWideReply::Hives(hives) => Ok(hives),
@@ -823,7 +793,7 @@ fn print_details(located: &Located, hive: &HiveConfig) -> anyhow::Result<()> {
     println!();
     println!("This repository:");
     println!("  Hive:      {} ({})", hive.display_name(), hive.hive);
-    println!("  Hub:       {}", hub::without_credentials(&hive.hub));
+    println!("  Hub:       {}", hive.hub);
     println!("  Machine:   {}", hive.node);
     let mut node = located.open()?;
     for (machine, workspace, commit) in node.machine_workspaces()? {

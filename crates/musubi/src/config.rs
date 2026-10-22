@@ -26,9 +26,10 @@ pub struct HiveConfig {
     /// reach.
     #[serde(default)]
     pub name: Option<String>,
-    /// The hub: a NATS URL, or an ssh destination (see [`crate::ssh`]).
+    /// The hub: an ssh destination (see [`crate::ssh`]), or on the hub's machine, its
+    /// directory.
     pub hub: String,
-    /// Prefix of the NATS subjects for this hive.
+    /// Prefix of the subjects of this hive's requests and announcements.
     #[serde(default = "default_subject_prefix")]
     pub subject_prefix: String,
     /// This node's name, used in status output.
@@ -108,10 +109,9 @@ impl DaemonSettings {
     }
 }
 
-/// Writes `path` so that only its owner can read it, since it may hold a hub's token, and
-/// so that a crash leaves either the old contents or the new ones, durably. Windows can't
-/// open a directory to sync it, so there the rename is as durable as the filesystem makes
-/// it.
+/// Writes `path` so that only its owner can read it, and so that a crash leaves either the
+/// old contents or the new ones, durably. Windows can't open a directory to sync it, so
+/// there the rename is as durable as the filesystem makes it.
 pub fn write_private(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
     use std::io::Write as _;
     let dir = path.parent().context("a file to write has no directory")?;

@@ -18,7 +18,6 @@ musubi-testutil = { path = "crates/musubi-testutil" }
 musubi-transport = { path = "crates/musubi-transport" }
 
 anyhow = "1"
-async-nats = { version = "=0.50.0", default-features = false, features = ["ring", "nuid"] }
 async-trait = "0.1.89"
 blake3 = "1"
 bytes = "1"

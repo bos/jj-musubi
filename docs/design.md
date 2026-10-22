@@ -267,10 +267,10 @@ pulls, merges, and pushes. That is the same path as any concurrent update.
 
 A hub is just a store. Every node holds every operation it has seen, so a new, empty hub fills
 up as soon as nodes connect: the first node fast-forwards it to its head, and the others
-fast-forward or merge as usual. A hub location is a NATS URL or an ssh destination, and a
-subject prefix. The old hub
-can publish a signed-by-config `hub-moved` advertisement carrying the new location and a
-higher epoch. Nodes then reconnect there and ignore lower-epoch hubs from then on.
+fast-forward or merge as usual. A hub location is an ssh destination, or on the hub's
+machine its directory, and a subject prefix. The old hub can publish a signed-by-config
+`hub-moved` advertisement carrying the new location and a higher epoch. Nodes then
+reconnect there and ignore lower-epoch hubs from then on.
 
 Two hubs running at once for the same hive (split brain) is the one case where duplicate
 merges can occur, if nodes on both sides reconnect to one hub at the same moment. Epochs make
@@ -327,8 +327,8 @@ commits and sends the store files the receiver lacks, in batches.
 
 ### Size limits and chunking
 
-NATS rejects messages larger than the server's `max_payload`, which defaults to 1 MiB. Control
-messages are small. Something bulky (packs, large views, batches of operations) travels
+The hub takes messages up to 1 MiB, and says so when a connection opens. Control messages
+are small. Something bulky (packs, large views, batches of operations) travels
 inline in the request or reply it belongs to when it fits in a quarter of that, and
 otherwise moves as a content-addressed blob in a resumable upload or download session. Each
 chunk carries its offset and fits under the negotiated limit, up to eight chunks are in
@@ -454,64 +454,53 @@ handling. The hub runs its own garbage collection.
 ## Transport
 
 The transport is a small trait. Request/response carries messages up to the negotiated size
-limit. Subscriptions carry hub notifications.
+limit. Subscriptions carry hub notifications. Hub requests go to `musubi.<hive>.rpc`, and
+notifications to `musubi.<hive>.head`. Requests about the hub as a whole (join, list,
+resolve a name, rename, remove) go to `musubi.hub.rpc`. The hub takes all of them on one
+subscription, `musubi.*.rpc`; each hive's requests go to a thread of its own, which opens
+the hive's store on its first request and answers one request at a time, which is what
+makes each push atomic, while different hives don't wait for each other. A request for a
+hive the hub doesn't have is an error: only a join creates hives. Every operation and
+object is verified against its content hash on receipt, so a misbehaving peer cannot inject
+data under a false id.
 
-- **NATS** is the first real transport. Hub requests go to `musubi.<hive>.rpc`, and
-  notifications to `musubi.<hive>.head`. Requests about the hub as a whole (join, list,
-  resolve a name, rename, remove) go to `musubi.hub.rpc`. The hub takes all of them on one
-  subscription, `musubi.*.rpc`; each hive's requests go to a thread of its own, which
-  opens the hive's store on its first request and answers one request at a time, which is
-  what makes each push atomic, while different hives don't wait for each other. A request
-  for a hive the hub doesn't have is an error: only a join creates hives. Core NATS is
-  enough: the hub is the durable store, so JetStream is not needed. NATS credentials
-  authenticate machines, carried in the URL (`nats://<token>@host:port`, or a user and
-  password), and TLS can protect them in transit. By default, though, machines reach a hub
-  over ssh (see [Reaching a hub over ssh](#reaching-a-hub-over-ssh)), and ssh authenticates
-  them. Every operation and object is verified
-  against its content hash on receipt, so a misbehaving peer cannot inject data under a
-  false id.
+- **In-memory**: an in-process network, which the hub's service and the connections it
+  serves meet on. Tests run nodes and hubs over one too, which can drop, delay, duplicate,
+  and reorder messages, and disconnect peers.
 - **Streams** carry the same subjects over a byte stream: the hub's local socket, and over
   ssh, the standard input and output of `musubi hub connect`. Each frame is its length,
   a kind, and its fields: `SUB`, `PUB` and `REQ` from the client, and `MSG` for its
   subscriptions, and `REPLY` or `FAIL` for its requests, from the hub, which relays each
-  connection through its own transport, every request as it comes. A frame the connection
-  ends partway through is never delivered. The client opens a new connection whenever one
-  ends, subscribing again to what it had; requests in flight on the old one fail at once,
-  and those made in between wait for the new one, up to their timeout.
+  connection through its own in-memory network, every request as it comes. A frame the
+  connection ends partway through is never delivered. The client opens a new connection
+  whenever one ends, subscribing again to what it had; requests in flight on the old one
+  fail at once, and those made in between wait for the new one, up to their timeout.
 
 ### Running a hub
 
 A hub is meant for one person's machines, or a team that trusts each other: anyone who can
-reach it, or who has its token if it has one, can read and write every hive on it.
-`musubi hub` serves a directory holding one subdirectory per hive, named by the hive's id,
-each with the hive's store (`canonical/`, `backend`, `git/` and `extras/` or `simple/`,
-`heads`, `blobs/`, `tmp/`), its `hive.toml` (name and backend), and its index. Removed hives move to `removed/`. Without `--dir` the
+reach it can read and write every hive on it. `musubi hub` serves a directory holding one
+subdirectory per hive, named by the hive's id, each with the hive's store (`canonical/`,
+`backend`, `git/` and `extras/` or `simple/`, `heads`, `blobs/`, `tmp/`), its `hive.toml`
+(name and backend), and its index. Removed hives move to `removed/`. Without `--dir` the
 hub serves `./musubi-hub`, or the current directory if it is a hub's, and takes a lock in
 the user's state directory, so that a second hub started the same way says where the first
 one is instead of starting; `--dir` runs more hubs on purpose.
 
-Without `--nats`, the hub runs `nats-server` itself, on a port chosen on the first run and
-kept in the hub directory's `hub.toml` so the URL never changes, listening only on the
-machine's loopback, unless `--listen` gave it another address, which it keeps there too. With `--token` the server requires a random token, also kept there (delete it
-from `hub.toml` to turn it off again), which the hub gives the server in a config file only
-its owner can read, `nats.conf`, rather than on its command line. It prints the commands
-other machines run, with this machine's host name, or the name `--advertise` gave it, which
-it keeps in `hub.toml` too: a machine doesn't always know a name others can reach it by.
-Listening on loopback, that name is an ssh destination; otherwise, the host of a NATS URL.
-It also saves its own URL as the machine's default hub, unless the machine has one, so that
-commands on the hub's machine need no `--hub`. A hub that was killed leaves its NATS server running; the next one finds it on
-the port and uses it. The hub logs what it does at info, but not the NATS client's notices
-of each connection.
-
-The hub also listens on a local socket that only its owner can reach, beside the daemon's
-control socket (`hub-<hash of its directory>.sock`, or a named pipe on Windows), and records
-where in `hub.toml`, which is how `musubi hub connect` finds it.
+The hub listens on a local socket that only its owner can reach, beside the daemon's
+control socket (`hub-<hash of its directory>.sock`, or a named pipe on Windows), and
+records where in the hub directory's `hub.toml`, which is how `musubi hub connect`, and
+commands on its machine, find it. It prints the commands other machines run, with this
+machine's host name, or the name `--advertise` gave it, which it keeps in `hub.toml` too: a
+machine doesn't always know a name others can reach it by. It also saves its directory as
+the machine's default hub, unless the machine has one, so that commands on the hub's
+machine need no `--hub`.
 
 ### Reaching a hub over ssh
 
 Often ssh is the only way one machine can reach another, as when a laptop reaches a devbox
 through a zero-trust tunnel, and the protocol trusts whoever can reach the hub, so it can't
-simply be exposed. A `--hub` that isn't a URL is an ssh destination instead,
+simply be exposed. A `--hub` that isn't an absolute path is an ssh destination,
 passed to the user's own `ssh` (or `$MUSUBI_SSH`), so `~/.ssh/config` applies: aliases,
 `ProxyCommand`, and the rest.
 
@@ -530,16 +519,13 @@ passed to the user's own `ssh` (or `$MUSUBI_SSH`), so `~/.ssh/config` applies: a
   stops while the machine sleeps and the wall clock doesn't, so a jump between them ends
   every connection at once, and the transport connects again within seconds of waking.
 - Once the transport reconnects, over ssh or not, the daemon syncs at once: the hub's
-  announcements while it was away are lost. If it was in the middle of a sync, it starts
-  that again, since over NATS, a request in flight when the connection dropped would
-  otherwise wait out its timeout.
+  announcements while it was away are lost. A request in flight when the connection
+  dropped fails at once, so a sync it was part of starts again.
 - ssh doesn't compress (`Compression=no`): musubi already compresses what it sends.
 - A failing ssh backs off, up to a minute, and the transport's attempts to connect
   meanwhile fail at once: otherwise they would run ssh, and perhaps a tunnel's login page in
   a browser, every few seconds. What ssh said, or that `musubi` isn't on the `PATH` there
   (exit status 127), becomes part of the error `musubi list` shows.
-- **In-memory** transport for tests. It can drop, delay, duplicate, and reorder messages, and
-  disconnect peers.
 
 The hub logic and the node sync logic are sans-IO state machines. They consume events and
 produce effects, which keeps them deterministic under test, and they correspond directly to
@@ -626,8 +612,9 @@ across incompatible ones. musubi is pinned to jj-lib 0.46.0.
   repositories themselves. The default test run covers fixed scenarios. The generated search
   is a separate, sharded, opt-in run, with one example database per shard, and reports which
   rules it never reached.
-- **NATS integration tests** run the same scenarios across processes against a real
-  `nats-server`.
+- **Transport tests** hold the in-memory and stream transports to the same contract, and run
+  nodes and a hub over streams. The CLI tests run hubs and daemons as processes of their
+  own, over local sockets and a stand-in for ssh.
 
 ## Milestones
 
@@ -635,10 +622,10 @@ across incompatible ones. musubi is pinned to jj-lib 0.46.0.
 2. jj integration: canonical op store, format guard, translation of per-machine fields,
    op-heads watching, realization under the colocated lock.
 3. Objects: git packs, keep refs, and extras; simple-backend store files.
-4. Hub storage, NATS transport, daemon and CLI (`hub`, `join`, `clone`, `sync`, `list`,
-   `leave`, `debug op-id`); hubs serving many hives, matching joining repositories to them,
-   and a daemon controlled over a local socket.
-5. Generated end-to-end tests and multi-process NATS tests.
+4. Hub storage, a transport between machines, daemon and CLI (`hub`, `join`, `clone`,
+   `sync`, `list`, `leave`, `debug op-id`); hubs serving many hives, matching joining
+   repositories to them, and a daemon controlled over a local socket.
+5. Generated end-to-end tests, and tests across processes.
 6. Supersede records for `jj op abandon`, hub garbage collection.
 7. Starting the daemon at login, as a launchd agent, systemd user unit, or Windows `Run`
    entry.

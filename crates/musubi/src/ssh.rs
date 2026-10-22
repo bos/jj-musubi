@@ -1,4 +1,4 @@
-//! Reaching a hub over ssh, for a hub that listens only on its own machine.
+//! Reaching a hub on another machine over ssh: a hub listens only on its own.
 //!
 //! The machine gets a key of its own (`hub_key` in the state directory), which joining
 //! adds to `~/.ssh/authorized_keys` on the hub's machine, allowed only to run

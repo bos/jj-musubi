@@ -14,13 +14,11 @@ use tokio::sync::mpsc;
 use tokio::sync::watch;
 
 mod memory;
-mod nats;
 pub mod stream;
 
 pub use memory::Faults;
 pub use memory::MemoryNetwork;
 pub use memory::MemoryTransport;
-pub use nats::NatsTransport;
 pub use stream::StreamTransport;
 
 #[derive(Debug, Error)]
@@ -112,8 +110,8 @@ pub trait Transport: Send + Sync {
 
     async fn publish(&self, subject: &str, payload: Bytes) -> Result<(), TransportError>;
 
-    /// Subscribes to `subject`, which may hold NATS wildcards: `*` matches one token, and a
-    /// final `>` one or more.
+    /// Subscribes to `subject`, which may hold wildcards: `*` matches one token, and a final
+    /// `>` one or more.
     async fn subscribe(&self, subject: &str) -> Result<Subscription, TransportError>;
 
     /// Publishes `payload` with a fresh reply subject and waits for the first reply.
@@ -125,7 +123,7 @@ pub trait Transport: Send + Sync {
     ) -> Result<Bytes, TransportError>;
 }
 
-/// Whether `subject` matches the subscription `pattern`, as NATS matches them.
+/// Whether `subject` matches the subscription `pattern`, wildcards and all.
 pub fn subject_matches(pattern: &str, subject: &str) -> bool {
     let mut pattern = pattern.split('.');
     let mut subject = subject.split('.');

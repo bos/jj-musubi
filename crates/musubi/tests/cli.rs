@@ -1,6 +1,6 @@
-//! The `musubi` binary end to end: a hub process with the NATS server it starts, machines
-//! joining and matching hives, cloning, listing, and each machine's daemon, started by
-//! joining, picking up repositories and other machines' work by itself.
+//! The `musubi` binary end to end: a hub process, machines joining and matching hives,
+//! cloning, listing, and each machine's daemon, started by joining, picking up repositories
+//! and other machines' work by itself.
 
 #![allow(clippy::unwrap_used)]
 
@@ -121,11 +121,11 @@ fn musubi_fails(env: &TestEnv, logs: &Logs, repo: &TestRepo, args: &[&str]) -> S
     stderr
 }
 
-/// A `musubi hub` process serving `<root>/hub` with a NATS server of its own.
+/// A `musubi hub` process serving `<root>/hub`.
 struct Hub {
     child: Child,
     dir: PathBuf,
-    /// The URL of its NATS server, which machines here join with directly.
+    /// Its directory, which machines here join with.
     url: String,
     /// The first line it printed.
     greeting: String,
@@ -182,25 +182,13 @@ impl Hub {
                 hub.greeting = line.trim().to_owned();
             }
             if line.starts_with("To share a repository:") {
-                hub.url = hub.nats_url();
+                hub.url = hub.dir.display().to_string();
             }
         }
         hub
     }
 
-    /// Its NATS server's URL, from the settings it keeps.
-    fn nats_url(&self) -> String {
-        let text = fs::read_to_string(self.dir.join("hub.toml")).unwrap();
-        let settings: toml::Table = toml::from_str(&text).unwrap();
-        let nats = settings["nats"].as_table().unwrap();
-        let port = nats["port"].as_integer().unwrap();
-        match nats.get("token") {
-            Some(token) => format!("nats://{}@127.0.0.1:{port}", token.as_str().unwrap()),
-            None => format!("nats://127.0.0.1:{port}"),
-        }
-    }
-
-    /// Kills the hub the hard way, leaving its NATS server running.
+    /// Kills the hub the hard way.
     fn kill(&mut self) {
         self.child.kill().ok();
         self.child.wait().ok();
@@ -210,18 +198,6 @@ impl Hub {
 impl Drop for Hub {
     fn drop(&mut self) {
         self.kill();
-        // The NATS server outlives a killed hub.
-        if let Ok(pid) = fs::read_to_string(self.dir.join("nats.pid")) {
-            let pid = pid.trim();
-            if cfg!(windows) {
-                Command::new("taskkill")
-                    .args(["/F", "/PID", pid])
-                    .output()
-                    .ok();
-            } else {
-                Command::new("kill").arg(pid).output().ok();
-            }
-        }
     }
 }
 
@@ -307,8 +283,6 @@ fn hub_join_sync_clone_and_list() {
         "{}",
         hub.greeting
     );
-    // No token unless asked for.
-    assert!(hub.url.starts_with("nats://127.0.0.1:"), "{}", hub.url);
     let alpha = env.init_repo("alpha");
     let beta = env.init_repo("beta");
     logs.daemon_of(&env, &alpha);
@@ -411,40 +385,13 @@ fn hub_join_sync_clone_and_list() {
     );
 }
 
-/// A machine's daemon serves a repository joined after it started, without a restart,
-/// and a restarted hub serves its hives again on the same URL, token and all.
+/// A machine's daemon serves a repository joined after it started, without a restart, and
+/// a restarted hub serves its hives again, to the daemons connected before as well.
 #[test]
 fn the_daemon_picks_up_new_repositories() {
     let env = TestEnv::new();
     let mut logs = Logs::default();
-    let mut hub = Hub::start_with(&env, &mut logs, &["--token"]);
-    assert!(hub.url.contains("@127.0.0.1:"), "{}", hub.url);
-    // The token is in a config file only its owner can read, not on a command line.
-    let token = hub
-        .url
-        .strip_prefix("nats://")
-        .unwrap()
-        .split('@')
-        .next()
-        .unwrap();
-    let conf = hub.dir.join("nats.conf");
-    assert!(fs::read_to_string(&conf).unwrap().contains(token));
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        let mode = fs::metadata(&conf).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o600);
-        let pid = fs::read_to_string(hub.dir.join("nats.pid")).unwrap();
-        let ps = Command::new("ps")
-            .args(["-o", "args=", "-p", pid.trim()])
-            .output()
-            .unwrap();
-        let args = String::from_utf8_lossy(&ps.stdout);
-        assert!(
-            args.contains("nats-server") && !args.contains(token),
-            "{args}"
-        );
-    }
+    let mut hub = Hub::start(&env, &mut logs);
     let mut daemons = Daemons::default();
     let alpha = env.init_repo("alpha");
     let beta = env.init_repo("beta");
@@ -498,10 +445,9 @@ fn the_daemon_picks_up_new_repositories() {
         try_log(&beta_second).is_some_and(|log| log.contains("second project, reworded"))
     });
 
-    // A restarted hub serves the same hives on the same URL, its NATS server and all.
+    // A restarted hub serves the same hives, and the daemons connect to it again.
     hub.kill();
     let restarted = Hub::start(&env, &mut logs);
-    assert_eq!(restarted.url, hub.url);
     assert!(
         restarted.greeting.starts_with("Serving 2 hives from"),
         "{}",
@@ -510,6 +456,14 @@ fn the_daemon_picks_up_new_repositories() {
     let list = musubi_in(&env, &logs, &alpha, &["list"]);
     assert!(list.contains("alpha  1 machine: alpha"), "{list}");
     assert!(list.contains("second  2 machines: alpha, beta"), "{list}");
+    let mut describe = alpha.program(Path::new("jj"));
+    describe
+        .args(["describe", "@-", "-m", "second project, after the restart"])
+        .current_dir(&second);
+    run(&env, &logs, describe);
+    wait_for(&logs, "work after the hub's restart to reach beta", || {
+        try_log(&beta_second).is_some_and(|log| log.contains("after the restart"))
+    });
 }
 
 #[test]
@@ -640,10 +594,9 @@ fn settings_are_shared_through_the_binary() {
     );
 }
 
-/// Machines reach a hub that listens only on its own machine over ssh: joining creates the
-/// machine's key and adds it on the hub's machine, allowed only to run `musubi hub connect`,
-/// and the daemon syncs through that, which relays to the hub's socket, needing none of the
-/// token its NATS server requires.
+/// Machines reach a hub over ssh: joining creates the machine's key and adds it on the hub's
+/// machine, allowed only to run `musubi hub connect`, and the daemon syncs through that,
+/// which relays to the hub's socket.
 #[cfg(unix)]
 #[test]
 fn machines_reach_the_hub_over_ssh() {
@@ -651,7 +604,7 @@ fn machines_reach_the_hub_over_ssh() {
 
     let env = TestEnv::new();
     let mut logs = Logs::default();
-    let hub = Hub::start_with(&env, &mut logs, &["--token"]);
+    let hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
     let mut daemons = Daemons::default();
     // Stands in for ssh to the hub's machine: runs what the machine's key may run there, and

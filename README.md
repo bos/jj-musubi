@@ -19,9 +19,7 @@ in anger.
 You need:
 
 - `jj` 0.46.0 and `git` on every machine;
-- `musubi` and [`nats-server`](https://docs.nats.io/running-a-nats-service/introduction/installation)
-  on the machine that runs the hub (`brew install nats-server`, or a release binary), with
-  `musubi` on the `PATH` of non-interactive shells there;
+- `musubi` on the machine that runs the hub, on the `PATH` of non-interactive shells there;
 - a repository with at least one commit;
 - ssh access to the hub's machine from every other machine: if `ssh devbox` works, so does
   musubi.
@@ -32,8 +30,7 @@ On the machine that will run the hub (any machine that is usually on):
 musubi hub
 ```
 
-It creates `./musubi-hub` the first time, starts a NATS server for it, and prints what to
-run on the other machines:
+It creates `./musubi-hub` the first time, and prints what to run on the other machines:
 
 ```text
 Created a new hub in /home/you/musubi-hub
@@ -71,18 +68,15 @@ sleeps. If it says `musubi` isn't on the hub machine's `PATH`, put it there for
 non-interactive shells (`~/.zshenv`, or near the top of `~/.bashrc`), or give its absolute
 path in that line of `~/.ssh/authorized_keys`.
 
-The hub's NATS server listens only on its own machine's loopback, and anyone who can reach
-it can read and write every hive on the hub. `musubi hub --listen 0.0.0.0` lets other
-machines connect to it directly, with `--hub nats://myhost:41234`, which only a network you
-trust should allow; on macOS, allow incoming connections when the firewall asks about
-`nats-server`. `musubi hub --token` has the server require a random token, which the URLs
-it prints then carry (`nats://<token>@myhost:41234`), and which `musubi hub connect` gives
-the server itself, so machines reaching the hub over ssh never need it.
+Anyone who can reach a hub can read and write every hive on it, so the hub listens only on
+a local socket that only its own user can reach, and other machines come in over ssh, as
+that user.
 
 A hub serves any number of repositories, each its own hive. A fork, which shares history
 but has a remote of its own, isn't joined to the original's hive: `musubi create` gives it
 one of its own, and `musubi join --hive <name>` joins a chosen hive whatever its remotes.
-Run `musubi hub` again in the same place after a restart: it keeps its port (and token).
+Run `musubi hub` again in the same place after a restart: daemons connect to it again by
+themselves.
 
 Workspaces stay per-machine: each machine keeps its own `default@`, and shows the other
 machines' working copies as workspaces named after them, so `jj log` shows
@@ -139,7 +133,7 @@ just check      # fmt, clippy, Lean proofs and oracle, tests, docs, cargo-deny, 
 just property   # the generated end-to-end search (slow)
 ```
 
-Needs `cargo-nextest`, `nats-server`, `cargo-deny`, `cargo-machete`, `typos`, and Lean via
+Needs `cargo-nextest`, `cargo-deny`, `cargo-machete`, `typos`, and Lean via
 `elan` (`~/.elan/bin`).
 
 CI (`.github/workflows/ci.yml`) runs the same lints on Linux, the tests on Linux, macOS and

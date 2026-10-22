@@ -683,8 +683,10 @@ jj-lib never verifies them on read. Two consequences:
   each canonical operation and view by decoding and re-hashing it. A mismatch means a peer is
   running an incompatible version, or is lying.
 
-Nodes and hub exchange protocol and jj-lib versions when they connect and refuse to talk
-across incompatible ones. musubi is pinned to jj-lib 0.46.0.
+Every message between a node and the hub starts with its protocol and jj-lib versions, which
+no release encodes differently, and each side reads them first and refuses a message whose
+versions aren't its own, so that a release that encodes the rest differently is refused for
+that reason rather than misread. musubi is pinned to jj-lib 0.46.0.
 
 ## Testing
 

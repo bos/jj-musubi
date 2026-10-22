@@ -1,9 +1,10 @@
 //! The bytes on the wire between nodes and a hub.
 //!
-//! Messages are postcard-encoded [`Envelope`]s. Every envelope carries the protocol version
-//! and the jj-lib version, and the hub refuses to talk across a mismatch: canonical
+//! Messages are postcard-encoded [`Envelope`]s. Every envelope starts with the protocol
+//! version and the jj-lib version, and each side refuses to talk across a mismatch: canonical
 //! operation ids are hashes of jj-lib's structs, so peers must agree on jj-lib exactly
-//! (docs/design.md, "Compatibility").
+//! (docs/design.md, "Compatibility"). Those two versions are read before the rest, which
+//! another release may encode differently, so no release may change how they're encoded.
 //!
 //! A small bundle travels inline, in the message that refers to it; a larger one as a blob,
 //! in chunks, several of them in flight at once. A message that would itself exceed the
@@ -139,20 +140,27 @@ impl<T: Serialize> Envelope<T> {
     }
 }
 
+/// The start of an [`Envelope`], the same in every release.
+#[derive(Deserialize)]
+struct Versions<'a> {
+    protocol: u32,
+    jj_lib: &'a str,
+}
+
 impl<T: for<'de> Deserialize<'de>> Envelope<T> {
-    /// Decodes and checks versions.
+    /// Checks versions, then decodes the body, which may not decode across them.
     pub fn decode(bytes: &[u8]) -> anyhow::Result<T> {
-        let envelope: Self = postcard::from_bytes(bytes)?;
+        let (versions, body) = postcard::take_from_bytes::<Versions<'_>>(bytes)?;
         anyhow::ensure!(
-            envelope.protocol == PROTOCOL_VERSION && envelope.jj_lib == JJ_LIB_VERSION,
+            versions.protocol == PROTOCOL_VERSION && versions.jj_lib == JJ_LIB_VERSION,
             "incompatible peer: protocol {} with jj-lib {}, but this is protocol {} with \
-             jj-lib {}",
-            envelope.protocol,
-            envelope.jj_lib,
+             jj-lib {}; run the same release of musubi on the hub and every machine",
+            versions.protocol,
+            versions.jj_lib,
             PROTOCOL_VERSION,
             JJ_LIB_VERSION
         );
-        Ok(envelope.body)
+        Ok(postcard::from_bytes(body)?)
     }
 }
 
@@ -253,4 +261,46 @@ pub fn map_reply<O, A, P, B>(
             attachment: attachment(a)?,
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    fn envelope<T: Serialize>(protocol: u32, jj_lib: &str, body: T) -> Vec<u8> {
+        let envelope = Envelope {
+            protocol,
+            jj_lib: jj_lib.to_owned(),
+            body,
+        };
+        postcard::to_stdvec(&envelope).unwrap()
+    }
+
+    #[test]
+    fn a_reply_decodes() {
+        let reply = HubReply::Error("no".to_owned());
+        let bytes = Envelope::encode(reply.clone()).unwrap();
+        assert_eq!(Envelope::<HubReply>::decode(&bytes).unwrap(), reply);
+    }
+
+    /// A message from another release is refused for its versions, even where this release
+    /// can't decode the rest of it.
+    #[test]
+    fn another_release_is_refused_whatever_it_sends() {
+        let unknown_variant = u32::MAX;
+        let bytes = envelope(PROTOCOL_VERSION + 1, "9.9.9", unknown_variant);
+        let err = Envelope::<HubReply>::decode(&bytes).unwrap_err();
+        assert!(
+            err.to_string().starts_with(&format!(
+                "incompatible peer: protocol {} with jj-lib 9.9.9",
+                PROTOCOL_VERSION + 1
+            )),
+            "{err}"
+        );
+        let bytes = envelope(PROTOCOL_VERSION, JJ_LIB_VERSION, unknown_variant);
+        let err = Envelope::<HubReply>::decode(&bytes).unwrap_err();
+        assert!(!err.to_string().contains("incompatible"), "{err}");
+    }
 }

@@ -88,8 +88,12 @@ docs/protocol.md assumes no message is corrupted. `musubi-sync/tests/faults.rs` 
 implementation where that doesn't hold. It records a real session over the in-memory
 transport, with a payload limit small enough that each commit's objects travel as a blob of
 several windows of chunks: one machine pushes a commit, another fetches it and pushes its
-own, and the first fetches that. It snapshots the hub's directory after each request, so
-that a case can start from any point in the session. Two Hegel tests use the session:
+own, and the first fetches that. It snapshots the hub's directory as each call starts, and
+a case starts from any point in the session by copying the snapshot before it and replaying
+the requests since. The session is recorded once per build of the test binary, under
+`target/tmp`, and so is the hive most of the race catalogue's tests start from: nextest
+runs each test in a process of its own, which would otherwise record them again. Two Hegel
+tests use the session:
 
 - `hub_survives_malformed_requests` sends a hub requests no honest node sends: the session's
   requests and bundles cut short, corrupted, or spliced; chunks at extreme offsets; requests

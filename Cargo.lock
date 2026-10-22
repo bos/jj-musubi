@@ -2851,7 +2851,6 @@ dependencies = [
  "musubi-testutil",
  "musubi-transport",
  "postcard",
- "reflink-copy",
  "serde",
  "serde_bytes",
  "serde_json",
@@ -2865,6 +2864,7 @@ name = "musubi-testutil"
 version = "0.1.0"
 dependencies = [
  "jj-lib",
+ "reflink-copy",
  "tempfile",
 ]
 

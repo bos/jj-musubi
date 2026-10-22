@@ -11,8 +11,6 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::hash::Hash as _;
-use std::hash::Hasher as _;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -51,6 +49,7 @@ use musubi_sync::wire::map_reply;
 use musubi_sync::wire::map_request;
 use musubi_testutil::TestEnv;
 use musubi_testutil::TestRepo;
+use musubi_testutil::copy_tree;
 use musubi_transport::MemoryNetwork;
 use musubi_transport::Subscription;
 use musubi_transport::Transport;
@@ -67,9 +66,6 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// How many requests a node may send once its link works. A sync here takes a few dozen; a
 /// node that keeps sending without getting anywhere runs past this.
 const RUNAWAY: usize = 2000;
-
-/// How long another build's recorded session is kept (see [`session`]).
-const STALE_SESSION: Duration = Duration::from_secs(3600);
 
 /// The hub answers every request without panicking, with a reply that fits the transport,
 /// its head only ever moves forward to an operation whose closure it has, and afterwards it
@@ -648,7 +644,7 @@ impl Session {
             .filter(|&start| start <= n)
             .max()
             .unwrap_or(0);
-        copy_dir(&self.snapshots.join(start.to_string()), dir);
+        copy_tree(&self.snapshots.join(start.to_string()), dir);
         let mut hub =
             HubService::new(HubAdapter::open(dir).unwrap(), dir, RPC.into(), HEAD.into()).unwrap();
         for request in &self.seen.requests[start..n] {
@@ -721,49 +717,14 @@ impl Call {
     }
 }
 
-/// The session, recorded once per build of this test binary, under `CARGO_TARGET_TMPDIR`.
-/// nextest runs each test in a process of its own, so otherwise every test that uses it
-/// would record it again, all of them at once in a full run.
+/// The session, recorded once per build of this test binary (see
+/// [`musubi_testutil::recorded`]): every test that uses it would otherwise record it again.
 fn session() -> &'static Session {
     static SESSION: OnceLock<Session> = OnceLock::new();
     SESSION.get_or_init(|| {
-        let cache = Path::new(env!("CARGO_TARGET_TMPDIR")).join("faults-session");
-        std::fs::create_dir_all(&cache).unwrap();
-        // The first process to get here records the session; the others wait for it.
-        let lock = std::fs::File::create(cache.join("lock")).unwrap();
-        lock.lock().unwrap();
-        let dir = cache.join(build());
-        if !dir.join("recorded").exists() {
-            // One a killed process left half recorded.
-            if dir.exists() {
-                std::fs::remove_dir_all(&dir).unwrap();
-            }
-            // Other builds' sessions, once their tests are long done: a build in another
-            // checkout sharing this target directory may still be copying from its own.
-            for entry in std::fs::read_dir(&cache).unwrap() {
-                let path = entry.unwrap().path();
-                let age = path.metadata().and_then(|metadata| metadata.modified());
-                if path.is_dir()
-                    && age.is_ok_and(|time| time.elapsed().unwrap_or_default() > STALE_SESSION)
-                {
-                    std::fs::remove_dir_all(path).ok();
-                }
-            }
-            record(&dir);
-            std::fs::write(dir.join("recorded"), "").unwrap();
-        }
-        drop(lock);
-        Session::load(&dir)
+        let base = Path::new(env!("CARGO_TARGET_TMPDIR"));
+        Session::load(&musubi_testutil::recorded(base, "faults-session", record))
     })
-}
-
-/// This build of the test binary: its path, size, and modification time, hashed.
-fn build() -> String {
-    let exe = std::env::current_exe().unwrap();
-    let metadata = std::fs::metadata(&exe).unwrap();
-    let mut hasher = std::hash::DefaultHasher::new();
-    (&exe, metadata.len(), metadata.modified().unwrap()).hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
 }
 
 /// Records a session in `dir`, for [`Session::load`].
@@ -803,11 +764,11 @@ fn record(dir: &Path) {
     let hub_dir = hub_dir.path().join("hub");
     let mut hub = fresh_hub(&hub_dir);
     let starts: BTreeSet<usize> = calls.iter().map(|call| call.start).collect();
-    copy_dir(&hub_dir, &snapshots.join("0"));
+    copy_tree(&hub_dir, &snapshots.join("0"));
     for (n, request) in requests.iter().enumerate() {
         hub.handle_bytes(request, MAX_PAYLOAD).unwrap();
         if starts.contains(&(n + 1)) {
-            copy_dir(&hub_dir, &snapshots.join((n + 1).to_string()));
+            copy_tree(&hub_dir, &snapshots.join((n + 1).to_string()));
         }
     }
     assert_eq!(hub.hub().head().1.to_bytes(), head);
@@ -834,25 +795,6 @@ fn read_frames(path: &Path) -> Vec<Vec<u8>> {
         rest = tail;
     }
     frames
-}
-
-/// Copies the directory `from` to `to`. On macOS that is one clonefile(2) of the whole
-/// tree, when `to` doesn't exist yet: alongside the rest of the suite, making a hub's files
-/// one by one takes over ten times longer.
-fn copy_dir(from: &Path, to: &Path) {
-    if cfg!(target_os = "macos") && reflink_copy::reflink(from, to).is_ok() {
-        return;
-    }
-    std::fs::create_dir_all(to).unwrap();
-    for entry in std::fs::read_dir(from).unwrap() {
-        let entry = entry.unwrap();
-        let to = to.join(entry.file_name());
-        if entry.file_type().unwrap().is_dir() {
-            copy_dir(&entry.path(), &to);
-        } else {
-            std::fs::copy(entry.path(), to).unwrap();
-        }
-    }
 }
 
 /// What some requests carried, to build malformed ones from.

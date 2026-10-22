@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use musubi_jj::node::NodeRepo;
 use musubi_jj::objects::Backend;
@@ -17,11 +18,31 @@ pub struct Fixture {
 
 impl Fixture {
     /// One colocated repository per name, each with its workspace named after it, all
-    /// joined to a fresh hive and synced.
+    /// joined to a fresh hive and synced. Dozens of tests start from the same hive, so it is
+    /// made once per build of the test binary for each set of names
+    /// (`musubi_testutil::recorded`), and each test gets a copy, with nodes that know
+    /// nothing of the hub yet, as after a restart.
     pub fn new(names: &[&str]) -> Self {
-        let env = TestEnv::new();
-        let repos = names.iter().map(|name| env.init_repo(name)).collect();
-        Self::join(env, repos)
+        let base = Path::new(env!("CARGO_TARGET_TMPDIR"));
+        let name = format!("fixture-{}", names.join("-"));
+        let saved = musubi_testutil::recorded(base, &name, |dir| {
+            let env = TestEnv::new();
+            let repos = names.iter().map(|name| env.init_repo(name)).collect();
+            let Self { env, hive, .. } = Self::join(env, repos);
+            // Its nodes finish writing what they realized as they close.
+            drop(hive);
+            env.save(dir);
+        });
+        let env = TestEnv::restore(&saved);
+        let repos: Vec<TestRepo> = names.iter().map(|name| env.repo_handle(name)).collect();
+        let mut hive = Hive::open(&env.root().join("hub")).unwrap();
+        for repo in &repos {
+            let node = NodeRepo::open(&repo.repo_path(), &repo.settings())
+                .unwrap()
+                .with_repo_config(Some(repo.repo_config_path()));
+            hive.add(node).unwrap();
+        }
+        Self { env, repos, hive }
     }
 
     /// Joins already-created repositories to a fresh hive and syncs.

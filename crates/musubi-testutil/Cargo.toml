@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 jj-lib.workspace = true
+reflink-copy.workspace = true
 tempfile.workspace = true
 
 [lints]

@@ -13,6 +13,8 @@
 #![allow(clippy::unwrap_used)]
 
 use std::fs;
+use std::hash::Hash as _;
+use std::hash::Hasher as _;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -21,6 +23,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use jj_lib::config::ConfigLayer;
 use jj_lib::config::ConfigSource;
@@ -45,18 +48,36 @@ impl Default for TestEnv {
 impl TestEnv {
     pub fn new() -> Self {
         check_jj_version();
-        let mut root = tempfile::Builder::new()
-            .prefix("musubi-test-")
-            .tempdir()
-            .unwrap();
-        // For inspecting a failure's repositories afterwards.
-        if std::env::var_os("MUSUBI_KEEP_TEST_DIRS").is_some() {
-            root.disable_cleanup(true);
-        }
+        let root = temp_root();
         fs::create_dir_all(root.path().join("home/.config")).unwrap();
         Self {
             root,
             seeds: Arc::new(AtomicU64::new(1)),
+        }
+    }
+
+    /// Saves a copy of this environment in `dir`, for [`Self::restore`]: its directory,
+    /// with every repository and its home, and where its seeds for change ids have got to.
+    pub fn save(&self, dir: &Path) {
+        fs::create_dir_all(dir).unwrap();
+        copy_tree(self.root(), &dir.join("root"));
+        let seed = self.seeds.load(Ordering::Relaxed);
+        fs::write(dir.join("seed"), seed.to_string()).unwrap();
+    }
+
+    /// An environment of its own with a copy of the one saved in `dir`, its repositories at
+    /// the same places in it (see [`Self::repo_handle`]). jj keeps no path of a repository's
+    /// in the repository, and takes one whose recorded path is gone for one that moved.
+    pub fn restore(dir: &Path) -> Self {
+        check_jj_version();
+        let root = temp_root();
+        // A clone wants a path with nothing there.
+        fs::remove_dir(root.path()).unwrap();
+        copy_tree(&dir.join("root"), root.path());
+        let seed = fs::read_to_string(dir.join("seed")).unwrap();
+        Self {
+            root,
+            seeds: Arc::new(AtomicU64::new(seed.parse().unwrap())),
         }
     }
 
@@ -124,6 +145,90 @@ impl TestEnv {
         repo.run_jj_at(self.root(), &["git", "init", "--colocate", machine]);
         repo
     }
+}
+
+/// A test environment's directory, kept with `MUSUBI_KEEP_TEST_DIRS` for inspecting a
+/// failure's repositories afterwards.
+fn temp_root() -> TempDir {
+    let mut root = tempfile::Builder::new()
+        .prefix("musubi-test-")
+        .tempdir()
+        .unwrap();
+    if std::env::var_os("MUSUBI_KEEP_TEST_DIRS").is_some() {
+        root.disable_cleanup(true);
+    }
+    root
+}
+
+/// Copies the directory `from` to `to`. On macOS that is one clonefile(2) of the whole
+/// tree, when `to` doesn't exist yet: alongside the rest of the suite, making a tree's
+/// files one by one takes over ten times longer. Other systems clone only a file at a
+/// time, which saves nothing on small files: those it copies.
+pub fn copy_tree(from: &Path, to: &Path) {
+    if cfg!(target_os = "macos") && reflink_copy::reflink(from, to).is_ok() {
+        return;
+    }
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let to = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &to);
+        } else {
+            fs::copy(entry.path(), to).unwrap();
+        }
+    }
+}
+
+/// How long a recording of another build of a test binary is kept (see [`recorded`]).
+const STALE_RECORDING: Duration = Duration::from_secs(3600);
+
+/// A directory under `base`, normally the test binary's `CARGO_TARGET_TMPDIR`, holding what
+/// `record` wrote to it, once for each build of the running test binary. nextest runs each
+/// test in a process of its own, so each would otherwise make it again, many of them at
+/// once in a full run. The first process to ask records it, while the others wait on a
+/// file lock; a later run of the same build finds it there.
+pub fn recorded(base: &Path, name: &str, record: impl FnOnce(&Path)) -> PathBuf {
+    let cache = base.join(name);
+    fs::create_dir_all(&cache).unwrap();
+    // Not truncated: on Windows that fails while another process holds the lock.
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(cache.join("lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let dir = cache.join(build());
+    if !dir.join("recorded").exists() {
+        // One a killed process left half recorded.
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
+        // Other builds' recordings, once their tests are long done: a build in another
+        // checkout sharing this target directory may still be copying from its own.
+        for entry in fs::read_dir(&cache).unwrap() {
+            let path = entry.unwrap().path();
+            let age = path.metadata().and_then(|metadata| metadata.modified());
+            if path.is_dir()
+                && age.is_ok_and(|time| time.elapsed().unwrap_or_default() > STALE_RECORDING)
+            {
+                fs::remove_dir_all(path).ok();
+            }
+        }
+        record(&dir);
+        fs::write(dir.join("recorded"), "").unwrap();
+    }
+    dir
+}
+
+/// This build of the running test binary: its path, size, and modification time, hashed.
+fn build() -> String {
+    let exe = std::env::current_exe().unwrap();
+    let metadata = fs::metadata(&exe).unwrap();
+    let mut hasher = std::hash::DefaultHasher::new();
+    (&exe, metadata.len(), metadata.modified().unwrap()).hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 /// jj's user config for a test machine. It turns on `snapshot.auto-update-stale`, which

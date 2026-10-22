@@ -41,6 +41,16 @@ impl Hive {
         })
     }
 
+    /// The hive whose hub is in `hub_dir`, with no nodes yet: they are added again, each
+    /// knowing nothing of the hub, as after a restart.
+    pub fn open(hub_dir: &Path) -> anyhow::Result<Self> {
+        Ok(Self {
+            hub: HubAdapter::open(hub_dir)?,
+            members: vec![],
+            hub_dir: hub_dir.to_owned(),
+        })
+    }
+
     /// Restarts the hub from its directory, as after a crash.
     pub fn restart_hub(&mut self) -> anyhow::Result<()> {
         self.hub = HubAdapter::open(&self.hub_dir)?;

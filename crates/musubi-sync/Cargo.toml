@@ -28,7 +28,6 @@ tracing.workspace = true
 async-trait.workspace = true
 hegeltest.workspace = true
 musubi-testutil.workspace = true
-reflink-copy.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time", "macros", "io-util"] }
 

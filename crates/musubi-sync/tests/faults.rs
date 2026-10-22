@@ -10,6 +10,7 @@
 #![allow(clippy::unwrap_used)]
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -603,16 +604,30 @@ struct Session {
     seen: Seen,
     calls: Vec<Call>,
     head: Vec<u8>,
-    /// The hub's directory after each prefix of the requests, `<n>` after the first `n`:
-    /// copying one is much faster than replaying the requests.
+    /// The hub's directory as each call starts, `<n>` after the first `n` requests: copying
+    /// one is much faster than replaying the requests. Not after every request: a hub is
+    /// some ninety files, and while the rest of the suite runs, making thousands of files
+    /// takes many times longer than replaying part of a call.
     snapshots: tempfile::TempDir,
 }
 
 impl Session {
     /// A hub in `dir` that has handled the first `n` requests.
     fn hub_after(&self, n: usize, dir: &Path) -> HubService {
-        copy_dir(&self.snapshots.path().join(n.to_string()), dir);
-        HubService::new(HubAdapter::open(dir).unwrap(), dir, RPC.into(), HEAD.into()).unwrap()
+        let start = self
+            .calls
+            .iter()
+            .map(|call| call.start)
+            .filter(|&start| start <= n)
+            .max()
+            .unwrap_or(0);
+        copy_dir(&self.snapshots.path().join(start.to_string()), dir);
+        let mut hub =
+            HubService::new(HubAdapter::open(dir).unwrap(), dir, RPC.into(), HEAD.into()).unwrap();
+        for request in &self.seen.requests[start..n] {
+            hub.handle_bytes(request, MAX_PAYLOAD).unwrap();
+        }
+        hub
     }
 }
 
@@ -712,10 +727,13 @@ fn session() -> &'static Session {
         let dir = tempfile::tempdir().unwrap();
         let dir = dir.path().join("hub");
         let mut hub = fresh_hub(&dir);
+        let starts: BTreeSet<usize> = calls.iter().map(|call| call.start).collect();
         copy_dir(&dir, &snapshots.path().join("0"));
         for (n, request) in seen.requests.iter().enumerate() {
             hub.handle_bytes(request, MAX_PAYLOAD).unwrap();
-            copy_dir(&dir, &snapshots.path().join((n + 1).to_string()));
+            if starts.contains(&(n + 1)) {
+                copy_dir(&dir, &snapshots.path().join((n + 1).to_string()));
+            }
         }
         assert_eq!(hub.hub().head().1.to_bytes(), head);
         Session {

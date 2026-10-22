@@ -1,7 +1,7 @@
 //! A node's local jj repository: canonicalization, realization, and op heads.
 //!
 //! See "Per-machine state in a replicated view" in docs/design.md and "Translation layer" in
-//! docs/protocol.md.
+//! docs/protocol.md. What a node does only when its backend is git is in `node/git.rs`.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -15,7 +15,6 @@ use std::sync::Arc;
 use std::thread;
 
 use futures::TryStreamExt as _;
-use gix::refs::transaction::PreviousValue;
 use jj_lib::config::ConfigFile;
 use jj_lib::config::ConfigNamePathBuf;
 use jj_lib::config::ConfigSource;
@@ -24,7 +23,6 @@ use jj_lib::content_hash::blake2b_hash;
 use jj_lib::default_backend_factories::default_backend_factories;
 use jj_lib::git::GitExportError;
 use jj_lib::git::REMOTE_NAME_FOR_LOCAL_GIT_REPO;
-use jj_lib::lock::FileLock;
 use jj_lib::lock::FileLockError;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_heads_store::OpHeadsStoreError;
@@ -38,7 +36,6 @@ use jj_lib::op_store::ViewId;
 use jj_lib::op_walk;
 use jj_lib::operation::Operation;
 use jj_lib::ref_name::GitRefNameBuf;
-use jj_lib::repo::MutableRepo;
 use jj_lib::repo::ReadonlyRepo;
 use jj_lib::repo::Repo as _;
 use jj_lib::repo::RepoLoader;
@@ -67,12 +64,13 @@ use crate::canonical::CanonicalStore;
 use crate::canonical::strip_git_records;
 use crate::format_guard;
 use crate::format_guard::FormatError;
+use crate::git_command::GitError;
 use crate::hive_settings;
 use crate::hive_settings::Entry;
 use crate::hive_settings::HiveSettings;
 use crate::hive_settings::SettingValues;
 use crate::hive_settings::Stamp;
-use crate::objects::GitObjects;
+use crate::objects::Backend;
 use crate::objects::GitStore;
 use crate::objects::Incompleteness;
 use crate::objects::ObjectError;
@@ -83,11 +81,15 @@ use crate::translation_map::TranslationMap;
 use crate::workspaces;
 use crate::workspaces::Machine;
 
+mod git;
+
+use git::Colocation;
+use git::NodeGit;
+
 /// What a hub matches a joining repository against: see [`NodeRepo::join_summary`].
 #[derive(Clone, Debug)]
 pub struct JoinSummary {
-    /// `git` or `simple`.
-    pub backend: &'static str,
+    pub backend: Backend,
     pub remotes: BTreeMap<String, hive_settings::Remote>,
     /// Visible commits whose parent is the root commit, other than an empty working-copy
     /// commit with no description.
@@ -172,6 +174,8 @@ pub enum NodeError {
     #[error(transparent)]
     Objects(#[from] ObjectError),
     #[error(transparent)]
+    Git(#[from] GitError),
+    #[error(transparent)]
     Backend(#[from] BackendError),
     #[error("musubi supports the git and simple backends, not {0:?}")]
     UnsupportedBackend(String),
@@ -226,7 +230,9 @@ pub struct NodeRepo {
     loader: RepoLoader,
     canonical: CanonicalStore,
     map: TranslationMap,
-    colocated: bool,
+    backend: Backend,
+    /// The repository's git repository, if its backend is git.
+    git: Option<NodeGit>,
     /// Whether every operation reachable from the op heads has been mapped since opening.
     heads_mapped: bool,
     machine: Machine,
@@ -320,6 +326,10 @@ impl NodeRepo {
                 loader.op_store().name().to_owned(),
             ));
         }
+        let store = loader.store();
+        let backend = Backend::of(store)
+            .ok_or_else(|| NodeError::UnsupportedBackend(store.backend().name().to_owned()))?;
+        let git = NodeGit::open(repo_path, store);
         let musubi_dir = repo_path.join("musubi");
         let canonical = CanonicalStore::open(
             &musubi_dir.join("canonical"),
@@ -330,13 +340,13 @@ impl NodeRepo {
             path: map_path,
             source,
         })?;
-        let colocated = is_colocated(repo_path, &loader);
         let mut node = Self {
             repo_path: repo_path.to_owned(),
             loader,
             canonical,
             map,
-            colocated,
+            backend,
+            git,
             heads_mapped: false,
             last_realized: None,
             prepared: None,
@@ -456,7 +466,7 @@ impl NodeRepo {
 
     /// Fails if this repository lacks history that musubi would need to send.
     pub fn check_complete(&self) -> Result<(), NodeError> {
-        match self.git_objects() {
+        match &self.git {
             Some(git) => match git.incompleteness()? {
                 Some(incompleteness) => Err(NodeError::Incomplete(incompleteness)),
                 None => Ok(()),
@@ -498,13 +508,9 @@ impl NodeRepo {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
-        let git = self.git_objects();
         Ok(JoinSummary {
-            backend: if git.is_some() { "git" } else { "simple" },
-            remotes: match git {
-                Some(git) => git.remotes(self.share_credentials())?,
-                None => BTreeMap::new(),
-            },
+            backend: self.backend,
+            remotes: self.remotes()?,
             roots,
             remote_targets,
         })
@@ -800,7 +806,7 @@ impl NodeRepo {
             .map(|(_, _, applied)| applied.clone())
             .unwrap_or_default();
         let machine = self.machine.key().to_owned();
-        let remotes_time = self.git_objects().map(|git| modified(&git.config_path()));
+        let remotes_time = self.git.as_ref().map(|git| modified(&git.config_path()));
         let config_time = self.repo_config.as_deref().map(modified);
         let mut ours = HiveSettings {
             remotes: stamp_changes(&local.remotes, &applied.remotes, || Stamp {
@@ -858,25 +864,25 @@ impl NodeRepo {
             .unwrap_or(false)
     }
 
-    fn git_objects(&self) -> Option<GitObjects> {
-        let backend = jj_lib::git::get_git_backend(self.loader.store()).ok()?;
-        Some(GitObjects::new(backend.git_repo_path()))
+    /// This machine's git remotes, if its backend is git.
+    fn remotes(&self) -> Result<BTreeMap<String, hive_settings::Remote>, NodeError> {
+        Ok(match &self.git {
+            Some(git) => git.remotes(self.share_credentials())?,
+            None => BTreeMap::new(),
+        })
     }
 
     /// The settings this machine has now: its git remotes, and the shared keys of its repo
     /// config, including `extra` keys.
     fn local_settings(&self, extra: &[String]) -> Result<SettingValues, NodeError> {
         Ok(SettingValues {
-            remotes: match self.git_objects() {
-                Some(git) => git.remotes(self.share_credentials())?,
-                None => BTreeMap::new(),
-            },
+            remotes: self.remotes()?,
             config: self.read_shared_config(extra)?,
         })
     }
 
     fn apply_settings(&self, from: &SettingValues, to: &SettingValues) -> Result<(), NodeError> {
-        if let Some(git) = self.git_objects() {
+        if let Some(git) = &self.git {
             git.change_remotes(&from.remotes, &to.remotes)?;
         }
         self.write_shared_config(&from.config, &to.config)
@@ -1048,7 +1054,12 @@ impl NodeRepo {
     }
 
     pub fn is_colocated(&self) -> bool {
-        self.colocated
+        self.colocation().is_some()
+    }
+
+    /// How the repository shares its git repository with a working copy, if it does.
+    fn colocation(&self) -> Option<&Colocation> {
+        self.git.as_ref()?.colocation()
     }
 
     /// The commits the stored canonical operations `ops` require, excluding the root commit.
@@ -1063,14 +1074,14 @@ impl NodeRepo {
     pub fn object_store(&self) -> Result<Box<dyn ObjectStore + '_>, NodeError> {
         let store = self.loader.store();
         let store_path = self.repo_path.join("store");
-        if let Ok(backend) = jj_lib::git::get_git_backend(store) {
-            Ok(Box::new(GitStore::for_node(&store_path, backend)))
-        } else if store.backend().name() == jj_lib::simple_backend::SimpleBackend::NAME {
-            Ok(Box::new(SimpleStore::new(&store_path)))
-        } else {
-            Err(NodeError::UnsupportedBackend(
-                store.backend().name().to_owned(),
-            ))
+        match self.backend {
+            Backend::Git => {
+                let backend = jj_lib::git::get_git_backend(store).map_err(|_| {
+                    NodeError::UnsupportedBackend(store.backend().name().to_owned())
+                })?;
+                Ok(Box::new(GitStore::for_node(&store_path, backend)))
+            }
+            Backend::Simple => Ok(Box::new(SimpleStore::new(&store_path))),
         }
     }
 
@@ -1090,13 +1101,13 @@ impl NodeRepo {
     /// becoming the op head, under jj's import/export lock, like every other op head musubi
     /// publishes. The exported copy has the same canonical form as the merge.
     pub fn merge_heads(&self) -> Result<OperationId, NodeError> {
-        if !self.colocated || self.local_heads()?.len() <= 1 {
-            let repo = self.load_at_head()?;
-            return Ok(repo.op_id().clone());
-        }
-        let _lock = FileLock::lock(self.repo_path.join("git_import_export.lock"))?;
+        let colocation = match self.colocation() {
+            Some(colocation) if self.local_heads()?.len() > 1 => colocation,
+            _ => return Ok(self.load_at_head()?.op_id().clone()),
+        };
+        let _lock = colocation.lock()?;
         let merged = self.load_at_head()?.op_id().clone();
-        let exported = self.export_refs(&merged)?;
+        let exported = colocation.export_refs(&self.loader, &merged)?;
         if exported != merged {
             self.loader
                 .op_heads_store()
@@ -1742,19 +1753,15 @@ impl NodeRepo {
         // Views made ahead inherit what this changes, in a colocated repository.
         self.prepared = None;
         let superseded = self.check_mergeable(&realized)?;
-        let _lock = if self.colocated {
-            Some(FileLock::lock(
-                self.repo_path.join("git_import_export.lock"),
-            )?)
-        } else {
-            None
-        };
-        let head = if self.colocated {
-            let exported = self.export_refs(&realized)?;
-            self.insert_map(exported.clone(), canonical.clone())?;
-            exported
-        } else {
-            realized
+        let colocation = self.colocation();
+        let _lock = colocation.map(Colocation::lock).transpose()?;
+        let head = match colocation {
+            Some(colocation) => {
+                let exported = colocation.export_refs(&self.loader, &realized)?;
+                self.insert_map(exported.clone(), canonical.clone())?;
+                exported
+            }
+            None => realized,
         };
         // The new head replaces those it descends from, as jj's own resolution of op heads
         // would: otherwise, after realizing several operations, the previous head stays, and
@@ -1975,41 +1982,6 @@ impl NodeRepo {
         Ok(moved)
     }
 
-    /// Runs jj's `export_refs` on top of a realization and returns the operation that
-    /// records the result: the same operation if nothing changed, otherwise a copy with the
-    /// updated per-machine fields.
-    fn export_refs(&self, realized: &OperationId) -> Result<OperationId, NodeError> {
-        let op = self.loader.load_operation(realized).block_on()?;
-        let repo: Arc<ReadonlyRepo> = self.loader.load_at(&op).block_on()?;
-        let mut tx = repo.start_transaction();
-        // Refs that fail to export keep their recorded values, exactly as after a failed
-        // export in a local `jj` command; jj's next import reconciles them.
-        let _stats = jj_lib::git::export_refs(tx.repo_mut())?;
-        export_conflicted_remote_bookmarks(tx.repo_mut())?;
-        let view = tx.repo().view().store_view();
-        if view == repo.view().store_view() {
-            return Ok(realized.clone());
-        }
-        let mut store_op = op.store_operation().clone();
-        store_op.view_id = self.loader.op_store().write_view(view).block_on()?;
-        let op_store = self.loader.op_store();
-        let exported = op_store.write_operation(&store_op).block_on()?;
-        // It refers to the realization's commits, so the realization's index is its index
-        // too. Without one, loading the repository there, as merging or the next `jj` command
-        // does, would index again every operation since the last one with an index, or for a
-        // clone, every commit: none it descends from has one.
-        let exported_op = Operation::new(op_store.clone(), exported.clone(), store_op);
-        if let Err(err) = self
-            .loader
-            .index_store()
-            .write_index(repo.readonly_index().start_modification(), &exported_op)
-        {
-            // Only a cache: jj indexes it when loading the repository there.
-            tracing::warn!("indexing the exported operation: {err}");
-        }
-        Ok(exported)
-    }
-
     fn insert_map(&mut self, local: OperationId, canonical: OperationId) -> Result<(), NodeError> {
         self.map
             .insert(local, canonical)
@@ -2018,115 +1990,6 @@ impl NodeRepo {
                 source,
             })
     }
-}
-
-/// Writes one side of each conflicted remote bookmark to this machine's `.git`, which jj's
-/// export leaves alone. Every `jj` command imports `refs/remotes/<remote>/<name>` and resolves
-/// a conflicted remote bookmark to what it finds there. On one machine that is its latest
-/// fetch, one of the sides. Here a machine that made neither fetch still has an older one,
-/// and its import would replicate that, losing both sides (docs/races.md, "Remotes"). Every
-/// machine writes the same side, the one committed last (then the greatest commit id), so
-/// their imports agree: one machine importing anything else would merge with the others'
-/// imports back to an older value. So the write compares against what `.git` holds, not jj's
-/// record of it, and replaces any value the hive already knows of: a term of the conflict,
-/// absent included, or the record. That includes a `git fetch` that happens to match a term;
-/// the next fetch after the conflict resolves corrects it. Any other value, absent included,
-/// was put there by git since, and the import takes it, as it would without musubi. A ref
-/// that can't be read or written is left alone, as jj's export leaves a failed ref.
-fn export_conflicted_remote_bookmarks(mut_repo: &mut MutableRepo) -> Result<(), NodeError> {
-    type Terms = Vec<Option<CommitId>>;
-    let conflicted: Vec<(GitRefNameBuf, Terms)> = mut_repo
-        .view()
-        .all_remote_bookmarks()
-        .filter(|(symbol, remote_ref)| {
-            symbol.remote != REMOTE_NAME_FOR_LOCAL_GIT_REPO
-                && symbol.name.as_str() != "HEAD"
-                && !remote_ref.target.is_resolved()
-        })
-        .map(|(symbol, remote_ref)| {
-            let name = format!(
-                "refs/remotes/{}/{}",
-                symbol.remote.as_str(),
-                symbol.name.as_str()
-            );
-            (name.into(), remote_ref.target.iter().cloned().collect())
-        })
-        .collect();
-    if conflicted.is_empty() {
-        return Ok(());
-    }
-    let git_repo = jj_lib::git::get_git_repo(mut_repo.store()).map_err(GitExportError::from)?;
-    for (name, terms) in conflicted {
-        let mut chosen: Option<(i64, CommitId)> = None;
-        // A conflict's terms alternate add, remove, add, ...; its sides are the adds.
-        for id in terms.iter().step_by(2).flatten() {
-            let time = mut_repo
-                .store()
-                .get_commit(id)?
-                .committer()
-                .timestamp
-                .timestamp
-                .0;
-            if chosen
-                .as_ref()
-                .is_none_or(|(best_time, best)| (time, id) > (*best_time, best))
-            {
-                chosen = Some((time, id.clone()));
-            }
-        }
-        let Some((_, side)) = chosen else {
-            continue;
-        };
-        let actual = match git_repo.try_find_reference(name.as_str()) {
-            Ok(Some(reference)) => match reference.into_fully_peeled_id() {
-                Ok(id) => Some(CommitId::from_bytes(id.detach().as_bytes())),
-                Err(_) => continue,
-            },
-            Ok(None) => None,
-            Err(_) => continue,
-        };
-        let recorded = mut_repo.view().get_git_ref(&name);
-        let known = terms.contains(&actual)
-            || (recorded.is_resolved() && recorded.as_normal() == actual.as_ref());
-        if actual.as_ref() != Some(&side) {
-            if !known {
-                continue;
-            }
-            let Ok(new) = gix::ObjectId::try_from(side.as_bytes()) else {
-                continue;
-            };
-            let constraint = match &actual {
-                Some(old) => {
-                    let Ok(old) = gix::ObjectId::try_from(old.as_bytes()) else {
-                        continue;
-                    };
-                    PreviousValue::MustExistAndMatch(old.into())
-                }
-                None => PreviousValue::MustNotExist,
-            };
-            if git_repo
-                .reference(name.as_str(), new, constraint, "export from musubi")
-                .is_err()
-            {
-                continue;
-            }
-        }
-        if recorded.as_normal() != Some(&side) {
-            mut_repo.set_git_ref_target(&name, RefTarget::normal(side));
-        }
-    }
-    Ok(())
-}
-
-/// Whether the repository shares its git repository with a working copy, so that every
-/// `jj` command imports and exports refs automatically.
-fn is_colocated(repo_path: &Path, loader: &RepoLoader) -> bool {
-    let Ok(backend) = jj_lib::git::get_git_backend(loader.store()) else {
-        return false;
-    };
-    let git_path = backend.git_repo_path();
-    git_path.file_name().is_some_and(|name| name == ".git")
-        && !git_path.starts_with(repo_path.join("store"))
 }
 
 /// Whether `commit` is visible: reachable from the view's heads.

@@ -9,8 +9,8 @@ use anyhow::bail;
 use jj_lib::backend::CommitId;
 use musubi_core::hub::HubStorage;
 use musubi_core::message::OpEntry;
-use musubi_hub::store::Backend;
 use musubi_hub::store::HubStore;
+use musubi_jj::objects::Backend;
 
 use crate::Attachment;
 use crate::OpId;

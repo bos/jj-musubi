@@ -12,8 +12,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 
-use musubi_hub::store::Backend;
 use musubi_jj::node::NodeRepo;
+use musubi_jj::objects::Backend;
 use musubi_sync::driver::NodeDriver;
 use musubi_sync::hub::HubAdapter;
 use musubi_sync::remote::RemoteHub;

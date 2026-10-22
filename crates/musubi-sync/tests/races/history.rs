@@ -286,8 +286,8 @@ fn hub_restart_between_push_and_fetch() {
 /// the other machine's op log then includes that history.
 #[test]
 fn joining_with_full_history() {
-    use musubi_hub::store::Backend;
     use musubi_jj::node::NodeRepo;
+    use musubi_jj::objects::Backend;
     use musubi_sync::hive::Hive;
 
     let env = TestEnv::new();

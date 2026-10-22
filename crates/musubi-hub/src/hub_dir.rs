@@ -11,6 +11,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use jj_lib::backend::CommitId;
+use musubi_jj::objects::Backend;
 use musubi_jj::workspaces;
 use serde::Deserialize;
 use serde::Serialize;
@@ -23,7 +24,7 @@ use crate::matching::Decision;
 use crate::matching::Joiner;
 use crate::names;
 use crate::names::RemoteUrl;
-use crate::store::Backend;
+use crate::store;
 use crate::store::HubStore;
 
 pub const HIVE_FILE: &str = "hive.toml";
@@ -32,11 +33,11 @@ pub const HIVE_FILE: &str = "hive.toml";
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HiveMeta {
     pub name: String,
-    pub backend: String,
+    pub backend: Backend,
 }
 
 /// What a joining repository tells the hub.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JoinRequest {
     /// A hive to join, by name, name prefix, or id.
     pub hive: Option<String>,
@@ -46,8 +47,7 @@ pub struct JoinRequest {
     /// The new hive's name, in place of one from the repository's remote or directory.
     /// Implies `create`.
     pub new: Option<String>,
-    /// `git` or `simple`.
-    pub backend: String,
+    pub backend: Backend,
     /// Names and URLs of its remotes: a remote's name once for each of its URLs, as git
     /// expands it and as written.
     pub remotes: Vec<(String, String)>,
@@ -67,7 +67,7 @@ pub struct JoinRequest {
 pub struct HiveInfo {
     pub id: String,
     pub name: String,
-    pub backend: String,
+    pub backend: Backend,
     pub urls: Vec<String>,
     /// Names of the machines with workspaces in the hive.
     pub machines: Vec<String>,
@@ -194,7 +194,7 @@ impl HubDir {
         HubStore::init(&dir, backend)?;
         let meta = HiveMeta {
             name: name.to_owned(),
-            backend: backend.name().to_owned(),
+            backend,
         };
         write_meta(&dir, &meta)?;
         let index = HiveIndex::default();
@@ -251,7 +251,7 @@ impl HubDir {
         Some(HiveInfo {
             id: id.to_owned(),
             name: hive.meta.name.clone(),
-            backend: hive.meta.backend.clone(),
+            backend: hive.meta.backend,
             urls: hive.index.urls.iter().cloned().collect(),
             machines: machine_names(&hive.index.machines),
         })
@@ -318,7 +318,7 @@ impl HubDir {
     /// Decides which hive a repository joins, or creates one if asked to. See
     /// [`crate::matching`].
     pub fn join(&mut self, request: &JoinRequest) -> Result<Joined, Refusal> {
-        let backend = Backend::parse(&request.backend).map_err(refusal)?;
+        let backend = request.backend;
         let chosen = request
             .hive
             .as_deref()
@@ -343,7 +343,7 @@ impl HubDir {
         let mut candidates = vec![];
         for (id, hive) in &self.hives {
             let pending_roots = hive.pending.iter().flat_map(|pending| &pending.roots);
-            let related = hive.meta.backend == backend.name()
+            let related = hive.meta.backend == backend
                 && (hive
                     .index
                     .roots
@@ -423,7 +423,7 @@ fn has_any(backend: Backend, dir: &Path, commits: &[CommitId]) -> anyhow::Result
     if commits.is_empty() {
         return Ok(false);
     }
-    let missing = backend.object_store(dir).missing(commits)?;
+    let missing = store::object_store(backend, dir).missing(commits)?;
     Ok(missing.len() < commits.len())
 }
 
@@ -440,12 +440,15 @@ mod tests {
 
     fn request(machine: &str, url: &str) -> JoinRequest {
         JoinRequest {
-            backend: "git".to_owned(),
+            backend: Backend::Git,
             remotes: vec![("origin".to_owned(), url.to_owned())],
             dir_name: "project".to_owned(),
             roots: vec!["11".repeat(20)],
             machine: format!("{machine}#00000000"),
-            ..JoinRequest::default()
+            hive: None,
+            create: false,
+            new: None,
+            remote_targets: vec![],
         }
     }
 

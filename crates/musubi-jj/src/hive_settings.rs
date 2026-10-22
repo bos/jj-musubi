@@ -66,15 +66,13 @@ pub struct SettingValues {
 
 /// A git remote's URLs: as written, and as the writing machine's git expands them through
 /// its `url.<base>.insteadOf` rules, where that differs, since another machine needn't have
-/// the same rules ([`GitObjects::remotes`]).
+/// the same rules.
 ///
 /// Two remotes are equal when they share a repository, however their URLs are spelled: by
 /// [`RemoteUrl::key`], as written or as expanded, of the URL, and of the push target (the
 /// push URL, or else the URL). So settings merge, and changes are noticed, by
 /// where remotes point, and a machine's own spelling of a shared remote, over https on one
 /// machine and ssh on another, say, or through an alias, is never a change.
-///
-/// [`GitObjects::remotes`]: crate::objects::GitObjects::remotes
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Remote {
     #[serde(default, skip_serializing_if = "Option::is_none")]

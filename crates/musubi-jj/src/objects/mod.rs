@@ -9,8 +9,14 @@ use std::io;
 use std::path::Path;
 
 use jj_lib::backend::CommitId;
+use jj_lib::simple_backend::SimpleBackend;
 use jj_lib::stacked_table::TableStoreError;
+use jj_lib::store::Store;
+use serde::Deserialize;
+use serde::Serialize;
 use thiserror::Error;
+
+use crate::git_command::GitError;
 
 pub mod bundle;
 mod git;
@@ -21,18 +27,62 @@ pub use git::ExtrasEntry;
 pub use git::GitObjects;
 pub use git::GitStore;
 pub use git::Incompleteness;
-pub use git::REPOSITORY_ENV;
 pub use git::extras_to_ship;
 pub use git::import_extras;
 pub use power::on_battery;
 pub use simple::SimpleStore;
 
+/// A backend musubi supports: the kind of repository a hive's machines have, which decides
+/// how its objects are stored and moved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Backend {
+    /// jj's git backend, its default.
+    Git,
+    /// jj's simple backend, which exists mainly for jj's own tests.
+    Simple,
+}
+
+impl Backend {
+    /// The backend of a jj store, if musubi supports it.
+    pub fn of(store: &Store) -> Option<Self> {
+        if jj_lib::git::get_git_backend(store).is_ok() {
+            Some(Self::Git)
+        } else if store.backend().name() == SimpleBackend::NAME {
+            Some(Self::Simple)
+        } else {
+            None
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Git => "git",
+            Self::Simple => "simple",
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "git" => Some(Self::Git),
+            "simple" => Some(Self::Simple),
+            _ => None,
+        }
+    }
+
+    /// The backend's root commit, which every view may mention and no store contains.
+    pub fn root_commit(self) -> CommitId {
+        match self {
+            Self::Git => CommitId::from_bytes(&[0; 20]),
+            Self::Simple => CommitId::from_bytes(&[0; 64]),
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ObjectError {
-    #[error("failed to run git {args}")]
-    Spawn { args: String, source: io::Error },
-    #[error("git {args} failed: {stderr}")]
-    Git { args: String, stderr: String },
+    #[error(transparent)]
+    Git(#[from] GitError),
     #[error("I/O error")]
     Io(#[from] io::Error),
     #[error("missing objects after receiving bundle: {0}")]

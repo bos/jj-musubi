@@ -10,8 +10,8 @@ use musubi_core::message::Request;
 use musubi_core::node::LocalRepo as _;
 use musubi_core::node::NodeCore;
 use musubi_core::node::Step;
-use musubi_hub::store::Backend;
 use musubi_jj::node::NodeRepo;
+use musubi_jj::objects::Backend;
 
 use crate::Attachment;
 use crate::OpId;

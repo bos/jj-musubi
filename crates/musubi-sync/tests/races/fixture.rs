@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
-use musubi_hub::store::Backend;
 use musubi_jj::node::NodeRepo;
+use musubi_jj::objects::Backend;
 use musubi_sync::hive::Hive;
 use musubi_testutil::TestEnv;
 use musubi_testutil::TestRepo;

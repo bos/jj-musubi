@@ -633,7 +633,7 @@ fn spawn(socket: &Socket) -> anyhow::Result<(std::process::Child, PathBuf)> {
 /// hook has, and not the command's ssh agent, but `agent_link`, which commands keep pointed
 /// at a live one ([`agent`]).
 fn isolate(command: &mut std::process::Command, agent_link: Option<&Path>) {
-    for name in musubi_jj::objects::REPOSITORY_ENV {
+    for name in musubi_jj::git_command::REPOSITORY_ENV {
         command.env_remove(name);
     }
     if let Some(link) = agent_link {
@@ -691,7 +691,7 @@ mod tests {
         let mut command = std::process::Command::new("musubi");
         isolate(&mut command, Some(Path::new("/state/ssh-agent")));
         let envs: BTreeMap<&OsStr, Option<&OsStr>> = command.get_envs().collect();
-        for name in musubi_jj::objects::REPOSITORY_ENV {
+        for name in musubi_jj::git_command::REPOSITORY_ENV {
             assert_eq!(envs.get(OsStr::new(name)), Some(&None), "{name}");
         }
         assert_eq!(

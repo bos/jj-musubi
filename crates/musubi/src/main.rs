@@ -24,6 +24,7 @@ use clap::Subcommand;
 use jj_lib::object_id::ObjectId as _;
 use musubi_hub::hub_dir::HiveInfo;
 use musubi_hub::hub_dir::JoinRequest;
+use musubi_jj::objects::Backend;
 use musubi_sync::wire::HubWideReply;
 use musubi_sync::wire::HubWideRequest;
 
@@ -397,7 +398,7 @@ fn join(start: &Path, choice: Choice, member: &Member, socket: &Socket) -> anyho
         hive,
         create,
         new,
-        backend: summary.backend.to_owned(),
+        backend: summary.backend,
         remotes: summary
             .remotes
             .into_iter()
@@ -561,12 +562,12 @@ fn clone(
         anyhow::bail!("unexpected reply from the hub: {reply:?}");
     };
     let dest = destination.to_str().context("destination is not UTF-8")?;
-    let init: &[&str] = match info.backend.as_str() {
-        "git" => &["git", "init", "--colocate"],
-        _ => &["debug", "init-simple"],
+    let init: &[&str] = match info.backend {
+        Backend::Git => &["git", "init", "--colocate"],
+        Backend::Simple => &["debug", "init-simple"],
     };
     let mut jj = Process::new("jj");
-    for name in musubi_jj::objects::REPOSITORY_ENV {
+    for name in musubi_jj::git_command::REPOSITORY_ENV {
         jj.env_remove(name);
     }
     let status = jj.args(init).arg(dest).status()?;

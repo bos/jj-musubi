@@ -41,7 +41,7 @@ fn join_request(repo: &TestRepo) -> JoinRequest {
     let node = NodeRepo::open(&repo.repo_path(), &repo.settings()).unwrap();
     let summary = node.join_summary().unwrap();
     JoinRequest {
-        backend: summary.backend.to_owned(),
+        backend: summary.backend,
         remotes: summary
             .remotes
             .into_iter()
@@ -54,7 +54,9 @@ fn join_request(repo: &TestRepo) -> JoinRequest {
         roots: summary.roots.iter().map(|id| id.hex()).collect(),
         remote_targets: summary.remote_targets.iter().map(|id| id.hex()).collect(),
         machine: node.machine().key().to_owned(),
-        ..JoinRequest::default()
+        hive: None,
+        create: false,
+        new: None,
     }
 }
 

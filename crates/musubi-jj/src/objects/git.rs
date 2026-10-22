@@ -1,7 +1,6 @@
 //! The git backend's objects: packfiles built and indexed by the `git` binary, which jj
 //! already requires for fetch and push, plus the backend extras jj cannot derive from them.
 
-use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs;
@@ -30,52 +29,11 @@ use super::bundle::BundleWriter;
 use super::bundle::PackRecord;
 use super::bundle::Record;
 use super::power;
-use crate::hive_settings::Remote;
-use crate::hive_settings::repository;
-use crate::hive_settings::same_repository;
-use crate::remote_url::without_credentials;
-
-/// The variables git sets, for what it runs in a repository such as a hook, to name that
-/// repository: the ones `git rev-parse --local-env-vars` lists. No git musubi runs gets
-/// them, nor does a daemon a command starts, which serves every repository on the machine;
-/// musubi run from a hook would otherwise hand them on.
-pub const REPOSITORY_ENV: &[&str] = &[
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    "GIT_CONFIG",
-    "GIT_CONFIG_PARAMETERS",
-    "GIT_CONFIG_COUNT",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_IMPLICIT_WORK_TREE",
-    "GIT_GRAFT_FILE",
-    "GIT_INDEX_FILE",
-    "GIT_NO_REPLACE_OBJECTS",
-    "GIT_REPLACE_REF_BASE",
-    "GIT_PREFIX",
-    "GIT_SHALLOW_FILE",
-    "GIT_COMMON_DIR",
-];
-
-/// `git` as musubi runs it: without [`REPOSITORY_ENV`], running no hooks, and, where git
-/// knows `GIT_NO_LAZY_FETCH`, fetching nothing. jj runs no hooks when it writes to `.git`;
-/// musubi's `update-ref` and `git remote` would run the repository's
-/// `reference-transaction`, and its `gc --auto` `pre-auto-gc`. In a partial clone, which
-/// musubi refuses ([`Incompleteness`]), git would fetch what it lacks from the promisor
-/// remote.
-fn git() -> Command {
-    let mut command = Command::new("git");
-    for name in REPOSITORY_ENV {
-        command.env_remove(name);
-    }
-    command.env("GIT_NO_LAZY_FETCH", "1");
-    // A path under which no hook can exist.
-    command.args(["-c", "core.hooksPath=/dev/null"]);
-    command
-}
-
-/// The empty tree's id, which git knows without storing it.
-const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+use crate::git_command::GitError;
+use crate::git_command::GitRepo;
+use crate::git_command::check_status;
+use crate::git_command::git;
+use crate::git_command::run_err;
 
 /// Where a hub's repository names the commits its head requires (see
 /// [`GitObjects::mark_head`]).
@@ -108,19 +66,19 @@ impl std::fmt::Display for Incompleteness {
 
 /// A git object database, driven through the `git` binary.
 pub struct GitObjects {
-    git_dir: PathBuf,
+    repo: GitRepo,
 }
 
 impl GitObjects {
     /// `git_dir` is the `.git` directory, or the repository itself if it is bare.
     pub fn new(git_dir: &Path) -> Self {
         Self {
-            git_dir: git_dir.to_owned(),
+            repo: GitRepo::new(git_dir),
         }
     }
 
     pub fn git_dir(&self) -> &Path {
-        &self.git_dir
+        self.repo.git_dir()
     }
 
     /// Creates a bare repository for a hub. git never garbage-collects it on its own: the
@@ -134,7 +92,7 @@ impl GitObjects {
             .args(args)
             .arg(git_dir)
             .output()
-            .map_err(|source| spawn_err(&args, source))?;
+            .map_err(|source| run_err(&args, source))?;
         check_status(&args, &output)?;
         let objects = Self::new(git_dir);
         objects.run(&["config", "gc.auto", "0"], None)?;
@@ -145,9 +103,9 @@ impl GitObjects {
     /// `shallow` file listing its shallow commits, in the common directory of a linked
     /// worktree, and a partial clone a promisor remote.
     pub fn incompleteness(&self) -> Result<Option<Incompleteness>, ObjectError> {
-        let common = match fs::read_to_string(self.git_dir.join("commondir")) {
-            Ok(dir) => self.git_dir.join(dir.trim()),
-            Err(_) => self.git_dir.clone(),
+        let common = match fs::read_to_string(self.git_dir().join("commondir")) {
+            Ok(dir) => self.git_dir().join(dir.trim()),
+            Err(_) => self.git_dir().to_owned(),
         };
         if fs::metadata(common.join("shallow")).is_ok_and(|shallow| shallow.len() > 0) {
             return Ok(Some(Incompleteness::Shallow));
@@ -163,179 +121,6 @@ impl GitObjects {
                         .contains(&value.to_ascii_lowercase().as_str())
         });
         Ok(partial.then_some(Incompleteness::Partial))
-    }
-
-    /// This repository's own git config file.
-    pub fn config_path(&self) -> PathBuf {
-        self.git_dir.join("config")
-    }
-
-    /// The remotes in this repository's own git config, with their URLs as written and,
-    /// where this machine's `url.<base>.insteadOf` rules change them, as git expands them,
-    /// since another machine needn't have the same rules. Unless `share_credentials`, the
-    /// URLs go [without the credentials](without_credentials) an http(s) URL may carry.
-    pub fn remotes(
-        &self,
-        share_credentials: bool,
-    ) -> Result<BTreeMap<String, Remote>, ObjectError> {
-        let output = self.run(&["config", "--local", "--list"], None)?;
-        let mut remotes: BTreeMap<String, Remote> = BTreeMap::new();
-        for line in String::from_utf8_lossy(&output).lines() {
-            let Some((key, value)) = line.split_once('=') else {
-                continue;
-            };
-            let Some((name, variable)) = key
-                .strip_prefix("remote.")
-                .and_then(|rest| rest.rsplit_once('.'))
-            else {
-                continue;
-            };
-            let remote = remotes.entry(name.to_owned()).or_default();
-            // The first of several, which git fetches from.
-            match variable {
-                "url" => _ = remote.url.get_or_insert_with(|| value.to_owned()),
-                "pushurl" => _ = remote.push_url.get_or_insert_with(|| value.to_owned()),
-                _ => {}
-            }
-        }
-        // Each remote's URLs as git uses them: its first URL, followed by a partial clone's
-        // filter, then where it pushes. Only a push URL in the config is expanded; where
-        // `pushInsteadOf` sends pushes is this machine's own business, as aliases are.
-        let output = self.run(&["remote", "-v"], None)?;
-        let output = String::from_utf8_lossy(&output);
-        let mut used: BTreeMap<&str, (Option<&str>, Option<&str>)> = BTreeMap::new();
-        for line in output.lines() {
-            let Some((name, url)) = line.split_once('\t') else {
-                continue;
-            };
-            let (fetch, push) = used.entry(name).or_default();
-            if let Some(url) = url.strip_suffix(" (push)") {
-                push.get_or_insert(url);
-            } else if let Some((url, _)) = url.rsplit_once(" (fetch)") {
-                fetch.get_or_insert(url);
-            }
-        }
-        let shared = |url: &str| {
-            if share_credentials {
-                url.to_owned()
-            } else {
-                without_credentials(url)
-            }
-        };
-        // An expansion only of a URL in this repository's config, and only where it differs
-        // as shared.
-        let expansion = |written: &Option<String>, used: Option<&str>| {
-            let written = written.as_deref()?;
-            let used = shared(used?);
-            (used != shared(written)).then_some(used)
-        };
-        for (name, remote) in &mut remotes {
-            if let Some(&(fetch, push)) = used.get(name.as_str()) {
-                remote.expanded_url = expansion(&remote.url, fetch);
-                remote.expanded_push_url = expansion(&remote.push_url, push);
-            }
-            for url in [&mut remote.url, &mut remote.push_url]
-                .into_iter()
-                .flatten()
-            {
-                *url = shared(url);
-            }
-        }
-        Ok(remotes)
-    }
-
-    /// How this machine writes a URL another machine wrote as `written` and expanded to
-    /// `expanded`: as written where this machine's git expands it to the same repository, so
-    /// that an alias they share stays one, even where its rule holds a token, and otherwise
-    /// as expanded.
-    fn spelling(
-        &self,
-        written: Option<&str>,
-        expanded: Option<&str>,
-    ) -> Result<Option<String>, ObjectError> {
-        let (Some(written), Some(expanded)) = (written, expanded) else {
-            return Ok(written.map(str::to_owned));
-        };
-        let same = self
-            .run(&["ls-remote", "--get-url", "--", written], None)
-            .is_ok_and(|here| {
-                repository(String::from_utf8_lossy(&here).trim_end()) == repository(expanded)
-            });
-        Ok(Some(if same { written } else { expanded }.to_owned()))
-    }
-
-    /// Changes this repository's git remotes from `from` to `to`, as `git remote` does:
-    /// renaming a remote moves its remote-tracking refs, and removing one deletes them.
-    pub fn change_remotes(
-        &self,
-        from: &BTreeMap<String, Remote>,
-        to: &BTreeMap<String, Remote>,
-    ) -> Result<(), ObjectError> {
-        let mut removed: Vec<&String> = from.keys().filter(|n| !to.contains_key(*n)).collect();
-        for (name, remote) in to {
-            match from.get(name) {
-                Some(old) if old == remote => continue,
-                Some(_) => {}
-                None => {
-                    // The same remote under a new name is a rename.
-                    if let Some(position) = removed.iter().position(|old| from[*old] == *remote) {
-                        let old = removed.remove(position);
-                        self.run(&["remote", "rename", old, name], None)?;
-                        continue;
-                    }
-                    let url =
-                        self.spelling(remote.url.as_deref(), remote.expanded_url.as_deref())?;
-                    self.run(
-                        &["remote", "add", "--", name, &url.unwrap_or_default()],
-                        None,
-                    )?;
-                }
-            }
-            self.set_remote_urls(name, from.get(name), remote)?;
-        }
-        for name in removed {
-            self.run(&["remote", "remove", name], None)?;
-        }
-        Ok(())
-    }
-
-    /// Points remote `name`, which `old` describes as this repository has it, where `remote`
-    /// says. A URL that already names the repository `remote`'s does is left as this
-    /// machine spells it (see [`Remote`]'s equality), and a push URL is removed once it no
-    /// longer names where pushes should go.
-    fn set_remote_urls(
-        &self,
-        name: &str,
-        old: Option<&Remote>,
-        remote: &Remote,
-    ) -> Result<(), ObjectError> {
-        let set = |variable: &str, value: Option<&str>| -> Result<(), ObjectError> {
-            let key = format!("remote.{name}.{variable}");
-            match value {
-                Some(value) => self.run(&["config", "--local", &key, value], None)?,
-                // Unsetting a variable that isn't set fails; that's fine.
-                None => self
-                    .run(&["config", "--local", "--unset-all", &key], None)
-                    .unwrap_or_default(),
-            };
-            Ok(())
-        };
-        let mut now = old.cloned().unwrap_or_default();
-        if old.is_none() || !same_repository(&now.url_repositories(), &remote.url_repositories()) {
-            let url = self.spelling(remote.url.as_deref(), remote.expanded_url.as_deref())?;
-            set("url", url.as_deref())?;
-            now.url.clone_from(&remote.url);
-            now.expanded_url.clone_from(&remote.expanded_url);
-        }
-        if old.is_none() || !same_repository(&now.push_repositories(), &remote.push_repositories())
-        {
-            let push = self.spelling(
-                remote.push_url.as_deref(),
-                remote.expanded_push_url.as_deref(),
-            )?;
-            set("pushurl", push.as_deref())?;
-        }
-        Ok(())
     }
 
     /// The subset of `ids` not present in the object database.
@@ -419,7 +204,7 @@ impl GitObjects {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|source| spawn_err(&args, source))?;
+            .map_err(|source| run_err(&args, source))?;
         let mut stdin = child.stdin.take().expect("stdin is piped");
         let input = revs_input(wants, haves);
         let writer = thread::spawn(move || stdin.write_all(&input));
@@ -429,7 +214,7 @@ impl GitObjects {
             io::Read::read_to_end(&mut stderr, &mut bytes).map(|_| bytes)
         });
         let copied = io::copy(&mut child.stdout.take().expect("stdout is piped"), out);
-        let status = child.wait()?;
+        let status = child.wait().map_err(|source| run_err(&args, source))?;
         writer.join().expect("stdin writer panicked")?;
         let stderr = errors.join().expect("stderr reader panicked")?;
         copied?;
@@ -440,7 +225,8 @@ impl GitObjects {
                 stdout: vec![],
                 stderr,
             },
-        )
+        )?;
+        Ok(())
     }
 
     /// Stores a received pack's objects, completing a thin pack from local objects. As
@@ -464,13 +250,16 @@ impl GitObjects {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .map_err(|source| spawn_err(args, source))?;
+            .map_err(|source| run_err(args, source))?;
         let mut stdin = child.stdin.take().expect("stdin is piped");
         let writer = thread::spawn(move || io::copy(&mut input, &mut stdin));
-        let output = child.wait_with_output()?;
+        let output = child
+            .wait_with_output()
+            .map_err(|source| run_err(args, source))?;
         // A failing git may close stdin early; its exit status explains why.
         writer.join().expect("stdin writer panicked").ok();
-        check_status(args, &output)
+        check_status(args, &output)?;
+        Ok(())
     }
 
     /// Consolidates packs and loose objects once there are enough of them, as git itself
@@ -523,7 +312,7 @@ impl GitObjects {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         detach(&mut command);
-        command.spawn().map_err(|source| spawn_err(args, source))?;
+        command.spawn().map_err(|source| run_err(args, source))?;
         Ok(true)
     }
 
@@ -584,7 +373,7 @@ impl GitObjects {
         }
         // Looked into at most hourly, since counting objects takes a moment, and a large
         // repository on a small machine may fail to write a bitmap index every time.
-        let checked = self.git_dir.join("musubi-bitmap-checked");
+        let checked = self.git_dir().join("musubi-bitmap-checked");
         let recently = fs::metadata(&checked)
             .and_then(|meta| meta.modified())
             .is_ok_and(|at| at.elapsed().is_ok_and(|age| age < BITMAP_RETRY));
@@ -599,7 +388,7 @@ impl GitObjects {
     }
 
     fn has_bitmap(&self) -> Result<bool, ObjectError> {
-        let dir = self.git_dir.join("objects/pack");
+        let dir = self.git_dir().join("objects/pack");
         let entries = match fs::read_dir(&dir) {
             Ok(entries) => entries,
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
@@ -645,15 +434,15 @@ impl GitObjects {
             "gc",
             "--quiet",
         ];
-        let log = self.git_dir.join("musubi-bitmap-gc.log");
+        let log = self.git_dir().join("musubi-bitmap-gc.log");
         let mut command = self.command(&args);
         command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(fs::File::create(&log)?);
         detach(&mut command);
-        let mut child = command.spawn().map_err(|source| spawn_err(&args, source))?;
-        let dir = self.git_dir.clone();
+        let mut child = command.spawn().map_err(|source| run_err(&args, source))?;
+        let dir = self.git_dir().to_owned();
         // Waited for, so that it never lingers as a zombie, and so that a failure is heard.
         thread::Builder::new()
             .name("bitmap gc".to_owned())
@@ -684,7 +473,9 @@ impl GitObjects {
             Some(revs_input(wants, haves)),
         ) {
             Ok(_) => Ok(()),
-            Err(ObjectError::Git { stderr, .. }) => Err(ObjectError::NotConnected(stderr)),
+            Err(ObjectError::Git(GitError::Failed { stderr, .. })) => {
+                Err(ObjectError::NotConnected(stderr))
+            }
             Err(err) => Err(err),
         }
     }
@@ -701,48 +492,11 @@ impl GitObjects {
     }
 
     fn command(&self, args: &[&str]) -> Command {
-        let mut command = git();
-        // Running inside the repository as well as naming it keeps a mistake from ever
-        // touching the caller's working directory.
-        command
-            .current_dir(&self.git_dir)
-            .env("GIT_DIR", &self.git_dir)
-            // git 2.43 to 2.45 read a bare repository's attributes from HEAD's tree, and
-            // `pack-objects` asks for each path's. Where HEAD names a branch that doesn't
-            // exist, as in a hub's repository or a non-colocated jj repository's, every
-            // ask tried each way of spelling HEAD as a ref, and failed: a million file
-            // lookups for a clone of jj, three times as long as the packing itself. Run here,
-            // git has no attributes to read anyway (a colocated `.git` is no working tree),
-            // so name the empty tree. Other gits ignore the setting, or use no tree in a bare
-            // repository already.
-            .args(["-c", &format!("attr.tree={EMPTY_TREE}")])
-            .args(args);
-        command
+        self.repo.command(args)
     }
 
     fn run(&self, args: &[&str], input: Option<Vec<u8>>) -> Result<Vec<u8>, ObjectError> {
-        let mut child = self
-            .command(args)
-            .stdin(if input.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|source| spawn_err(args, source))?;
-        let writer = input.map(|input| {
-            let mut stdin = child.stdin.take().expect("stdin is piped");
-            thread::spawn(move || stdin.write_all(&input))
-        });
-        let output = child.wait_with_output()?;
-        if let Some(writer) = writer {
-            // A failing git may close stdin early; its exit status explains why.
-            writer.join().expect("stdin writer panicked").ok();
-        }
-        check_status(args, &output)?;
-        Ok(output.stdout)
+        Ok(self.repo.run(args, input)?)
     }
 }
 
@@ -786,24 +540,6 @@ fn revs_input(wants: &[CommitId], haves: &[CommitId]) -> Vec<u8> {
     let mut input = hex_lines(wants.iter(), "");
     input.extend(hex_lines(haves.iter(), "^"));
     input
-}
-
-fn spawn_err(args: &[&str], source: io::Error) -> ObjectError {
-    ObjectError::Spawn {
-        args: args.join(" "),
-        source,
-    }
-}
-
-fn check_status(args: &[&str], output: &std::process::Output) -> Result<(), ObjectError> {
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(ObjectError::Git {
-            args: args.join(" "),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        })
-    }
 }
 
 /// A backend extras entry that a receiver could not derive from the commit object alone.
@@ -1053,128 +789,6 @@ impl ObjectStore for GitStore<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn args(objects: &GitObjects) -> Vec<String> {
-        objects
-            .command(&["pack-objects"])
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect()
-    }
-
-    #[test]
-    fn attributes_come_from_the_empty_tree() {
-        assert_eq!(
-            args(&GitObjects::new(Path::new("unused"))),
-            [
-                "-c",
-                "core.hooksPath=/dev/null",
-                "-c",
-                &format!("attr.tree={EMPTY_TREE}"),
-                "pack-objects"
-            ]
-        );
-    }
-
-    /// The list is git's own, so that a variable a newer git adds is noticed here.
-    #[test]
-    fn repository_env_is_what_git_lists() {
-        let output = Command::new("git")
-            .args(["rev-parse", "--local-env-vars"])
-            .output()
-            .unwrap();
-        assert!(output.status.success());
-        for name in String::from_utf8(output.stdout).unwrap().lines() {
-            assert!(REPOSITORY_ENV.contains(&name), "{name} is missing");
-        }
-    }
-
-    #[test]
-    fn remotes_go_as_written_and_as_expanded() {
-        let dir = tempfile::tempdir().unwrap();
-        let run = |args: &[&str]| {
-            let output = git().current_dir(dir.path()).args(args).output().unwrap();
-            assert!(output.status.success(), "git {args:?}: {output:?}");
-        };
-        run(&["init", "--quiet"]);
-        run(&[
-            "config",
-            "url.https://example.com/.insteadOf",
-            "musubi-test:",
-        ]);
-        run(&[
-            "config",
-            "url.ssh://example.org/.pushInsteadOf",
-            "https://example.org/",
-        ]);
-        run(&["remote", "add", "aliased", "musubi-test:team/aliased"]);
-        let token = "https://bryan:secret@example.net/team/token";
-        run(&["remote", "add", "token", token]);
-        run(&["remote", "add", "pushes", "https://example.org/team/pushes"]);
-        let explicit = "https://example.com/team/explicit";
-        run(&["remote", "add", "explicit", explicit]);
-        run(&["remote", "set-url", "--push", "explicit", explicit]);
-        run(&["remote", "add", "filtered", "musubi-test:team/filtered"]);
-        run(&["config", "remote.filtered.partialclonefilter", "blob:none"]);
-        let objects = GitObjects::new(&dir.path().join(".git"));
-        let remotes = objects.remotes(false).unwrap();
-        let urls = |name: &str| {
-            let remote = &remotes[name];
-            [
-                &remote.url,
-                &remote.expanded_url,
-                &remote.push_url,
-                &remote.expanded_push_url,
-            ]
-            .map(|url| url.as_deref())
-        };
-        let aliased = [
-            "musubi-test:team/aliased",
-            "https://example.com/team/aliased",
-        ];
-        assert_eq!(
-            urls("aliased"),
-            [Some(aliased[0]), Some(aliased[1]), None, None]
-        );
-        let stripped = "https://example.net/team/token";
-        assert_eq!(urls("token"), [Some(stripped), None, None, None]);
-        // Where pushes go through `pushInsteadOf` is this machine's own business.
-        let pushes = "https://example.org/team/pushes";
-        assert_eq!(urls("pushes"), [Some(pushes), None, None, None]);
-        assert_eq!(
-            urls("explicit"),
-            [Some(explicit), None, Some(explicit), None]
-        );
-        let filtered = [
-            "musubi-test:team/filtered",
-            "https://example.com/team/filtered",
-        ];
-        assert_eq!(
-            urls("filtered"),
-            [Some(filtered[0]), Some(filtered[1]), None, None]
-        );
-        let shared = objects.remotes(true).unwrap();
-        assert_eq!(shared["token"].url.as_deref(), Some(token));
-
-        // Another machine's alias is kept where this one expands it the same way.
-        let spelling = |written, expanded| objects.spelling(Some(written), Some(expanded)).unwrap();
-        assert_eq!(
-            spelling(aliased[0], aliased[1]).as_deref(),
-            Some(aliased[0])
-        );
-        let theirs = ["theirs:team/x", "https://example.com/team/x"];
-        assert_eq!(spelling(theirs[0], theirs[1]).as_deref(), Some(theirs[1]));
-        // An alias whose rule holds a token, which the other machine's expansion lacks.
-        run(&["config", "url.https://tok@example.org/.insteadOf", "tok:"]);
-        let token = ["tok:team/x", "https://example.org/team/x"];
-        assert_eq!(spelling(token[0], token[1]).as_deref(), Some(token[0]));
-        // Not git's option, but an alias.
-        run(&["config", "url.https://example.com/.insteadOf", "-x:"]);
-        assert_eq!(
-            spelling("-x:team/x", theirs[1]).as_deref(),
-            Some("-x:team/x")
-        );
-    }
 
     #[test]
     fn shallow_and_partial_clones_are_incomplete() {

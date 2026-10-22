@@ -24,6 +24,7 @@ use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::OperationId;
 use musubi_jj::canonical::CanonicalError;
 use musubi_jj::canonical::CanonicalStore;
+use musubi_jj::objects::Backend;
 use musubi_jj::objects::GitObjects;
 use musubi_jj::objects::GitStore;
 use musubi_jj::objects::ObjectError;
@@ -45,43 +46,11 @@ pub enum StoreError {
     UnknownBackend(String),
 }
 
-/// The backend of a hive's repositories, which decides how the hub stores objects.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Backend {
-    Git,
-    Simple,
-}
-
-impl Backend {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Git => "git",
-            Self::Simple => "simple",
-        }
-    }
-
-    pub fn parse(name: &str) -> Result<Self, StoreError> {
-        match name {
-            "git" => Ok(Self::Git),
-            "simple" => Ok(Self::Simple),
-            name => Err(StoreError::UnknownBackend(name.to_owned())),
-        }
-    }
-
-    /// The object store of the hub store in `dir`, without opening the rest of it.
-    pub fn object_store(self, dir: &Path) -> Box<dyn ObjectStore + 'static> {
-        match self {
-            Self::Git => Box::new(GitStore::for_hub(&dir.join("git"), &dir.join("extras"))),
-            Self::Simple => Box::new(SimpleStore::new(&dir.join("simple"))),
-        }
-    }
-
-    /// The backend's root commit, which every view may mention and no store contains.
-    fn root_commit(self) -> CommitId {
-        match self {
-            Self::Git => CommitId::from_bytes(&[0; 20]),
-            Self::Simple => CommitId::from_bytes(&[0; 64]),
-        }
+/// The object store of the hub store in `dir`, without opening the rest of it.
+pub fn object_store(backend: Backend, dir: &Path) -> Box<dyn ObjectStore + 'static> {
+    match backend {
+        Backend::Git => Box::new(GitStore::for_hub(&dir.join("git"), &dir.join("extras"))),
+        Backend::Simple => Box::new(SimpleStore::new(&dir.join("simple"))),
     }
 }
 
@@ -131,8 +100,8 @@ impl HubStore {
 
     pub fn open(dir: &Path) -> Result<Self, StoreError> {
         let backend_path = dir.join("backend");
-        let backend =
-            Backend::parse(&fs::read_to_string(&backend_path).map_err(io_err(&backend_path))?)?;
+        let name = fs::read_to_string(&backend_path).map_err(io_err(&backend_path))?;
+        let backend = Backend::parse(&name).ok_or(StoreError::UnknownBackend(name))?;
         let canonical = CanonicalStore::open(&dir.join("canonical"), backend.root_commit())?;
         let history = read_heads(dir)?;
         let seq = history.len() as u64 - 1;
@@ -166,7 +135,7 @@ impl HubStore {
     }
 
     pub fn object_store(&self) -> Box<dyn ObjectStore + '_> {
-        self.backend.object_store(&self.dir)
+        object_store(self.backend, &self.dir)
     }
 
     pub fn dir(&self) -> &Path {

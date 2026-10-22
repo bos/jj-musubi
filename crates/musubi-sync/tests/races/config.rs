@@ -72,3 +72,37 @@ fn shared_config_set_on_two_machines_at_once() {
     assert_eq!(get(&hive, 0, "git.private-commits"), expected);
     assert_eq!(get(&hive, 1, "git.private-commits"), expected);
 }
+
+/// What each machine and the hive last agreed on is written again only when a setting
+/// changes, not at every sync that brings operations: ext4 writes out at once a file that
+/// replaces another.
+#[cfg(unix)]
+#[test]
+fn settings_state_is_rewritten_only_for_settings() {
+    use std::os::unix::fs::MetadataExt as _;
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    let state = |hive: &Fixture, index: usize, name: &str| {
+        hive.repo(index).repo_path().join("musubi").join(name)
+    };
+    // A link keeps the file's inode, so that a replacement can't be given it.
+    for index in 0..2 {
+        let state = |name| state(&hive, index, name);
+        std::fs::hard_link(state("settings.json"), state("settings.before")).unwrap();
+    }
+    let replaced = |hive: &Fixture| {
+        (0..2)
+            .map(|index| {
+                let inode = |name| std::fs::metadata(state(hive, index, name)).unwrap().ino();
+                inode("settings.json") != inode("settings.before")
+            })
+            .collect::<Vec<_>>()
+    };
+    hive.commit(0, "f", "one");
+    hive.commit(1, "g", "two");
+    hive.sync();
+    assert_eq!(replaced(&hive), [false, false]);
+    hive.repo(0)
+        .jj(&["config", "set", "--repo", "git.private-commits", "'wip'"]);
+    hive.sync();
+    assert_eq!(replaced(&hive), [true, true]);
+}

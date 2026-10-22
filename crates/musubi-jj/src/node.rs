@@ -300,7 +300,8 @@ fn fields_of(op: &Operation) -> Result<PerMachine, NodeError> {
 /// The settings this machine and the hive agreed on when they were last reconciled.
 #[derive(Serialize, Deserialize)]
 struct SettingsState {
-    /// The canonical operation they were reconciled at.
+    /// A canonical operation at which the hive's settings were `hive`: the one this was last
+    /// written at.
     op: String,
     /// The hive's settings there, if any machine had recorded some.
     hive: Option<HiveSettings>,
@@ -907,11 +908,21 @@ impl NodeRepo {
             log_replaced(&local, &merged);
             self.apply_settings(&local, &values)?;
         }
-        self.write_settings_state(&SettingsState {
-            op: at.hex(),
-            hive: hive_now,
-            settings: merged,
-        })?;
+        // The state names an operation only so that a restart's `settings_at` can stop
+        // there, and any at which the hive had these settings will do, as it always will: so
+        // it is written only when the settings change. Rewriting it for each new operation
+        // would replace it at almost every sync, and ext4 writes out at once a file that
+        // replaces another.
+        let unchanged = state
+            .as_ref()
+            .is_some_and(|(_, hive, settings)| *hive == hive_now && *settings == merged);
+        if !unchanged {
+            self.write_settings_state(&SettingsState {
+                op: at.hex(),
+                hive: hive_now,
+                settings: merged,
+            })?;
+        }
         Ok(recorded)
     }
 
@@ -1075,11 +1086,6 @@ impl NodeRepo {
     fn write_settings_state(&self, state: &SettingsState) -> Result<(), NodeError> {
         let path = self.settings_state_path();
         let json = serde_json::to_vec_pretty(state).expect("settings serialize");
-        // Most syncs change none of it. Rewriting it anyway would replace it every time, and
-        // ext4 writes out at once a file that replaces another.
-        if fs::read(&path).is_ok_and(|old| old == json) {
-            return Ok(());
-        }
         let dir = path.parent().expect("path has a parent");
         let io_err = |source| NodeError::Io {
             path: path.clone(),

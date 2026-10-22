@@ -8,6 +8,7 @@
 //! have gets an error: only a join creates a hive.
 
 use std::collections::HashMap;
+use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -102,18 +103,25 @@ impl HubServer {
                 }
                 continue;
             };
-            let worker = self.workers.entry(token.clone()).or_insert_with(|| {
+            let spawn = || {
                 spawn_worker(
                     token.clone(),
-                    dir,
+                    dir.clone(),
                     &self.prefix,
                     self.hubs.clone(),
                     transport.clone(),
                 )
-            });
-            if worker.requests.send(message).is_err() {
-                tracing::error!("hive {token}'s thread has stopped");
-                self.workers.remove(&token);
+            };
+            let worker = self.workers.entry(token.clone()).or_insert_with(spawn);
+            if let Err(mpsc::SendError(message)) = worker.requests.send(message) {
+                // Its thread has stopped, which a request's failing, or even panicking, can't
+                // make it do: a fresh one takes the request.
+                tracing::error!("hive {token}'s thread has stopped; starting another");
+                let worker = spawn();
+                if worker.requests.send(message).is_err() {
+                    tracing::error!("hive {token}'s new thread has stopped too");
+                }
+                self.workers.insert(token, worker);
             }
         }
         Ok(())
@@ -190,15 +198,27 @@ fn spawn_worker(
             while let Ok(message) = receiver.recv() {
                 let limit = transport.max_payload();
                 let started = std::time::Instant::now();
-                let reply = serve_one(
-                    &id,
-                    &dir,
-                    (&rpc, &head),
-                    &mut service,
-                    &hubs,
-                    &message,
-                    limit,
-                );
+                let served = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                    serve_one(
+                        &id,
+                        &dir,
+                        (&rpc, &head),
+                        &mut service,
+                        &hubs,
+                        &message,
+                        limit,
+                    )
+                }));
+                let reply = served.unwrap_or_else(|panic| {
+                    // jj-lib panics on some malformed input, as a peer could send it. The
+                    // hive's service may be left half-changed: the next request opens it
+                    // afresh.
+                    service = None;
+                    Err(anyhow::anyhow!(
+                        "the hub failed: {}",
+                        panic_message(panic.as_ref())
+                    ))
+                });
                 let (reply, notice) = match reply {
                     Ok(result) => result,
                     Err(err) => {
@@ -231,6 +251,15 @@ fn spawn_worker(
         })
         .expect("spawning a thread");
     Worker { requests, thread }
+}
+
+/// What a panic said, if it said it as text.
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
+    panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("a panic")
 }
 
 /// Answers one request for a hive, opening its store first if need be, and updates the

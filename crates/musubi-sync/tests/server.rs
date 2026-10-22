@@ -8,16 +8,21 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use jj_lib::object_id::ObjectId as _;
+use musubi_core::message::Reply;
+use musubi_core::message::Request;
 use musubi_hub::hub_dir::JoinRequest;
 use musubi_hub::hub_dir::Joined;
 use musubi_jj::node::NodeRepo;
+use musubi_jj::objects::bundle::BundleWriter;
 use musubi_sync::driver::NodeDriver;
 use musubi_sync::remote::RemoteHub;
 use musubi_sync::server::HubServer;
 use musubi_sync::wire::Envelope;
 use musubi_sync::wire::HubReply;
+use musubi_sync::wire::HubRequest;
 use musubi_sync::wire::HubWideReply;
 use musubi_sync::wire::HubWideRequest;
+use musubi_sync::wire::WireAttachment;
 use musubi_testutil::TestEnv;
 use musubi_testutil::TestRepo;
 use musubi_transport::MemoryNetwork;
@@ -294,4 +299,67 @@ async fn one_hub_many_hives() {
 
 fn uuid_like() -> &'static str {
     "00000000-0000-4000-8000-000000000000"
+}
+
+async fn hive_request(transport: &dyn Transport, hive: &str, request: HubRequest) -> HubReply {
+    let reply = transport
+        .request(
+            &format!("musubi.{hive}.rpc"),
+            Bytes::from(Envelope::encode(request).unwrap()),
+            TIMEOUT,
+        )
+        .await
+        .unwrap();
+    Envelope::decode(&reply).unwrap()
+}
+
+/// A request that makes the hub panic, as jj-lib does decoding a view with a tag whose
+/// target is empty, gets an error reply, and the hive goes on answering.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_request_that_panics_the_hub_gets_an_error() {
+    let env = TestEnv::new();
+    let dir = env.root().join("hub");
+    std::fs::create_dir(&dir).unwrap();
+    let network = MemoryNetwork::new(1, 1024 * 1024);
+    let server = HubServer::open(&dir, "musubi").unwrap();
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(server.run(Arc::new(network.connect()), move || {
+        ready_tx.send(()).ok();
+    }));
+    ready_rx.await.unwrap();
+    let client: Arc<dyn Transport> = Arc::new(network.connect());
+    let alpha = env.init_repo("alpha");
+    alpha.write_file("a", "a");
+    alpha.jj(&["commit", "-m", "first"]);
+    let hive = join(&*client, creating(join_request(&alpha)))
+        .await
+        .unwrap()
+        .hive
+        .id;
+
+    // A view whose one tag has a target with nothing in it.
+    let view = [0x32, 0x05, 0x0a, 0x01, b't', 0x12, 0x00];
+    let bundle = env.root().join("bundle");
+    let mut writer = BundleWriter::create(&bundle).unwrap();
+    writer.view(&[1; 64], &view).unwrap();
+    writer.finish().unwrap();
+    let push = Request::Push {
+        ops: vec![vec![2; 64]],
+        ops_attachment: WireAttachment::Inline(std::fs::read(&bundle).unwrap()),
+        objects: WireAttachment::None,
+        expected: vec![0; 64],
+        new: vec![2; 64],
+    };
+    match hive_request(&*client, &hive, HubRequest::Protocol(push)).await {
+        HubReply::Error(err) => assert!(err.contains("the hub failed"), "{err}"),
+        other => panic!("unexpected reply {other:?}"),
+    }
+    let fetch = Request::Fetch {
+        base: vec![0; 64],
+        haves: WireAttachment::Haves(vec![]),
+    };
+    assert!(matches!(
+        hive_request(&*client, &hive, HubRequest::Protocol(fetch)).await,
+        HubReply::Protocol(Reply::Fetched { .. })
+    ));
 }

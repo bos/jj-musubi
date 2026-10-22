@@ -48,8 +48,6 @@ pub struct HubService {
     /// Blobs prepared for nodes to download. They are kept apart from uploads, which can
     /// have the same content, so that deleting one never takes away the other.
     prepared: BlobStore,
-    rpc_subject: String,
-    head_subject: String,
     handled: u64,
     /// Prepared blobs whose last chunk has been served, and when a chunk of them was last
     /// asked for. A blob prepared again, for another reply with the same content, is taken
@@ -59,12 +57,7 @@ pub struct HubService {
 }
 
 impl HubService {
-    pub fn new(
-        hub: HubAdapter,
-        dir: &std::path::Path,
-        rpc_subject: String,
-        head_subject: String,
-    ) -> anyhow::Result<Self> {
+    pub fn new(hub: HubAdapter, dir: &std::path::Path) -> anyhow::Result<Self> {
         let blobs = dir.join("blobs");
         Ok(Self {
             hub,
@@ -73,8 +66,6 @@ impl HubService {
             // upgraded from before sweeps the prepared blobs it left in `blobs/complete` as
             // old uploads.
             prepared: BlobStore::open(&blobs.join("prepared"))?,
-            rpc_subject,
-            head_subject,
             handled: 0,
             served: HashMap::new(),
             served_lifetime: SERVED_BLOB_LIFETIME,
@@ -103,15 +94,17 @@ impl HubService {
         &self.hub
     }
 
-    /// Serves until the transport's subscription ends, calling `ready` once subscribed, when
-    /// requests start being answered. Requests are handled strictly one at a time, which is
-    /// what makes every `Push` atomic.
+    /// Serves requests on `rpc_subject`, announcing new heads on `head_subject`, until the
+    /// transport's subscription ends, calling `ready` once subscribed, when requests start
+    /// being answered. Requests are handled strictly one at a time, which is what makes every
+    /// `Push` atomic. For tests: a hub serves its hives through [`crate::server::HubServer`].
     pub async fn run(
         mut self,
         transport: Arc<dyn Transport>,
+        (rpc_subject, head_subject): (&str, &str),
         ready: impl FnOnce(),
     ) -> anyhow::Result<()> {
-        let mut requests = transport.subscribe(&self.rpc_subject).await?;
+        let mut requests = transport.subscribe(rpc_subject).await?;
         ready();
         while let Some(message) = requests.next().await {
             let Some(reply_to) = message.reply else {
@@ -131,7 +124,7 @@ impl HubService {
             }
             if let Some(notice) = notice {
                 let notice = Bytes::from(Envelope::encode(notice)?);
-                if let Err(err) = transport.publish(&self.head_subject, notice).await {
+                if let Err(err) = transport.publish(head_subject, notice).await {
                     tracing::warn!("could not announce the new head: {err}");
                 }
             }

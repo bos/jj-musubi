@@ -46,8 +46,10 @@ fn spawn_hub_with(
 ) {
     let dir = env.root().join("hub");
     let hub = HubAdapter::init(&dir, Backend::Git).unwrap();
-    let service = configure(HubService::new(hub, &dir, RPC.into(), HEAD.into()).unwrap());
-    tokio::task::spawn_local(async move { service.run(transport, || {}).await.unwrap() });
+    let service = configure(HubService::new(hub, &dir).unwrap());
+    tokio::task::spawn_local(
+        async move { service.run(transport, (RPC, HEAD), || {}).await.unwrap() },
+    );
 }
 
 fn driver(repo: &TestRepo, transport: Arc<dyn Transport>, timeout: Duration) -> NodeDriver {

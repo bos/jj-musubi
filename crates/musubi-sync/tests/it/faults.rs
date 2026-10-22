@@ -646,8 +646,7 @@ impl Session {
             .max()
             .unwrap_or(0);
         copy_tree(&self.snapshots.join(start.to_string()), dir);
-        let mut hub =
-            HubService::new(HubAdapter::open(dir).unwrap(), dir, RPC.into(), HEAD.into()).unwrap();
+        let mut hub = HubService::new(HubAdapter::open(dir).unwrap(), dir).unwrap();
         for request in &self.seen.requests[start..n] {
             hub.handle_bytes(request, MAX_PAYLOAD).unwrap();
         }
@@ -1199,7 +1198,7 @@ fn check_head(hub: &HubService, before: &(u64, OpId)) {
 
 fn fresh_hub(dir: &Path) -> HubService {
     let adapter = HubAdapter::init(dir, Backend::Git).unwrap();
-    HubService::new(adapter, dir, RPC.into(), HEAD.into()).unwrap()
+    HubService::new(adapter, dir).unwrap()
 }
 
 /// Starts `service` answering on `transport`, once it is listening.
@@ -1207,7 +1206,7 @@ async fn serve(service: HubService, transport: Arc<dyn Transport>) {
     let (ready, listening) = tokio::sync::oneshot::channel();
     tokio::task::spawn_local(async move {
         service
-            .run(transport, || ready.send(()).unwrap())
+            .run(transport, (RPC, HEAD), || ready.send(()).unwrap())
             .await
             .unwrap();
     });

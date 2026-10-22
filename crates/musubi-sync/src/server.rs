@@ -178,7 +178,7 @@ fn spawn_worker(
 ) -> Worker {
     let (requests, receiver) = mpsc::channel();
     let runtime = tokio::runtime::Handle::current();
-    let (rpc, head) = (rpc_subject(&id), head_subject(&id));
+    let head = head_subject(&id);
     let thread = std::thread::Builder::new()
         .name(format!("hive {id}"))
         .spawn(move || {
@@ -190,15 +190,7 @@ fn spawn_worker(
                 let limit = transport.max_payload();
                 let started = std::time::Instant::now();
                 let served = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    serve_one(
-                        &id,
-                        &dir,
-                        (&rpc, &head),
-                        &mut service,
-                        &hubs,
-                        &message,
-                        limit,
-                    )
+                    serve_one(&id, &dir, &mut service, &hubs, &message, limit)
                 }));
                 let reply = served.unwrap_or_else(|panic| {
                     // jj-lib panics on some malformed input, as a peer could send it. The
@@ -259,7 +251,6 @@ fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
 fn serve_one(
     id: &str,
     dir: &Path,
-    (rpc, head): (&str, &str),
     service: &mut Option<HubService>,
     hubs: &Mutex<HubDir>,
     message: &Message,
@@ -270,12 +261,7 @@ fn serve_one(
         None => {
             let adapter = HubAdapter::open(dir)?;
             tracing::info!("opened");
-            service.insert(HubService::new(
-                adapter,
-                dir,
-                rpc.to_owned(),
-                head.to_owned(),
-            )?)
+            service.insert(HubService::new(adapter, dir)?)
         }
     };
     let before = service.hub().store().head().1.clone();

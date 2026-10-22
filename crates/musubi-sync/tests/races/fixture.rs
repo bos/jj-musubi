@@ -210,6 +210,11 @@ impl Fixture {
     }
 
     fn assert_git_matches(&self, index: usize, bookmarks: &BTreeMap<String, String>) {
+        // A repository that isn't colocated keeps its git store inside `.jj`, with no
+        // `.git` to check.
+        if self.repo(index).repo_path().join("store/git").is_dir() {
+            return;
+        }
         let refs = self.repo(index).git(&[
             "for-each-ref",
             "--format=%(refname:short) %(objectname)",

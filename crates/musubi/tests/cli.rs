@@ -495,8 +495,21 @@ fn two_machines(
     daemons: &mut Daemons,
     hub: &Hub,
 ) -> (TestRepo, TestRepo) {
+    two_machines_with(env, logs, daemons, hub, |_| {})
+}
+
+/// [`two_machines`], with `configure` run in each repository before anything else.
+fn two_machines_with(
+    env: &TestEnv,
+    logs: &mut Logs,
+    daemons: &mut Daemons,
+    hub: &Hub,
+    configure: impl Fn(&TestRepo),
+) -> (TestRepo, TestRepo) {
     let alpha = env.init_repo("alpha");
     let beta = env.init_repo("beta");
+    configure(&alpha);
+    configure(&beta);
     logs.daemon_of(env, &alpha);
     logs.daemon_of(env, &beta);
     daemons.of(&alpha);
@@ -592,6 +605,80 @@ fn settings_are_shared_through_the_binary() {
         beta.jj(&["git", "remote", "list"]),
         "upstream https://example.com/up.git\n"
     );
+}
+
+/// With commit signing on, the commits musubi rewrites when it merges another machine's
+/// operations are signed, as jj's own rewrites are: musubi loads jj's signing config as jj
+/// does. jj signs and verifies with `ssh-keygen` here; Unix only until a Windows runner
+/// has shown its OpenSSH does the same.
+#[cfg(unix)]
+#[test]
+fn rewrites_are_signed_as_jj_signs_them() {
+    let env = TestEnv::new();
+    let mut logs = Logs::default();
+    let hub = Hub::start(&env, &mut logs);
+    // Stopped before the hub.
+    let mut daemons = Daemons::default();
+    let key = env.root().join("signing-key");
+    let keygen = Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-C", "", "-f"])
+        .arg(&key)
+        .output()
+        .unwrap();
+    assert!(
+        keygen.status.success(),
+        "{}",
+        String::from_utf8_lossy(&keygen.stderr)
+    );
+    let public = fs::read_to_string(key.with_extension("pub")).unwrap();
+    let signers = env.root().join("allowed-signers");
+    fs::write(&signers, format!("test@example.com {public}")).unwrap();
+    let signing = [
+        ("signing.behavior", "own"),
+        ("signing.backend", "ssh"),
+        ("signing.key", key.to_str().unwrap()),
+        (
+            "signing.backends.ssh.allowed-signers",
+            signers.to_str().unwrap(),
+        ),
+    ];
+    let (alpha, beta) = two_machines_with(&env, &mut logs, &mut daemons, &hub, |repo| {
+        for (name, value) in signing {
+            repo.jj(&["config", "set", "--user", name, value]);
+        }
+    });
+    // Without the daemons, `musubi sync` syncs directly, and nothing else does, so neither
+    // machine sees the other's change before musubi merges them.
+    for repo in [&alpha, &beta] {
+        musubi_in(&env, &logs, repo, &["daemon", "stop"]);
+    }
+    alpha.write_file("x", "x");
+    alpha.jj(&["commit", "-m", "X"]);
+    let x = alpha.jj(&["log", "--no-graph", "-r", "@-", "-T", "commit_id"]);
+    musubi_in(&env, &logs, &alpha, &["sync"]);
+    musubi_in(&env, &logs, &beta, &["sync"]);
+
+    // Alpha rewrites X while beta builds Y on it. Beta syncs second, so its musubi rebases
+    // Y onto the rewrite.
+    alpha.jj(&["describe", "-r", &x, "-m", "X, rewritten"]);
+    beta.jj(&["new", &x]);
+    beta.write_file("y", "y");
+    beta.jj(&["commit", "-m", "Y"]);
+    for repo in [&alpha, &beta, &alpha] {
+        musubi_in(&env, &logs, repo, &["sync"]);
+    }
+    let template = r#"parents.map(|p| p.description().first_line()).join(",") ++ ": " ++ if(signature, signature.status(), "unsigned") ++ "\n""#;
+    for repo in [&alpha, &beta] {
+        let rebased = repo.jj(&[
+            "log",
+            "--no-graph",
+            "-r",
+            r#"description(exact:"Y\n")"#,
+            "-T",
+            template,
+        ]);
+        assert_eq!(rebased, "X, rewritten: good\n", "on {}", repo.machine());
+    }
 }
 
 /// Machines reach a hub over ssh: joining creates the machine's key and adds it on the hub's

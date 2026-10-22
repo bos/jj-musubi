@@ -73,6 +73,16 @@ impl TestEnv {
         repo
     }
 
+    /// Creates a repository for `machine` that isn't colocated, whose git store is inside
+    /// `.jj` and whose workspace is named after it.
+    pub fn init_non_colocated_repo(&self, machine: &str) -> TestRepo {
+        let repo = self.repo_handle(machine);
+        fs::write(&repo.config_path, machine_config(machine)).unwrap();
+        repo.run_jj_at(self.root(), &["git", "init", "--no-colocate", machine]);
+        repo.jj(&["workspace", "rename", machine]);
+        repo
+    }
+
     /// Creates a colocated repository in directory `machine` whose workspace is named
     /// `workspace`, for provoking name collisions.
     pub fn init_repo_with_workspace(&self, machine: &str, workspace: &str) -> TestRepo {

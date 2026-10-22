@@ -17,29 +17,12 @@ fn with_origin(hive: &Fixture) -> PathBuf {
 }
 
 /// A bare `origin` with one commit on `main`; returns the clone that seeded it.
-fn create_origin(hive: &Fixture) -> PathBuf {
+pub fn create_origin(hive: &Fixture) -> PathBuf {
     let origin = hive.env.root().join("origin.git");
     let seed = hive.env.root().join("seed");
-    let git = |dir: &std::path::Path, args: &[&str]| {
-        let status = std::process::Command::new("git")
-            .current_dir(dir)
-            .args(args)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("HOME", hive.env.root().join("home"))
-            .env("GIT_AUTHOR_NAME", "o")
-            .env("GIT_AUTHOR_EMAIL", "o@example.com")
-            .env("GIT_COMMITTER_NAME", "o")
-            .env("GIT_COMMITTER_EMAIL", "o@example.com")
-            .output()
-            .unwrap();
-        assert!(
-            status.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&status.stderr)
-        );
-    };
     std::fs::create_dir_all(&seed).unwrap();
-    git(
+    seed_git(
+        hive,
         hive.env.root(),
         &[
             "init",
@@ -49,11 +32,12 @@ fn create_origin(hive: &Fixture) -> PathBuf {
             origin.to_str().unwrap(),
         ],
     );
-    git(&seed, &["init", "--quiet", "--initial-branch=main"]);
+    seed_git(hive, &seed, &["init", "--quiet", "--initial-branch=main"]);
     std::fs::write(seed.join("upstream"), "upstream 1").unwrap();
-    git(&seed, &["add", "."]);
-    git(&seed, &["commit", "--quiet", "-m", "upstream 1"]);
-    git(
+    seed_git(hive, &seed, &["add", "."]);
+    seed_git(hive, &seed, &["commit", "--quiet", "-m", "upstream 1"]);
+    seed_git(
+        hive,
         &seed,
         &["push", "--quiet", origin.to_str().unwrap(), "main"],
     );
@@ -489,13 +473,14 @@ fn a_machine_that_lags_behind_respellings_takes_later_changes() {
     );
 }
 
-/// Runs `git` in the clone that seeds origin.
-fn seed_git(hive: &Fixture, seed: &std::path::Path, args: &[&str]) {
-    let out = std::process::Command::new("git")
-        .current_dir(seed)
+/// Runs `git` in `dir`, such as the clone that seeds origin, as origin's author, in the
+/// tests' hermetic environment.
+pub fn seed_git(hive: &Fixture, dir: &std::path::Path, args: &[&str]) {
+    let out = hive
+        .repo(0)
+        .program(std::path::Path::new("git"))
+        .current_dir(dir)
         .args(args)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("HOME", hive.env.root().join("home"))
         .env("GIT_AUTHOR_NAME", "o")
         .env("GIT_AUTHOR_EMAIL", "o@example.com")
         .env("GIT_COMMITTER_NAME", "o")
@@ -569,6 +554,45 @@ fn push_from_one_machine() {
     hive.assert_converged();
     let feature = hive.commit_id(1, "feature");
     assert_eq!(hive.bookmarks(1)["feature@origin"], feature);
+}
+
+/// Whether remote bookmark `symbol` (`main@origin`) is tracked on machine `index`.
+fn tracked(hive: &Fixture, index: usize, symbol: &str) -> bool {
+    let template = r#"if(remote, name ++ "@" ++ remote ++ " " ++ if(tracked, "tracked", "untracked") ++ "\n")"#;
+    let list = hive
+        .repo(index)
+        .jj(&["bookmark", "list", "--all-remotes", "-T", template]);
+    list.lines()
+        .find_map(|line| line.strip_prefix(symbol)?.strip_prefix(' '))
+        == Some("tracked")
+}
+
+/// One machine stops tracking a remote bookmark; every machine stops, so a later fetch on
+/// any of them moves the remote bookmark but leaves the local one where it was.
+#[test]
+fn untracking_a_remote_bookmark_reaches_every_machine() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    let seed = with_origin(&hive);
+    hive.repo(0).jj(&["git", "fetch"]);
+    hive.repo(0).jj(&["bookmark", "track", "main@origin"]);
+    hive.sync();
+    hive.assert_converged();
+    assert!(tracked(&hive, 1, "main@origin"));
+    let upstream = hive.bookmarks(1)["main@"].clone();
+
+    hive.repo(0).jj(&["bookmark", "untrack", "main@origin"]);
+    hive.sync();
+    assert!(!tracked(&hive, 1, "main@origin"));
+    advance_origin(&hive, &seed, 2);
+    hive.repo(1).jj(&["git", "fetch"]);
+    hive.sync();
+    hive.assert_converged();
+    for index in [0, 1] {
+        let bookmarks = hive.bookmarks(index);
+        assert_eq!(bookmarks["main@"], upstream, "local main on {index}");
+        assert_ne!(bookmarks["main@origin"], upstream, "main@origin on {index}");
+        assert!(!tracked(&hive, index, "main@origin"), "{index}");
+    }
 }
 
 /// Two repositories created independently, each with a `main` at a different commit,

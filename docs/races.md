@@ -9,11 +9,12 @@ same result. Where jj would silently do something harmful only because the opera
 from different machines, musubi detects it and stops.
 
 Each entry below is pinned by a test in `crates/musubi-sync/tests/races/`, which runs real
-colocated repositories through the real protocol core and hub storage. Every test ends
-with `assert_converged`: running `jj` everywhere and syncing again reaches a fixed point
-within a few rounds; every machine agrees on visible commits and bookmarks; in every
-colocated repository the git branches match the bookmarks that are not conflicted; and
-`jj status` creates no further operation.
+repositories, colocated unless the entry says otherwise, through the real protocol core and
+hub storage, or, where it needs the binary, in `crates/musubi/tests/cli.rs`. Every test in
+`races/` ends with `assert_converged`: running `jj` everywhere and syncing again reaches a
+fixed point within a few rounds; every machine agrees on visible commits and bookmarks; in
+every colocated repository the git branches match the bookmarks that are not conflicted;
+and `jj status` creates no further operation.
 
 The generated end-to-end tests (docs/testing.md) explore interleavings of the same actions
 at random.
@@ -58,6 +59,7 @@ named after the machine (`beta/default`) (docs/design.md).
 | Both machines squash different work into the same commit | A divergent change, the same everywhere. | `both_machines_squash_into_the_same_commit` |
 | A conflicted commit made on one machine | Conflicted, with the same terms, on every machine; resolving it anywhere resolves it everywhere. | `conflicts_replicate_and_resolve` |
 | Three machines build on, and one rewrites, the same commit | Merged one at a time through the hub; no spurious divergence. Independent merges on each machine would each rebase the same commits and create divergence, which is why the hub orders updates (docs/design.md). | `three_machines_build_on_the_same_commit` |
+| One machine rewrites a commit another builds on, with commit signing on | The commits musubi rebases when it merges the two are signed, as jj's own rewrites would be: musubi loads jj's signing config as jj does. | `rewrites_are_signed_as_jj_signs_them` |
 
 ## Remotes
 
@@ -67,6 +69,7 @@ named after the machine (`beta/default`) (docs/design.md).
 | Two machines fetch while the remote moves in between | The newer fetch descends from the older one, so jj resolves the remote bookmark to it; no conflict. | `concurrent_fetches_of_a_moving_remote` |
 | Two machines fetch while the remote is force-pushed in between | The remote bookmark is conflicted, which jj won't export, and every `jj` command resolves a conflicted remote bookmark to what `.git` has. So musubi writes one side to every machine's `.git`, replacing whatever value from the conflict or jj's record was there, and every machine settles on that fetch, not on an older one some machine's `.git` still had. The side is the one committed last, which is not necessarily the later fetch; the next fetch corrects it. | `conflicted_remote_bookmark_resolves_to_a_fetched_side`, `conflicted_remote_bookmark_resolves_despite_a_stale_record` |
 | One machine pushes | Every machine sees the pushed, tracked remote bookmark. | `push_from_one_machine` |
+| One machine stops tracking a remote bookmark | Every machine stops: a later fetch on any of them moves the remote bookmark but not the local one. | `untracking_a_remote_bookmark_reaches_every_machine` |
 | A machine adds, renames, or removes a git remote, or changes its URL | Every machine does the same to its git config (docs/design.md, "Hive settings"), along with the remote bookmarks, which jj renames or forgets in the replicated view. | `remote_added_on_one_machine_reaches_the_others`, `remote_renamed_and_removed_everywhere` |
 | Two machines change the same remote's URL at once | The later write wins everywhere, by the writing machines' clocks; the other machine's value is replaced, and its daemon logs it. | `remote_changed_on_two_machines_at_once` |
 | One machine changes a remote's URL while another changes its push URL | Two writes to one remote: the later wins, whichever reaches the hub first, whichever machine merges, and whatever either does meanwhile. Clock skew can make the earlier win. | `the_later_change_to_a_remote_wins`, `the_later_change_wins_reaching_the_hub_last`, `working_on_after_the_earlier_change_makes_no_difference` |
@@ -76,6 +79,15 @@ named after the machine (`beta/default`) (docs/design.md).
 | A machine upgrades from before settings were timed | What it last applied has no time, so the hive's value wins, and a remote or key the hive removed meanwhile, which left no record of the removal, goes from this machine too. Its own changes since are written at the file's time. | `an_upgraded_machine_takes_removals_made_before_times` |
 | Machines reach one remote by different URLs (https and ssh, say) | Each keeps its own, joining or later, through moves, renames, and push URL changes on either machine, and after missing several changes; only pointing the remote at another repository replicates, and a push URL to where it used to point goes. A rename seen together with another change to the same remote isn't recognized as one: the remote is replaced, in the hive's spelling, and its remote-tracking refs go with it until the next sync brings them back. | `machines_keep_their_own_spelling_of_a_shared_remote`, `changes_to_a_remote_reach_machines_with_their_own_spelling`, `a_push_url_to_the_old_repository_goes_when_the_remote_moves`, `a_rename_keeps_each_machines_spelling`, `a_machine_that_lags_behind_respellings_takes_later_changes` |
 | `jj git colocation disable` or `enable` while `musubi daemon` runs | The daemon's next sync fails, since the repository it had open moved its git store. The daemon reopens the repository after any failed sync and retries after its backoff, so it carries on. | `daemon_carries_on_after_colocation_changes` |
+
+## Kinds of repository
+
+Not races: kinds of repository and history a hive carries.
+
+| Kind | Outcome | Test |
+| --- | --- | --- |
+| A machine's repository isn't colocated | Fine: its git store is inside `.jj`, where musubi reads and writes objects, with no `.git` to keep in step. Its work and bookmarks reach colocated machines, whose `.git` gets the branches, theirs reach it, and it merges concurrent work like any other machine. | `colocated_and_non_colocated_repositories_share_a_hive` |
+| History has a submodule | Fine: trees name the submodule's commit, which no machine needs, and nothing transfers it or asks for it. | `history_with_a_submodule_replicates` |
 
 ## Operation history
 

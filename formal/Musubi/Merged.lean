@@ -104,7 +104,7 @@ theorem pushReject_merged {s : State} (h : Reachable N s) {n hd : Nat} (hn : n <
       obtain ⟨⟨y, hy, hoy⟩, -⟩ := ho
       exact hI.lObjs n y o (hI.lopsAnc hl hy) hoy) hl))
   have r2 := r1.step (Or.inr (SyncStep.hubPushReject _ n (s.upOps n hd) (s.upObjs n hd)
-    (s.node n).known.2 hd (Or.inr rfl) hrej' (fun ⟨e, _, _⟩ => hrej e)))
+    (s.node n).known.2 hd (Or.inr rfl) hrej' (Or.inl hrej)))
   have r3 := r2.step (Or.inr (SyncStep.learn _ n .rejected s.hub.seq s.hub.head hn
     (Or.inr rfl) hlt))
   exact ⟨_, r3, rfl, rfl, fun _ => ⟨rfl, rfl, rfl, rfl⟩⟩

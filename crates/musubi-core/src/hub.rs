@@ -76,6 +76,8 @@ pub enum CasOutcome {
     Idempotent,
     Accepted,
     Rejected,
+    /// `expected` was the head, but `closure(new)` isn't stored.
+    Incomplete,
 }
 
 pub fn handle<S: HubStorage>(
@@ -126,7 +128,8 @@ pub fn handle<S: HubStorage>(
 
 /// Answers `Push`: stores the operations and objects, then is idempotent if `new` is already
 /// the head, and otherwise accepts exactly when `head = expected`, `closure(new)` is stored,
-/// and `expected ∈ anc*(new)`.
+/// and `expected ∈ anc*(new)`. Where `head = expected` but `closure(new)` isn't stored, the
+/// node lacks what `new` requires, and the answer says so.
 pub fn push<S: HubStorage>(
     storage: &mut S,
     ops: &[S::Op],
@@ -152,7 +155,22 @@ pub fn push<S: HubStorage>(
             },
         ));
     }
-    if head == *expected && storage.is_closed(new)? && storage.descends(expected, new)? {
+    if head == *expected && !storage.is_closed(new)? {
+        let reply = Reply::Head {
+            kind: HeadKind::Incomplete,
+            seq,
+            head,
+        };
+        return Ok((
+            CasOutcome::Incomplete,
+            Handled {
+                reply,
+                publish: None,
+            },
+        ));
+    }
+    // Closed, if `head = expected`: the ancestry check needs every operation stored.
+    if head == *expected && storage.descends(expected, new)? {
         storage.set_head(seq + 1, new)?;
         let reply = Reply::Head {
             kind: HeadKind::Accepted,

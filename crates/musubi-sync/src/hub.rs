@@ -14,6 +14,7 @@ use musubi_jj::objects::Backend;
 
 use crate::Attachment;
 use crate::OpId;
+use crate::short;
 use crate::temp_bundle;
 
 pub struct HubAdapter {
@@ -129,7 +130,18 @@ impl HubStorage for HubAdapter {
     }
 
     fn is_closed(&self, op: &OpId) -> anyhow::Result<bool> {
-        Ok(self.store.missing_closure(op)?.is_empty())
+        let missing = self.store.missing_closure(op)?;
+        if !missing.is_empty() {
+            // The node hears only that something is missing (`Incomplete`).
+            let shown: Vec<&str> = missing.iter().take(5).map(String::as_str).collect();
+            tracing::warn!(
+                "a push of {} can't be closed: {} missing, among them {}",
+                short(op),
+                missing.len(),
+                shown.join(", ")
+            );
+        }
+        Ok(missing.is_empty())
     }
 
     fn descends(&self, ancestor: &OpId, op: &OpId) -> anyhow::Result<bool> {

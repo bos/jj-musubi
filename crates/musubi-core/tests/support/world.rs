@@ -62,6 +62,7 @@ fn kind_name(kind: HeadKind) -> &'static str {
         HeadKind::Head => "head",
         HeadKind::Accepted => "accepted",
         HeadKind::Rejected => "rejected",
+        HeadKind::Incomplete => "incomplete",
         HeadKind::Notify => "notify",
     }
 }
@@ -110,6 +111,17 @@ impl World {
     pub fn undelivered(&self) -> Vec<usize> {
         (0..self.net.len())
             .filter(|&i| !self.net[i].delivered)
+            .collect()
+    }
+
+    /// The kinds of the head replies sent to `node`, oldest first.
+    pub fn head_replies(&self, node: usize) -> Vec<HeadKind> {
+        self.net
+            .iter()
+            .filter_map(|message| match &message.payload {
+                Payload::Reply(to, Reply::Head { kind, .. }) if *to == node => Some(*kind),
+                _ => None,
+            })
             .collect()
     }
 
@@ -326,6 +338,7 @@ impl World {
                     CasOutcome::Idempotent => "hubPushIdem",
                     CasOutcome::Accepted => "hubPushAccept",
                     CasOutcome::Rejected => "hubPushReject",
+                    CasOutcome::Incomplete => "hubPushIncomplete",
                 };
                 let action = json!({"kind": kind, "node": node,
                     "ops": sorted(ops.iter().copied()), "objs": sorted(objects.iter().copied()),

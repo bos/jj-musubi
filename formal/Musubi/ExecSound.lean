@@ -652,14 +652,27 @@ theorem execCore_sound {N : Nat} {es es' : EState} {a : Action} (hlt : ParLt es.
     rw [abs_send _ nb, abs_hubStore]
     refine Or.inr (SyncStep.hubPushReject _ n (setP S) (setP O) e d (inNet_net nb h1)
       (of_decide_eq_true h2) ?_)
-    rintro ⟨he, ha, hc⟩
-    have : (decide (es.hub.head = e) && ancB es.parF e d && (es.hubStore S O).closedB d)
-        = true := by
-      simp only [Bool.and_eq_true, decide_eq_true_eq]
-      refine ⟨⟨he, (ancB_iff hlt).2 ha⟩, (closedB_iff (es := es.hubStore S O) hlt).2 ?_⟩
+    simp only [Bool.or_eq_true, Bool.not_eq_true', decide_eq_false_iff_not,
+      Bool.and_eq_true] at h3
+    rcases h3 with he | ⟨hc, ha⟩
+    · exact Or.inl he
+    · refine Or.inr ⟨?_, fun ha' => ?_⟩
+      · rw [← abs_hubStore]; exact (closedB_iff (es := es.hubStore S O) hlt).1 hc
+      · rw [(ancB_iff hlt).2 ha'] at ha; cases ha
+  | hubPushIncomplete n S O e d =>
+    simp only [execCore] at h
+    obtain ⟨h1, h⟩ := req_ok h; obtain ⟨h2, h⟩ := req_ok h; obtain ⟨h3, h⟩ := req_ok h
+    obtain ⟨h4, h⟩ := req_ok h
+    cases h
+    rw [abs_send _ nb, abs_hubStore]
+    refine Or.inr (SyncStep.hubPushIncomplete _ n (setP S) (setP O) e d (inNet_net nb h1)
+      (of_decide_eq_true h2) (of_decide_eq_true h3) ?_)
+    intro hc
+    have : (es.hubStore S O).closedB d = true := by
+      refine (closedB_iff (es := es.hubStore S O) hlt).2 ?_
       rw [abs_hubStore]; exact hc
-    rw [this] at h3
-    cases h3
+    rw [this] at h4
+    cases h4
   | hubFetch n b H =>
     simp only [execCore] at h
     obtain ⟨h1, h⟩ := req_ok h

@@ -21,6 +21,7 @@ def decodeHeadKind : String → Except String HeadKind
   | "head" => pure .head
   | "accepted" => pure .accepted
   | "rejected" => pure .rejected
+  | "incomplete" => pure .incomplete
   | "notify" => pure .notify
   | k => throw s!"unknown headKind {k}"
 
@@ -67,6 +68,9 @@ def decodeAction (j : Json) : Except String Action := do
   | "hubPushReject" =>
     return .hubPushReject (← node) (← getNats j "ops") (← getNats j "objs")
       (← getNat j "expected") (← getNat j "new")
+  | "hubPushIncomplete" =>
+    return .hubPushIncomplete (← node) (← getNats j "ops") (← getNats j "objs")
+      (← getNat j "expected") (← getNat j "new")
   | "hubFetch" => return .hubFetch (← node) (← getNat j "base") (← getNats j "haves")
   | "crashHub" => return .crashHub
   | k => throw s!"unknown action kind {k}"
@@ -82,6 +86,7 @@ def headKindStr : HeadKind → String
   | .head => "head"
   | .accepted => "accepted"
   | .rejected => "rejected"
+  | .incomplete => "incomplete"
   | .notify => "notify"
 
 def msgObj (kind : String) (n : Nat) (rest : List (String × Json)) : Json :=

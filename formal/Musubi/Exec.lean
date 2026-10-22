@@ -303,6 +303,7 @@ inductive Action
   | hubPushIdem (node : Nat) (ops objs : List Nat) (expected new : Nat)
   | hubPushAccept (node : Nat) (ops objs : List Nat) (expected new : Nat)
   | hubPushReject (node : Nat) (ops objs : List Nat) (expected new : Nat)
+  | hubPushIncomplete (node : Nat) (ops objs : List Nat) (expected new : Nat)
   | hubFetch (node base : Nat) (haves : List Nat)
   | crashHub
   deriving Repr
@@ -494,9 +495,19 @@ def execCore (N : Nat) (es : EState) : Action → Except String EState
       (fun _ => s!"hubPushReject: push({e}, {d}) from node {n} not in net") fun _ =>
     req (decide (es.hub.head ≠ d))
       (fun _ => s!"hubPushReject: head is already {d} (idempotent)") fun _ =>
-    req (!(decide (es.hub.head = e) && ancB es.parF e d && (es.hubStore S O).closedB d))
-      (fun _ => s!"hubPushReject: push({e}, {d}) is acceptable") fun _ =>
+    req (!(decide (es.hub.head = e)) || ((es.hubStore S O).closedB d && !(ancB es.parF e d)))
+      (fun _ => s!"hubPushReject: push({e}, {d}) is acceptable or incomplete") fun _ =>
     .ok ((es.hubStore S O).send (.head n .rejected es.hub.seq es.hub.head))
+  | .hubPushIncomplete n S O e d =>
+    req (es.inNet (.push n S O e d))
+      (fun _ => s!"hubPushIncomplete: push({e}, {d}) from node {n} not in net") fun _ =>
+    req (decide (es.hub.head ≠ d))
+      (fun _ => s!"hubPushIncomplete: head is already {d} (idempotent)") fun _ =>
+    req (decide (es.hub.head = e))
+      (fun _ => s!"hubPushIncomplete: head {es.hub.head} is not expected {e}") fun _ =>
+    req (!(es.hubStore S O).closedB d)
+      (fun _ => s!"hubPushIncomplete: closure of {d} is stored at hub") fun _ =>
+    .ok ((es.hubStore S O).send (.head n .incomplete es.hub.seq es.hub.head))
   | .hubFetch n b H =>
     req (es.inNet (.fetch n b H))
       (fun _ => s!"hubFetch: fetch({b}) from node {n} not in net") fun _ =>

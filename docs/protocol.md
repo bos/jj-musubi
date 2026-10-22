@@ -37,7 +37,7 @@ Requests and replies (each request carries a node-chosen request id that the rep
 | --- | --- |
 | `Fetch(base, haves H)` | `Fetched(seq, head, ops, objects)`: the hub's `(seq, head)`, the stored operations in `anc*(head) \ anc*(base)`, and the stored objects they require, less `closure(base)` and `H` |
 | `GetObjects(for operations S, base, haves H)` | `Objects`: the stored objects `S` requires, less `closure(base)` and `H` |
-| `Push(operations, objects, expected, new)` | `Accepted(seq, head)` or `Rejected(seq, head)` |
+| `Push(operations, objects, expected, new)` | `Accepted(seq, head)`, `Rejected(seq, head)`, or `Incomplete(seq, head)` |
 
 `Fetch` asks for a range ending at the hub's own head, because a node cannot name operations
 it has never seen, and the reply says which head that was. `base` is an operation the hub
@@ -56,11 +56,15 @@ it stores the operations and objects, then answers `Cas(expected, new)`:
    (HubClosed), and so is the closure of every operation in `anc*(head)`, the closure check
    need only look at what `new` adds to them.
 3. On acceptance it sets `head := new` and `seq := seq + 1`, persists both, and only then
-   replies `Accepted(seq, new)` and publishes `Head(seq, new)` to subscribers. Otherwise it
-   replies `Rejected(seq, head)`.
+   replies `Accepted(seq, new)` and publishes `Head(seq, new)` to subscribers.
+4. Otherwise, if `head = expected` but `closure(new) ⊄ ops ∪ objects`, it replies
+   `Incomplete(seq, head)`. The node pushed from the head, but lacks what `new` requires,
+   so pushing again would send the same: it stops with an error rather than retry
+   forever. Otherwise it replies `Rejected(seq, head)`: the head isn't `expected`, as when
+   another push came first, or `new` doesn't descend from it.
 
-Every `Head`, `Accepted`, `Rejected`, and `Fetched` carries a `(seq, head)` pair the hub
-actually had.
+Every `Head`, `Accepted`, `Rejected`, `Incomplete`, and `Fetched` carries a `(seq, head)`
+pair the hub actually had.
 
 Each request takes one round trip. Bulky payloads (operations and objects) travel inline when
 they are small, and otherwise as chunked blobs (see [Chunked blobs](#chunked-blobs)). At this
@@ -99,9 +103,9 @@ These happen outside musubi, through `jj`:
 
 ### Sync actions
 
-- `Learn(s, h)`: on receiving `Head`, `Accepted`, `Rejected`, or `Fetched` carrying
-  `(s, h)`, if `s > known.seq` then `known := (s, h)`. Stale and duplicated notifications
-  are therefore harmless.
+- `Learn(s, h)`: on receiving `Head`, `Accepted`, `Rejected`, `Incomplete`, or `Fetched`
+  carrying `(s, h)`, if `s > known.seq` then `known := (s, h)`. Stale and duplicated
+  notifications are therefore harmless.
 - `Fetch`: send `Fetch(base, H)`, where `base` is any local operation the node knows the
   hub accepted, and `H` names objects of its heads. So that the node is never sent what it
   has, `base` is the newest `known.head` that was local and in `anc*(heads)`, which

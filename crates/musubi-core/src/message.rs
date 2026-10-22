@@ -13,7 +13,12 @@ use serde::Serialize;
 pub enum HeadKind {
     Head,
     Accepted,
+    /// A push that can't move the head: the head isn't the one it expected, as when another
+    /// push came first, or its new head doesn't descend from that.
     Rejected,
+    /// A push from the hub's head that the hub still can't close, whatever the node sends
+    /// again, since the node lacks what its operation requires (docs/protocol.md).
+    Incomplete,
     Notify,
 }
 
@@ -49,7 +54,8 @@ pub struct OpEntry<O> {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Reply<O, A> {
-    /// Answer to `Push` (`Accepted` or `Rejected`), and the hub's announcements (`Notify`).
+    /// Answer to `Push` (`Accepted`, `Rejected` or `Incomplete`), and the hub's announcements
+    /// (`Notify`).
     Head {
         kind: HeadKind,
         seq: u64,

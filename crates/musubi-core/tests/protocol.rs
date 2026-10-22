@@ -14,6 +14,7 @@ use std::rc::Rc;
 
 use hegel::TestCase;
 use hegel::generators as gs;
+use musubi_core::message::HeadKind;
 use support::oracle::Oracle;
 use support::world::World;
 
@@ -196,6 +197,21 @@ fn push_after_forgotten_upload_reuploads() {
     world.hub_forget();
     world.quiesce();
     world.check_invariants();
+}
+
+/// A push from the hub's head whose closure the hub still lacks is `Incomplete`, not
+/// `Rejected`: a node takes `Rejected` for a lost race, and would fetch and push the same
+/// again forever, though it can't send what it lacks.
+#[test]
+fn an_unclosable_push_is_incomplete() {
+    let mut world = World::new(1, None);
+    world.user_op(0, 0, 1);
+    let op = *world.local_ops(0).last().unwrap();
+    world.rogue_push(0, 0, op);
+    for index in world.undelivered() {
+        world.deliver(index);
+    }
+    assert_eq!(world.head_replies(0), [HeadKind::Incomplete]);
 }
 
 /// A node fetches only operations it lacks: once the hub accepts its own push, it fetches

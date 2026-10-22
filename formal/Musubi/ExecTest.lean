@@ -59,12 +59,16 @@ def merged : List Action :=
       (es.nodeOf 1).known == (1, 1)
   | .error _ => false
 
--- A push whose upload leaves the closure incomplete is rejected, and stores what it carried.
+-- A push from the head whose upload leaves the closure incomplete is incomplete, not
+-- rejected, and stores what it carried.
 #guard errorOf (run 2 initE [.userOp 0 root [10], .pushAll 0 [1] [] root 1,
     .hubPushAccept 0 [1] [] root 1]) ==
   "hubPushAccept: closure of 1 not stored at hub (missing object 10 of op 1)"
+#guard errorOf (run 2 initE [.userOp 0 root [10], .pushAll 0 [1] [] root 1,
+    .hubPushReject 0 [1] [] root 1]) ==
+  "hubPushReject: push(0, 1) is acceptable or incomplete"
 #guard match run 2 initE [.userOp 0 root [10], .pushAll 0 [1] [] root 1,
-    .hubPushReject 0 [1] [] root 1] with
+    .hubPushIncomplete 0 [1] [] root 1] with
   | .ok es => es.hub.ops.contains 1 && es.hub.head == root
   | .error _ => false
 

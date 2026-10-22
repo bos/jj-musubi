@@ -123,6 +123,13 @@ impl NodeDriver {
             }
         };
         let reply = self.remote.call(request).await?;
+        let incomplete = matches!(
+            reply,
+            Reply::Head {
+                kind: HeadKind::Incomplete,
+                ..
+            }
+        );
         // Handling the reply imports its bundles, which go once it is dropped.
         let handled = self.core.handle(&mut self.adapter, reply)?;
         if let Handled::Learned {
@@ -133,6 +140,12 @@ impl NodeDriver {
             self.tally.pushed += pushing;
         }
         log_handled(&handled);
+        // Pushing again would send the same, and get the same answer.
+        anyhow::ensure!(
+            !incomplete,
+            "the hub can't accept this machine's work: it still lacks objects that the work \
+             requires, after this machine sent what it had (the hub's log names them)"
+        );
         Ok(())
     }
 

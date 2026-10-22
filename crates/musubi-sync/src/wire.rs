@@ -21,7 +21,7 @@ use serde::Serialize;
 
 use crate::blobs::BlobId;
 
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 pub const JJ_LIB_VERSION: &str = "0.46.0";
 
 /// An operation or commit id on the wire.

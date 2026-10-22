@@ -461,6 +461,8 @@ theorem inv_syncStep {s s' : State} (hI : Inv N s) (h : SyncStep N s s') : Inv N
     exact inv_casAccept (inv_hubStore hI) (hI.msgs _ hm : CasOK s n d) hne he ha hc
   | hubPushReject n S O e d hm hne hrej =>
     exact (inv_hubStore hI).send (MsgOK_headNow (inv_hubStore hI) n _)
+  | hubPushIncomplete n S O e d hm hne he hc =>
+    exact (inv_hubStore hI).send (MsgOK_headNow (inv_hubStore hI) n _)
   | hubFetch n b H hm =>
     refine ((hI.send (MsgOK_headNow hI n _)).send ?_).send trivial
     exact fun x hx => hx.1

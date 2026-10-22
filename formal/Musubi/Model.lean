@@ -51,12 +51,14 @@ structure Node where
   /-- `staged` objects. -/
   sobj : OSet
 
-/-- The three hub replies carrying a head, plus the published notification. They are all
-handled the same way by `Learn`. -/
+/-- The four hub replies carrying a head, plus the published notification. They are all
+handled the same way by `Learn`. `incomplete` answers a push from the hub's head that the
+hub still can't close, which only a node lacking what its operation requires sends. -/
 inductive HeadKind
   | head
   | accepted
   | rejected
+  | incomplete
   | notify
   deriving DecidableEq, Repr
 
@@ -306,10 +308,17 @@ inductive SyncStep (N : Nat) : State → State → Prop
       SyncStep N s
         ((((s.hubStore S O).hubAccept d).send (.head n .accepted (s.hub.seq + 1) d)).notifyAll
           (s.hub.seq + 1) d)
+  /-- A `push` rejected: the head isn't the expected one, or `new` doesn't descend from it,
+  as far as the stored closure says. -/
   | hubPushReject (s : State) (n : Nat) (S O : OSet) (e d : Nat)
       (hm : s.net (.push n S O e d)) (hne : s.hub.head ≠ d)
-      (hrej : ¬ (s.hub.head = e ∧ Anc s.U.par e d ∧ ClosedAt (s.hubStore S O) d)) :
+      (hrej : s.hub.head ≠ e ∨ (ClosedAt (s.hubStore S O) d ∧ ¬ Anc s.U.par e d)) :
       SyncStep N s ((s.hubStore S O).send (.head n .rejected s.hub.seq s.hub.head))
+  /-- A `push` from the head that the hub still can't close, said apart from a lost race. -/
+  | hubPushIncomplete (s : State) (n : Nat) (S O : OSet) (e d : Nat)
+      (hm : s.net (.push n S O e d)) (hne : s.hub.head ≠ d) (he : s.hub.head = e)
+      (hc : ¬ ClosedAt (s.hubStore S O) d) :
+      SyncStep N s ((s.hubStore S O).send (.head n .incomplete s.hub.seq s.hub.head))
   /-- A `fetch` answered with the head, and the operations and objects since `b`. -/
   | hubFetch (s : State) (n b : Nat) (H : OSet) (hm : s.net (.fetch n b H)) :
       SyncStep N s (((s.send (.head n .head s.hub.seq s.hub.head)).send

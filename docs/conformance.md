@@ -88,14 +88,16 @@ compared as sets.
 | `hubPushIdem` | `node`, `ops`, `objs`, `expected`, `new` | `SyncStep.hubPushIdem` |
 | `hubPushAccept` | `node`, `ops`, `objs`, `expected`, `new` | `SyncStep.hubPushAccept` |
 | `hubPushReject` | `node`, `ops`, `objs`, `expected`, `new` | `SyncStep.hubPushReject` |
+| `hubPushIncomplete` | `node`, `ops`, `objs`, `expected`, `new` | `SyncStep.hubPushIncomplete` |
 | `hubFetch` | `node`, `base`, `haves` | `SyncStep.hubFetch`: replies with a `head`, an `ops` and an `objs` message |
 | `crashHub` | none | `SyncStep.crashHub` |
 
-`headKind` is one of `head`, `accepted`, `rejected`, `notify`. The Rust hub decides how to
-answer a `Push`, and the test sends whichever of `hubPushIdem`, `hubPushAccept`, or
-`hubPushReject` it chose. The oracle checks that choice's guard, so a hub that accepts a
-`Push` the model would reject is caught. The Rust core sends only the merged requests;
-the finer-grained actions remain in the model and the oracle.
+`headKind` is one of `head`, `accepted`, `rejected`, `incomplete`, `notify`. The Rust hub
+decides how to answer a `Push`, and the test sends whichever of `hubPushIdem`,
+`hubPushAccept`, `hubPushReject`, or `hubPushIncomplete` it chose. The oracle checks that
+choice's guard, so a hub that accepts a `Push` the model would reject is caught, and so is
+one that rejects a `Push` the model says is incomplete. The Rust core sends only the merged
+requests; the finer-grained actions remain in the model and the oracle.
 
 ### Replies
 
@@ -192,7 +194,7 @@ that it asks for them.
 | `NodeCore` realizes or advances | `realize` / `advance` |
 | The hub handles `Fetch` | `hubFetch` |
 | The hub handles `GetObjects { for_ops: S, haves: H, .. }` | `hubGetObjs` with `objs(S) \ H` |
-| The hub handles `Push` | `hubPushIdem`, `hubPushAccept`, or `hubPushReject` |
+| The hub handles `Push` | `hubPushIdem`, `hubPushAccept`, `hubPushReject`, or `hubPushIncomplete` |
 | A node restarts | `loseKnown` (its staged files survive; `known` does not) |
 | A node restarts while taking in a `Fetched` reply, after staging its operations and before staging its objects (test rule) | `learn` if its head is newer, `recvOps`, then `loseKnown` |
 | The hub restarts | `crashHub` |

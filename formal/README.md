@@ -66,11 +66,11 @@ The binary is `formal/.lake/build/bin/oracle`.
 | History of accepted heads | ghost `s.hub.hist : Nat → Nat` (`hist i` = head accepted at `i`) |
 | Node `local`, `heads`, `staged`, `known` | `(s.node n).lops`, `.heads`, `.sops`/`.sobj`, `.known`; `.lobj` is the local object store |
 | `max(S)` | `maxSet par S` |
-| `GetHead`/`Head`, `Accepted`, `Rejected`, publish | `Msg.getHead`, `Msg.head n k sq h` with `k : HeadKind` (`head`, `accepted`, `rejected`, `notify`) |
+| `GetHead`/`Head`, `Accepted`, `Rejected`, `Incomplete`, publish | `Msg.getHead`, `Msg.head n k sq h` with `k : HeadKind` (`head`, `accepted`, `rejected`, `incomplete`, `notify`) |
 | `PutOps`/`PutObjects`/`Stored` | `Msg.putOps n S`, `Msg.putObjs n S`, `Msg.stored` |
 | `GetOps`/`Ops`, `GetObjects`/`Objects` | `Msg.getOps`, `Msg.ops`, `Msg.getObjs`, `Msg.objs` |
 | `Cas(expected, new)` | `Msg.cas n e d`; hub steps `casIdem`, `casAccept`, `casReject` |
-| `Push(operations, objects, expected, new)` | `Msg.push n S O e d`; node step `pushAll`; hub steps `hubPushIdem`, `hubPushAccept`, `hubPushReject`, each storing `S` and `O` first (`State.hubStore`) |
+| `Push(operations, objects, expected, new)` | `Msg.push n S O e d`; node step `pushAll`; hub steps `hubPushIdem`, `hubPushAccept`, `hubPushReject`, `hubPushIncomplete`, each storing `S` and `O` first (`State.hubStore`) |
 | `Fetch(base, haves)`/`Fetched` | `Msg.fetch n b H`; node step `fetchAll`; hub step `hubFetch`, which sends `head n head seq head`, `ops n (sinceOps b)` and `objs n (sinceObjs b H)` |
 | `UserOp(p)` | `EnvStep.userOp` → `State.userOp` |
 | `Merge` | `EnvStep.merge` → `State.mergeOp` |
@@ -326,8 +326,8 @@ underspecified, and the implementation should pin them down:
     hub replied first and then lost the update in a crash, HubMonotone and
     KnownIsHubHistory would fail.
   - `closure(head)` is durable whenever `head` is.
-  - Every `Head`, `Accepted` and `Rejected` message carries a pair `(seq, head)` that the hub
-    actually had.
+  - Every `Head`, `Accepted`, `Rejected` and `Incomplete` message carries a pair
+    `(seq, head)` that the hub actually had.
 - **Node:**
   - Request, stage and realize only operations in `closure(known.head)`.
   - Push only local operations.

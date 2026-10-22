@@ -7,11 +7,23 @@ import sys
 
 B = os.path.dirname(os.path.abspath(__file__))
 WORK = os.environ.get("MUSUBI_BENCH_DIR") or f"{B}/work"
-REPOS = [r for r in ("small", "jj", "git") if os.path.exists(f"{WORK}/results/{r}.json")]
+RESULTS = f"{WORK}/results"
+# The README's repositories first, smallest first; then the others by name.
+ORDER = ("small", "jj", "git")
+
+
+def ordered(names):
+    return sorted(names, key=lambda r: (ORDER.index(r) if r in ORDER else len(ORDER), r))
+
+
+NAMES = os.listdir(RESULTS) if os.path.isdir(RESULTS) else []
+# bench.py's results, by repository; the other scripts' names, and delayed runs', have a dash,
+# which a repository's name never does.
+REPOS = ordered(n[:-5] for n in NAMES if n.endswith(".json") and "-" not in n)
 
 
 def load(r):
-    with open(f"{WORK}/results/{r}.json") as f:
+    with open(f"{RESULTS}/{r}.json") as f:
         return json.load(f)
 
 
@@ -28,7 +40,7 @@ def fmt_t(t):
 
 
 def stat(values, f):
-    values = list(values)
+    values = [v for v in values if v is not None]
     if not values:
         return "-"
     med = statistics.median(values)
@@ -45,12 +57,15 @@ def initial():
     for r in REPOS:
         d = load(r)["initial"]
         rows = [
+            ("`git clone`", d.get("plain_git_clone_B", [])),
             ("`jj git clone`", d["git_clone_B"]),
             ("`musubi clone`", d["musubi_clone_B"]),
             ("`musubi join` (has a git clone already)", [d["musubi_join_existing_C"]]),
             ("first machine `musubi create` (seeds hub)", [d["musubi_seed_A"]]),
         ]
         for name, ms in rows:
+            if not ms:
+                continue
             print(
                 f"| {r} | {name} | {stat((m['t'] for m in ms), fmt_t)} | "
                 f"{stat((m['down'] for m in ms), fmt_b)} | {stat((m['up'] for m in ms), fmt_b)} | "
@@ -62,20 +77,23 @@ def initial():
 def scenarios():
     print("### Incremental changes, A to B\n")
     print(
-        "| repo | change | ops | git push | musubi push (A) | git fetch | musubi fetch (B) "
-        "| git total bytes | musubi total bytes |"
+        "| repo | change | ops | jj git push | musubi push (A) | git fetch | jj git fetch "
+        "| musubi fetch (B) | jj git total bytes | musubi total bytes |"
     )
-    print("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    print("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     for r in REPOS:
         sc = load(r).get("scenarios", {})
         for s, rows in sc.items():
             if not rows:
                 continue
-            g = lambda k, f: stat((row[k][f] for row in rows), fmt_b if f != "t" else fmt_t)  # noqa: E731
+            g = lambda k, f: stat(  # noqa: E731
+                (row[k][f] if k in row else None for row in rows), fmt_b if f != "t" else fmt_t
+            )
             ops = statistics.median(row["hub_store"]["n_ops"] for row in rows)
             print(
                 f"| {r} | {s} | {ops:.0f} | {g('git_push', 't')}, {g('git_push', 'total')} | "
                 f"{g('musubi_push', 't')}, {g('musubi_push', 'total')} | "
+                f"{g('plain_git_fetch', 't')}, {g('plain_git_fetch', 'total')} | "
                 f"{g('git_fetch', 't')}, {g('git_fetch', 'total')} | "
                 f"{g('musubi_fetch', 't')}, {g('musubi_fetch', 'total')} | "
                 f"{stat((row['git_push']['total'] + row['git_fetch']['total'] for row in rows), fmt_b)} | "
@@ -100,14 +118,46 @@ def scenarios():
 
 def noop():
     print("### No-op sync\n")
-    print("| repo | git fetch | git push | musubi sync (B) | musubi sync (A) |")
-    print("| --- | --- | --- | --- | --- |")
+    print("| repo | git fetch | jj git fetch | jj git push | musubi sync (B) | musubi sync (A) |")
+    print("| --- | --- | --- | --- | --- | --- |")
     for r in REPOS:
         no = load(r).get("noop")
         if not no:
             continue
-        cell = lambda k: f"{stat((m['t'] for m in no[k]), fmt_t)}, {stat((m['total'] for m in no[k]), fmt_b)}"  # noqa: E731
-        print(f"| {r} | {cell('git_fetch')} | {cell('git_push')} | {cell('musubi_B')} | {cell('musubi_A')} |")
+        cell = lambda k: f"{stat((m['t'] for m in no.get(k, [])), fmt_t)}, {stat((m['total'] for m in no.get(k, [])), fmt_b)}"  # noqa: E731
+        print(
+            f"| {r} | {cell('plain_git_fetch')} | {cell('git_fetch')} | {cell('git_push')} | "
+            f"{cell('musubi_B')} | {cell('musubi_A')} |"
+        )
+    print()
+
+
+def week():
+    print("### A week away: B catches up\n")
+    print(
+        "Upstream's commits land on main a day at a time, and each day A fetches them, rebases "
+        "its feature onto them and works on it, and pushes (in musubi's world, syncs). B, away "
+        "all week, then catches up at once.\n"
+    )
+    print(
+        "| repo | upstream commits | hub ops | git fetch | jj git fetch | musubi sync (B) "
+        "| A's daily jj git push | A's daily musubi sync |"
+    )
+    print("| --- | --- | --- | --- | --- | --- | --- | --- |")
+    for r in REPOS:
+        wk = load(r).get("week")
+        if not wk:
+            continue
+        cell = lambda m: f"{fmt_t(m['t'])}, {fmt_b(m['total'])}"  # noqa: E731
+        daily = lambda k: (  # noqa: E731
+            f"{stat((m['t'] for m in wk.get(k, [])), fmt_t)}, "
+            f"{stat((m['total'] for m in wk.get(k, [])), fmt_b)}"
+        )
+        print(
+            f"| {r} | {wk['upstream_commits']} | {wk['hub_store']['n_ops']} | "
+            f"{cell(wk['plain_git_fetch'])} | {cell(wk['git_fetch'])} | "
+            f"{cell(wk['musubi_fetch'])} | {daily('git_A_pushes')} | {daily('musubi_A_syncs')} |"
+        )
     print()
 
 
@@ -158,24 +208,29 @@ def disk():
         ("Am_musubi", "  of which .jj/repo/musubi"),
         ("B_git", "git-world B .git"),
         ("B_jj", "git-world B .jj"),
+        ("Bp_git", "plain git B .git"),
         ("Bm_git", "musubi B .git"),
         ("Bm_jj", "musubi B .jj"),
         ("Bm_musubi", "  of which .jj/repo/musubi"),
     ]
-    print("| | " + " | ".join(f"{r} (after initial / after scenarios)" for r in REPOS) + " |")
+    whens = ("disk_after_initial", "disk_after_scenarios", "disk_after_week")
+    print(
+        "| | "
+        + " | ".join(f"{r} (after initial / after scenarios / after week)" for r in REPOS)
+        + " |"
+    )
     print("| --- |" + " --- |" * len(REPOS))
     for k, name in keys:
         cells = []
         for r in REPOS:
             d = load(r)
-            a = d.get("disk_after_initial", {}).get(k)
-            s = d.get("disk_after_scenarios", {}).get(k)
-            cells.append(f"{fmt_b(a) if a is not None else '-'} / {fmt_b(s) if s is not None else '-'}")
+            sizes = (d.get(when, {}).get(k) for when in whens)
+            cells.append(" / ".join(fmt_b(n) if n is not None else "-" for n in sizes))
         print(f"| {name} | " + " | ".join(cells) + " |")
     print()
     for r in REPOS:
         d = load(r)
-        for when in ("disk_after_initial", "disk_after_scenarios"):
+        for when in whens:
             hs = d.get(when, {}).get("hub_store")
             if hs:
                 print(f"- {r} {when}: hub has {hs['n_ops']} ops ({fmt_b(hs['ops_bytes'])}), "
@@ -198,8 +253,8 @@ def oplog():
             f"{fmt_t(statistics.median(m['t'] for m in first))} and "
             f"{fmt_b(statistics.median(m['total'] for m in first))} on a fresh hive"
         )
-    for r in ("small", "jj", "git"):
-        p = f"{WORK}/results/oplog-{r}.json"
+    for r in ordered(n[len("oplog-") : -5] for n in NAMES if n.startswith("oplog-")):
+        p = f"{RESULTS}/oplog-{r}.json"
         if os.path.exists(p):
             d = json.load(open(p))
             print(f"\n{r} (oplog.py): `jj git clone` {fmt_t(d['git_clone']['t'])}, {fmt_b(d['git_clone']['total'])}\n")
@@ -214,6 +269,7 @@ if __name__ == "__main__":
     initial()
     scenarios()
     noop()
+    week()
     daemon()
     disk()
     oplog()

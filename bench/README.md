@@ -1,12 +1,13 @@
 # Benchmarks
 
-Scripts that measure jj-musubi against `jj git clone`, `jj git fetch` and `jj git push`
-on localhost: time, and bytes on the wire as counted by a TCP proxy. They need
-`/usr/bin/python3`, `git`, `jj`, `ssh-keygen` and a release build of `musubi`.
+Scripts that measure jj-musubi against `git clone` and `git fetch`, and `jj git clone`,
+`jj git fetch` and `jj git push`, on localhost: time, and bytes on the wire as counted by
+a TCP proxy. They need `/usr/bin/python3`, `git`, `jj`, `ssh-keygen` and a release build
+of `musubi`.
 
 | Script | Measures |
 | --- | --- |
-| `bench.py REPO REPS` | Initial transfer (seed, clone, join with an existing clone), incremental changes from one machine to another, no-op syncs, daemon latency and idle traffic, and a clone after a long operation log. `--delay-ms` adds latency to every route. |
+| `bench.py REPO REPS` | Initial transfer (seed, clone, join with an existing clone), incremental changes from one machine to another, no-op syncs, a week away (upstream's commits land a day at a time, one machine works on them, and the other catches up at the end), daemon latency and idle traffic, and a clone after a long operation log. `--delay-ms` adds latency to every route. |
 | `stalebase.py REPO PUSHES KB` | Whether a node downloads again what it uploaded itself. |
 | `oplog.py REPO N...` | How `musubi clone` scales with the length of the hive's operation log. |
 | `daemonslots.py REPO N` | Whether a long-running daemon keeps up as received packs accumulate. |
@@ -34,13 +35,21 @@ daemons themselves.
 
 ```sh
 cargo build --release -p musubi
-JJ_SRC=~/dev/jj GIT_SRC=~/dev/git bench/setup_sources.sh
+bench/setup_sources.sh jj=$HOME/dev/jj git=https://github.com/git/git
+/usr/bin/python3 -I bench/bench.py jj 5
 /usr/bin/python3 -I bench/stalebase.py jj 5 200
 ```
 
-`setup_sources.sh` builds the server repositories: a small synthetic one, and copies of
-local clones of jj and git when `JJ_SRC` and `GIT_SRC` name them. The scripts take a
-repository by name (`small`, `jj`, `git`).
+`setup_sources.sh` builds the server repositories: a small synthetic one, and a copy of
+each `NAME=SOURCE` it is given, a local clone or a URL; a `NAME` is letters, digits and
+underscores. Each has `main` as it was a week before its newest commit, for bench.py's
+week phase to bring in the rest; server repositories built before the week phase existed
+need building again. The scripts take a repository by name (`small`, or a `NAME`).
+
+In the git world, B is both a `jj git clone` and a plain `git clone`. With
+`$MUSUBI_BENCH_PERF` set to `perf record`'s options, such as `-a -g`, each measurement
+(of bench.py, stalebase.py and oplog.py) runs under perf, into `runs/<run>/perf/`, and its
+result names the file.
 
 Server repositories, runs and results go under `$MUSUBI_BENCH_DIR`, by default
 `bench/work`. `$MUSUBI` overrides the binary, by default `target/release/musubi`. Each run's

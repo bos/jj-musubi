@@ -1,15 +1,19 @@
-"""jj-musubi versus `jj git clone/fetch/push`: time and bytes on localhost.
+"""jj-musubi versus `git clone/fetch` and `jj git clone/fetch/push`: time and bytes on localhost.
 
-Usage: /usr/bin/python3 -I bench.py REPO REPS [--phases initial,scenarios,noop,daemon,oplog]
+Usage: /usr/bin/python3 -I bench.py REPO REPS [--phases initial,scenarios,noop,week,daemon,oplog]
                                          [--oplog-ops N] [--clones N]
 
-REPO is one of the server repositories built by setup_sources.sh (small, jj, git).
+REPO is one of the server repositories built by setup_sources.sh (small, or a NAME it was given).
 Results go to $WORK/results/REPO.json; logs to $WORK/runs/REPO/log.txt (see README.md).
 
 Topology (all 127.0.0.1):
   git world:    A, B  --proxy(gitA|gitB)-->  git daemon  --> runs/REPO/srv-git/REPO.git
   musubi world: A', B' --ssh.py--proxy(hubA|hubB)--> sshd.py --musubi hub connect--> hub
-The proxy (proxy.py) counts TCP payload bytes per route in both directions.
+The proxy (proxy.py) counts TCP payload bytes per route in both directions. In the git
+world, B is both a `jj git clone` and a plain `git clone`.
+
+With $MUSUBI_BENCH_PERF set, each measurement runs under `perf record`, given those options
+(as in "-a -g"), into runs/REPO/perf/; its file is the measurement's "perf".
 """
 
 import argparse
@@ -65,6 +69,7 @@ for k in ("MUSUBI_CONFIG_DIR", "MUSUBI_SOCKET", "GIT_DIR", "GIT_WORK_TREE", "GIT
 
 PROCS = []
 LOG = None
+PERF = os.environ.get("MUSUBI_BENCH_PERF")
 
 
 def log(*parts):
@@ -173,9 +178,14 @@ def counters():
 
 def measure(route, fn):
     c0 = counters()[route]
-    dt = fn()
-    time.sleep(0.05)  # let the last bytes, as a connection closes, land in the counters
-    c1 = counters()[route]
+    perf = perf_start(route) if PERF else None
+    try:
+        dt = fn()
+        time.sleep(0.05)  # let the last bytes, as a connection closes, land in the counters
+        c1 = counters()[route]
+    finally:
+        if perf:
+            perf_stop(perf)
     out = {
         "t": dt,
         "up": c1["up"] - c0["up"],
@@ -183,7 +193,41 @@ def measure(route, fn):
         "conns": c1["conns"] - c0["conns"],
     }
     out["total"] = out["up"] + out["down"]
+    if perf:
+        out["perf"] = perf[1]
     return out
+
+
+def perf_start(route):
+    os.makedirs(f"{RUN}/perf", exist_ok=True)
+    path = f"perf/{len(os.listdir(f'{RUN}/perf')):03d}-{route}.data"
+    with open(f"{RUN}/perf.log", "a") as logf:
+        p = subprocess.Popen(
+            ["perf", "record", *PERF.split(), "-o", f"{RUN}/{path}"], stdout=logf, stderr=logf
+        )
+    # perf creates its file as it starts, and soon after records; with -a, once it has listed
+    # what is running.
+    try:
+        deadline = time.time() + 10
+        while not os.path.exists(f"{RUN}/{path}"):
+            if p.poll() is not None or time.time() > deadline:
+                raise RuntimeError(f"perf record didn't start; see {RUN}/perf.log")
+            time.sleep(0.01)
+        time.sleep(0.5)
+        if p.poll() is not None:
+            raise RuntimeError(f"perf record exited ({p.returncode}); see {RUN}/perf.log")
+    except BaseException:
+        p.kill()
+        p.wait()
+        raise
+    return p, path
+
+
+def perf_stop(perf):
+    p, path = perf
+    p.send_signal(signal.SIGINT)
+    p.wait()
+    return path
 
 
 def start_hub(hub, **extra):
@@ -325,6 +369,37 @@ def scenario(name, repo, i):
 SCENARIOS = ["new_commit", "describe", "rebase", "bookmark_move", "abandon"]
 
 
+def week_days(srv):
+    """The week setup_sources.sh held back from `srv`'s main, which ends at
+    refs/bench/upstream: for each day, the last commit on its first-parent line made by the
+    day's end, or None while there is none yet."""
+    span = "main..refs/bench/upstream"
+    _, p = sh(["git", "-C", srv, "log", "--first-parent", "--reverse", "--format=%H %ct", span])
+    line = [(c, int(t)) for c, t in (entry.split() for entry in p.stdout.splitlines())]
+    start = line[-1][1] - 7 * 86400
+    days, latest = [], None
+    for d in range(1, 8):
+        latest = next((c for c, t in reversed(line) if t <= start + d * 86400), latest)
+        days.append(latest)
+    days[-1] = line[-1][0]
+    return days
+
+
+def work_day(repo, d, commits, describes):
+    """A day of work: bring in upstream's, rebase the feature onto it, and add to it."""
+    jj(repo, "git", "fetch")
+    jj(repo, "rebase", "-s", "roots(::feature ~ ::main)", "-o", "main")
+    os.makedirs(f"{repo}/bench-week", exist_ok=True)
+    for i in range(commits):
+        jj(repo, "new", "feature")
+        with open(f"{repo}/bench-week/day-{d}-{i}.txt", "w") as f:
+            f.write(f"day {d}, change {i}\n" * 5)
+        jj(repo, "commit", "-m", f"bench: day {d} commit {i}")
+        jj(repo, "bookmark", "set", "feature", "-r", "@-")
+    for i in range(describes):
+        jj(repo, "describe", "feature", "-m", f"bench: day {d} commit {commits - 1}, take {i}")
+
+
 # ---------------------------------------------------------------------------------------
 
 
@@ -333,8 +408,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("repo")
     ap.add_argument("reps", type=int)
-    ap.add_argument("--phases", default="initial,scenarios,noop,daemon,oplog")
+    ap.add_argument("--phases", default="initial,scenarios,noop,week,daemon,oplog")
     ap.add_argument("--clones", type=int, default=3)
+    ap.add_argument("--week-commits", type=int, default=3, help="commits A makes each day")
+    ap.add_argument("--week-describes", type=int, default=5, help="rewordings A makes each day")
     ap.add_argument("--oplog-ops", type=int, default=300)
     ap.add_argument("--latency-reps", type=int, default=10)
     ap.add_argument("--idle-seconds", type=int, default=150)
@@ -343,6 +420,16 @@ def main():
     phases = set(args.phases.split(","))
     R = args.repo
     tag = f"{R}-delay{args.delay_ms:g}ms" if args.delay_ms else R
+    if "week" in phases:
+        srv = f"{WORK}/srv/{R}.git"
+        week = subprocess.run(
+            ["git", "-C", srv, "rev-parse", "-q", "--verify", "refs/bench/upstream"],
+            capture_output=True,
+        )
+        if week.returncode != 0:
+            sys.exit(
+                f"srv/{R}.git holds back no week for the week phase; run setup_sources.sh again"
+            )
     RUN = f"{WORK}/runs/{tag}"
     if os.path.exists(RUN):
         shutil.rmtree(RUN)
@@ -388,11 +475,23 @@ def main():
     shutil.copytree(f"{WORK}/srv/{R}.git", f"{RUN}/srv-m/{R}.git")
     url = lambda route: f"git://127.0.0.1:{ROUTES[route][0]}/{srv_rel}"  # noqa: E731
     direct_m = f"git://127.0.0.1:{PORT_GIT}/srv-m/{R}.git"
-    A, Bg = f"{RUN}/A", f"{RUN}/B"
+    A, Bg, Bp = f"{RUN}/A", f"{RUN}/B", f"{RUN}/Bp"
     Am, Cm = f"{RUN}/Am", f"{RUN}/Cm"
 
     def track(repo):
         jj(repo, "bookmark", "track", "feature@origin", "marker@origin")
+
+    def git_world_agrees():
+        for ref in ("main", "feature", "marker"):
+            a, b = rev(A, ref), rev(Bg, ref)
+            assert a and a == b, f"git world diverged on {ref}: {a} vs {b}"
+            p = rev(Bp, f"refs/remotes/origin/{ref}")
+            assert a == p, f"plain git diverged on {ref}: {a} vs {p}"
+
+    def musubi_world_agrees():
+        for ref in ("main", "feature", "marker"):
+            a, b = rev(Am, ref), rev(Bm, ref)
+            assert a and a == b, f"musubi world diverged on {ref}: {a} vs {b}"
 
     # --- initial transfer --------------------------------------------------------------
     init = res.setdefault("initial", {})
@@ -418,6 +517,17 @@ def main():
         else:
             os.rename(dest, Bg)
     track(Bg)
+    init["plain_git_clone_B"] = []
+    for k in range(args.clones):
+        dest = f"{RUN}/Bpclone{k}"
+        m = measure("gitB", lambda: sh(["git", "clone", "-q", url("gitB"), dest], cwd=RUN)[0])
+        m["disk_git"] = du(f"{dest}/.git")
+        init["plain_git_clone_B"].append(m)
+        log("plain git clone B", k, m)
+        if k < args.clones - 1:
+            shutil.rmtree(dest)
+        else:
+            os.rename(dest, Bp)
 
     # musubi world
     sh(["jj", "git", "clone", "--colocate", direct_m, Am], cwd=RUN)
@@ -483,6 +593,7 @@ def main():
             "A_jj": du(f"{A}/.jj"),
             "B_git": du(f"{Bg}/.git"),
             "B_jj": du(f"{Bg}/.jj"),
+            "Bp_git": du(f"{Bp}/.git"),
             "hub_total": du(hub),
             "hub_git": du(f"{hive}/git"),
             "hub_canonical": du(f"{hive}/canonical"),
@@ -512,9 +623,10 @@ def main():
                     "gitA", lambda: sh(["jj", "git", "push", "--tracked"], cwd=A)[0]
                 )
                 row["git_fetch"] = measure("gitB", lambda: sh(["jj", "git", "fetch"], cwd=Bg)[0])
-                for ref in ("feature", "marker"):
-                    a, b = rev(A, ref), rev(Bg, ref)
-                    assert a and a == b, f"git world diverged on {ref}: {a} vs {b}"
+                row["plain_git_fetch"] = measure(
+                    "gitB", lambda: sh(["git", "fetch", "-q"], cwd=Bp)[0]
+                )
+                git_world_agrees()
                 # musubi world
                 row["local_musubi"], bm = scenario(s, Am, i)
                 h0 = hub_stats(hub)
@@ -535,9 +647,7 @@ def main():
                         e=machine(nameB, GIT_TRACE2_EVENT=f"{RUN}/trace-B-{s}-{i}.json"),
                     )[0],
                 )
-                for ref in ("feature", "marker"):
-                    a, b = rev(Am, ref), rev(Bm, ref)
-                    assert a and a == b, f"musubi world diverged on {ref}: {a} vs {b}"
+                musubi_world_agrees()
                 sc[s].append(row)
                 log(
                     f"{R} rep {i} {s}: git push {row['git_push']['total']}B "
@@ -553,9 +663,15 @@ def main():
 
     # --- no-op -------------------------------------------------------------------------
     if "noop" in phases:
-        no = res.setdefault("noop", {"git_fetch": [], "git_push": [], "musubi_B": [], "musubi_A": []})
+        no = res.setdefault(
+            "noop",
+            {k: [] for k in ("git_fetch", "plain_git_fetch", "git_push", "musubi_B", "musubi_A")},
+        )
         for _ in range(5):
             no["git_fetch"].append(measure("gitB", lambda: sh(["jj", "git", "fetch"], cwd=Bg)[0]))
+            no["plain_git_fetch"].append(
+                measure("gitB", lambda: sh(["git", "fetch", "-q"], cwd=Bp)[0])
+            )
             no["git_push"].append(
                 measure("gitA", lambda: sh(["jj", "git", "push", "--tracked"], cwd=A)[0])
             )
@@ -566,6 +682,42 @@ def main():
                 measure("hubA", lambda: sh([MUSUBI, "sync"], cwd=Am, e=machine("A"))[0])
             )
         log("noop", json.dumps(no)[:2000])
+        save()
+
+    # --- a week: upstream moves on and A works, while B is away; then B catches up -------
+    if "week" in phases:
+        wk = res.setdefault("week", {})
+        servers = (f"{RUN}/{srv_rel}", f"{RUN}/srv-m/{R}.git")
+        days = week_days(servers[0])
+        wk["upstream_commits"] = int(
+            sh(["git", "-C", servers[0], "rev-list", "--count", f"main..{days[-1]}"])[1].stdout
+        )
+        h0 = hub_stats(hub)
+        wk["git_A_pushes"], wk["musubi_A_syncs"] = [], []
+        for d, commit in enumerate(days):
+            if commit:
+                for srv in servers:
+                    sh(["git", "-C", srv, "update-ref", "refs/heads/main", commit])
+            for repo in (A, Am):
+                work_day(repo, d, args.week_commits, args.week_describes)
+            wk["git_A_pushes"].append(
+                measure("gitA", lambda: sh(["jj", "git", "push", "--tracked"], cwd=A)[0])
+            )
+            wk["musubi_A_syncs"].append(
+                measure("hubA", lambda: sh([MUSUBI, "sync"], cwd=Am, e=machine("A"))[0])
+            )
+        wk["hub_store"] = stats_delta(h0, hub_stats(hub))
+        wk["git_fetch"] = measure("gitB", lambda: sh(["jj", "git", "fetch"], cwd=Bg)[0])
+        wk["plain_git_fetch"] = measure("gitB", lambda: sh(["git", "fetch", "-q"], cwd=Bp)[0])
+        wk["musubi_fetch"] = measure(
+            "hubB", lambda: sh([MUSUBI, "sync"], cwd=Bm, e=machine(nameB))[0]
+        )
+        for repo in (A, Am):
+            assert rev(repo, "main") == days[-1], f"{repo} didn't bring in upstream's week"
+        git_world_agrees()
+        musubi_world_agrees()
+        log("week", json.dumps(wk))
+        res["disk_after_week"] = disk()
         save()
 
     # --- daemons: latency and idle cost ------------------------------------------------

@@ -71,10 +71,10 @@ bench-smoke: dev
     }
     trap cleanup EXIT
     export MUSUBI=$PWD/target/debug/musubi MUSUBI_BENCH_DIR=$work
-    unset JJ_SRC GIT_SRC
     py="/usr/bin/python3 -I"
     bench/setup_sources.sh
-    $py bench/bench.py small 1 --clones 1 --latency-reps 1 --idle-seconds 1 --oplog-ops 2
+    $py bench/bench.py small 1 --clones 1 --week-commits 1 --week-describes 1 \
+        --latency-reps 1 --idle-seconds 1 --oplog-ops 2
     $py bench/stalebase.py small 1 1
     $py bench/oplog.py small 1
     $py bench/daemonslots.py small 1

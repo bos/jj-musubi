@@ -317,7 +317,9 @@ observing a dangling reference.
 Objects move as git packfiles. musubi uses the `git` binary: `git pack-objects --revs` with
 the receiver's known commits as exclusions, and `git index-pack --fix-thin` to receive. jj
 already needs `git` for fetch and push, and this gets delta compression and bitmaps for free,
-the latter for clones.
+the latter for clones. A node runs the git jj is configured to use (`git.executable-path`),
+the one its fetches and pushes use; a hub, which has no jj config, runs `git` from its
+`PATH`.
 
 - The hub stores objects in a bare git repository. Its only refs are under
   `refs/musubi/head/`, naming the visible heads of its accepted head's view, so that git can

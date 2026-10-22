@@ -46,10 +46,18 @@ pub enum StoreError {
     UnknownBackend(String),
 }
 
+/// The git a hub runs: whatever `git` is on its `PATH`. A node runs the git jj is configured
+/// to use, but a hub has no repository, and so no jj config to name one.
+const GIT: &str = "git";
+
 /// The object store of the hub store in `dir`, without opening the rest of it.
 pub fn object_store(backend: Backend, dir: &Path) -> Box<dyn ObjectStore + 'static> {
     match backend {
-        Backend::Git => Box::new(GitStore::for_hub(&dir.join("git"), &dir.join("extras"))),
+        Backend::Git => Box::new(GitStore::for_hub(
+            Path::new(GIT),
+            &dir.join("git"),
+            &dir.join("extras"),
+        )),
         Backend::Simple => Box::new(SimpleStore::new(&dir.join("simple"))),
     }
 }
@@ -85,7 +93,7 @@ impl HubStore {
             Backend::Git => {
                 let extras = dir.join("extras");
                 fs::create_dir(&extras).map_err(io_err(&extras))?;
-                GitObjects::init_bare(&dir.join("git"))?;
+                GitObjects::init_bare(Path::new(GIT), &dir.join("git"))?;
             }
             Backend::Simple => {
                 SimpleStore::init(&dir.join("simple"))?;

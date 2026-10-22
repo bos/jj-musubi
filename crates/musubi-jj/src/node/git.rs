@@ -51,17 +51,22 @@ pub(super) struct Colocation {
 
 impl NodeGit {
     /// The git repository of the jj repository whose `.jj/repo` directory is `repo_path` and
-    /// whose store is `store`, if its backend is git.
-    pub fn open(repo_path: &Path, store: &Store) -> Option<Self> {
+    /// whose store is `store`, if its backend is git, with `executable` the git to run there.
+    pub fn open(executable: &Path, repo_path: &Path, store: &Store) -> Option<Self> {
         let git_path = jj_lib::git::get_git_backend(store).ok()?.git_repo_path();
         let colocated = git_path.file_name().is_some_and(|name| name == ".git")
             && !git_path.starts_with(repo_path.join("store"));
         Some(Self {
-            repo: GitRepo::new(git_path),
+            repo: GitRepo::new(executable, git_path),
             colocation: colocated.then(|| Colocation {
                 lock_path: repo_path.join("git_import_export.lock"),
             }),
         })
+    }
+
+    /// The git this repository runs.
+    pub fn executable(&self) -> &Path {
+        self.repo.executable()
     }
 
     pub fn colocation(&self) -> Option<&Colocation> {
@@ -70,7 +75,7 @@ impl NodeGit {
 
     /// What this repository lacks of its history, if anything.
     pub fn incompleteness(&self) -> Result<Option<Incompleteness>, ObjectError> {
-        GitObjects::new(self.repo.git_dir()).incompleteness()
+        GitObjects::new(self.repo.executable(), self.repo.git_dir()).incompleteness()
     }
 
     /// This repository's own git config file.
@@ -398,7 +403,11 @@ mod tests {
     fn remotes_go_as_written_and_as_expanded() {
         let dir = tempfile::tempdir().unwrap();
         let run = |args: &[&str]| {
-            let output = git().current_dir(dir.path()).args(args).output().unwrap();
+            let output = git(Path::new("git"))
+                .current_dir(dir.path())
+                .args(args)
+                .output()
+                .unwrap();
             assert!(output.status.success(), "git {args:?}: {output:?}");
         };
         run(&["init", "--quiet"]);
@@ -422,7 +431,7 @@ mod tests {
         run(&["remote", "add", "filtered", "musubi-test:team/filtered"]);
         run(&["config", "remote.filtered.partialclonefilter", "blob:none"]);
         let repo = NodeGit {
-            repo: GitRepo::new(&dir.path().join(".git")),
+            repo: GitRepo::new(Path::new("git"), &dir.path().join(".git")),
             colocation: None,
         };
         let remotes = repo.remotes(false).unwrap();

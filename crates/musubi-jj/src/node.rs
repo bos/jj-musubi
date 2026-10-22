@@ -16,12 +16,14 @@ use std::thread;
 
 use futures::TryStreamExt as _;
 use jj_lib::config::ConfigFile;
+use jj_lib::config::ConfigGetError;
 use jj_lib::config::ConfigNamePathBuf;
 use jj_lib::config::ConfigSource;
 use jj_lib::config::ConfigValue;
 use jj_lib::content_hash::blake2b_hash;
 use jj_lib::default_backend_factories::default_backend_factories;
 use jj_lib::git::GitExportError;
+use jj_lib::git::GitSubprocessOptions;
 use jj_lib::git::REMOTE_NAME_FOR_LOCAL_GIT_REPO;
 use jj_lib::lock::FileLockError;
 use jj_lib::object_id::ObjectId as _;
@@ -176,6 +178,8 @@ pub enum NodeError {
     #[error(transparent)]
     Git(#[from] GitError),
     #[error(transparent)]
+    UserSettings(#[from] ConfigGetError),
+    #[error(transparent)]
     Backend(#[from] BackendError),
     #[error("musubi supports the git and simple backends, not {0:?}")]
     UnsupportedBackend(String),
@@ -329,7 +333,15 @@ impl NodeRepo {
         let store = loader.store();
         let backend = Backend::of(store)
             .ok_or_else(|| NodeError::UnsupportedBackend(store.backend().name().to_owned()))?;
-        let git = NodeGit::open(repo_path, store);
+        // musubi runs the git jj runs for fetches and pushes, from jj's own setting, which jj
+        // reads only for the git backend.
+        let git = match backend {
+            Backend::Git => {
+                let executable = GitSubprocessOptions::from_settings(settings)?.executable_path;
+                NodeGit::open(&executable, repo_path, store)
+            }
+            Backend::Simple => None,
+        };
         let musubi_dir = repo_path.join("musubi");
         let canonical = CanonicalStore::open(
             &musubi_dir.join("canonical"),
@@ -1076,10 +1088,15 @@ impl NodeRepo {
         let store_path = self.repo_path.join("store");
         match self.backend {
             Backend::Git => {
-                let backend = jj_lib::git::get_git_backend(store).map_err(|_| {
-                    NodeError::UnsupportedBackend(store.backend().name().to_owned())
-                })?;
-                Ok(Box::new(GitStore::for_node(&store_path, backend)))
+                let unsupported =
+                    || NodeError::UnsupportedBackend(store.backend().name().to_owned());
+                let git = self.git.as_ref().ok_or_else(unsupported)?;
+                let backend = jj_lib::git::get_git_backend(store).map_err(|_| unsupported())?;
+                Ok(Box::new(GitStore::for_node(
+                    git.executable(),
+                    &store_path,
+                    backend,
+                )))
             }
             Backend::Simple => Ok(Box::new(SimpleStore::new(&store_path))),
         }

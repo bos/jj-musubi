@@ -41,16 +41,16 @@ pub enum GitError {
     Failed { args: String, stderr: String },
 }
 
-/// `git` as musubi runs it: without [`REPOSITORY_ENV`], running no hooks, and, where git
-/// knows `GIT_NO_LAZY_FETCH`, fetching nothing. jj runs no hooks when it writes to `.git`;
-/// musubi's `update-ref` and `git remote` would run the repository's
+/// The git at `executable` as musubi runs it: without [`REPOSITORY_ENV`], running no hooks,
+/// and, where git knows `GIT_NO_LAZY_FETCH`, fetching nothing. jj runs no hooks when it
+/// writes to `.git`; musubi's `update-ref` and `git remote` would run the repository's
 /// `reference-transaction`, and its `gc --auto` `pre-auto-gc`. In a partial clone, which
 /// musubi refuses ([`Incompleteness`]), git would fetch what it lacks from the promisor
 /// remote.
 ///
 /// [`Incompleteness`]: crate::objects::Incompleteness
-pub(crate) fn git() -> Command {
-    let mut command = Command::new("git");
+pub(crate) fn git(executable: &Path) -> Command {
+    let mut command = Command::new(executable);
     for name in REPOSITORY_ENV {
         command.env_remove(name);
     }
@@ -63,17 +63,23 @@ pub(crate) fn git() -> Command {
 /// The empty tree's id, which git knows without storing it.
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
-/// A git repository, driven through the `git` binary.
+/// A git repository, driven through the git binary at `executable`.
 pub(crate) struct GitRepo {
+    executable: PathBuf,
     git_dir: PathBuf,
 }
 
 impl GitRepo {
     /// `git_dir` is the `.git` directory, or the repository itself if it is bare.
-    pub fn new(git_dir: &Path) -> Self {
+    pub fn new(executable: &Path, git_dir: &Path) -> Self {
         Self {
+            executable: executable.to_owned(),
             git_dir: git_dir.to_owned(),
         }
+    }
+
+    pub fn executable(&self) -> &Path {
+        &self.executable
     }
 
     pub fn git_dir(&self) -> &Path {
@@ -82,7 +88,7 @@ impl GitRepo {
 
     /// `git args` in this repository, ready to run.
     pub fn command(&self, args: &[&str]) -> Command {
-        let mut command = git();
+        let mut command = git(&self.executable);
         // Running inside the repository as well as naming it keeps a mistake from ever
         // touching the caller's working directory.
         command
@@ -155,8 +161,10 @@ mod tests {
 
     #[test]
     fn attributes_come_from_the_empty_tree() {
-        let args: Vec<String> = GitRepo::new(Path::new("unused"))
-            .command(&["pack-objects"])
+        let command =
+            GitRepo::new(Path::new("their-git"), Path::new("unused")).command(&["pack-objects"]);
+        assert_eq!(command.get_program(), "their-git");
+        let args: Vec<String> = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();

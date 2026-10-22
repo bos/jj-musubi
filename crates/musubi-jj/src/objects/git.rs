@@ -70,10 +70,11 @@ pub struct GitObjects {
 }
 
 impl GitObjects {
-    /// `git_dir` is the `.git` directory, or the repository itself if it is bare.
-    pub fn new(git_dir: &Path) -> Self {
+    /// `executable` is the git to run, and `git_dir` the `.git` directory, or the repository
+    /// itself if it is bare.
+    pub fn new(executable: &Path, git_dir: &Path) -> Self {
         Self {
-            repo: GitRepo::new(git_dir),
+            repo: GitRepo::new(executable, git_dir),
         }
     }
 
@@ -85,16 +86,16 @@ impl GitObjects {
     /// hub decides what is unreferenced, not git, and its only refs, under
     /// `refs/musubi/head/`, are for git's bitmap index (see [`Self::mark_head`]). Only
     /// [`Self::maintain`] and [`Self::mark_head`] consolidate it.
-    pub fn init_bare(git_dir: &Path) -> Result<Self, ObjectError> {
+    pub fn init_bare(executable: &Path, git_dir: &Path) -> Result<Self, ObjectError> {
         // Not through `run`: GIT_DIR must not be set when the repository does not exist yet.
         let args = ["init", "--quiet", "--bare"];
-        let output = git()
+        let output = git(executable)
             .args(args)
             .arg(git_dir)
             .output()
             .map_err(|source| run_err(&args, source))?;
         check_status(&args, &output)?;
-        let objects = Self::new(git_dir);
+        let objects = Self::new(executable, git_dir);
         objects.run(&["config", "gc.auto", "0"], None)?;
         Ok(objects)
     }
@@ -634,10 +635,10 @@ pub struct GitStore<'a> {
 }
 
 impl<'a> GitStore<'a> {
-    /// A node's repository. `store_path` is `.jj/repo/store`.
-    pub fn for_node(store_path: &Path, backend: &'a GitBackend) -> Self {
+    /// A node's repository, with the git it runs. `store_path` is `.jj/repo/store`.
+    pub fn for_node(executable: &Path, store_path: &Path, backend: &'a GitBackend) -> Self {
         Self {
-            git: GitObjects::new(backend.git_repo_path()),
+            git: GitObjects::new(executable, backend.git_repo_path()),
             extras: Extras::Jj {
                 store_path: store_path.to_owned(),
                 backend,
@@ -645,10 +646,10 @@ impl<'a> GitStore<'a> {
         }
     }
 
-    /// A hub's bare repository and extras directory.
-    pub fn for_hub(git_dir: &Path, extras_dir: &Path) -> Self {
+    /// A hub's bare repository and extras directory, with the git it runs.
+    pub fn for_hub(executable: &Path, git_dir: &Path, extras_dir: &Path) -> Self {
         Self {
-            git: GitObjects::new(git_dir),
+            git: GitObjects::new(executable, git_dir),
             extras: Extras::Files(extras_dir.to_owned()),
         }
     }
@@ -794,7 +795,11 @@ mod tests {
     fn shallow_and_partial_clones_are_incomplete() {
         let dir = tempfile::tempdir().unwrap();
         let run = |args: &[&str]| {
-            let output = git().current_dir(dir.path()).args(args).output().unwrap();
+            let output = git(Path::new("git"))
+                .current_dir(dir.path())
+                .args(args)
+                .output()
+                .unwrap();
             assert!(output.status.success(), "git {args:?}: {output:?}");
         };
         run(&["init", "--quiet", "--initial-branch=main", "origin"]);
@@ -831,7 +836,7 @@ mod tests {
             "partial",
         ]);
         let of = |clone: &str| {
-            GitObjects::new(&dir.path().join(clone).join(".git"))
+            GitObjects::new(Path::new("git"), &dir.path().join(clone).join(".git"))
                 .incompleteness()
                 .unwrap()
         };
@@ -854,7 +859,8 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
 
         let dir = tempfile::tempdir().unwrap();
-        let objects = GitObjects::init_bare(&dir.path().join("repo.git")).unwrap();
+        let objects =
+            GitObjects::init_bare(Path::new("git"), &dir.path().join("repo.git")).unwrap();
         let hooks = dir.path().join("repo.git/hooks");
         // Here, whatever the developer's own git config says.
         objects

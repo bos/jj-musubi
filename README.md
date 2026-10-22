@@ -20,7 +20,8 @@ in anger.
 
 You need:
 
-- `jj` 0.46.0 and `git` on every machine;
+- `jj` 0.46.0 and `git` on every machine: a hub runs the `git` on its `PATH`, and other
+  machines the git jj's `git.executable-path` names;
 - `musubi` on the machine that runs the hub, on the `PATH` of non-interactive shells there;
 - a repository with at least one commit, and all of its history: not a shallow or partial
   clone;

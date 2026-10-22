@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
+use std::io::Write as _;
 use std::path::PathBuf;
 
 use anyhow::Context as _;
@@ -462,9 +463,17 @@ impl LocalRepo for NodeAdapter {
     }
 
     fn set_accepted_base(&mut self, op: &OpId) -> anyhow::Result<()> {
-        let tmp = tempfile::NamedTempFile::new_in(&self.tmp)?;
-        fs::write(tmp.path(), op.hex())?;
-        tmp.persist(&self.base_path)?;
+        // Overwritten in place: it changes at every advance, and ext4 writes out at once a
+        // file renamed over another, or truncated to nothing. Operation ids are all one
+        // length, so `set_len` only cuts off what isn't one.
+        let hex = op.hex();
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&self.base_path)?;
+        file.write_all(hex.as_bytes())?;
+        file.set_len(hex.len() as u64)?;
         Ok(())
     }
 }

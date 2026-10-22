@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -66,10 +67,23 @@ impl Status {
         serde_json::from_slice(&fs::read(Self::path(repo_path)).ok()?).ok()
     }
 
+    /// Overwrites the status in place: it changes at every sync attempt, and ext4 writes out
+    /// at once a file truncated to nothing, or renamed over another. A reader that comes
+    /// while it is written may find no status.
     fn save(&self, repo_path: &Path) {
-        if let Ok(json) = serde_json::to_vec_pretty(self) {
-            fs::write(Self::path(repo_path), json).ok();
-        }
+        let Ok(json) = serde_json::to_vec_pretty(self) else {
+            return;
+        };
+        let write = || -> std::io::Result<()> {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(Self::path(repo_path))?;
+            file.write_all(&json)?;
+            file.set_len(json.len() as u64)
+        };
+        write().ok();
     }
 }
 

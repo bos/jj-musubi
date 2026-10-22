@@ -109,9 +109,8 @@ impl DaemonSettings {
     }
 }
 
-/// Writes `path` so that only its owner can read it, and so that a crash leaves either the
-/// old contents or the new ones, durably. Windows can't open a directory to sync it, so
-/// there the rename is as durable as the filesystem makes it.
+/// Writes `path` so that only its owner can read it, and so that a reader finds either the
+/// old contents or the new ones.
 pub fn write_private(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
     use std::io::Write as _;
     let dir = path.parent().context("a file to write has no directory")?;
@@ -120,11 +119,7 @@ pub fn write_private(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
         // rename keeps that.
         let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
         tmp.write_all(contents)?;
-        tmp.as_file().sync_all()?;
         tmp.persist(path).map_err(|err| err.error)?;
-        if cfg!(unix) {
-            fs::File::open(dir)?.sync_all()?;
-        }
         Ok(())
     };
     write().with_context(|| format!("writing {path:?}"))

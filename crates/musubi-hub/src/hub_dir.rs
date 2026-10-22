@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fs;
+use std::io::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -303,10 +304,19 @@ impl HubDir {
         };
         hive.pending
             .retain(|pending| !index.machines.contains(&pending.machine));
-        hive.index.urls.extend(index.urls);
-        hive.index.roots.extend(index.roots);
+        let mut changed = hive.index.machines != index.machines;
+        for url in index.urls {
+            changed |= hive.index.urls.insert(url);
+        }
+        for root in index.roots {
+            changed |= hive.index.roots.insert(root);
+        }
         hive.index.machines = index.machines;
-        hive.index.save(&hive.dir)?;
+        // Most heads bring nothing new. Saving anyway would replace the index at every push,
+        // and ext4 writes out a file that replaces another at once.
+        if changed {
+            hive.index.save(&hive.dir)?;
+        }
         Ok(())
     }
 
@@ -428,8 +438,8 @@ fn has_any(backend: Backend, dir: &Path, commits: &[CommitId]) -> anyhow::Result
 }
 
 fn write_meta(dir: &Path, meta: &HiveMeta) -> anyhow::Result<()> {
-    let tmp = tempfile::NamedTempFile::new_in(dir)?;
-    fs::write(tmp.path(), toml::to_string(meta)?)?;
+    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+    tmp.write_all(toml::to_string(meta)?.as_bytes())?;
     tmp.persist(dir.join(HIVE_FILE))?;
     Ok(())
 }

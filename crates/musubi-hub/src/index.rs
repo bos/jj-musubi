@@ -5,6 +5,7 @@
 
 use std::collections::BTreeSet;
 use std::fs;
+use std::io::Write as _;
 use std::path::Path;
 
 use jj_lib::backend::CommitId;
@@ -38,8 +39,10 @@ impl HiveIndex {
 
     pub fn save(&self, hive_dir: &Path) -> std::io::Result<()> {
         let json = serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?;
-        let tmp = tempfile::NamedTempFile::new_in(hive_dir)?;
-        fs::write(tmp.path(), json)?;
+        // Through its own handle: reopened truncating, ext4 would write it out as it closed
+        // (see `BundleWriter::create`).
+        let mut tmp = tempfile::NamedTempFile::new_in(hive_dir)?;
+        tmp.write_all(&json)?;
         tmp.persist(hive_dir.join(FILE)).map_err(|err| err.error)?;
         Ok(())
     }

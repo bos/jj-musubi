@@ -387,9 +387,9 @@ impl NodeRepo {
         self.repo_path.join("musubi/joins")
     }
 
-    /// Join records are the one part of the translation that cannot be recomputed, so
-    /// unlike the translation cache they are written durably: each line holds the local
-    /// join point, the canonical join operation, and the join point's fingerprint.
+    /// Join records are the one part of the translation that cannot be recomputed, so they
+    /// live apart from the translation cache: each line holds the local join point, the
+    /// canonical join operation, and the join point's fingerprint.
     fn read_joins(&self) -> Result<Vec<(OperationId, OperationId, String)>, NodeError> {
         let path = self.joins_path();
         let text = match fs::read_to_string(&path) {
@@ -428,14 +428,13 @@ impl NodeRepo {
             .map_err(io_err)?;
         let fingerprint = fingerprint(local_op);
         writeln!(file, "{} {} {fingerprint}", local.hex(), canonical.hex()).map_err(io_err)?;
-        file.sync_all().map_err(io_err)?;
         self.joins.insert(fingerprint, canonical.clone());
         self.insert_map(local, canonical)
     }
 
     /// Creates the canonical operation that replicates this repository's current state in
-    /// place of its operation history, and durably records that the current op head
-    /// canonicalizes to it. See "Joining" in docs/design.md.
+    /// place of its operation history, and records that the current op head canonicalizes
+    /// to it. See "Joining" in docs/design.md.
     pub fn create_join_operation(&mut self, description: &str) -> Result<OperationId, NodeError> {
         let head = self.merge_heads()?;
         if let Some(canonical) = self.canonical_of(&head) {
@@ -1028,6 +1027,11 @@ impl NodeRepo {
     fn write_settings_state(&self, state: &SettingsState) -> Result<(), NodeError> {
         let path = self.settings_state_path();
         let json = serde_json::to_vec_pretty(state).expect("settings serialize");
+        // Most syncs change none of it. Rewriting it anyway would replace it every time, and
+        // ext4 writes out at once a file that replaces another.
+        if fs::read(&path).is_ok_and(|old| old == json) {
+            return Ok(());
+        }
         let dir = path.parent().expect("path has a parent");
         let io_err = |source| NodeError::Io {
             path: path.clone(),

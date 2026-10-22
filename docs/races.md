@@ -35,7 +35,7 @@ named after the machine (`beta/default`) (docs/design.md).
 | A machine abandons another machine's working-copy commit | jj gives that workspace a new commit on the parent, as for any workspace, and its machine adopts it. | `abandoning_another_machines_working_copy_commit` |
 | A machine renames its workspace | The other machines show the new name. | `renamed_workspace_shows_renamed` |
 | A machine renames or forgets its workspace while another machine rewrites its working copy | The rename or forget wins, as when jj merges concurrent operations on one machine: musubi merges workspaces three-way as jj does, removals first. | `e2e_smoke`, `workspace_merge_matches_jj` |
-| Several machines share a hostname | Told apart by a random suffix in each machine's durable identity, and shown as `mac-1a2b/default`. | `machines_sharing_a_hostname_are_told_apart` |
+| Several machines share a hostname | Told apart by a random suffix in each machine's stored identity, and shown as `mac-1a2b/default`. | `machines_sharing_a_hostname_are_told_apart` |
 | A workspace name git can't store as a ref, an import in a repository that isn't colocated, or a git remote named after a machine | Nothing happens: other machines' working copies are never git refs, so git can't drop them, and jj's import never abandons work because of them. | `git_never_sees_other_machines_working_copies` |
 
 ## Bookmarks and tags
@@ -102,12 +102,12 @@ Not races: kinds of repository and history a hive carries.
 | `jj undo` and `jj redo` of this machine's own latest operation | As without musubi; both replicate. `jj redo` finds nothing to redo once another machine's operation has arrived after the undo. | `undo_and_redo_of_own_operation` |
 | A command based at an older operation (`--at-op`, or a long-running command) | A concurrent local operation; jj merges it locally and the merge replicates. | `concurrent_operation_on_one_machine` |
 | A machine misses many updates while working | Catches up with one merge. | `long_offline_machine_catches_up` |
-| The hub restarts between one machine's push and another's fetch | Nothing lost: the head log and stores are durable. | `hub_restart_between_push_and_fetch` |
+| The hub restarts between one machine's push and another's fetch | Nothing lost: the head log and stores are on disk. | `hub_restart_between_push_and_fetch` |
 | A repository joins with its whole operation history | Other machines' op logs include that history. | `joining_with_full_history` |
 | Two fresh, empty repositories form a hive | Works like any other join. | `empty_repositories_make_a_hive` |
 | `jj op abandon` of operations the hub accepted, whether this machine's latest operation is its own or another machine's | **Replication pauses** for that repository, with an error, rather than reintroducing the abandoned operations or duplicating history. Planned: replicate it as a supersede record (docs/design.md). | `op_abandon_pauses_replication`, `op_abandon_under_a_realized_head_pauses_replication` |
 | `jj op abandon` of only the history from before the machine joined, then `jj util gc` | Nothing changes for the other machines, and replication carries on: the rewritten join point maps to the same canonical join operation, by its view and metadata. | `op_abandon_of_pre_join_history_is_harmless` |
-| Restart that loses the translation cache | Recovered from operation attributes and the durable join records; no duplicate realizations. | `restart_with_lost_cache`, `lost_cache_does_not_duplicate_realizations` |
+| Restart that loses the translation cache | Recovered from operation attributes and the join records; no duplicate realizations. | `restart_with_lost_cache`, `lost_cache_does_not_duplicate_realizations` |
 | Colocated git state replicated verbatim | Would silently move bookmarks back. Translation exists to prevent this. | `verbatim_replication_reverts_bookmarks` (negative control) |
 
 ## Known jj limitations

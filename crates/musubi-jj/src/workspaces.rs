@@ -21,8 +21,8 @@ use jj_lib::backend::CommitId;
 use jj_lib::ref_name::WorkspaceNameBuf;
 
 /// This machine's identity in the hive: a readable name plus a random suffix, `name#1a2b3c4d`,
-/// so that two machines with the same hostname are never confused. Stored durably on first
-/// use, because canonical operations embed it and must not change when recomputed.
+/// so that two machines with the same hostname are never confused. Stored on first use,
+/// because canonical operations embed it and must not change when recomputed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Machine {
     key: String,
@@ -47,7 +47,6 @@ impl Machine {
         }
         let mut tmp = tempfile::NamedTempFile::new_in(path.parent().unwrap_or(Path::new(".")))?;
         tmp.write_all(key.as_bytes())?;
-        tmp.as_file().sync_all()?;
         tmp.persist(path).map_err(|err| err.error)?;
         Ok(Self { key })
     }
@@ -196,7 +195,7 @@ mod tests {
     }
 
     #[test]
-    fn identity_is_durable() {
+    fn identity_is_kept() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("machine");
         let first = Machine::load_or_create(&path, "Bryan's MacBook Pro").unwrap();

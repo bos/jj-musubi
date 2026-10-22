@@ -84,7 +84,7 @@ Replicating views verbatim corrupts the second kind.
   map, and replicating it as is would make every machine's workspaces workspaces of every
   other machine's repository: any machine could forget or rename another's, and every
   machine's `default` would collide. So each machine's workspaces are its own, but every
-  machine shows the others'. Each machine has a durable identity, its name plus a random
+  machine shows the others'. Each machine has a lasting identity, its name plus a random
   suffix (`laptop#1a2b3c4d`), so two machines that share a hostname are never confused.
   The canonical view records every machine's workspaces under machine-qualified keys
   (`laptop#1a2b3c4d/default`). A machine realizes its own under their plain names and the
@@ -298,6 +298,10 @@ fast-forward or merge as usual. A hub location is an ssh destination, or on the 
 machine its directory, and a subject prefix. The old hub can publish a signed-by-config
 `hub-moved` advertisement carrying the new location and a higher epoch. Nodes then
 reconnect there and ignore lower-epoch hubs from then on.
+
+Since an empty hub fills up this way, a hub needn't be durable, and it syncs nothing to disk:
+one that loses its state, to a power cut say, is deleted and made again, and the machines'
+repositories fill the new one.
 
 Two hubs running at once for the same hive (split brain) is the one case where duplicate
 merges can occur, if nodes on both sides reconnect to one hub at the same moment. Epochs make

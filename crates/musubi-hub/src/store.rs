@@ -1,4 +1,4 @@
-//! The hub's durable state: canonical operations, objects, extras, and the canonical head.
+//! The hub's state on disk: canonical operations, objects, extras, and the canonical head.
 //!
 //! Layout under the hub directory:
 //!
@@ -7,8 +7,12 @@
 //! - `git/` and `extras/<commit>` (git backend): a bare repository holding every object the
 //!   operations require, and backend extras entries a receiver cannot derive from them.
 //! - `simple/` (simple backend): store files, as in a simple-backend repository.
-//! - `heads`: the log of accepted heads, one `<seq> <operation id>` line each, appended and
-//!   fsynced before any reply that depends on it. Its last line is the current head.
+//! - `heads`: the log of accepted heads, one `<seq> <operation id>` line each, appended
+//!   before any reply that depends on it. Its last line is the current head.
+//!
+//! None of it is synced to disk: a hub only gathers what its machines' repositories hold,
+//! so one that loses its state is deleted and made again (see "Moving the hub" in
+//! docs/design.md).
 
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -99,7 +103,8 @@ impl HubStore {
                 SimpleStore::init(&dir.join("simple"))?;
             }
         }
-        write_atomic(&dir.join("backend"), backend.name().as_bytes())?;
+        let path = dir.join("backend");
+        fs::write(&path, backend.name()).map_err(io_err(&path))?;
         let canonical = CanonicalStore::open(&dir.join("canonical"), backend.root_commit())?;
         let root = canonical.root_operation_id().clone();
         append_head(dir, 0, &root)?;
@@ -155,8 +160,8 @@ impl HubStore {
         self.accepted.contains_key(op)
     }
 
-    /// Durably replaces the head. The caller has checked that `new` is closed and descends
-    /// from the current head.
+    /// Replaces the head. The caller has checked that `new` is closed and descends from the
+    /// current head.
     pub fn set_head(&mut self, seq: u64, new: &OperationId) -> Result<(), StoreError> {
         assert_eq!(seq, self.seq + 1, "heads are accepted in sequence");
         append_head(&self.dir, seq, new)?;
@@ -339,23 +344,5 @@ fn append_head(dir: &Path, seq: u64, head: &OperationId) -> Result<(), StoreErro
         .append(true)
         .open(&path)
         .map_err(io_err(&path))?;
-    writeln!(file, "{seq} {}", head.hex()).map_err(io_err(&path))?;
-    file.sync_all().map_err(io_err(&path))
-}
-
-/// Writes `path` so that a crash leaves either the old or the new contents, durably.
-fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), StoreError> {
-    let dir = path.parent().expect("path has a parent");
-    let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(io_err(dir))?;
-    tmp.write_all(contents).map_err(io_err(path))?;
-    tmp.as_file().sync_all().map_err(io_err(path))?;
-    tmp.persist(path).map_err(|err| io_err(path)(err.error))?;
-    // Make the rename durable. Windows can't open a directory as a file to sync it, so
-    // there the rename is as durable as the filesystem makes it.
-    if cfg!(unix) {
-        fs::File::open(dir)
-            .and_then(|d| d.sync_all())
-            .map_err(io_err(dir))?;
-    }
-    Ok(())
+    writeln!(file, "{seq} {}", head.hex()).map_err(io_err(&path))
 }

@@ -8,7 +8,7 @@ use crate::message::OpEntry;
 use crate::message::Reply;
 use crate::message::Request;
 
-/// The hub's durable state.
+/// The hub's state, which outlives a restart.
 pub trait HubStorage {
     type Op: Clone + Eq;
     type Attachment;
@@ -17,7 +17,7 @@ pub trait HubStorage {
     /// The current `(seq, head)`.
     fn head(&self) -> (u64, Self::Op);
 
-    /// Durably replaces the head. Must be persisted before returning.
+    /// Replaces the head, which must be stored before this returns.
     fn set_head(&mut self, seq: u64, head: &Self::Op) -> Result<(), Self::Error>;
 
     fn store_ops(

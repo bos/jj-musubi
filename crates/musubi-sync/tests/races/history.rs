@@ -266,7 +266,7 @@ fn restart_with_lost_cache() {
     hive.assert_converged();
 }
 
-/// The hub restarts between one machine's push and another's fetch; its store is durable.
+/// The hub restarts between one machine's push and another's fetch; its store is on disk.
 #[test]
 fn hub_restart_between_push_and_fetch() {
     let mut hive = Fixture::new(&["alpha", "beta"]);

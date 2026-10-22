@@ -322,22 +322,11 @@ impl HubDir {
         Ok(())
     }
 
-    /// Decides which hive a repository joins, or creates one if asked to. See
-    /// [`crate::matching`].
-    pub fn join(&mut self, request: &JoinRequest) -> Result<Joined, Refusal> {
+    /// Every hive, as a candidate for `request` to join: whether it shares history with the
+    /// joining repository, or will once its pending joins push, and the repositories its
+    /// remotes name.
+    fn candidates(&self, request: &JoinRequest) -> Result<Vec<Candidate>, Refusal> {
         let backend = request.backend;
-        let chosen = request
-            .hive
-            .as_deref()
-            .map(|name| self.resolve(name))
-            .transpose()?;
-        if let Some(name) = &request.new {
-            self.check_new_name(name)?;
-        }
-        let now = Instant::now();
-        for hive in self.hives.values_mut() {
-            hive.pending.retain(|pending| pending.until > now);
-        }
         let roots: BTreeSet<&String> = request.roots.iter().collect();
         let targets: Vec<CommitId> = request
             .remote_targets
@@ -370,6 +359,26 @@ impl HubDir {
                     .collect(),
             });
         }
+        Ok(candidates)
+    }
+
+    /// Decides which hive a repository joins, or creates one if asked to. See
+    /// [`crate::matching`].
+    pub fn join(&mut self, request: &JoinRequest) -> Result<Joined, Refusal> {
+        let backend = request.backend;
+        let chosen = request
+            .hive
+            .as_deref()
+            .map(|name| self.resolve(name))
+            .transpose()?;
+        if let Some(name) = &request.new {
+            self.check_new_name(name)?;
+        }
+        let now = Instant::now();
+        for hive in self.hives.values_mut() {
+            hive.pending.retain(|pending| pending.until > now);
+        }
+        let candidates = self.candidates(request)?;
         let joiner = Joiner {
             has_commits: !request.roots.is_empty(),
             chosen,

@@ -48,6 +48,7 @@ named after the machine (`beta/default`) (docs/design.md).
 | Bookmark moved on one machine, deleted on another | jj's three-way result, the same on every machine. | `bookmark_moved_on_one_machine_and_deleted_on_another` |
 | Branch moved with `git` behind jj's back while another machine moves the bookmark | The git move is imported by that machine's next `jj` command, as a local change; the hive converges, with no flip-flopping. | `git_branch_moved_behind_jj_while_another_machine_moves_it` |
 | Same tag set to different commits | Conflicted tag on every machine. Each machine's `@git` tag keeps its own value. | `same_tag_created_at_different_commits` |
+| One machine fetches an annotated tag | A known limitation: every machine's jj has the tag, at the same commit, but only that machine's `.git` has the tag object, with its message, tagger and any signature. The others' `.git` has a lightweight tag at the commit, so there `git describe` without `--tags` passes it over, and `git tag -v` has nothing to verify. jj records a tag by its commit, and musubi moves the commits a view needs, not tag objects. | `an_annotated_tag_arrives_lightweight` |
 | Independent repositories with differing `main` join one hive | The histories merge at jj's shared root operation, and `main` is conflicted until someone resolves it. | `joining_repositories_with_conflicting_bookmarks` |
 
 ## Changes

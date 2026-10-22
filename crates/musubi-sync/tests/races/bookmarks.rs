@@ -1,6 +1,8 @@
 //! Bookmarks and tags moved concurrently on different machines.
 
 use crate::fixture::Fixture;
+use crate::remotes::create_origin;
+use crate::remotes::seed_git;
 
 /// Both machines point `main` at different new commits before syncing. jj's answer for
 /// concurrent operations is a conflicted bookmark, and every machine must show the same
@@ -112,6 +114,39 @@ fn same_tag_created_at_different_commits() {
         "v1 should be conflicted: {}",
         tags(0)
     );
+}
+
+/// A known limitation (#35): one machine fetches an annotated tag, and every machine's jj
+/// has the tag, but only that machine's `.git` has the tag object, with its message, tagger
+/// and any signature. The others' `.git` has a lightweight tag at the same commit: jj records
+/// a tag by its commit, and musubi moves the commits a view needs, not tag objects. If this
+/// test fails, musubi has started moving them; update docs/races.md.
+#[test]
+fn an_annotated_tag_arrives_lightweight() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    let seed = create_origin(&hive);
+    let origin = hive.env.root().join("origin.git");
+    seed_git(&hive, &seed, &["tag", "-a", "v1", "-m", "release one"]);
+    seed_git(
+        &hive,
+        &seed,
+        &["push", "--quiet", origin.to_str().unwrap(), "v1"],
+    );
+    hive.repo(0)
+        .jj(&["git", "remote", "add", "origin", origin.to_str().unwrap()]);
+    hive.repo(0).jj(&["git", "fetch"]);
+    hive.sync();
+    hive.assert_converged();
+    let tags = |index| hive.repo(index).jj(&["tag", "list", "--all-remotes"]);
+    assert_eq!(tags(0), tags(1));
+    let kind = |index| hive.repo(index).git(&["cat-file", "-t", "refs/tags/v1"]);
+    assert_eq!(kind(0), "tag\n");
+    assert_eq!(kind(1), "commit\n");
+    let commit = |index| {
+        hive.repo(index)
+            .git(&["rev-parse", "refs/tags/v1^{commit}"])
+    };
+    assert_eq!(commit(0), commit(1));
 }
 
 /// Both machines delete the same bookmark.

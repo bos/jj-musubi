@@ -11,6 +11,12 @@
 //! transport's payload limit (a long list of operation ids, say) is stored as a blob and
 //! sent as [`HubRequest::Indirect`] or [`HubReply::Indirect`].
 
+use std::io;
+use std::io::Write as _;
+use std::path::Path;
+
+use jj_lib::backend::CommitId;
+use jj_lib::object_id::ObjectId as _;
 use musubi_core::message::OpEntry;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
@@ -20,7 +26,9 @@ use musubi_hub::hub_dir::Joined;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::Attachment;
 use crate::blobs::BlobId;
+use crate::blobs::BlobStore;
 
 pub const PROTOCOL_VERSION: u32 = 5;
 pub const JJ_LIB_VERSION: &str = "0.46.0";
@@ -36,6 +44,52 @@ pub enum WireAttachment {
     // time: attachments and chunks run to a megabyte.
     Inline(#[serde(with = "serde_bytes")] Vec<u8>),
     Haves(Vec<WireId>),
+}
+
+impl WireAttachment {
+    /// `attachment` as it travels: inline if it fits in what `inline_left` leaves of the
+    /// message, which it then takes, and otherwise as a blob, which `store` stores.
+    pub fn of(
+        attachment: &Attachment,
+        inline_left: &mut u64,
+        store: impl FnOnce(&Path) -> io::Result<(BlobId, u64)>,
+    ) -> anyhow::Result<Self> {
+        Ok(match attachment {
+            Attachment::None => Self::None,
+            Attachment::Bundle(_) | Attachment::File(_) => {
+                let path = attachment.bundle_path()?;
+                let len = std::fs::metadata(path)?.len();
+                if len <= *inline_left {
+                    *inline_left -= len;
+                    Self::Inline(std::fs::read(path)?)
+                } else {
+                    let (blob, len) = store(path)?;
+                    Self::Blob { blob, len }
+                }
+            }
+            Attachment::Haves(ids) => Self::Haves(ids.iter().map(|id| id.to_bytes()).collect()),
+        })
+    }
+
+    /// The attachment this stands for: inline bytes in a temporary file in `blobs`, and a
+    /// blob as `find` makes it.
+    pub fn into_attachment(
+        self,
+        blobs: &BlobStore,
+        find: impl FnOnce(BlobId) -> anyhow::Result<Attachment>,
+    ) -> anyhow::Result<Attachment> {
+        Ok(match self {
+            Self::None => Attachment::None,
+            Self::Blob { blob, .. } => find(blob)?,
+            Self::Inline(bytes) => {
+                // Not reopened truncating (see `BundleWriter::create`).
+                let mut file = blobs.temp_file()?;
+                file.write_all(&bytes)?;
+                Attachment::bundle(file.into_temp_path())
+            }
+            Self::Haves(ids) => Attachment::Haves(ids.into_iter().map(CommitId::new).collect()),
+        })
+    }
 }
 
 pub type WireRequest = Request<WireId, WireAttachment>;

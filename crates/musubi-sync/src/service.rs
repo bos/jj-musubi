@@ -8,7 +8,6 @@ use std::time::Instant;
 use std::time::SystemTime;
 
 use bytes::Bytes;
-use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
 use musubi_core::hub;
 use musubi_core::message::Reply;
@@ -210,24 +209,12 @@ impl HubService {
             HubRequest::Protocol(request) => {
                 let mut uploaded = vec![];
                 let request = map_request(request, OpId::new, |attachment| {
-                    Ok(match attachment {
-                        WireAttachment::None => Attachment::None,
-                        WireAttachment::Blob { blob, .. } => {
-                            uploaded.push(blob);
-                            let path = self.uploads.get(&blob).ok_or_else(|| {
-                                anyhow::anyhow!("attachment {blob:?} was not uploaded")
-                            })?;
-                            Attachment::File(path)
-                        }
-                        WireAttachment::Inline(bytes) => {
-                            // Not reopened truncating (see `BundleWriter::create`).
-                            let mut file = self.uploads.temp_file()?;
-                            std::io::Write::write_all(&mut file, &bytes)?;
-                            Attachment::bundle(file.into_temp_path())
-                        }
-                        WireAttachment::Haves(ids) => {
-                            Attachment::Haves(ids.into_iter().map(CommitId::new).collect())
-                        }
+                    attachment.into_attachment(&self.uploads, |blob| {
+                        uploaded.push(blob);
+                        let path = self.uploads.get(&blob).ok_or_else(|| {
+                            anyhow::anyhow!("attachment {blob:?} was not uploaded")
+                        })?;
+                        Ok(Attachment::File(path))
                     })
                 })?;
                 let pushed = log_request(&request);
@@ -249,23 +236,10 @@ impl HubService {
                     handled.reply,
                     |id| id.to_bytes(),
                     |attachment| {
-                        Ok(match attachment {
-                            Attachment::None => WireAttachment::None,
-                            Attachment::Bundle(_) | Attachment::File(_) => {
-                                let path = attachment.bundle_path()?;
-                                let len = std::fs::metadata(path)?.len();
-                                if len <= inline_left {
-                                    inline_left -= len;
-                                    WireAttachment::Inline(std::fs::read(path)?)
-                                } else {
-                                    let (blob, len) = self.prepared.insert_file(path)?;
-                                    self.served.remove(&blob);
-                                    WireAttachment::Blob { blob, len }
-                                }
-                            }
-                            Attachment::Haves(ids) => {
-                                WireAttachment::Haves(ids.iter().map(|id| id.to_bytes()).collect())
-                            }
+                        WireAttachment::of(&attachment, &mut inline_left, |path| {
+                            let (blob, len) = self.prepared.insert_file(path)?;
+                            self.served.remove(&blob);
+                            Ok((blob, len))
                         })
                     },
                 )?;

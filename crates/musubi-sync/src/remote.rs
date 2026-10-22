@@ -12,7 +12,6 @@ use std::time::SystemTime;
 use bytes::Bytes;
 use futures::StreamExt as _;
 use futures::stream::FuturesOrdered;
-use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
@@ -87,23 +86,10 @@ impl RemoteHub {
             request,
             |id| id.to_bytes(),
             |attachment| {
-                Ok(match attachment {
-                    Attachment::None => WireAttachment::None,
-                    Attachment::Bundle(_) | Attachment::File(_) => {
-                        let path = attachment.bundle_path()?;
-                        let len = std::fs::metadata(path)?.len();
-                        if len <= inline_left {
-                            inline_left -= len;
-                            WireAttachment::Inline(std::fs::read(path)?)
-                        } else {
-                            let (blob, len) = self.blobs.insert_file(path)?;
-                            uploads.ids.push(blob);
-                            WireAttachment::Blob { blob, len }
-                        }
-                    }
-                    Attachment::Haves(ids) => {
-                        WireAttachment::Haves(ids.iter().map(|id| id.to_bytes()).collect())
-                    }
+                WireAttachment::of(&attachment, &mut inline_left, |path| {
+                    let (blob, len) = self.blobs.insert_file(path)?;
+                    uploads.ids.push(blob);
+                    Ok((blob, len))
                 })
             },
         )?;
@@ -129,25 +115,13 @@ impl RemoteHub {
             downloads.push((blob, Arc::new(path)));
         }
         map_reply(reply, OpId::new, |attachment| {
-            Ok(match attachment {
-                WireAttachment::None => Attachment::None,
-                WireAttachment::Blob { blob, .. } => {
-                    let path = downloads
-                        .iter()
-                        .find(|(id, _)| *id == blob)
-                        .map(|(_, path)| Arc::clone(path))
-                        .expect("downloaded above");
-                    Attachment::Bundle(path)
-                }
-                WireAttachment::Inline(bytes) => {
-                    // Not reopened truncating (see `BundleWriter::create`).
-                    let mut file = self.blobs.temp_file()?;
-                    std::io::Write::write_all(&mut file, &bytes)?;
-                    Attachment::bundle(file.into_temp_path())
-                }
-                WireAttachment::Haves(ids) => {
-                    Attachment::Haves(ids.into_iter().map(CommitId::new).collect())
-                }
+            attachment.into_attachment(&self.blobs, |blob| {
+                let path = downloads
+                    .iter()
+                    .find(|(id, _)| *id == blob)
+                    .map(|(_, path)| Arc::clone(path))
+                    .expect("downloaded above");
+                Ok(Attachment::Bundle(path))
             })
         })
     }

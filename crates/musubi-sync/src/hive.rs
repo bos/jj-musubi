@@ -7,7 +7,6 @@ use musubi_core::hub;
 use musubi_core::message::HeadKind;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
-use musubi_core::node::LocalRepo as _;
 use musubi_core::node::NodeCore;
 use musubi_core::node::Step;
 use musubi_jj::node::NodeRepo;
@@ -59,10 +58,10 @@ impl Hive {
 
     /// Adds a node; returns its index.
     pub fn add(&mut self, repo: NodeRepo) -> anyhow::Result<usize> {
-        let root = repo.canonical_store().root_operation_id().clone();
+        let adapter = NodeAdapter::new(repo)?;
         self.members.push(Member {
-            adapter: NodeAdapter::new(repo)?,
-            core: NodeCore::new(root),
+            core: NodeCore::new(adapter.root().clone()),
+            adapter,
             uploaded: 0,
             downloaded: 0,
         });
@@ -72,13 +71,7 @@ impl Hive {
     /// Restarts a node's protocol state, as after a crash.
     pub fn restart(&mut self, node: usize) {
         let member = &mut self.members[node];
-        let root = member
-            .adapter
-            .repo()
-            .canonical_store()
-            .root_operation_id()
-            .clone();
-        member.core.restart(root);
+        member.core.restart(member.adapter.root().clone());
     }
 
     fn request(&mut self, node: usize, request: Request<OpId, Attachment>) -> anyhow::Result<()> {
@@ -129,19 +122,15 @@ impl Hive {
     /// Polls the hub, then runs the node's policy until it has nothing left to do. Returns
     /// how many steps it took.
     pub fn sync(&mut self, node: usize) -> anyhow::Result<usize> {
-        self.members[node].adapter.reconcile_settings(true)?;
         let member = &mut self.members[node];
-        member.adapter.heads()?;
+        member.adapter.before_sync()?;
         let poll = member.core.poll(&member.adapter)?;
         self.request(node, poll)?;
         for steps in 0..10_000 {
             let member = &mut self.members[node];
             match member.core.step(&mut member.adapter)? {
                 Step::Idle => {
-                    // Both run; either may write an operation to upload.
-                    let settings = member.adapter.reconcile_settings(false)?;
-                    let workspaces = member.adapter.show_other_workspaces()?;
-                    if settings || workspaces {
+                    if member.adapter.when_idle()? {
                         continue;
                     }
                     return Ok(steps);

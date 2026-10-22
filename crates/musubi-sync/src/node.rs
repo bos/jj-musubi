@@ -80,11 +80,31 @@ impl NodeAdapter {
         Ok(self.repo.reconcile_settings()?)
     }
 
+    /// Gets ready to sync. A repository made shallow or partial since it joined can't send
+    /// what its new work requires, and the hub would refuse it. Settings changed here go up
+    /// with the sync, and once the node has the hive's head, the hive's settings apply here.
+    /// Op heads may have changed since the last step: a fetch's haves should say so.
+    pub fn before_sync(&mut self) -> anyhow::Result<()> {
+        self.repo.check_complete()?;
+        self.reconcile_settings(true)?;
+        self.heads()?;
+        Ok(())
+    }
+
+    /// What a node does once its policy has nothing left to do: reconcile its settings, and
+    /// show other machines' workspaces again. Both run; either may write an operation to
+    /// upload, and then it returns true, since the policy has more to do.
+    pub fn when_idle(&mut self) -> anyhow::Result<bool> {
+        let settings = self.reconcile_settings(false)?;
+        let workspaces = self.show_other_workspaces()?;
+        Ok(settings || workspaces)
+    }
+
     pub fn repo_mut(&mut self) -> &mut NodeRepo {
         &mut self.repo
     }
 
-    fn root(&self) -> &OpId {
+    pub fn root(&self) -> &OpId {
         self.repo.canonical_store().root_operation_id()
     }
 

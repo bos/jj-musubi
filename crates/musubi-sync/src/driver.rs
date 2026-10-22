@@ -4,7 +4,6 @@ use musubi_core::message::HeadKind;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
 use musubi_core::node::Handled;
-use musubi_core::node::LocalRepo as _;
 use musubi_core::node::NodeCore;
 use musubi_core::node::Step;
 use musubi_jj::node::NodeRepo;
@@ -31,10 +30,10 @@ struct Tally {
 
 impl NodeDriver {
     pub fn new(repo: NodeRepo, remote: RemoteHub) -> anyhow::Result<Self> {
-        let root = repo.canonical_store().root_operation_id().clone();
+        let adapter = NodeAdapter::new(repo)?;
         Ok(Self {
-            adapter: NodeAdapter::new(repo)?,
-            core: NodeCore::new(root),
+            core: NodeCore::new(adapter.root().clone()),
+            adapter,
             remote,
             tally: Tally::default(),
         })
@@ -51,14 +50,7 @@ impl NodeDriver {
     /// Asks the hub for its head and anything new, then runs the policy until there is
     /// nothing left to do. Returns how many steps that took.
     pub async fn sync(&mut self) -> anyhow::Result<usize> {
-        // A repository made shallow or partial since it joined can't send what its new work
-        // requires, and the hub would refuse it.
-        self.adapter.repo().check_complete()?;
-        // Settings changed here go up with this sync, and once the node has the hive's head,
-        // the hive's settings apply here.
-        self.adapter.reconcile_settings(true)?;
-        // Op heads may have changed since the last step: a fetch's haves should say so.
-        self.adapter.heads()?;
+        self.adapter.before_sync()?;
         self.tally = Tally::default();
         let poll = self.core.poll(&self.adapter)?;
         self.deliver(poll).await?;
@@ -66,10 +58,7 @@ impl NodeDriver {
         loop {
             match self.core.step(&mut self.adapter)? {
                 Step::Idle => {
-                    // Both run; either may write an operation to upload.
-                    let settings = self.adapter.reconcile_settings(false)?;
-                    let workspaces = self.adapter.show_other_workspaces()?;
-                    if settings || workspaces {
+                    if self.adapter.when_idle()? {
                         continue;
                     }
                     // Learning the head alone, as after a restart, changes nothing here.
@@ -172,13 +161,7 @@ impl NodeDriver {
 
     /// Forgets volatile protocol state, as after a crash.
     pub fn restart(&mut self) {
-        let root = self
-            .adapter
-            .repo()
-            .canonical_store()
-            .root_operation_id()
-            .clone();
-        self.core.restart(root);
+        self.core.restart(self.adapter.root().clone());
     }
 }
 

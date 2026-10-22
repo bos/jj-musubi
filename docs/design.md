@@ -289,9 +289,22 @@ observing a dangling reference.
 
 Objects move as git packfiles. musubi uses the `git` binary: `git pack-objects --revs` with
 the receiver's known commits as exclusions, and `git index-pack --fix-thin` to receive. jj
-already needs `git` for fetch and push, and this gets delta compression and bitmaps for free.
+already needs `git` for fetch and push, and this gets delta compression and bitmaps for free,
+the latter for clones.
 
-- The hub stores objects in a bare git repository.
+- The hub stores objects in a bare git repository. Its only refs are under
+  `refs/musubi/head/`, naming the visible heads of its accepted head's view, so that git can
+  keep a bitmap index of what they reach: with one, counting what a clone needs takes a
+  fraction of the time. Nodes never see them, since what the hub sends is bundles, not refs.
+  The hub writes its first bitmap index, with a full `git gc` in the background, once it
+  holds 10,000 objects, and `git gc --auto`'s full repacks refresh it. Only a clone, which
+  has nothing, uses it: with a bitmap, git skips the walk that finds what the receiver has
+  to make deltas against, so an edit pushed a moment ago, with no delta stored, would go to
+  every other node whole.
+- musubi runs git with `attr.tree` naming the empty tree. git 2.43 to 2.45 otherwise read a
+  bare repository's attributes from HEAD's tree, path by path, and where HEAD names a branch
+  that doesn't exist, as on a hub, each lookup tried every way of spelling HEAD as a ref:
+  `pack-objects` for a clone of jj spent three times as long on that as on packing.
 - A pack is written once on each side: `git pack-objects` writes it straight into the bundle
   that carries it, which goes into the blob store as a hard link rather than a copy where
   the filesystem allows, and the receiver pipes it from the bundle into git.
@@ -305,8 +318,8 @@ already needs `git` for fetch and push, and this gets delta compression and bitm
   `git gc --auto`, which consolidates packs and loose objects once there are enough of them
   (by git's thresholds, or the repository's), in the background as git does
   (`gc.autoDetach`, including on Windows, where git can't detach itself), but with pruning
-  disabled: musubi never deletes an object, reachable or not. The hub's repository has no
-  refs, so to git all of its objects are unreachable, and they go to a cruft pack.
+  disabled: musubi never deletes an object, reachable or not. On the hub, what its head's
+  refs don't reach goes to a cruft pack.
 - jj-lib's git backend sizes gix's table of pack indexes when it opens the repository, so a
   long-running node could fail to read objects in packs added since. A node therefore reopens
   the repository before it imports objects.

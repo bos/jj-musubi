@@ -113,4 +113,10 @@ pub trait ObjectStore {
         wants: &[CommitId],
         haves: &[CommitId],
     ) -> Result<(), ObjectError>;
+
+    /// Tells a hub's store the visible heads of its accepted head's view, which a store may
+    /// index for exporting what they reach.
+    fn mark_head(&self, _commits: &[CommitId]) -> Result<(), ObjectError> {
+        Ok(())
+    }
 }

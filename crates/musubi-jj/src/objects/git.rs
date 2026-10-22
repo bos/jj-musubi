@@ -2,6 +2,7 @@
 //! already requires for fetch and push, plus the backend extras jj cannot derive from them.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs;
 use std::io;
@@ -65,6 +66,19 @@ fn git() -> Command {
     command
 }
 
+/// The empty tree's id, which git knows without storing it.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/// Where a hub's repository names the commits its head requires (see
+/// [`GitObjects::mark_head`]).
+const HEAD_REFS: &str = "refs/musubi/head/";
+
+/// How many objects a hub's repository holds before a bitmap index is worth writing.
+const BITMAP_AFTER: u64 = 10_000;
+
+/// How long a hub without a bitmap index waits before looking into writing one again.
+const BITMAP_RETRY: std::time::Duration = std::time::Duration::from_secs(3600);
+
 /// A git object database, driven through the `git` binary.
 pub struct GitObjects {
     git_dir: PathBuf,
@@ -83,8 +97,9 @@ impl GitObjects {
     }
 
     /// Creates a bare repository for a hub. git never garbage-collects it on its own: the
-    /// hub decides what is unreferenced, not git, and a hub's repository has no refs. Only
-    /// [`Self::maintain`] consolidates it.
+    /// hub decides what is unreferenced, not git, and its only refs, under
+    /// `refs/musubi/head/`, are for git's bitmap index (see [`Self::mark_head`]). Only
+    /// [`Self::maintain`] and [`Self::mark_head`] consolidate it.
     pub fn init_bare(git_dir: &Path) -> Result<Self, ObjectError> {
         // Not through `run`: GIT_DIR must not be set when the repository does not exist yet.
         let args = ["init", "--quiet", "--bare"];
@@ -249,14 +264,23 @@ impl GitObjects {
         haves: &[CommitId],
         out: &mut dyn Write,
     ) -> Result<(), ObjectError> {
-        let args = [
+        let mut args = vec![];
+        if !haves.is_empty() {
+            // With a bitmap index, git skips the walk that finds what the receiver has to
+            // make deltas against, so an object with no delta stored, as one pushed a moment
+            // ago often is, would go whole: hundreds of kilobytes for a small edit to a large
+            // file. Counting is quick when there is something to leave out, so the index is
+            // only for clones.
+            args.extend(["-c", "pack.useBitmaps=false"]);
+        }
+        args.extend([
             "pack-objects",
             "--revs",
             "--thin",
             "--stdout",
             "--delta-base-offset",
             "-q",
-        ];
+        ]);
         let mut child = self
             .command(&args)
             .stdin(Stdio::piped())
@@ -320,8 +344,8 @@ impl GitObjects {
     /// Consolidates packs and loose objects once there are enough of them, as git itself
     /// does after a fetch, with `git gc --auto` and the repository's own thresholds. It
     /// never deletes an object, reachable or not: jj's `refs/jj/keep` refs need not cover
-    /// every commit an operation refers to, and a hub's repository has no refs at all. git
-    /// may finish in the background.
+    /// every commit an operation refers to, and a hub's refs cover only its head. git may
+    /// finish in the background.
     pub fn maintain(&self, hub: bool) -> Result<(), ObjectError> {
         let mut args = vec![
             "-c",
@@ -330,7 +354,7 @@ impl GitObjects {
             "gc.worktreePruneExpire=never",
         ];
         if hub {
-            // A hub's objects are all unreachable to git: keep them in a cruft pack rather
+            // Much of a hub's history is unreachable to git: keep it in a cruft pack rather
             // than loose, and override the hub's own `gc.auto 0`.
             args.extend(["-c", "gc.cruftPacks=true", "-c", "gc.auto=6700"]);
         }
@@ -349,24 +373,18 @@ impl GitObjects {
     /// it did.
     #[cfg(windows)]
     fn gc_in_background(&self, args: &[&str]) -> Result<bool, ObjectError> {
-        use std::os::windows::process::CommandExt as _;
-        // Its own hidden console and process group, as `setsid` gives git elsewhere, so that
-        // Ctrl-C or closing the terminal doesn't stop it partway. (A job object that kills its
-        // processes when it closes still can; git copes, and repacks next time.)
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         if !self.auto_detach()? {
             return Ok(false);
         }
         // Nothing waits for it, so as with git's own detached gc a failure goes unreported,
         // and the next `gc --auto` tries again.
-        self.command(args)
+        let mut command = self.command(args);
+        command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
-            .spawn()
-            .map_err(|source| spawn_err(args, source))?;
+            .stderr(Stdio::null());
+        detach(&mut command);
+        command.spawn().map_err(|source| spawn_err(args, source))?;
         Ok(true)
     }
 
@@ -390,6 +408,126 @@ impl GitObjects {
             None,
         )?;
         Ok(String::from_utf8_lossy(&value).trim() != "false")
+    }
+
+    /// Makes the refs under `refs/musubi/head/` name exactly `commits`, the visible heads of
+    /// a hub's accepted head, so that git can index what they reach; nothing else on a hub
+    /// refers to anything. The refs are the hub's own: what it sends nodes never includes
+    /// refs, so jj never sees them. Then, unless the repository has a bitmap index, or is
+    /// too small for one to matter, or tried to write one within the hour, starts a full
+    /// `git gc` in the background to write one: with it, counting what a clone needs takes
+    /// a fraction of the time ([`Self::write_pack`] uses it only for clones). Later full
+    /// repacks, once `git gc --auto` finds enough packs, write a fresh one. Like
+    /// [`Self::maintain`], the gc never deletes an object: what no ref reaches goes to a
+    /// cruft pack.
+    pub fn mark_head(&self, commits: &[CommitId]) -> Result<(), ObjectError> {
+        let listed = self.run(&["for-each-ref", "--format=%(refname)", HEAD_REFS], None)?;
+        let existing: BTreeSet<String> = String::from_utf8_lossy(&listed)
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        // The root commit isn't a git object.
+        let wanted: BTreeSet<String> = commits
+            .iter()
+            .filter(|commit| commit.as_bytes().iter().any(|&b| b != 0))
+            .map(|commit| format!("{HEAD_REFS}{}", commit.hex()))
+            .collect();
+        let mut input = String::new();
+        for name in wanted.difference(&existing) {
+            let id = name.strip_prefix(HEAD_REFS).expect("named above");
+            writeln!(input, "create {name} {id}").expect("writing to a String");
+        }
+        for name in existing.difference(&wanted) {
+            writeln!(input, "delete {name}").expect("writing to a String");
+        }
+        if !input.is_empty() {
+            self.run(&["update-ref", "--stdin"], Some(input.into_bytes()))?;
+        }
+        // Looked into at most hourly, since counting objects takes a moment, and a large
+        // repository on a small machine may fail to write a bitmap index every time.
+        let checked = self.git_dir.join("musubi-bitmap-checked");
+        let recently = fs::metadata(&checked)
+            .and_then(|meta| meta.modified())
+            .is_ok_and(|at| at.elapsed().is_ok_and(|age| age < BITMAP_RETRY));
+        if wanted.is_empty() || recently || self.has_bitmap()? {
+            return Ok(());
+        }
+        fs::write(&checked, b"")?;
+        if self.packed_objects()? >= BITMAP_AFTER {
+            self.gc_for_bitmap()?;
+        }
+        Ok(())
+    }
+
+    fn has_bitmap(&self) -> Result<bool, ObjectError> {
+        let dir = self.git_dir.join("objects/pack");
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(err) => return Err(err.into()),
+        };
+        for entry in entries {
+            let name = entry?.file_name();
+            let name = name.to_string_lossy();
+            // Not a temporary one a killed gc left.
+            if (name.starts_with("pack-") || name.starts_with("multi-pack-index-"))
+                && name.ends_with(".bitmap")
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// How many objects the repository's packs hold.
+    fn packed_objects(&self) -> Result<u64, ObjectError> {
+        let output = self.run(&["count-objects", "-v"], None)?;
+        Ok(String::from_utf8_lossy(&output)
+            .lines()
+            .find_map(|line| line.strip_prefix("in-pack: "))
+            .and_then(|count| count.trim().parse().ok())
+            .unwrap_or(0))
+    }
+
+    /// Starts a full `git gc` that writes a bitmap index, without waiting for it. git's own
+    /// lock keeps two from running at once; one that fails is logged, and an accepted head
+    /// tries again after [`BITMAP_RETRY`]. What git says goes to a file, not a pipe, so that
+    /// the hub's exiting doesn't stop it partway.
+    fn gc_for_bitmap(&self) -> Result<(), ObjectError> {
+        let args = [
+            "-c",
+            "gc.pruneExpire=never",
+            "-c",
+            "gc.worktreePruneExpire=never",
+            "-c",
+            "gc.cruftPacks=true",
+            "-c",
+            "repack.writeBitmaps=true",
+            "gc",
+            "--quiet",
+        ];
+        let log = self.git_dir.join("musubi-bitmap-gc.log");
+        let mut command = self.command(&args);
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(fs::File::create(&log)?);
+        detach(&mut command);
+        let mut child = command.spawn().map_err(|source| spawn_err(&args, source))?;
+        let dir = self.git_dir.clone();
+        // Waited for, so that it never lingers as a zombie, and so that a failure is heard.
+        thread::Builder::new()
+            .name("bitmap gc".to_owned())
+            .spawn(move || match child.wait() {
+                Ok(status) if status.success() => {}
+                Ok(status) => tracing::warn!(
+                    "writing a bitmap index in {}: git gc failed ({status}): {}",
+                    dir.display(),
+                    fs::read_to_string(&log).unwrap_or_default().trim()
+                ),
+                Err(err) => tracing::warn!("writing a bitmap index in {}: {err}", dir.display()),
+            })?;
+        Ok(())
     }
 
     /// Fails unless every object reachable from `wants` is present, assuming everything
@@ -430,6 +568,15 @@ impl GitObjects {
         command
             .current_dir(&self.git_dir)
             .env("GIT_DIR", &self.git_dir)
+            // git 2.43 to 2.45 read a bare repository's attributes from HEAD's tree, and
+            // `pack-objects` asks for each path's. Where HEAD names a branch that doesn't
+            // exist, as in a hub's repository or a non-colocated jj repository's, every
+            // ask tried each way of spelling HEAD as a ref, and failed: a million file
+            // lookups for a clone of jj, three times as long as the packing itself. Run here,
+            // git has no attributes to read anyway (a colocated `.git` is no working tree),
+            // so name the empty tree. Other gits ignore the setting, or use no tree in a bare
+            // repository already.
+            .args(["-c", &format!("attr.tree={EMPTY_TREE}")])
             .args(args);
         command
     }
@@ -458,6 +605,22 @@ impl GitObjects {
         check_status(args, &output)?;
         Ok(output.stdout)
     }
+}
+
+/// Starts `command` apart from whatever started this process, so that Ctrl-C there doesn't
+/// stop it partway (git copes if something does, and repacks next time).
+#[cfg(unix)]
+fn detach(command: &mut Command) {
+    use std::os::unix::process::CommandExt as _;
+    command.process_group(0);
+}
+
+#[cfg(windows)]
+fn detach(command: &mut Command) {
+    use std::os::windows::process::CommandExt as _;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
 }
 
 /// `fetch.unpackLimit`'s default: received packs with fewer objects are unpacked.
@@ -737,11 +900,40 @@ impl ObjectStore for GitStore<'_> {
         }
         self.git.maintain(matches!(self.extras, Extras::Files(_)))
     }
+
+    fn mark_head(&self, commits: &[CommitId]) -> Result<(), ObjectError> {
+        match self.extras {
+            Extras::Files(_) => self.git.mark_head(commits),
+            Extras::Jj { .. } => Ok(()),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn args(objects: &GitObjects) -> Vec<String> {
+        objects
+            .command(&["pack-objects"])
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn attributes_come_from_the_empty_tree() {
+        assert_eq!(
+            args(&GitObjects::new(Path::new("unused"))),
+            [
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                &format!("attr.tree={EMPTY_TREE}"),
+                "pack-objects"
+            ]
+        );
+    }
 
     /// The list is git's own, so that a variable a newer git adds is noticed here.
     #[test]

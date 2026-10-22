@@ -8,6 +8,7 @@ use std::process::Command;
 use std::process::Stdio;
 
 use jj_lib::backend::CommitId;
+use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::OperationId;
 use musubi_hub::store::Backend;
 use musubi_hub::store::HubStore;
@@ -80,6 +81,33 @@ fn closure_and_head_persist() {
     assert_eq!(hub.missing_closure(&head).unwrap(), Vec::<String>::new());
 
     hub.set_head(1, &head).unwrap();
+    // Refs name the head's visible heads, for git to index.
+    let refs = Command::new("git")
+        .arg("-C")
+        .arg(hub.dir().join("git"))
+        .args([
+            "for-each-ref",
+            "--format=%(objectname)",
+            "refs/musubi/head/",
+        ])
+        .output()
+        .unwrap();
+    let named: BTreeSet<String> = String::from_utf8(refs.stdout)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    let view_id = hub.canonical().read_operation(&head).unwrap().view_id;
+    let heads: BTreeSet<String> = hub
+        .canonical()
+        .read_view(&view_id)
+        .unwrap()
+        .head_ids
+        .iter()
+        .map(|commit| commit.hex())
+        .collect();
+    assert!(!named.is_empty());
+    assert_eq!(named, heads);
     drop(hub);
     let hub = HubStore::open(&hub_dir).unwrap();
     assert_eq!(hub.head(), (1, &head));
@@ -209,4 +237,77 @@ fn closure_check_skips_accepted_history() {
     )
     .unwrap();
     assert_eq!(hub.missing_closure(&second).unwrap(), Vec::<String>::new());
+}
+
+/// With a bitmap index, git sends an object it stores no delta for whole, rather than as a
+/// delta against what the receiver has: an edit just pushed, which the hub keeps loose, would
+/// go to every other node as the whole file. So an export to a node that has something uses
+/// no bitmap.
+#[test]
+fn small_edits_stay_small_beside_a_bitmap() {
+    let env = TestEnv::new();
+    let repo = env.init_repo("alpha");
+    // A large file that compresses poorly.
+    let lines: Vec<String> = (0..20_000u32)
+        .map(|i| format!("{:08x}", i.wrapping_mul(2_654_435_761)))
+        .collect();
+    repo.write_file("big", &lines.join("\n"));
+    repo.jj(&["commit", "-m", "big"]);
+    let mut node = NodeRepo::open(&repo.repo_path(), &repo.settings()).unwrap();
+    let old = node.canonical_heads().unwrap().pop().unwrap();
+    let hub_dir = env.root().join("hub");
+    let mut hub = HubStore::init(&hub_dir, Backend::Git).unwrap();
+    upload_ops(&node, &hub, &old);
+    let old_wants = required(&node, &canonical_ancestry(&node, &old));
+    let bundle = tempfile::NamedTempFile::new().unwrap();
+    node.object_store()
+        .unwrap()
+        .export(&old_wants, &[], bundle.path())
+        .unwrap();
+    hub.object_store()
+        .import(bundle.path(), &old_wants, &[])
+        .unwrap();
+    hub.set_head(1, &old).unwrap();
+    // A bitmap index of what the head reaches, as the hub's gc writes once it's big.
+    let git_dir = hub.dir().join("git");
+    let repack = Command::new("git")
+        .env("GIT_DIR", &git_dir)
+        .args(["repack", "-a", "-d", "-b", "-q", "--cruft"])
+        .args(["--cruft-expiration=never"])
+        .status()
+        .unwrap();
+    assert!(repack.success());
+    let packs = std::fs::read_dir(git_dir.join("objects/pack")).unwrap();
+    assert!(
+        packs
+            .flatten()
+            .any(|entry| { entry.file_name().to_string_lossy().ends_with(".bitmap") })
+    );
+    drop(node);
+
+    // A small edit, few enough objects that the hub stores them loose.
+    let mut edited = lines.clone();
+    edited[10_000] = "edited".to_owned();
+    repo.write_file("big", &edited.join("\n"));
+    repo.jj(&["commit", "-m", "edit"]);
+    let mut node = NodeRepo::open(&repo.repo_path(), &repo.settings()).unwrap();
+    let new = node.canonical_heads().unwrap().pop().unwrap();
+    upload_ops(&node, &hub, &new);
+    let new_wants = required(&node, &canonical_ancestry(&node, &new));
+    let bundle = tempfile::NamedTempFile::new().unwrap();
+    node.object_store()
+        .unwrap()
+        .export(&new_wants, &old_wants, bundle.path())
+        .unwrap();
+    hub.object_store()
+        .import(bundle.path(), &new_wants, &old_wants)
+        .unwrap();
+
+    // To a node that has the old head, the edit goes as a delta.
+    let bundle = tempfile::NamedTempFile::new().unwrap();
+    hub.object_store()
+        .export(&new_wants, &old_wants, bundle.path())
+        .unwrap();
+    let size = std::fs::metadata(bundle.path()).unwrap().len();
+    assert!(size < 10_000, "{size} bytes for a one-line edit");
 }

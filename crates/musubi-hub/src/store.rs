@@ -187,7 +187,26 @@ impl HubStore {
         self.seq = seq;
         self.head = new.clone();
         self.history.push(new.clone());
-        self.accept_ancestors(new, seq)
+        self.accept_ancestors(new, seq)?;
+        // Upkeep, which a push mustn't fail over.
+        if let Err(err) = self.mark_head(new) {
+            tracing::warn!("indexing what head {} reaches: {err}", new.hex());
+        }
+        Ok(())
+    }
+
+    /// Tells the object store the visible heads of `head`'s view, which reach most of what a
+    /// clone fetches: not what older operations' views or predecessors name that they don't,
+    /// nor hidden commits that remote bookmarks point at.
+    fn mark_head(&self, head: &OperationId) -> Result<(), StoreError> {
+        if self.backend != Backend::Git {
+            return Ok(());
+        }
+        let view = self
+            .canonical
+            .read_view(&self.canonical.read_operation(head)?.view_id)?;
+        let heads: Vec<CommitId> = view.head_ids.into_iter().collect();
+        Ok(self.object_store().mark_head(&heads)?)
     }
 
     fn accept_ancestors(&mut self, head: &OperationId, seq: u64) -> Result<(), StoreError> {

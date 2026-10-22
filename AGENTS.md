@@ -44,6 +44,12 @@ often:
 
 ## Compatibility
 
-musubi hasn't been released, so there is nothing to stay compatible with. Rename flags,
-config keys and wire formats outright, with no aliases or migrations, and leave
-`PROTOCOL_VERSION` alone.
+Until 1.0, musubi promises no compatibility with earlier releases. Rename flags, config keys
+and wire formats outright, with no aliases or migrations, but:
+
+- If a change alters the wire format and `PROTOCOL_VERSION` hasn't changed since the latest
+  `v*` tag (`jj tag list`), bump it, so that machines and hubs of different releases refuse
+  each other, saying so; with no tag yet, leave it alone. Never change how an `Envelope`
+  encodes the versions it starts with: every release reads them first.
+- Say what breaks, and what a user must do on upgrading, under an Unreleased heading at the top
+  of `CHANGELOG.md`, adding the heading if it's missing.

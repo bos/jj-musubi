@@ -16,6 +16,28 @@ Status: early. The protocol is verified in Lean (`formal/`), and the implementat
 tested against that model and against real repositories, but musubi has not yet been used
 in anger.
 
+## Install
+
+Install musubi on every machine, the hub's included. Download the archive for your platform
+from the [latest release](https://github.com/bos/jj-musubi/releases/latest), and put the
+`musubi` in it on your `PATH`: on the hub's machine, the `PATH` of non-interactive shells too
+(see [Quick start](#quick-start)). There are builds for Linux (static, x86_64 and aarch64), macOS
+(x86_64 and aarch64), and Windows (x86_64 and aarch64). The release's `SHA256SUMS` lists each
+archive's checksum, and `gh attestation verify <archive> --repo bos/jj-musubi` checks that
+this repository's release workflow built it.
+
+On macOS, a browser marks what it downloads as quarantined, and macOS then refuses to run
+`musubi`, which isn't notarized. Download it with `curl -LO` instead, or clear the mark with
+`xattr -d com.apple.quarantine musubi`.
+
+Or build it from source, with Rust 1.97.1 or later:
+
+```sh
+cargo install --locked --git https://github.com/bos/jj-musubi --tag v0.1.0 musubi
+```
+
+Without `--tag`, that builds the latest code, which may not talk to a hub running a release.
+
 ## Quick start
 
 You need:
@@ -121,6 +143,15 @@ Logs:
   restart it (`musubi daemon restart`). One started by another command also inherits that
   command's `RUST_LOG`, which takes the config's place.
 
+## Upgrading
+
+Upgrade the hub's machine and every other machine together: until 1.0, a release may change
+the protocol, and a machine and a hub whose protocols differ refuse to sync, saying so.
+Install the new musubi everywhere, in place of the old one: a daemon that starts at login runs
+the path `musubi daemon install` found, so run that again wherever the path changes. Then stop
+the hub and run `musubi hub` again, and run `musubi daemon restart` on each other machine. [CHANGELOG.md](CHANGELOG.md) says what each release
+changes, and anything else to do on upgrading.
+
 ## How it works
 
 - [docs/design.md](docs/design.md): the design, and why.
@@ -145,7 +176,8 @@ Windows, and the Lean proofs and conformance test on Linux.
 
 ## Releasing
 
-Set the version in `Cargo.toml`, then push a matching tag:
+Set the version in `Cargo.toml`, give it to `CHANGELOG.md`'s Unreleased section as its
+heading if there is one, and update the `--tag` under Install. Once that's on main, push a matching tag:
 
 ```sh
 jj tag set v0.1.0 -r main
@@ -155,5 +187,6 @@ jj git push --remote origin --tag v0.1.0
 `.github/workflows/release.yml` builds `musubi` for Linux (static, x86_64 and aarch64),
 macOS (x86_64 and aarch64), and Windows (x86_64 and aarch64), with build provenance
 attestations, and attaches the archives and their checksums to a draft GitHub release.
-Review the draft and publish it. Running the workflow by hand from the Actions tab builds
+Review the draft, put the version's section of `CHANGELOG.md` at the top of its notes, and
+publish it. Running the workflow by hand from the Actions tab builds
 the same archives without releasing anything.

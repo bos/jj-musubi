@@ -11,6 +11,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 
 use jj_lib::backend::CommitId;
@@ -64,6 +65,10 @@ fn io_err(path: &Path) -> impl FnOnce(io::Error) -> CanonicalError + '_ {
         source,
     }
 }
+
+/// An operation [`CanonicalStore::import_operations`] took in, with its parents if it stored
+/// it, or `None` if it was stored already.
+pub type Imported = (OperationId, Option<Vec<OperationId>>);
 
 pub struct CanonicalStore {
     path: PathBuf,
@@ -192,8 +197,19 @@ impl CanonicalStore {
     /// Verifies and stores an operation received from a peer. The operation's view must
     /// already be stored, so that a stored operation is always readable.
     pub fn import_operation(&self, id: &OperationId, bytes: &[u8]) -> Result<(), CanonicalError> {
+        self.import_operation_parents(id, bytes)?;
+        Ok(())
+    }
+
+    /// [`Self::import_operation`], returning the parents of an operation it stored, which
+    /// verifying it decoded, or `None` if the operation was stored already.
+    fn import_operation_parents(
+        &self,
+        id: &OperationId,
+        bytes: &[u8],
+    ) -> Result<Option<Vec<OperationId>>, CanonicalError> {
         if self.has_operation(id) {
-            return Ok(());
+            return Ok(None);
         }
         let staged = self.path.join("incoming/operations").join(id.hex());
         fs::write(&staged, bytes).map_err(io_err(&staged))?;
@@ -212,7 +228,8 @@ impl CanonicalStore {
             "operation",
             id.hex(),
             actual.hex(),
-        )
+        )?;
+        Ok(Some(op.parents))
     }
 
     pub fn import_view(&self, id: &ViewId, bytes: &[u8]) -> Result<(), CanonicalError> {
@@ -316,42 +333,63 @@ impl CanonicalStore {
     /// `ops` is `anc*(head) \ anc*(base)` and it has `base`. Then it has every parent's view
     /// by the time it reads an operation, so a view a parent has is not sent at all, and
     /// any other view goes as a delta against the first parent's: consecutive views
-    /// usually differ in a few bookmarks, however large they are.
+    /// usually differ in a few bookmarks, however large they are. A delta is between the two
+    /// views' normal forms (see `normal_view_bytes`), as the reader assumes when it
+    /// takes the view one delta made as the base of the next.
     pub fn export_operations(&self, ops: &[OperationId], out: &Path) -> Result<(), CanonicalError> {
         let is_root_view = |id: &ViewId| id.as_bytes().iter().all(|&b| b == 0);
         let mut writer = BundleWriter::create(out)?;
         writer.begin_compressed()?;
         let mut sent = HashSet::new();
+        // The views of the operations written so far, which are usually the next ones'
+        // parents.
+        let mut views: HashMap<OperationId, ViewId> = HashMap::new();
+        // The last view a delta went to, in normal form: usually the next delta's base.
+        let mut last: Option<(ViewId, Vec<u8>)> = None;
         for id in ops {
             let op = self.read_operation(id)?;
             let mut parent_views = vec![];
             for parent in &op.parents {
-                parent_views.push(self.read_operation(parent)?.view_id);
+                parent_views.push(match views.get(parent) {
+                    Some(view) => view.clone(),
+                    None => self.read_operation(parent)?.view_id,
+                });
             }
             let view = &op.view_id;
             if !is_root_view(view) && !parent_views.contains(view) && sent.insert(view.clone()) {
                 match parent_views.first().filter(|base| !is_root_view(base)) {
-                    Some(base) => writer.view_delta(
-                        view.as_bytes(),
-                        base.as_bytes(),
-                        &self.normal_view_bytes(base)?,
-                        &self.normal_view_bytes(view)?,
-                    )?,
+                    Some(base) => {
+                        let base_bytes = match last.take() {
+                            Some((last_id, bytes)) if last_id == *base => bytes,
+                            _ => self.normal_view_bytes(base)?,
+                        };
+                        let view_bytes = self.normal_view_bytes(view)?;
+                        writer.view_delta(
+                            view.as_bytes(),
+                            base.as_bytes(),
+                            &base_bytes,
+                            &view_bytes,
+                        )?;
+                        last = Some((view.clone(), view_bytes));
+                    }
                     None => writer.view(view.as_bytes(), &self.view_bytes(view)?)?,
                 }
             }
             writer.operation(id.as_bytes(), &self.operation_bytes(id)?)?;
+            views.insert(id.clone(), op.view_id);
         }
         Ok(writer.finish()?)
     }
 
     /// Verifies and stores the views and operations of a bundle written by
-    /// [`Self::export_operations`]. Returns the operation ids, in bundle order.
-    pub fn import_operations(
-        &self,
-        bundle_path: &Path,
-    ) -> Result<Vec<OperationId>, CanonicalError> {
+    /// [`Self::export_operations`]. Returns the operations in bundle order, each with its
+    /// parents if this stored it, or `None` if it was stored already.
+    pub fn import_operations(&self, bundle_path: &Path) -> Result<Vec<Imported>, CanonicalError> {
         let mut ops = vec![];
+        // The last view a delta made, in normal form (see `normal_view_bytes`): usually the
+        // next delta's base, since consecutive operations' views go as deltas against each
+        // other.
+        let mut last: Option<(ViewId, Vec<u8>)> = None;
         bundle::read(bundle_path, |record| {
             match record {
                 Record::View { id, contents } => {
@@ -361,21 +399,27 @@ impl CanonicalStore {
                 Record::ViewDelta { id, base, delta } => {
                     let (id, base) = (ViewId::new(id), ViewId::new(base));
                     if !self.has_view(&id) {
-                        if !self.has_view(&base) {
-                            return Err(boxed(CanonicalError::MissingDeltaBase {
-                                view: id.hex(),
-                                base: base.hex(),
-                            }));
-                        }
-                        let base = self.normal_view_bytes(&base).map_err(boxed)?;
+                        let base = match last.take() {
+                            Some((last_id, bytes)) if last_id == base => bytes,
+                            _ if !self.has_view(&base) => {
+                                return Err(boxed(CanonicalError::MissingDeltaBase {
+                                    view: id.hex(),
+                                    base: base.hex(),
+                                }));
+                            }
+                            _ => self.normal_view_bytes(&base).map_err(boxed)?,
+                        };
                         let contents = bundle::apply_view_delta(&base, &delta)?;
                         self.import_view(&id, &contents).map_err(boxed)?;
+                        last = Some((id, contents));
                     }
                 }
                 Record::Operation { id, contents } => {
                     let id = OperationId::new(id);
-                    self.import_operation(&id, &contents).map_err(boxed)?;
-                    ops.push(id);
+                    let parents = self
+                        .import_operation_parents(&id, &contents)
+                        .map_err(boxed)?;
+                    ops.push((id, parents));
                 }
                 _ => {
                     return Err(ObjectError::MalformedBundle(
@@ -532,7 +576,10 @@ mod tests {
         sender
             .export_operations(std::slice::from_ref(&child), bundle.path())
             .unwrap();
-        assert_eq!(receiver.import_operations(bundle.path()).unwrap(), [child]);
+        assert_eq!(
+            receiver.import_operations(bundle.path()).unwrap(),
+            [(child, Some(vec![base]))]
+        );
         assert_eq!(receiver.read_view(&child_view).unwrap(), view);
     }
 }

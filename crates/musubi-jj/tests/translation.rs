@@ -59,7 +59,13 @@ fn ship_operations(from: &NodeRepo, to: &NodeRepo, head: &OperationId) {
         .unwrap();
     let bundle = tempfile::NamedTempFile::new().unwrap();
     src.export_operations(&ops, bundle.path()).unwrap();
-    assert_eq!(dst.import_operations(bundle.path()).unwrap(), ops);
+    let imported: Vec<OperationId> = dst
+        .import_operations(bundle.path())
+        .unwrap()
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(imported, ops);
 }
 
 fn single_canonical_head(node: &mut NodeRepo) -> OperationId {

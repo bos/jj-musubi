@@ -60,7 +60,7 @@ impl HubStorage for HubAdapter {
             .store
             .canonical()
             .import_operations(attachment.bundle_path()?)?;
-        let imported: BTreeSet<&OpId> = imported.iter().collect();
+        let imported: BTreeSet<&OpId> = imported.iter().map(|(id, _)| id).collect();
         if let Some(missing) = ops.iter().find(|op| !imported.contains(op)) {
             bail!("bundle lacks announced operation {missing:?}");
         }

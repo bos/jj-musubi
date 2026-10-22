@@ -151,7 +151,10 @@ The per-machine fields therefore stay per-machine.
   its workspace named as above, plus a `musubi.canonical = <id>` attribute. Its parents are the local realizations of C's
   parents, and its view is C's view plus per-machine fields. jj's `Transaction` cannot
   reproduce another machine's metadata, so musubi writes these operations through jj-lib's
-  `OpStore`, as `jj op integrate` does, and lets jj build the index lazily.
+  `OpStore`, as `jj op integrate` does, and lets jj build the index lazily. The op store
+  syncs each file it writes to disk, which takes milliseconds on a cloud disk, so a node
+  catching up writes its realizations in parallel. Nothing reads them, and no op head or
+  translation names them, until they are all written.
   - An operation that will not be an op head inherits its parent realization's per-machine
     fields, merging them three-way with jj's `merge_ref_targets` for a merge. That makes it
     deterministic, so re-realizing after a crash rewrites identical files.

@@ -11,6 +11,7 @@ use std::io::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::thread;
 
 use futures::TryStreamExt as _;
 use gix::refs::transaction::PreviousValue;
@@ -32,6 +33,7 @@ use jj_lib::op_store::OperationId;
 use jj_lib::op_store::RefTarget;
 use jj_lib::op_store::RemoteView;
 use jj_lib::op_store::View;
+use jj_lib::op_store::ViewId;
 use jj_lib::op_walk;
 use jj_lib::ref_name::GitRefNameBuf;
 use jj_lib::repo::MutableRepo;
@@ -126,6 +128,8 @@ pub enum NodeError {
     Lock(#[from] FileLockError),
     #[error("I/O error on {path}")]
     Io { path: PathBuf, source: io::Error },
+    #[error("the op store wrote realized operation {0} under another id")]
+    MisnamedWrite(String),
     #[error("canonical operation {0} is not realized and cannot be: {1}")]
     NotRealizable(String, &'static str),
     #[error("operation {op} names canonical operation {canonical}, which is not stored")]
@@ -217,6 +221,31 @@ pub struct NodeRepo {
     settings: HashMap<OperationId, Option<HiveSettings>>,
     /// jj's repo config file for this repository, which holds the config the hive shares.
     repo_config: Option<PathBuf>,
+    /// The last operation realized here, with its per-machine fields: usually the next
+    /// one's parent, which then needn't be read back.
+    last_realized: Option<(OperationId, PerMachine)>,
+    /// Realized operations still being written (see [`Self::realize_pending`]).
+    unwritten: Vec<Unwritten>,
+}
+
+/// How many realized operations may be written at once. jj's op store syncs each file it
+/// writes to disk, which takes milliseconds on a cloud disk, so realizing many operations
+/// one write at a time mostly waits.
+const MAX_UNWRITTEN: usize = 32;
+
+/// A realized operation being written, and the canonical operation it realizes.
+struct Unwritten {
+    write: thread::JoinHandle<Result<(), NodeError>>,
+    local: OperationId,
+    canonical: OperationId,
+}
+
+/// A realized operation, not yet written.
+struct Realization {
+    id: OperationId,
+    op: StoreOperation,
+    view: View,
+    per_machine: PerMachine,
 }
 
 /// The settings this machine and the hive agreed on when they were last reconciled.
@@ -228,6 +257,20 @@ struct SettingsState {
     hive: Option<HiveSettings>,
     /// The settings both had afterwards.
     settings: HiveSettings,
+}
+
+impl Drop for NodeRepo {
+    fn drop(&mut self) {
+        // While unwinding, a writer's panic passed on would abort the process; the writes
+        // finish anyway, and what they wrote is realized again, identically, next time.
+        if thread::panicking() {
+            return;
+        }
+        // So that what was realized needn't be realized again.
+        if let Err(err) = self.settle() {
+            tracing::warn!("writing realized operations: {err}");
+        }
+    }
 }
 
 impl NodeRepo {
@@ -258,6 +301,8 @@ impl NodeRepo {
             map,
             colocated,
             heads_mapped: false,
+            last_realized: None,
+            unwritten: vec![],
             joins: BTreeMap::new(),
             settings: HashMap::new(),
             repo_config: None,
@@ -1193,6 +1238,16 @@ impl NodeRepo {
     /// Realizes a stored canonical operation, and any unrealized ancestors, without
     /// publishing it. Returns the local operation id.
     pub fn realize(&mut self, canonical: &OperationId) -> Result<OperationId, NodeError> {
+        let local = self.realize_pending(canonical)?;
+        self.settle()?;
+        Ok(local)
+    }
+
+    /// [`Self::realize`], leaving the realizations to be written meanwhile: the store may
+    /// lack them until [`Self::settle`], which [`Self::realize`], [`Self::advance`] and
+    /// dropping this call, and so must anything else that reads them before then.
+    /// [`Self::local_of`] knows them at once.
+    pub fn realize_pending(&mut self, canonical: &OperationId) -> Result<OperationId, NodeError> {
         // Map everything reachable from the op heads first. Otherwise, after losing the
         // translation cache, an operation that already has a reachable realization would be
         // realized again, and two reachable local operations would share a canonical form.
@@ -1223,17 +1278,119 @@ impl NodeRepo {
                 stack.extend(missing.into_iter().map(|parent| (parent, None)));
                 continue;
             }
-            let local = self.realize_one(&id, &op)?;
-            self.insert_map(local, id)?;
+            // Realizing it reads its parents from the store, unless its only parent is the
+            // operation realized last.
+            let follows_last = match (op.parents.as_slice(), &self.last_realized) {
+                ([parent], Some((last, _))) => self.local_of(parent).as_ref() == Some(last),
+                _ => false,
+            };
+            if !follows_last {
+                self.settle()?;
+            }
+            let realization = self.realize_one(&id, &op)?;
+            self.write_later(realization, id)?;
         }
         Ok(self.local_of(canonical).expect("realized above"))
     }
 
+    /// Starts writing a realization, after waiting for those being written if there are
+    /// already enough of them.
+    fn write_later(
+        &mut self,
+        realization: Realization,
+        canonical: OperationId,
+    ) -> Result<(), NodeError> {
+        if self.unwritten.len() >= MAX_UNWRITTEN {
+            self.settle()?;
+        }
+        let Realization {
+            id,
+            op,
+            view,
+            per_machine,
+        } = realization;
+        let store = self.loader.op_store().clone();
+        let expected = id.clone();
+        let write = thread::Builder::new()
+            .name("write operation".to_owned())
+            .spawn(move || {
+                let view_id = store.write_view(&view).block_on()?;
+                let written = store.write_operation(&op).block_on()?;
+                if view_id != op.view_id || written != expected {
+                    return Err(NodeError::MisnamedWrite(expected.hex()));
+                }
+                Ok(())
+            })
+            .map_err(|source| NodeError::Io {
+                path: self.repo_path.join("op_store"),
+                source,
+            })?;
+        self.map.insert_unwritten(id.clone(), canonical.clone());
+        self.last_realized = Some((id.clone(), per_machine));
+        self.unwritten.push(Unwritten {
+            write,
+            local: id,
+            canonical,
+        });
+        Ok(())
+    }
+
+    /// Waits for the realizations being written, then records them in the translation
+    /// map's file. If any write failed, the map forgets them all: a later realization may
+    /// refer to the failed one, and realizing them again writes the same operations.
+    pub fn settle(&mut self) -> Result<(), NodeError> {
+        let unwritten = std::mem::take(&mut self.unwritten);
+        let mut failed = None;
+        let mut panicked = None;
+        let mut translations = vec![];
+        for Unwritten {
+            write,
+            local,
+            canonical,
+        } in unwritten
+        {
+            match write.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    failed.get_or_insert(err);
+                }
+                Err(panic) => {
+                    panicked.get_or_insert(panic);
+                }
+            }
+            translations.push((local, canonical));
+        }
+        if let Some(panic) = panicked {
+            for (local, canonical) in &translations {
+                self.map.forget(local, canonical);
+            }
+            self.last_realized = None;
+            std::panic::resume_unwind(panic);
+        }
+        if let Some(err) = failed {
+            for (local, canonical) in &translations {
+                self.map.forget(local, canonical);
+            }
+            self.last_realized = None;
+            return Err(err);
+        }
+        for (local, canonical) in &translations {
+            self.map
+                .write(local, canonical)
+                .map_err(|source| NodeError::Io {
+                    path: self.repo_path.join("musubi/translation"),
+                    source,
+                })?;
+        }
+        Ok(())
+    }
+
+    /// Realizes one canonical operation whose parents are realized, without writing it.
     fn realize_one(
         &self,
         canonical_id: &OperationId,
         op: &StoreOperation,
-    ) -> Result<OperationId, NodeError> {
+    ) -> Result<Realization, NodeError> {
         let parents: Vec<OperationId> = op
             .parents
             .iter()
@@ -1263,17 +1420,19 @@ impl NodeRepo {
         metadata
             .attributes
             .insert(CANONICAL_ATTRIBUTE.to_owned(), canonical_id.hex());
+        // The ids the op store gives them, worked out as it does.
         let local_op = StoreOperation {
-            view_id: self.loader.op_store().write_view(&view).block_on()?,
+            view_id: ViewId::new(blake2b_hash(&view).to_vec()),
             parents,
             metadata,
             commit_predecessors: op.commit_predecessors.clone(),
         };
-        Ok(self
-            .loader
-            .op_store()
-            .write_operation(&local_op)
-            .block_on()?)
+        Ok(Realization {
+            id: OperationId::new(blake2b_hash(&local_op).to_vec()),
+            op: local_op,
+            per_machine: PerMachine::of(&view),
+            view,
+        })
     }
 
     /// The local name of the workspace that made a canonical operation, as the operation's
@@ -1302,6 +1461,11 @@ impl NodeRepo {
     /// The per-machine fields a realization starts from: its parent's, or for a merge, the
     /// parents' merged three-way by jj, as a local merge of the same operations would.
     fn inherited_per_machine(&self, parents: &[OperationId]) -> Result<PerMachine, NodeError> {
+        if let ([parent], Some((last, per_machine))) = (parents, &self.last_realized)
+            && parent == last
+        {
+            return Ok(per_machine.clone());
+        }
         let (first, rest) = parents.split_first().expect("operations have parents");
         let first_op = self.loader.load_operation(first).block_on()?;
         if rest.is_empty() {
@@ -1329,13 +1493,14 @@ impl NodeRepo {
         Ok(PerMachine::of(tx.repo().view().store_view()))
     }
 
-    /// Realizes a canonical operation and publishes it as an op head. In a colocated
+    /// Realizes a canonical operation and publishes it as an op head, in place of the op
+    /// heads it descends from (heads := max(heads ∪ {op})). In a colocated
     /// repository the realization first exports its refs to `.git`, holding jj's colocated
     /// import/export lock, so that no `jj` command sees the operation before `.git` matches
     /// it.
     pub fn advance(&mut self, canonical: &OperationId) -> Result<OperationId, NodeError> {
         let realized = self.realize(canonical)?;
-        self.check_mergeable(&realized)?;
+        let superseded = self.check_mergeable(&realized)?;
         let _lock = if self.colocated {
             Some(FileLock::lock(
                 self.repo_path.join("git_import_export.lock"),
@@ -1350,15 +1515,19 @@ impl NodeRepo {
         } else {
             realized
         };
-        let parents = self
+        // The new head replaces those it descends from, as jj's own resolution of op heads
+        // would: otherwise, after realizing several operations, the previous head stays, and
+        // the next step merges it.
+        let mut replaced = self
             .loader
             .op_store()
             .read_operation(&head)
             .block_on()?
             .parents;
+        replaced.extend(superseded);
         self.loader
             .op_heads_store()
-            .update_op_heads(&parents, &head)
+            .update_op_heads(&replaced, &head)
             .block_on()?;
         drop(_lock);
         self.replace_abandoned_working_copies()?;
@@ -1369,19 +1538,33 @@ impl NodeRepo {
     /// concurrent operations. Published, it would be merged by every `jj` command here, and
     /// each would fail, or for some jj bugs panic, until someone reverted an operation by
     /// hand. Unpublished, jj keeps working, and the error says which operations to revert.
-    fn check_mergeable(&self, realized: &OperationId) -> Result<(), NodeError> {
+    /// Returns the op heads the realization descends from, beyond its parents, which are
+    /// not concurrent with it: after a catch-up of several operations, the previous head.
+    fn check_mergeable(&self, realized: &OperationId) -> Result<Vec<OperationId>, NodeError> {
         let realized_op = self.loader.load_operation(realized).block_on()?;
-        let concurrent: Vec<OperationId> = self
+        let others: Vec<OperationId> = self
             .local_heads()?
             .into_iter()
             .filter(|head| head != realized && !realized_op.parent_ids().contains(head))
             .collect();
-        if concurrent.is_empty() {
-            return Ok(());
-        }
         let mut theirs = vec![];
-        for head in &concurrent {
-            theirs.push(self.loader.load_operation(head).block_on()?);
+        let mut superseded = vec![];
+        for head in others {
+            let op = self.loader.load_operation(&head).block_on()?;
+            // Nothing of its own that the realization lacks: an ancestor.
+            let beyond = std::pin::pin!(op_walk::walk_ancestors_range(
+                std::slice::from_ref(&op),
+                std::slice::from_ref(&realized_op),
+            ))
+            .try_next()
+            .block_on()?;
+            match beyond {
+                None => superseded.push(head),
+                Some(_) => theirs.push(op),
+            }
+        }
+        if theirs.is_empty() {
+            return Ok(superseded);
         }
         // This machine's operations that the hive doesn't have: one of them conflicts.
         let roots = realized_op.parents().block_on()?;
@@ -1405,7 +1588,7 @@ impl NodeRepo {
             });
             merged.map_err(|reason| self.unmergeable(&ours, reason))?;
         }
-        Ok(())
+        Ok(superseded)
     }
 
     /// The error for operations of this machine's, `ours` (newest first), that jj can't

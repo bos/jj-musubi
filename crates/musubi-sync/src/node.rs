@@ -28,6 +28,13 @@ pub struct NodeAdapter {
     generations: RefCell<HashMap<OpId, u64>>,
     /// `anc*(base)` for the most recent `base` asked about.
     base_ancestry: RefCell<Option<(OpId, HashSet<OpId>)>>,
+    /// The parents of operations a fetch staged that were not local, until they are
+    /// realized, so that planning their realization needn't read each one again. A
+    /// canonical operation never changes, so neither does an entry.
+    staged: HashMap<OpId, Vec<OpId>>,
+    /// The operations whose objects were staged last, with every commit they require:
+    /// what checking that those objects are all here asks about next.
+    staged_commits: Option<(HashSet<OpId>, Vec<CommitId>)>,
 }
 
 impl NodeAdapter {
@@ -41,6 +48,8 @@ impl NodeAdapter {
             tmp,
             generations: RefCell::new(HashMap::new()),
             base_ancestry: RefCell::new(None),
+            staged: HashMap::new(),
+            staged_commits: None,
         })
     }
 
@@ -51,6 +60,7 @@ impl NodeAdapter {
     /// Shows other machines' workspaces again where this machine's view lost them
     /// (`NodeRepo::show_other_workspaces`). Returns whether it wrote an operation.
     pub fn show_other_workspaces(&mut self) -> anyhow::Result<bool> {
+        self.repo.settle()?;
         Ok(self.repo.show_other_workspaces()?)
     }
 
@@ -61,6 +71,7 @@ impl NodeAdapter {
         if before_fetching && !self.repo.has_reconciled_settings() {
             return Ok(false);
         }
+        self.repo.settle()?;
         Ok(self.repo.reconcile_settings()?)
     }
 
@@ -272,6 +283,7 @@ impl LocalRepo for NodeAdapter {
     }
 
     fn merge_heads(&mut self) -> anyhow::Result<()> {
+        self.repo.settle()?;
         self.repo.merge_heads()?;
         Ok(())
     }
@@ -310,16 +322,32 @@ impl LocalRepo for NodeAdapter {
 
     fn stage_ops(&mut self, ops: &[OpEntry<OpId>], attachment: &Attachment) -> anyhow::Result<()> {
         let store = self.repo.canonical_store();
-        store.import_operations(attachment.bundle_path()?)?;
+        let imported: HashMap<OpId, Vec<OpId>> = store
+            .import_operations(attachment.bundle_path()?)?
+            .into_iter()
+            .filter_map(|(id, parents)| Some((id, parents?)))
+            .collect();
         for entry in ops {
-            let op = store
-                .read_operation(&entry.id)
-                .with_context(|| format!("operation {} missing from bundle", entry.id.hex()))?;
-            if op.parents != entry.parents {
+            let parents = match imported.get(&entry.id) {
+                Some(parents) => parents.clone(),
+                // Stored before, or not at all.
+                None => {
+                    store
+                        .read_operation(&entry.id)
+                        .with_context(|| {
+                            format!("operation {} missing from bundle", entry.id.hex())
+                        })?
+                        .parents
+                }
+            };
+            if parents != entry.parents {
                 bail!(
                     "operation {} has different parents than announced",
                     entry.id.hex()
                 );
+            }
+            if self.repo.local_of(&entry.id).is_none() {
+                self.staged.insert(entry.id.clone(), parents);
             }
         }
         Ok(())
@@ -331,6 +359,7 @@ impl LocalRepo for NodeAdapter {
             return Ok(());
         }
         let wants = self.required_commits(for_ops)?;
+        self.staged_commits = Some((for_ops.iter().cloned().collect(), wants.clone()));
         let haves = self.haves(for_ops)?;
         // The import may add a pack, which jj-lib must be able to read.
         self.repo.reload()?;
@@ -341,8 +370,14 @@ impl LocalRepo for NodeAdapter {
     }
 
     fn staged_parents(&self, op: &OpId) -> anyhow::Result<Option<Vec<OpId>>> {
+        if self.repo.local_of(op).is_some() {
+            return Ok(None);
+        }
+        if let Some(parents) = self.staged.get(op) {
+            return Ok(Some(parents.clone()));
+        }
         let store = self.repo.canonical_store();
-        if self.repo.local_of(op).is_some() || !store.has_operation(op) {
+        if !store.has_operation(op) {
             return Ok(None);
         }
         Ok(Some(store.read_operation(op)?.parents))
@@ -350,8 +385,18 @@ impl LocalRepo for NodeAdapter {
 
     fn objects_missing(&self, ops: &[OpId]) -> anyhow::Result<Vec<OpId>> {
         // One question to git for all of them. Usually nothing is missing, and then each
-        // view is read only once.
-        let wanted = self.required_commits(ops)?;
+        // view is read only once, or not at all if these are among the operations whose
+        // objects were just staged: the commits all of those require will do, since only an
+        // absent commit leads to asking about each operation.
+        let staged = self
+            .staged_commits
+            .as_ref()
+            .filter(|(staged, _)| ops.iter().all(|op| staged.contains(op)))
+            .map(|(_, commits)| commits.clone());
+        let wanted = match staged {
+            Some(commits) => commits,
+            None => self.required_commits(ops)?,
+        };
         let absent: HashSet<CommitId> = self
             .repo
             .object_store()?
@@ -376,7 +421,10 @@ impl LocalRepo for NodeAdapter {
     }
 
     fn realize(&mut self, op: &OpId) -> anyhow::Result<()> {
-        self.repo.realize(op)?;
+        // Written meanwhile: `advance` waits for them, and so does anything else here that
+        // reads local operations.
+        self.repo.realize_pending(op)?;
+        self.staged.remove(op);
         Ok(())
     }
 

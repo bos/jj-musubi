@@ -70,6 +70,29 @@ impl TranslationMap {
         Ok(())
     }
 
+    /// Records a translation whose local operation isn't written yet, in memory only: the
+    /// file gets it from [`Self::write`] once the operation is written, so that it never
+    /// names an operation that isn't there.
+    pub fn insert_unwritten(&mut self, local: OperationId, canonical: OperationId) {
+        self.remember(local, canonical);
+    }
+
+    /// Adds a translation [`Self::insert_unwritten`] recorded to the file.
+    pub fn write(&mut self, local: &OperationId, canonical: &OperationId) -> io::Result<()> {
+        writeln!(self.file, "{} {}", local.hex(), canonical.hex())
+    }
+
+    /// Forgets a translation [`Self::insert_unwritten`] recorded, whose operation was never
+    /// written.
+    pub fn forget(&mut self, local: &OperationId, canonical: &OperationId) {
+        if self.to_canonical.get(local) == Some(canonical) {
+            self.to_canonical.remove(local);
+        }
+        if self.to_local.get(canonical) == Some(local) {
+            self.to_local.remove(canonical);
+        }
+    }
+
     fn remember(&mut self, local: OperationId, canonical: OperationId) {
         self.to_canonical.insert(local.clone(), canonical.clone());
         self.to_local.insert(canonical, local);

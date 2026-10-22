@@ -79,8 +79,8 @@ impl SimpleStore {
             .map(|id| (ObjectKind::Commit, id.to_bytes()))
             .collect();
         while let Some((kind, id)) = stack.pop() {
-            let is_root = kind == ObjectKind::Commit && id.iter().all(|&b| b == 0);
-            if is_root || haves.contains(id.as_slice()) || !seen.insert((kind, id.clone())) {
+            let root = kind == ObjectKind::Commit && is_root(&id);
+            if root || haves.contains(id.as_slice()) || !seen.insert((kind, id.clone())) {
                 continue;
             }
             let Some(contents) = self.read(kind, &id)? else {
@@ -122,13 +122,17 @@ impl SimpleStore {
     }
 }
 
+/// Whether `id` is the root commit's, which no store holds.
+fn is_root(id: &[u8]) -> bool {
+    id.iter().all(|&b| b == 0)
+}
+
 impl ObjectStore for SimpleStore {
     fn missing(&self, commits: &[CommitId]) -> Result<Vec<CommitId>, ObjectError> {
         Ok(commits
             .iter()
             .filter(|id| {
-                !id.as_bytes().iter().all(|&b| b == 0)
-                    && !self.path(ObjectKind::Commit, id.as_bytes()).exists()
+                !is_root(id.as_bytes()) && !self.path(ObjectKind::Commit, id.as_bytes()).exists()
             })
             .cloned()
             .collect())
@@ -174,7 +178,6 @@ impl ObjectStore for SimpleStore {
     }
 
     fn roots(&self, wants: &[CommitId], haves: &[CommitId]) -> Result<Vec<CommitId>, ObjectError> {
-        let is_root = |id: &[u8]| id.iter().all(|&b| b == 0);
         let mut seen: HashSet<Vec<u8>> = haves.iter().map(|id| id.to_bytes()).collect();
         let mut stack: Vec<Vec<u8>> = wants.iter().map(|id| id.to_bytes()).collect();
         let mut roots = vec![];

@@ -1954,11 +1954,22 @@ impl NodeRepo {
         }
         let mut store_op = op.store_operation().clone();
         store_op.view_id = self.loader.op_store().write_view(view).block_on()?;
-        Ok(self
+        let op_store = self.loader.op_store();
+        let exported = op_store.write_operation(&store_op).block_on()?;
+        // It refers to the realization's commits, so the realization's index is its index
+        // too. Without one, loading the repository there, as merging or the next `jj` command
+        // does, would index again every operation since the last one with an index, or for a
+        // clone, every commit: none it descends from has one.
+        let exported_op = Operation::new(op_store.clone(), exported.clone(), store_op);
+        if let Err(err) = self
             .loader
-            .op_store()
-            .write_operation(&store_op)
-            .block_on()?)
+            .index_store()
+            .write_index(repo.readonly_index().start_modification(), &exported_op)
+        {
+            // Only a cache: jj indexes it when loading the repository there.
+            tracing::warn!("indexing the exported operation: {err}");
+        }
+        Ok(exported)
     }
 
     fn insert_map(&mut self, local: OperationId, canonical: OperationId) -> Result<(), NodeError> {

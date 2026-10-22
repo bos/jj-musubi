@@ -151,7 +151,8 @@ The per-machine fields therefore stay per-machine.
   its workspace named as above, plus a `musubi.canonical = <id>` attribute. Its parents are the local realizations of C's
   parents, and its view is C's view plus per-machine fields. jj's `Transaction` cannot
   reproduce another machine's metadata, so musubi writes these operations through jj-lib's
-  `OpStore`, as `jj op integrate` does, and lets jj build the index lazily. The op store
+  `OpStore`, as `jj op integrate` does, and lets jj build the index lazily, except that the
+  op head that exporting refs to git writes gets its realization's index. The op store
   syncs each file it writes to disk, which takes milliseconds on a cloud disk, so a node
   catching up writes its realizations in parallel. Making their views is most of the rest,
   so it makes those of a run of operations, each the only parent of the next, in parallel

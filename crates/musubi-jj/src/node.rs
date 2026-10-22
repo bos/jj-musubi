@@ -522,11 +522,11 @@ impl NodeRepo {
         let children: Vec<CommitId> = RevsetExpression::root()
             .children()
             .evaluate(repo.as_ref())
-            .map_err(|err| NodeError::Index(err.to_string()))?
+            .map_err(index_err)?
             .stream()
             .try_collect()
             .block_on()
-            .map_err(|err| NodeError::Index(err.to_string()))?;
+            .map_err(index_err)?;
         let mut roots = vec![];
         for id in children {
             let commit = repo.store().get_commit(&id)?;
@@ -1995,7 +1995,7 @@ impl NodeRepo {
             }
             tx.repo_mut()
                 .set_wc_commit(name.clone(), commit.clone())
-                .map_err(|err| NodeError::Index(err.to_string()))?;
+                .map_err(index_err)?;
             shown = true;
         }
         if !shown {

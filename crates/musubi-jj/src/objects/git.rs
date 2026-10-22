@@ -602,6 +602,14 @@ pub(crate) struct ExtrasEntry {
     pub value: Vec<u8>,
 }
 
+/// The error for `commit`, which couldn't be read for the reason `source` gives.
+fn read_err<E: std::fmt::Display>(commit: &CommitId) -> impl FnOnce(E) -> ObjectError + '_ {
+    move |source| ObjectError::ReadCommit {
+        commit: commit.hex(),
+        source: source.to_string().into(),
+    }
+}
+
 /// Returns the extras entries for `commits` that differ from what jj would derive from the
 /// commit objects: change ids of commits without a `change-id` header that were not derived
 /// from the commit id, and conflicts written before the `jj:trees` header existed.
@@ -619,10 +627,9 @@ pub(crate) fn extras_to_ship(
         };
         let extras = jj_lib::protos::git_store::Commit::decode(value)
             .map_err(|_| ObjectError::MalformedExtras(commit.hex()))?;
-        let read_err = || ObjectError::ReadCommit(commit.hex());
-        let oid = gix::ObjectId::try_from(commit.as_bytes()).map_err(|_| read_err())?;
-        let object = git_repo.find_object(oid).map_err(|_| read_err())?;
-        let git_commit = object.try_to_commit_ref().map_err(|_| read_err())?;
+        let oid = gix::ObjectId::try_from(commit.as_bytes()).map_err(read_err(commit))?;
+        let object = git_repo.find_object(oid).map_err(read_err(commit))?;
+        let git_commit = object.try_to_commit_ref().map_err(read_err(commit))?;
         let header = |name: &str| git_commit.extra_headers().find(name).is_some();
         let derived_change_id = synthetic_change_id_from_git_commit_id(commit);
         let change_id_derivable = header(CHANGE_ID_COMMIT_HEADER)

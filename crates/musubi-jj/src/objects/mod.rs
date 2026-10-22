@@ -86,8 +86,11 @@ pub enum ObjectError {
     Io(#[from] io::Error),
     #[error("missing objects after receiving bundle: {0}")]
     NotConnected(String),
-    #[error("failed to read commit {0}")]
-    ReadCommit(String),
+    #[error("failed to read commit {commit}")]
+    ReadCommit {
+        commit: String,
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     #[error("backend extras table")]
     Extras(#[from] TableStoreError),
     #[error("malformed extras entry for {0}")]

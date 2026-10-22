@@ -11,6 +11,7 @@
 
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::Context as _;
 use interprocess::local_socket::GenericFilePath;
@@ -126,6 +127,21 @@ impl Socket {
                 Ok(None)
             }
             Err(err) => Err(err).with_context(|| format!("connecting to {self}")),
+        }
+    }
+}
+
+/// The next connection to `listener`. One that can't be accepted, as when the process is
+/// out of file descriptors, is logged, and the next tried a moment later: at once, the
+/// same failure would spin.
+pub async fn accept(listener: &Listener) -> Stream {
+    loop {
+        match listener.accept().await {
+            Ok(stream) => return stream,
+            Err(err) => {
+                tracing::warn!("accepting a connection: {err}");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
         }
     }
 }

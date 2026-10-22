@@ -17,7 +17,6 @@ use std::time::SystemTime;
 
 use anyhow::Context as _;
 use futures::StreamExt as _;
-use interprocess::local_socket::traits::tokio::Listener as _;
 use jj_lib::object_id::ObjectId as _;
 use musubi_sync::driver::NodeDriver;
 use musubi_sync::remote::RemoteHub;
@@ -294,18 +293,14 @@ async fn listen(socket: &Socket, lock_path: &Path) -> anyhow::Result<()> {
     let mut check = tokio::time::interval(Duration::from_secs(5));
     loop {
         tokio::select! {
-            connection = listener.accept() => match connection {
-                Ok(stream) => {
-                    let channel = tarpc::server::BaseChannel::with_defaults(
-                        control::transport(stream),
-                    );
-                    let serve = channel.execute(daemon.clone().serve()).for_each(|request| async {
-                        tokio::spawn(request);
-                    });
-                    tokio::spawn(serve);
-                }
-                Err(err) => tracing::warn!("accepting a connection: {err}"),
-            },
+            stream = crate::socket::accept(&listener) => {
+                let channel =
+                    tarpc::server::BaseChannel::with_defaults(control::transport(stream));
+                let serve = channel.execute(daemon.clone().serve()).for_each(|request| async {
+                    tokio::spawn(request);
+                });
+                tokio::spawn(serve);
+            }
             () = daemon.stop.notified() => break,
             () = crate::hub::interrupted() => break,
             _ = check.tick() => if !lock_path.exists() {

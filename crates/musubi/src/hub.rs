@@ -17,7 +17,6 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use interprocess::local_socket::tokio::Listener;
 use interprocess::local_socket::tokio::Stream;
-use interprocess::local_socket::traits::tokio::Listener as _;
 use musubi_sync::server::HubServer;
 use musubi_sync::wire::Envelope;
 use musubi_sync::wire::HUB_TOKEN;
@@ -36,6 +35,7 @@ use tokio::sync::oneshot;
 
 use crate::config;
 use crate::config::default_subject_prefix;
+use crate::socket;
 use crate::socket::Socket;
 use crate::ssh;
 
@@ -224,15 +224,7 @@ pub fn serve(args: ServeArgs) -> anyhow::Result<()> {
 async fn accept(listener: Listener, transport: Arc<dyn Transport>, answers: oneshot::Receiver<()>) {
     answers.await.ok();
     loop {
-        let stream = match listener.accept().await {
-            Ok(stream) => stream,
-            Err(err) => {
-                tracing::warn!("accepting a connection: {err}");
-                // Out of file descriptors, say: don't spin.
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                continue;
-            }
-        };
+        let stream = socket::accept(&listener).await;
         let transport = transport.clone();
         tokio::spawn(async move {
             let (reader, writer) = tokio::io::split(stream);

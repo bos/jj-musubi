@@ -116,12 +116,14 @@ impl TranslationMap {
 /// A line's local and canonical ids, if it is whole.
 fn parse(line: &[u8]) -> Option<(OperationId, OperationId)> {
     let (local, canonical) = std::str::from_utf8(line).ok()?.split_once(' ')?;
-    let id = |hex: &str| {
-        (hex.len() == ID_HEX_LEN)
-            .then(|| OperationId::try_from_hex(hex))
-            .flatten()
-    };
-    Some((id(local)?, id(canonical)?))
+    Some((whole_id(local)?, whole_id(canonical)?))
+}
+
+/// The operation id `hex` names, if it is a whole one.
+pub(crate) fn whole_id(hex: &str) -> Option<OperationId> {
+    (hex.len() == ID_HEX_LEN)
+        .then(|| OperationId::try_from_hex(hex))
+        .flatten()
 }
 
 #[cfg(test)]

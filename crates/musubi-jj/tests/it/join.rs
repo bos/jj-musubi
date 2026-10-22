@@ -4,6 +4,7 @@
 
 use std::collections::BTreeSet;
 
+use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::OperationId;
 use musubi_jj::node::NodeRepo;
 use musubi_testutil::TestEnv;
@@ -135,4 +136,30 @@ fn join_after_deleting_every_exported_bookmark() {
     b_node.merge_heads().unwrap();
     let b_head = b_node.canonical_heads().unwrap().pop().unwrap();
     sync(&b_node, &mut a_node, &b_head);
+}
+
+/// A join record a killed `musubi join` tore names nothing, and the record the next join
+/// writes after it stands.
+#[test]
+fn a_torn_join_record_names_nothing() {
+    let env = TestEnv::new();
+    let repo = env.init_repo("alpha");
+    let mut node = open(&repo);
+    let head = node.merge_heads().unwrap();
+    let first = node.create_join_operation("musubi: alpha joins").unwrap();
+    drop(node);
+    // As if the join had been killed while it wrote its record, before it recorded anything
+    // else.
+    let musubi = repo.repo_path().join("musubi");
+    let torn = format!("{} {}", head.hex(), &first.hex()[..40]);
+    std::fs::write(musubi.join("joins"), torn).unwrap();
+    std::fs::remove_file(musubi.join("translation")).unwrap();
+    let mut node = open(&repo);
+    assert_eq!(node.canonical_of(&head), None);
+    let second = node.create_join_operation("musubi: alpha joins").unwrap();
+    drop(node);
+    // The record alone.
+    std::fs::remove_file(musubi.join("translation")).unwrap();
+    let node = open(&repo);
+    assert_eq!(node.canonical_of(&head), Some(second));
 }

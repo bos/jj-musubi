@@ -80,6 +80,7 @@ use crate::objects::ObjectStore;
 use crate::objects::SimpleStore;
 use crate::remote_url::without_credentials;
 use crate::translation_map::TranslationMap;
+use crate::translation_map::whole_id;
 use crate::workspaces;
 use crate::workspaces::Machine;
 
@@ -390,22 +391,26 @@ impl NodeRepo {
 
     /// Join records are the one part of the translation that cannot be recomputed, so they
     /// live apart from the translation cache: each line holds the local join point, the
-    /// canonical join operation, and the join point's fingerprint.
+    /// canonical join operation, and the join point's fingerprint. A line a power cut tore,
+    /// or a killed join left unfinished, names nothing.
     fn read_joins(&self) -> Result<Vec<(OperationId, OperationId, String)>, NodeError> {
         let path = self.joins_path();
-        let text = match fs::read_to_string(&path) {
-            Ok(text) => text,
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
             Err(source) => return Err(NodeError::Io { path, source }),
         };
-        Ok(text
+        Ok(String::from_utf8_lossy(&bytes)
             .lines()
             .filter_map(|line| {
-                let mut fields = line.split(' ');
+                let [local, canonical, fingerprint] = *line.split(' ').collect::<Vec<_>>() else {
+                    return None;
+                };
+                whole_id(fingerprint)?;
                 Some((
-                    OperationId::try_from_hex(fields.next()?)?,
-                    OperationId::try_from_hex(fields.next()?)?,
-                    fields.next()?.to_owned(),
+                    whole_id(local)?,
+                    whole_id(canonical)?,
+                    fingerprint.to_owned(),
                 ))
             })
             .collect())
@@ -422,13 +427,22 @@ impl NodeRepo {
             path: path.clone(),
             source,
         };
+        // A record a killed join left unfinished is ended first, so that this one is whole.
+        let unended = fs::read(&path).is_ok_and(|bytes| bytes.last().is_some_and(|&b| b != b'\n'));
         let mut file = fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
             .map_err(io_err)?;
         let fingerprint = fingerprint(local_op);
-        writeln!(file, "{} {} {fingerprint}", local.hex(), canonical.hex()).map_err(io_err)?;
+        let line = format!(
+            "{}{} {} {fingerprint}\n",
+            if unended { "\n" } else { "" },
+            local.hex(),
+            canonical.hex()
+        );
+        // In one write, not writeln!'s several, so that a kill seldom tears it.
+        file.write_all(line.as_bytes()).map_err(io_err)?;
         self.joins.insert(fingerprint, canonical.clone());
         self.insert_map(local, canonical)
     }

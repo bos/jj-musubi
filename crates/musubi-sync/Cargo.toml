@@ -19,6 +19,7 @@ musubi-jj.workspace = true
 musubi-transport.workspace = true
 postcard.workspace = true
 serde.workspace = true
+serde_bytes.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt", "time", "sync", "macros"] }
 tracing.workspace = true

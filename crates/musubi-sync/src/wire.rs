@@ -31,7 +31,9 @@ pub type WireId = Vec<u8>;
 pub enum WireAttachment {
     None,
     Blob { blob: BlobId, len: u64 },
-    Inline(Vec<u8>),
+    // As bytes, which postcard copies at once, rather than a sequence it takes one at a
+    // time: attachments and chunks run to a megabyte.
+    Inline(#[serde(with = "serde_bytes")] Vec<u8>),
     Haves(Vec<WireId>),
 }
 
@@ -50,6 +52,7 @@ pub enum HubRequest {
         blob: BlobId,
         total: u64,
         offset: u64,
+        #[serde(with = "serde_bytes")]
         data: Vec<u8>,
     },
     GetChunk {
@@ -74,6 +77,7 @@ pub enum HubReply {
     },
     Chunk {
         total: u64,
+        #[serde(with = "serde_bytes")]
         data: Vec<u8>,
     },
     Error(String),

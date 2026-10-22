@@ -158,7 +158,9 @@ The per-machine fields therefore stay per-machine.
   too. Nothing reads the realizations, and no op head or translation names them, until they
   are all written.
   - An operation that will not be an op head inherits its parent realization's per-machine
-    fields, merging them three-way with jj's `merge_ref_targets` for a merge. That makes it
+    fields, merging them three-way for a merge: as jj's merge of the operations would, but
+    without it when at most one parent's fields differ from the base's, since jj's merge
+    loads each parent's repository, and indexes one that has none. That makes it
     deterministic, so re-realizing after a crash rewrites identical files.
   - The operation that becomes an op head is realized while musubi holds jj's
     `git_import_export.lock`. musubi runs jj's `export_refs` with C's bookmarks, tags, and

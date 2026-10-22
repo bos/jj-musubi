@@ -36,6 +36,7 @@ use jj_lib::op_store::RemoteView;
 use jj_lib::op_store::View;
 use jj_lib::op_store::ViewId;
 use jj_lib::op_walk;
+use jj_lib::operation::Operation;
 use jj_lib::ref_name::GitRefNameBuf;
 use jj_lib::repo::MutableRepo;
 use jj_lib::repo::ReadonlyRepo;
@@ -187,9 +188,12 @@ impl PerMachine {
     fn of(view: &View) -> Self {
         Self {
             git_refs: view.git_refs.clone(),
+            // An empty `git` remote, which jj leaves when the last ref it exported goes,
+            // counts as none, as it does when jj merges views.
             git_remote: view
                 .remote_views
                 .get(REMOTE_NAME_FOR_LOCAL_GIT_REPO)
+                .filter(|remote| **remote != RemoteView::default())
                 .cloned(),
             git_heads: view.git_heads.clone(),
         }
@@ -264,6 +268,11 @@ struct LocalView {
     view: View,
     id: ViewId,
     names: BTreeMap<WorkspaceNameBuf, WorkspaceNameBuf>,
+}
+
+/// The per-machine fields of a local operation's view.
+fn fields_of(op: &Operation) -> Result<PerMachine, NodeError> {
+    Ok(PerMachine::of(op.view().block_on()?.store_view()))
 }
 
 /// The settings this machine and the hive agreed on when they were last reconciled.
@@ -1604,7 +1613,8 @@ impl NodeRepo {
     }
 
     /// The per-machine fields a realization starts from: its parent's, or for a merge, the
-    /// parents' merged three-way by jj, as a local merge of the same operations would.
+    /// parents' merged three-way as jj merges them, as a local merge of the same operations
+    /// would.
     fn inherited_per_machine(&self, parents: &[OperationId]) -> Result<Arc<PerMachine>, NodeError> {
         if let ([parent], Some((last, per_machine))) = (parents, &self.last_realized)
             && parent == last
@@ -1614,28 +1624,74 @@ impl NodeRepo {
         let (first, rest) = parents.split_first().expect("operations have parents");
         let first_op = self.loader.load_operation(first).block_on()?;
         if rest.is_empty() {
-            return Ok(Arc::new(PerMachine::of(
-                first_op.view().block_on()?.store_view(),
-            )));
+            return Ok(Arc::new(fields_of(&first_op)?));
         }
+        // jj's merge loads each parent's repository, and so its index, which for a join
+        // operation, whose only ancestor is the root, means indexing all its commits anew: a
+        // second or more for a large repository. Usually it isn't needed.
+        if let Some(merged) = self.merged_trivially(&first_op, rest)? {
+            debug_assert_eq!(*merged, *self.merged_by_jj(first_op, rest)?);
+            return Ok(merged);
+        }
+        self.merged_by_jj(first_op, rest)
+    }
+
+    /// The per-machine fields of `first_op` and `rest` merged three-way, if at most one of
+    /// them differs from its base, which the merge then takes: another machine's join
+    /// operation's are its base's, the root's, as, usually, are those of other machines'
+    /// operations.
+    fn merged_trivially(
+        &self,
+        first_op: &Operation,
+        rest: &[OperationId],
+    ) -> Result<Option<Arc<PerMachine>>, NodeError> {
+        let mut merged = fields_of(first_op)?;
+        let mut ops = vec![first_op.clone()];
+        for other in rest {
+            let other_op = self.loader.load_operation(other).block_on()?;
+            let (base, theirs) = (
+                fields_of(&self.merge_base(&ops, &other_op)?)?,
+                fields_of(&other_op)?,
+            );
+            if theirs != base {
+                if merged != base {
+                    return Ok(None);
+                }
+                merged = theirs;
+            }
+            ops.push(other_op);
+        }
+        Ok(Some(Arc::new(merged)))
+    }
+
+    /// The per-machine fields of `first_op` and `rest` merged three-way by jj.
+    fn merged_by_jj(
+        &self,
+        first_op: Operation,
+        rest: &[OperationId],
+    ) -> Result<Arc<PerMachine>, NodeError> {
         let repo = self.loader.load_at(&first_op).block_on()?;
         let mut tx = repo.start_transaction();
         let mut merged = vec![first_op];
         for other in rest {
             let other_op = self.loader.load_operation(other).block_on()?;
-            let bases =
-                op_walk::closest_common_ancestors(merged.clone(), [other_op.clone()]).block_on()?;
-            // Several closest common ancestors would need jj's recursive merge. Per-machine
-            // fields only describe this machine's `.git`, and the op head's export corrects
-            // them, so the first base is good enough.
-            let base = match bases.into_iter().next() {
-                Some(base) => base,
-                None => self.loader.root_operation().block_on(),
-            };
+            let base = self.merge_base(&merged, &other_op)?;
             tx.merge_operation(&base, &other_op).block_on()?;
             merged.push(other_op);
         }
         Ok(Arc::new(PerMachine::of(tx.repo().view().store_view())))
+    }
+
+    /// The base a merge of `ops` with `other` merges three-way against.
+    fn merge_base(&self, ops: &[Operation], other: &Operation) -> Result<Operation, NodeError> {
+        let bases = op_walk::closest_common_ancestors(ops.to_vec(), [other.clone()]).block_on()?;
+        // Several closest common ancestors would need jj's recursive merge. Per-machine
+        // fields only describe this machine's `.git`, and the op head's export corrects
+        // them, so the first base is good enough.
+        Ok(match bases.into_iter().next() {
+            Some(base) => base,
+            None => self.loader.root_operation().block_on(),
+        })
     }
 
     /// Realizes a canonical operation and publishes it as an op head, in place of the op

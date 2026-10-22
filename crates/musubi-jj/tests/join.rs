@@ -109,3 +109,30 @@ fn independent_repositories_join_and_merge() {
     let mut fresh = open(&a);
     assert_eq!(fresh.canonical_heads().unwrap(), vec![b_head]);
 }
+
+/// A machine whose `git` remote view is left empty, by deleting the last bookmark it
+/// exported, joins: realizing the merge of its join with another machine's, whose fields
+/// here are the root's, gives what jj's merge would (which debug builds check).
+#[test]
+fn join_after_deleting_every_exported_bookmark() {
+    let env = TestEnv::new();
+    let a = env.init_repo("alpha");
+    let b = env.init_repo("beta");
+    for (repo, name) in [(&a, "alpha"), (&b, "beta")] {
+        for i in 0..3 {
+            repo.write_file(&format!("{name}-{i}"), "x");
+            repo.jj(&["commit", "-m", &format!("{name} {i}")]);
+        }
+        repo.jj(&["bookmark", "create", name, "-r", "@-"]);
+    }
+    a.jj(&["bookmark", "delete", "alpha"]);
+
+    let mut a_node = open(&a);
+    let a_join = a_node.create_join_operation("musubi: alpha joins").unwrap();
+    let mut b_node = open(&b);
+    b_node.create_join_operation("musubi: beta joins").unwrap();
+    sync(&a_node, &mut b_node, &a_join);
+    b_node.merge_heads().unwrap();
+    let b_head = b_node.canonical_heads().unwrap().pop().unwrap();
+    sync(&b_node, &mut a_node, &b_head);
+}

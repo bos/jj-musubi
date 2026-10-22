@@ -183,9 +183,7 @@ impl HubStore {
         if self.backend != Backend::Git {
             return Ok(());
         }
-        let view = self
-            .canonical
-            .read_view(&self.canonical.read_operation(head)?.view_id)?;
+        let view = self.canonical.read_operation_view(head)?;
         let heads: Vec<CommitId> = view.head_ids.into_iter().collect();
         Ok(self.object_store().mark_head(&heads)?)
     }

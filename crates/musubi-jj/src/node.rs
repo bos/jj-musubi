@@ -566,9 +566,7 @@ impl NodeRepo {
             if parent == self.canonical.root_operation_id() {
                 continue;
             }
-            let parent_view = self
-                .canonical
-                .read_view(&self.canonical.read_operation(parent)?.view_id)?;
+            let parent_view = self.canonical.read_operation_view(parent)?;
             parent_heads.extend(parent_view.head_ids.iter().cloned());
             for (key, name) in self.local_names(&parent_view) {
                 if !self.is_own_key(&key) {
@@ -625,11 +623,7 @@ impl NodeRepo {
             }
             let repo = match &repo {
                 Some(repo) => repo,
-                None => repo.insert(
-                    self.loader
-                        .load_at(&self.loader.load_operation(local_op).block_on()?)
-                        .block_on()?,
-                ),
+                None => repo.insert(self.repo_at(local_op)?),
             };
             let parents = repo.store().get_commit_async(commit).block_on()?;
             let mut parents_visible = true;
@@ -719,7 +713,7 @@ impl NodeRepo {
             .into_iter()
             .filter_map(|(key, commit)| {
                 let (machine, workspace) = workspaces::split_key(key.as_str())?;
-                let name = machine.split_once('#').map_or(machine, |(name, _)| name);
+                let name = workspaces::machine_name(machine);
                 Some((name.to_owned(), workspace.to_owned(), commit))
             })
             .collect())
@@ -733,9 +727,7 @@ impl NodeRepo {
         if op == self.canonical.root_operation_id() {
             return Ok(BTreeMap::new());
         }
-        let view = self
-            .canonical
-            .read_view(&self.canonical.read_operation(op)?.view_id)?;
+        let view = self.canonical.read_operation_view(op)?;
         Ok(view.wc_commit_ids)
     }
 
@@ -1035,10 +1027,7 @@ impl NodeRepo {
         head: &OperationId,
         settings: &HiveSettings,
     ) -> Result<OperationId, NodeError> {
-        let repo = self
-            .loader
-            .load_at(&self.loader.load_operation(head).block_on()?)
-            .block_on()?;
+        let repo = self.repo_at(head)?;
         let mut tx = repo.start_transaction();
         tx.set_attribute(hive_settings::ATTRIBUTE.to_owned(), settings.to_attribute());
         let repo = tx.commit("musubi: hive settings changed").block_on()?;
@@ -1191,6 +1180,12 @@ impl NodeRepo {
                 .block_on()?;
         }
         Ok(exported)
+    }
+
+    /// The repository as of its local operation `id`.
+    fn repo_at(&self, id: &OperationId) -> Result<Arc<ReadonlyRepo>, NodeError> {
+        let op = self.loader.load_operation(id).block_on()?;
+        Ok(self.loader.load_at(&op).block_on()?)
     }
 
     /// Loads the repository at its op head, letting jj merge concurrent heads.
@@ -1974,14 +1969,9 @@ impl NodeRepo {
         if canonical == *self.canonical.root_operation_id() {
             return Ok(false);
         }
-        let view = self
-            .canonical
-            .read_view(&self.canonical.read_operation(&canonical)?.view_id)?;
+        let view = self.canonical.read_operation_view(&canonical)?;
         let names = self.local_names(&view);
-        let repo = self
-            .loader
-            .load_at(&self.loader.load_operation(&head).block_on()?)
-            .block_on()?;
+        let repo = self.repo_at(&head)?;
         let hive_heads: Vec<CommitId> = view.head_ids.iter().cloned().collect();
         let mut tx = repo.start_transaction();
         let mut shown = false;
@@ -2033,10 +2023,7 @@ impl NodeRepo {
             .filter(|key| self.is_own_key(key))
             .map(|key| key_workspace(&key).to_owned())
             .collect();
-        let repo = self
-            .loader
-            .load_at(&self.loader.load_operation(&head).block_on()?)
-            .block_on()?;
+        let repo = self.repo_at(&head)?;
         let mut abandoned = vec![];
         for (name, wc) in repo.view().wc_commit_ids() {
             // Other machines replace their own.

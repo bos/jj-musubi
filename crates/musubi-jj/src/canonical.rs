@@ -144,6 +144,11 @@ impl CanonicalStore {
         Ok(self.store.read_view(id).block_on()?)
     }
 
+    /// The view of the operation `id`.
+    pub fn read_operation_view(&self, id: &OperationId) -> Result<View, CanonicalError> {
+        self.read_view(&self.read_operation(id)?.view_id)
+    }
+
     pub fn write_operation(&self, op: &Operation) -> Result<OperationId, CanonicalError> {
         Ok(self.store.write_operation(op).block_on()?)
     }

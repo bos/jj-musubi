@@ -252,8 +252,9 @@ fn blobs_prepared_again_last_as_long_as_new_ones() {
         .unwrap();
     let dir = musubi_testutil::tempdir();
     let hub_dir = dir.path().join("hub");
-    // Short enough to wait out, as the minute the hub keeps a blob it has served.
-    let served_lifetime = Duration::from_secs(1);
+    // The minute the hub keeps a blob it has served, which the test makes pass without
+    // waiting it out.
+    let served_lifetime = Duration::from_secs(60);
     let mut hub = session
         .hub_after(call.start, &hub_dir)
         .with_served_blob_lifetime(served_lifetime);
@@ -271,7 +272,7 @@ fn blobs_prepared_again_last_as_long_as_new_ones() {
         .set_modified(SystemTime::now() - Duration::from_secs(2 * 3600))
         .unwrap();
     assert_eq!(prepare(&mut hub, &fetch), (blob, len));
-    std::thread::sleep(served_lifetime);
+    hub.age_served_blobs(served_lifetime);
     // It downloads slowly enough that the hub sweeps, as it does every hundred requests.
     for _ in 0..100 {
         chunk(&mut hub, blob, 0);
@@ -283,7 +284,7 @@ fn blobs_prepared_again_last_as_long_as_new_ones() {
     assert_eq!(prepare(&mut hub, &fetch), (blob, len));
     download(&mut hub, blob, len);
     for _ in 0..11 {
-        std::thread::sleep(served_lifetime / 10);
+        hub.age_served_blobs(served_lifetime / 10);
         chunk(&mut hub, blob, 0);
     }
     download(&mut hub, blob, len);

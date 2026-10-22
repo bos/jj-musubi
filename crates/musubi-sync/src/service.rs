@@ -92,6 +92,18 @@ impl HubService {
         self
     }
 
+    /// Makes it as if `elapsed` had passed since each served blob's last chunk, for tests
+    /// that would otherwise sleep through the time the hub keeps one. Panics where the clock
+    /// can't go back that far, as within a minute of booting: aging nothing, the test would
+    /// test nothing.
+    pub fn age_served_blobs(&mut self, elapsed: Duration) {
+        for served in self.served.values_mut() {
+            *served = served
+                .checked_sub(elapsed)
+                .expect("the clock goes back as far as the time to age");
+        }
+    }
+
     pub fn hub(&self) -> &HubAdapter {
         &self.hub
     }

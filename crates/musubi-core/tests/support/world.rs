@@ -135,23 +135,27 @@ impl World {
     /// `Fetched` reply, and checks that they lead to the state the Rust side is in.
     fn act_all(&mut self, actions: Vec<Value>) {
         self.trace.extend(actions.iter().cloned());
+        // Without an oracle there is nothing to check against, and building the state took
+        // most of the time of the tests that run without one.
+        let Some(mut oracle) = self.oracle.take() else {
+            return;
+        };
         let expected = self.state_json();
-        if let Some(oracle) = &mut self.oracle {
-            let mut state = Value::Null;
-            for action in &actions {
-                state = oracle.step(action).unwrap_or_else(|error| {
-                    panic!(
-                        "the Lean model rejects {action}: {error}\ntrace: {:#?}",
-                        self.trace
-                    )
-                });
-            }
-            let (got, want) = (canonical_state(&state), canonical_state(&expected));
-            assert_eq!(
-                got, want,
-                "state differs from the Lean model after {actions:?}"
-            );
+        let mut state = Value::Null;
+        for action in &actions {
+            state = oracle.step(action).unwrap_or_else(|error| {
+                panic!(
+                    "the Lean model rejects {action}: {error}\ntrace: {:#?}",
+                    self.trace
+                )
+            });
         }
+        let (got, want) = (canonical_state(&state), canonical_state(&expected));
+        assert_eq!(
+            got, want,
+            "state differs from the Lean model after {actions:?}"
+        );
+        self.oracle = Some(oracle);
     }
 
     fn send(&mut self, model: Vec<Value>, payload: Payload) {

@@ -49,7 +49,6 @@ pub struct HubService {
     /// Blobs prepared for nodes to download. They are kept apart from uploads, which can
     /// have the same content, so that deleting one never takes away the other.
     prepared: BlobStore,
-    tmp: std::path::PathBuf,
     rpc_subject: String,
     head_subject: String,
     handled: u64,
@@ -68,8 +67,6 @@ impl HubService {
         head_subject: String,
     ) -> anyhow::Result<Self> {
         let blobs = dir.join("blobs");
-        let tmp = dir.join("tmp");
-        std::fs::create_dir_all(&tmp)?;
         Ok(Self {
             hub,
             uploads: BlobStore::open(&blobs)?,
@@ -77,7 +74,6 @@ impl HubService {
             // upgraded from before sweeps the prepared blobs it left in `blobs/complete` as
             // old uploads.
             prepared: BlobStore::open(&blobs.join("prepared"))?,
-            tmp,
             rpc_subject,
             head_subject,
             handled: 0,
@@ -225,7 +221,7 @@ impl HubService {
                         }
                         WireAttachment::Inline(bytes) => {
                             // Not reopened truncating (see `BundleWriter::create`).
-                            let mut file = tempfile::NamedTempFile::new_in(&self.tmp)?;
+                            let mut file = self.uploads.temp_file()?;
                             std::io::Write::write_all(&mut file, &bytes)?;
                             Attachment::bundle(file.into_temp_path())
                         }

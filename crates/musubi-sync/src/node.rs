@@ -18,6 +18,7 @@ use musubi_jj::node::REALIZE_AT_ONCE;
 
 use crate::Attachment;
 use crate::OpId;
+use crate::open_bundle_dir;
 use crate::temp_bundle;
 
 pub struct NodeAdapter {
@@ -44,7 +45,7 @@ impl NodeAdapter {
     pub fn new(repo: NodeRepo) -> anyhow::Result<Self> {
         let musubi_dir = repo.repo_path().join("musubi");
         let tmp = musubi_dir.join("tmp");
-        fs::create_dir_all(&tmp)?;
+        open_bundle_dir(&tmp)?;
         Ok(Self {
             base_path: musubi_dir.join("accepted_base"),
             repo,

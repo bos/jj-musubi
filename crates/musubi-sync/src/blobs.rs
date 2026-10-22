@@ -209,21 +209,32 @@ impl BlobStore {
         fs::remove_file(self.partial_path(id)).ok();
     }
 
-    /// Removes blobs, finished or not, last modified before `cutoff`.
+    /// A temporary file, under `partial/`, so that [`Self::sweep`] removes it if a crash
+    /// leaves it behind.
+    pub fn temp_file(&self) -> io::Result<tempfile::NamedTempFile> {
+        tempfile::NamedTempFile::new_in(self.dir.join("partial"))
+    }
+
+    /// Removes blobs, finished or not, and temporary files, last modified before `cutoff`.
     pub fn sweep(&self, cutoff: SystemTime) {
         for sub in ["complete", "partial"] {
-            let Ok(entries) = fs::read_dir(self.dir.join(sub)) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                let old = entry
-                    .metadata()
-                    .and_then(|m| m.modified())
-                    .is_ok_and(|t| t < cutoff);
-                if old {
-                    fs::remove_file(entry.path()).ok();
-                }
-            }
+            sweep_dir(&self.dir.join(sub), cutoff);
+        }
+    }
+}
+
+/// Removes the files in `dir` last modified before `cutoff`.
+pub(crate) fn sweep_dir(dir: &Path, cutoff: SystemTime) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let old = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .is_ok_and(|t| t < cutoff);
+        if old {
+            fs::remove_file(entry.path()).ok();
         }
     }
 }
@@ -262,6 +273,16 @@ mod tests {
         assert_eq!(inode(&file), inode(&stored));
         fs::remove_file(&file).unwrap();
         assert_eq!(store.read(&id, 0, 100).unwrap(), (8, b"contents".to_vec()));
+    }
+
+    /// A temporary file a crash left behind goes with a sweep.
+    #[test]
+    fn temp_files_are_swept() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::open(dir.path()).unwrap();
+        let (_, path) = store.temp_file().unwrap().keep().unwrap();
+        store.sweep(SystemTime::now() + std::time::Duration::from_secs(60));
+        assert!(!path.exists());
     }
 
     /// A blob that a crash left torn, before the store opened, is neither served nor kept.

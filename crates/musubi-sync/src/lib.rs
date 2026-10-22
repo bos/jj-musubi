@@ -9,9 +9,13 @@
 //!
 //! Attachments are local bundle files here; transports carry them as chunked blobs.
 
+use std::fs;
+use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
+use std::time::SystemTime;
 
 use jj_lib::backend::CommitId;
 
@@ -66,6 +70,18 @@ impl Attachment {
             _ => &[],
         }
     }
+}
+
+/// How old a temporary bundle must be for whoever opens its directory to take it for one a
+/// process left there when it was killed: none is in use for so long.
+const ABANDONED_BUNDLE_AGE: Duration = Duration::from_secs(24 * 3600);
+
+/// Creates `dir`, for temporary bundles, if need be, and removes any a process left there
+/// when it was killed: only dropping its [`tempfile::TempPath`] deletes a bundle.
+pub(crate) fn open_bundle_dir(dir: &Path) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    blobs::sweep_dir(dir, SystemTime::now() - ABANDONED_BUNDLE_AGE);
+    Ok(())
 }
 
 /// A fresh temporary file in `dir` for building a bundle.

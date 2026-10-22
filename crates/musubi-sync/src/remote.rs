@@ -51,7 +51,6 @@ pub struct RemoteHub {
     transport: Arc<dyn Transport>,
     rpc_subject: String,
     blobs: BlobStore,
-    dir: PathBuf,
     timeout: Duration,
 }
 
@@ -66,7 +65,6 @@ impl RemoteHub {
             transport,
             rpc_subject,
             blobs: BlobStore::open(blob_dir)?,
-            dir: blob_dir.to_owned(),
             timeout,
         })
     }
@@ -143,7 +141,7 @@ impl RemoteHub {
                 }
                 WireAttachment::Inline(bytes) => {
                     // Not reopened truncating (see `BundleWriter::create`).
-                    let mut file = tempfile::NamedTempFile::new_in(&self.dir)?;
+                    let mut file = self.blobs.temp_file()?;
                     std::io::Write::write_all(&mut file, &bytes)?;
                     Attachment::bundle(file.into_temp_path())
                 }

@@ -3,8 +3,11 @@
 
 #![allow(clippy::unwrap_used)]
 
+use std::fs::File;
 use std::path::Path;
 use std::process::Command;
+use std::time::Duration;
+use std::time::SystemTime;
 
 use musubi_jj::node::NodeRepo;
 use musubi_jj::objects::Backend;
@@ -41,6 +44,36 @@ fn downloaded_by_sync(hive: &mut Hive, node: usize) -> u64 {
     let before = hive.members[node].downloaded;
     hive.sync(node).unwrap();
     hive.members[node].downloaded - before
+}
+
+/// A bundle a process was making or holding when it was killed, which only dropping deletes,
+/// goes once it is a day old, when the hub or the node next opens: a clone's can be
+/// gigabytes.
+#[test]
+fn bundles_left_by_a_killed_process_are_removed() {
+    let env = TestEnv::new();
+    let alpha = env.init_repo("alpha");
+    let hub_dir = env.root().join("hub");
+    let mut hive = Hive::new(&hub_dir, Backend::Git).unwrap();
+    let a = join(&mut hive, &alpha);
+    hive.sync(a).unwrap();
+    let dirs = [hub_dir.join("tmp"), alpha.repo_path().join("musubi/tmp")];
+    let day_old = SystemTime::now() - Duration::from_secs(25 * 3600);
+    for dir in &dirs {
+        File::create(dir.join("left"))
+            .unwrap()
+            .set_modified(day_old)
+            .unwrap();
+        // Perhaps another process's, still in use.
+        File::create(dir.join("new")).unwrap();
+    }
+    hive.restart_hub().unwrap();
+    let node = NodeRepo::open(&alpha.repo_path(), &alpha.settings()).unwrap();
+    hive.add(node).unwrap();
+    for dir in &dirs {
+        assert!(!dir.join("left").exists(), "{} kept it", dir.display());
+        assert!(dir.join("new").exists(), "{} lost a new one", dir.display());
+    }
 }
 
 /// A machine that joins with a copy of the repository the hive started from downloads only

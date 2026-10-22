@@ -1,7 +1,6 @@
 //! The core's `HubStorage` over a hub store.
 
 use std::collections::BTreeSet;
-use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -14,6 +13,7 @@ use musubi_jj::objects::Backend;
 
 use crate::Attachment;
 use crate::OpId;
+use crate::open_bundle_dir;
 use crate::short;
 use crate::temp_bundle;
 
@@ -33,7 +33,7 @@ impl HubAdapter {
 
     fn new(store: HubStore, dir: &Path) -> anyhow::Result<Self> {
         let tmp = dir.join("tmp");
-        fs::create_dir_all(&tmp)?;
+        open_bundle_dir(&tmp)?;
         Ok(Self { store, tmp })
     }
 

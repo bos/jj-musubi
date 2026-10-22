@@ -35,6 +35,7 @@ use serde::Serialize;
 use tokio::sync::oneshot;
 
 use crate::config;
+use crate::lock::try_lock;
 use crate::socket;
 use crate::socket::Socket;
 use crate::ssh;
@@ -72,27 +73,6 @@ impl HubSettings {
 pub struct ServeArgs {
     pub dir: Option<PathBuf>,
     pub advertise: Option<String>,
-}
-
-/// Holds a lock file for as long as it lives.
-struct Lock(#[expect(dead_code, reason = "held for its lock")] fs::File);
-
-/// Takes the lock at `path`, or says what holds it.
-fn try_lock(path: &Path) -> anyhow::Result<Option<Lock>> {
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir)?;
-    }
-    let file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(path)
-        .with_context(|| format!("opening {path:?}"))?;
-    match file.try_lock() {
-        Ok(()) => Ok(Some(Lock(file))),
-        Err(fs::TryLockError::WouldBlock) => Ok(None),
-        Err(fs::TryLockError::Error(err)) => Err(err).with_context(|| format!("locking {path:?}")),
-    }
 }
 
 pub fn serve(args: ServeArgs) -> anyhow::Result<()> {

@@ -263,25 +263,9 @@ impl Control for Daemon {
 /// Runs the daemon until it is stopped or interrupted.
 pub fn run(socket: &Socket) -> anyhow::Result<()> {
     let lock_path = socket.lock_path()?;
-    if let Some(dir) = lock_path.parent() {
-        fs::create_dir_all(dir)?;
-    }
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&lock_path)
-        .with_context(|| format!("opening {lock_path:?}"))?;
-    if let Err(err) = lock.try_lock() {
-        match err {
-            fs::TryLockError::WouldBlock => {
-                anyhow::bail!("a musubi daemon is already running (its socket is {socket})")
-            }
-            fs::TryLockError::Error(err) => {
-                return Err(err).with_context(|| format!("locking {lock_path:?}"));
-            }
-        }
-    }
+    let Some(lock) = crate::lock::try_lock(&lock_path)? else {
+        anyhow::bail!("a musubi daemon is already running (its socket is {socket})")
+    };
     // Beside the lock, for finding the daemon's process.
     let pid_path = lock_path.with_extension("pid");
     fs::write(&pid_path, std::process::id().to_string())?;

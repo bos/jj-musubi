@@ -5,6 +5,7 @@ mod config;
 mod control;
 mod daemon;
 mod hub;
+mod lock;
 mod login;
 mod repo;
 mod settings;

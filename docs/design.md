@@ -327,7 +327,12 @@ the latter for clones.
   (by git's thresholds, or the repository's), in the background as git does
   (`gc.autoDetach`, including on Windows, where git can't detach itself), but with pruning
   disabled: musubi never deletes an object, reachable or not. On the hub, what its head's
-  refs don't reach goes to a cruft pack.
+  refs don't reach goes to a cruft pack. On battery, musubi defers the gc until an import
+  on mains power, which a `pre-auto-gc` hook could have done before musubi's git stopped
+  running hooks. It asks `pmset` on macOS, and on Linux defers when no mains or USB supply
+  is online and a battery of the machine's own, not a mouse's, is discharging. Elsewhere
+  it can't tell, and doesn't defer. A machine that only ever syncs on battery never runs
+  this gc, but the user's own git commands still do.
 - jj-lib's git backend sizes gix's table of pack indexes when it opens the repository, so a
   long-running node could fail to read objects in packs added since. A node therefore reopens
   the repository before it imports objects.

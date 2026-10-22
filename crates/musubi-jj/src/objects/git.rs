@@ -29,6 +29,7 @@ use super::bundle;
 use super::bundle::BundleWriter;
 use super::bundle::PackRecord;
 use super::bundle::Record;
+use super::power;
 use crate::hive_settings::Remote;
 
 /// The variables git sets, for what it runs in a repository such as a hook, to name that
@@ -345,8 +346,15 @@ impl GitObjects {
     /// does after a fetch, with `git gc --auto` and the repository's own thresholds. It
     /// never deletes an object, reachable or not: jj's `refs/jj/keep` refs need not cover
     /// every commit an operation refers to, and a hub's refs cover only its head. git may
-    /// finish in the background.
+    /// finish in the background. On battery it waits for an import on mains power.
     pub fn maintain(&self, hub: bool) -> Result<(), ObjectError> {
+        if power::on_battery() {
+            return Ok(());
+        }
+        self.gc_auto(hub)
+    }
+
+    fn gc_auto(&self, hub: bool) -> Result<(), ObjectError> {
         let mut args = vec![
             "-c",
             "gc.pruneExpire=never",
@@ -981,7 +989,8 @@ mod tests {
         let hook = hooks.join("pre-auto-gc");
         fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", ran.display())).unwrap();
         fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
-        objects.maintain(false).unwrap();
+        // Not `maintain`, which on battery wouldn't run gc at all.
+        objects.gc_auto(false).unwrap();
         assert!(!ran.exists(), "git ran the pre-auto-gc hook");
     }
 }

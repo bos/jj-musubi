@@ -14,6 +14,7 @@ use thiserror::Error;
 
 pub mod bundle;
 mod git;
+mod power;
 mod simple;
 
 pub use git::ExtrasEntry;
@@ -22,6 +23,7 @@ pub use git::GitStore;
 pub use git::REPOSITORY_ENV;
 pub use git::extras_to_ship;
 pub use git::import_extras;
+pub use power::on_battery;
 pub use simple::SimpleStore;
 
 #[derive(Debug, Error)]

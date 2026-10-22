@@ -201,6 +201,10 @@ fn small_transfers_leave_no_pack() {
 /// deleted, not even objects nothing refers to.
 #[test]
 fn packs_are_consolidated_and_nothing_is_lost() {
+    if musubi_jj::objects::on_battery() {
+        eprintln!("skipped: on battery, musubi defers its gc");
+        return;
+    }
     let env = TestEnv::new();
     let alpha = env.init_repo("alpha");
     let beta = env.init_repo("beta");

@@ -11,11 +11,12 @@ This is a jj repository: use jj, never git.
 `just check` is the full local check (see the justfile). The test suite alone takes about
 two minutes, so each check runs once, run by whoever owns it.
 
-- While working, run only what the change touches: one test, one test file
+- While working, run only what the change touches: typically one test, one test file
   (`cargo nextest run -p musubi-jj --test join`), or one crate (`cargo nextest run -p
   musubi-jj`).
+- Don't ask for a review if any checks fail. Fix them first.
 - Once the change is final, its author runs `just check`, and says in any request for review
-  exactly which checks passed.
+  either exactly which checks passed if a subset, or otherwise that all of them did.
 - A reviewer doesn't run the checks again, not even `cargo check`. A review reads the diff
   and reasons about it. Run one targeted test only when a specific finding depends on its
   result, and say so.

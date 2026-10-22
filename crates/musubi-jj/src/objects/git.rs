@@ -95,13 +95,15 @@ impl GitObjects {
     pub fn init_bare(executable: &Path, git_dir: &Path) -> Result<Self, ObjectError> {
         // Not through `run`: GIT_DIR must not be set when the repository does not exist yet.
         // In the files ref format, whatever git's default, since gix reads the hub's refs
-        // ([`Self::gix`]) and knows no other.
+        // ([`Self::gix`]) and knows no other. Without git's template, whose sample hooks
+        // and description a hub never uses.
         let args = [
             "-c",
             "init.defaultRefFormat=files",
             "init",
             "--quiet",
             "--bare",
+            "--template=",
         ];
         let output = git(executable)
             .args(args)
@@ -1089,6 +1091,7 @@ mod tests {
                 .unwrap();
         }
         let ran = dir.path().join("ran");
+        fs::create_dir_all(&hooks).unwrap();
         let hook = hooks.join("pre-auto-gc");
         fs::write(&hook, format!("#!/bin/sh\ntouch '{}'\n", ran.display())).unwrap();
         fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();

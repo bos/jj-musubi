@@ -11,6 +11,8 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::hash::Hash as _;
+use std::hash::Hasher as _;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -65,6 +67,9 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// How many requests a node may send once its link works. A sync here takes a few dozen; a
 /// node that keeps sending without getting anywhere runs past this.
 const RUNAWAY: usize = 2000;
+
+/// How long another build's recorded session is kept (see [`session`]).
+const STALE_SESSION: Duration = Duration::from_secs(3600);
 
 /// The hub answers every request without panicking, with a reply that fits the transport,
 /// its head only ever moves forward to an operation whose closure it has, and afterwards it
@@ -606,12 +611,34 @@ struct Session {
     head: Vec<u8>,
     /// The hub's directory as each call starts, `<n>` after the first `n` requests: copying
     /// one is much faster than replaying the requests. Not after every request: a hub is
-    /// some ninety files, and while the rest of the suite runs, making thousands of files
+    /// dozens of files, and while the rest of the suite runs, making thousands of files
     /// takes many times longer than replaying part of a call.
-    snapshots: tempfile::TempDir,
+    snapshots: PathBuf,
 }
 
 impl Session {
+    /// The session recorded in `dir`: its requests, their replies, by request, the head it
+    /// ends at, and the hub's snapshots.
+    fn load(dir: &Path) -> Self {
+        let requests = read_frames(&dir.join("requests"));
+        let replies = read_frames(&dir.join("replies"))
+            .into_iter()
+            .map(|frame| {
+                let (n, reply) = frame.split_at(8);
+                (
+                    u64::from_le_bytes(n.try_into().unwrap()) as usize,
+                    reply.to_vec(),
+                )
+            })
+            .collect();
+        Self {
+            calls: Call::all(&requests, &replies),
+            seen: Seen::new(requests),
+            head: std::fs::read(dir.join("head")).unwrap(),
+            snapshots: dir.join("snapshots"),
+        }
+    }
+
     /// A hub in `dir` that has handled the first `n` requests.
     fn hub_after(&self, n: usize, dir: &Path) -> HubService {
         let start = self
@@ -621,7 +648,7 @@ impl Session {
             .filter(|&start| start <= n)
             .max()
             .unwrap_or(0);
-        copy_dir(&self.snapshots.path().join(start.to_string()), dir);
+        copy_dir(&self.snapshots.join(start.to_string()), dir);
         let mut hub =
             HubService::new(HubAdapter::open(dir).unwrap(), dir, RPC.into(), HEAD.into()).unwrap();
         for request in &self.seen.requests[start..n] {
@@ -694,58 +721,128 @@ impl Call {
     }
 }
 
+/// The session, recorded once per build of this test binary, under `CARGO_TARGET_TMPDIR`.
+/// nextest runs each test in a process of its own, so otherwise every test that uses it
+/// would record it again, all of them at once in a full run.
 fn session() -> &'static Session {
     static SESSION: OnceLock<Session> = OnceLock::new();
     SESSION.get_or_init(|| {
-        let mut session = None;
-        run_local(async {
-            let env = TestEnv::new();
-            let alpha = env.init_repo("alpha");
-            let beta = env.init_repo("beta");
-            let hub_dir = env.root().join("hub");
-            let network = MemoryNetwork::new(1, MAX_PAYLOAD);
-            serve(fresh_hub(&hub_dir), Arc::new(network.connect())).await;
-            let link = Link::new(Arc::new(network.connect()), &hub_dir, None);
-            let mut alpha_node = driver(&alpha, link.clone());
-            let mut beta_node = driver(&beta, link.clone());
-            big_commit(&alpha, "from alpha");
-            alpha_node.sync().await.unwrap();
-            big_commit(&beta, "from beta");
-            beta_node.sync().await.unwrap();
-            alpha_node.sync().await.unwrap();
-            let calls = Call::all(&link.sent(), &link.replies());
-            session = Some((
-                Seen::new(link.sent()),
-                calls,
-                alpha_node.known().1.to_bytes(),
-            ));
-        });
-        let (seen, calls, head) = session.unwrap();
-        // Replayed, the requests take a fresh hub to the same head, so each snapshot is a
-        // state the hub really passes through.
-        let snapshots = tempfile::tempdir().unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let dir = dir.path().join("hub");
-        let mut hub = fresh_hub(&dir);
-        let starts: BTreeSet<usize> = calls.iter().map(|call| call.start).collect();
-        copy_dir(&dir, &snapshots.path().join("0"));
-        for (n, request) in seen.requests.iter().enumerate() {
-            hub.handle_bytes(request, MAX_PAYLOAD).unwrap();
-            if starts.contains(&(n + 1)) {
-                copy_dir(&dir, &snapshots.path().join((n + 1).to_string()));
+        let cache = Path::new(env!("CARGO_TARGET_TMPDIR")).join("faults-session");
+        std::fs::create_dir_all(&cache).unwrap();
+        // The first process to get here records the session; the others wait for it.
+        let lock = std::fs::File::create(cache.join("lock")).unwrap();
+        lock.lock().unwrap();
+        let dir = cache.join(build());
+        if !dir.join("recorded").exists() {
+            // One a killed process left half recorded.
+            if dir.exists() {
+                std::fs::remove_dir_all(&dir).unwrap();
             }
+            // Other builds' sessions, once their tests are long done: a build in another
+            // checkout sharing this target directory may still be copying from its own.
+            for entry in std::fs::read_dir(&cache).unwrap() {
+                let path = entry.unwrap().path();
+                let age = path.metadata().and_then(|metadata| metadata.modified());
+                if path.is_dir()
+                    && age.is_ok_and(|time| time.elapsed().unwrap_or_default() > STALE_SESSION)
+                {
+                    std::fs::remove_dir_all(path).ok();
+                }
+            }
+            record(&dir);
+            std::fs::write(dir.join("recorded"), "").unwrap();
         }
-        assert_eq!(hub.hub().head().1.to_bytes(), head);
-        Session {
-            seen,
-            calls,
-            head,
-            snapshots,
-        }
+        drop(lock);
+        Session::load(&dir)
     })
 }
 
+/// This build of the test binary: its path, size, and modification time, hashed.
+fn build() -> String {
+    let exe = std::env::current_exe().unwrap();
+    let metadata = std::fs::metadata(&exe).unwrap();
+    let mut hasher = std::hash::DefaultHasher::new();
+    (&exe, metadata.len(), metadata.modified().unwrap()).hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// Records a session in `dir`, for [`Session::load`].
+fn record(dir: &Path) {
+    let mut session = None;
+    run_local(async {
+        let env = TestEnv::new();
+        let alpha = env.init_repo("alpha");
+        let beta = env.init_repo("beta");
+        let hub_dir = env.root().join("hub");
+        let network = MemoryNetwork::new(1, MAX_PAYLOAD);
+        serve(fresh_hub(&hub_dir), Arc::new(network.connect())).await;
+        let link = Link::new(Arc::new(network.connect()), &hub_dir, None);
+        let mut alpha_node = driver(&alpha, link.clone());
+        let mut beta_node = driver(&beta, link.clone());
+        big_commit(&alpha, "from alpha");
+        alpha_node.sync().await.unwrap();
+        big_commit(&beta, "from beta");
+        beta_node.sync().await.unwrap();
+        alpha_node.sync().await.unwrap();
+        session = Some((link.sent(), link.replies(), alpha_node.known().1.to_bytes()));
+    });
+    let (requests, replies, head) = session.unwrap();
+    std::fs::create_dir_all(dir).unwrap();
+    write_frames(&dir.join("requests"), &requests);
+    let replies: Vec<Vec<u8>> = replies
+        .into_iter()
+        .map(|(n, reply)| [(n as u64).to_le_bytes().as_slice(), &reply].concat())
+        .collect();
+    write_frames(&dir.join("replies"), &replies);
+    std::fs::write(dir.join("head"), &head).unwrap();
+    // Replayed, the requests take a fresh hub to the same head, so each snapshot is a
+    // state the hub really passes through.
+    let snapshots = dir.join("snapshots");
+    let calls = Session::load(dir).calls;
+    let hub_dir = tempfile::tempdir().unwrap();
+    let hub_dir = hub_dir.path().join("hub");
+    let mut hub = fresh_hub(&hub_dir);
+    let starts: BTreeSet<usize> = calls.iter().map(|call| call.start).collect();
+    copy_dir(&hub_dir, &snapshots.join("0"));
+    for (n, request) in requests.iter().enumerate() {
+        hub.handle_bytes(request, MAX_PAYLOAD).unwrap();
+        if starts.contains(&(n + 1)) {
+            copy_dir(&hub_dir, &snapshots.join((n + 1).to_string()));
+        }
+    }
+    assert_eq!(hub.hub().head().1.to_bytes(), head);
+}
+
+/// Writes `frames` to one file, each after its length.
+fn write_frames(path: &Path, frames: &[Vec<u8>]) {
+    let mut bytes = vec![];
+    for frame in frames {
+        bytes.extend_from_slice(&(frame.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(frame);
+    }
+    std::fs::write(path, bytes).unwrap();
+}
+
+fn read_frames(path: &Path) -> Vec<Vec<u8>> {
+    let bytes = std::fs::read(path).unwrap();
+    let mut rest = bytes.as_slice();
+    let mut frames = vec![];
+    while !rest.is_empty() {
+        let (len, tail) = rest.split_at(8);
+        let (frame, tail) = tail.split_at(u64::from_le_bytes(len.try_into().unwrap()) as usize);
+        frames.push(frame.to_vec());
+        rest = tail;
+    }
+    frames
+}
+
+/// Copies the directory `from` to `to`. On macOS that is one clonefile(2) of the whole
+/// tree, when `to` doesn't exist yet: alongside the rest of the suite, making a hub's files
+/// one by one takes over ten times longer.
 fn copy_dir(from: &Path, to: &Path) {
+    if cfg!(target_os = "macos") && reflink_copy::reflink(from, to).is_ok() {
+        return;
+    }
     std::fs::create_dir_all(to).unwrap();
     for entry in std::fs::read_dir(from).unwrap() {
         let entry = entry.unwrap();

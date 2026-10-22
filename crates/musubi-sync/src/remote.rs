@@ -36,9 +36,10 @@ use crate::wire::map_request;
 /// busy, without queueing much at the hub, which answers one request at a time.
 pub const WINDOW: usize = 8;
 
-/// How many times an upload may start over. The hub starts over only after discarding an
-/// abandoned upload, or when what it has fails the hash check; a blob that keeps failing it
-/// won't pass by being sent again.
+/// How many times a transfer may start over. The hub starts an upload over only after
+/// discarding it as abandoned, or when what it has fails the hash check, and a download
+/// starts over only when what came fails it; a blob that keeps failing it won't pass by being
+/// sent again.
 const RESTARTS: usize = 3;
 
 /// How long a node keeps a blob nothing has touched: a partial download, which a later call
@@ -235,10 +236,12 @@ impl RemoteHub {
     async fn download(&self, blob: &BlobId, total: u64) -> anyhow::Result<PathBuf> {
         let chunk = chunk_size(self.transport.max_payload()) as u64;
         let mut offset = 0;
+        let mut restarts = 0;
         loop {
             if let Some(path) = self.blobs.get(blob) {
                 return Ok(path);
             }
+            let start = offset;
             let mut chunks = FuturesOrdered::new();
             let mut next = offset;
             loop {
@@ -264,6 +267,15 @@ impl RemoteHub {
                     Received::Complete => break,
                     Received::Prefix(have) => have,
                 };
+            }
+            // A window takes the download further, unless what came failed the hash check
+            // and it started over.
+            if offset <= start && self.blobs.get(blob).is_none() {
+                restarts += 1;
+                anyhow::ensure!(
+                    restarts <= RESTARTS,
+                    "{blob:?} failed its hash check {restarts} times"
+                );
             }
         }
     }
@@ -303,4 +315,86 @@ fn reply_blobs(reply: &Reply<Vec<u8>, WireAttachment>) -> Vec<(BlobId, u64)> {
             _ => None,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+
+    use musubi_transport::Subscription;
+    use musubi_transport::TransportError;
+
+    use super::*;
+
+    /// A hub whose every chunk of the blob it names fails the hash check.
+    struct Corrupting {
+        blob: BlobId,
+        chunks: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl Transport for Corrupting {
+        fn max_payload(&self) -> usize {
+            1 << 20
+        }
+
+        async fn publish(&self, _: &str, _: Bytes) -> Result<(), TransportError> {
+            Ok(())
+        }
+
+        async fn subscribe(&self, _: &str) -> Result<Subscription, TransportError> {
+            unimplemented!("a node subscribes to no subject here")
+        }
+
+        async fn request(
+            &self,
+            _: &str,
+            payload: Bytes,
+            _: Duration,
+        ) -> Result<Bytes, TransportError> {
+            let reply = match Envelope::<HubRequest>::decode(&payload).unwrap() {
+                HubRequest::GetChunk { .. } => {
+                    self.chunks.fetch_add(1, Ordering::SeqCst);
+                    HubReply::Chunk {
+                        total: 5,
+                        data: b"wrong".to_vec(),
+                    }
+                }
+                _ => HubReply::Indirect {
+                    blob: self.blob,
+                    len: 5,
+                },
+            };
+            Ok(Bytes::from(Envelope::encode(reply).unwrap()))
+        }
+    }
+
+    /// A download that keeps failing its hash check gives up, rather than starting over
+    /// forever.
+    #[tokio::test]
+    async fn downloads_give_up_on_a_blob_that_keeps_failing() {
+        let dir = tempfile::tempdir().unwrap();
+        let transport = Arc::new(Corrupting {
+            blob: BlobId::of_bytes(b"right"),
+            chunks: AtomicUsize::new(0),
+        });
+        let remote = RemoteHub::new(
+            transport.clone(),
+            "rpc".into(),
+            dir.path(),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let err = remote
+            .send(HubRequest::Indirect {
+                blob: BlobId::of_bytes(b"other"),
+            })
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("failed its hash check"), "{err:#}");
+        assert_eq!(transport.chunks.load(Ordering::SeqCst), RESTARTS + 1);
+    }
 }

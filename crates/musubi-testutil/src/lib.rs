@@ -354,7 +354,7 @@ impl TestRepo {
 
     /// Runs `jj` in the repository and returns the raw output.
     pub fn jj_output(&self, args: &[&str]) -> Output {
-        self.command("jj", &self.path).args(args).output().unwrap()
+        self.jj_command(&self.path).args(args).output().unwrap()
     }
 
     /// Runs `git` in the repository and returns stdout, panicking on failure.
@@ -364,8 +364,20 @@ impl TestRepo {
     }
 
     fn run_jj_at(&self, dir: &Path, args: &[&str]) -> String {
-        let output = self.command("jj", dir).args(args).output().unwrap();
+        let output = self.jj_command(dir).args(args).output().unwrap();
         expect_success("jj", args, &output)
+    }
+
+    fn jj_command(&self, dir: &Path) -> Command {
+        let mut command = self.command("jj", dir);
+        command
+            // Without a terminal, jj asks `tput` for its width: two more processes for each
+            // command that writes output.
+            .env("COLUMNS", "80")
+            // jj starts a thread a core for each command, which on 32 cores nearly doubled
+            // the CPU a command took in repositories this small.
+            .env("RAYON_NUM_THREADS", "1");
+        command
     }
 
     /// A command for any program, run in the repository with the same hermetic

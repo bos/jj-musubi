@@ -811,3 +811,20 @@ fn conflicted_remote_bookmark_resolves_despite_a_stale_record() {
     conflicted_fetches(Some(0));
     conflicted_fetches(Some(1));
 }
+
+/// A remote with a push URL and no URL reaches the others as it is, with no URL, not an
+/// empty one.
+#[test]
+fn a_remote_without_a_url_reaches_the_others_without_one() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.repo(0)
+        .git(&["config", "remote.mirror.pushurl", MIRROR]);
+    hive.sync();
+    hive.assert_converged();
+    let config = |key: &str| {
+        hive.repo(1)
+            .git(&["config", "--default", "-", "--get", key])
+    };
+    assert_eq!(config("remote.mirror.pushurl"), format!("{MIRROR}\n"));
+    assert_eq!(config("remote.mirror.url"), "-\n");
+}

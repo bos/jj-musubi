@@ -206,10 +206,25 @@ impl NodeGit {
                         continue;
                     }
                     let url = self.spelling(remote.url.as_deref(), remote.expanded_url.as_deref());
-                    self.repo.run(
-                        &["remote", "add", "--", name, &url.unwrap_or_default()],
-                        None,
-                    )?;
+                    let given = url.as_deref().unwrap_or_default();
+                    self.repo.run(&["remote", "add", "--", name, given], None)?;
+                    if url.is_none() {
+                        // git adds it with an empty URL; it has none.
+                        let key = format!("remote.{name}.url");
+                        self.repo
+                            .run(&["config", "--local", "--unset-all", &key], None)?;
+                    }
+                    // Its URL set, only a push URL, if it has one, is still to set: one naming
+                    // the URL's repository too, if that is how it was written.
+                    let push = self.spelling(
+                        remote.push_url.as_deref(),
+                        remote.expanded_push_url.as_deref(),
+                    );
+                    if let Some(push) = push {
+                        let key = format!("remote.{name}.pushurl");
+                        self.repo.run(&["config", "--local", &key, &push], None)?;
+                    }
+                    continue;
                 }
             }
             self.set_remote_urls(name, from.get(name), remote)?;

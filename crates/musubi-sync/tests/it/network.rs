@@ -32,6 +32,8 @@ use musubi_transport::stream::Connector;
 use musubi_transport::stream::Reader;
 use musubi_transport::stream::Writer;
 
+use crate::serve::serve_hive;
+
 const RPC: &str = "musubi.test.rpc";
 const HEAD: &str = "musubi.test.head";
 
@@ -47,9 +49,11 @@ fn spawn_hub_with(
     let dir = env.root().join("hub");
     let hub = HubAdapter::init(&dir, Backend::Git).unwrap();
     let service = configure(HubService::new(hub, &dir).unwrap());
-    tokio::task::spawn_local(
-        async move { service.run(transport, (RPC, HEAD), || {}).await.unwrap() },
-    );
+    tokio::task::spawn_local(async move {
+        serve_hive(service, transport, (RPC, HEAD), || {})
+            .await
+            .unwrap();
+    });
 }
 
 fn driver(repo: &TestRepo, transport: Arc<dyn Transport>, timeout: Duration) -> NodeDriver {

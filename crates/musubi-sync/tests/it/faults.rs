@@ -55,6 +55,8 @@ use musubi_transport::Subscription;
 use musubi_transport::Transport;
 use musubi_transport::TransportError;
 
+use crate::serve::serve_hive;
+
 const RPC: &str = "musubi.test.rpc";
 const HEAD: &str = "musubi.test.head";
 
@@ -83,7 +85,7 @@ fn hub_survives_malformed_requests(tc: TestCase) {
             let before = hub.hub().head();
             let reply = match hub.handle_bytes(&request, MAX_PAYLOAD) {
                 Ok((reply, _)) => reply,
-                // As `HubService::run` and the hub's server answer an error.
+                // As `serve_hive` and the hub's server answer an error.
                 Err(err) => {
                     let error = fit_error(format!("{err:#}"), MAX_PAYLOAD);
                     Envelope::encode(HubReply::Error(error)).unwrap()
@@ -1205,8 +1207,7 @@ fn fresh_hub(dir: &Path) -> HubService {
 async fn serve(service: HubService, transport: Arc<dyn Transport>) {
     let (ready, listening) = tokio::sync::oneshot::channel();
     tokio::task::spawn_local(async move {
-        service
-            .run(transport, (RPC, HEAD), || ready.send(()).unwrap())
+        serve_hive(service, transport, (RPC, HEAD), || ready.send(()).unwrap())
             .await
             .unwrap();
     });

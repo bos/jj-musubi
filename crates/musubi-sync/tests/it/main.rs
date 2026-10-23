@@ -3,5 +3,6 @@
 
 mod faults;
 mod network;
+mod serve;
 mod server;
 mod transfer;

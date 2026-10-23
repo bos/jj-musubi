@@ -1,18 +1,15 @@
-//! The hub as a network service: answers requests on the hive's RPC subject, one at a
-//! time, and announces new heads on its head subject.
+//! A hive's side of the wire: each encoded request answered, one at a time, with the head
+//! to announce if it accepted one. `server::HubServer` serves it on a transport.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 
-use bytes::Bytes;
 use jj_lib::object_id::ObjectId as _;
 use musubi_core::hub;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
-use musubi_transport::Transport;
 
 use crate::Attachment;
 use crate::OpId;
@@ -27,7 +24,6 @@ use crate::wire::HubReply;
 use crate::wire::HubRequest;
 use crate::wire::WireAttachment;
 use crate::wire::chunk_size;
-use crate::wire::fit_error;
 use crate::wire::inline_limit;
 use crate::wire::map_reply;
 use crate::wire::map_request;
@@ -92,44 +88,6 @@ impl HubService {
 
     pub fn hub(&self) -> &HubAdapter {
         &self.hub
-    }
-
-    /// Serves requests on `rpc_subject`, announcing new heads on `head_subject`, until the
-    /// transport's subscription ends, calling `ready` once subscribed, when requests start
-    /// being answered. Requests are handled strictly one at a time, which is what makes every
-    /// `Push` atomic. For tests: a hub serves its hives through [`crate::server::HubServer`].
-    pub async fn run(
-        mut self,
-        transport: Arc<dyn Transport>,
-        (rpc_subject, head_subject): (&str, &str),
-        ready: impl FnOnce(),
-    ) -> anyhow::Result<()> {
-        let mut requests = transport.subscribe(rpc_subject).await?;
-        ready();
-        while let Some(message) = requests.next().await {
-            let Some(reply_to) = message.reply else {
-                continue;
-            };
-            let (reply, notice) = match self.handle_bytes(&message.payload, transport.max_payload())
-            {
-                Ok(result) => result,
-                Err(err) => {
-                    tracing::warn!("request failed: {err:#}");
-                    let error = fit_error(format!("{err:#}"), transport.max_payload());
-                    (Envelope::encode(HubReply::Error(error))?, None)
-                }
-            };
-            if let Err(err) = transport.publish(&reply_to, Bytes::from(reply)).await {
-                tracing::warn!("could not reply: {err}");
-            }
-            if let Some(notice) = notice {
-                let notice = Bytes::from(Envelope::encode(notice)?);
-                if let Err(err) = transport.publish(head_subject, notice).await {
-                    tracing::warn!("could not announce the new head: {err}");
-                }
-            }
-        }
-        Ok(())
     }
 
     /// Handles one encoded request, returning the encoded reply and any head to announce.

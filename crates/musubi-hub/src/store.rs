@@ -77,15 +77,14 @@ pub struct HubStore {
     dir: PathBuf,
     backend: Backend,
     canonical: CanonicalStore,
-    seq: u64,
-    head: OperationId,
     /// `anc*(head)`, each operation with the sequence number at which it was first accepted.
     /// Every member is stored and closed, so walks over newly uploaded operations stop as
     /// soon as they reach it. Because `anc*(hist[j])` is exactly the operations accepted by
     /// sequence number `j`, the range `anc*(hist[i]) \ anc*(hist[j])` is the operations
     /// accepted after `j` and by `i`.
     accepted: HashMap<OperationId, u64>,
-    /// `hist`: the head accepted at each sequence number.
+    /// `hist`: the head accepted at each sequence number, the root operation at 0 and the
+    /// head now last.
     history: Vec<OperationId>,
 }
 
@@ -117,26 +116,25 @@ impl HubStore {
         let backend = Backend::parse(&name).ok_or(StoreError::UnknownBackend(name))?;
         let canonical = CanonicalStore::open(&dir.join("canonical"), backend.root_commit())?;
         let history = read_heads(dir)?;
-        let seq = history.len() as u64 - 1;
-        let head = history[history.len() - 1].clone();
         let mut store = Self {
             dir: dir.to_owned(),
             backend,
             canonical,
-            seq,
-            head,
             accepted: HashMap::new(),
             history: vec![],
         };
-        for (seq, head) in history.into_iter().enumerate() {
-            store.accept_ancestors(&head, seq as u64)?;
-            store.history.push(head);
+        for head in history {
+            store.accept(head)?;
         }
         Ok(store)
     }
 
     pub fn head(&self) -> (u64, &OperationId) {
-        (self.seq, &self.head)
+        let head = self
+            .history
+            .last()
+            .expect("history starts at the root operation");
+        (self.history.len() as u64 - 1, head)
     }
 
     pub fn canonical(&self) -> &CanonicalStore {
@@ -159,12 +157,17 @@ impl HubStore {
     /// Replaces the head. The caller has checked that `new` is closed and descends from the
     /// current head.
     pub fn set_head(&mut self, seq: u64, new: &OperationId) -> Result<(), StoreError> {
-        assert_eq!(seq, self.seq + 1, "heads are accepted in sequence");
+        assert_eq!(
+            seq,
+            self.history.len() as u64,
+            "heads are accepted in sequence"
+        );
+        let accepted = self.unaccepted_ancestors(new)?;
         append_head(&self.dir, seq, new)?;
-        self.seq = seq;
-        self.head = new.clone();
+        for id in accepted {
+            self.accepted.insert(id, seq);
+        }
         self.history.push(new.clone());
-        self.accept_ancestors(new, seq)?;
         // Upkeep, which a push mustn't fail over.
         if let Err(err) = self.mark_head(new) {
             tracing::warn!("indexing what head {} reaches: {err}", new.hex());
@@ -184,26 +187,38 @@ impl HubStore {
         Ok(self.object_store().mark_head(&heads)?)
     }
 
-    fn accept_ancestors(&mut self, head: &OperationId, seq: u64) -> Result<(), StoreError> {
-        let mut stack = vec![head.clone()];
-        while let Some(id) = stack.pop() {
-            if self.accepted.contains_key(&id) {
-                continue;
-            }
-            self.accepted.insert(id.clone(), seq);
-            if id != *self.canonical.root_operation_id() {
-                stack.extend(self.canonical.read_operation(&id)?.parents);
-            }
+    /// Accepts `head` as the next head, as read back from the log.
+    fn accept(&mut self, head: OperationId) -> Result<(), StoreError> {
+        let seq = self.history.len() as u64;
+        for id in self.unaccepted_ancestors(&head)? {
+            self.accepted.insert(id, seq);
         }
+        self.history.push(head);
         Ok(())
     }
 
-    /// The sequence number at which `head` was the accepted head, if it ever was.
+    /// The operations in `anc*(head)` not accepted yet.
+    fn unaccepted_ancestors(&self, head: &OperationId) -> Result<Vec<OperationId>, StoreError> {
+        let mut found = vec![];
+        let mut seen = HashSet::new();
+        let mut stack = vec![head.clone()];
+        while let Some(id) = stack.pop() {
+            if self.accepted.contains_key(&id) || !seen.insert(id.clone()) {
+                continue;
+            }
+            if id != *self.canonical.root_operation_id() {
+                stack.extend(self.canonical.read_operation(&id)?.parents);
+            }
+            found.push(id);
+        }
+        Ok(found)
+    }
+
+    /// The sequence number at which `head` was the accepted head, if it ever was: the one at
+    /// which it was first accepted, since a head is accepted with its ancestors, never before.
     fn head_seq(&self, head: &OperationId) -> Option<u64> {
-        self.history
-            .iter()
-            .rposition(|h| h == head)
-            .map(|i| i as u64)
+        let seq = *self.accepted.get(head)?;
+        (self.history[usize::try_from(seq).ok()?] == *head).then_some(seq)
     }
 
     /// `anc*(head) \ anc*(base)`, ancestors first. When both were accepted heads this needs
@@ -242,7 +257,7 @@ impl HubStore {
         let mut seen = HashSet::new();
         let mut stack = vec![op.clone()];
         while let Some(id) = stack.pop() {
-            if id == self.head {
+            if id == *self.head().1 {
                 return Ok(true);
             }
             if self.accepted.contains_key(&id)
@@ -270,7 +285,7 @@ impl HubStore {
     pub fn missing_closure(&self, op: &OperationId) -> Result<Vec<String>, StoreError> {
         let mut missing = vec![];
         let mut reached = vec![];
-        let mut boundary = BTreeSet::from([self.head.clone()]);
+        let mut boundary = BTreeSet::from([self.head().1.clone()]);
         let mut seen = HashSet::new();
         let mut stack = vec![op.clone()];
         while let Some(id) = stack.pop() {

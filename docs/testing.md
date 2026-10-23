@@ -152,7 +152,8 @@ stand for a buggy or mismatched peer.
 
 Modeled on jj-stack's generated integration tests. A Hegel state machine drives two or three
 real colocated repositories, each served by a real musubi node, through an in-process hub
-over the in-memory transport.
+that `musubi_sync::hive::Hive` delivers their requests to directly, one step at a time, so
+that a failing case replays exactly.
 
 Rules fall into separate groups, and are kept separate so that the inconsistent states
 between them get explored:
@@ -161,12 +162,15 @@ between them get explored:
   new on a random commit, rebase, squash, abandon, bookmark create, move, and delete, undo,
   and commands at an older operation (`--at-op`), which create concurrent operations.
 - **Git-side work** in a colocated repository: move or delete a branch with `git`.
-- **Sync**: let one node take a single sync step, which may stop partway through an upload.
-- **Faults**: partition and heal a node, drop or delay messages, crash a node or the hub.
-  Faults are capped per sequence, so that a short walk still reaches recovery.
+- **Sync**: let one node sync until it is idle, or take a few steps, which may stop partway
+  through an upload.
+- **Faults**: restart a node, losing its protocol state; crash one, losing its caches, its
+  translation cache too, or realizations it was still writing, or crash it partway through
+  realizing what a sync fetched; restart the hub; or lose the reply to a request the hub
+  handled. Faults are capped per sequence, so that a short walk still reaches recovery.
 
 After each rule, every repository must still load, and `jj status` must succeed. At the end,
-`quiesce` heals everything and syncs to a fixed point, then checks:
+`converge` syncs every node to a fixed point, then checks:
 
 - every node's canonical head equals the hub's;
 - all repositories agree on visible commits, change ids, bookmarks, tags, and remote

@@ -15,8 +15,7 @@ pub fn masked(bug: &str) -> bool {
 }
 
 impl World {
-    /// Heals everything, syncs to a fixed point, checks every property, then starts the
-    /// ledger afresh.
+    /// Syncs to a fixed point, checks every property, then starts the ledger afresh.
     pub fn converge(&mut self) {
         self.record("converge".to_owned());
         self.sync_everything();

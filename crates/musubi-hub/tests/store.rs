@@ -81,7 +81,7 @@ fn closure_and_head_persist() {
     // Refs name the head's visible heads, for git to index.
     let refs = Command::new("git")
         .arg("-C")
-        .arg(hub.dir().join("git"))
+        .arg(hub_dir.join("git"))
         .args([
             "for-each-ref",
             "--format=%(objectname)",
@@ -289,7 +289,7 @@ fn small_edits_stay_small_beside_a_bitmap() {
         .unwrap();
     hub.set_head(1, &old).unwrap();
     // A bitmap index of what the head reaches, as the hub's gc writes once it's big.
-    let git_dir = hub.dir().join("git");
+    let git_dir = hub_dir.join("git");
     let repack = Command::new("git")
         .env("GIT_DIR", &git_dir)
         .args(["repack", "-a", "-d", "-b", "-q", "--cruft"])

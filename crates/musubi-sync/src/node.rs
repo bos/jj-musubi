@@ -58,6 +58,7 @@ impl NodeAdapter {
         })
     }
 
+    /// The repository, for tests that look into it.
     pub fn repo(&self) -> &NodeRepo {
         &self.repo
     }
@@ -100,6 +101,7 @@ impl NodeAdapter {
         Ok(settings || workspaces)
     }
 
+    /// The repository, for tests that act on it, as by crashing it.
     pub fn repo_mut(&mut self) -> &mut NodeRepo {
         &mut self.repo
     }

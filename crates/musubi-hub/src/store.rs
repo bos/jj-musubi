@@ -151,10 +151,6 @@ impl HubStore {
         object_store(self.backend, &self.dir)
     }
 
-    pub fn dir(&self) -> &Path {
-        &self.dir
-    }
-
     /// Whether `op` is in `anc*(head)`.
     pub fn is_accepted(&self, op: &OperationId) -> bool {
         self.accepted.contains_key(op)

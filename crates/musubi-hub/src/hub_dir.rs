@@ -28,6 +28,7 @@ use crate::names;
 use crate::names::RemoteUrl;
 use crate::store;
 use crate::store::HubStore;
+use crate::store::StoreError;
 
 const HIVE_FILE: &str = "hive.toml";
 
@@ -192,11 +193,11 @@ impl HubDir {
         Ok(hubs)
     }
 
-    /// Opens hive `id`'s store, making the hive again first if a power cut left the store
-    /// corrupt or torn ([`open_whole`]).
+    /// Opens hive `id`'s store, making the hive again first if a power cut left it corrupt
+    /// ([`open_whole`]).
     pub fn open_store(&mut self, id: &str) -> anyhow::Result<HubStore> {
         let dir = self.hive(id)?.dir.clone();
-        match open_whole(&dir, true)? {
+        match open_whole(&dir)? {
             Opened::Whole(store) => Ok(*store),
             Opened::Damaged(why) => {
                 self.remake(id, &why)?;
@@ -220,7 +221,7 @@ impl HubDir {
     /// and a new one takes its place, made whole beside it first, so that a failure leaves
     /// the hive as it was, to be made again next time, and a crash between the two renames
     /// leaves it for the hub to finish as it next starts.
-    pub fn remake(&mut self, id: &str, why: &dyn std::fmt::Display) -> anyhow::Result<()> {
+    pub fn remake(&mut self, id: &str, why: &StoreError) -> anyhow::Result<()> {
         let hive = self.hive(id)?;
         let removed = self.dir.join("removed");
         fs::create_dir_all(&removed)?;
@@ -559,30 +560,21 @@ fn has_any(backend: Backend, dir: &Path, commits: &[CommitId]) -> anyhow::Result
     Ok(missing.len() < commits.len())
 }
 
-/// A hive's store, opened as its hub first opens it.
+/// A hive's store, or why it is corrupt.
 pub enum Opened {
     Whole(Box<HubStore>),
-    /// Corrupt or torn, as said, and to be made again.
-    Damaged(String),
+    /// Corrupt, and to be made again.
+    Damaged(StoreError),
 }
 
-/// Opens the store in `dir`: one that won't open because it is corrupt, or, if `look` says
-/// to look over it, that opens but in which something is torn ([`HubStore::torn`]), is
-/// damaged. Nothing tears while the hub runs, so a store need be looked over only the first
-/// time a process opens it; that reads all of it. Fails if it can't tell, as when the hub
-/// is out of file descriptors.
-pub fn open_whole(dir: &Path, look: bool) -> anyhow::Result<Opened> {
-    let store = match HubStore::open(dir) {
-        Ok(store) => store,
-        Err(err) if store::is_corrupt(&err) => return Ok(Opened::Damaged(err.to_string())),
-        Err(err) => return Err(err.into()),
-    };
-    let torn = if look { store.torn()? } else { vec![] };
-    Ok(if torn.is_empty() {
-        Opened::Whole(Box::new(store))
-    } else {
-        Opened::Damaged(format!("torn: {}", torn.join("; ")))
-    })
+/// Opens the store in `dir`: one that won't open because it is corrupt is damaged. Fails if
+/// it won't open for some other reason, as when the hub is out of file descriptors.
+pub fn open_whole(dir: &Path) -> anyhow::Result<Opened> {
+    match HubStore::open(dir) {
+        Ok(store) => Ok(Opened::Whole(Box::new(store))),
+        Err(err) if store::is_corrupt(&err) => Ok(Opened::Damaged(err)),
+        Err(err) => Err(err.into()),
+    }
 }
 
 /// Where [`HubDir::remake`] makes hive `id` of the hub in `hub_dir` again: not a hive's

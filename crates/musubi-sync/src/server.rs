@@ -189,14 +189,11 @@ fn spawn_worker(
             // on under any filter that shows anything.
             let _span = tracing::error_span!("hive", id = %id).entered();
             let mut service = None;
-            // Whether this hive's store has been looked over for what a power cut tore,
-            // which it need be once: nothing tears while the hub runs.
-            let mut looked = false;
             while let Ok(message) = receiver.recv() {
                 let limit = transport.max_payload();
                 let started = std::time::Instant::now();
                 let served = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    serve_one(&id, &dir, &mut service, &mut looked, &hubs, &message, limit)
+                    serve_one(&id, &dir, &mut service, &hubs, &message, limit)
                 }));
                 let reply = served.unwrap_or_else(|panic| {
                     // jj-lib panics on some malformed input, as a peer could send it. The
@@ -258,7 +255,6 @@ fn serve_one(
     id: &str,
     dir: &Path,
     service: &mut Option<HubService>,
-    looked: &mut bool,
     hubs: &Mutex<HubDir>,
     message: &Message,
     max_payload: usize,
@@ -266,9 +262,9 @@ fn serve_one(
     let service = match service {
         Some(service) => service,
         None => {
-            // Looked over outside the lock, since that reads the whole store, and made
+            // Opened outside the lock, since opening reads every accepted operation, and made
             // again under it, if damaged.
-            let store = match open_whole(dir, !*looked)? {
+            let store = match open_whole(dir)? {
                 Opened::Whole(store) => *store,
                 Opened::Damaged(why) => {
                     hubs.lock()
@@ -277,7 +273,6 @@ fn serve_one(
                     HubStore::open(dir)?
                 }
             };
-            *looked = true;
             tracing::info!("opened");
             service.insert(HubService::new(HubAdapter::new(store, dir)?, dir)?)
         }

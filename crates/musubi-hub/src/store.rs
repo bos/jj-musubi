@@ -19,8 +19,6 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
 use std::io;
-use std::io::Read as _;
-use std::io::Seek as _;
 use std::io::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
@@ -280,45 +278,6 @@ impl HubStore {
         Ok(self.canonical.required_commits(ops)?)
     }
 
-    /// What a power cut left torn in this store, which opened: operations and views that
-    /// aren't what their names say, accepted operations whose views are missing, objects
-    /// left empty that none can be, and git packs cut short. A file new to the disk is what
-    /// ext4 empties without a sync, and a large one it can cut short. Fails, rather than
-    /// count something torn, if it can't tell, as when the hub is out of file descriptors.
-    /// Reads the whole store.
-    pub fn torn(&self) -> Result<Vec<String>, StoreError> {
-        let mut torn = self.canonical.torn()?;
-        for id in self.accepted.keys() {
-            let view = self.canonical.read_operation(id)?.view_id;
-            if !self.canonical.has_view(&view) {
-                torn.push(format!(
-                    "view {} of operation {} is missing",
-                    view.hex(),
-                    id.hex()
-                ));
-            }
-        }
-        match self.backend {
-            Backend::Git => {
-                // A loose object is named by its id's hex but the first two digits, which
-                // name its directory. Anything else there, as a temporary file git hasn't
-                // written yet, is no object.
-                let objects = self.dir.join("git/objects");
-                let loose = |name: &str| hex(name, &[38, 62]);
-                empty_files(&objects, |name| hex(name, &[2]), loose, &mut torn)?;
-                cut_packs(&objects.join("pack"), &mut torn)?;
-                let extras = |name: &str| hex(name, &[40, 64]);
-                empty_files(&self.dir.join("extras"), |_| false, extras, &mut torn)?;
-            }
-            Backend::Simple => {
-                // Trees and files can be empty, but a commit names its tree.
-                let commits = self.dir.join("simple/commits");
-                empty_files(&commits, |_| false, |name| hex(name, &[128]), &mut torn)?;
-            }
-        }
-        Ok(torn)
-    }
-
     /// Whether `closure(op)` is stored: every operation in `anc*(op)`, its view, and every
     /// object its view requires. Returns the missing pieces' descriptions if not.
     ///
@@ -390,110 +349,6 @@ fn read_heads(dir: &Path) -> Result<Vec<OperationId>, StoreError> {
         return Err(StoreError::CorruptHead(path));
     }
     Ok(heads)
-}
-
-/// Whether `name` is all hex digits, as many as one of `lens`.
-fn hex(name: &str, lens: &[usize]) -> bool {
-    lens.contains(&name.len()) && name.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
-/// Adds to `torn` the empty files in `dir` named as `kept` says objects are, looking in its
-/// subdirectories named as `descend` says; or `dir` itself, if it is missing.
-fn empty_files(
-    dir: &Path,
-    descend: fn(&str) -> bool,
-    kept: fn(&str) -> bool,
-    torn: &mut Vec<String>,
-) -> Result<(), StoreError> {
-    let Some(entries) = entries(dir, torn)? else {
-        return Ok(());
-    };
-    for Entry { path, name, kind } in entries {
-        if kind.is_dir() && descend(&name) {
-            empty_files(&path, descend, kept, torn)?;
-        } else if kind.is_file() && kept(&name) && file_len(&path)? == 0 {
-            torn.push(format!("{} is empty", path.display()));
-        }
-    }
-    Ok(())
-}
-
-/// Adds to `torn` the packs in `dir` that don't end in the checksum their indexes record
-/// for them, as one cut short does, or whose indexes are cut short. A pack without an
-/// index is skipped: git writes the index last, so its objects were never there.
-fn cut_packs(dir: &Path, torn: &mut Vec<String>) -> Result<(), StoreError> {
-    let Some(entries) = entries(dir, torn)? else {
-        return Ok(());
-    };
-    for Entry {
-        path: pack, name, ..
-    } in entries
-    {
-        let Some(hash) = name
-            .strip_prefix("pack-")
-            .and_then(|name| name.strip_suffix(".pack"))
-            .filter(|hash| hex(hash, &[40, 64]))
-        else {
-            continue;
-        };
-        let index = pack.with_extension("idx");
-        if !index.exists() {
-            continue;
-        }
-        // Each ends in its checksum, which the index records the pack's in front of.
-        let len = (hash.len() / 2) as u64;
-        let ending = |path: &Path, from_end: u64| -> Result<Option<Vec<u8>>, StoreError> {
-            let read = || -> io::Result<Option<Vec<u8>>> {
-                let mut file = fs::File::open(path)?;
-                let size = file.metadata()?.len();
-                if size < from_end {
-                    return Ok(None);
-                }
-                file.seek(io::SeekFrom::Start(size - from_end))?;
-                let mut bytes = vec![0; len as usize];
-                file.read_exact(&mut bytes)?;
-                Ok(Some(bytes))
-            };
-            read().map_err(io_err(path))
-        };
-        let recorded = ending(&index, 2 * len)?;
-        if recorded.is_none() || ending(&pack, len)? != recorded {
-            torn.push(format!("{} is cut short", pack.display()));
-        }
-    }
-    Ok(())
-}
-
-/// A file or directory [`entries`] found.
-struct Entry {
-    path: PathBuf,
-    name: String,
-    kind: fs::FileType,
-}
-
-/// The entries of `dir`, or `None`, having added `dir` to `torn`, if it is missing.
-fn entries(dir: &Path, torn: &mut Vec<String>) -> Result<Option<Vec<Entry>>, StoreError> {
-    let read = match fs::read_dir(dir) {
-        Ok(read) => read,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {
-            torn.push(format!("{} is missing", dir.display()));
-            return Ok(None);
-        }
-        Err(err) => return Err(io_err(dir)(err)),
-    };
-    let mut entries = vec![];
-    for entry in read {
-        let entry = entry.map_err(io_err(dir))?;
-        let path = entry.path();
-        let kind = entry.file_type().map_err(io_err(&path))?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        entries.push(Entry { path, name, kind });
-    }
-    Ok(Some(entries))
-}
-
-fn file_len(path: &Path) -> Result<u64, StoreError> {
-    Ok(fs::metadata(path).map_err(io_err(path))?.len())
 }
 
 /// Whether `err`, opening a store, means it is corrupt, as a power cut can leave one, rather

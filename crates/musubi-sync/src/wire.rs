@@ -20,6 +20,8 @@ use jj_lib::object_id::ObjectId as _;
 use musubi_core::message::OpEntry;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
+use musubi_hub::activity::HubActivity;
+use musubi_hub::activity::Report;
 use musubi_hub::hub_dir::HiveInfo;
 use musubi_hub::hub_dir::JoinRequest;
 use musubi_hub::hub_dir::Joined;
@@ -185,6 +187,13 @@ pub enum HubWideRequest {
     Remove {
         name: String,
     },
+    /// How a machine's sync with the hive `hive`, by id, went: its daemon says after each.
+    Report {
+        hive: String,
+        report: Report,
+    },
+    /// What the hub has seen of its hives since it started, for `musubi top`.
+    Activity,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -192,6 +201,9 @@ pub enum HubWideReply {
     Joined(Joined),
     Hives(Vec<HiveInfo>),
     Hive(HiveInfo),
+    /// After [`HubWideRequest::Report`].
+    Noted,
+    Activity(HubActivity),
     Error(String),
 }
 

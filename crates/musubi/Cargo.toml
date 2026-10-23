@@ -32,6 +32,7 @@ musubi-sync.workspace = true
 musubi-transport.workspace = true
 notify.workspace = true
 pollster.workspace = true
+ratatui.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tarpc.workspace = true

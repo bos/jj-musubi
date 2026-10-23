@@ -17,6 +17,10 @@ change the protocol, so run the same release on the hub and every machine (see
 - After a hub loses its state, `musubi join` in one copy of each hive makes it again, and the
   other machines fill it: no more `musubi leave` and `musubi create` on every machine.
   `musubi join --hub <hub>` in each copy moves a hive to another hub.
+- `musubi top` watches what flows through the hubs as it happens: each hive's bytes a second
+  in and out, the operations and commits that came in, and which machines are offline,
+  behind, or failing to sync. Daemons now report to the hub after every sync for it. See
+  [Watch every machine](docs/guides/manage.md#watch-every-machine).
 - The hub and machines talk differently, so upgrade the hub and every machine together.
 
 ## 0.1.0

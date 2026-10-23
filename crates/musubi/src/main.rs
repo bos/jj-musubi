@@ -12,6 +12,7 @@ mod repo;
 mod settings;
 mod socket;
 mod ssh;
+mod top;
 mod watch;
 
 use std::collections::BTreeMap;
@@ -148,6 +149,31 @@ enum Command {
     /// where every machine's working copy is, and its last sync.
     #[command(alias = "status")]
     List,
+    /// Watch what flows through the hubs, and what is wrong, as it happens.
+    ///
+    /// For each hive, it shows the bytes a second coming into its hub and going out, the
+    /// operations and commits machines have sent since the hub started, and what came in
+    /// lately. For each machine, it shows when the hub last heard from its daemon, how far
+    /// behind it is, and how its syncing goes. Above them it lists the issues: hubs out of
+    /// reach, requests the hub failed, and machines that are offline, behind, or failing
+    /// to sync, and whether this machine's daemon is running.
+    ///
+    /// It asks this machine's default hub and the hubs of its copies, or the hub `--hub`
+    /// names. Without a terminal, or with `--once`, it prints what it sees once, without
+    /// rates.
+    Top {
+        /// The hub to watch, as `musubi hub` prints it [default: every hub this machine
+        /// uses].
+        #[arg(long, add = ArgValueCandidates::new(completion::hubs))]
+        hub: Option<String>,
+        /// How often to refresh, in seconds. `+` and `-` change it as it runs.
+        #[arg(short, long, value_name = "SECONDS", default_value_t = 5,
+              value_parser = clap::value_parser!(u64).range(1..=3600))]
+        interval: u64,
+        /// Print what it sees once, and stop.
+        #[arg(long)]
+        once: bool,
+    },
     /// Stop syncing the repository in the current directory.
     ///
     /// The repository keeps everything it has, and the hive keeps everything it sent.
@@ -283,6 +309,12 @@ fn log_filter(cli: &Cli) -> anyhow::Result<tracing_subscriber::EnvFilter> {
     if daemon || hub {
         return parse_filter("info");
     }
+    // Anything logged would land in the middle of the screen; top shows what goes wrong.
+    if matches!(cli.command, Some(Command::Top { once: false, .. }))
+        && std::io::IsTerminal::is_terminal(&std::io::stdout())
+    {
+        return parse_filter("off");
+    }
     // Commands say why a hub is out of reach in their error; the ssh link would say it
     // again at every retry.
     parse_filter("warn,musubi::ssh=off")
@@ -382,6 +414,18 @@ fn main() -> anyhow::Result<()> {
             &socket()?,
         ),
         Command::List => list(&cwd, socket()),
+        Command::Top {
+            hub,
+            interval,
+            once,
+        } => top::run(
+            top::Args {
+                hub,
+                interval: Duration::from_secs(interval),
+                once,
+            },
+            socket(),
+        ),
         Command::Leave => leave(&cwd, &socket()?),
         Command::Daemon { action: None } => daemon::run(&socket()?),
         Command::Daemon {

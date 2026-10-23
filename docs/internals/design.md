@@ -551,7 +551,8 @@ The transport is a small trait. Every message goes to a subject, a dotted name t
 and subscriptions address. Request/response carries messages up to the negotiated size
 limit. Subscriptions carry hub notifications. Requests about a hive go to `musubi.<id>.rpc`,
 where `<id>` is the hive's id, and notifications to `musubi.<id>.head`. Requests about the
-hub as a whole (join, list, resolve a name, rename, remove) go to `musubi.hub.rpc`. The hub
+hub as a whole (join, list, resolve a name, rename, remove, and a daemon's report on a sync,
+and `musubi top`'s request for activity) go to `musubi.hub.rpc`. The hub
 takes all of them on one subscription, `musubi.*.rpc`; each hive's requests go to a thread
 of its own, which opens the hive's store on its first request and answers one request at a
 time, which is what makes each push atomic, while different hives don't wait for each other.
@@ -607,6 +608,15 @@ the commands other machines run, with this machine's host name, or the name `--a
 gave it, which it keeps in `hub.toml` too: a machine doesn't always know a name others can
 reach it by. It also saves its directory as the machine's default hub, unless the machine
 has one, so that commands on the hub's machine need no `--hub`.
+
+For `musubi top`, the hub keeps account in memory, per hive, of the bytes each hive's
+requests and replies carry, the heads it accepts and what they bring (operations, and the
+commits their `commit_predecessors` say they wrote), pushes it turns away, requests it fails,
+and the latest report of each machine's daemon (`musubi_hub::activity`). A daemon reports
+after every sync that ran, without waiting for an answer: the hub's head as the sync left it
+knowing it, its error if it failed, and its release. The hub tells a machine is behind from
+when it accepted the first head the machine's report lacks. None of it is persisted: a hub
+that restarts knows nothing of what came before, as it needn't.
 
 ### Reaching a hub over ssh
 

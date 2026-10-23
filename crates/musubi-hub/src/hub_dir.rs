@@ -436,6 +436,11 @@ impl HubDir {
         })
     }
 
+    /// The keys of the machines with workspaces in hive `id`'s head.
+    pub fn machine_keys(&self, id: &str) -> Option<&BTreeSet<String>> {
+        Some(&self.hives.get(id)?.index.machines)
+    }
+
     pub fn list(&self) -> Vec<HiveInfo> {
         let mut hives: Vec<HiveInfo> = self.hives.keys().filter_map(|id| self.info(id)).collect();
         hives.sort_by(|a, b| a.name.cmp(&b.name));

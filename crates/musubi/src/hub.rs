@@ -390,13 +390,19 @@ pub async fn ask_over(
     hub: &str,
     request: HubWideRequest,
 ) -> anyhow::Result<HubWideReply> {
+    ask_within(connection, hub, request, Duration::from_secs(60)).await
+}
+
+/// [`ask_over`], waiting at most `limit` for the answer.
+pub async fn ask_within(
+    connection: &Connection,
+    hub: &str,
+    request: HubWideRequest,
+    limit: Duration,
+) -> anyhow::Result<HubWideReply> {
     let subject = rpc_subject(HUB_TOKEN);
     let payload = Bytes::from(Envelope::encode(request)?);
-    let reply = match connection
-        .transport
-        .request(&subject, payload, Duration::from_secs(60))
-        .await
-    {
+    let reply = match connection.transport.request(&subject, payload, limit).await {
         Ok(reply) => reply,
         Err(TransportError::NoResponders(_)) => {
             anyhow::bail!("no hub is serving at {hub}; is `musubi hub` running?")

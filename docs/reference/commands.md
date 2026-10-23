@@ -36,6 +36,7 @@ your choosing. See [Set up a hub and machines](../guides/set-up.md).
 | --- | --- |
 | `list` | Show the hubs' hives, this machine's copies of them, and whether each is syncing. In a hive's repository, also show its details. `status` is an alias. |
 | `sync` | Sync the repository you're in now, and see at once whether it worked. |
+| `top` | Watch what flows through the hubs, and which machines are offline, behind, or failing, as it happens. |
 
 ## Run the daemon
 

@@ -8,8 +8,10 @@ use std::time::SystemTime;
 
 use jj_lib::object_id::ObjectId as _;
 use musubi_core::hub;
+use musubi_core::message::HeadKind;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
+use musubi_hub::activity::Outcome;
 
 use crate::Attachment;
 use crate::OpId;
@@ -50,6 +52,8 @@ pub struct HubService {
     /// out: that reply's download has only begun.
     served: HashMap<BlobId, Instant>,
     served_lifetime: Duration,
+    /// What the latest request did.
+    outcome: Outcome,
 }
 
 impl HubService {
@@ -65,6 +69,7 @@ impl HubService {
             handled: 0,
             served: HashMap::new(),
             served_lifetime: SERVED_BLOB_LIFETIME,
+            outcome: Outcome::Other,
         })
     }
 
@@ -90,6 +95,11 @@ impl HubService {
         &self.hub
     }
 
+    /// What the latest request did, for the hub's activity.
+    pub fn outcome(&self) -> Outcome {
+        self.outcome
+    }
+
     /// Handles one encoded request, returning the encoded reply and any head to announce.
     pub fn handle_bytes(
         &mut self,
@@ -97,6 +107,7 @@ impl HubService {
         max_payload: usize,
     ) -> anyhow::Result<(Vec<u8>, Option<HeadNotice>)> {
         self.handled += 1;
+        self.outcome = Outcome::Other;
         self.forget_served();
         if self.handled.is_multiple_of(100) {
             self.sweep();
@@ -176,6 +187,22 @@ impl HubService {
                 }
                 let handled = handled?;
                 log_reply(&handled.reply);
+                self.outcome = match &handled.reply {
+                    Reply::Head {
+                        kind: HeadKind::Accepted,
+                        ..
+                    } if handled.publish.is_some() => Outcome::Accepted,
+                    Reply::Head {
+                        kind: HeadKind::Rejected,
+                        ..
+                    } => Outcome::Rejected,
+                    Reply::Head {
+                        kind: HeadKind::Incomplete,
+                        ..
+                    } => Outcome::Incomplete,
+                    Reply::Fetched { ops, .. } => Outcome::Sent(ops.len() as u64),
+                    _ => Outcome::Other,
+                };
                 if let Some((seq, head)) = &handled.publish {
                     tracing::info!(
                         "accepted {pushed} operations; the head is now {seq} ({})",

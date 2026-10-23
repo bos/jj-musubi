@@ -2,6 +2,7 @@
 //!
 //! Internal to jj-musubi, with no stable API.
 
+pub mod activity;
 pub mod hub_dir;
 pub mod index;
 pub mod matching;

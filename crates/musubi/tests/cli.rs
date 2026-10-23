@@ -378,6 +378,21 @@ fn hub_join_sync_clone_and_list() {
     let out = musubi_in(&env, &logs, &alpha, &["sync"]);
     assert!(out.contains("Synced (hive at #"), "{out}");
 
+    // Without a terminal, `musubi top` prints once what the hub has seen: the heads that
+    // came in, and each machine up to date once its daemon has reported the latest.
+    let mut top = String::new();
+    wait_for(&logs, "both machines to report the hive's head", || {
+        top = musubi_in(&env, &logs, &beta, &["top"]);
+        top.contains("2/2")
+    });
+    assert!(top.contains("No issues."), "{top}");
+    assert!(top.contains("\nproject since the hub started"), "{top}");
+    for machine in ["alpha", "beta"] {
+        assert!(top.contains(&format!("  {machine} ")), "{top}");
+    }
+    assert!(top.contains("up to date"), "{top}");
+    assert!(top.contains("AGO"), "{top}");
+
     // Operation ids translate between this machine's and the hive's.
     let local = beta.jj(&["op", "log", "--no-graph", "-n1", "-T", "id"]);
     let translated = musubi_in(&env, &logs, &beta, &["debug", "op-id", &local]);
@@ -711,7 +726,7 @@ fn copies_move_to_another_hub() {
 }
 
 /// A hive removed from the hub is over: each copy leaves it as it hears, keeping everything
-/// it has.
+/// it has, whether its daemon hears or `musubi sync` does.
 #[test]
 fn copies_leave_a_removed_hive() {
     let env = TestEnv::new();
@@ -720,6 +735,9 @@ fn copies_leave_a_removed_hive() {
     // Stopped before the hub.
     let mut daemons = Daemons::default();
     let (alpha, beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
+    // Without its daemon, which would otherwise sync at any moment and hear first, beta
+    // hears through `musubi sync`.
+    musubi_in(&env, &logs, &beta, &["daemon", "stop"]);
     let out = musubi_in(&env, &logs, &alpha, &["hub", "rm", "alpha"]);
     assert!(out.contains("Removed hive alpha"), "{out}");
     let err = musubi_fails(&env, &logs, &beta, &["sync"]);
@@ -728,6 +746,15 @@ fn copies_leave_a_removed_hive() {
     let list = musubi_in(&env, &logs, &beta, &["list"]);
     assert!(!list.contains("here:"), "{list}");
     assert!(log(&beta).contains("start"));
+    // Alpha's daemon hears when it next syncs, as after an operation here.
+    alpha.write_file("after", "after");
+    alpha.jj(&["status"]);
+    wait_for(&logs, "alpha's daemon to leave the hive", || {
+        !alpha.repo_path().join("musubi/hive.toml").exists()
+    });
+    let list = musubi_in(&env, &logs, &alpha, &["list"]);
+    assert!(!list.contains("here:"), "{list}");
+    assert!(log(&alpha).contains("start"));
 }
 
 /// With its hub gone, `musubi sync` through the daemon says why at once, as it does without

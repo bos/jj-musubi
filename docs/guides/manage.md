@@ -21,6 +21,50 @@ Run in a hive's repository, it adds that repository's details: its hive, hub, an
 name, where each machine's working copy is, and the latest head of the hub that this machine
 knows of.
 
+### Watch every machine
+
+`musubi list` knows only this machine's copies. `musubi top` asks the hubs, which hear from
+every machine's daemon after each sync, and refreshes every five seconds. On a terminal, it
+looks like this:
+
+```text
+musubi top: 1 hub, every 5s
+This machine's daemon is running, serving 2 repositories.
+Hub devbox: up 3h12m, musubi 0.1.0, 2 hives.
+Issues:
+  app: desktop not heard from in 6m: offline, or its daemon isn't running
+
+HIVE      HEAD  IN/s     OUT/s    OPS  COMMITS  MACHINES  ISSUES
+app       #412  12 KiB/s 40 KiB/s 96   51       2/3       1
+dotfiles  #88   0 B/s    0 B/s    3    1        1/1
+
+app since the hub started: received 4.1 MiB and sent 12 MiB; 96 operations, writing 51
+commits, came in, and 180 went out; 40 pushes moved the head, and 2 found it moved first.
+  MACHINE  HEARD   AT    MUSUBI  STATE
+  desktop  6m ago  #401  0.1.0   not heard from in 6m: offline, or its daemon isn't running
+  devbox   3s ago  #412  0.1.0   up to date
+  laptop   2s ago  #412  0.1.0   up to date
+
+  AGO     HEAD  FROM    OPS  COMMITS  WHAT
+  2s ago  #412  laptop  1    1        snapshot working copy
+```
+
+For each hive, it shows the bytes a second going into the hub and out, the operations and
+commits that came in since the hub started, and below, for the hive you choose with the arrow
+keys, each machine and the latest updates: which machine they came from, and what `jj op log`
+calls them. The issues at the top are what needs you: a hub out of reach, a hub failing
+requests, and machines offline, stuck behind, or failing to sync.
+[Troubleshooting](../troubleshooting.md#what-musubi-top-reports) says what to do about each.
+
+`q` quits, `r` refreshes now, and `+` and `-` refresh less or more often; `--interval` sets
+how often to start with. `--hub` watches one hub rather than all this machine knows.
+Without a terminal, or with `--once`, it prints what it sees once, without the rates, which
+need two looks.
+
+The hub keeps all this in memory, so it starts from nothing when the hub restarts, and a
+machine shows as heard from once its daemon next syncs, within half a minute. It forgets a
+machine it hasn't heard from in a day, which may have left the hive.
+
 ## Rename or remove a hive
 
 ```sh

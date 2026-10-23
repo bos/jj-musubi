@@ -3,6 +3,7 @@
 Start with `musubi list`, run in the repository. It shows whether the daemon is running,
 whether the hub is reachable, and for each copy on this machine, when it last synced or the
 error its last sync failed with. `musubi sync` syncs at once and prints any error itself.
+`musubi top` shows every machine's syncing at once, as the hub hears of it.
 
 For more, look at the daemon's log: `daemon.log` in musubi's state directory
 (`~/.local/state/musubi` on Linux and macOS), or under systemd, `journalctl --user -u
@@ -205,6 +206,50 @@ given. The daemon keeps trying. Fix the cause, and `musubi list` shows when it s
 
 The command synced the repository itself, but there's no daemon to keep it in sync. The
 message gives the reason. Start the daemon with `musubi daemon start` once it's fixed.
+
+## What `musubi top` reports
+
+### "... not heard from in 6m: offline, or its daemon isn't running"
+
+The machine's daemon reports to the hub after every sync, at least every half minute, and
+the hub has heard nothing from it for over two minutes. The machine is asleep or off the
+network, its daemon has stopped, or it can't reach the hub: run `musubi list` there, which
+says which. Nothing is lost meanwhile: it catches up when it reconnects. A machine reports
+only once a sync ends, so one in the middle of a long first sync shows like this too, and
+so, for a day, does a machine that left the hive or whose copy was deleted.
+
+### "... 3 heads behind for 2m"
+
+The machine reports to the hub, but hasn't caught up with what the hub accepted over a minute
+ago, though it syncs as soon as it hears of a new head. Look at its daemon's log (see the top
+of this page) for why.
+
+### "... sync failing: ..."
+
+The machine's last sync failed, for the reason quoted. Find the message on this page.
+
+### "... the hub failed a request 5m ago: ..."
+
+The hub couldn't answer a request for the hive in the last ten minutes, for the reason
+quoted; the hub's log says more. The machine that asked retries, and if it keeps failing, it
+shows as failing too.
+
+### "... the hub had trouble 5m ago: its store was damaged, so the hub made it again: ..."
+
+The hub found the hive's store corrupt, as after a power cut, and made it again, empty. The
+machines fill it again as they sync, and nothing is lost.
+
+### "not heard from since the hub started" or "not heard from in a day: it may have left the hive"
+
+The hive shows a workspace of this machine, but the hub hasn't heard from its daemon since
+the hub started, or in over a day. That's not an issue in itself: a machine that left the
+hive, or whose copy was deleted, still shows its workspace. A machine that's still in the
+hive is heard from once it next syncs, within half a minute.
+
+### "This machine's daemon isn't running; `musubi daemon start` starts it."
+
+Nothing keeps this machine's copies in sync. Start the daemon, and to have it start at login
+from now on, run `musubi daemon install`.
 
 ## The daemon
 

@@ -10,6 +10,7 @@ use bytes::Bytes;
 use jj_lib::object_id::ObjectId as _;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
+use musubi_hub::activity::Report;
 use musubi_hub::hub_dir::JoinChoice;
 use musubi_hub::hub_dir::JoinRequest;
 use musubi_hub::hub_dir::Joined;
@@ -82,6 +83,10 @@ async fn join(transport: &dyn Transport, request: JoinRequest) -> Result<Joined,
 async fn sync(repo: &TestRepo, transport: Arc<dyn Transport>, hive: &str) {
     let mut node = NodeRepo::open(&repo.repo_path(), &repo.settings()).unwrap();
     node.create_join_operation("musubi: join").unwrap();
+    sync_node(node, repo, transport, hive).await;
+}
+
+async fn sync_node(node: NodeRepo, repo: &TestRepo, transport: Arc<dyn Transport>, hive: &str) {
     let blobs = repo.repo_path().join("musubi/blobs");
     let rpc = format!("musubi.{hive}.rpc");
     let remote = RemoteHub::new(transport, rpc, &blobs, TIMEOUT).unwrap();
@@ -378,6 +383,93 @@ async fn a_request_that_panics_the_hub_gets_an_error() {
         hive_request(&*client, &hive, HubRequest::Protocol(fetch)).await,
         HubReply::Protocol(Reply::Fetched { .. })
     ));
+}
+
+/// The hub keeps account of what each hive's requests bring and take, the heads it
+/// accepts, the requests it fails, and what machines report, and tells it all at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_hub_keeps_account_of_its_hives() {
+    let env = TestEnv::new();
+    let dir = env.root().join("hub");
+    std::fs::create_dir(&dir).unwrap();
+    let network = MemoryNetwork::new(1, 1024 * 1024);
+    let server = HubServer::open(&dir).unwrap();
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(server.run(Arc::new(network.connect()), move || {
+        ready_tx.send(()).ok();
+    }));
+    ready_rx.await.unwrap();
+    let client: Arc<dyn Transport> = Arc::new(network.connect());
+    let alpha = env.init_repo("alpha");
+    alpha.write_file("a", "a");
+    alpha.jj(&["commit", "-m", "first"]);
+    let request = creating(join_request(&alpha));
+    let machine = request.machine.clone();
+    let hive = join(&*client, request).await.unwrap().hive.id;
+    sync(&alpha, client.clone(), &hive).await;
+    // A join brings the repository as it is, writing no commits; then a commit.
+    alpha.write_file("b", "b");
+    alpha.jj(&["commit", "-m", "second"]);
+    let node = NodeRepo::open(&alpha.repo_path(), &alpha.settings()).unwrap();
+    sync_node(node, &alpha, client.clone(), &hive).await;
+    let missing = HubRequest::Indirect {
+        blob: musubi_sync::blobs::BlobId::of_bytes(b"never uploaded"),
+    };
+    assert!(matches!(
+        hive_request(&*client, &hive, missing).await,
+        HubReply::Error(_)
+    ));
+    let report = Report {
+        machine: machine.clone(),
+        seq: 1,
+        error: Some("a sync failed".to_owned()),
+        version: "0.1.0".to_owned(),
+    };
+    let reported = HubWideRequest::Report {
+        hive: hive.clone(),
+        report: report.clone(),
+    };
+    assert_eq!(hub_wide(&*client, reported).await, HubWideReply::Noted);
+    let elsewhere = HubWideRequest::Report {
+        hive: uuid_like().to_owned(),
+        report: report.clone(),
+    };
+    assert!(matches!(
+        hub_wide(&*client, elsewhere).await,
+        HubWideReply::Error(m) if m.contains("no hive")
+    ));
+
+    let HubWideReply::Activity(activity) = hub_wide(&*client, HubWideRequest::Activity).await
+    else {
+        panic!("expected the activity");
+    };
+    let [activity] = activity.hives.as_slice() else {
+        panic!("expected one hive: {activity:?}");
+    };
+    let traffic = activity.traffic;
+    assert_eq!(activity.head, Some(2), "{activity:?}");
+    assert_eq!((traffic.accepted, traffic.failures), (2, 1), "{traffic:?}");
+    assert!(traffic.received > 0 && traffic.sent > 0, "{traffic:?}");
+    let failure = activity.failure.as_ref().unwrap();
+    assert!(failure.message.contains("no blob"), "{failure:?}");
+    assert!(failure.request, "{failure:?}");
+    let [second, first] = activity.recent.as_slice() else {
+        panic!("expected two heads: {activity:?}");
+    };
+    assert_eq!((second.seq, first.seq), (2, 1));
+    assert_eq!(first.commits, 0);
+    assert!(second.commits >= 1, "{second:?}");
+    assert!(second.description.starts_with("commit "), "{second:?}");
+    assert_eq!(traffic.ops_in, first.ops + second.ops);
+    assert_eq!(traffic.commits_in, second.commits);
+    let [seen] = activity.machines.as_slice() else {
+        panic!("expected one machine: {activity:?}");
+    };
+    assert_eq!(seen.key, machine);
+    assert_eq!(seen.name, "alpha");
+    assert!(seen.in_view);
+    assert_eq!(seen.report.as_ref(), Some(&report));
+    assert!(seen.behind.is_some(), "{seen:?}");
 }
 
 /// A hive whose store a power cut left corrupt is made again, empty, when the hub next opens

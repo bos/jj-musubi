@@ -16,13 +16,19 @@ use std::time::Duration;
 use std::time::SystemTime;
 
 use anyhow::Context as _;
+use bytes::Bytes;
 use futures::StreamExt as _;
 use jj_lib::object_id::ObjectId as _;
+use musubi_hub::activity::Report;
 use musubi_sync::driver::NodeDriver;
 use musubi_sync::remote::HiveGone;
 use musubi_sync::remote::RemoteHub;
 use musubi_sync::wire::Envelope;
+use musubi_sync::wire::HUB_TOKEN;
 use musubi_sync::wire::HeadNotice;
+use musubi_sync::wire::HubWideRequest;
+use musubi_sync::wire::rpc_subject;
+use musubi_transport::Transport;
 use serde::Deserialize;
 use serde::Serialize;
 use tarpc::server::Channel as _;
@@ -47,6 +53,7 @@ use crate::watch::OpHeadsWatcher;
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
+const REPORT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A repository's replication state, written after every sync attempt, by the daemon or by
 /// `musubi sync` without one.
@@ -450,7 +457,7 @@ async fn serve_async(
     let located = Located::find(workspace)?;
     let hive = HiveConfig::load(&located.repo_path)?
         .with_context(|| format!("{} is not part of a hive", workspace.display()))?;
-    let (connection, mut driver) = open_driver(&located, &hive).await?;
+    let (connection, mut driver, machine) = open_driver(&located, &hive).await?;
     let transport = connection.transport.clone();
     let mut notices = transport.subscribe(&hive.head_subject()).await?;
     let mut reconnections = transport.reconnections();
@@ -565,6 +572,13 @@ async fn serve_async(
         record(workspace, status, |status| {
             status.synced(reply.as_ref().err().cloned(), &synced);
         });
+        report(
+            &transport,
+            &hive,
+            &machine,
+            synced.seq,
+            reply.as_ref().err(),
+        );
         for waiter in waiting.drain(..) {
             waiter.send(reply.clone()).ok();
         }
@@ -603,6 +617,39 @@ async fn serve_async(
     }
 }
 
+/// Tells the hub how a sync went, for `musubi top`, without waiting for its answer: a sync
+/// that failed may have failed to reach it.
+fn report(
+    transport: &Arc<dyn Transport>,
+    hive: &HiveConfig,
+    machine: &str,
+    seq: u64,
+    error: Option<&String>,
+) {
+    let request = HubWideRequest::Report {
+        hive: hive.hive.to_string(),
+        report: Report {
+            machine: machine.to_owned(),
+            seq,
+            error: error.cloned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+        },
+    };
+    let Ok(payload) = Envelope::encode(request) else {
+        return;
+    };
+    let transport = transport.clone();
+    tokio::spawn(async move {
+        let subject = rpc_subject(HUB_TOKEN);
+        if let Err(err) = transport
+            .request(&subject, Bytes::from(payload), REPORT_TIMEOUT)
+            .await
+        {
+            tracing::debug!("could not report to the hub: {err}");
+        }
+    });
+}
+
 /// Makes the repository at `located` no longer part of `hive`, as `musubi leave` does,
 /// keeping everything it has: forgets its membership, and that this machine's daemon serves
 /// it. Returns false, doing nothing, if it isn't part of `hive` through the same hub (any
@@ -623,7 +670,7 @@ pub fn leave_hive(located: &Located, hive: &HiveConfig) -> anyhow::Result<bool> 
 async fn open_driver(
     located: &Located,
     hive: &HiveConfig,
-) -> anyhow::Result<(crate::hub::Connection, NodeDriver)> {
+) -> anyhow::Result<(crate::hub::Connection, NodeDriver, String)> {
     let connection = crate::hub::connect(&hive.hub, REQUEST_TIMEOUT).await?;
     let blobs = located.repo_path.join("musubi/blobs");
     let remote = RemoteHub::new(
@@ -632,8 +679,10 @@ async fn open_driver(
         &blobs,
         REQUEST_TIMEOUT,
     )?;
-    let driver = NodeDriver::new(located.open()?, remote)?;
-    Ok((connection, driver))
+    let repo = located.open()?;
+    let machine = repo.machine().key().to_owned();
+    let driver = NodeDriver::new(repo, remote)?;
+    Ok((connection, driver, machine))
 }
 
 /// The hive's head as `driver` knows it.
@@ -649,7 +698,7 @@ fn known(driver: &NodeDriver) -> Synced {
 /// `musubi list`.
 pub async fn sync_once(located: &Located, hive: &HiveConfig) -> anyhow::Result<Synced> {
     let mut status = Status::load(&located.repo_path).unwrap_or_default();
-    let (connection, mut driver) = match open_driver(located, hive).await {
+    let (connection, mut driver, _) = match open_driver(located, hive).await {
         Ok(opened) => opened,
         Err(err) => {
             status.failed(format!("{err:#}"));

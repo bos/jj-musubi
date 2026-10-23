@@ -22,6 +22,12 @@ two minutes, so each check runs once, run by whoever owns it.
   result, and say so.
 - After fixing what a review found, rerun only what the fixes can affect.
 
+## Tests
+
+Write new tests as docs/efficient-tests.md says. Restructure an existing test to fit it, or
+measure as it describes, only when making tests faster is the task; otherwise run the checks
+as above.
+
 ## Reviews
 
 Have a subagent review every fix before it is pushed, and fix what the review finds first.

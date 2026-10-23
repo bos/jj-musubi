@@ -1,5 +1,5 @@
 //! Frames from a byte stream (`musubi_transport::stream`): reading never panics, and each
-//! frame read encodes to one that reads back the same.
+//! frame read encodes to exactly the bytes it was read from.
 
 #![no_main]
 

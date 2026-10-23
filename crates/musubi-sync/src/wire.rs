@@ -235,7 +235,13 @@ impl<T: for<'de> Deserialize<'de>> Envelope<T> {
             PROTOCOL_VERSION,
             JJ_LIB_VERSION
         );
-        Ok(postcard::from_bytes(body)?)
+        let (body, rest) = postcard::take_from_bytes(body)?;
+        anyhow::ensure!(
+            rest.is_empty(),
+            "a message with {} bytes after its end",
+            rest.len()
+        );
+        Ok(body)
     }
 }
 
@@ -373,6 +379,15 @@ mod tests {
         let reply = HubReply::Error("no".to_owned());
         let bytes = Envelope::encode(reply.clone()).unwrap();
         assert_eq!(Envelope::<HubReply>::decode(&bytes).unwrap(), reply);
+    }
+
+    /// Nothing may follow a message, as nothing honest sends.
+    #[test]
+    fn bytes_after_a_message_are_refused() {
+        let mut bytes = Envelope::encode(HubReply::Error("no".to_owned())).unwrap();
+        bytes.push(0);
+        let err = Envelope::<HubReply>::decode(&bytes).unwrap_err();
+        assert!(err.to_string().contains("1 bytes after its end"), "{err}");
     }
 
     /// A message from another release is refused for its versions, even where this release

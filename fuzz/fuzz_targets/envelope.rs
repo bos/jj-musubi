@@ -1,5 +1,6 @@
-//! Messages (`musubi_sync::wire`): decoding never panics, and what decodes encodes to a
-//! message that decodes the same.
+//! Messages (`musubi_sync::wire`): decoding never panics; what decodes encodes to a message
+//! that decodes the same; and nothing may follow one. postcard takes varints longer than
+//! they need be, so a message may have more than one encoding.
 
 #![no_main]
 
@@ -40,7 +41,9 @@ where
     T: Clone + Debug + PartialEq + Serialize + for<'de> Deserialize<'de>,
 {
     if let Ok(body) = Envelope::<T>::decode(bytes) {
-        let encoded = Envelope::encode(body.clone()).unwrap();
+        let mut encoded = Envelope::encode(body.clone()).unwrap();
         assert_eq!(Envelope::<T>::decode(&encoded).unwrap(), body);
+        encoded.push(0);
+        assert!(Envelope::<T>::decode(&encoded).is_err());
     }
 }

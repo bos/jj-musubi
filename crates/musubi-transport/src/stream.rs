@@ -214,6 +214,7 @@ impl Frame {
             SUB => {
                 let sid = take_u64(&mut body)?;
                 let subject = take_str(&mut body)?;
+                take_end(&body)?;
                 Self::Sub { sid, subject }
             }
             PUB => {
@@ -253,6 +254,7 @@ impl Frame {
                 let id = take_u64(&mut body)?;
                 let code = take_u8(&mut body)?;
                 let message = take_str(&mut body)?;
+                take_end(&body)?;
                 Self::Fail { id, code, message }
             }
             kind => return Err(invalid(format!("a frame of unknown kind {kind}"))),
@@ -294,6 +296,14 @@ fn take_str(body: &mut Bytes) -> io::Result<String> {
         return Err(cut_short());
     }
     String::from_utf8(body.split_to(len).to_vec()).map_err(|_| invalid("a string that isn't UTF-8"))
+}
+
+/// The end of a frame with no payload, which nothing may follow.
+fn take_end(body: &Bytes) -> io::Result<()> {
+    if !body.is_empty() {
+        return Err(invalid("a frame longer than its fields"));
+    }
+    Ok(())
 }
 
 fn cut_short() -> io::Error {
@@ -896,20 +906,25 @@ fn failure(id: u64, err: TransportError) -> Frame {
 /// too, so that they're checked and linted with everything else.
 #[cfg(any(fuzzing, test))]
 pub mod fuzzing {
-    use bytes::Bytes;
-
-    use super::Frame;
     use super::read_frame;
 
     /// Reads frames from `stream` until it ends or one is malformed, checking that each
-    /// encodes to a frame that reads back as the same one.
-    pub async fn frames(mut stream: &[u8], limit: usize) {
-        while let Ok(Some(frame)) = read_frame(&mut stream, limit).await {
-            let encoded = frame.encode();
-            let len = u32::from_be_bytes([encoded[0], encoded[1], encoded[2], encoded[3]]);
-            assert_eq!(len as usize, encoded.len() - 4);
-            let decoded = Frame::decode(Bytes::from(encoded[4..].to_vec()));
-            assert_eq!(decoded.ok(), Some(frame));
+    /// encodes to exactly the bytes it was read from: a frame has one encoding. Returns how
+    /// many it read.
+    pub async fn frames(stream: &[u8], limit: usize) -> usize {
+        let mut rest = stream;
+        let mut read = 0;
+        loop {
+            let before = rest;
+            let Ok(Some(frame)) = read_frame(&mut rest, limit).await else {
+                return read;
+            };
+            assert_eq!(
+                frame.encode(),
+                &before[..before.len() - rest.len()],
+                "{frame:?}"
+            );
+            read += 1;
         }
     }
 }
@@ -965,6 +980,45 @@ mod tests {
         });
     }
 
+    /// Frames of every kind, read from a stream, encode to exactly the bytes they were read
+    /// from, as the fuzz target checks of any stream.
+    #[tokio::test]
+    async fn frames_encode_as_they_were_read() {
+        let frames = [
+            Frame::Sub {
+                sid: 7,
+                subject: "musubi.*.rpc".into(),
+            },
+            Frame::Pub {
+                subject: "musubi.hive.head".into(),
+                payload: Bytes::from_static(b"head"),
+            },
+            Frame::Req {
+                id: u64::MAX,
+                timeout: Duration::from_millis(u64::MAX),
+                subject: "s".repeat(usize::from(u16::MAX)),
+                payload: Bytes::new(),
+            },
+            Frame::Msg {
+                sid: 1,
+                subject: "musubi.hive.head".into(),
+                reply: None,
+                payload: Bytes::from_static(b"notice"),
+            },
+            Frame::Reply {
+                id: 3,
+                payload: Bytes::from_static(b"reply"),
+            },
+            Frame::Fail {
+                id: 4,
+                code: OTHER,
+                message: String::new(),
+            },
+        ];
+        let stream: Vec<u8> = frames.iter().flat_map(Frame::encode).collect();
+        assert_eq!(fuzzing::frames(&stream, 1 << 20).await, frames.len());
+    }
+
     #[test]
     fn long_messages_are_cut_to_fit() {
         let message = "é".repeat(40_000);
@@ -999,6 +1053,23 @@ mod tests {
         ]))
         .unwrap_err();
         assert!(err.to_string().contains("UTF-8"), "{err}");
+        // Nothing may follow the fields of a frame without a payload.
+        for frame in [
+            Frame::Sub {
+                sid: 7,
+                subject: "subject".into(),
+            },
+            Frame::Fail {
+                id: 4,
+                code: OTHER,
+                message: "it went wrong".into(),
+            },
+        ] {
+            let mut encoded = frame.encode();
+            encoded.push(0);
+            let err = Frame::decode(Bytes::from(encoded[4..].to_vec())).unwrap_err();
+            assert!(err.to_string().contains("longer than its fields"), "{err}");
+        }
     }
 
     #[tokio::test]

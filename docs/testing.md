@@ -164,11 +164,14 @@ The fault tests make malformed input from a real session. `fuzz/` holds coverage
 fuzz targets, run by libFuzzer through cargo-fuzz, that make it from nothing, for each
 decoder of what a peer sends. Each checks more than that nothing panics:
 
-- `frames`: frames read from a byte stream. Each encodes to one that reads back the same.
+- `frames`: frames read from a byte stream. Each encodes to exactly the bytes it was read
+  from, since a frame has only one encoding.
 - `greeting`: what the hub's machine prints before the hub greets. The greeting is found only
   at the end of a line, within the noise allowed before it.
 - `envelope`: messages of each kind, most behind this release's versions, which the fuzzer
-  would otherwise have to find first. One that decodes encodes to one that decodes the same.
+  would otherwise have to find first. One that decodes encodes to one that decodes the same,
+  and that encoding, with a byte after it, is refused. postcard takes varints longer than
+  they need be, so a message can have more than one encoding.
 - `bundle`: bundles, most behind the header. The records of one that reads, written to a
   bundle of their own, compressed or not, read back the same.
 - `canonical`: operations and views imported into a canonical store, under an id they don't

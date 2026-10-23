@@ -546,7 +546,7 @@ impl World {
     }
 
     /// The workspace that made the head operation, as `jj op log` shows it: `default@`,
-    /// `"default@beta"@` for another machine's, or nothing for an operation musubi made.
+    /// `beta/default@` for another machine's, or nothing for an operation musubi made.
     pub fn head_op_workspace(&self, m: usize) -> String {
         let heads = self.op_heads(m);
         let template = "workspace_name";

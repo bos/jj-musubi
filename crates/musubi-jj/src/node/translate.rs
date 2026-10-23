@@ -187,7 +187,7 @@ impl NodeRepo {
         Ok(())
     }
 
-    fn root_op_id(&self) -> &OperationId {
+    pub(super) fn root_op_id(&self) -> &OperationId {
         self.loader.op_store().root_operation_id()
     }
 }

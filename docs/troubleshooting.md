@@ -155,19 +155,18 @@ is paused for this repository
 
 `jj op abandon` removed operations that the hub, and so other machines, already have. musubi
 can't yet pass that on, and won't bring them back, so it stops syncing this repository.
-Abandoning only the operations from before this machine joined is fine.
+Abandoning only the operations from before this machine first joined is fine.
 
 A similar message, "operation ... realizes canonical operation ... but no longer has its
 parents (was `jj op abandon` run?)", has the same cause and the same remedy.
 
-The same message appears, with no `jj op abandon`, on the first sync after `musubi leave`
-and `musubi create` or `join`, if `jj` ran in the copy since its last sync. Follow the steps
-in [Replace or move a hub](guides/manage.md#replace-or-move-a-hub), which remove the record
-the message comes from.
-
 musubi can't yet sync this copy again. The other machines keep the operations you abandoned.
 To carry on here, run `musubi leave`, make a new copy with `musubi clone`, and bring across
 any work this copy made since its last sync.
+
+If `musubi join` or `musubi create` says this, the operations were abandoned while the copy
+was out of its hive, and it isn't in one: skip `musubi leave`. A `musubi create` that failed
+this way leaves an empty hive on the hub; remove it with `musubi hub rm`.
 
 ### "unknown field ... (written by a newer jj?)"
 

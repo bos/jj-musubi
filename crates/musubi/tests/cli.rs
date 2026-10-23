@@ -569,6 +569,79 @@ fn two_machines_with(
     (alpha, beta)
 }
 
+/// A copy that left its hive can join it again, even after jj has run in it since, and
+/// whether it first joined with its whole operation history or not: it carries on from the
+/// history it shared, which the hive has.
+#[test]
+fn a_copy_can_join_again_after_leaving() {
+    let env = TestEnv::new();
+    let mut logs = Logs::default();
+    let hub = Hub::start(&env, &mut logs);
+    // Stopped before the hub.
+    let mut daemons = Daemons::default();
+    let (alpha, beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
+    let gamma = env.init_repo("gamma");
+    logs.daemon_of(&env, &gamma);
+    daemons.of(&gamma);
+    fetch_history(&alpha, &gamma);
+    musubi_in(
+        &env,
+        &logs,
+        &gamma,
+        &["join", "--full-history", "--hub", &hub.url],
+    );
+    for (repo, name) in [(&beta, "beta"), (&gamma, "gamma")] {
+        musubi_in(&env, &logs, repo, &["leave"]);
+        let message = format!("made in {name} while out of the hive");
+        repo.write_file(name, name);
+        repo.jj(&["commit", "-m", &message]);
+        let out = musubi_in(&env, &logs, repo, &["join"]);
+        assert!(out.contains("Synced with the hub"), "{out}");
+        wait_for(
+            &logs,
+            &format!("alpha's daemon to fetch {name}'s commit"),
+            || try_log(&alpha).is_some_and(|log| log.contains(&message)),
+        );
+    }
+    // Every machine's working copy keeps its own name.
+    let list = alpha.jj(&["workspace", "list"]);
+    let listed: Vec<&str> = list.lines().filter_map(|l| l.split(':').next()).collect();
+    assert_eq!(listed, ["alpha", "beta/beta", "gamma/gamma"], "{list}");
+}
+
+/// A hive the hub has lost, here by `musubi hub rm`, is made again from the copies, which
+/// leave it and create and join a new one, each with work done since. Each copy carries on
+/// from its history, so every machine's working copy keeps its own name.
+#[test]
+fn copies_make_a_lost_hive_again() {
+    let env = TestEnv::new();
+    let mut logs = Logs::default();
+    let hub = Hub::start(&env, &mut logs);
+    // Stopped before the hub.
+    let mut daemons = Daemons::default();
+    let (alpha, beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
+    musubi_in(&env, &logs, &alpha, &["hub", "rm", "alpha"]);
+    for (repo, file) in [(&alpha, "from alpha"), (&beta, "from beta")] {
+        musubi_in(&env, &logs, repo, &["leave"]);
+        repo.write_file(file, file);
+        repo.jj(&["commit", "-m", file]);
+    }
+    musubi_in(&env, &logs, &alpha, &["create", "again"]);
+    musubi_in(&env, &logs, &beta, &["join"]);
+    wait_for(&logs, "the machines to share their work", || {
+        try_log(&alpha).is_some_and(|log| log.contains("from beta"))
+            && try_log(&beta).is_some_and(|log| log.contains("from alpha"))
+    });
+    for (repo, names) in [
+        (&alpha, ["alpha", "beta/beta"]),
+        (&beta, ["alpha/alpha", "beta"]),
+    ] {
+        let list = repo.jj(&["workspace", "list"]);
+        let listed: Vec<&str> = list.lines().filter_map(|l| l.split(':').next()).collect();
+        assert_eq!(listed, names, "{list}");
+    }
+}
+
 /// The daemon reopens the repository after a failed sync, so it carries on after changes
 /// an open repository can't follow, such as turning colocation off.
 #[test]

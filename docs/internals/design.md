@@ -302,7 +302,7 @@ disk: one that loses its state, to a power cut say, is deleted and made again, a
 machines' repositories fill the new one. For now, though, a node knows its hive only by an
 id the old hub made, which a new hub doesn't have, so each machine leaves the hive and
 joins one made again from the copies, by hand (docs/guides/manage.md, "Replace or move a
-hub"; issues #42 to #44).
+hub"; issue #44).
 
 A hub does that itself for a hive whose store it finds corrupt as it opens it: its heads
 file torn, say. The store goes under `removed/`, and the hive is made again, empty, under
@@ -438,6 +438,17 @@ canonicalizes to it. Earlier operations stay local. A repository
 that has been in use for years can have tens of thousands of operations, and every one of
 their views pins commits that would otherwise never need transferring, such as old
 working-copy snapshots. `--full-history` replicates everything instead.
+
+A repository that was part of a hive before, and left it, writes no join operation when it
+joins again, if its head descends from the history it shared (an operation canonicalized
+already, a realization, or a join point): that history is canonical already, and the head is
+canonicalized as any operation is, on top of it. A join operation on the root would hide
+that history from the head, and the head the old hub last accepted, which the node keeps,
+would no longer be reachable from it, which musubi takes for an op abandon, whichever hive
+the repository joins; and other machines' workspaces, no longer recognised as theirs, would
+come back as this machine's own. Joining a different hive therefore brings the old hive's
+shared history with it, its machines' workspaces included, which show on every machine of
+the new hive, as a machine's workspaces do once it stops syncing.
 
 Merging needs no special machinery. Every jj repository's operation log starts at the same
 root operation, so a joining node's history and the hive's history meet there. The joining

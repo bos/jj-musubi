@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::io::Write as _;
@@ -22,6 +23,7 @@ use jj_lib::repo::Repo as _;
 use jj_lib::revset::RevsetExpression;
 use pollster::FutureExt as _;
 
+use super::CANONICAL_ATTRIBUTE;
 use super::NodeError;
 use super::NodeRepo;
 use super::index_err;
@@ -91,6 +93,36 @@ impl NodeRepo {
         self.insert_map(local, canonical)
     }
 
+    /// Whether `head` descends from history this repository shared with a hive: an operation
+    /// canonicalized already, a realization of another machine's, or a join point, as
+    /// `canonicalize` knows them.
+    fn descends_from_canonical(&self, head: &OperationId) -> Result<bool, NodeError> {
+        // A repository that never shared anything has none, and needn't walk its history.
+        // The canonical store, unlike the translation cache, is never lost.
+        if self.joins.is_empty() && !self.canonical.has_operations()? {
+            return Ok(false);
+        }
+        let op_store = self.loader.op_store();
+        let mut seen = HashSet::new();
+        let mut stack = vec![head.clone()];
+        while let Some(id) = stack.pop() {
+            if id == *self.root_op_id() || !seen.insert(id.clone()) {
+                continue;
+            }
+            if self.canonical_of(&id).is_some() {
+                return Ok(true);
+            }
+            let op = op_store.read_operation(&id).block_on()?;
+            if op.metadata.attributes.contains_key(CANONICAL_ATTRIBUTE)
+                || self.joins.contains_key(&fingerprint(&op))
+            {
+                return Ok(true);
+            }
+            stack.extend(op.parents);
+        }
+        Ok(false)
+    }
+
     /// Creates the canonical operation that replicates this repository's current state in
     /// place of its operation history, and records that the current op head canonicalizes
     /// to it. See "Joining" in docs/internals/design.md.
@@ -98,6 +130,14 @@ impl NodeRepo {
         let head = self.merge_heads()?;
         if let Some(canonical) = self.canonical_of(&head) {
             return Ok(canonical);
+        }
+        // A repository that was part of a hive before, and left, has canonical history
+        // already: if its head descends from it, carry on from it, as any operation does. A
+        // join operation on the root would hide that history from the head, and the head the
+        // old hub last accepted, which this node keeps, would no longer be reachable from it:
+        // which musubi takes for an op abandon, whichever hive the repository joins.
+        if self.descends_from_canonical(&head)? {
+            return self.canonicalize(&head);
         }
         let op = self.loader.op_store().read_operation(&head).block_on()?;
         self.check_format(&head, &op)?;

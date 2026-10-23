@@ -55,9 +55,9 @@ musubi leave
 
 That leaves the repository on that machine without a working copy.
 
-To sync a copy again after it has left, follow steps 2 to 4 of [Replace or move a
-hub](#replace-or-move-a-hub). Joining without them fails if `jj` has run in the copy since it
-left.
+To sync a copy again after it has left, run `musubi join` in it. It carries on from the
+history it shared, so a copy that joins a different hive brings its old hive's history along,
+and the new hive's machines show the old hive's working copies too.
 
 To stop using musubi on a machine altogether:
 
@@ -100,24 +100,7 @@ machine's copy in turn:
    musubi leave
    ```
 
-2. Forget the other machines' workspaces, which the new hive will bring back. List them with
-   `jj workspace list`; they're the ones named after machines:
-
-   ```sh
-   jj workspace forget laptop/default desktop/default
-   ```
-
-3. Remove the copy's record of what the old hub last accepted, `accepted_base`, in the
-   repository's `.jj/repo/musubi` directory:
-
-   ```sh
-   rm .jj/repo/musubi/accepted_base
-   ```
-
-   Without this, if `jj` has run in the copy since its last sync, the first sync with the new
-   hive fails, saying that the operation history the hub accepted is no longer reachable.
-
-4. On the first machine, start the hive, giving its old name, since a new hive is named after
+2. On the first machine, start the hive, giving its old name, since a new hive is named after
    the repository's remote:
 
    ```sh
@@ -130,8 +113,8 @@ machine's copy in turn:
    musubi join --hub newbox
    ```
 
-Working copies, commits, and bookmarks come through unchanged. The operation log keeps the old
-hive's operations, and gains each machine's join to the new one.
+Each copy carries on from its own operation log, so working copies, commits, bookmarks, and
+the history the old hive had all come through unchanged.
 
 If the hub moved, each machine's default hub, which commands use without `--hub`, is still
 the old one, and `musubi list` goes on showing it. Change `hub` in `config.toml` (see

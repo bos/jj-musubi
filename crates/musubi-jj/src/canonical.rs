@@ -227,6 +227,23 @@ impl CanonicalStore {
         }
     }
 
+    /// Whether any operation but the root is stored.
+    pub fn has_operations(&self) -> Result<bool, CanonicalError> {
+        let dir = self.path.join("operations");
+        for entry in fs::read_dir(&dir).map_err(io_err(&dir))? {
+            let entry = entry.map_err(io_err(&dir))?;
+            if entry
+                .file_name()
+                .to_str()
+                .and_then(OperationId::try_from_hex)
+                .is_some()
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Every stored operation except the root, in no particular order.
     pub fn operation_ids(&self) -> Result<Vec<OperationId>, CanonicalError> {
         let dir = self.path.join("operations");

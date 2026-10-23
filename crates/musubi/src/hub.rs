@@ -237,13 +237,36 @@ pub async fn interrupted() {
 /// A connection to a hub, and over ssh, what keeps it from working while it doesn't.
 pub struct Connection {
     pub transport: Arc<dyn Transport>,
-    health: Option<ssh::Health>,
+    place: Place,
+}
+
+/// Where a hub is.
+enum Place {
+    /// The directory of a hub on this machine.
+    Local(PathBuf),
+    /// An ssh destination, and what ssh says of it.
+    Ssh { hub: String, health: ssh::Health },
 }
 
 impl Connection {
     /// Why the hub can't be reached now, as far as ssh says.
     fn problem(&self) -> Option<String> {
-        self.health.as_ref().and_then(ssh::Health::problem)
+        match &self.place {
+            Place::Local(_) => None,
+            Place::Ssh { health, .. } => health.problem(),
+        }
+    }
+
+    /// Why the hub can't be reached, for a transport that has lost its connection, in the
+    /// words of the commands that connect to it: what a hub's socket on this machine says
+    /// now, or what ssh last said, without running it again. `None` if nothing says so.
+    pub async fn out_of_reach(&self) -> Option<String> {
+        match &self.place {
+            Place::Local(dir) => open_local(dir).await.err().map(|err| format!("{err:#}")),
+            Place::Ssh { hub, health } => {
+                health.problem().map(|problem| out_of_reach(hub, &problem))
+            }
+        }
     }
 
     /// `err`, with why the hub can't be reached, if ssh says.
@@ -276,32 +299,43 @@ pub fn absolute(hub: &str) -> String {
 /// Connects to `hub`, an ssh destination or the directory of a hub on this machine, giving
 /// up after `limit`.
 pub async fn connect(hub: &str, limit: Duration) -> anyhow::Result<Connection> {
-    let out_of_reach = |problem: Option<String>| match problem {
-        Some(problem) => anyhow::anyhow!("the hub at {hub} is out of reach: {problem}"),
+    let unreachable = |problem: Option<String>| match problem {
+        Some(problem) => anyhow::anyhow!(out_of_reach(hub, &problem)),
         None => anyhow::anyhow!("the hub at {hub} is out of reach"),
     };
     if is_local(hub) {
         let dir = PathBuf::from(hub);
         // Nothing to wait for if no hub is serving it.
         let first = Mutex::new(Some(open_local(&dir).await?));
-        let local = Local { dir, first };
+        let local = Local {
+            dir: dir.clone(),
+            first,
+        };
         let transport = tokio::time::timeout(limit, StreamTransport::connect(Arc::new(local)))
             .await
-            .map_err(|_| out_of_reach(None))??;
+            .map_err(|_| unreachable(None))??;
         return Ok(Connection {
             transport: Arc::new(transport),
-            health: None,
+            place: Place::Local(dir),
         });
     }
     let link = ssh::Link::new(hub)?;
     let health = link.health();
     let transport = tokio::time::timeout(limit, StreamTransport::connect(Arc::new(link)))
         .await
-        .map_err(|_| out_of_reach(health.problem()))??;
+        .map_err(|_| unreachable(health.problem()))??;
     Ok(Connection {
         transport: Arc::new(transport),
-        health: Some(health),
+        place: Place::Ssh {
+            hub: hub.to_owned(),
+            health,
+        },
     })
+}
+
+/// That the hub at `hub` is out of reach, and why.
+fn out_of_reach(hub: &str, problem: &str) -> String {
+    format!("the hub at {hub} is out of reach: {problem}")
 }
 
 /// Opens connections to a hub on this machine, through its socket.

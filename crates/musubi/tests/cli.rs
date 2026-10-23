@@ -642,6 +642,39 @@ fn copies_make_a_lost_hive_again() {
     }
 }
 
+/// With its hub gone, `musubi sync` through the daemon says why at once, as it does without
+/// a daemon, rather than once the sync's requests time out, and `musubi list` says it too.
+#[test]
+fn a_sync_says_at_once_that_the_hub_is_gone() {
+    let env = TestEnv::new();
+    let mut logs = Logs::default();
+    let mut hub = Hub::start(&env, &mut logs);
+    // Stopped before the hub.
+    let mut daemons = Daemons::default();
+    let alpha = env.init_repo("alpha");
+    logs.daemon_of(&env, &alpha);
+    daemons.of(&alpha);
+    alpha.write_file("a", "a");
+    alpha.jj(&["commit", "-m", "start"]);
+    musubi_in(&env, &logs, &alpha, &["create", "--hub", &hub.url]);
+    hub.kill();
+    let started = Instant::now();
+    let err = musubi_fails(&env, &logs, &alpha, &["sync"]);
+    assert!(err.contains("no hub is serving"), "{err}");
+    assert!(started.elapsed() < Duration::from_secs(10), "{err}");
+    let list = musubi_in(&env, &logs, &alpha, &["list"]);
+    assert!(list.contains("sync failing: no hub is serving"), "{list}");
+    // As soon as the hub is back, a sync goes through: what the daemon knew is not stale.
+    hub = Hub::start(&env, &mut logs);
+    assert!(
+        hub.greeting.starts_with("Serving 1 hive"),
+        "{}",
+        hub.greeting
+    );
+    let out = musubi_in(&env, &logs, &alpha, &["sync"]);
+    assert!(out.contains("Synced (hive at #"), "{out}");
+}
+
 /// The daemon reopens the repository after a failed sync, so it carries on after changes
 /// an open repository can't follow, such as turning colocation off.
 #[test]

@@ -708,6 +708,10 @@ impl Transport for StreamTransport {
         Reconnections::watching(self.shared.reconnected.subscribe())
     }
 
+    fn connected(&self) -> bool {
+        *self.shared.connected.borrow()
+    }
+
     fn max_payload(&self) -> usize {
         self.shared.lock().max_payload
     }

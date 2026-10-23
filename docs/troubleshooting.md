@@ -56,8 +56,9 @@ echo "restrict,command=\"musubi hub connect\" $(cat ~/.local/state/musubi/hub_ke
 ### "the hub at devbox is out of reach", "no hub is serving ...", or "request timed out"
 
 No hub answered. Check that `musubi hub` is running on the hub's machine, and start it if
-not. The daemons reconnect by themselves. A sync that goes through the daemon waits about
-half a minute for the hub, then says only `request timed out`.
+not. `musubi sync` and `musubi list` say why the hub is out of reach. The daemons reconnect by
+themselves: within a few seconds for a hub on the same machine, and within about a minute over
+ssh, which waits longer between tries after each failure.
 
 If the hub runs with `--dir`, other machines can't find it: `musubi hub connect`, which they
 run over ssh, finds the hub that `musubi hub` last served without `--dir`. Add `--dir <dir>`

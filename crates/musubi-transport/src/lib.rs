@@ -107,6 +107,11 @@ pub trait Transport: Send + Sync {
         Reconnections::never()
     }
 
+    /// Whether it has a connection now. One that never loses it always has.
+    fn connected(&self) -> bool {
+        true
+    }
+
     /// The largest payload the transport accepts.
     fn max_payload(&self) -> usize;
 

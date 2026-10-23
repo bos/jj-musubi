@@ -455,6 +455,8 @@ async fn serve_async(
     // Whether the connection coming back has cut short a wait to retry since the last sync
     // that worked.
     let mut woke_early = false;
+    // Why the hub was out of reach when last asked, to log once rather than at every retry.
+    let mut unreachable: Option<String> = None;
     tracing::info!("serving in hive {}", hive.display_name());
     loop {
         // After a failure, try again once the backoff has passed, rather than waiting for
@@ -493,6 +495,36 @@ async fn serve_async(
                 },
             }
         };
+        // While the hub is out of reach, a sync could only wait for its requests to time
+        // out. Say why instead, to `musubi list` and to any command waiting, and wait for
+        // the connection to come back, or for the backoff to pass. A reconnection from now
+        // on ends the wait.
+        reconnections.seen();
+        if !transport.connected()
+            && let Some(why) = connection.out_of_reach().await
+        {
+            if unreachable.as_ref() != Some(&why) {
+                tracing::warn!("{why}");
+            }
+            record(workspace, status, |status| status.failed(why.clone()));
+            for waiter in waiting.drain(..) {
+                waiter.send(Err(why.clone())).ok();
+            }
+            unreachable = Some(why);
+            retry = true;
+            // Nothing failed here, so nothing need start over; and the connection coming
+            // back always ends the wait, since no sync ran that could lose it again.
+            let stopped = tokio::select! {
+                stopped = pause(backoff, commands, waiting) => stopped,
+                () = reconnections.next() => false,
+            };
+            if stopped {
+                return Ok(());
+            }
+            backoff = (backoff * 2).min(MAX_BACKOFF);
+            continue;
+        }
+        unreachable = None;
         tracing::debug!("syncing after {trigger}");
         let started = std::time::Instant::now();
         // Reconnecting during the sync, which may miss announcements, calls for another.
@@ -500,7 +532,7 @@ async fn serve_async(
         let result = driver.sync().await;
         tracing::debug!("sync took {:?}", started.elapsed());
         let synced = known(&driver);
-        // Over ssh, why the hub is out of reach says more than a timeout.
+        // Why the hub is out of reach, if the connector knows, says more than a timeout.
         let result = result.map_err(|err| connection.explain(err));
         let reply = match &result {
             Ok(_) => Ok(synced.clone()),

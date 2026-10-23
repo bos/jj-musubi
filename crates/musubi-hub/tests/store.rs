@@ -7,9 +7,12 @@ use std::path::Path;
 use std::process::Command;
 use std::process::Stdio;
 
+use hegel::TestCase;
+use hegel::generators as gs;
 use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::OperationId;
+use musubi_hub::store;
 use musubi_hub::store::HubStore;
 use musubi_hub::store::StoreError;
 use musubi_jj::node::NodeRepo;
@@ -257,6 +260,38 @@ fn torn_heads_are_corrupt() {
             matches!(HubStore::open(&hub_dir), Err(StoreError::CorruptHead(_))),
             "{torn:?} was taken"
         );
+    }
+}
+
+/// Whatever a crash or a disk did to the files naming a store's backend and heads, the store
+/// opens as it was, or fails as a corrupt one, to be made again.
+#[hegel::test(test_cases = 100)]
+fn damaged_stores_open_or_are_corrupt(tc: TestCase) {
+    let dir = tempfile::tempdir().unwrap();
+    let hub_dir = dir.path().join("hub");
+    let root = HubStore::init(&hub_dir, Backend::Simple)
+        .unwrap()
+        .head()
+        .1
+        .clone();
+    let file = hub_dir.join(if tc.draw(gs::booleans()) {
+        "heads"
+    } else {
+        "backend"
+    });
+    let mut bytes = std::fs::read(&file).unwrap();
+    for _ in 0..tc.draw(gs::integers::<u8>().min_value(1).max_value(3)) {
+        let at = tc.draw(gs::integers::<usize>().max_value(bytes.len()));
+        match tc.draw(gs::integers::<u8>().max_value(2)) {
+            0 => bytes.truncate(at),
+            1 if at < bytes.len() => bytes[at] = tc.draw(gs::integers::<u8>()),
+            _ => bytes.insert(at, tc.draw(gs::integers::<u8>())),
+        }
+    }
+    std::fs::write(&file, &bytes).unwrap();
+    match HubStore::open(&hub_dir) {
+        Ok(store) => assert_eq!(store.head(), (0, &root)),
+        Err(err) => assert!(store::is_corrupt(&err), "{err:?} is not corrupt"),
     }
 }
 

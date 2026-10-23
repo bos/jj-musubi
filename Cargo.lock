@@ -2802,6 +2802,7 @@ name = "musubi-hub"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "hegeltest",
  "jj-lib",
  "musubi-jj",
  "musubi-testutil",

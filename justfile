@@ -101,6 +101,26 @@ bench-smoke: dev
 property:
     cargo nextest run --workspace --profile search
 
+# Run a fuzz target until stopped, or as libFuzzer's options say: `just fuzz bundle
+# -max_total_time=300`. See "Fuzzing" in docs/testing.md.
+fuzz target *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Nightly's cargo and rustc, ahead of any others on PATH.
+    rustc=$(rustup which --toolchain nightly rustc)
+    PATH="$(dirname "$rustc"):$PATH"
+    cargo fuzz run {{target}} -- {{args}}
+
+# Run every fuzz target briefly, so that they keep up with the code. It finds little.
+fuzz-smoke:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rustc=$(rustup which --toolchain nightly rustc)
+    PATH="$(dirname "$rustc"):$PATH"
+    for target in $(cargo fuzz list); do
+        cargo fuzz run "$target" -- -runs=2000
+    done
+
 # Mutation testing of the protocol core against its property and conformance tests. Each
 # mutant runs against the oracle built here, not one it builds for itself.
 mutants: oracle

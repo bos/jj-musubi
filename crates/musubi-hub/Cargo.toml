@@ -19,6 +19,7 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+hegeltest.workspace = true
 musubi-testutil.workspace = true
 tempfile.workspace = true
 

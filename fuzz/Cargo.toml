@@ -1,0 +1,58 @@
+[package]
+name = "musubi-fuzz"
+description = "Fuzz targets for the decoders of what musubi's peers send (see \"Fuzzing\" in docs/testing.md)"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# Apart from the main workspace: libFuzzer builds only on nightly, with sanitizers.
+[workspace]
+
+[dependencies]
+jj-lib = { version = "=0.46.0", default-features = false, features = ["git"] }
+libfuzzer-sys = "0.4"
+musubi-jj = { path = "../crates/musubi-jj" }
+musubi-sync = { path = "../crates/musubi-sync" }
+musubi-transport = { path = "../crates/musubi-transport" }
+pollster = "1.0.1"
+serde = "1"
+tempfile = "3"
+
+[[bin]]
+name = "bundle"
+path = "fuzz_targets/bundle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "canonical"
+path = "fuzz_targets/canonical.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "envelope"
+path = "fuzz_targets/envelope.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "frames"
+path = "fuzz_targets/frames.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "greeting"
+path = "fuzz_targets/greeting.rs"
+test = false
+doc = false
+bench = false

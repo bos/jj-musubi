@@ -57,20 +57,7 @@ impl NodeRepo {
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
             Err(source) => return Err(NodeError::Io { path, source }),
         };
-        Ok(String::from_utf8_lossy(&bytes)
-            .lines()
-            .filter_map(|line| {
-                let [local, canonical, fingerprint] = *line.split(' ').collect::<Vec<_>>() else {
-                    return None;
-                };
-                whole_id(fingerprint)?;
-                Some((
-                    whole_id(local)?,
-                    whole_id(canonical)?,
-                    fingerprint.to_owned(),
-                ))
-            })
-            .collect())
+        Ok(parse_joins(&bytes))
     }
 
     fn record_join(
@@ -185,6 +172,24 @@ impl NodeRepo {
     }
 }
 
+/// The records of a joins file, one for each whole line.
+fn parse_joins(bytes: &[u8]) -> Vec<(OperationId, OperationId, String)> {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .filter_map(|line| {
+            let [local, canonical, fingerprint] = *line.split(' ').collect::<Vec<_>>() else {
+                return None;
+            };
+            whole_id(fingerprint)?;
+            Some((
+                whole_id(local)?,
+                whole_id(canonical)?,
+                fingerprint.to_owned(),
+            ))
+        })
+        .collect()
+}
+
 /// What identifies an operation apart from its parents: its view, metadata, and the
 /// rewrites it records. `jj op abandon` changes only the parents of the operations it
 /// rewrites.
@@ -194,4 +199,42 @@ pub(super) fn fingerprint(op: &StoreOperation) -> String {
         ..op.clone()
     };
     OperationId::new(blake2b_hash(&without_parents).to_vec()).hex()
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use hegel::TestCase;
+    use hegel::generators as gs;
+
+    use super::*;
+
+    fn id(byte: u8) -> OperationId {
+        OperationId::new(vec![byte; 64])
+    }
+
+    /// Among whole lines, any torn anywhere names nothing, the last perhaps unended: the
+    /// whole ones are read, in order.
+    #[hegel::test(test_cases = 200)]
+    fn torn_joins_lose_only_themselves(tc: TestCase) {
+        let lines = tc.draw(gs::integers::<u8>().max_value(6));
+        let (mut text, mut whole) = (String::new(), vec![]);
+        for i in 0..lines {
+            let (local, canonical) = (id(3 * i), id(3 * i + 1));
+            let fingerprint = id(3 * i + 2).hex();
+            let line = format!("{} {} {fingerprint}", local.hex(), canonical.hex());
+            if tc.draw(gs::booleans()) {
+                let cut = tc.draw(gs::integers::<usize>().max_value(line.len() - 1));
+                text.push_str(&line[..cut]);
+            } else {
+                text.push_str(&line);
+                whole.push((local, canonical, fingerprint));
+            }
+            if i + 1 < lines || tc.draw(gs::booleans()) {
+                text.push('\n');
+            }
+        }
+        assert_eq!(parse_joins(text.as_bytes()), whole);
+    }
 }

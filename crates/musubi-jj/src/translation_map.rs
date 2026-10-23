@@ -130,6 +130,9 @@ pub(crate) fn whole_id(hex: &str) -> Option<OperationId> {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
+    use hegel::TestCase;
+    use hegel::generators as gs;
+
     use super::*;
 
     fn id(byte: u8) -> OperationId {
@@ -158,5 +161,46 @@ mod tests {
         assert_eq!(map.local_of(&b), Some(&a));
         assert_eq!(map.local_of(&d), Some(&c));
         assert_eq!(map.local_of(&f), Some(&e));
+    }
+
+    /// Among whole lines, any torn anywhere names nothing, the last perhaps unended: the
+    /// whole ones are read, and none is lost to a line inserted after them.
+    #[hegel::test(test_cases = 200)]
+    fn torn_lines_lose_only_themselves(tc: TestCase) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("translation");
+        let lines = tc.draw(gs::integers::<u8>().max_value(6));
+        let (mut text, mut whole, mut torn) = (String::new(), vec![], vec![]);
+        for i in 0..lines {
+            let (local, canonical) = (id(2 * i), id(2 * i + 1));
+            let line = format!("{} {}", local.hex(), canonical.hex());
+            if tc.draw(gs::booleans()) {
+                let cut = tc.draw(gs::integers::<usize>().max_value(line.len() - 1));
+                text.push_str(&line[..cut]);
+                torn.push(local);
+            } else {
+                text.push_str(&line);
+                whole.push((local, canonical));
+            }
+            if i + 1 < lines || tc.draw(gs::booleans()) {
+                text.push('\n');
+            }
+        }
+        fs::write(&path, &text).unwrap();
+        let mut map = TranslationMap::open(&path).unwrap();
+        for (local, canonical) in &whole {
+            assert_eq!(map.canonical_of(local), Some(canonical));
+            assert_eq!(map.local_of(canonical), Some(local));
+        }
+        for local in &torn {
+            assert_eq!(map.canonical_of(local), None);
+        }
+        let (local, canonical) = (id(0xfe), id(0xff));
+        map.insert(local.clone(), canonical.clone()).unwrap();
+        drop(map);
+        let map = TranslationMap::open(&path).unwrap();
+        for (local, canonical) in whole.iter().chain([&(local, canonical)]) {
+            assert_eq!(map.canonical_of(local), Some(canonical));
+        }
     }
 }

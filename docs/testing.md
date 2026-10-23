@@ -11,6 +11,7 @@ test belongs at the narrowest layer that can catch its bug.
 | Unit tests | `#[cfg(test)]` modules | Pure logic: URL normalization and hive names across forges, matching joining repositories to hives | Microseconds |
 | Example tests | each crate's `tests/` | jj integration details: translation, git refs, objects, joins, transports, the hub's hives, the CLI | ~0.2–0.5 s per test |
 | Fault tests | `crates/musubi-sync/tests/it/faults.rs` | Malformed requests reaching the hub's decoders, and links that die or stall partway through a sync | ~0.2–1.5 s per test |
+| Fuzz targets | `fuzz/` | Bytes no honest peer sends reaching the decoders of frames, messages, bundles, and imported operations and views | Minutes to hours a run; opt-in |
 | Generated end-to-end tests | `crates/musubi-sync/tests/e2e_search` | Everything interacting: real `jj` commands, real repositories, faults | Seconds per case; opt-in |
 
 The costs are for one test among the rest of the suite on Linux, on 32 cores.
@@ -42,11 +43,20 @@ A Hegel state machine owns a hub and several nodes, all of them sans-IO state ma
 - environment: a node makes a local operation on some local parent, not necessarily a head;
   a node merges its heads;
 - delivery: deliver, drop, duplicate, or delay a chosen in-flight message;
-- failure: crash a node or the hub, keeping only persistent state;
+- failure: crash a node or the hub, keeping only persistent state; or send the hub back to
+  an earlier head, as a power cut that loses the last heads it accepted would (`hubRegress`
+  in the oracle). A node whose own request gets a reply with a head older than it knows, or
+  another at the same sequence number, starts over from that reply (`loseKnown`, then
+  `learn`);
 - progress: let a node take its next policy step.
 
 After every rule the test checks the model's safety invariants: HubClosed, HubMonotone,
-NodeClosed, Locality, and MergeOwnership. A final `quiesce` step stops environment actions,
+NodeClosed, Locality, MergeOwnership, that a node stages only operations the hub accepted
+(staged-is-accepted), and that the head a node knows is in the hub's history
+(KnownIsHubHistory). Once the hub has gone back, Locality, staged-is-accepted and
+KnownIsHubHistory are checked against its history together with the heads it lost, and
+MergeOwnership no longer is: two nodes can then merge the same heads
+(`formal/Musubi/RegressScenario.lean`). A final `quiesce` step stops environment actions,
 makes the network reliable, and runs every node's policy until nothing changes. The test then
 checks liveness: every node's heads are `{hub.head}`, and every created operation is in its
 ancestry. A bound on quiescence steps turns livelock into a failure.
@@ -148,6 +158,39 @@ transport frames each message with its length and drops an incomplete one. A kil
 musubi as a lost request or reply, which the link faults model. The truncated messages
 stand for a buggy or mismatched peer.
 
+## Fuzzing
+
+The fault tests make malformed input from a real session. `fuzz/` holds coverage-guided
+fuzz targets, run by libFuzzer through cargo-fuzz, that make it from nothing, for each
+decoder of what a peer sends. Each checks more than that nothing panics:
+
+- `frames`: frames read from a byte stream. Each encodes to one that reads back the same.
+- `greeting`: what the hub's machine prints before the hub greets. The greeting is found only
+  at the end of a line, within the noise allowed before it.
+- `envelope`: messages of each kind, most behind this release's versions, which the fuzzer
+  would otherwise have to find first. One that decodes encodes to one that decodes the same.
+- `bundle`: bundles, most behind the header. The records of one that reads, written to a
+  bundle of their own, compressed or not, read back the same.
+- `canonical`: operations and views imported into a canonical store, under an id they don't
+  hash to and then under the one they do, which reaches the checks past the hash. One
+  admitted reads back as what it hashes to, and none, admitted or refused, leaves the store
+  holding anything that isn't what its name says. A panic in jj-lib, which panics on some
+  malformed input, counts as a refusal, as it does on the hub; a panic anywhere else fails.
+
+`just fuzz bundle` runs one until stopped, and takes libFuzzer's options after the target, as
+in `just fuzz bundle -max_total_time=300`; `just fuzz-smoke` runs each briefly, to check that
+they still build and run. They need `cargo-fuzz` and a nightly toolchain from rustup. `fuzz/`
+is a workspace of its own, so that `just check` neither builds nor lints it; its targets reach
+private code only through `cfg(fuzzing)` modules, which cargo-fuzz sets, and which tests build
+too, so that `just check` checks them. Corpora and crashes
+stay in `fuzz/`, unversioned, and the files the targets write go in `/dev/shm`.
+
+The files musubi appends lines to have Hegel properties beside their parsers instead. In the
+translation map and the joins, among whole lines, any torn anywhere names nothing, and the
+whole ones are read. The hub's log of heads, cut where a line ends, reads as the heads before
+the cut, and cut anywhere else is corrupt; and a store whose `heads` or `backend` a crash or a
+disk damaged opens as it was or is corrupt, to be made again, never failing as if for now.
+
 ## Generated end-to-end tests
 
 Modeled on jj-stack's generated integration tests. A Hegel state machine drives two or three
@@ -166,8 +209,10 @@ between them get explored:
   through an upload.
 - **Faults**: restart a node, losing its protocol state; crash one, losing its caches, its
   translation cache too, or realizations it was still writing, or crash it partway through
-  realizing what a sync fetched; restart the hub; or lose the reply to a request the hub
-  handled. Faults are capped per sequence, so that a short walk still reaches recovery.
+  realizing what a sync fetched; restart the hub, or send it back, dropping the last one to
+  three lines of its `heads` before it restarts, as a power cut would (`hub_goes_back`); or
+  lose the reply to a request the hub handled. Faults are capped per sequence, so that a
+  short walk still reaches recovery.
 
 After each rule, every repository must still load, and `jj status` must succeed. At the end,
 `converge` syncs every node to a fixed point, then checks:

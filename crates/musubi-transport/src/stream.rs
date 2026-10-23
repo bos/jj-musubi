@@ -892,6 +892,28 @@ fn failure(id: u64, err: TransportError) -> Frame {
     Frame::Fail { id, code, message }
 }
 
+/// Entry points for fuzz/, which reach frames without making them public. Tests build them
+/// too, so that they're checked and linted with everything else.
+#[cfg(any(fuzzing, test))]
+pub mod fuzzing {
+    use bytes::Bytes;
+
+    use super::Frame;
+    use super::read_frame;
+
+    /// Reads frames from `stream` until it ends or one is malformed, checking that each
+    /// encodes to a frame that reads back as the same one.
+    pub async fn frames(mut stream: &[u8], limit: usize) {
+        while let Ok(Some(frame)) = read_frame(&mut stream, limit).await {
+            let encoded = frame.encode();
+            let len = u32::from_be_bytes([encoded[0], encoded[1], encoded[2], encoded[3]]);
+            assert_eq!(len as usize, encoded.len() - 4);
+            let decoded = Frame::decode(Bytes::from(encoded[4..].to_vec()));
+            assert_eq!(decoded.ok(), Some(frame));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

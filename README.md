@@ -170,6 +170,7 @@ changes, and anything else to do on upgrading.
 ```sh
 just check      # fmt, clippy, Lean proofs and oracle, tests, docs, cargo-deny, machete, typos
 just property   # the generated end-to-end search (slow)
+just fuzz bundle  # one fuzz target, until stopped (needs cargo-fuzz and nightly Rust)
 ```
 
 Needs `cargo-nextest`, `cargo-deny`, `cargo-machete`, `typos`, and Lean with `lake` on

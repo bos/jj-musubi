@@ -519,3 +519,45 @@ fn append_head(dir: &Path, seq: u64, head: &OperationId) -> Result<(), StoreErro
     file.write_all(format!("{seq} {}\n", head.hex()).as_bytes())
         .map_err(io_err(&path))
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use std::fmt::Write as _;
+
+    use hegel::TestCase;
+    use hegel::generators as gs;
+
+    use super::*;
+
+    /// A log cut where a line ends, keeping one, reads as the heads before the cut; cut
+    /// anywhere else, or to nothing, it is corrupt.
+    #[hegel::test(test_cases = 200)]
+    fn a_cut_log_reads_only_where_a_line_ends(tc: TestCase) {
+        let dir = tempfile::tempdir().unwrap();
+        let count = tc.draw(gs::integers::<u8>().min_value(1).max_value(12));
+        let heads: Vec<OperationId> = (0..count).map(|i| OperationId::new(vec![i; 64])).collect();
+        let mut text = String::new();
+        let mut ends = vec![0];
+        for (seq, head) in heads.iter().enumerate() {
+            writeln!(text, "{seq} {}", head.hex()).unwrap();
+            ends.push(text.len());
+        }
+        let cut = if tc.draw(gs::booleans()) {
+            ends[tc.draw(gs::integers::<usize>().max_value(ends.len() - 1))]
+        } else {
+            tc.draw(gs::integers::<usize>().max_value(text.len()))
+        };
+        fs::write(dir.path().join("heads"), &text[..cut]).unwrap();
+        match ends.iter().position(|&end| end == cut) {
+            Some(lines) if lines > 0 => {
+                assert_eq!(read_heads(dir.path()).unwrap(), heads[..lines]);
+            }
+            _ => assert!(matches!(
+                read_heads(dir.path()),
+                Err(StoreError::CorruptHead(_))
+            )),
+        }
+    }
+}

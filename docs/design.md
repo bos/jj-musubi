@@ -303,9 +303,10 @@ Since an empty hub fills up this way, a hub needn't be durable, and it syncs not
 one that loses its state, to a power cut say, is deleted and made again, and the machines'
 repositories fill the new one.
 
-Two hubs running at once for the same hive (split brain) is the one case where duplicate
-merges can occur, if nodes on both sides reconnect to one hub at the same moment. Epochs make
-that case detectable.
+Duplicate merges can occur in two cases. One is two hubs running at once for the same hive
+(split brain), if nodes on both sides reconnect to one hub at the same moment; epochs make
+that case detectable. The other is a hub going back to a head it accepted earlier, having
+lost later ones to a power cut (docs/protocol.md, "Network and failures").
 
 ## Objects
 

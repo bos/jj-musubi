@@ -349,28 +349,31 @@ end createOp
 
 /-! ## `UserOp` -/
 
-/-- Characterization of `max(heads \ {p} ∪ {o})`. -/
-theorem userOp_heads_iff {s : State} (hI : Inv N s) {n p : Nat} (hp : (s.node n).lops p)
+/-- Characterization of `max(heads \ {p} ∪ {o})`, from the facts about the universe and node
+`n` it needs. -/
+theorem userOp_heads_iff_of {s : State} {n p : Nat} (hlt : ParLt s.U.par)
+    (hpl : p < s.U.next) (hHlt : ∀ y, (s.node n).heads y → y < s.U.next)
+    (hAnti : ∀ x y, (s.node n).heads x → (s.node n).heads y → Anc s.U.par x y → x = y)
     {y : Nat} :
     maxSet (upd s.U.par s.U.next [p])
         (fun y => ((s.node n).heads y ∧ y ≠ p) ∨ y = s.U.next) y ↔
       y = s.U.next ∨ ((s.node n).heads y ∧ y ≠ p ∧ ¬ Anc s.U.par y p) := by
   have hLlt : ∀ q ∈ [p], q < s.U.next := by
-    intro q hq; simp at hq; subst hq; exact hI.lLt n q hp
-  have hlt' := parLt_upd hI.parLt hLlt
+    intro q hq; simp at hq; subst hq; exact hpl
+  have hlt' := parLt_upd hlt hLlt
   have T : ∀ {a x : Nat}, x < s.U.next →
       (Anc (upd s.U.par s.U.next [p]) a x ↔ Anc s.U.par a x) :=
-    fun hx => anc_upd_iff hI.parLt hLlt hx
+    fun hx => anc_upd_iff hlt hLlt hx
   have Tnew : ∀ {a : Nat}, Anc (upd s.U.par s.U.next [p]) a s.U.next ↔
       a = s.U.next ∨ Anc s.U.par a p := by
-    intro a; rw [anc_upd_new hI.parLt hLlt]; simp
+    intro a; rw [anc_upd_new hlt hLlt]; simp
   constructor
   · rintro ⟨hy, hmax⟩
     rcases hy with ⟨hh, hne⟩ | hy
     · right
       refine ⟨hh, hne, fun hA => ?_⟩
       have := hmax s.U.next (Or.inr rfl) (Tnew.2 (Or.inr hA))
-      have := hI.headsLt hh
+      have := hHlt _ hh
       omega
     · exact Or.inl hy
   · rintro (hy | ⟨hh, hne, hna⟩)
@@ -378,16 +381,24 @@ theorem userOp_heads_iff {s : State} (hI : Inv N s) {n p : Nat} (hp : (s.node n)
       refine ⟨Or.inr rfl, fun z hz hA => ?_⟩
       rcases hz with ⟨hz, -⟩ | hz
       · have h1 := hA.le hlt'
-        have h2 := hI.headsLt hz
+        have h2 := hHlt _ hz
         omega
       · exact hz.symm
     · refine ⟨Or.inl ⟨hh, hne⟩, fun z hz hA => ?_⟩
       rcases hz with ⟨hz, -⟩ | hz
-      · exact hI.headsAnti n y z hh hz ((T (hI.headsLt hz)).1 hA)
+      · exact hAnti y z hh hz ((T (hHlt _ hz)).1 hA)
       · subst hz
         rcases Tnew.1 hA with h | h
-        · have := hI.headsLt hh; omega
+        · have := hHlt _ hh; omega
         · exact absurd h hna
+
+/-- Characterization of `max(heads \ {p} ∪ {o})`. -/
+theorem userOp_heads_iff {s : State} (hI : Inv N s) {n p : Nat} (hp : (s.node n).lops p)
+    {y : Nat} :
+    maxSet (upd s.U.par s.U.next [p])
+        (fun y => ((s.node n).heads y ∧ y ≠ p) ∨ y = s.U.next) y ↔
+      y = s.U.next ∨ ((s.node n).heads y ∧ y ≠ p ∧ ¬ Anc s.U.par y p) :=
+  userOp_heads_iff_of hI.parLt (hI.lLt n p hp) (fun _ h => hI.headsLt h) (hI.headsAnti n)
 
 theorem inv_userOp {s : State} (hI : Inv N s) {n p : Nat} {O : List Nat} (hn : n < N)
     (hp : (s.node n).lops p) : Inv N (s.userOp n p O) := by

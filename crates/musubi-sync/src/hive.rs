@@ -99,6 +99,9 @@ impl Hive {
             }
             Reply::Head { .. } => {}
         }
+        if self.members[node].core.hub_went_back(&handled.reply) {
+            self.restart(node);
+        }
         self.reply(node, handled.reply)?;
         if let Some((seq, head)) = handled.publish {
             for target in 0..self.members.len() {

@@ -363,6 +363,26 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
         }
     }
 
+    /// Whether `reply`, to this node's own request, says that the hub has gone back: to a
+    /// head older than the one this node knows, or to another with the same sequence
+    /// number. A hub that keeps what it accepts never does, since it answers a request only
+    /// after everything this node learned before sending it, but one that lost heads, as a
+    /// power cut can make it, does. Taking such a reply for a stale one would leave the
+    /// node deaf to the hub's announcements, and pushing what the hub rejects, again and
+    /// again: it [`restart`](Self::restart)s, and takes the reply. A notification can be
+    /// stale, and never counts.
+    pub fn hub_went_back<A>(&self, reply: &Reply<O, A>) -> bool {
+        let (seq, head) = match reply {
+            Reply::Head {
+                kind: HeadKind::Notify,
+                ..
+            }
+            | Reply::Objects { .. } => return false,
+            Reply::Head { seq, head, .. } | Reply::Fetched { seq, head, .. } => (*seq, head),
+        };
+        seq < self.known.0 || (seq == self.known.0 && *head != self.known.1)
+    }
+
     /// Forgets everything volatile, as a restart does.
     pub fn restart(&mut self, root: O) {
         *self = Self::new(root);
@@ -387,4 +407,45 @@ fn all_reach<O: Hash + Eq>(head: &O, ops: &[OpEntry<O>]) -> bool {
         }
     }
     reached.len() == parents.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn head(kind: HeadKind, seq: u64, head: u32) -> Reply<u32, ()> {
+        Reply::Head { kind, seq, head }
+    }
+
+    #[test]
+    fn a_reply_older_than_what_the_node_knows_says_the_hub_went_back() {
+        let mut core = NodeCore::new(0);
+        core.known = (4, 40);
+        for kind in [
+            HeadKind::Head,
+            HeadKind::Accepted,
+            HeadKind::Rejected,
+            HeadKind::Incomplete,
+        ] {
+            assert!(core.hub_went_back(&head(kind, 3, 30)), "{kind:?}");
+            assert!(core.hub_went_back(&head(kind, 4, 41)), "{kind:?}");
+            assert!(!core.hub_went_back(&head(kind, 4, 40)), "{kind:?}");
+            assert!(!core.hub_went_back(&head(kind, 5, 50)), "{kind:?}");
+        }
+        let fetched = |seq, head| Reply::Fetched {
+            seq,
+            head,
+            ops: vec![],
+            ops_attachment: (),
+            objects: (),
+        };
+        assert!(core.hub_went_back(&fetched(0, 0)));
+        assert!(!core.hub_went_back(&fetched(4, 40)));
+        // A notification can be stale, and an `Objects` reply names no head.
+        assert!(!core.hub_went_back(&head(HeadKind::Notify, 3, 30)));
+        assert!(!core.hub_went_back(&Reply::<u32, ()>::Objects {
+            for_ops: vec![],
+            attachment: (),
+        }));
+    }
 }

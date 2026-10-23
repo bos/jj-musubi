@@ -105,7 +105,10 @@ These happen outside musubi, through `jj`:
 
 - `Learn(s, h)`: on receiving `Head`, `Accepted`, `Rejected`, `Incomplete`, or `Fetched`
   carrying `(s, h)`, if `s > known.seq` then `known := (s, h)`. Stale and duplicated
-  notifications are therefore harmless.
+  notifications are therefore harmless. A reply to the node's own request is never stale,
+  though, unless the hub has gone back (see "Network and failures"): one with
+  `s < known.seq`, or with `s = known.seq` and `h ≠ known.head`, makes the node restart,
+  forgetting `known`, and then learn `(s, h)`.
 - `Fetch`: send `Fetch(base, H)`, where `base` is any local operation the node knows the
   hub accepted, and `H` names objects of its heads. So that the node is never sent what it
   has, `base` is the newest `known.head` that was local and in `anc*(heads)`, which
@@ -159,6 +162,13 @@ therefore takes one round trip, and one that pushes takes two.
 - The hub can crash. It must keep `head`, `seq`, and `closure(head)`, persisting a head
   change before replying. It may lose, or garbage-collect, any operations and objects
   outside `closure(head)`, and upload sessions.
+- musubi's hub persists nothing synchronously, though, so a power cut can lose the last
+  heads it accepted: the hub goes back to one it accepted earlier, with its sequence
+  number. The safety properties below that rest on the hub's history only growing
+  (HubMonotone, KnownIsHubHistory, Locality, MergeOwnership) can then fail, and two nodes
+  can merge the same heads. The rest hold still. So does liveness: nodes that knew the lost
+  heads follow the hub back, by the rule in `Learn`, and once it stops going back they
+  converge on it, with every operation any node created in `anc*(hub.head)`.
 
 ## Properties
 
@@ -215,7 +225,10 @@ limit travels inline in its message, which takes no session at all.
 
 ## Verification
 
-`formal/` proves every property above in Lean, for any number of nodes. The proofs found no
+`formal/` proves every property above in Lean, for any number of nodes, and
+`formal/Musubi/Regress.lean` what still holds of a hub that goes back: its head stays closed,
+its history a chain from the root, each node's repository closed, and the nodes converge
+once it stops going back, whatever order they take their steps in. The proofs found no
 counterexamples. They did make several requirements in this document more precise (the `Cas`
 order, the `Fetch` guard, what must be durable, keying sessions by blob id).
 [conformance.md](conformance.md) describes how the Rust implementation is checked against

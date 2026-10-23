@@ -108,6 +108,15 @@ impl NodeDriver {
             }
         };
         let reply = self.remote.call(request).await?;
+        if self.core.hub_went_back(&reply) {
+            let (seq, head) = self.core.known();
+            tracing::warn!(
+                "the hub has gone back from {seq} ({}), having lost heads it accepted: \
+                 starting over from where it is",
+                short(head)
+            );
+            self.restart();
+        }
         let incomplete = matches!(
             reply,
             Reply::Head {

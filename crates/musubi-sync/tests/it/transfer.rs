@@ -326,3 +326,43 @@ fn views_travel_as_deltas() {
         "a {view}-byte view: {uploaded} bytes up, {downloaded} down"
     );
 }
+
+/// A hub that lost the last heads it accepted, as a power cut can make it, goes back to an
+/// older one. Nodes that knew the lost heads follow it, rather than pushing against it, again
+/// and again, and ignoring what it announces: even once it has accepted another head with
+/// the sequence number of one they knew.
+#[test]
+fn nodes_follow_a_hub_that_went_back() {
+    let env = TestEnv::new();
+    let alpha = env.init_repo("alpha");
+    let beta = env.init_repo("beta");
+    let hub_dir = env.root().join("hub");
+    let mut hive = Hive::new(&hub_dir, Backend::Git).unwrap();
+    let a = join(&mut hive, &alpha);
+    let b = join(&mut hive, &beta);
+    for i in 0..3 {
+        alpha.write_file("f", &format!("{i}"));
+        alpha.jj(&["commit", "-m", &format!("before {i}")]);
+        hive.sync(a).unwrap();
+        hive.sync(b).unwrap();
+    }
+    let before = hive.hub.store().head().0;
+    let heads = hub_dir.join("heads");
+    let text = std::fs::read_to_string(&heads).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    std::fs::write(&heads, lines[..lines.len() - 2].join("\n") + "\n").unwrap();
+    hive.restart_hub().unwrap();
+    assert_eq!(hive.hub.store().head().0, before - 2);
+    beta.write_file("g", "beta");
+    beta.jj(&["commit", "-m", "from beta"]);
+    hive.sync(b).unwrap();
+    assert_eq!(hive.hub.store().head().0, before - 1);
+    alpha.write_file("f", "after");
+    alpha.jj(&["commit", "-m", "from alpha"]);
+    hive.sync(a).unwrap();
+    hive.sync(b).unwrap();
+    assert!(beta.jj(&["log", "-r", "all()"]).contains("from alpha"));
+    assert!(alpha.jj(&["log", "-r", "all()"]).contains("from beta"));
+    assert_eq!(hive.members[a].core.known(), hive.members[b].core.known());
+    assert_eq!(hive.members[a].core.known().0, hive.hub.store().head().0);
+}

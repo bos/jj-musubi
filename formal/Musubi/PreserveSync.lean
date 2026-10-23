@@ -164,8 +164,10 @@ theorem inv_realize {s : State} (hI : Inv N s) {n x : Nat} (hx : (s.node n).sops
     · exact hI.locality n y hy
     · exact Or.inr hxa
 
-/-- Characterization of `max(heads ∪ {k})` when `k ∉ anc*(heads)`. -/
-theorem advance_heads_iff {s : State} (hI : Inv N s) {n : Nat}
+/-- Characterization of `max(heads ∪ {k})` when `k ∉ anc*(heads)`, from the heads being an
+antichain. -/
+theorem advance_heads_iff_of {s : State} {n : Nat}
+    (hAnti : ∀ x y, (s.node n).heads x → (s.node n).heads y → Anc s.U.par x y → x = y)
     (hna : ¬ ∃ h, (s.node n).heads h ∧ Anc s.U.par (s.node n).known.2 h) {y : Nat} :
     maxSet s.U.par (fun y => (s.node n).heads y ∨ y = (s.node n).known.2) y ↔
       y = (s.node n).known.2 ∨ ((s.node n).heads y ∧ ¬ Anc s.U.par y (s.node n).known.2) := by
@@ -183,8 +185,15 @@ theorem advance_heads_iff {s : State} (hI : Inv N s) {n : Nat}
       · exact hz.symm
     · refine ⟨Or.inl hy, fun z hz hA => ?_⟩
       rcases hz with hz | hz
-      · exact hI.headsAnti n y z hy hz hA
+      · exact hAnti y z hy hz hA
       · subst hz; exact absurd hA hnk
+
+/-- Characterization of `max(heads ∪ {k})` when `k ∉ anc*(heads)`. -/
+theorem advance_heads_iff {s : State} (hI : Inv N s) {n : Nat}
+    (hna : ¬ ∃ h, (s.node n).heads h ∧ Anc s.U.par (s.node n).known.2 h) {y : Nat} :
+    maxSet s.U.par (fun y => (s.node n).heads y ∨ y = (s.node n).known.2) y ↔
+      y = (s.node n).known.2 ∨ ((s.node n).heads y ∧ ¬ Anc s.U.par y (s.node n).known.2) :=
+  advance_heads_iff_of (hI.headsAnti n) hna
 
 theorem inv_advance {s : State} (hI : Inv N s) {n : Nat}
     (hk : (s.node n).lops (s.node n).known.2)

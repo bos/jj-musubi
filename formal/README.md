@@ -44,6 +44,7 @@ The binary is `formal/.lake/build/bin/oracle`.
 | `Musubi/Safety.lean` | The safety properties and no-feedback. |
 | `Musubi/Liveness.lean` | The reliable policy model `PStep`, simulation into the async model, the measure, progress, termination and convergence. |
 | `Musubi/Merged.lean` | The merged `Push` and `Fetch` exchanges reach states that agree with policy steps on everything the measure and convergence depend on. |
+| `Musubi/Regress.lean` | A hub that goes back to an earlier accepted head, as a power cut or a remade hive makes it: the extended system `RStep`, the invariant that survives, and convergence once the hub stops going back. |
 | `Musubi/Chunks.lean` | The chunked-blob model, its safety and its liveness. |
 | `Musubi/Scenario.lean` | A concrete reachable run: a lost Cas race, then fetch, advance, merge, and the merge accepted. It shows the model is not vacuous. |
 | `Musubi/Exec.lean` | The executable model: finite `EState`, the `Action` vocabulary of `docs/conformance.md`, and `execStep`. |
@@ -138,6 +139,37 @@ Merged requests (`Merged.lean`):
 
 `Converged N s` means that every node `n < N` has `heads = {hub.head}` and
 `known = (hub.seq, hub.head)`.
+
+A hub that goes back (`Regress.lean`). `protocol.md` requires the hub to keep `head`, `seq` and
+`closure(head)`; musubi's hub syncs nothing to disk, so it may not. `hubRegress` sets
+`head := hist i` and `seq := i` for any `i ≤ seq`; `RStep` is `Step` or `hubRegress`, and
+`RReachable` its reachable states. Making a hive again, empty, is `hubRegress` to 0 followed
+by `hubForget` (`remake_reachable`). The invariant `InvR` keeps the universe, the hub's
+history and closure, and each node's repository, but not what relates nodes to the hub's
+history, so Locality, MergeOwnership, HubMonotone and KnownIsHubHistory are not claimed
+there: after the hub goes back, nodes can hold operations the hub no longer has, and two
+nodes can merge the same heads.
+
+- `invR_reachable`: `InvR` holds in every `RReachable` state.
+- `rhubClosed`, `rhubHistory`, `rnodeClosed`, `rnoFeedback`: HubClosed, the history chain,
+  NodeClosed and no feedback, with a hub that goes back.
+- `pstepR_reachable`, `progressR`, `measureR_decreases`, `no_infinite_policy_runR`,
+  `eventually_convergesR`, `maximal_run_convergesR`, `terminal_iff_convergedR`,
+  `converged_all_acceptedR`: liveness once the hub stops going back, for the policy `PStepR`.
+  It differs from `PStep` in two steps. A node learns the head in a reply to its own request
+  whenever it differs from the one it knows, older or not (`learnUnfiltered`, which has the
+  effect of `loseKnown` then `learn`), and it realizes only below a head in the hub's current
+  history (`Consistent`), as it does after a `Fetch` whose reply it has learned. Once
+  converged, every operation any node created is in `anc*(hub.head)`: a hive made again
+  fills from its machines.
+
+The measure is `(nodes not good, inconsistent nodes, Σ staleness of consistent nodes,
+Σ missing ops, Σ pending advances, Σ pending merges)`. A node is good when its `known` is in
+the hub's current history and it has one head, accepted and comparable with every head in
+that history. The dirty count of `Liveness.lean` does not work here: after the hub goes
+back, a node can hold two accepted heads that are not comparable, and merging them makes it
+dirty. A good node stays good under every policy step of every node, and an accepted push
+makes its node good, so the hub head moves at most once per node that is not good.
 
 Chunked blobs (`Chunks.lean`, with `hash` assumed injective):
 

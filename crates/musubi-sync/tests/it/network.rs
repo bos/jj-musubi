@@ -367,3 +367,55 @@ async fn prepared_blobs_go_once_downloaded() {
         })
         .await;
 }
+
+/// A hub restarted having lost the last heads it accepted, as a power cut can make it,
+/// without the nodes' connections dropping: drivers that knew the lost heads follow it back,
+/// rather than ignoring it until it passes them, or pushing against it without end
+/// (`transfer::nodes_follow_a_hub_that_went_back`).
+#[tokio::test(flavor = "current_thread")]
+async fn drivers_follow_a_hub_that_went_back() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let env = TestEnv::new();
+            let alpha = env.init_repo("alpha");
+            let beta = env.init_repo("beta");
+            let network = MemoryNetwork::new(13, 1 << 20);
+            let dir = env.root().join("hub");
+            let serve = |hub: HubAdapter| {
+                let service = HubService::new(hub, &dir).unwrap();
+                let transport = Arc::new(network.connect());
+                tokio::task::spawn_local(async move {
+                    serve_hive(service, transport, (RPC, HEAD), || {})
+                        .await
+                        .unwrap();
+                })
+            };
+            let serving = serve(HubAdapter::init(&dir, Backend::Git).unwrap());
+            let timeout = Duration::from_secs(10);
+            let mut drivers = [
+                driver(&alpha, Arc::new(network.connect()), timeout),
+                driver(&beta, Arc::new(network.connect()), timeout),
+            ];
+            for i in 0..3 {
+                alpha.write_file("f", &format!("{i}"));
+                alpha.jj(&["commit", "-m", &format!("before {i}")]);
+                converge(&mut drivers).await;
+            }
+            serving.abort();
+            serving.await.unwrap_err();
+            let heads = dir.join("heads");
+            let text = std::fs::read_to_string(&heads).unwrap();
+            let lines: Vec<&str> = text.lines().collect();
+            std::fs::write(&heads, lines[..lines.len() - 2].join("\n") + "\n").unwrap();
+            let _serving = serve(HubAdapter::open(&dir).unwrap());
+            alpha.write_file("f", "after");
+            alpha.jj(&["commit", "-m", "after"]);
+            tokio::time::timeout(Duration::from_secs(60), converge(&mut drivers))
+                .await
+                .expect("the nodes never settled");
+            assert_eq!(visible(&alpha), visible(&beta));
+            assert!(visible(&beta).contains("after"));
+        })
+        .await;
+}

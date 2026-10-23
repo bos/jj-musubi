@@ -100,7 +100,7 @@ impl GitObjects {
     /// `refs/musubi/head/`, are for git's bitmap index (see [`Self::mark_head`]). Only
     /// [`Self::maintain`] and [`Self::mark_head`] consolidate it. Nor does git sync what it
     /// writes there, as it does packs and refs by default: a hub needn't be durable (see
-    /// "Moving the hub" in docs/design.md).
+    /// "Replacing the hub" in docs/design.md).
     pub fn init_bare(executable: &Path, git_dir: &Path) -> Result<Self, ObjectError> {
         // Not through `run`: GIT_DIR must not be set when the repository does not exist yet.
         // In the files ref format, whatever git's default, since gix reads the hub's refs

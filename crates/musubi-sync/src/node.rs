@@ -283,7 +283,7 @@ impl LocalRepo for NodeAdapter {
         // jj never makes an operation unreachable from the op heads except through
         // `jj op abandon`. Replicating the rewritten history would put the abandoned
         // operations back on every other machine, so stop instead (docs/design.md,
-        // "Abandoning operations and garbage collection").
+        // "Abandoning operations").
         let base = self.accepted_base()?;
         let mut reachable = false;
         for head in &heads {

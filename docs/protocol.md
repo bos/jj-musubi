@@ -70,10 +70,10 @@ Each request takes one round trip. Bulky payloads (operations and objects) trave
 they are small, and otherwise as chunked blobs (see [Chunked blobs](#chunked-blobs)). At this
 level of the protocol each is atomic.
 
-The formal model also has finer-grained requests, which earlier versions of musubi sent:
-`GetHead`, `PutOps`, `PutObjects`, `GetOpsSince(head, base)` for `head = known.head`, and
-`Cas`. A `Push` is `PutOps`, `PutObjects` and `Cas` handled together. Safety is proved for
-nodes that send any of them.
+The formal model also has finer-grained requests, which musubi doesn't send: `GetHead`,
+`PutOps`, `PutObjects`, `GetOpsSince(head, base)` for `head = known.head`, and `Cas`. A
+`Push` is `PutOps`, `PutObjects` and `Cas` handled together. Safety is proved for nodes that
+send any of them.
 
 ## Node
 
@@ -170,8 +170,8 @@ therefore takes one round trip, and one that pushes takes two.
   heads it accepted: the hub goes back to one it accepted earlier, with its sequence
   number, or, when what it lost leaves a hive's store corrupt, to the root, making the hive
   again, empty. The model takes what the hub keeps to be intact; a hive whose store a power
-  cut tore in a way it doesn't notice is made again by hand (docs/design.md, "Moving the
-  hub"). The safety properties below that rest on the hub's history only growing
+  cut tore in a way it doesn't notice is made again by hand (docs/design.md, "Replacing
+  the hub"). The safety properties below that rest on the hub's history only growing
   (HubMonotone, KnownIsHubHistory, Locality, MergeOwnership) can then fail, and two nodes
   can merge the same heads. The rest hold still. So does liveness: nodes that knew the lost
   heads follow the hub back, by the rule in `Learn`, and once it stops going back they
@@ -246,8 +246,8 @@ the model.
 `canon(L)` maps a local operation to its canonical form:
 
 - If `L` carries the attribute `musubi.canonical = C`, then `canon(L) = C`.
-- If `L` is the join point recorded by `musubi join`, then `canon(L)` is the join operation
-  recorded with it.
+- If `L` is the join point recorded by `musubi create` or `musubi join`, then `canon(L)` is
+  the join operation recorded with it.
 - Otherwise `canon(L)` is `L` with its view's `git_refs` and `git` remote removed, its parents
   replaced by their `canon`, and stored in the canonical op store.
 

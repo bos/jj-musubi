@@ -21,21 +21,21 @@ The chain has three links:
    model does. The executable model therefore never accepts anything the proofs don't cover.
 2. **Executable model to oracle.** `formal/Oracle.lean` is a thin JSON wrapper around
    `execStep`, built by `lake build oracle`. It contains no protocol logic of its own.
-3. **Oracle to Rust.** The Hegel conformance tests in `crates/musubi-core/tests/conformance.rs`
-   run the Rust hub and nodes, translate every step they take into model actions, and check
-   each one with the oracle. They fail on any action the oracle rejects, or any difference
+3. **Oracle to Rust.** The Hegel test `conformance`, in `crates/musubi-core/tests/protocol.rs`,
+   runs the Rust hub and nodes, translates every step they take into model actions, and checks
+   each one with the oracle. It fails on any action the oracle rejects, or any difference
    between the Rust state and the oracle's state. Hegel shrinks failures to a minimal trace.
 
 ## The abstraction
 
-The conformance tests run the real Rust core (`HubCore`, `NodeCore`, and their message
-handling) against test implementations of its storage traits. These keep exactly the
+The conformance test runs the real Rust core (the hub's `hub::handle` and `NodeCore`) against
+test implementations of its storage traits, in `tests/support/model.rs`. These keep exactly the
 model's state:
 
 | Model | Rust test implementation |
 | --- | --- |
 | Universe: `next`, `par`, `objs` | the test's operation table; operation and object ids are small integers, root `0` |
-| Hub `ops`, `objs`, `head`, `seq` | `FakeHubStorage` |
+| Hub `ops`, `objs`, `head`, `seq` | `FakeHub` |
 | Node `lops`, `lobj`, `heads`, `known`, `sops`, `sobj` | `FakeRepo` (`lops`…`sobj`) and `NodeCore` (`known`) |
 | `net`, the set of every message sent | the test's network: a set, so any message can be delivered any number of times, or never |
 
@@ -160,8 +160,8 @@ cargo nextest run -p musubi-core     # protocol_invariants and conformance
 The conformance test runs `lake build oracle` first, so that the oracle matches the model;
 it does nothing when the oracle is up to date. The oracle binary is
 `formal/.lake/build/bin/oracle`. Setting `MUSUBI_ORACLE` to another binary skips the build,
-as CI does with the one it has just built.
-`formal/test/run_smoke.sh` replays a fixed two-node run through it.
+as CI does with the one it has just built. `formal/test/run_smoke.sh` replays a fixed
+two-node run through it.
 
 The test makes 150 cases on CI, where it runs as a job of its own, and 50 elsewhere, where
 it would otherwise take most of `just test`'s time. `MUSUBI_CONFORMANCE_CASES` sets the
@@ -180,12 +180,8 @@ Deliberately broken versions of the core, each caught:
 | Node realizes an operation before its objects arrive | invariants and conformance |
 | Node learns a head whose `seq` equals the one it knows | conformance only: harmless, but not a model step |
 
-`just mutants` (cargo-mutants over `hub.rs` and `node.rs`) leaves no surviving mutant out
-of 61. Earlier versions had survivors; tests that killed them added a lying hub, a hub that
-forgets unaccepted uploads, a directed test for re-uploading after a forgotten upload, and a
-node that crashes after staging operations but before staging their objects. Without that
-crash no node ever lacked the objects of an operation it had staged, so nothing checked
-that it asks for them.
+`just mutants` runs cargo-mutants over `hub.rs` and `node.rs`; the property and conformance
+tests should kill every mutant it makes.
 
 ## How Rust events map to model actions
 

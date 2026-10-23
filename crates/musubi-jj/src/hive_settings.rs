@@ -5,8 +5,8 @@
 //! is in each machine's git config. So musubi records the hive's settings in an attribute
 //! of an operation it makes whenever they change, and replicates them like any operation.
 //! Each setting carries the time it was written, by the writing machine's clock, and where
-//! machines disagree, the later write wins (docs/settings-merge.md). Clock skew can make
-//! the wrong one win; that is accepted, for a rule anyone can predict.
+//! machines disagree, the later write wins (docs/design.md, "Recording and merging"). Clock
+//! skew can make the wrong one win; that is accepted, for a rule anyone can predict.
 
 use std::collections::BTreeMap;
 

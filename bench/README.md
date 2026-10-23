@@ -2,8 +2,9 @@
 
 Scripts that measure jj-musubi against `git clone` and `git fetch`, and `jj git clone`,
 `jj git fetch` and `jj git push`, on localhost: time, and bytes on the wire as counted by
-a TCP proxy. They need `/usr/bin/python3`, `git`, `jj`, `ssh-keygen` and a release build
-of `musubi`.
+a TCP proxy. Where they compare with git, the machine that clones does so twice, with
+`jj git clone` and with plain `git clone`. They need `/usr/bin/python3`, `git`, `jj`,
+`ssh-keygen` and a release build of `musubi`.
 
 | Script | Measures |
 | --- | --- |
@@ -17,19 +18,24 @@ of `musubi`.
 `proxy.py` is the byte-counting proxy the scripts start; `env/` holds the jj and git
 config they run with.
 
-Machines reach the hub as they would over ssh, through one proxy route each. `ssh.py`, as
-`$MUSUBI_SSH`, takes the `--hub` it is given, `127.0.0.1:PORT`, for a route's port and
-relays to it, and at the route's other end `sshd.py` runs `musubi hub connect` for each
-connection. The bytes counted are musubi's own stream, without ssh's handshake,
-encryption and keepalives (every 10 s on a quiet connection, which would add about as
-much again to idle daemons' traffic), and the times include starting `ssh.py`, a Python
-process, for each connection, but no handshake. Machines that aren't measured, the first
-in `oplog.py` and both in `daemonslots.py`, name the hub by its directory instead, as on
-the hub's machine.
-Each machine has a config directory of its own, with its key already made.
-`musubi create`, `join` and `clone` start a daemon to do their first sync, so their times
-include that; the scripts stop it, and only `musubi sync` moves anything until they start
-daemons themselves.
+Machines reach the hub as they would over ssh, through one proxy route each, but without
+ssh itself. `ssh.py` stands in for ssh, as `$MUSUBI_SSH`: given a `--hub` of
+`127.0.0.1:PORT`, it connects to that route's port, and at the route's other end `sshd.py`
+runs `musubi hub connect` for each connection.
+
+- The bytes counted are musubi's own stream, without ssh's handshake, encryption and
+  keepalives. (Keepalives go every 10 s on a quiet connection, and would about double idle
+  daemons' traffic.)
+- The times include starting `ssh.py`, a Python process, for each connection, but no
+  handshake.
+- Machines that aren't measured (the machine that creates the hive in `oplog.py`, and both
+  machines in `daemonslots.py`) name the hub by its directory instead, as on the hub's
+  machine.
+
+Each machine has a config directory of its own, with its key already made. `musubi create`,
+`join` and `clone` start a daemon to do their first sync, so their times include that; the
+scripts then stop it, and only `musubi sync` moves anything until they start daemons
+themselves.
 
 ## Running
 
@@ -43,11 +49,10 @@ bench/setup_sources.sh jj=$HOME/dev/jj git=https://github.com/git/git
 `setup_sources.sh` builds the server repositories: a small synthetic one, and a copy of
 each `NAME=SOURCE` it is given, a local clone or a URL; a `NAME` is letters, digits and
 underscores. Each has `main` as it was a week before its newest commit, for bench.py's
-week phase to bring in the rest; server repositories built before the week phase existed
-need building again. The scripts take a repository by name (`small`, or a `NAME`).
+week phase to bring in the rest. The scripts take a repository by name (`small`, or a
+`NAME`).
 
-In the git world, B is both a `jj git clone` and a plain `git clone`. With
-`$MUSUBI_BENCH_PERF` set to `perf record`'s options, such as `-a -g`, each measurement
+With `$MUSUBI_BENCH_PERF` set to `perf record`'s options, such as `-a -g`, each measurement
 (of bench.py, stalebase.py and oplog.py) runs under perf, into `runs/<run>/perf/`, and its
 result names the file.
 

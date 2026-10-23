@@ -8,13 +8,17 @@ musubi replicates jj's operation log, not just branches, so `jj undo`, `jj op lo
 divergence all behave across machines as they do between workspaces on one machine. It
 never touches working copies: when another machine rewrites the commit under your `@`, your
 next `jj` command stops and suggests `jj workspace update-stale`, which updates your files.
-With `snapshot.auto-update-stale = true`, the next command updates them itself. To set it on
-every machine at once, set it in the repo config (`jj config set --repo`) and name it there in
-`musubi.shared-config`.
+With `snapshot.auto-update-stale = true`, the next command updates them itself. To set that
+on every machine at once, set it in the repo config and share it:
 
-Status: early. The protocol is verified in Lean (`formal/`), and the implementation is
-tested against that model and against real repositories, but musubi has not yet been used
-in anger.
+```sh
+jj config set --repo snapshot.auto-update-stale true
+jj config set --repo musubi.shared-config '["snapshot.auto-update-stale"]'
+```
+
+Status: early. The protocol is proved correct in the Lean theorem prover (`formal/`), and
+the implementation is tested against that model and against real repositories, but musubi
+has not yet been used in anger.
 
 ## Install
 
@@ -137,7 +141,7 @@ Logs:
 
 - The hub and the daemon log what they do; other commands only warn. The hub logs to its
   terminal, and the daemon to `daemon.log` in musubi's state directory
-  (`~/.local/state/musubi` on Linux and macOS), or under systemd to
+  (`~/.local/state/musubi` on Linux and macOS), or, when systemd starts it at login, to
   `journalctl --user -u musubi`.
 - `--log <filter>` on any command chooses what it logs, as a filter in `RUST_LOG`'s
   syntax: `musubi --log debug hub`, or `musubi --log musubi_sync=debug sync` to see each
@@ -153,8 +157,9 @@ Upgrade the hub's machine and every other machine together: until 1.0, a release
 the protocol, and a machine and a hub whose protocols differ refuse to sync, saying so.
 Install the new musubi everywhere, in place of the old one: a daemon that starts at login runs
 the path `musubi daemon install` found, so run that again wherever the path changes. Then stop
-the hub and run `musubi hub` again, and run `musubi daemon restart` on each other machine. [CHANGELOG.md](CHANGELOG.md) says what each release
-changes, and anything else to do on upgrading.
+the hub and run `musubi hub` again, and run `musubi daemon restart` on each other machine.
+[CHANGELOG.md](CHANGELOG.md) says what each release changes, and anything else to do on
+upgrading.
 
 ## How it works
 

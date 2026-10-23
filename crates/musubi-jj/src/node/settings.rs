@@ -1,5 +1,5 @@
 //! The hive's settings: this machine's git remotes and shared repo config, reconciled with
-//! the hive's (see docs/settings-merge.md).
+//! the hive's (see docs/design.md, "Hive settings").
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -91,7 +91,7 @@ impl NodeRepo {
 
     /// Brings this machine's settings and the hive's together: records this machine's
     /// changes for the hive, in an operation of its own, and applies the hive's here,
-    /// setting by setting, the later write winning (docs/settings-merge.md). A setting
+    /// setting by setting, the later write winning (docs/design.md, "Hive settings"). A setting
     /// that differs from what this machine last applied is a change, written when the file
     /// holding it was last modified. A machine reconciling for the first time takes the
     /// hive's value of every setting the hive has, and adds its own others. Remotes compare

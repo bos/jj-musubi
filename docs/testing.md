@@ -1,7 +1,8 @@
 # Testing
 
-musubi's correctness rests on three layers of evidence. Each guards a different risk, so a
-test belongs at the narrowest layer that can catch its bug.
+Each layer of testing guards against a different risk, so a test belongs at the narrowest
+layer that can catch its bug. Several layers use Hegel, the Rust port of Python's Hypothesis,
+for property-based and stateful tests.
 
 | Layer | Where | Guards against | Cost |
 | --- | --- | --- | --- |
@@ -16,24 +17,25 @@ test belongs at the narrowest layer that can catch its bug.
 
 The costs are for one test among the rest of the suite on Linux, on 32 cores.
 
-Run the default suite with `cargo nextest run`, or everything with `just check`. It needs `jj` 0.46.0 and `git`
-on `PATH`. jj syncs what it writes to disk, and on a disk waiting for that takes most of the
-suite's time, so the tests' directories are in memory where possible. On Linux they are in
-`/dev/shm`, unless `TMPDIR` is set or `/dev/shm` is mounted `noexec`. On macOS `just test`
-(and so `just check`) makes a RAM disk for the run and sets `TMPDIR` to it, which makes the
-suite three times as fast; `cargo nextest run` alone leaves them on the disk. Neither OS puts
-them in memory when `MUSUBI_KEEP_TEST_DIRS` keeps them for inspecting a failure, and what a
-test binary records once per build stays under `target/`. Run the generated end-to-end
-search with `cargo nextest run --profile search`. Check
-the formal model with `lake build` in `formal/`. `.cargo/config.toml` hides the developer's
-global and system git config from the git that tests, and the musubi they run in-process,
-start; the `jj` and `git` they run as commands get musubi-testutil's own home directory.
+`just test` runs the default suite, `just property` the generated end-to-end search, and
+`just check` everything, the Lean proofs included. The tests need `jj` 0.46.0 and `git` on
+`PATH`. They don't read your own git config: `.cargo/config.toml` hides the global and
+system config from the git they start, and the `jj` and `git` they run as commands get a
+home directory of their own.
 
-CI runs the default suite on Linux, macOS and Windows, and checks the Lean model and runs
-the conformance test against its oracle on Linux. The Search workflow runs the end-to-end
-search nightly on Linux, each shard on a runner of its own, with a seed that changes from
-run to run. A failing shard uploads its example database; its output gives the seed and a
-`reproduce_failure` attribute for replaying the failure locally.
+jj syncs each file it writes to disk, which on a real disk takes most of the suite's time,
+so the tests keep their directories in memory where they can. On Linux they go in
+`/dev/shm`, unless `TMPDIR` is set or `/dev/shm` is mounted `noexec`. On macOS, `just test`
+makes a RAM disk for the run, which makes the suite three times as fast; a bare
+`cargo nextest run` uses the disk. Setting `MUSUBI_KEEP_TEST_DIRS` keeps the directories
+after a run, for inspecting a failure, and puts them on the disk.
+
+CI runs the default suite on Linux, macOS and Windows, and on Linux checks the Lean model,
+runs the conformance test against its oracle, and runs each benchmark script once
+(`just bench-smoke`). The Search workflow runs the end-to-end search nightly on Linux, each
+shard on a runner of its own, with a seed that changes from run to run. A failing shard
+uploads its example database; its output gives the seed and a `reproduce_failure` attribute
+for replaying the failure locally.
 
 ## Protocol property tests
 
@@ -41,25 +43,33 @@ A Hegel state machine owns a hub and several nodes, all of them sans-IO state ma
 `musubi-core`, joined by a simulated network that the test controls completely. Its rules:
 
 - environment: a node makes a local operation on some local parent, not necessarily a head;
-  a node merges its heads;
-- delivery: deliver, drop, duplicate, or delay a chosen in-flight message;
-- failure: crash a node or the hub, keeping only persistent state; or send the hub back to
-  an earlier head, as a power cut that loses the last heads it accepted would (`hubRegress`
-  in the oracle). A node whose own request gets a reply with a head older than it knows, or
-  another at the same sequence number, starts over from that reply (`loseKnown`, then
-  `learn`);
-- progress: let a node take its next policy step.
+- progress: a node takes the next step of its policy (docs/protocol.md, "Policy"), merging
+  if it has several heads; sends a poll's `Fetch`; or takes a policy step whose requests
+  and replies go through at once;
+- delivery: deliver any message in flight, in any order, or deliver one again; a message
+  never delivered is lost;
+- misbehavior: a node pushes without uploading, a hub replies with operations it never
+  accepted, or a hub forgets uploads it never accepted;
+- failure: crash a node or the hub, keeping only persistent state, or crash a node partway
+  through taking in a fetch; or send the hub back to an earlier head, as a power cut that
+  loses the last heads it accepted would (`hubRegress` in the oracle). A node whose own
+  request gets a reply with a head older than it knows, or another at the same sequence
+  number, starts over from that reply (`loseKnown`, then `learn`).
 
-After every rule the test checks the model's safety invariants: HubClosed, HubMonotone,
-NodeClosed, Locality, MergeOwnership, that a node stages only operations the hub accepted
-(staged-is-accepted), and that the head a node knows is in the hub's history
-(KnownIsHubHistory). Once the hub has gone back, Locality, staged-is-accepted and
-KnownIsHubHistory are checked against its history together with the heads it lost, and
-MergeOwnership no longer is: two nodes can then merge the same heads
+Two tests run this machine: `protocol_invariants`, and `conformance`, which also checks every
+step against the Lean model (docs/conformance.md) and so leaves out the hub forgetting
+uploads, which the model's oracle can't express.
+
+After every rule the test checks the model's safety invariants (docs/protocol.md,
+"Properties"): HubClosed, HubMonotone, NodeClosed, Locality, MergeOwnership, that a node
+stages only operations the hub accepted (staged-is-accepted), and that the head a node
+knows is in the hub's history (KnownIsHubHistory). Once the hub has gone back, Locality,
+staged-is-accepted and KnownIsHubHistory are checked against its history together with the
+heads it lost, and MergeOwnership no longer is: two nodes can then merge the same heads
 (`formal/Musubi/RegressScenario.lean`). A final `quiesce` step stops environment actions,
-makes the network reliable, and runs every node's policy until nothing changes. The test then
-checks liveness: every node's heads are `{hub.head}`, and every created operation is in its
-ancestry. A bound on quiescence steps turns livelock into a failure.
+makes the network reliable, and runs every node's policy until nothing changes. The test
+then checks liveness: every node's heads are `{hub.head}`, and every created operation is
+in its ancestry. A bound on quiescence steps turns livelock into a failure.
 
 Operations here are abstract: ids, parents, and object sets. No jj repository is involved.
 
@@ -102,61 +112,47 @@ is the one step no test exercises.
 
 ## Faults
 
-The protocol tests deliver well-formed messages, and lose, duplicate, or delay whole ones;
+The protocol tests lose, duplicate, or delay whole messages, but never corrupt one:
 docs/protocol.md assumes no message is corrupted. `musubi-sync/tests/it/faults.rs` tests the
-implementation where that doesn't hold. It records a real session over the in-memory
-transport, with a payload limit small enough that each commit's objects travel as a blob of
-several windows of chunks: one machine pushes a commit, another fetches it and pushes its
-own, and the first fetches that. It snapshots the hub's directory as each call starts, and
-a case starts from any point in the session by copying the snapshot before it and replaying
-the requests since. The session is recorded once per build of the test binary, under
-`target/tmp`, and so is the hive most of the race catalogue's tests start from: nextest
-runs each test in a process of its own, which would otherwise record them again. Two Hegel
-tests use the session:
+implementation where that doesn't hold, and where a link fails partway through a call. It
+records a real session over the in-memory transport: one machine pushes a commit, another
+fetches it and pushes its own, and the first fetches that. The payload limit is small
+enough that each commit's objects travel as a blob in several windows of chunks. A case can
+start from any point in the session, from a snapshot of the hub's directory taken as each
+call started. The session is recorded once per build of the test binary, under
+`target/tmp`, as is the hive most race tests start from, since nextest runs each test in a
+process of its own.
 
-- `hub_survives_malformed_requests` sends a hub requests no honest node sends: the session's
-  requests and bundles cut short, corrupted, or spliced; chunks at extreme offsets; requests
-  that arrive as blobs, and are themselves malformed or indirect; protocol requests with ids
-  and attachments taken from the session or made up; and envelopes from another version. The
-  hub answers each without panicking, with a reply, or an error, that fits the transport, and
-  its head moves only forward, to an operation whose closure it has (HubMonotone and
-  HubClosed). Afterwards it still answers a fetch from the root, which reads everything up to
-  its head.
-- `calls_finish_once_the_link_is_back` makes one of the session's calls, a push and its
-  uploads or a fetch and its downloads, through a link that fails at a chosen request. The
-  request and all later ones may be lost, as when the wifi goes off. The request may arrive
-  but its reply and all later requests be lost, as when a lid closes just after it went. Or
-  an hour may pass before it arrives, in which the hub sweeps away transfers in progress,
-  and then the link carries on, as when the lid opens. Meanwhile the hub may hear malformed
-  requests made from what the node sent, and an hour may pass. Once the link is back, the
-  call, made again, gets the reply it got in the session, unless a malformed request was a
-  valid push that moved the head, within a bound on requests that catches a node that never
-  starts over.
+- `hub_survives_malformed_requests` sends the hub requests no honest node sends: the
+  session's requests and bundles cut short, corrupted, or spliced; chunks at extreme
+  offsets; malformed requests sent as blobs; made-up ids and attachments; and envelopes from
+  another protocol version. The hub must answer each without panicking, its head must move
+  only forward, to operations whose closure it has (HubMonotone and HubClosed), and
+  afterwards it must still answer a fetch from the root.
+- `calls_finish_once_the_link_is_back` makes one of the session's calls through a link that
+  fails at a chosen request. The request and everything after it may be lost, as when the
+  wifi goes off; the request may arrive but its reply and everything after it be lost, as
+  when a lid closes just after it went; or it may arrive an hour late, after the hub has
+  swept away transfers in progress. Meanwhile the hub may receive malformed requests made
+  from what the node sent. Once the link is back, the call, made again, must get the reply
+  it got in the session (unless a malformed request happened to be a valid push that moved
+  the head), within a bound on the number of requests.
+- `node_recovers_when_its_link_fails_partway` fails the link the same ways with real
+  repositories and the node's driver, retrying as the daemon does, while another machine
+  syncs. Afterwards both machines must see the same commits. It is slow, so it runs few
+  cases.
 
-A third, `node_recovers_when_its_link_fails_partway`, fails the link the same ways with real
-repositories and the node's driver, retrying as the daemon does, while another machine
-syncs. Afterwards both machines see the same commits. It is slow, so it runs few cases.
+Smaller tests cover how long blobs live: a blob the hub prepares again for a second fetch
+lasts as long as a new one (`blobs_prepared_again_last_as_long_as_new_ones`); uploading the
+same content leaves a prepared blob alone (`uploads_leave_prepared_blobs_alone`); and a call
+that fails or is dropped partway leaves no uploads behind, and no downloads but a partial
+one, kept for a later call to resume (`calls_leave_no_uploads_behind`,
+`calls_leave_no_downloads_behind`).
 
-An hour passing sweeps every blob at once, so those tests never meet a blob the hub
-prepares twice. `blobs_prepared_again_last_as_long_as_new_ones` makes a fetch of the
-session against the hub directly, downloads its blob, backdates the blob past the sweep's
-hour, and makes the fetch again, as another node would. The second fetch gets the same
-blob, and its download survives a sweep and outlasts the time the hub keeps a blob it has
-served. So does the download for a third fetch, made before the second download finishes
-and paced to span that time. `uploads_leave_prepared_blobs_alone` downloads a fetch's
-blob, then uploads the same content and pushes it, as another node would push what the
-first fetched, and downloads the blob again. `calls_leave_no_uploads_behind` makes a push
-of the session through a link that fails partway through its upload, and again with the
-call dropped partway, as the daemon drops a sync when the connection comes back; either
-way the node's blob store is left empty. `calls_leave_no_downloads_behind` does the same
-partway through the second of a fetch's two downloads, which leaves only the partial
-download, for a later call to resume until it has gone a day untouched; and when the
-fetch succeeds, its downloads go once its reply is dropped.
-
-A connection that dies partway through a message never delivers part of it: the stream
-transport frames each message with its length and drops an incomplete one. A killed connection reaches
-musubi as a lost request or reply, which the link faults model. The truncated messages
-stand for a buggy or mismatched peer.
+The truncated messages stand for a buggy or mismatched peer, not a dropped connection: the
+stream transport frames each message with its length and drops one its connection ends
+partway through, so a dropped connection looks like a lost request or reply, which the link
+faults cover.
 
 ## Fuzzing
 
@@ -185,8 +181,8 @@ in `just fuzz bundle -max_total_time=300`; `just fuzz-smoke` runs each briefly, 
 they still build and run. They need `cargo-fuzz` and a nightly toolchain from rustup. `fuzz/`
 is a workspace of its own, so that `just check` neither builds nor lints it; its targets reach
 private code only through `cfg(fuzzing)` modules, which cargo-fuzz sets, and which tests build
-too, so that `just check` checks them. Corpora and crashes
-stay in `fuzz/`, unversioned, and the files the targets write go in `/dev/shm`.
+too, so that `just check` checks them. Corpora and crashes stay in `fuzz/`, unversioned,
+and the files the targets write go in `/dev/shm`.
 
 The files musubi appends lines to have Hegel properties beside their parsers instead. In the
 translation map and the joins, among whole lines, any torn anywhere names nothing, and the
@@ -196,29 +192,30 @@ disk damaged opens as it was or is corrupt, to be made again, never failing as i
 
 ## Generated end-to-end tests
 
-Modeled on jj-stack's generated integration tests. A Hegel state machine drives two or three
-real colocated repositories, each served by a real musubi node, through an in-process hub
-that `musubi_sync::hive::Hive` delivers their requests to directly, one step at a time, so
-that a failing case replays exactly.
+A Hegel state machine drives two or three real colocated repositories, each served by a
+musubi node, through an in-process hub that `musubi_sync::hive::Hive` delivers their
+requests to directly, one step at a time, so that a failing case replays exactly. Its rules
+fall into groups, kept separate so that the inconsistent states between them get explored:
+a machine can work on a stale view, git can move a branch jj has not imported, a node can
+stop halfway through a sync.
 
-Rules fall into separate groups, and are kept separate so that the inconsistent states
-between them get explored:
+- **Local work**, through the `jj` CLI on a chosen machine: commit, edit without
+  snapshotting, describe, new (including merges), rebase, squash, abandon, resolve, bookmark
+  and tag changes, undo, and commands at an older operation (`--at-op`), which create
+  concurrent operations.
+- **Workspaces**: add, rename, and forget them; forget another machine's; and rewrite or
+  abandon another machine's working-copy commit.
+- **The remote**: someone outside the hive advances `origin`; a machine fetches or pushes.
+- **Git-side work**: move or delete a branch with `git`.
+- **Sync**: one node syncs until it is idle, or takes only a few steps of a sync, which may
+  stop partway through an upload.
+- **Faults**: restart or crash a node, with or without its translation cache, or while it
+  is still writing realizations; restart the hub, or send it back, dropping the last one to
+  three lines of its `heads` before it restarts, as a power cut would; or lose a reply the
+  hub sent. Faults are capped per sequence, so that a short walk still reaches recovery.
 
-- **Local work**, through the `jj` CLI on a chosen machine: write files and commit, describe,
-  new on a random commit, rebase, squash, abandon, bookmark create, move, and delete, undo,
-  and commands at an older operation (`--at-op`), which create concurrent operations.
-- **Git-side work** in a colocated repository: move or delete a branch with `git`.
-- **Sync**: let one node sync until it is idle, or take a few steps, which may stop partway
-  through an upload.
-- **Faults**: restart a node, losing its protocol state; crash one, losing its caches, its
-  translation cache too, or realizations it was still writing, or crash it partway through
-  realizing what a sync fetched; restart the hub, or send it back, dropping the last one to
-  three lines of its `heads` before it restarts, as a power cut would (`hub_goes_back`); or
-  lose the reply to a request the hub handled. Faults are capped per sequence, so that a
-  short walk still reaches recovery.
-
-After each rule, every repository must still load, and `jj status` must succeed. At the end,
-`converge` syncs every node to a fixed point, then checks:
+After each rule, every repository must still load. At the end of a sequence, and at most
+once in the middle, the hive syncs to a fixed point, and the test checks:
 
 - every node's canonical head equals the hub's;
 - all repositories agree on visible commits, change ids, bookmarks, tags, and remote
@@ -236,27 +233,23 @@ After each rule, every repository must still load, and `jj status` must succeed.
   merge's parents. Two commits of a change with the same parents and contents are the same
   rebase done twice, which the hub's sequencing exists to prevent.
 
-As in jj-stack:
+To keep the search effective:
 
 - a rule is eligible only when it has work to do, and its candidates are computed by a helper
   that its precondition shares;
-- each seeded search shard has its own Hegel example database;
+- each search shard has its own Hegel example database;
 - a case replays exactly, so that Hegel can shrink a failure and a stored example finds it
   again: jj's change ids, random otherwise, come from a counter that each test
-  environment's repositories share (musubi-testutil), origin's upstream commits carry
-  change ids of their own, and rules choose among commits in change-id order, since commit
-  ids and `jj log`'s order depend on when jj made the commits.
+  environment's repositories share, and rules choose among commits in change-id order, since
+  commit ids and `jj log`'s order depend on when jj made the commits. A failure that doesn't
+  replay exactly fails the run at once, saying where the replay diverged.
   `MUSUBI_SEARCH_FINGERPRINTS` writes each case's trace without the ids that differ between
-  runs, for checking that two runs of a case did the same. A failure that doesn't replay
-  exactly fails the run at once, saying where the replay went another way. By default
-  Hegel would replay it in batches, for minutes, pass the run if that didn't confirm it,
-  and could keep it to replay in batches again in later runs;
-- the search run ends by listing rules that never fired. An unreached rule is a search
-  problem: give it a richer starting state or fix its precondition.
+  runs, for checking that two runs of a case did the same;
+- the run ends by listing rules that never fired. An unreached rule is a search problem:
+  give it a richer starting state or fix its precondition.
 
 ## Testing the tests
 
 `just mutants` runs `cargo-mutants` over the protocol core's hub and node logic: each
-surviving mutant is a change to the protocol the property tests and the Lean conformance
-check fail to notice. docs/conformance.md lists hand-made mutants and which check catches
-each.
+surviving mutant is a change to the protocol that the property and conformance tests fail to
+notice. docs/conformance.md lists hand-made mutants and which check catches each.

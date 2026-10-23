@@ -8,13 +8,15 @@ had come from concurrent processes on one machine, and every machine ends up wit
 same result. Where jj would silently do something harmful only because the operations came
 from different machines, musubi detects it and stops.
 
-Each entry below is pinned by a test in `crates/musubi-sync/tests/races/`, which runs real
-repositories, colocated unless the entry says otherwise, through the real protocol core and
-hub storage, or, where it needs the binary, in `crates/musubi/tests/cli.rs`. Every test in
-`races/` ends with `assert_converged`: running `jj` everywhere and syncing again reaches a
-fixed point within a few rounds; every machine agrees on visible commits and bookmarks; in
-every colocated repository the git branches match the bookmarks that are not conflicted;
-and `jj status` creates no further operation.
+Each entry below is pinned by a test. Most are in `crates/musubi-sync/tests/races/`, which
+runs real repositories, colocated unless the entry says otherwise, through the real protocol
+core and hub storage; a few that need the binary are in `crates/musubi/tests/cli.rs`, and a
+few that test one layer are beside that layer's other tests. Most tests in `races/` end with
+`assert_converged`: running `jj` everywhere and syncing again reaches a fixed point within a
+few rounds; every machine agrees on visible commits and bookmarks; in every colocated
+repository the git branches match the bookmarks that are not conflicted; and `jj status`
+creates no further operation. A few, such as those where replication pauses, check
+something else instead.
 
 The generated end-to-end tests (docs/testing.md) explore interleavings of the same actions
 at random.
@@ -78,7 +80,6 @@ named after the machine (`beta/default`) (docs/design.md).
 | A machine sets or unsets a shared repo config key (`revset-aliases."immutable_heads()"`, `revset-aliases."trunk()"`, `git.private-commits`, or one `musubi.shared-config` names) | Every machine does the same. Other repo config stays each machine's own. | `shared_config_reaches_every_machine`, `other_config_is_shared_only_when_named`, `settings_are_shared_through_the_binary` |
 | Two machines set a shared config key differently at once | The later write wins, as for remotes. | `shared_config_set_on_two_machines_at_once` |
 | A machine joins with remotes of its own | Its remotes join the hive's, even one by a name the hive once removed, but where both have a remote of the same name pointing to different repositories, the hive's wins. | `joining_machine_merges_its_remotes_with_the_hives`, `a_joining_machine_keeps_a_remote_the_hive_removed` |
-| A machine upgrades from before settings were timed | What it last applied has no time, so the hive's value wins, and a remote or key the hive removed meanwhile, which left no record of the removal, goes from this machine too. Its own changes since are written at the file's time. | `an_upgraded_machine_takes_removals_made_before_times` |
 | A machine spells a remote through a `url.<base>.insteadOf` rule, an alias or a redirect to a mirror, or its https URL carries credentials | The remote goes as written and as git expands it there. A machine whose git expands it the same way, as one with the same alias, keeps it as written; another gets the expansion, a mirror's URL included; the writing machine keeps its own spelling. The hub matches joining machines on either. Unless `musubi.share-credentials` is set, the credentials never leave the machine, not even in the command line jj records with the operation that added the remote. | `remotes_go_as_written_and_as_expanded`, `one_hub_many_hives` |
 | Machines reach one remote by different URLs (https and ssh, say) | Each keeps its own, joining or later, through moves, renames, and push URL changes on either machine, and after missing several changes; only pointing the remote at another repository replicates, and a push URL to where it used to point goes. A rename seen together with another change to the same remote isn't recognized as one: the remote is replaced, in the hive's spelling, and its remote-tracking refs go with it until the next sync brings them back. | `machines_keep_their_own_spelling_of_a_shared_remote`, `changes_to_a_remote_reach_machines_with_their_own_spelling`, `a_push_url_to_the_old_repository_goes_when_the_remote_moves`, `a_rename_keeps_each_machines_spelling`, `a_machine_that_lags_behind_respellings_takes_later_changes` |
 | `jj git colocation disable` or `enable` while `musubi daemon` runs | The daemon's next sync fails, since the repository it had open moved its git store. The daemon reopens the repository after any failed sync and retries after its backoff, so it carries on. | `daemon_carries_on_after_colocation_changes` |

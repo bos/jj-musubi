@@ -11,8 +11,8 @@
 //!   before any reply that depends on it. Its last line is the current head.
 //!
 //! None of it is synced to disk: a hub only gathers what its machines' repositories hold,
-//! so one that loses its state is made again, empty, and they fill it (see "Moving the hub"
-//! in docs/design.md).
+//! so one that loses its state is made again, empty, and they fill it (see "Replacing the
+//! hub" in docs/design.md).
 
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -328,7 +328,7 @@ impl HubStore {
 }
 
 /// Reads the log of accepted heads. A line torn by a power cut makes it corrupt: the hive
-/// is made again rather than recovered (see "Moving the hub" in docs/design.md).
+/// is made again rather than recovered (see "Replacing the hub" in docs/design.md).
 fn read_heads(dir: &Path) -> Result<Vec<OperationId>, StoreError> {
     let path = dir.join("heads");
     let bytes = fs::read(&path).map_err(io_err(&path))?;

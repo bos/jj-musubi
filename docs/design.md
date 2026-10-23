@@ -8,16 +8,17 @@ within a second or so. A machine that was offline catches up when it reconnects.
 
 musubi never touches working copies. It writes only to the operation log, the commit store,
 and, in git-backed repositories, the git object database and refs. A remote operation can
-rewrite this machine's working-copy commit, exactly as an operation in another workspace can, for
-example by rebasing its parent. jj then treats the working copy as stale, exactly as after a `jj
-rebase` run from another workspace. By default the next `jj` command stops and suggests `jj
-workspace update-stale`, which updates the files. With `snapshot.auto-update-stale = true`, jj
-updates them itself, but then any `jj` command, even `jj log`, can change files under a running
-build or an editor, so musubi doesn't turn it on. Either way, if the working copy had edits not
-yet snapshotted, jj snapshots them first, and you get a divergent working-copy change instead
-of losing them. Each machine can set `snapshot.auto-update-stale` for itself; to set it for the
-whole hive, set it in the repo config and name it in `musubi.shared-config` (see
-[hive settings](#hive-settings)). The hive's value then overrides each machine's user config.
+rewrite this machine's working-copy commit, for example by rebasing its parent, and jj then
+treats the working copy as stale, exactly as after a `jj rebase` run in another workspace.
+By default the next `jj` command stops and suggests `jj workspace update-stale`, which
+updates the files. With `snapshot.auto-update-stale = true`, jj updates them itself, but
+then any `jj` command, even `jj log`, can change files under a running build or an editor,
+so musubi doesn't turn it on. Either way, if the working copy had edits not yet
+snapshotted, jj snapshots them first, and you get a divergent working-copy change instead
+of losing them. Each machine can set `snapshot.auto-update-stale` for itself; to set it for
+the whole hive, set it in the repo config and name it in `musubi.shared-config` (see
+[hive settings](#hive-settings)). The hive's value then overrides each machine's user
+config.
 
 This document targets jj-lib 0.46.0.
 
@@ -42,6 +43,9 @@ This document targets jj-lib 0.46.0.
   arrived from elsewhere.
 - **Canonical head**: the single operation the hub currently considers the latest state of the
   hive.
+- **Colocated**: a git-backed jj repository whose git repository is the `.git` beside `.jj`,
+  which git commands use too. A repository that isn't colocated keeps its git store inside
+  `.jj`.
 
 ## What is replicated
 
@@ -90,33 +94,23 @@ Replicating views verbatim corrupts the second kind.
   (`laptop#1a2b3c4d/default`). A machine realizes its own under their plain names and the
   others' as workspaces named after the machine, `laptop/default`, so `jj log` shows the
   laptop's working copy as `laptop/default@`, and `jj new laptop/default@` builds on it.
-  (Two machines that share a name are shown as `laptop-1a2b/default`.) These are never git
-  refs, so nothing git does can drop them, and jj's git import never abandons work because
-  of them.
+  (Where that name is taken, as by two machines that share a name, it is shown as
+  `laptop-1a2b/default`.) These are never git refs, so nothing git does can drop them, and
+  jj's git import never abandons work because of them.
 
   jj moves another machine's workspace as it moves any workspace: when it rewrites the
-  commit, its workspace follows (to the second half of a split, say), and when it abandons
-  it, the workspace gets a new empty commit on the parents. Restoring an older view,
-  through `jj undo`, `jj redo` or `jj op restore`, restores every workspace's position.
-  Canonicalization takes those moves, and the machine that owns the workspace adopts
-  them, as a second workspace does on one machine: its working copy becomes stale,
-  and `jj workspace update-stale` updates the files (or its next command does, with
-  `snapshot.auto-update-stale = true`). Nothing else a machine does to another
-  machine's workspaces counts: adding, forgetting or renaming them stays
-  local (forgetting one doesn't even abandon its empty working-copy commit, as
-  `jj workspace forget` otherwise would, unless this machine then rewrites or abandons
-  that commit's parents: jj, no longer seeing the commit, leaves it behind, and keeping it
-  would bring the old parents back), and at the end of every sync musubi shows any
-  that went missing again. Where concurrent operations disagree about a
-  workspace, musubi merges it three-way exactly as jj does, so a machine's removal of its
-  own workspace wins over another machine moving it meanwhile. If another machine
-  abandons this machine's working-copy commit without moving its workspace (because it had
-  forgotten the workspace), this machine gives itself a fresh `@` where jj would have put
-  it: on the nearest visible ancestor, or on the rewrite of an ancestor that was rewritten
-  rather than abandoned (the change's one visible commit). Much as when jj merges
-  concurrent operations, a commit moved with `jj rebase -r` counts as rewritten, so the
-  fresh `@` follows it, where a local `jj rebase -r` would have left the working copy
-  behind.
+  commit, the workspace follows (to the second half of a split, say); when it abandons it,
+  the workspace gets a new empty commit on the parents; and `jj undo`, `jj redo` and
+  `jj op restore` restore every workspace's position. The machine that owns the workspace
+  adopts those moves, as a second workspace on one machine does: its working copy becomes
+  stale. Nothing else a machine does to another machine's workspaces counts: adding,
+  forgetting or renaming them stays local, and the next sync shows them again. Where
+  concurrent operations disagree about a workspace, musubi merges it three-way as jj does,
+  so a machine's removal of its own workspace wins over another machine moving it
+  meanwhile. If a machine that has forgotten another's workspace then abandons that
+  workspace's commit, or rewrites its parent, the owner gives itself a fresh `@` where jj
+  would have put it. The race catalogue ([races.md](races.md), "Workspaces") has the
+  details.
 
   Which workspace made an operation is per-machine too. jj records it in the operation's
   metadata, and `jj undo` and `jj redo` refuse to undo another workspace's operation, telling
@@ -149,37 +143,34 @@ and breaks A's record in turn.
 The per-machine fields therefore stay per-machine.
 
 - **Canonicalizing** a local operation copies it, but with `git_refs` and the `git`
-  pseudo-remote removed from the view, and its workspace machine-qualified. Its parents are replaced with their canonical ids. It
-  is written to a canonical op store kept beside the repository, which assigns the id.
-- **Realizing** a canonical operation C on a node writes a local operation with C's metadata,
-  its workspace named as above, plus a `musubi.canonical = <id>` attribute. Its parents are the local realizations of C's
-  parents, and its view is C's view plus per-machine fields. jj's `Transaction` cannot
-  reproduce another machine's metadata, so musubi writes these operations through jj-lib's
-  `OpStore`, as `jj op integrate` does, and lets jj build the index lazily, except that the
-  op head that exporting refs to git writes gets its realization's index. The op store
-  syncs each file it writes to disk, which takes milliseconds on a cloud disk, so a node
-  catching up writes its realizations in parallel. Making their views is most of the rest,
-  so it makes those of a run of operations, each the only parent of the next, in parallel
-  too. Nothing reads the realizations, and no op head or translation names them, until they
-  are all written.
+  pseudo-remote removed from the view, its workspace machine-qualified, and its parents
+  replaced with their canonical ids. It is written to a canonical op store kept beside the
+  repository, which assigns the id.
+- **Realizing** a canonical operation C on a node writes a local operation with C's
+  metadata, its workspace named as above, and a `musubi.canonical = <id>` attribute. Its
+  parents are the local realizations of C's parents, and its view is C's view plus
+  per-machine fields. jj's `Transaction` cannot reproduce another machine's metadata, so
+  musubi writes these operations through jj-lib's `OpStore`, as `jj op integrate` does, and
+  mostly leaves the index for jj to build when it needs it. The op store syncs each file it
+  writes to disk, so a node catching up writes its realizations, and makes their views, in
+  parallel; nothing names them until they are all written.
   - An operation that will not be an op head inherits its parent realization's per-machine
-    fields, merging them three-way for a merge: as jj's merge of the operations would, but
-    without it when at most one parent's fields differ from the base's, since jj's merge
-    loads each parent's repository, and indexes one that has none. That makes it
-    deterministic, so re-realizing after a crash rewrites identical files.
-  - The operation that becomes an op head is realized while musubi holds jj's
-    `git_import_export.lock`. musubi runs jj's `export_refs` with C's bookmarks, tags, and
-    remote bookmarks against this machine's `.git`. This writes `refs/heads`, `refs/tags`, and
-    `refs/remotes`, with compare-and-swap against the recorded values, exactly as a local `jj`
-    process would. musubi records the resulting per-machine fields and then publishes the op
-    head. Because of the lock, a concurrent `jj` command never sees the operation before
-    `.git` matches it.
-  - Before publishing it next to this machine's own concurrent operations, musubi merges
-    them as jj will, in jj's order and the reverse, since the result can depend on it. jj
-    0.46 can't merge some concurrent operations (docs/races.md, "Known jj limitations"),
-    and published, they would leave every `jj` command here failing or panicking. So if
-    the merge fails, musubi publishes nothing: the sync fails, naming this machine's
-    operations the hive doesn't have yet, one of which to revert, and jj keeps working.
+    fields, or for a merge, their three-way merge, as jj's merge of the operations would
+    make it. That makes realizing deterministic, so re-realizing after a crash rewrites
+    identical files.
+  - For the operation that becomes an op head, in a colocated repository, musubi runs jj's
+    `export_refs` with C's bookmarks, tags, and remote bookmarks against this machine's
+    `.git`. This writes `refs/heads`, `refs/tags`, and `refs/remotes`, with compare-and-swap
+    against the recorded values, as a local `jj` process would, and musubi records the
+    resulting per-machine fields. It holds jj's `git_import_export.lock` from the export
+    until it has published the op head, so a concurrent `jj` command never sees the
+    operation before `.git` matches it.
+  - Before publishing it, musubi merges it with this machine's own concurrent operations as
+    jj will, in jj's order and the reverse, since the result can depend on the order. jj
+    0.46 can't merge some concurrent operations ([races.md](races.md), "Known jj
+    limitations"), and publishing them would leave every `jj` command here failing. So if
+    the merge fails, musubi publishes nothing, and the sync fails, naming this machine's
+    operations that the hive doesn't have yet, one of which to revert.
 - Canonicalizing a realization returns the canonical operation its attribute names.
   Realizing never creates new canonical operations, so updates cannot loop between machines.
 
@@ -196,64 +187,74 @@ But which remotes exist, and where they point, is in each machine's git config. 
 more, `jj git remote rename` on one machine would rename the remote bookmarks everywhere
 while every other machine's git config kept the old name.
 
-Some repo config must agree too. If `immutable_heads()` or `git.private-commits`
-differed, one machine would rewrite or push what another protects. But much repo config
-is personal, and some is a machine's own business, so musubi shares only chosen keys:
+Some repo config must agree too. If `immutable_heads()` or `git.private-commits` differed,
+one machine would rewrite or push what another protects. But much repo config is personal,
+and some is a machine's own business, so musubi shares only chosen keys:
 `revset-aliases."immutable_heads()"`, `revset-aliases."trunk()"`, `git.private-commits`,
-and any that the shared key `musubi.shared-config` names (`["aliases.l"]`, say). jj keeps
-repo config outside the repository, so musubi finds the file as `jj` does.
+`musubi.shared-config`, and any keys that `musubi.shared-config` names (`["aliases.l"]`,
+say). jj keeps repo config outside the repository, so musubi finds the file as `jj` does.
 
-So musubi treats the remote definitions (each remote's name, URL, and push URL) and the
-shared config keys as hive settings. A remote's URLs go as written and, where the
-machine's `url.<base>.insteadOf` rules change them, as its git expands them, since other
-machines needn't have the same rules. A machine writes a URL it receives as written where
-its own git expands it the same way, so that an alias they share stays one, and otherwise
-as expanded. Unless `musubi.share-credentials` is set in jj's config, the URLs go without
-the user and password an http(s) URL may carry, a token meant for that machine, and so
-does the command line jj records with each operation. Remotes compare by where they point,
-as written or as expanded, so each machine keeps its own spelling. When a machine's settings
-change, musubi records the new settings in an attribute (`musubi.settings`) of an operation
-it writes, which changes nothing else. That operation replicates like any other. Each
-remote and shared config key carries the time it was written, by the writing machine's
-clock (the modification time of the file holding it), and the machine that wrote it, and
-where machines disagree, the later write wins: the hive's settings as of an operation are
-the nearest recording ancestor's, and at a merge operation, for each setting, the parent
-whose write is later. Equal times go to the machine key that sorts last. Clock skew can
-make the wrong write win; that is accepted, for a rule anyone can predict
-([settings-merge.md](settings-merge.md)). Settings recorded before writes were timed take
-their operation's time.
+These are the hive settings: each remote's name, URL, and push URL, and the shared config
+keys.
 
-Since remotes compare as written or as expanded, an expansion once shared stays until the
-remote points somewhere else: a machine that drops a redirect to a mirror doesn't take the
-mirror's URL back from the others, though any of them can respell its own copy, which
-musubi leaves alone. And an alias is keyed as a host, `gh:team/p` as `gh/team/p`, so two
-machines' aliases of the same name compare as one repository, whatever they expand to;
-joining a hive takes shared history too.
+### Recording and merging
 
-At the start and end of every sync, a machine reconciles its settings: a setting that
-differs from what it last applied is a change of its own, written at the file's modification
-time, and the later write wins against the hive's. It records its own changes, and applies
-the hive's, logging each value it replaces: remotes with `git remote`, which also renames or
-deletes the remote-tracking refs, and config keys in its repo config file. Config values are
-compared as TOML, normalized, so that machines that write the same value differently agree
-on it. Remotes, likewise, are compared by the repositories they name: two are equal when
-their URLs have the same key (as for joining, under "Which hive"), and so do their push
-targets (the push URL, or else the URL). The merge, the checks for what changed, and the
-detection of renames all use that equality, so they work on where remotes point, not on how
-they are spelled, and the key is a pure function of the URL, so every machine agrees on it.
-A machine's own spelling of a shared remote, over https on one machine and ssh on another,
-is never a change, and respelling it records nothing. Applying a change writes only the URLs
-whose repository differs, and removes a push URL that no longer names where pushes go, so a
-machine keeps its spelling of whatever it still shares. For machines that don't have a
-remote yet, the settings hold the spelling of the machine that last wrote it; every spelling
-names the same repository. A remote is one setting: one machine changing its URL while
-another changes its push URL are two writes, and the later stands. A machine that joins adds
-its remotes to the hive's, but takes the hive's where both have a remote of the same name
-for different repositories; the first machine's settings become the hive's. A machine that
-needs another identity for a remote, an ssh key of its own, say, should keep the ordinary
-URL and rewrite it with git's `url.<base>.insteadOf` in its user config: a URL spelled with
-an ssh host alias names a host no other machine knows, so it doesn't count as the same
-repository, and a machine without the alias can't use it.
+At the end of every sync, and at its start once the machine knows the hive's settings, a
+machine reconciles its settings with the hive's. A setting that differs from what the
+machine last applied is a change of its own. It records its changes in an attribute,
+`musubi.settings`, of an operation that changes nothing else, and which replicates like any
+other. It applies the hive's changes, remotes with `git remote` (which also renames or
+deletes the remote-tracking refs) and config keys in its repo config file, and its daemon
+logs each value it replaces: the old value, the new one, and which machine wrote that when.
+
+Where machines disagree, the later write wins. Each setting carries the time it was written,
+by the writing machine's clock (the modification time of the file holding it), and the
+writing machine's key, which breaks ties: the one that sorts
+last wins. The hive's settings as of an operation are those of its nearest ancestor that
+records settings, and at a merge, for each setting, those of the parent whose write is
+later. A remote is one setting, so one machine changing its URL while another changes its
+push URL are two writes, and the later stands. Clock skew can make the wrong write win. That
+is accepted: the rule isn't sound, but it is simple and does what people expect ("I changed
+it at 9, you changed it at 8, mine stands").
+
+What counts as a change ignores spelling. Config values are compared as TOML, normalized,
+so that machines that write the same value differently agree on it. Remotes are compared by
+the repositories they name: two are equal when their URLs have the same key (the normalized
+form used for joining, under [Which hive](#which-hive)), and so do their push targets (the
+push URL, or else the URL). So one machine can reach a remote over https and another over
+ssh: neither spelling is a change, respelling records nothing, and applying a change writes
+only the URLs whose repository differs, removing a push URL that no longer names where
+pushes go. A machine that doesn't have a remote yet gets the spelling of the machine that
+last wrote it.
+
+### Remote URLs
+
+A remote's URLs go as written and, where the writing machine's `url.<base>.insteadOf` rules
+change them, as its git expands them, since other machines needn't have the same rules. A
+machine writes a URL it receives as written where its own git expands it the same way, so
+that an alias they share stays one, and otherwise as expanded. An alias is keyed as a host,
+`gh:team/p` as `gh/team/p`, so two machines' aliases of the same name compare as one
+repository whatever they expand to (though joining a hive takes shared history too). Once
+machines share an expanded URL, it stays until the remote points at another repository: a
+machine that drops a redirect to a mirror doesn't take the mirror's URL back from the
+others, though each can respell its own copy.
+
+Unless `musubi.share-credentials` is set in jj's config, URLs go without the user and
+password an http(s) URL may carry, a token meant for one machine, and so does the command
+line jj records with each operation.
+
+A machine that needs another identity for a remote, an ssh key of its own, say, should keep
+the ordinary URL and rewrite it with git's `url.<base>.insteadOf` in its user config. A URL
+spelled with an ssh host alias names a host no other machine knows, so it doesn't count as
+the same repository, and a machine without the alias can't use it.
+
+### A joining machine's settings
+
+A machine that joins adds its remotes to the hive's, but takes the hive's where both have a
+remote of the same name for different repositories; the first machine's settings become the
+hive's. Joining adds a machine rather than changing the hive's mind, so a joining machine's
+remote or shared config key comes back even if the hive had removed it: remove it again
+afterwards.
 
 ## Ordering: one hub, one canonical head
 
@@ -278,52 +279,48 @@ The hub therefore keeps a single canonical head and accepts only fast-forward up
   local work, which is the same outcome as two jj processes on one machine.
 
 Every merge operation has at least one parent that only its creator had. Two machines
-therefore never perform the same merge. The [formal model](#formal-model) proves this,
+therefore never perform the same merge. The [formal model](../formal/README.md) proves this,
 together with the other safety properties.
 
-Notifications are hints. The hub publishes each new canonical head on a subject. Nodes also
-compare heads with the hub whenever they connect, and periodically. Correctness never depends
-on receiving a notification.
+Notifications are hints. The hub announces each new canonical head to the hive's nodes.
+Nodes also compare heads with the hub whenever they connect, and periodically. Correctness
+never depends on receiving a notification.
 
 ### Offline work
 
 A disconnected node keeps working locally; jj does not need the hub. When it reconnects, it
 pulls, merges, and pushes. That is the same path as any concurrent update.
 
-### Moving the hub
+### Replacing the hub
 
-A hub is just a store. Every node holds every operation it has seen, so a new, empty hub fills
-up as soon as nodes connect: the first node fast-forwards it to its head, and the others
-fast-forward or merge as usual. A hub location is an ssh destination, or on the hub's
-machine its directory. The old hub can publish a signed-by-config `hub-moved`
-advertisement carrying the new location and a higher epoch. Nodes then reconnect there
-and ignore lower-epoch hubs from then on.
+A hub is just a store. Every node holds every operation it has seen, so a new, empty hub
+fills up as soon as nodes connect: the first node fast-forwards it to its head, and the
+others fast-forward or merge as usual. So a hub needn't be durable, and it syncs nothing to
+disk: one that loses its state, to a power cut say, is deleted and made again, and the
+machines' repositories fill the new one.
 
-Since an empty hub fills up this way, a hub needn't be durable, and it syncs nothing to disk:
-one that loses its state, to a power cut say, is deleted and made again, and the machines'
-repositories fill the new one. A hub does that itself for a hive whose store it finds
-corrupt as it opens it: its heads file torn, say. The store goes under `removed/`, and the
-hive is made again, empty, under its id, name, and index. Machines that knew its later
-heads follow it back to its root, as they follow any hub that goes back (docs/protocol.md,
-"Network and failures"), and push what they have. A machine whose last head the first to
-push lacked then fetches the whole hive again, as from a new hub, since the hub can't tell
-what it has. The old store is deleted once it has been set aside a day and the new one has
-accepted a head, or the hive has been taken out of the hub.
+A hub does that itself for a hive whose store it finds corrupt as it opens it: its heads
+file torn, say. The store goes under `removed/`, and the hive is made again, empty, under
+its id, name, and index. Machines that knew its later heads follow it back to its root, as
+they follow any hub that goes back (docs/protocol.md, "Network and failures"), and push
+what they have. A machine whose last head the first to push lacked then fetches the whole
+hive again, as from a new hub, since the hub can't tell what it has. The old store is
+deleted once it has been set aside a day and the new one has accepted a head, or the hive
+has been taken out of the hub.
 
 A power cut can also leave a file the hub wrote just before it empty, or cut short, in a
-store that still opens, since the hub reads only its heads and accepted operations to open
-it: an operation or view, or a git object. The hub doesn't look for that. Such a file is
-rare, needing a cut within a minute or so of the write. A hive stuck on one, the syncs
-that reach it failing on the same file, is made again by hand: stop the hub, delete the
-hive's `heads`, and start it again, and the hub finds the store corrupt and makes the hive
-again under its id, for its machines to fill. Looking over each store for torn files as
-the hub first opens it would read every view the hive has, and a view names every
-bookmark: gigabytes, for a repository with thousands of branches and operations.
+store that still opens: an operation or view, or a git object. The hub doesn't look for
+that, since it reads only its heads and accepted operations to open a store, and looking
+over every view for torn files would read gigabytes for a repository with thousands of
+branches and operations. Such a file is rare, needing a cut within a minute or so of the
+write. A hive stuck on one, the syncs that reach it failing on the same file, is made
+again by hand: stop the hub, delete the hive's `heads`, and start it again. The hub then
+finds the store corrupt and makes the hive again under its id, for its machines to fill.
 
-Duplicate merges can occur in two cases. One is two hubs running at once for the same hive
-(split brain), if nodes on both sides reconnect to one hub at the same moment; epochs make
-that case detectable. The other is a hub going back to a head it accepted earlier, having
-lost later ones to a power cut (docs/protocol.md, "Network and failures").
+Duplicate merges can occur in two cases. One is two hubs serving the same hive at once
+(split brain): nodes that synced through different hubs can each merge the same work once
+they meet at one. The other is a hub going back to a head it accepted earlier, having lost
+later ones to a power cut (docs/protocol.md, "Network and failures").
 
 ## Objects
 
@@ -338,29 +335,26 @@ observing a dangling reference.
 
 Objects move as git packfiles. musubi uses the `git` binary: `git pack-objects --revs` with
 the receiver's known commits as exclusions, and `git index-pack --fix-thin` to receive. jj
-already needs `git` for fetch and push, and this gets delta compression and bitmaps for free,
-the latter for clones. A node runs the git jj is configured to use (`git.executable-path`),
-the one its fetches and pushes use; a hub, which has no jj config, runs `git` from its
-`PATH`. What only needs an answer musubi asks gix, which jj uses too, in-process: which
-commits exist, which commits a transfer covers and which of them have no parents, and which
-refs the hub has. Starting git for each would cost more than the answer, on Windows most of
-all. Each question opens the repository afresh, so that gix sees what git
-has just written, and holds no pack open that git's gc would delete, which Windows forbids.
+already needs `git` for fetch and push, and this gets delta compression, and bitmaps for
+clones, for free. A node runs the git jj is configured to use (`git.executable-path`); a
+hub, which has no jj config, runs `git` from its `PATH`. Questions that need only an answer
+(which commits exist, which commits a transfer covers and which of them have no parents,
+which refs the hub has) musubi asks gix, which jj uses too, in-process, since starting git
+would cost more than the answer, on Windows most of all. Each question opens the repository
+afresh, so that gix sees what git has just written, and holds no pack open that git's gc
+might delete, which Windows forbids.
 
-- The hub stores objects in a bare git repository, in the files ref format whatever git's
-  default, since gix reads no other. Its only refs are under
-  `refs/musubi/head/`, naming the visible heads of its accepted head's view, so that git can
-  keep a bitmap index of what they reach: with one, counting what a clone needs takes a
-  fraction of the time. Nodes never see them, since what the hub sends is bundles, not refs.
-  The hub writes its first bitmap index, with a full `git gc` in the background, once it
-  holds 10,000 objects, and `git gc --auto`'s full repacks refresh it. Only a clone, which
-  has nothing, uses it: with a bitmap, git skips the walk that finds what the receiver has
-  to make deltas against, so an edit pushed a moment ago, with no delta stored, would go to
+- The hub stores objects in a bare git repository, in the files ref format, the only one gix
+  reads. Its only refs are under `refs/musubi/head/`, naming the visible heads of its
+  accepted head's view. Nodes never see them, since the hub sends bundles, not refs; they
+  are there so that git can keep a bitmap index, which makes counting what a clone needs
+  much faster. The hub writes its first bitmap index, with a full `git gc` in the
+  background, once it holds 10,000 objects, and `git gc --auto`'s full repacks refresh it.
+  Only clones use it. Other fetches don't, since with a bitmap git skips the walk that finds
+  what the receiver has to make deltas against, so an edit pushed a moment ago would go to
   every other node whole.
-- musubi runs git with `attr.tree` naming the empty tree. git 2.43 to 2.45 otherwise read a
-  bare repository's attributes from HEAD's tree, path by path, and where HEAD names a branch
-  that doesn't exist, as on a hub, each lookup tried every way of spelling HEAD as a ref:
-  `pack-objects` for a clone of jj spent three times as long on that as on packing.
+- musubi runs git with `attr.tree` naming the empty tree, which spares git 2.43 to 2.45
+  slow attribute lookups on a hub.
 - A pack is written once on each side: `git pack-objects` writes it straight into the bundle
   that carries it, which goes into the blob store as a hard link rather than a copy where
   the filesystem allows, and the receiver pipes it from the bundle into git.
@@ -370,23 +364,17 @@ has just written, and holds no pack open that git's gc would delete, which Windo
   bookmark reaches from `git gc`. Without them, git would eventually delete every anonymous
   head.
 - As `git fetch` does, a received pack of fewer than 100 objects is unpacked into loose
-  objects, and a larger one kept as a pack. After receiving, the hub and nodes run
-  `git gc --auto`, which consolidates packs and loose objects once there are enough of them
-  (by git's thresholds, or the repository's), but only once musubi, measuring as git does,
-  finds that there are: more than `gc.autoPackLimit` packs not kept, or more than `gc.auto`
-  loose objects, estimated from one of the 256 directories they spread across. It runs in
-  the background as git does
-  (`gc.autoDetach`, including on Windows, where git can't detach itself), but with pruning
-  disabled: musubi never deletes an object, reachable or not. On the hub, what its head's
-  refs don't reach goes to a cruft pack. On battery, musubi defers the gc until an import
-  on mains power, which a `pre-auto-gc` hook could have done before musubi's git stopped
-  running hooks. It asks `pmset` on macOS, and on Linux defers when no mains or USB supply
-  is online and a battery of the machine's own, not a mouse's, is discharging. Elsewhere
-  it can't tell, and doesn't defer. A machine that only ever syncs on battery never runs
-  this gc, but the user's own git commands still do.
-- jj-lib's git backend sizes gix's table of pack indexes when it opens the repository, so a
-  long-running node could fail to read objects in packs added since. A node therefore reopens
-  the repository before it imports objects.
+  objects, and a larger one kept as a pack.
+- After receiving, the hub and nodes run `git gc --auto` in the background (on Windows too,
+  where git can't detach itself), when musubi, measuring as git does, finds there is work to
+  do: more than `gc.autoPackLimit` packs not kept, or more than `gc.auto` loose objects. But
+  pruning is disabled: musubi never deletes an object, reachable or not. On the hub, what
+  its head's refs don't reach goes to a cruft pack.
+- On battery, musubi defers that gc until an import on mains power. It asks `pmset` on
+  macOS, and on Linux defers when no mains or USB supply is online and the machine's own
+  battery is discharging. Elsewhere it can't tell, and doesn't defer.
+- A node reopens the repository before it imports objects, since jj-lib's git backend
+  can't read packs added after it opened it.
 - jj commits carry `change-id` and conflict headers by default, so for nearly every commit the
   raw object is enough: the receiver derives the same extras from it. The exceptions are
   commits written by older jj or with the header disabled, whose change id lives only in the
@@ -405,17 +393,17 @@ commits and sends the store files the receiver lacks, in batches.
 ### Size limits and chunking
 
 The hub takes messages up to 1 MiB, and says so when a connection opens. Control messages
-are small. Something bulky (packs, large views, batches of operations) travels
-inline in the request or reply it belongs to when it fits in a quarter of that, and
-otherwise moves as a content-addressed blob in a resumable upload or download session. Each
-chunk carries its offset and fits under the negotiated limit, up to eight chunks are in
-flight at once, and the blob's hash is checked when the session finishes. An interrupted
-session resumes from the receiver's reported offset. The hub deletes a blob it prepared
-once it has served the last chunk and a minute has passed without a request for any chunk
-of it, and unfinished sessions expire after an hour. A blob prepared again, for another
-reply with the same content, is kept as one prepared just now. A node deletes what it
-uploads or downloads once it is done with it, however the call ends, except a partial
-download, which it keeps for a later call to resume until it has gone a day untouched.
+are small. Something bulky (packs, large views, batches of operations) travels inline in the
+request or reply it belongs to when it fits in a quarter of that, and otherwise moves as a
+content-addressed blob in a resumable upload or download session. Each chunk carries its
+offset and fits under the negotiated limit, up to eight chunks are in flight at once, and
+the blob's hash is checked when the session finishes. An interrupted session resumes from
+the receiver's reported offset. The hub deletes a blob it prepared once it has served the
+last chunk and a minute has passed without a request for any chunk of it, and unfinished
+sessions expire after an hour. A blob prepared again, for another reply with the same
+content, is kept as one prepared just now. A node deletes what it uploads or downloads once
+it is done with it, however the call ends, except a partial download, which it keeps for a
+later call to resume until it has gone a day untouched.
 
 A sync takes few round trips. A node's first request, which it also sends whenever it
 polls, asks for the hub's head together with every operation accepted since the newest
@@ -425,22 +413,23 @@ that pushes two.
 
 Views are stored whole for every operation, and a repository with thousands of remote
 bookmarks can have megabyte-sized views, while consecutive views usually differ in a few
-bookmarks. In transit, musubi compresses a bundle's operations and views together with zstd,
-and sends each view as a delta against its operation's first parent's view: the view
-compressed with the parent's as a prefix that zstd may refer back to, a few hundred bytes for
-a view of any size. A view a parent has is not sent at all. The receiver always has the
-parents' views. Every bundle of operations is a range `anc*(head) \ anc*(base)` for a `base`
-the receiver has, in topological order, so each parent is either earlier in the bundle or in
-`anc*(base)`. Ids remain those of the uncompressed views, and the receiver checks them after
-reconstructing each one. Stores keep views whole and uncompressed, as jj does.
+bookmarks.  In transit, musubi compresses a bundle's operations and views together with
+           zstd, and sends each view as a delta against its operation's first parent's view:
+           the view compressed with the parent's as a prefix that zstd may refer back to, a
+           few hundred bytes for a view of any size. A view a parent has is not sent at all.
+           The receiver always has the parents' views: a bundle holds the ancestors of a
+           head that aren't ancestors of a base the receiver has, parents first, so each
+           parent is either earlier in the bundle or one the receiver has already. Ids
+           remain those of the uncompressed views, and the receiver checks them after
+           reconstructing each one. Stores keep views whole and uncompressed, as jj does.
 
 ## Joining
 
 `musubi create` starts a hive from an existing repository, and `musubi join` makes another
 copy of it part of that hive. By default each replicates the repository's current state,
-not its operation history. It writes one canonical join
-operation whose parent is the root operation and whose view is the current view, and records
-that the current local head canonicalizes to it. Earlier operations stay local. A repository
+not its operation history. It writes one canonical join operation whose parent is the root
+operation and whose view is the current view, and records that the current local head
+canonicalizes to it. Earlier operations stay local. A repository
 that has been in use for years can have tens of thousands of operations, and every one of
 their views pins commits that would otherwise never need transferring, such as old
 working-copy snapshots. `--full-history` replicates everything instead.
@@ -465,12 +454,13 @@ creating a hive, though: `join` that matches nothing is refused, and so is `crea
 matches a hive, unless it names the new one. A copy whose remote URL doesn't look like the
 others', behind an ssh host alias, say, would otherwise get a hive of its own and sync with
 nothing, with no sign anything was wrong. In one request the node sends its backend, its
-remotes' URLs, its root commits (the commits whose parent is the root commit, git's
-parentless commits, leaving out an empty, undescribed working-copy commit), and the
-commits its remote bookmarks point to. The hub decides under its lock, so a copy joining
-while another creates the hive finds it. (musubi refuses a shallow or partial clone before
-asking the hub, and won't sync one: the hub accepts an operation only with everything it
-requires, which such a clone can't send.)
+remotes' URLs, its root commits, and the commits its remote bookmarks point to. Its root
+commits are those whose only parent is jj's root commit, which in git are those with no
+parents, leaving out an empty, undescribed working-copy commit. The hub decides under its
+lock, so a copy joining while another creates the hive finds it.
+
+musubi refuses a shallow or partial clone before asking the hub, and won't sync one: the
+hub accepts an operation only with everything it requires, which such a clone can't send.
 
 1. A repository with no commits of its own is refused: there is nothing to match, and
    nothing to share.
@@ -515,38 +505,33 @@ accept any unique prefix of its name.
 
 `musubi clone <name>` creates a new colocated repository and joins it to the named hive.
 
-## Abandoning operations and garbage collection
+## Abandoning operations
 
 `jj op abandon` rewrites the descendants of the abandoned operations into new operations with
 new ids. If musubi ignored that, the next pull would bring the old operations straight back.
+So a node notices when canonical operations it had published stop being reachable from its
+op heads, which jj does only in `op abandon`, and pauses replication for that repository,
+saying why, rather than undoing it.
 
-musubi treats an op abandon as an update in its own right. A node notices when canonical
-operations it had published stop being reachable from its op heads. jj never does that except
-in `op abandon`. The node pairs each rewritten operation with its original by matching
-metadata and view, and pushes a supersede record: the new head replaces the old one, with
-equal views at the tips. The hub accepts it like a fast-forward. Other nodes apply the same
-rewrite locally, reparenting any unpushed work of their own onto the new chain as
-`jj op abandon` does. The hub later discards superseded operations and objects nothing
-references.
-
-Until supersede records are implemented, a node that detects an op abandon pauses
-replication for that repository and says why, rather than undoing it.
+Replicating an op abandon, as a record that the new history supersedes the old for every
+machine to apply, is not built yet.
 
 `jj util gc` only removes data that is no longer reachable locally, so it needs no special
-handling. The hub runs its own garbage collection.
+handling. Neither the hub nor the nodes ever delete an operation or an object.
 
 ## Transport
 
-The transport is a small trait. Request/response carries messages up to the negotiated size
-limit. Subscriptions carry hub notifications. Hub requests go to `musubi.<hive>.rpc`, and
-notifications to `musubi.<hive>.head`. Requests about the hub as a whole (join, list,
-resolve a name, rename, remove) go to `musubi.hub.rpc`. The hub takes all of them on one
-subscription, `musubi.*.rpc`; each hive's requests go to a thread of its own, which opens
-the hive's store on its first request and answers one request at a time, which is what
-makes each push atomic, while different hives don't wait for each other. A request for a
-hive the hub doesn't have is an error: only a join creates hives. Every operation and
-object is verified against its content hash on receipt, so a misbehaving peer cannot inject
-data under a false id.
+The transport is a small trait. Every message goes to a subject, a dotted name that requests
+and subscriptions address. Request/response carries messages up to the negotiated size
+limit. Subscriptions carry hub notifications. Requests about a hive go to `musubi.<id>.rpc`,
+where `<id>` is the hive's id, and notifications to `musubi.<id>.head`. Requests about the
+hub as a whole (join, list, resolve a name, rename, remove) go to `musubi.hub.rpc`. The hub
+takes all of them on one subscription, `musubi.*.rpc`; each hive's requests go to a thread
+of its own, which opens the hive's store on its first request and answers one request at a
+time, which is what makes each push atomic, while different hives don't wait for each other.
+A request for a hive the hub doesn't have is an error: only a join creates hives. Every
+operation and object is verified against its content hash on receipt, so a misbehaving peer
+cannot inject data under a false id.
 
 - **In-memory**: an in-process network, which the hub's service and the connections it
   serves meet on. Tests run nodes and hubs over one too, which can drop, delay, duplicate,
@@ -559,20 +544,16 @@ data under a false id.
   connection ends partway through is never delivered. The client opens a new connection
   whenever one ends, subscribing again to what it had; requests in flight on the old one
   fail at once, and those made in between wait for the new one, up to their timeout.
-  Either side ends a connection that falls 1024 frames behind, as one whose other side
-  vanished without a word does. Once connected, a client tries a hub that then answers
-  with another version's greeting, more noise than it passes over, or an implausible
-  payload limit again only after a minute; connecting the first time, that fails at once,
-  and the daemon backs off as after any failure.
+  Either side ends a connection that falls 1024 frames behind, as it would one whose other
+  side vanished. A hub that greets the client wrongly (another version, too much noise
+  first, or an implausible payload limit) fails the first connection at once; after that,
+  the client tries it again only after a minute.
 - Over ssh, the hub's machine may print something before the hub greets: some shells'
   startup files print for every shell, a banner in ASCII art, say. The client passes over
-  up to 64 KiB of it, as Mercurial's ssh client passes over noise before its handshake;
-  past that, it fails, quoting the first thing printed. The greeting starts with a NUL,
-  which is never part of text, so that a banner passes for it only by printing it on
-  purpose. The client greets the hub only after the hub has greeted it, so that nothing
-  that runs there first can read the greeting. Messages broadcast to terminals, as by
-  `wall` or `shutdown`, never reach the stream: the session has no terminal, so it isn't
-  among the logins they write to.
+  up to 64 KiB of it; past that, it fails, quoting the first thing printed. The greeting
+  starts with a NUL, which is never part of text, so that a banner can't be mistaken for
+  it. The client greets the hub only after the hub has greeted it, so that nothing that
+  runs there first can read the greeting.
 
 ### Running a hub
 
@@ -581,10 +562,11 @@ reach it can read and write every hive on it. `musubi hub` serves a directory ho
 subdirectory per hive, named by the hive's id, each with the hive's store (`canonical/`,
 `backend`, `git/` and `extras/` or `simple/`, `heads`, `blobs/`, `tmp/`), its `hive.toml`
 (name and backend), and its index. Removed hives move to `removed/`, as do corrupt stores
-(see "Moving the hub"). Without `--dir` the hub serves `./musubi-hub`, or the current
-directory if it is a hub's, and takes a lock in the user's state directory, so that a
-second hub started the same way says where the first one is instead of starting; `--dir`
-runs more hubs on purpose.
+(see [Replacing the hub](#replacing-the-hub)). Without `--dir` the hub serves
+`./musubi-hub`, or the current directory if it is a hub's, and takes a lock in the user's
+state directory, so that a second hub started the same way says where the first one is
+instead of starting. `--dir` runs more hubs on purpose, and a lock in each hub's directory
+stops two hubs serving the same one.
 
 The hub listens on a local socket that only its owner can reach, `run/hub.sock` in its
 directory, in a subdirectory only its owner can open (on Windows, a named pipe named after
@@ -599,8 +581,8 @@ has one, so that commands on the hub's machine need no `--hub`.
 
 Often ssh is the only way one machine can reach another, as when a laptop reaches a devbox
 through a zero-trust tunnel, and the protocol trusts whoever can reach the hub, so it can't
-simply be exposed. A `--hub` that isn't an absolute path is an ssh destination,
-passed to the user's own `ssh` (or `$MUSUBI_SSH`), so `~/.ssh/config` applies: aliases,
+simply be exposed. A `--hub` that isn't an absolute path is an ssh destination, passed to
+the user's own `ssh` (or `$MUSUBI_SSH`), so `~/.ssh/config` applies: aliases,
 `ProxyCommand`, and the rest.
 
 - Each machine has a key of its own, `hub_key` in its state directory. Joining a hub over
@@ -615,12 +597,13 @@ passed to the user's own `ssh` (or `$MUSUBI_SSH`), so `~/.ssh/config` applies: a
 - On the other machine, each connection is an ssh of its own, and the stream transport
   speaks through its stdin and stdout. Nothing outlives a connection: an `ssh -L` forward
   that lasts goes dead when the machine sleeps, while here, connecting again is a new ssh.
-  ssh's `ServerAliveInterval` gives up on a dead link within half a minute, but `Instant`
-  stops while the machine sleeps and the wall clock doesn't, so a jump between them ends
-  every connection at once, and the transport connects again within seconds of waking.
+  ssh's `ServerAliveInterval` gives up on a dead link within half a minute, and musubi
+  ends every connection at once when it sees that the machine has slept (its monotonic
+  clock stops during sleep and the wall clock doesn't), so the transport connects again
+  within seconds of waking.
 - Once the transport reconnects, over ssh or not, the daemon syncs at once, even if it was
-  waiting to retry a sync that failed (once in a run of failures, since a sync could lose
-  the connection itself): the hub's announcements while it was away are lost.
+  waiting to retry a sync that failed (only once per run of failures, in case the sync is
+  what loses the connection), since it missed the hub's announcements while it was away.
   A request in flight when the connection dropped fails at once, so a sync it was part of
   starts again.
 - ssh doesn't compress (`Compression=no`): musubi already compresses what it sends.
@@ -630,28 +613,24 @@ passed to the user's own `ssh` (or `$MUSUBI_SSH`), so `~/.ssh/config` applies: a
   working, not whatever the shell printed first. What ssh said, or that `musubi` isn't on
   the `PATH` there (exit status 127), becomes part of the error `musubi list` shows.
 
-The hub logic and the node sync logic are sans-IO state machines. They consume events and
-produce effects, which keeps them deterministic under test, and they correspond directly to
-the formal model.
-
 ## Local integration
 
 - Each user runs one daemon, which serves every repository listed in its config file
   (`config.toml` in musubi's config directory, the source of truth), one thread each.
-  Commands reach it over a control socket: tarpc, with JSON messages, over a Unix domain
-  socket (`$XDG_RUNTIME_DIR/musubi/daemon.sock` on Linux, `$TMPDIR/musubi/daemon.sock` on
-  macOS) or a Windows named pipe (`\\.\pipe\musubi-<user>`). It answers `version`, `add`
-  (start serving a repository now, and reply after its first sync), `remove`, `sync`,
-  `status`, and `stop`. `musubi create`, `join`, and `clone` write the repository's
-  membership and the config file, then ask the daemon to add it, starting the daemon in the
-  background first if none is running. Only the user can reach the daemon: a Unix socket's directory
-  must be theirs and writable by no one else, as tmux and ssh-agent check, or the daemon
-  won't listen there and commands won't connect; a named pipe admits only its owner, and
-  the daemon creates it as the first instance, so it can't start if another user took the
-  name. A lock file in the state directory, named after the socket, keeps a second daemon
-  from starting; the daemon holding it removes a socket a crashed daemon left behind.
-  Commands check the daemon's version first, and suggest `musubi daemon restart` when it
-  differs.
+  Commands reach it over a control socket: tarpc (a Rust RPC library), with JSON messages,
+  over a Unix domain socket (`$XDG_RUNTIME_DIR/musubi/daemon.sock` on Linux,
+  `$TMPDIR/musubi/daemon.sock` on macOS) or a Windows named pipe (`\\.\pipe\musubi-<user>`).
+  It answers `version`, `add` (start serving a repository now, and reply after its first
+  sync), `remove`, `sync`, `status`, and `stop`. `musubi create`, `join`, and `clone` write
+  the repository's membership and the config file, then ask the daemon to add it, starting
+  the daemon in the background first if none is running. Only the user can reach the daemon:
+  a Unix socket's directory must be theirs and writable by no one else, as tmux and
+  ssh-agent check, or the daemon won't listen there and commands won't connect; a named pipe
+  admits only its owner, and the daemon creates it as the first instance, so it can't start
+  if another user took the name. A lock file in the state directory, named after the socket,
+  keeps a second daemon from starting; the daemon holding it removes a socket a crashed
+  daemon left behind. Commands check the daemon's version first, and suggest
+  `musubi daemon restart` when it differs.
 - `musubi daemon install` hands the daemon to the platform's service manager, to start at
   login: a launchd agent on macOS and a systemd user unit on Linux, which restart it after
   a crash but not after `musubi daemon stop`, and an entry in the user's `Run` registry key
@@ -702,12 +681,17 @@ jj-lib never verifies them on read. Two consequences:
   each canonical operation and view by decoding and re-hashing it. A mismatch means a peer is
   running an incompatible version, or is lying.
 
-Every message between a node and the hub starts with its protocol and jj-lib versions, which
-no release encodes differently, and each side reads them first and refuses a message whose
-versions aren't its own, so that a release that encodes the rest differently is refused for
-that reason rather than misread. musubi is pinned to jj-lib 0.46.0.
+Every message between a node and the hub starts with its protocol and jj-lib versions,
+encoded the same way in every release. Each side reads them first and refuses a message
+whose versions aren't its own, so that a message from another release is refused as such
+rather than misread. musubi is pinned to jj-lib 0.46.0.
 
 ## Testing
+
+The hub logic and the node sync logic are sans-IO state machines: they do no I/O themselves,
+but consume events and produce effects, which keeps them deterministic under test, and they
+correspond directly to the formal model. [testing.md](testing.md) describes each layer of
+tests.
 
 - **Formal model**: a Lean 4 model of the hub and node protocol, covering lossy and reordering
   networks, crashes, interrupted uploads, and concurrent local operations. It proves the
@@ -717,30 +701,16 @@ that reason rather than misread. musubi is pinned to jj-lib 0.46.0.
   perform the same merge. It also proves progress: when local activity stops and the network
   delivers, every node converges to the canonical head.
 - **Protocol property tests**: Hegel (the Rust port of Hypothesis) stateful tests drive the
-  sans-IO hub and nodes over the in-memory transport with fault injection, checking the same
-  invariants as the model after every step and convergence after a quiescence step.
-- **Generated end-to-end tests**, in the style of jj-stack's property harness: a Hegel state
-  machine runs real `jj` commands (commit, describe, rebase, abandon, new, bookmark moves,
-  `op abandon`, git-side ref changes) against several real repositories, some colocated. Each
-  repository is served by a real musubi node, with faults kept as separate rules
-  (disconnects, crashes mid-upload, hub restarts). Invariants are checked against the
-  repositories themselves. The default test run covers fixed scenarios. The generated search
-  is a separate, sharded, opt-in run, with one example database per shard, and reports which
-  rules it never reached.
+  sans-IO hub and nodes over a simulated network with fault injection, checking the same
+  invariants as the model after every step, and convergence at the end.
+- **Race catalogue** ([races.md](races.md)): a test for each way machines can change the
+  same thing at once, with real repositories.
+- **Generated end-to-end tests**: a Hegel state machine runs real `jj` commands (commit,
+  describe, rebase, squash, abandon, bookmark and workspace changes, `--at-op`, git-side
+  branch moves) against two or three real colocated repositories, each served by a musubi
+  node, with faults kept as separate rules (crashes, lost replies, hub restarts). Invariants
+  are checked against the repositories themselves. It is a separate, sharded, opt-in run,
+  which reports the rules it never reached.
 - **Transport tests** hold the in-memory and stream transports to the same contract, and run
   nodes and a hub over streams. The CLI tests run hubs and daemons as processes of their
   own, over local sockets and a stand-in for ssh.
-
-## Milestones
-
-1. Formal model; sans-IO protocol core, in-memory transport, and protocol property tests.
-2. jj integration: canonical op store, format guard, translation of per-machine fields,
-   op-heads watching, realization under the colocated lock.
-3. Objects: git packs, keep refs, and extras; simple-backend store files.
-4. Hub storage, a transport between machines, daemon and CLI (`hub`, `join`, `clone`,
-   `sync`, `list`, `leave`, `debug op-id`); hubs serving many hives, matching joining
-   repositories to them, and a daemon controlled over a local socket.
-5. Generated end-to-end tests, and tests across processes.
-6. Supersede records for `jj op abandon`, hub garbage collection.
-7. Starting the daemon at login, as a launchd agent, systemd user unit, or Windows `Run`
-   entry.

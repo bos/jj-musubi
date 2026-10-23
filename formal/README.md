@@ -206,11 +206,11 @@ Chunked blobs (`Chunks.lean`, with `hash` assumed injective):
   carrying sets, as `protocol.md` specifies at this level. `Chunks.lean` justifies the
   atomicity: a finished blob is exactly the sent bytes, so a payload arrives whole or not at
   all.
-- **Hub condition 2** is checked with the global `parents`. Condition 3 guarantees that
-  every operation in `closure(new)` is stored, so this agrees with a check over the hub's
-  stored operations.
-- **Cas order.** `new = head` is answered `Accepted(seq, head)` before conditions 1–3 are
-  considered (`casIdem`).
+- **The ancestry check** uses the global `parents`. It matters only once the closure check
+  has passed, which means every operation in `closure(new)` is stored, so this agrees with a
+  check over the hub's stored operations.
+- **Cas order.** `new = head` is answered `Accepted(seq, head)` before the other conditions
+  are checked (`casIdem`).
 - **Node-side guards are weakened where safety does not need them**, so the safety theorems
   also hold for a buggy node:
   - `Upload` may send any local operations and objects.
@@ -222,7 +222,8 @@ Chunked blobs (`Chunks.lean`, with `hash` assumed injective):
     can move backwards.
 
   The policy's own actions are instances of these weakened ones. Only one node-side guard
-  carries weight: `GetOps` requests only operations in `anc*(known.head)`.
+  carries weight: `GetOps` requests only operations in `anc*(known.head)`. The merged
+  `Fetch` needs none, since the hub chooses the operations, all of them accepted.
 - **Proven-safe relaxations of durability.** `loseKnown` lets a restarting node lose `known`
   (reset to `(0, root)`) while keeping `staged`, which is what the Rust node does.
   `loseVolatile` lets it lose `staged` as well. `hubForget` lets the hub lose or garbage-collect any
@@ -345,47 +346,20 @@ accepted pushes move the hub head. So once environment activity stops, the hub h
 at most once per dirty node, at most `N` times. Every lost Cas race teaches the loser a
 newer head, which decreases its staleness.
 
-## Findings
-
-No property in `protocol.md` is false under this model. The spec leaves the following
-underspecified, and the implementation should pin them down:
-
-1. **Cas wording.** `Cas` is said to be accepted "if and only if" conditions 1–3 hold. The
-   idempotent rule (`new = head` answers `Accepted`) contradicts this when
-   `expected ≠ head`. The model checks the idempotent rule first, which is safe.
-2. **Hub condition 2** must be evaluated only once condition 3 holds, or together with it.
-   `anc*` over the stored operations is meaningful only if `closure(new)` is stored.
-3. **`GetOps` can return unaccepted uploads.** The hub may store uploads it never accepted,
-   and `GetOps` returns any stored operation. Locality therefore depends on nodes requesting
-   only ids in `closure(known.head)`. Defensively, a node should also stage and realize only
-   operations in `anc*(known.head)`, and ignore any unrequested operation in a reply.
-4. **Chunk sessions.** A session id must never be reused for a different blob, including
-   across restarts; alternatively, every chunk should carry the blob id. Otherwise
-   duplicated stale chunks from an old session can cause a hash mismatch after every
-   restart, and the session never finishes. Chunk liveness also needs receiver crashes and
-   corrupted chunks to eventually stop. The second is the spec's assumption that corrupt
-   messages count as lost.
-5. **Durability is weaker than stated.**
-   - Safety does not need `known` or `staged` to be persistent (`loseKnown`,
-     `loseVolatile`).
-   - Safety does not need `Learn`'s seq filter (`learnUnfiltered`).
-   - The hub needs to keep only `closure(head)`, `head` and `seq`; unaccepted uploads may be
-     lost or garbage-collected (`hubForget`).
-6. **The policy's priority order is not needed** for termination: any interleaving of
-   enabled policy actions converges.
-
 ## Obligations for the Rust implementation
 
 - **Hub:**
-  - Conditions 1–3 of `Cas` and the update of `head` and `seq` form one critical section.
-  - The new `head` and `seq` are durable before the reply or notification is sent. If the
-    hub replied first and then lost the update in a crash, HubMonotone and
-    KnownIsHubHistory would fail.
+  - A `Cas`'s checks and the update of `head` and `seq` form one critical section.
+  - The new `head` and `seq` are written before the reply or notification is sent, so that
+    they survive the hub's process crashing. If the hub replied first and then lost the
+    update in a crash, HubMonotone and KnownIsHubHistory would fail. (A power cut can still
+    lose them, since musubi's hub syncs nothing to disk; `Regress.lean` covers a hub that
+    goes back.)
   - `closure(head)` is durable whenever `head` is.
   - Every `Head`, `Accepted`, `Rejected` and `Incomplete` message carries a pair
     `(seq, head)` that the hub actually had.
 - **Node:**
-  - Request, stage and realize only operations in `closure(known.head)`.
+  - Stage and realize only operations in `anc*` of a head the hub accepted.
   - Push only local operations.
   - `Merge` takes all current heads as parents.
   - No other node-side check is needed for safety. The Upload and Push guards, the order of

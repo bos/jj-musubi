@@ -14,9 +14,13 @@ snapshots of the hub, not replaying the requests they test.
   runs past 30 seconds. Measure a test there, not alone. Alone, it has the machine to
   itself; in `just test` it competes for cores and the disk. Making the fault tests'
   snapshots took a second alone and 16 seconds in a full run.
-- Count what a test starts and waits for, as well as timing it: processes started and
-  files synced (on Linux, `strace -f -c` counts both). Counts don't vary from run to run,
-  and they say what to remove.
+- Use perf and bpftrace, and use them a lot, to see what is really going on: a time says
+  that something is slow, not why. Count what a run starts and waits for, see where the CPU
+  goes and where threads wait off it. They cost little, where strace slows what it traces
+  enough to change the answer. On macOS, use `fs_usage` and Instruments. If a tool isn't
+  installed, or tracing needs a permission you don't have, ask for it rather than guess.
+  The suite's biggest wins came this way: some fifteen thousand `fdatasync` calls of 4 to
+  32 ms each, and two processes per jj command spent asking `tput` for a width.
 - Compare two versions by running them alternately, several times each, on the same
   machine, and compare averages. One run of each says little.
 
@@ -32,6 +36,26 @@ survive a power cut. On a real disk, waiting for those syncs was most of the sui
 
 On 32 Linux cores the default suite went from 17.5 seconds to 3.5; on an M4 Max, from 78
 to 26.
+
+## Know what the file system does
+
+What a write costs depends on the file system, and the differences are large enough to
+decide where a test's time goes.
+
+- A sync waits for the disk. On the cloud volumes and CI disks the suite was measured on,
+  each of jj's `fdatasync` calls took 4 to 32 ms, and the waiting left a third of 32 cores
+  idle. On tmpfs, which `/dev/shm` is, a sync returns at once.
+- On macOS, a plain `fsync` doesn't wait for the SSD to empty its cache, but `F_FULLFSYNC`
+  does, and Rust's `sync_data` and `sync_all` use `F_FULLFSYNC` on macOS. So every sync
+  jj makes there waits for the flush, and a test that is fast on Linux in memory can be
+  slow on a Mac's SSD. Don't infer the cost of a sync on macOS from what `fsync` costs.
+- ext4 (with `auto_da_alloc`, its default) and btrfs write a file out without being asked
+  when it replaces another by rename, or is truncated to nothing and closed. Code that
+  tests run often should overwrite in place or append instead (AGENTS.md, "Resilience").
+- APFS clones a whole directory tree in one `clonefile(2)` call, copy-on-write, so copying
+  a fixture costs almost nothing: a hub snapshot took 13 to 21 ms that way, against 240 to
+  280 ms copying file by file. Linux clones one file at a time (`FICLONE`, on btrfs and XFS
+  but not ext4), which saves nothing on small files, so `copy_tree` copies them there.
 
 ## Make an expensive fixture once per build
 

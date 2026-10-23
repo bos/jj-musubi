@@ -31,6 +31,7 @@ use musubi_hub::hub_dir::JoinChoice;
 use musubi_hub::hub_dir::JoinRequest;
 use musubi_jj::node::NodeRepo;
 use musubi_jj::objects::Backend;
+use musubi_sync::remote::HiveGone;
 use musubi_sync::wire::HubWideReply;
 use musubi_sync::wire::HubWideRequest;
 
@@ -207,9 +208,15 @@ enum Debug {
 
 #[derive(Subcommand)]
 enum HubAction {
-    /// Remove a hive from the hub. Its store moves to the hub's `removed/` directory.
-    Rm {
-        /// The hive: a name, a prefix of one, or an id.
+    /// Remove a hive from the hub. Each machine's copy stops syncing with it as it hears,
+    /// keeping everything it has.
+    ///
+    /// The hive's store moves to the hub's `removed/` directory, and is emptied a day or so
+    /// later. Its machines leave it as `musubi leave` would; `musubi create` and `musubi
+    /// join` make a new hive of the repository if it's wanted again.
+    #[command(alias = "rm")]
+    Remove {
+        /// The hive: its whole name, or its id.
         #[arg(add = ArgValueCandidates::new(completion::hives))]
         hive: String,
         /// The hub, as `musubi hub` prints it [default: this machine's default hub].
@@ -322,7 +329,7 @@ fn main() -> anyhow::Result<()> {
             ..
         } => hub::relay(dir),
         Command::Hub {
-            action: Some(HubAction::Rm { hive, hub }),
+            action: Some(HubAction::Remove { hive, hub }),
             ..
         } => block_on(async {
             let hub = UserConfig::hub(hub.as_deref())?;
@@ -456,13 +463,26 @@ fn join(start: &Path, choice: JoinChoice, member: &Member, socket: &Socket) -> a
     } = member;
     let (hub, machine, full_history) = (hub.as_deref(), machine.as_deref(), *full_history);
     let located = Located::find(start)?;
-    if let Some(hive) = HiveConfig::load(&located.repo_path)? {
-        anyhow::bail!(
+    // `musubi join` in a repository that is part of a hive joins that hive again, made again
+    // if its hub has lost it.
+    let (choice, hub) = match (HiveConfig::load(&located.repo_path)?, choice) {
+        (None, choice) => (choice, UserConfig::hub(hub)?),
+        (Some(hive), JoinChoice::Match) => {
+            let remake = JoinChoice::Remake {
+                id: hive.hive.to_string(),
+                name: hive.name.clone(),
+            };
+            (
+                remake,
+                hub.map_or_else(|| Ok(hive.hub.clone()), |hub| UserConfig::hub(Some(hub)))?,
+            )
+        }
+        (Some(hive), _) => anyhow::bail!(
             "this repository is already part of hive {}; `musubi leave` first to join another",
             hive.display_name()
-        );
-    }
-    let hub = UserConfig::hub(hub)?;
+        ),
+    };
+    let remaking = matches!(choice, JoinChoice::Remake { .. });
     set_machine_name(&located, machine)?;
     let node = located.open()?;
     let summary = node.join_summary()?;
@@ -498,7 +518,33 @@ fn join(start: &Path, choice: JoinChoice, member: &Member, socket: &Socket) -> a
     } else {
         format!("{count} machines")
     };
-    if joined.created {
+    if remaking {
+        // The daemon serves the repository with the hub it knew: start it over, as for a
+        // repository newly joined.
+        block_on(async {
+            if let Some(client) = daemon::running(socket).await? {
+                client
+                    .remove(
+                        control::context(Duration::from_secs(120)),
+                        located.workspace_root.clone(),
+                    )
+                    .await?
+                    .map_err(anyhow::Error::msg)?;
+            }
+            Ok::<_, anyhow::Error>(())
+        })?;
+    }
+    if remaking && joined.created {
+        println!(
+            "Made hive {} again from this repository; its other machines fill it as they sync",
+            joined.hive.name
+        );
+    } else if remaking {
+        println!(
+            "Hive {} is on the hub, and this repository is part of it",
+            joined.hive.name
+        );
+    } else if joined.created {
         println!("Created hive {}", joined.hive.name);
     } else {
         println!(
@@ -670,7 +716,8 @@ fn sync_directly(located: &Located) -> anyhow::Result<Synced> {
 /// Syncs through the daemon when it serves the repository, else directly.
 fn sync(start: &Path, socket: &Socket) -> anyhow::Result<()> {
     let located = Located::find(start)?;
-    HiveConfig::load(&located.repo_path)?.context("this repository is not part of a hive")?;
+    let hive =
+        HiveConfig::load(&located.repo_path)?.context("this repository is not part of a hive")?;
     let served = UserConfig::load()?.repos.contains(&located.workspace_root);
     let through_daemon = block_on(async {
         if !served {
@@ -688,7 +735,17 @@ fn sync(start: &Path, socket: &Socket) -> anyhow::Result<()> {
     let synced = match through_daemon {
         Some(Ok(synced)) => synced,
         Some(Err(message)) => anyhow::bail!("{message}"),
-        None => sync_directly(&located)?,
+        None => match sync_directly(&located) {
+            Ok(synced) => synced,
+            // As the daemon would: the hive is over.
+            Err(err) if HiveGone::of(&err) == Some(HiveGone::Removed) => {
+                daemon::leave_hive(&located, &hive)?;
+                anyhow::bail!(
+                    "{err:#}, so this repository no longer syncs with it; everything it has stays"
+                );
+            }
+            Err(err) => return Err(err),
+        },
     };
     println!("Synced (hive at #{}).", synced.seq);
     Ok(())
@@ -710,9 +767,7 @@ fn leave(start: &Path, socket: &Socket) -> anyhow::Result<()> {
         }
         Ok(())
     })?;
-    UserConfig::remove_repo(&located.workspace_root)?;
-    std::fs::remove_file(HiveConfig::path(&located.repo_path))?;
-    std::fs::remove_file(Status::path(&located.repo_path)).ok();
+    daemon::leave_hive(&located, &hive)?;
     println!(
         "This repository no longer syncs with hive {}. Everything it has stays.",
         hive.display_name()

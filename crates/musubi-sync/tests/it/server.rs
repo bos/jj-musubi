@@ -238,10 +238,10 @@ async fn one_hub_many_hives() {
         )
         .await
         .unwrap();
-    let HubReply::Error(message) = Envelope::<HubReply>::decode(&reply).unwrap() else {
-        panic!("expected an error");
-    };
-    assert!(message.contains("no hive"), "{message}");
+    assert_eq!(
+        Envelope::<HubReply>::decode(&reply).unwrap(),
+        HubReply::NoHive
+    );
 
     // Listing, resolving, renaming, removing.
     let HubWideReply::Hives(hives) = hub_wide(&*client, HubWideRequest::List).await else {
@@ -269,13 +269,30 @@ async fn one_hub_many_hives() {
         to: "gamma".to_owned(),
     };
     assert!(matches!(hub_wide(&*client, rename).await, HubWideReply::Hive(h) if h.name == "gamma"));
-    let remove = HubWideRequest::Remove {
-        name: "gamma".to_owned(),
+    // Only by its whole name or id, which a prefix is too easily mistaken for.
+    let remove = |name: &str| HubWideRequest::Remove {
+        name: name.to_owned(),
     };
     assert!(matches!(
-        hub_wide(&*client, remove).await,
-        HubWideReply::Hive(_)
+        hub_wide(&*client, remove("ga")).await,
+        HubWideReply::Error(m) if m.contains("no hive named ga")
     ));
+    let HubWideReply::Hive(removed) = hub_wide(&*client, remove("gamma")).await else {
+        panic!("expected the removed hive");
+    };
+    // Its machines hear that it was removed.
+    let reply = client
+        .request(
+            &format!("musubi.{}.rpc", removed.id),
+            Bytes::from(Envelope::encode(HubReply::Error(String::new())).unwrap()),
+            TIMEOUT,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        Envelope::<HubReply>::decode(&reply).unwrap(),
+        HubReply::Removed
+    );
     let resolve = HubWideRequest::Resolve {
         name: "gamma".to_owned(),
     };

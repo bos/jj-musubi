@@ -25,15 +25,18 @@ knows of.
 
 ```sh
 musubi hub rename app work-app
-musubi hub rm work-app
+musubi hub remove work-app
 ```
 
 Renaming changes the name that commands take and `musubi list` shows. Copies keep syncing,
 and each machine's copy takes the new name the next time `musubi list` runs there.
 
-Removing a hive moves its store to `removed/` in the hub's directory. Its machines keep
-everything they have, but their syncs fail, with `hub: this hub has no hive <id>`, until you
-run `musubi leave` in each copy.
+Removing a hive takes its whole name, or its id: not a prefix, as other commands accept.
+`rm` is short for `remove`. Each machine's copy leaves the hive as it next syncs, as
+`musubi leave` would, keeping everything it has. The hub keeps the hive's store in
+`removed/` for a day or so, and then only an empty directory, the record that the hive was
+removed, so that no copy brings it back. To share the repository again, start a new hive with
+`musubi create`, and run `musubi join` in the other copies.
 
 ## Take a repository or machine out
 
@@ -84,38 +87,33 @@ and refuses operations that a newer jj wrote.
 ## Replace or move a hub
 
 Every machine keeps everything it has synced, so losing a hub, its directory deleted or its
-machine gone, loses no work. But the machines can't fill a new, empty hub by themselves: each
-copy belongs to a hive by an id that only the old hub knew, and syncs fail with
-`hub: this hub has no hive <id>`. Make the hive again on the new hub, from the copies. The
-same steps move a hive to another hub on purpose, or remake one that `musubi hub rm`
-removed.
+machine gone, loses no work. Start a new hub where the machines reach the old one, as in [Set
+up a hub and machines](set-up.md#start-the-hub). The new hub knows none of the hives, and
+syncs fail, saying the hub has no record of the repository's hive. Make each hive again from
+one machine's copy:
 
-Start the new hub, as in [Set up a hub and machines](set-up.md#start-the-hub). Then, in each
-machine's copy in turn:
+```sh
+musubi join
+```
 
-1. Stop syncing it with the old hive:
+That makes the hive again on the hub, under its id and name, from this copy. The other
+machines find it there as their daemons next try, within a minute, or at once with
+`musubi sync`, and fill it with what they have. Working copies, commits, bookmarks, and the
+history the old hive had all come through unchanged.
 
-   ```sh
-   musubi leave
-   ```
+A person makes the hive again, not the machines by themselves, because a hub that doesn't
+know a hive may just be the wrong one, such as a hub started from another directory by
+mistake.
 
-2. On the first machine, start the hive, giving its old name, since a new hive is named after
-   the repository's remote:
+To move to a hub at another address, start it, and run `musubi join` with its address in each
+machine's copy:
 
-   ```sh
-   musubi create app --hub newbox
-   ```
+```sh
+musubi join --hub newbox
+```
 
-   On the others, join it:
-
-   ```sh
-   musubi join --hub newbox
-   ```
-
-Each copy carries on from its own operation log, so working copies, commits, bookmarks, and
-the history the old hive had all come through unchanged.
-
-If the hub moved, each machine's default hub, which commands use without `--hub`, is still
-the old one, and `musubi list` goes on showing it. Change `hub` in `config.toml` (see
+The first makes the hive again there, and the others join it. Each machine's default hub,
+which commands use without `--hub`, is still the old one, and `musubi list` goes on showing
+it. Change `hub` in `config.toml` (see
 [Configuration](../reference/configuration.md#musubis-config-file)) to make the new hub the
 default.

@@ -90,8 +90,11 @@ impl HubServer {
             }
             let dir = self.lock().hive_dir(&token).map(Path::to_owned);
             let Some(dir) = dir else {
-                let error = format!("this hub has no hive {token}");
-                let reply = HubReply::Error(fit_error(error, transport.max_payload()));
+                let reply = if self.lock().is_removed(&token) {
+                    HubReply::Removed
+                } else {
+                    HubReply::NoHive
+                };
                 if let Err(err) = transport
                     .publish(&reply_to, Bytes::from(Envelope::encode(reply)?))
                     .await
@@ -150,7 +153,7 @@ impl HubServer {
                 HubWideReply::Hive(info)
             }),
             HubWideRequest::Remove { name } => {
-                let resolved = self.lock().resolve(&name);
+                let resolved = self.lock().resolve_exact(&name);
                 match resolved {
                     Err(err) => Err(err),
                     Ok(id) => {

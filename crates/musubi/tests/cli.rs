@@ -144,11 +144,12 @@ struct Hub {
 
 impl Hub {
     fn start(env: &TestEnv, logs: &mut Logs) -> Self {
-        Self::start_with(env, logs, &[])
+        Self::start_in(env, logs, "hub")
     }
 
-    fn start_with(env: &TestEnv, logs: &mut Logs, args: &[&str]) -> Self {
-        let dir = env.root().join("hub");
+    /// A hub serving the directory `name`, as another machine's might.
+    fn start_in(env: &TestEnv, logs: &mut Logs, name: &str) -> Self {
+        let dir = env.root().join(name);
         let mut command = Command::new(musubi());
         command
             .args([
@@ -158,10 +159,12 @@ impl Hub {
                 "--advertise",
                 "127.0.0.1",
             ])
-            .args(args)
-            .env("MUSUBI_CONFIG_DIR", env.root().join("hub-config"))
+            .env(
+                "MUSUBI_CONFIG_DIR",
+                env.root().join(format!("{name}-config")),
+            )
             .stdout(Stdio::piped());
-        logs.attach(env, "hub", &mut command);
+        logs.attach(env, name, &mut command);
         let mut child = command.spawn().unwrap();
         let stdout = child.stdout.take().unwrap();
         let (tx, rx) = mpsc::channel();
@@ -627,25 +630,41 @@ fn a_copy_can_join_again_after_leaving() {
     assert_eq!(listed, ["alpha", "beta/beta", "gamma/gamma"], "{list}");
 }
 
-/// A hive the hub has lost, here by `musubi hub rm`, is made again from the copies, which
-/// leave it and create and join a new one, each with work done since. Each copy carries on
-/// from its history, so every machine's working copy keeps its own name.
+/// A hub that lost its directory knows none of its hives; one `musubi join`, in one copy,
+/// makes a hive again under its id, and the other copies, their work since included, fill
+/// it as they sync, with every machine's working copy under its own name.
 #[test]
 fn copies_make_a_lost_hive_again() {
     let env = TestEnv::new();
     let mut logs = Logs::default();
-    let hub = Hub::start(&env, &mut logs);
+    let mut hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
     let mut daemons = Daemons::default();
     let (alpha, beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
-    musubi_in(&env, &logs, &alpha, &["hub", "rm", "alpha"]);
+    hub.kill();
+    fs::remove_dir_all(&hub.dir).unwrap();
+    hub = Hub::start(&env, &mut logs);
+    assert!(
+        hub.greeting.starts_with("Created a new hub"),
+        "{}",
+        hub.greeting
+    );
     for (repo, file) in [(&alpha, "from alpha"), (&beta, "from beta")] {
-        musubi_in(&env, &logs, repo, &["leave"]);
         repo.write_file(file, file);
         repo.jj(&["commit", "-m", file]);
     }
-    musubi_in(&env, &logs, &alpha, &["create", "again"]);
-    musubi_in(&env, &logs, &beta, &["join"]);
+    let err = musubi_fails(&env, &logs, &beta, &["sync"]);
+    assert!(
+        err.contains("`musubi join` in this repository makes the hive again"),
+        "{err}"
+    );
+    let out = musubi_in(&env, &logs, &alpha, &["join"]);
+    assert!(
+        out.contains("Made hive alpha again from this repository"),
+        "{out}"
+    );
+    let out = musubi_in(&env, &logs, &beta, &["sync"]);
+    assert!(out.contains("Synced (hive at #"), "{out}");
     wait_for(&logs, "the machines to share their work", || {
         try_log(&alpha).is_some_and(|log| log.contains("from beta"))
             && try_log(&beta).is_some_and(|log| log.contains("from alpha"))
@@ -658,6 +677,57 @@ fn copies_make_a_lost_hive_again() {
         let listed: Vec<&str> = list.lines().filter_map(|l| l.split(':').next()).collect();
         assert_eq!(listed, names, "{list}");
     }
+}
+
+/// Moving to another hub is `musubi join --hub` in each copy: the first makes the hive
+/// again there, under its id, and the rest join it, carrying on as before.
+#[test]
+fn copies_move_to_another_hub() {
+    let env = TestEnv::new();
+    let mut logs = Logs::default();
+    let mut old = Hub::start(&env, &mut logs);
+    let new = Hub::start_in(&env, &mut logs, "newhub");
+    // Stopped before the hubs.
+    let mut daemons = Daemons::default();
+    let (alpha, beta) = two_machines(&env, &mut logs, &mut daemons, &old);
+    old.kill();
+    let out = musubi_in(&env, &logs, &alpha, &["join", "--hub", &new.url]);
+    assert!(
+        out.contains("Made hive alpha again from this repository"),
+        "{out}"
+    );
+    let out = musubi_in(&env, &logs, &beta, &["join", "--hub", &new.url]);
+    assert!(
+        out.contains("Hive alpha is on the hub, and this repository is part of it"),
+        "{out}"
+    );
+    alpha.write_file("moved", "moved");
+    alpha.jj(&["commit", "-m", "after the move"]);
+    wait_for(
+        &logs,
+        "beta's daemon to fetch alpha's commit from the new hub",
+        || try_log(&beta).is_some_and(|log| log.contains("after the move")),
+    );
+}
+
+/// A hive removed from the hub is over: each copy leaves it as it hears, keeping everything
+/// it has.
+#[test]
+fn copies_leave_a_removed_hive() {
+    let env = TestEnv::new();
+    let mut logs = Logs::default();
+    let hub = Hub::start(&env, &mut logs);
+    // Stopped before the hub.
+    let mut daemons = Daemons::default();
+    let (alpha, beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
+    let out = musubi_in(&env, &logs, &alpha, &["hub", "rm", "alpha"]);
+    assert!(out.contains("Removed hive alpha"), "{out}");
+    let err = musubi_fails(&env, &logs, &beta, &["sync"]);
+    assert!(err.contains("removed from the hub"), "{err}");
+    assert!(!beta.repo_path().join("musubi/hive.toml").exists());
+    let list = musubi_in(&env, &logs, &beta, &["list"]);
+    assert!(!list.contains("here:"), "{list}");
+    assert!(log(&beta).contains("start"));
 }
 
 /// With its hub gone, `musubi sync` through the daemon says why at once, as it does without

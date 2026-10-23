@@ -35,6 +35,48 @@ use crate::wire::map_request;
 /// busy, without queueing much at the hub, which answers one request at a time.
 pub const WINDOW: usize = 8;
 
+/// That the hub doesn't have the hive asked about: the error a sync fails with then, which
+/// the daemon looks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HiveGone {
+    /// The hub has no record of it: it lost it, or isn't the hub the repository was part of.
+    Missing,
+    /// `musubi hub remove` removed it.
+    Removed,
+}
+
+impl std::fmt::Display for HiveGone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Missing => {
+                "the hub has no record of this repository's hive: if it is the right hub, \
+                 `musubi join` in this repository makes the hive again from it"
+            }
+            Self::Removed => "this repository's hive was removed from the hub",
+        })
+    }
+}
+
+impl std::error::Error for HiveGone {}
+
+impl HiveGone {
+    /// Whether `err` comes of the hub not having the hive, and which way.
+    pub fn of(err: &anyhow::Error) -> Option<Self> {
+        err.chain()
+            .find_map(|cause| cause.downcast_ref::<Self>().copied())
+    }
+}
+
+/// The error a reply stands for when it isn't one the request expects.
+fn unexpected(reply: HubReply) -> anyhow::Error {
+    match reply {
+        HubReply::Error(err) => anyhow::anyhow!("hub: {err}"),
+        HubReply::NoHive => HiveGone::Missing.into(),
+        HubReply::Removed => HiveGone::Removed.into(),
+        other => anyhow::anyhow!("unexpected reply {other:?}"),
+    }
+}
+
 /// How many times a transfer may start over. The hub starts an upload over only after
 /// discarding it as abandoned, or when what it has fails the hash check, and a download
 /// starts over only when what came fails it; a blob that keeps failing it won't pass by being
@@ -100,8 +142,7 @@ impl RemoteHub {
         drop(uploads);
         let reply = match reply? {
             HubReply::Protocol(reply) => reply,
-            HubReply::Error(err) => anyhow::bail!("hub: {err}"),
-            other => anyhow::bail!("unexpected reply {other:?}"),
+            other => return Err(unexpected(other)),
         };
         // Deleted here if a later download fails or the call is dropped, and otherwise once
         // the caller is done with the reply.
@@ -187,8 +228,7 @@ impl RemoteHub {
                 match ack? {
                     HubReply::ChunkAck { complete: true, .. } => return Ok(()),
                     HubReply::ChunkAck { received, .. } => furthest = furthest.max(received),
-                    HubReply::Error(err) => anyhow::bail!("hub: {err}"),
-                    other => anyhow::bail!("unexpected reply {other:?}"),
+                    other => return Err(unexpected(other)),
                 }
             }
             // The chunk at `offset` takes the hub further, unless it started over.
@@ -232,8 +272,7 @@ impl RemoteHub {
             while let Some((at, reply)) = chunks.next().await {
                 let (total, data) = match reply? {
                     HubReply::Chunk { total, data } => (total, data),
-                    HubReply::Error(err) => anyhow::bail!("hub: {err}"),
-                    other => anyhow::bail!("unexpected reply {other:?}"),
+                    other => return Err(unexpected(other)),
                 };
                 offset = match self.blobs.receive(blob, total, at, &data)? {
                     Received::Complete => break,

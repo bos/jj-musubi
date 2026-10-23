@@ -15,7 +15,7 @@ musubi <command> --help
 | Command | Use it to |
 | --- | --- |
 | `create [<name>]` | Start a hive from the repository you're in, for other copies to join. |
-| `join` | Add this machine's copy of a repository to the hive it belongs in. |
+| `join` | Add this machine's copy of a repository to the hive it belongs in. In a copy that is part of a hive, make the hive again on a hub that has lost it, or on another hub given with `--hub`. |
 | `clone <hive> <dir>` | Make a new copy of a hive on this machine. |
 | `leave` | Stop syncing the repository you're in. It keeps everything it has. |
 
@@ -57,11 +57,11 @@ it is running, and otherwise syncs by itself.
 | --- | --- |
 | `hub` | Run a hub, in the foreground. `--dir` chooses its directory, and `--advertise` the host name it tells other machines to use. |
 | `hub rename <hive> <new-name>` | Rename a hive. |
-| `hub rm <hive>` | Remove a hive from the hub. Its store moves to the hub's `removed/` directory. |
+| `hub remove <hive>` | Remove a hive from the hub, by its whole name or id. Each machine's copy leaves it as it hears. `rm` is short for it. |
 | `hub connect` | Relay standard input and output to this machine's hub. Other machines run it over ssh; you don't need to. |
 
 Commands that take a hive accept its name, any prefix of the name that no other hive shares,
-or its id.
+or its id; `hub remove` takes only a whole name or an id.
 
 ## Complete commands in your shell
 

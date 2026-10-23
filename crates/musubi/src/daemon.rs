@@ -19,6 +19,7 @@ use anyhow::Context as _;
 use futures::StreamExt as _;
 use jj_lib::object_id::ObjectId as _;
 use musubi_sync::driver::NodeDriver;
+use musubi_sync::remote::HiveGone;
 use musubi_sync::remote::RemoteHub;
 use musubi_sync::wire::Envelope;
 use musubi_sync::wire::HeadNotice;
@@ -139,7 +140,11 @@ impl Supervisor {
     /// Starts serving `workspace`, unless it already is.
     fn start(&self, workspace: PathBuf) {
         let mut repos = self.lock();
-        if repos.contains_key(&workspace) {
+        // A thread that finished, as after its hive was removed, serves nothing.
+        if repos
+            .get(&workspace)
+            .is_some_and(|served| !served.thread.is_finished())
+        {
             return;
         }
         let (commands, receiver) = mpsc::unbounded_channel();
@@ -208,6 +213,7 @@ impl Supervisor {
         let mut statuses: Vec<RepoStatus> = self
             .lock()
             .iter()
+            .filter(|(_, served)| !served.thread.is_finished())
             .map(|(workspace, served)| RepoStatus {
                 workspace: workspace.clone(),
                 status: served
@@ -534,6 +540,24 @@ async fn serve_async(
         let synced = known(&driver);
         // Why the hub is out of reach, if the connector knows, says more than a timeout.
         let result = result.map_err(|err| connection.explain(err));
+        // The hive is over: leave it, then say so, so that whoever asked finds it left.
+        if let Err(err) = &result
+            && HiveGone::of(err) == Some(HiveGone::Removed)
+        {
+            let message = format!(
+                "{err:#}, so this repository no longer syncs with it; everything it has stays"
+            );
+            // Changed meanwhile, as by `musubi join --hub`: start over with what it is now.
+            anyhow::ensure!(
+                leave_hive(&located, &hive)?,
+                "this repository's hive or hub changed while it synced"
+            );
+            tracing::warn!("{message}");
+            for waiter in waiting.drain(..) {
+                waiter.send(Err(message.clone())).ok();
+            }
+            return Ok(());
+        }
         let reply = match &result {
             Ok(_) => Ok(synced.clone()),
             Err(err) => Err(format!("{err:#}")),
@@ -577,6 +601,22 @@ async fn serve_async(
             }
         }
     }
+}
+
+/// Makes the repository at `located` no longer part of `hive`, as `musubi leave` does,
+/// keeping everything it has: forgets its membership, and that this machine's daemon serves
+/// it. Returns false, doing nothing, if it isn't part of `hive` through the same hub (any
+/// more), as when it left it, joined another, or moved to another hub, meanwhile.
+pub fn leave_hive(located: &Located, hive: &HiveConfig) -> anyhow::Result<bool> {
+    if HiveConfig::load(&located.repo_path)?
+        .is_none_or(|now| now.hive != hive.hive || now.hub != hive.hub)
+    {
+        return Ok(false);
+    }
+    UserConfig::remove_repo(&located.workspace_root)?;
+    fs::remove_file(HiveConfig::path(&located.repo_path))?;
+    fs::remove_file(Status::path(&located.repo_path)).ok();
+    Ok(true)
 }
 
 /// Connects to the hive's hub, and opens the repository to sync with it there.

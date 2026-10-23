@@ -64,13 +64,18 @@ If the hub runs with `--dir`, other machines can't find it: `musubi hub connect`
 run over ssh, finds the hub that `musubi hub` last served without `--dir`. Add `--dir <dir>`
 to the `command=` in the line musubi added to `~/.ssh/authorized_keys` on the hub's machine.
 
-### "hub: this hub has no hive ..."
+### "the hub has no record of this repository's hive ..."
 
-The hub doesn't have the hive this copy belongs to: someone removed it with `musubi hub rm`,
-or the hub lost its state, or this machine now reaches a different hub. `musubi list` shows
-the hive as "(no longer on the hub)". Nothing is lost: see [Replace or move a
-hub](guides/manage.md#replace-or-move-a-hub) to make the hive again from the machines'
-copies.
+The hub has lost the hive this copy belongs to, as when its directory was deleted, or this
+machine now reaches a different hub. `musubi list` shows the hive as "(no longer on the
+hub)". Nothing is lost: if this is the right hub, run `musubi join` in the copy, which makes
+the hive again from it, and the other machines fill it. See [Replace or move a
+hub](guides/manage.md#replace-or-move-a-hub).
+
+### "this repository's hive was removed from the hub, ..."
+
+Someone removed the hive with `musubi hub remove`, and this copy has left it, keeping
+everything it has. To share the repository again, start a new hive with `musubi create`.
 
 ### "incompatible peer: protocol ... but this is protocol ..."
 
@@ -105,16 +110,24 @@ The hub decides which hive a copy belongs in. It refuses when it can't tell, and
 - **"this repository shares no history with hive app; ..."**, from `musubi join --hive app`:
   `--hive` joins only a hive the copy has some history in common with. Check the name, or
   start a hive of its own with `musubi create`.
-- **"this hub has no hive named app"**: no hive's name starts with that. `musubi list` shows
-  the hub's hives.
+- **"this hub has no hive named app"**: no hive's name starts with that (for
+  `musubi hub remove`, no hive has that whole name or id). `musubi list` shows the hub's
+  hives.
 - **"this repository belongs in hive app (...); `musubi join` joins it, ..."**, from
   `musubi create`: the hub already has a hive for this repository. Run `musubi join` to
   join it, or `musubi create <name>` to start another hive anyway.
 
 ### "this repository is already part of hive app; `musubi leave` first to join another"
 
-The repository is already in a hive. To move it to another hive or hub, run `musubi leave`,
-then `musubi join` or `musubi create`.
+The repository is already in a hive, and `musubi create` or `musubi join --hive` would put it
+in another. To put it in another hive, run `musubi leave` first. To move it, hive and all, to
+another hub, run `musubi join --hub <hub>` instead.
+
+### "the hub lacks this repository's hive, but won't make it again: ..."
+
+`musubi join` would make this copy's hive again, but the copy belongs in a hive the hub has,
+which someone made again meanwhile with `musubi create`, say. Run `musubi leave`, then
+`musubi join`, to join that one.
 
 ### "musubi needs all of a repository's history, and this one is a shallow clone ..."
 
@@ -167,7 +180,7 @@ any work this copy made since its last sync.
 
 If `musubi join` or `musubi create` says this, the operations were abandoned while the copy
 was out of its hive, and it isn't in one: skip `musubi leave`. A `musubi create` that failed
-this way leaves an empty hive on the hub; remove it with `musubi hub rm`.
+this way leaves an empty hive on the hub; remove it with `musubi hub remove`.
 
 ### "unknown field ... (written by a newer jj?)"
 

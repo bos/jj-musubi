@@ -116,7 +116,7 @@ it, such as `laptop/default@`, and `jj op log` shows what every machine did.
 - `musubi sync` syncs the current repository now; `musubi leave` stops syncing it.
 - `musubi daemon install` starts the daemon at login; `musubi daemon start`, `stop` and
   `restart` control it.
-- `musubi hub rename` and `musubi hub rm` manage the hub's hives.
+- `musubi hub rename` and `musubi hub remove` manage the hub's hives.
 
 The hub and the daemon log what they do: the daemon to `daemon.log` in musubi's state
 directory (`~/.local/state/musubi` on Linux and macOS), or, when systemd starts it at login,

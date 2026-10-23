@@ -114,7 +114,7 @@ The hub's directory, `musubi-hub` by default, holds:
 | --- | --- |
 | `hub.toml` | The hub's settings: the name `--advertise` gave it. |
 | `<hive id>/` | One directory per hive, with the hive's name in its `hive.toml`, and its operations and objects. |
-| `removed/` | Hives that `musubi hub rm` removed, and stores the hub found corrupt and set aside. |
+| `removed/` | Hives that `musubi hub remove` removed, each emptied a day later and then kept, empty, as the record that it was removed; and stores the hub found corrupt and set aside. |
 | `run/hub.sock` | The socket the hub listens on, which only you can reach. |
 
 The hub only stitches together copies of repositories that exist anyway, so nothing in its

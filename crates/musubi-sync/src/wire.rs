@@ -135,6 +135,11 @@ pub enum HubReply {
         data: Vec<u8>,
     },
     Error(String),
+    /// The hub has no hive by the id asked about, nor did it remove one: it lost it, or is
+    /// not the hub the asker was part of.
+    NoHive,
+    /// `musubi hub remove` removed the hive asked about.
+    Removed,
 }
 
 /// The first token of every subject the hub serves (docs/internals/design.md, "Transport").

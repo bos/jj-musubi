@@ -10,6 +10,14 @@ change the protocol, so run the same release on the hub and every machine (see
   line to your shell's startup file, and `musubi completion <shell>` prints a completion
   script. See
   [Complete commands in your shell](docs/reference/commands.md#complete-commands-in-your-shell).
+- `musubi hub rm` is now `musubi hub remove`, with `rm` still short for it, and takes a
+  hive's whole name or its id, not a prefix. Each machine's copy of a removed hive now leaves
+  it as it next syncs, keeping everything it has, rather than failing to sync until someone
+  runs `musubi leave`.
+- After a hub loses its state, `musubi join` in one copy of each hive makes it again, and the
+  other machines fill it: no more `musubi leave` and `musubi create` on every machine.
+  `musubi join --hub <hub>` in each copy moves a hive to another hub.
+- The hub and machines talk differently, so upgrade the hub and every machine together.
 
 ## 0.1.0
 

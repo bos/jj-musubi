@@ -299,10 +299,19 @@ A hub is just a store. Every node holds every operation it has seen, so a new, e
 fills up as soon as nodes connect: the first node fast-forwards it to its head, and the
 others fast-forward or merge as usual. So a hub needn't be durable, and it syncs nothing to
 disk: one that loses its state, to a power cut say, is deleted and made again, and the
-machines' repositories fill the new one. For now, though, a node knows its hive only by an
-id the old hub made, which a new hub doesn't have, so each machine leaves the hive and
-joins one made again from the copies, by hand (docs/guides/manage.md, "Replace or move a
-hub"; issue #44).
+machines' repositories fill the new one.
+
+A node knows its hive by the id the old hub made, which a new hub doesn't have: the hub
+answers its requests "no hive", and the node's syncs fail, saying so. `musubi join` in one
+copy then makes the hive again (a join with `JoinChoice::Remake`): empty, under its id and
+the name the copy knew, or if that's taken, one from its remote or directory, unless the hub
+removed that hive, or
+the copy belongs in a hive the hub has, as an unnamed `musubi create` would be refused. The
+other nodes find their hive again at their next sync, and fill it, as nodes follow any hub
+that goes back. A person makes it, rather than the first node to sync: a hub that doesn't
+know a hive may be the wrong hub, as one started from another directory by mistake, which
+would otherwise fill up with every hive, beside the right one. `musubi join --hub` makes the
+hive again on another hub in the same way, which moves a copy there.
 
 A hub does that itself for a hive whose store it finds corrupt as it opens it: its heads
 file torn, say. The store goes under `removed/`, and the hive is made again, empty, under
@@ -517,7 +526,8 @@ Forgejo, Gitea, and Bitbucket; the full group path on GitLab; `user/repo` for so
 otherwise the last two components of the path. A hive gets the shortest form of its name no
 other hive has: `jj-musubi`, then `bos/jj-musubi`, then `github.com/bos/jj-musubi`. Names
 never change by themselves; `musubi hub rename` changes one. Commands that take a hive
-accept any unique prefix of its name.
+accept any unique prefix of its name, except `musubi hub remove`, which takes a whole name or
+an id, since a prefix is too easily mistaken.
 
 `musubi clone <name>` creates a new colocated repository and joins it to the named hive.
 
@@ -545,7 +555,8 @@ hub as a whole (join, list, resolve a name, rename, remove) go to `musubi.hub.rp
 takes all of them on one subscription, `musubi.*.rpc`; each hive's requests go to a thread
 of its own, which opens the hive's store on its first request and answers one request at a
 time, which is what makes each push atomic, while different hives don't wait for each other.
-A request for a hive the hub doesn't have is an error: only a join creates hives. Every
+A request for a hive the hub doesn't have is answered "no hive", or "removed" for a hive
+`musubi hub remove` removed: only a join creates hives, or makes one again. Every
 operation and object is verified against its content hash on receipt, so a misbehaving peer
 cannot inject data under a false id.
 
@@ -578,7 +589,11 @@ reach it can read and write every hive on it. `musubi hub` serves a directory ho
 subdirectory per hive, named by the hive's id, each with the hive's store (`canonical/`,
 `backend`, `git/` and `extras/` or `simple/`, `heads`, `blobs/`, `tmp/`), its `hive.toml`
 (name and backend), and its index. Removed hives move to `removed/`, as do corrupt stores
-(see [Replacing the hub](#replacing-the-hub)). Without `--dir` the hub serves
+(see [Replacing the hub](#replacing-the-hub)). A removed hive's store is emptied a day later,
+and its directory, `<id>-<time>`, stays for good, empty, as its tombstone: the hub answers
+the hive's machines "removed", and they leave it, as `musubi leave` would; a lost hive,
+which has no tombstone, can be made again. Corrupt stores' directories end in `.corrupt`,
+and their hives are still there. Without `--dir` the hub serves
 `./musubi-hub`, or the current directory if it is a hub's, and takes a lock in the user's
 state directory, so that a second hub started the same way says where the first one is
 instead of starting. `--dir` runs more hubs on purpose, and a lock in each hub's directory

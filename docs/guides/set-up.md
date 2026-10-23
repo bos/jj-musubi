@@ -137,7 +137,7 @@ The hub works out which hive the copy belongs in: the one that has some of its h
 one of its remotes' URLs. You don't need to name it:
 
 ```text
-Joined hive app (matched origin), 2 machines
+Joined hive app (matched remote origin), 2 machines
 Syncing...
 Synced with the hub (hive at #3). The daemon keeps it in sync from now on.
 ```

@@ -127,7 +127,7 @@ fn find(joiner: &Joiner, hives: &[Candidate]) -> Decision {
     match sharing.as_slice() {
         [(hive, remote)] => Decision::Join {
             id: hive.id.clone(),
-            reason: format!("matched {remote}"),
+            reason: format!("matched remote {remote}"),
         },
         [] => match related.as_slice() {
             // A hive started from a copy that had no remotes yet.
@@ -225,15 +225,15 @@ mod tests {
             hive("c", true, &["github.com/someone/fork"]),
         ];
         let decision = decide(&joiner(&[ORIGIN]), &hives);
-        assert_eq!(joins(&decision), Some(("b", "matched origin")));
+        assert_eq!(joins(&decision), Some(("b", "matched remote origin")));
         // Any remote counts, not only origin; origin is named when several match.
         let decision = decide(
             &joiner(&[("upstream", "example.com/other"), ORIGIN]),
             &hives,
         );
-        assert_eq!(joins(&decision), Some(("b", "matched origin")));
+        assert_eq!(joins(&decision), Some(("b", "matched remote origin")));
         let decision = decide(&joiner(&[("mine", "example.com/other")]), &hives);
-        assert_eq!(joins(&decision), Some(("b", "matched mine")));
+        assert_eq!(joins(&decision), Some(("b", "matched remote mine")));
     }
 
     #[test]
@@ -315,7 +315,7 @@ mod tests {
         asking.create = true;
         let decision = decide(&asking, &hives);
         assert!(
-            refuses(&decision, "belongs in hive name-a (matched origin)"),
+            refuses(&decision, "belongs in hive name-a (matched remote origin)"),
             "{decision:?}"
         );
         assert!(refuses(&decision, "musubi join"), "{decision:?}");

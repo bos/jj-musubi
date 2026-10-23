@@ -27,8 +27,8 @@ This repository:
   Hive:      app (8e1f6b0c-4d2a-4f57-9a43-0d5c6e7f8a9b)
   Hub:       devbox
   Machine:   desktop
-             default@desktop is at 3f2a1c9e07b4
-             default@laptop is at 8d0b4e11c2a7
+             default@ is at 3f2a1c9e07b4
+             laptop/default@ is at 8d0b4e11c2a7
   Last sync: synced 3s ago
   Hub head:  #412 5c0e9d7a3b21
 ```

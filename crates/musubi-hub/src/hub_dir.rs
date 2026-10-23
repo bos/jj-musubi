@@ -86,7 +86,7 @@ pub struct HiveInfo {
 pub struct Joined {
     pub hive: HiveInfo,
     pub created: bool,
-    /// Why this hive, for telling the user: `matched origin`, say.
+    /// Why this hive, for telling the user: `matched remote origin`, say.
     pub reason: String,
 }
 

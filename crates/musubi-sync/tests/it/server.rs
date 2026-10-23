@@ -154,13 +154,13 @@ async fn one_hub_many_hives() {
         .await
         .unwrap_err();
     assert!(
-        err.contains("belongs in hive project (matched origin)"),
+        err.contains("belongs in hive project (matched remote origin)"),
         "{err}"
     );
     let joined = join(&*client, join_request(&beta)).await.unwrap();
     assert!(!joined.created);
     assert_eq!(joined.hive.id, hive);
-    assert_eq!(joined.reason, "matched origin");
+    assert_eq!(joined.reason, "matched remote origin");
     assert_eq!(joined.hive.machines, ["alpha", "beta"]);
 
     // So does one that spells it through a `url.<base>.insteadOf` alias of its own: the hub
@@ -183,7 +183,7 @@ async fn one_hub_many_hives() {
     aliased.jj(&["git", "remote", "add", "origin", "musubi-test:team/project"]);
     let joined = join(&*client, join_request(&aliased)).await.unwrap();
     assert_eq!(joined.hive.id, hive);
-    assert_eq!(joined.reason, "matched origin");
+    assert_eq!(joined.reason, "matched remote origin");
 
     // A fork, with history in common but a remote of its own, isn't taken for the first:
     // joining it is refused, and created, it gets a hive of its own, named apart.

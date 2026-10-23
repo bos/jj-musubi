@@ -326,7 +326,7 @@ fn hub_join_sync_clone_and_list() {
     ]);
     let out = musubi_in(&env, &logs, &beta, &["join", "--hub", &hub.url]);
     assert!(
-        out.contains("Joined hive project (matched origin), 2 machines"),
+        out.contains("Joined hive project (matched remote origin), 2 machines"),
         "{out}"
     );
     assert!(log(&beta).contains("from alpha"));
@@ -345,8 +345,10 @@ fn hub_join_sync_clone_and_list() {
         list.contains("Daemon: running, serving 1 repositories;"),
         "{list}"
     );
-    // Every machine's workspaces are listed, by machine.
-    assert!(list.contains("alpha@alpha is at"), "{list}");
+    // Every machine's workspaces are listed, as jj names them here, this machine's first.
+    let own = list.find("  beta@ is at").expect(&list);
+    let other = list.find("  alpha/alpha@ is at").expect(&list);
+    assert!(own < other, "{list}");
     assert!(list.contains("Machine:   beta"), "{list}");
 
     // Daemons keep the machines in sync on their own.

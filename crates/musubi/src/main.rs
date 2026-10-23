@@ -853,9 +853,9 @@ fn print_details(located: &Located, hive: &HiveConfig) -> anyhow::Result<()> {
     println!("  Hub:       {}", hive.hub);
     println!("  Machine:   {}", hive.node);
     let mut node = located.open()?;
-    for (machine, workspace, commit) in node.machine_workspaces()? {
+    for (workspace, commit) in node.machine_workspaces()? {
         let short = &commit.hex()[..12];
-        println!("             {workspace}@{machine} is at {short}");
+        println!("             {workspace}@ is at {short}");
     }
     if let Some(status) = Status::load(&located.repo_path) {
         println!("  Last sync: {}", describe(Some(&status)));

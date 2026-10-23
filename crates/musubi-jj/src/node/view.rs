@@ -241,18 +241,32 @@ impl NodeRepo {
     }
 
     /// Where every machine's workspaces were, as of the canonical form of this machine's
-    /// (merged) op head: `(machine name, workspace, commit)`.
-    pub fn machine_workspaces(&mut self) -> Result<Vec<(String, String, CommitId)>, NodeError> {
+    /// (merged) op head: each workspace's name here, as jj shows it (`default`, or
+    /// `beta/default` for another machine's), and its commit. This machine's come first.
+    pub fn machine_workspaces(&mut self) -> Result<Vec<(String, CommitId)>, NodeError> {
         let head = self.merge_heads()?;
         let canonical = self.canonicalize(&head)?;
-        Ok(self
-            .workspaces_of(&canonical)?
-            .into_iter()
+        if canonical == *self.canonical.root_operation_id() {
+            return Ok(vec![]);
+        }
+        let view = self.canonical.read_operation_view(&canonical)?;
+        let names = self.local_names(&view);
+        let mut workspaces: Vec<(bool, String, CommitId)> = view
+            .wc_commit_ids
+            .iter()
             .filter_map(|(key, commit)| {
-                let (machine, workspace) = workspaces::split_key(key.as_str())?;
-                let name = workspaces::machine_name(machine);
-                Some((name.to_owned(), workspace.to_owned(), commit))
+                let name = names.get(key)?;
+                Some((
+                    !self.is_own_key(key),
+                    name.as_str().to_owned(),
+                    commit.clone(),
+                ))
             })
+            .collect();
+        workspaces.sort();
+        Ok(workspaces
+            .into_iter()
+            .map(|(_, name, commit)| (name, commit))
             .collect())
     }
 

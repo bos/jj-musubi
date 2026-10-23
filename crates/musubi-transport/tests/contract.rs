@@ -266,21 +266,3 @@ async fn stream_transport_refuses_what_is_not_a_hub() {
         assert!(told.contains(expected), "{told}");
     }
 }
-
-#[tokio::test]
-async fn memory_partition_cuts_both_directions() {
-    let network = MemoryNetwork::new(1, LIMIT);
-    let (a, b) = (network.connect(), network.connect());
-    let mut sub = b.subscribe("s").await.unwrap();
-    network.partition(&a);
-    assert!(matches!(
-        a.publish("s", Bytes::new()).await,
-        Err(TransportError::Disconnected)
-    ));
-    network.heal(&a);
-    network.partition(&b);
-    a.publish("s", Bytes::from_static(b"lost")).await.unwrap();
-    network.heal(&b);
-    a.publish("s", Bytes::from_static(b"kept")).await.unwrap();
-    assert_eq!(sub.next().await.unwrap().payload, "kept");
-}

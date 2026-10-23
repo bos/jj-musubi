@@ -34,13 +34,11 @@ pub struct Faults {
 }
 
 struct Subscriber {
-    client: u64,
     sender: mpsc::UnboundedSender<Message>,
 }
 
 struct State {
     subscriptions: HashMap<String, Vec<Subscriber>>,
-    partitioned: HashMap<u64, bool>,
     faults: Faults,
     rng: u64,
 }
@@ -68,7 +66,6 @@ impl MemoryNetwork {
         Self {
             state: Arc::new(Mutex::new(State {
                 subscriptions: HashMap::new(),
-                partitioned: HashMap::new(),
                 faults: Faults::default(),
                 rng: seed | 1,
             })),
@@ -91,28 +88,8 @@ impl MemoryNetwork {
         }
     }
 
-    /// Cuts a client off: nothing it sends is delivered, and nothing reaches it.
-    pub fn partition(&self, transport: &MemoryTransport) {
-        self.state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .partitioned
-            .insert(transport.client, true);
-    }
-
-    pub fn heal(&self, transport: &MemoryTransport) {
-        self.state
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .partitioned
-            .remove(&transport.client);
-    }
-
-    fn deliver(&self, from: u64, message: Message) -> Result<(), TransportError> {
+    fn deliver(&self, message: Message) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        if state.partitioned.contains_key(&from) {
-            return Err(TransportError::Disconnected);
-        }
         let faults = state.faults;
         // Subscriptions whose subscribers have gone away, as the inbox of a request given up
         // on does.
@@ -125,7 +102,6 @@ impl MemoryNetwork {
             .iter()
             .filter(|(pattern, _)| subject_matches(pattern, &message.subject))
             .flat_map(|(_, subs)| subs)
-            .filter(|sub| !state.partitioned.contains_key(&sub.client))
             .map(|sub| sub.sender.clone())
             .collect();
         for target in targets {
@@ -151,7 +127,6 @@ impl MemoryNetwork {
                 }
             }
         }
-        Ok(())
     }
 
     fn has_subscribers(&self, subject: &str) -> bool {
@@ -184,7 +159,8 @@ impl Transport for MemoryTransport {
             payload,
             reply: None,
         };
-        self.network.deliver(self.client, message)
+        self.network.deliver(message);
+        Ok(())
     }
 
     async fn subscribe(&self, subject: &str) -> Result<Subscription, TransportError> {
@@ -196,10 +172,7 @@ impl Transport for MemoryTransport {
             .unwrap_or_else(PoisonError::into_inner);
         let subs = state.subscriptions.entry(subject.to_owned()).or_default();
         subs.retain(|sub| !sub.sender.is_closed());
-        subs.push(Subscriber {
-            client: self.client,
-            sender,
-        });
+        subs.push(Subscriber { sender });
         Ok(Subscription::new(receiver))
     }
 
@@ -224,7 +197,7 @@ impl Transport for MemoryTransport {
             payload,
             reply: Some(inbox.clone()),
         };
-        self.network.deliver(self.client, message)?;
+        self.network.deliver(message);
         let reply = tokio::time::timeout(timeout, replies.next()).await;
         self.network
             .state

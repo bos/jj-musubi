@@ -1,12 +1,12 @@
 //! A node's local jj repository: canonicalization, realization, and op heads.
 //!
-//! See "Per-machine state in a replicated view" in docs/design.md and "Translation layer" in
-//! docs/protocol.md. [`NodeRepo`] is here, with what opens and loads it; what it does is in
-//! submodules, one concern each: joining a hive (`join`), translating local operations to
-//! canonical ones (`translate`) and canonical ones to local ones (`realize`), the views
-//! between them (`view`), working copies (`working_copies`), the hive's settings
-//! (`settings`), and what can go wrong (`error`). What a node does only when its backend is
-//! git is in `git`.
+//! See "Per-machine state in a replicated view" in docs/internals/design.md and "Translation
+//! layer" in docs/internals/protocol.md. [`NodeRepo`] is here, with what opens and loads it; what
+//! it does is in submodules, one concern each: joining a hive (`join`), translating local
+//! operations to canonical ones (`translate`) and canonical ones to local ones (`realize`), the
+//! views between them (`view`), working copies (`working_copies`), the hive's settings
+//! (`settings`), and what can go wrong (`error`). What a node does only when its backend is git
+//! is in `git`.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;

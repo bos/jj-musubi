@@ -18,13 +18,13 @@ repository the git branches match the bookmarks that are not conflicted; and `jj
 creates no further operation. A few, such as those where replication pauses, check
 something else instead.
 
-The generated end-to-end tests (docs/testing.md) explore interleavings of the same actions
-at random.
+The generated end-to-end tests (docs/internals/testing.md) explore interleavings of the same
+actions at random.
 
 ## Workspaces
 
 Each machine's workspaces are its own, and every machine shows the others' as workspaces
-named after the machine (`beta/default`) (docs/design.md).
+named after the machine (`beta/default`) (docs/internals/design.md).
 
 | Race | Outcome | Test |
 | --- | --- | --- |
@@ -62,7 +62,7 @@ named after the machine (`beta/default`) (docs/design.md).
 | Commit abandoned on one machine while another builds on it | The orphan is rebased onto the abandoned commit's parent exactly once, so nothing diverges. | `commit_abandoned_while_another_machine_builds_on_it` |
 | Both machines squash different work into the same commit | A divergent change, the same everywhere. | `both_machines_squash_into_the_same_commit` |
 | A conflicted commit made on one machine | Conflicted, with the same terms, on every machine; resolving it anywhere resolves it everywhere. | `conflicts_replicate_and_resolve` |
-| Three machines build on, and one rewrites, the same commit | Merged one at a time through the hub; no spurious divergence. Independent merges on each machine would each rebase the same commits and create divergence, which is why the hub orders updates (docs/design.md). | `three_machines_build_on_the_same_commit` |
+| Three machines build on, and one rewrites, the same commit | Merged one at a time through the hub; no spurious divergence. Independent merges on each machine would each rebase the same commits and create divergence, which is why the hub orders updates (docs/internals/design.md). | `three_machines_build_on_the_same_commit` |
 | One machine rewrites a commit another builds on, with commit signing on | The commits musubi rebases when it merges the two are signed, as jj's own rewrites would be: musubi loads jj's signing config as jj does. | `rewrites_are_signed_as_jj_signs_them` |
 
 ## Remotes
@@ -74,7 +74,7 @@ named after the machine (`beta/default`) (docs/design.md).
 | Two machines fetch while the remote is force-pushed in between | The remote bookmark is conflicted, which jj won't export, and every `jj` command resolves a conflicted remote bookmark to what `.git` has. So musubi writes one side to every machine's `.git`, replacing whatever value from the conflict or jj's record was there, and every machine settles on that fetch, not on an older one some machine's `.git` still had. The side is the one committed last, which is not necessarily the later fetch; the next fetch corrects it. | `conflicted_remote_bookmark_resolves_to_a_fetched_side`, `conflicted_remote_bookmark_resolves_despite_a_stale_record` |
 | One machine pushes | Every machine sees the pushed, tracked remote bookmark. | `push_from_one_machine` |
 | One machine stops tracking a remote bookmark | Every machine stops: a later fetch on any of them moves the remote bookmark but not the local one. | `untracking_a_remote_bookmark_reaches_every_machine` |
-| A machine adds, renames, or removes a git remote, or changes its URL | Every machine does the same to its git config (docs/design.md, "Hive settings"), along with the remote bookmarks, which jj renames or forgets in the replicated view. | `remote_added_on_one_machine_reaches_the_others`, `remote_renamed_and_removed_everywhere` |
+| A machine adds, renames, or removes a git remote, or changes its URL | Every machine does the same to its git config (docs/internals/design.md, "Hive settings"), along with the remote bookmarks, which jj renames or forgets in the replicated view. | `remote_added_on_one_machine_reaches_the_others`, `remote_renamed_and_removed_everywhere` |
 | Two machines change the same remote's URL at once | The later write wins everywhere, by the writing machines' clocks; the other machine's value is replaced, and its daemon logs it. | `remote_changed_on_two_machines_at_once` |
 | One machine changes a remote's URL while another changes its push URL | Two writes to one remote: the later wins, whichever reaches the hub first, whichever machine merges, and whatever either does meanwhile. Clock skew can make the earlier win. | `the_later_change_to_a_remote_wins`, `the_later_change_wins_reaching_the_hub_last`, `working_on_after_the_earlier_change_makes_no_difference` |
 | A machine sets or unsets a shared repo config key (`revset-aliases."immutable_heads()"`, `revset-aliases."trunk()"`, `git.private-commits`, or one `musubi.shared-config` names) | Every machine does the same. Other repo config stays each machine's own. | `shared_config_reaches_every_machine`, `other_config_is_shared_only_when_named`, `settings_are_shared_through_the_binary` |
@@ -107,7 +107,7 @@ Not races: kinds of repository and history a hive carries.
 | The hub restarts between one machine's push and another's fetch | Nothing lost: the head log and stores are on disk. | `hub_restart_between_push_and_fetch` |
 | A repository joins with its whole operation history | Other machines' op logs include that history. | `joining_with_full_history` |
 | Two fresh, empty repositories form a hive | Works like any other join. | `empty_repositories_make_a_hive` |
-| `jj op abandon` of operations the hub accepted, whether this machine's latest operation is its own or another machine's | **Replication pauses** for that repository, with an error, rather than reintroducing the abandoned operations or duplicating history. Planned: replicate it as a supersede record (docs/design.md). | `op_abandon_pauses_replication`, `op_abandon_under_a_realized_head_pauses_replication` |
+| `jj op abandon` of operations the hub accepted, whether this machine's latest operation is its own or another machine's | **Replication pauses** for that repository, with an error, rather than reintroducing the abandoned operations or duplicating history. Planned: replicate it as a supersede record (docs/internals/design.md). | `op_abandon_pauses_replication`, `op_abandon_under_a_realized_head_pauses_replication` |
 | `jj op abandon` of only the history from before the machine joined, then `jj util gc` | Nothing changes for the other machines, and replication carries on: the rewritten join point maps to the same canonical join operation, by its view and metadata. | `op_abandon_of_pre_join_history_is_harmless` |
 | Restart that loses the translation cache | Recovered from operation attributes and the join records; no duplicate realizations. | `restart_with_lost_cache`, `lost_cache_does_not_duplicate_realizations` |
 | A crash while realized operations are still being written, some in full, some only as far as their views | None of them was recorded, so they are realized again after the restart, as the same operations; no duplicate realizations. | `crash_with_writes_in_flight` |
@@ -132,4 +132,4 @@ generated end-to-end search found each of them.
 Lost, duplicated, reordered, and delayed messages; concurrent pushes, where one wins and the
 others merge and retry; node and hub crashes at every step; rogue pushes without uploads.
 These are covered for any number of nodes by the Lean model's proofs, and checked against
-the Rust core by `protocol_invariants` and `conformance` (docs/conformance.md).
+the Rust core by `protocol_invariants` and `conformance` (docs/internals/conformance.md).

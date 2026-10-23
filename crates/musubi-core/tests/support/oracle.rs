@@ -1,4 +1,5 @@
-//! The Lean model as an oracle: a child process speaking docs/conformance.md's JSON lines.
+//! The Lean model as an oracle: a child process speaking the JSON lines of
+//! docs/internals/conformance.md.
 
 use std::io::BufRead as _;
 use std::io::BufReader;

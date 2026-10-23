@@ -1,5 +1,5 @@
 /-
-The asynchronous protocol model of `docs/protocol.md`: hub, nodes, environment actions,
+The asynchronous protocol model of `docs/internals/protocol.md`: hub, nodes, environment actions,
 sync actions, and a lossy, duplicating, reordering network.
 -/
 import Musubi.Dag

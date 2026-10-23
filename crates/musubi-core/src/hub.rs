@@ -1,4 +1,4 @@
-//! The hub's request handling (docs/protocol.md, "Hub").
+//! The hub's request handling (docs/internals/protocol.md, "Hub").
 //!
 //! The hub is a function of its storage: [`handle`] answers one request. Callers must run it
 //! for one request at a time per hive, which makes every `Push` atomic.

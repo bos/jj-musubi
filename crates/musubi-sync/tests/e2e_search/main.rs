@@ -1,9 +1,9 @@
-//! Generated end-to-end tests (docs/testing.md, "Generated end-to-end tests"): a Hegel
+//! Generated end-to-end tests (docs/internals/testing.md, "Generated end-to-end tests"): a Hegel
 //! state machine drives two or three real colocated repositories, each a musubi node of an
 //! in-process hive, through local `jj` work, workspaces, a shared `origin`, git-side work,
 //! partial syncs, and faults, then syncs to a fixed point and checks that the hive
-//! converged. The rules can reach every row of the race catalogue (docs/races.md) but the
-//! documented refusals; `coverage` maps rows to rules.
+//! converged. The rules can reach every row of the race catalogue (docs/internals/races.md) but
+//! the documented refusals; `coverage` maps rows to rules.
 //!
 //! After every rule, every op head of every repository a sync or fault touched loads, and
 //! every `jj` command and sync step must succeed. At every full convergence (`checks`):

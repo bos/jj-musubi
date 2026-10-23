@@ -1,4 +1,4 @@
-//! A node's side of the protocol (docs/protocol.md, "Node").
+//! A node's side of the protocol (docs/internals/protocol.md, "Node").
 //!
 //! [`NodeCore`] holds the node's volatile protocol state and implements the policy. Its
 //! persistent state lives in the [`LocalRepo`]: the jj repository in production, a model of
@@ -166,7 +166,7 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
         })
     }
 
-    /// Takes the next policy step (docs/protocol.md, "Policy").
+    /// Takes the next policy step (docs/internals/protocol.md, "Policy").
     pub fn step<R>(&mut self, repo: &mut R) -> Result<Step<O, R::Attachment>, R::Error>
     where
         R: LocalRepo<Op = O>,
@@ -340,7 +340,7 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
                     (seq, head.clone())
                 });
                 // Stage only operations in `anc*(known.head)`: the guard Locality, and so
-                // MergeOwnership, depend on (docs/protocol.md, "Fetch").
+                // MergeOwnership, depend on (docs/internals/protocol.md, "Fetch").
                 if ops.is_empty() || head != self.known.1 || !all_reach(&head, &ops) {
                     return Ok(match learned {
                         Some((seq, head)) => Handled::Learned {
@@ -416,8 +416,8 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
 }
 
 /// Whether every entry is reachable from `head` through parents among the entries: the
-/// check that keeps operations the hub has not accepted out of `staged` (docs/protocol.md,
-/// "Fetch").
+/// check that keeps operations the hub has not accepted out of `staged`
+/// (docs/internals/protocol.md, "Fetch").
 fn all_reach<O: Hash + Eq>(head: &O, ops: &[OpEntry<O>]) -> bool {
     let parents: HashMap<&O, &[O]> = ops
         .iter()

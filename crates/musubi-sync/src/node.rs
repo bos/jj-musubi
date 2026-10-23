@@ -216,8 +216,8 @@ impl NodeAdapter {
     /// Commits this node has, with everything they reach, that the objects of `ops` are
     /// likely to share: those of the local operations `ops` descend from, of the op heads,
     /// and of the accepted base. The hub leaves out of a transfer everything they reach
-    /// (docs/design.md, "Joining"). Only commits present here count: jj may have collected
-    /// an old operation's.
+    /// (docs/internals/design.md, "Joining"). Only commits present here count: jj may have
+    /// collected an old operation's.
     fn haves(&self, ops: &[OpId]) -> anyhow::Result<Vec<CommitId>> {
         let mut have_ops = self.local_frontier(ops)?;
         have_ops.extend(self.canonical_heads()?);
@@ -282,7 +282,7 @@ impl LocalRepo for NodeAdapter {
         let heads = self.repo.canonical_heads()?;
         // jj never makes an operation unreachable from the op heads except through
         // `jj op abandon`. Replicating the rewritten history would put the abandoned
-        // operations back on every other machine, so stop instead (docs/design.md,
+        // operations back on every other machine, so stop instead (docs/internals/design.md,
         // "Abandoning operations").
         let base = self.accepted_base()?;
         let mut reachable = false;

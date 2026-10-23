@@ -1,6 +1,6 @@
 [package]
 name = "musubi-fuzz"
-description = "Fuzz targets for the decoders of what musubi's peers send (see \"Fuzzing\" in docs/testing.md)"
+description = "Fuzz targets for the decoders of what musubi's peers send (see \"Fuzzing\" in docs/internals/testing.md)"
 version = "0.0.0"
 edition = "2024"
 license = "Apache-2.0"

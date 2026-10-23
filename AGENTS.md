@@ -24,9 +24,9 @@ two minutes, so each check runs once, run by whoever owns it.
 
 ## Tests
 
-Write new tests as docs/efficient-tests.md says. Restructure an existing test to fit it, or
-measure as it describes, only when making tests faster is the task; otherwise run the checks
-as above.
+Write new tests as docs/internals/efficient-tests.md says. Restructure an existing test to fit it,
+or measure as it describes, only when making tests faster is the task; otherwise run the checks as
+above.
 
 ## Reviews
 
@@ -59,3 +59,9 @@ and wire formats outright, with no aliases or migrations, but:
   encodes the versions it starts with: every release reads them first.
 - Say what breaks, and what a user must do on upgrading, under an Unreleased heading at the top
   of `CHANGELOG.md`, adding the heading if it's missing.
+
+## Documentation
+
+`docs/` is the user guide and `docs/internals/` the contributor docs.
+[docs/AGENTS.md](docs/AGENTS.md) says which page owns what, and the vocabulary for users. A
+change to what users see updates the user guide and the built-in help with it.

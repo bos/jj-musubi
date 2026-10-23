@@ -1,9 +1,9 @@
 //! Hegel stateful tests of the protocol core: a hub and several nodes, a network the test
-//! controls completely, environment actions, and crashes (docs/testing.md).
+//! controls completely, environment actions, and crashes (docs/internals/testing.md).
 //!
 //! `protocol_invariants` checks the model's safety properties directly on the Rust state.
 //! `conformance` additionally runs the Lean model in lockstep and requires every step to be
-//! a legal model step leading to the same state (docs/conformance.md).
+//! a legal model step leading to the same state (docs/internals/conformance.md).
 
 #![allow(clippy::unwrap_used)]
 

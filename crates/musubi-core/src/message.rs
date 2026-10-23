@@ -1,4 +1,4 @@
-//! Protocol messages between nodes and the hub (docs/protocol.md, "Hub").
+//! Protocol messages between nodes and the hub (docs/internals/protocol.md, "Hub").
 //!
 //! Operation ids are generic so the same core serves real jj operation ids and the small
 //! integers of the conformance tests. Bulky content (operation and object bundles) travels
@@ -17,7 +17,7 @@ pub enum HeadKind {
     /// push came first, or its new head doesn't descend from that.
     Rejected,
     /// A push from the hub's head that the hub still can't close, whatever the node sends
-    /// again, since the node lacks what its operation requires (docs/protocol.md).
+    /// again, since the node lacks what its operation requires (docs/internals/protocol.md).
     Incomplete,
     Notify,
 }

@@ -1,9 +1,9 @@
 /-
 The executable model: finite, computable states, an `Action` vocabulary matching
-`docs/conformance.md`, and `execStep`, which evaluates every guard of the relational model and
-names the guard that failed. `exec_sound` proves that every accepted action other than
-`hubRegress` is a `Step` of the relational model between the abstracted states, and
-`exec_rsound` that every accepted action is an `RStep`.
+`docs/internals/conformance.md`, and `execStep`, which evaluates every guard of the relational
+model and names the guard that failed. `exec_sound` proves that every accepted action other than
+`hubRegress` is a `Step` of the relational model between the abstracted states, and `exec_rsound`
+that every accepted action is an `RStep`.
 -/
 import Musubi.Regress
 
@@ -278,7 +278,7 @@ end EState
 
 /-! ## Actions -/
 
-/-- The action vocabulary of `docs/conformance.md`: one constructor per relational step
+/-- The action vocabulary of `docs/internals/conformance.md`: one constructor per relational step
 that the conformance tests exercise. -/
 inductive Action
   | userOp (node parent : Nat) (objs : List Nat)

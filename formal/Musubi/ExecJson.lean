@@ -1,6 +1,6 @@
 /-
-JSON codec for the oracle (`docs/conformance.md`, "Wire format"). Decoding and encoding only;
-no protocol logic.
+JSON codec for the oracle (`docs/internals/conformance.md`, "Wire format"). Decoding and encoding
+only; no protocol logic.
 -/
 import Lean.Data.Json
 import Musubi.Exec

@@ -1,5 +1,5 @@
 //! What the protocol tests never send: malformed requests, and a link that dies or stalls
-//! partway through a sync (docs/testing.md, "Faults").
+//! partway through a sync (docs/internals/testing.md, "Faults").
 //!
 //! The protocol tests deliver well-formed messages, and lose, duplicate, or delay whole ones.
 //! Here the hub takes requests no honest node sends, built from a real session's: cut short,
@@ -1175,7 +1175,7 @@ fn heads(hub: &HubService, session: &Session) -> Vec<Vec<u8>> {
 }
 
 /// The head moves only forward, to an operation whose closure the hub has (HubMonotone and
-/// HubClosed, docs/protocol.md).
+/// HubClosed, docs/internals/protocol.md).
 fn check_head(hub: &HubService, before: &(u64, OpId)) {
     let adapter = hub.hub();
     let (seq, head) = adapter.head();

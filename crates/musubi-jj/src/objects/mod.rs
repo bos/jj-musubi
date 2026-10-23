@@ -3,7 +3,7 @@
 //! A canonical operation requires the commits its view and `commit_predecessors` mention,
 //! plus everything reachable from them. Objects move between stores as bundles, one framed
 //! file format for every backend (see [`bundle`]), so the transfer layer never needs to know
-//! which backend a hive uses. See "Objects" in docs/design.md.
+//! which backend a hive uses. See "Objects" in docs/internals/design.md.
 
 use std::io;
 use std::path::Path;

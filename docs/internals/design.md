@@ -68,8 +68,10 @@ containing a secret, every machine in the hive receives it.
 ## Why replicate the operation log
 
 The alternative is fetch-style sync: replicate heads and bookmarks only, as `jj git fetch`
-does. That loses the operation history, so rebases and abandons arrive as unexplained new
-commits, and musubi would have to reconcile concurrent changes itself.
+does. That loses the operation history, so `jj op log` and `jj undo` stay per-machine, and
+commits that no bookmark points to, such as another machine's working copy, don't travel.
+Since jj 0.42 a fetch infers rewrites from change ids, and rebases local descendants of a
+rewritten commit, but musubi would still have to reconcile other concurrent changes itself.
 
 Replicating operations reuses jj's own concurrency model. jj already lets several processes
 write to one repository without locking each other out: each writes an operation, and when a
@@ -279,7 +281,7 @@ The hub therefore keeps a single canonical head and accepts only fast-forward up
   local work, which is the same outcome as two jj processes on one machine.
 
 Every merge operation has at least one parent that only its creator had. Two machines
-therefore never perform the same merge. The [formal model](../formal/README.md) proves this,
+therefore never perform the same merge. The [formal model](../../formal/README.md) proves this,
 together with the other safety properties.
 
 Notifications are hints. The hub announces each new canonical head to the hive's nodes.
@@ -293,16 +295,19 @@ pulls, merges, and pushes. That is the same path as any concurrent update.
 
 ### Replacing the hub
 
-A hub is just a store. Every node holds every operation it has seen, so a new, empty hub
+A hub is just a store. Every node holds every operation it has seen, so a new, empty hive
 fills up as soon as nodes connect: the first node fast-forwards it to its head, and the
 others fast-forward or merge as usual. So a hub needn't be durable, and it syncs nothing to
 disk: one that loses its state, to a power cut say, is deleted and made again, and the
-machines' repositories fill the new one.
+machines' repositories fill the new one. For now, though, a node knows its hive only by an
+id the old hub made, which a new hub doesn't have, so each machine leaves the hive and
+joins one made again from the copies, by hand (docs/guides/manage.md, "Replace or move a
+hub"; issues #42 to #44).
 
 A hub does that itself for a hive whose store it finds corrupt as it opens it: its heads
 file torn, say. The store goes under `removed/`, and the hive is made again, empty, under
 its id, name, and index. Machines that knew its later heads follow it back to its root, as
-they follow any hub that goes back (docs/protocol.md, "Network and failures"), and push
+they follow any hub that goes back (docs/internals/protocol.md, "Network and failures"), and push
 what they have. A machine whose last head the first to push lacked then fetches the whole
 hive again, as from a new hub, since the hub can't tell what it has. The old store is
 deleted once it has been set aside a day and the new one has accepted a head, or the hive
@@ -320,7 +325,7 @@ finds the store corrupt and makes the hive again under its id, for its machines 
 Duplicate merges can occur in two cases. One is two hubs serving the same hive at once
 (split brain): nodes that synced through different hubs can each merge the same work once
 they meet at one. The other is a hub going back to a head it accepted earlier, having lost
-later ones to a power cut (docs/protocol.md, "Network and failures").
+later ones to a power cut (docs/internals/protocol.md, "Network and failures").
 
 ## Objects
 

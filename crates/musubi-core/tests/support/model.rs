@@ -1,5 +1,5 @@
 //! Test implementations of the core's storage traits that keep exactly the Lean model's
-//! state (docs/conformance.md, "The abstraction").
+//! state (docs/internals/conformance.md, "The abstraction").
 
 use std::cell::Cell;
 use std::cell::RefCell;

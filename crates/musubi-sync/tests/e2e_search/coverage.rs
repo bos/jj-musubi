@@ -1,6 +1,6 @@
 //! Which rules the generated sequences fired, and which rows of the race catalogue
-//! (docs/races.md) they reached. A rule or row no sequence reaches is a search problem:
-//! give it a richer starting state or fix its precondition (docs/testing.md).
+//! (docs/internals/races.md) they reached. A rule or row no sequence reaches is a search problem:
+//! give it a richer starting state or fix its precondition (docs/internals/testing.md).
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;

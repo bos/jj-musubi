@@ -123,7 +123,8 @@ pub fn config_dir() -> anyhow::Result<PathBuf> {
 }
 
 /// Where musubi keeps logs and locks: `$XDG_STATE_HOME/musubi` (`~/.local/state/musubi`),
-/// `%LOCALAPPDATA%\musubi` on Windows, or `$MUSUBI_CONFIG_DIR`.
+/// `%APPDATA%\musubi` on Windows, which has no state directory of its own, or
+/// `$MUSUBI_CONFIG_DIR`.
 pub fn state_dir() -> anyhow::Result<PathBuf> {
     if let Some(dir) = std::env::var_os("MUSUBI_CONFIG_DIR") {
         return Ok(PathBuf::from(dir));

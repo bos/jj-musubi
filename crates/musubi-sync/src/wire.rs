@@ -3,8 +3,8 @@
 //! Messages are postcard-encoded [`Envelope`]s. Every envelope starts with the protocol
 //! version and the jj-lib version, and each side refuses to talk across a mismatch: canonical
 //! operation ids are hashes of jj-lib's structs, so peers must agree on jj-lib exactly
-//! (docs/design.md, "Compatibility"). Those two versions are read before the rest, which
-//! another release may encode differently, so no release may change how they're encoded.
+//! (docs/internals/design.md, "Compatibility"). Those two versions are read before the rest,
+//! which another release may encode differently, so no release may change how they're encoded.
 //!
 //! A small bundle travels inline, in the message that refers to it; a larger one as a blob,
 //! in chunks, several of them in flight at once. A message that would itself exceed the
@@ -137,7 +137,7 @@ pub enum HubReply {
     Error(String),
 }
 
-/// The first token of every subject the hub serves (docs/design.md, "Transport").
+/// The first token of every subject the hub serves (docs/internals/design.md, "Transport").
 const SUBJECT_PREFIX: &str = "musubi";
 
 /// What stands in for a hive id in the subject of requests to the hub as a whole:

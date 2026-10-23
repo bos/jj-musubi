@@ -120,7 +120,7 @@ fn same_tag_created_at_different_commits() {
 /// has the tag, but only that machine's `.git` has the tag object, with its message, tagger
 /// and any signature. The others' `.git` has a lightweight tag at the same commit: jj records
 /// a tag by its commit, and musubi moves the commits a view needs, not tag objects. If this
-/// test fails, musubi has started moving them; update docs/races.md.
+/// test fails, musubi has started moving them; update docs/internals/races.md.
 #[test]
 fn an_annotated_tag_arrives_lightweight() {
     let mut hive = Fixture::new(&["alpha", "beta"]);

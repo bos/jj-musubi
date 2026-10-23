@@ -1,10 +1,10 @@
 name: Search
 
-# The generated end-to-end search (docs/testing.md), which CI's test job leaves out for its
-# quick sibling `e2e_smoke`: nightly, and by hand. Each run searches from a seed of its own,
-# shard n from seed + n, one shard per runner. A case replays exactly, so a failure
-# reproduces locally from the `reproduce_failure` attribute its output gives, or from the
-# shard's example database, which a failing run uploads.
+# The generated end-to-end search (docs/internals/testing.md), which CI's test job leaves out for
+# its quick sibling `e2e_smoke`: nightly, and by hand. Each run searches from a seed of its own,
+# shard n from seed + n, one shard per runner. A case replays exactly, so a failure reproduces
+# locally from the `reproduce_failure` attribute its output gives, or from the shard's example
+# database, which a failing run uploads.
 on:
   schedule:
     - cron: "23 6 * * *"

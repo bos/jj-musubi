@@ -325,15 +325,15 @@ impl Colocation {
 /// export leaves alone. Every `jj` command imports `refs/remotes/<remote>/<name>` and resolves
 /// a conflicted remote bookmark to what it finds there. On one machine that is its latest
 /// fetch, one of the sides. Here a machine that made neither fetch still has an older one,
-/// and its import would replicate that, losing both sides (docs/races.md, "Remotes"). Every
-/// machine writes the same side, the one committed last (then the greatest commit id), so
-/// their imports agree: one machine importing anything else would merge with the others'
-/// imports back to an older value. So the write compares against what `.git` holds, not jj's
-/// record of it, and replaces any value the hive already knows of: a term of the conflict,
-/// absent included, or the record. That includes a `git fetch` that happens to match a term;
-/// the next fetch after the conflict resolves corrects it. Any other value, absent included,
-/// was put there by git since, and the import takes it, as it would without musubi. A ref
-/// that can't be read or written is left alone, as jj's export leaves a failed ref.
+/// and its import would replicate that, losing both sides (docs/internals/races.md, "Remotes").
+/// Every machine writes the same side, the one committed last (then the greatest commit id), so
+/// their imports agree: one machine importing anything else would merge with the others' imports
+/// back to an older value. So the write compares against what `.git` holds, not jj's record of
+/// it, and replaces any value the hive already knows of: a term of the conflict, absent included,
+/// or the record. That includes a `git fetch` that happens to match a term; the next fetch after
+/// the conflict resolves corrects it. Any other value, absent included, was put there by git
+/// since, and the import takes it, as it would without musubi. A ref that can't be read or
+/// written is left alone, as jj's export leaves a failed ref.
 fn export_conflicted_remote_bookmarks(mut_repo: &mut MutableRepo) -> Result<(), NodeError> {
     type Terms = Vec<Option<CommitId>>;
     let conflicted: Vec<(GitRefNameBuf, Terms)> = mut_repo

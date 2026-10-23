@@ -1,4 +1,4 @@
-//! What syncing transfers, nothing a node already has (docs/design.md, "Joining"), and
+//! What syncing transfers, nothing a node already has (docs/internals/design.md, "Joining"), and
 //! what it leaves behind in git's object stores.
 
 #![allow(clippy::unwrap_used)]

@@ -50,13 +50,13 @@ cargo install --locked --git https://github.com/bos/jj-musubi jj-musubi
 
 You need:
 
-- `jj` 0.46.0 and `git` on every machine: a hub runs the `git` on its `PATH`, and other
-  machines the git jj's `git.executable-path` names;
-- `musubi` on the machine that runs the hub, on the `PATH` of non-interactive shells there;
+- `jj` 0.46.0 and `git` on every machine;
 - a repository with at least one commit, and all of its history: not a shallow or partial
   clone;
 - ssh access to the hub's machine from every other machine: if `ssh devbox` works, so does
-  musubi.
+  musubi;
+- `musubi` on the hub machine's `PATH` for non-interactive shells, which other machines run
+  it in: check with `ssh devbox musubi --version`.
 
 On the machine that will run the hub (any machine that is usually on):
 
@@ -83,134 +83,71 @@ musubi create --hub devbox
 ```
 
 The hive is named after the repository's `origin` remote (`jj-musubi`, say), or its
-directory; `musubi create <name>` names it yourself. In each other machine's copy, join it:
+directory. In each other machine's copy, join it:
 
 ```sh
 musubi join --hub devbox
 ```
 
-That's all. A copy joins the hive it shares history and a remote with, and is refused if
-there's none, rather than starting a hive of its own. `create` and `join` start a daemon in
-the background that keeps every repository on the machine in sync, and remember the hub, so
-later commands need no `--hub`.
+That's all. The hub works out which hive a copy belongs in from its history and remotes.
+`create` and `join` start a daemon in the background that keeps every repository on the
+machine in sync, and remember the hub, so later commands need no `--hub`. The first time a
+machine uses a hub, musubi adds an ssh key of its own to `~/.ssh/authorized_keys` there,
+allowed only to reach the hub; ssh may ask for your password that once.
 
-The first time a machine uses a hub, musubi creates an ssh key of its own for the machine
-and adds it to `~/.ssh/authorized_keys` on the hub's machine, allowed only to run `musubi
-hub connect`; ssh may ask for your password that once. The daemon then reaches the hub
-through ssh, your `~/.ssh/config` and all, reconnecting by itself, as after the machine
-sleeps. If it says `musubi` isn't on the hub machine's `PATH`, put it there for
-non-interactive shells (`~/.zshenv`, or near the top of `~/.bashrc`), or give its absolute
-path in that line of `~/.ssh/authorized_keys`.
-
-Anyone who can reach a hub can read and write every hive on it, so the hub listens only on
-a local socket that only its own user can reach, and other machines come in over ssh, as
-that user.
-
-A hub serves any number of repositories, each its own hive. A fork, which shares history
-but has a remote of its own, isn't joined to the original's hive: `musubi create` gives it
-one of its own, and `musubi join --hive <name>` joins a chosen hive whatever its remotes.
-Run `musubi hub` again in the same place after a restart: daemons connect to it again by
-themselves.
-
-Workspaces stay per-machine: each machine keeps its own `default@`, and shows the other
-machines' working copies as workspaces named after them, so `jj log` shows
-`laptop/default@` and so on. A machine's name defaults to jj's `operation.hostname`;
-choose another with `--machine <name>` to `create` or `join`.
-
-Or start a new machine from a hive:
+To start a new machine from a hive instead:
 
 ```sh
-musubi clone jj-musubi ~/src/jj-musubi
+musubi clone jj-musubi ~/src/jj-musubi --hub devbox
 ```
 
-Day to day:
+To keep the daemon running across reboots, run `musubi daemon install` on each machine.
+
+## Day to day
+
+Keep using jj. Each other machine's working copy shows in `jj log` as a workspace named after
+it, such as `laptop/default@`, and `jj op log` shows what every machine did.
 
 - `musubi` (or `musubi list`) shows the hub's hives, this machine's copies of them, and how
   their syncing goes, and in a hive's repository, its details.
 - `musubi sync` syncs the current repository now; `musubi leave` stops syncing it.
-- `musubi daemon install` starts the daemon at login from now on: a launchd agent on macOS,
-  a systemd user unit on Linux, a `Run` registry entry on Windows. `musubi daemon
-  uninstall` undoes it, and `musubi daemon start`, `stop` and `restart` control the daemon.
-- `musubi hub rename <name> <new-name>` and `musubi hub rm <name>` manage the hub's hives.
-- Each machine records its own git refs and workspaces in its operations, so the same
-  operation has a different id on each machine and in the hive; `musubi debug op-id <id>`
-  translates between them. (`musubi debug` holds tools for investigating a hive, and is
-  left out of `musubi --help`.)
+- `musubi daemon install` starts the daemon at login; `musubi daemon start`, `stop` and
+  `restart` control it.
+- `musubi hub rename` and `musubi hub rm` manage the hub's hives.
 
-Logs:
+The hub and the daemon log what they do: the daemon to `daemon.log` in musubi's state
+directory (`~/.local/state/musubi` on Linux and macOS), or, when systemd starts it at login,
+to `journalctl --user -u musubi`.
 
-- The hub and the daemon log what they do; other commands only warn. The hub logs to its
-  terminal, and the daemon to `daemon.log` in musubi's state directory
-  (`~/.local/state/musubi` on Linux and macOS), or, when systemd starts it at login, to
-  `journalctl --user -u musubi`.
-- `--log <filter>` on any command chooses what it logs, as a filter in `RUST_LOG`'s
-  syntax: `musubi --log debug hub`, or `musubi --log musubi_sync=debug sync` to see each
-  request a sync makes. Without it, `RUST_LOG` does the same.
-- A daemon started for you, at login or by another command, is given no `--log`: give it a
-  filter as `log` under `[daemon]` in musubi's config, `~/.config/musubi/config.toml`, and
-  restart it (`musubi daemon restart`). One started by another command also inherits that
-  command's `RUST_LOG`, which takes the config's place.
+## Learn more
+
+- [How musubi works](docs/how-it-works.md): what replicates, and what stays on each machine.
+- [Set up a hub and machines](docs/guides/set-up.md): ssh, keeping the hub running, forks,
+  machine names, and more than one repository.
+- [Work across machines](docs/guides/working-across-machines.md): stale working copies, undo,
+  concurrent changes, and shared remotes and config.
+- [Manage hives, machines, and hubs](docs/guides/manage.md): leaving, renaming, upgrading, and
+  replacing a hub.
+- [Troubleshooting](docs/troubleshooting.md)
+- [Command reference](docs/reference/commands.md) and
+  [configuration](docs/reference/configuration.md)
+- [How musubi compares with other approaches](docs/comparison.md)
+
+The [user guide](docs/README.md) lists every page. For every flag, run
+`musubi <command> --help`.
 
 ## Upgrading
 
 Upgrade the hub's machine and every other machine together: until 1.0, a release may change
 the protocol, and a machine and a hub whose protocols differ refuse to sync, saying so.
-Install the new musubi everywhere, in place of the old one: a daemon that starts at login runs
-the path `musubi daemon install` found, so run that again wherever the path changes. Then stop
-the hub and run `musubi hub` again, and run `musubi daemon restart` on each other machine.
 [CHANGELOG.md](CHANGELOG.md) says what each release changes, and anything else to do on
-upgrading.
-
-## How it works
-
-- [docs/design.md](docs/design.md): the design, and why.
-- [docs/protocol.md](docs/protocol.md): the sync protocol, precisely.
-- [docs/races.md](docs/races.md): what happens when machines change the same thing at once.
-- [docs/conformance.md](docs/conformance.md): how the Rust code is checked against the Lean
-  model.
-- [docs/testing.md](docs/testing.md): the test layers.
-- [docs/efficient-tests.md](docs/efficient-tests.md): how to keep tests fast, and why.
+upgrading. See [Upgrade musubi](docs/guides/manage.md#upgrade-musubi) for the steps.
 
 ## Development
 
-```sh
-just check      # fmt, clippy, Lean proofs and oracle, tests, docs, cargo-deny, machete, typos
-just property   # the generated end-to-end search (slow)
-just fuzz bundle  # one fuzz target, until stopped (needs cargo-fuzz and nightly Rust)
-```
-
-Needs `cargo-nextest`, `cargo-deny`, `cargo-machete`, `typos`, and Lean with `lake` on
-`PATH` (for example, installed via `elan`).
-
-CI (`.github/workflows/ci.yml`) runs the same lints on Linux, the tests on Linux, macOS and
-Windows, and the Lean proofs and conformance test on Linux.
-
-## Releasing
-
-Set the version in `Cargo.toml`, both the workspace's and the one its own crates require of
-each other, run `cargo update --workspace` to put it in `Cargo.lock`, and give it to
-`CHANGELOG.md`'s Unreleased section as its heading if there is one. Once that's on main, push
-a matching tag:
-
-```sh
-jj tag set v0.1.0 -r main
-jj git push --remote origin --tag v0.1.0
-```
-
-`.github/workflows/release.yml` builds `musubi` for Linux (static, x86_64 and aarch64),
-macOS (x86_64 and aarch64), and Windows (x86_64 and aarch64), with build provenance
-attestations, and attaches the archives and their checksums to a draft GitHub release.
-Review the draft, put the version's section of `CHANGELOG.md` at the top of its notes, and
-publish it. Running the workflow by hand from the Actions tab builds the same archives without
-releasing anything.
-
-Then, once the release has built, publish the crates from the tagged commit, with a crates.io
-token (`cargo login`). Publishing can't be undone, only yanked:
-
-```sh
-jj new v0.1.0
-cargo publish --workspace --locked
-```
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and checks, and the
+[contributor docs](docs/internals/README.md) for the design, the protocol and its proofs, and
+testing.
 
 ## License
 

@@ -9,7 +9,7 @@ keep a test cheap.
 | --- | --- | --- | --- |
 | Formal model | `formal/` (Lean) | Protocol design errors: lost operations, dangling references, duplicate merges, livelock | Proof effort, no runtime |
 | Protocol property tests | `crates/musubi-core/tests` | The Rust state machines departing from the model | Milliseconds per case |
-| Race catalogue | `crates/musubi-sync/tests/races` | Concurrent changes on different machines resolving differently from jj's local behavior (docs/races.md) | ~0.3 s per test |
+| Race catalogue | `crates/musubi-sync/tests/races` | Concurrent changes on different machines resolving differently from jj's local behavior (docs/internals/races.md) | ~0.3 s per test |
 | Unit tests | `#[cfg(test)]` modules | Pure logic: URL normalization and hive names across forges, matching joining repositories to hives | Microseconds |
 | Example tests | each crate's `tests/` | jj integration details: translation, git refs, objects, joins, transports, the hub's hives, the CLI | ~0.2–0.5 s per test |
 | Fault tests | `crates/musubi-sync/tests/it/faults.rs` | Malformed requests reaching the hub's decoders, and links that die or stall partway through a sync | ~0.2–1.5 s per test |
@@ -44,8 +44,8 @@ A Hegel state machine owns a hub and several nodes, all of them sans-IO state ma
 `musubi-core`, joined by a simulated network that the test controls completely. Its rules:
 
 - environment: a node makes a local operation on some local parent, not necessarily a head;
-- progress: a node takes the next step of its policy (docs/protocol.md, "Policy"), merging
-  if it has several heads; sends a poll's `Fetch`; or takes a policy step whose requests
+- progress: a node takes the next step of its policy (docs/internals/protocol.md, "Policy"),
+  merging if it has several heads; sends a poll's `Fetch`; or takes a policy step whose requests
   and replies go through at once;
 - delivery: deliver any message in flight, in any order, or deliver one again; a message
   never delivered is lost;
@@ -58,10 +58,10 @@ A Hegel state machine owns a hub and several nodes, all of them sans-IO state ma
   number, starts over from that reply (`loseKnown`, then `learn`).
 
 Two tests run this machine: `protocol_invariants`, and `conformance`, which also checks every
-step against the Lean model (docs/conformance.md) and so leaves out the hub forgetting
+step against the Lean model (docs/internals/conformance.md) and so leaves out the hub forgetting
 uploads, which the model's oracle can't express.
 
-After every rule the test checks the model's safety invariants (docs/protocol.md,
+After every rule the test checks the model's safety invariants (docs/internals/protocol.md,
 "Properties"): HubClosed, HubMonotone, NodeClosed, Locality, MergeOwnership, that a node
 stages only operations the hub accepted (staged-is-accepted), and that the head a node
 knows is in the hub's history (KnownIsHubHistory). Once the hub has gone back, Locality,
@@ -114,15 +114,14 @@ is the one step no test exercises.
 ## Faults
 
 The protocol tests lose, duplicate, or delay whole messages, but never corrupt one:
-docs/protocol.md assumes no message is corrupted. `musubi-sync/tests/it/faults.rs` tests the
-implementation where that doesn't hold, and where a link fails partway through a call. It
-records a real session over the in-memory transport: one machine pushes a commit, another
-fetches it and pushes its own, and the first fetches that. The payload limit is small
-enough that each commit's objects travel as a blob in several windows of chunks. A case can
-start from any point in the session, from a snapshot of the hub's directory taken as each
-call started. The session is recorded once per build of the test binary, under
-`target/tmp`, as is the hive most race tests start from, since nextest runs each test in a
-process of its own.
+docs/internals/protocol.md assumes no message is corrupted. `musubi-sync/tests/it/faults.rs` tests
+the implementation where that doesn't hold, and where a link fails partway through a call. It
+records a real session over the in-memory transport: one machine pushes a commit, another fetches
+it and pushes its own, and the first fetches that. The payload limit is small enough that each
+commit's objects travel as a blob in several windows of chunks. A case can start from any point in
+the session, from a snapshot of the hub's directory taken as each call started. The session is
+recorded once per build of the test binary, under `target/tmp`, as is the hive most race tests
+start from, since nextest runs each test in a process of its own.
 
 - `hub_survives_malformed_requests` sends the hub requests no honest node sends: the
   session's requests and bundles cut short, corrupted, or spliced; chunks at extreme
@@ -253,4 +252,4 @@ To keep the search effective:
 
 `just mutants` runs `cargo-mutants` over the protocol core's hub and node logic: each
 surviving mutant is a change to the protocol that the property and conformance tests fail to
-notice. docs/conformance.md lists hand-made mutants and which check catches each.
+notice. docs/internals/conformance.md lists hand-made mutants and which check catches each.

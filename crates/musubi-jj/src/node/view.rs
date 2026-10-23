@@ -27,7 +27,7 @@ use crate::workspaces;
 /// Per-machine fields of a view that a realization inherits: this machine's record of its
 /// own `.git` (`git_refs`, the `git` pseudo-remote, and each workspace's `git_heads`). The
 /// working copies come from the canonical view instead. See "Per-machine state in a
-/// replicated view" in docs/design.md.
+/// replicated view" in docs/internals/design.md.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(super) struct PerMachine {
     git_refs: BTreeMap<GitRefNameBuf, RefTarget>,

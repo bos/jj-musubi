@@ -1,14 +1,14 @@
 //! Machine identity, and how each machine's workspaces appear to the others.
 //!
-//! Workspaces are per-machine (docs/design.md, "Per-machine state in a replicated view"), but
-//! where each machine's working copies are is worth seeing. The canonical view records every
-//! machine's workspaces under machine-qualified keys, `<machine>/<workspace>`. Each machine
-//! shows the others' as workspaces of its own view, named after the machine, so `jj log`
-//! shows beta's working copy as `beta/default@`. They are never git refs, so nothing git
-//! does can touch them. jj moves them as it moves any workspace when it rewrites or abandons
-//! their commits, and canonicalization takes those moves, but no other change a machine
-//! makes to another machine's workspaces: adding, forgetting or renaming them stays local,
-//! and the next realization shows them again.
+//! Workspaces are per-machine (docs/internals/design.md, "Per-machine state in a replicated
+//! view"), but where each machine's working copies are is worth seeing. The canonical view
+//! records every machine's workspaces under machine-qualified keys, `<machine>/<workspace>`. Each
+//! machine shows the others' as workspaces of its own view, named after the machine, so `jj log`
+//! shows beta's working copy as `beta/default@`. They are never git refs, so nothing git does can
+//! touch them. jj moves them as it moves any workspace when it rewrites or abandons their
+//! commits, and canonicalization takes those moves, but no other change a machine makes to
+//! another machine's workspaces: adding, forgetting or renaming them stays local, and the next
+//! realization shows them again.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;

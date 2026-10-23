@@ -1,5 +1,5 @@
 /-
-Per-machine and shared state in a replicated view, for one git ref (docs/design.md,
+Per-machine and shared state in a replicated view, for one git ref (docs/internals/design.md,
 "Per-machine state in a replicated view").
 
 In a colocated repository each view records what jj last saw in this machine's `.git`, and

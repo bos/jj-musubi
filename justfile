@@ -102,7 +102,7 @@ property:
     cargo nextest run --workspace --profile search
 
 # Run a fuzz target until stopped, or as libFuzzer's options say: `just fuzz bundle
-# -max_total_time=300`. See "Fuzzing" in docs/testing.md.
+# -max_total_time=300`. See "Fuzzing" in docs/internals/testing.md.
 fuzz target *args:
     #!/usr/bin/env bash
     set -euo pipefail

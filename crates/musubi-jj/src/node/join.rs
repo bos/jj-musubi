@@ -1,5 +1,5 @@
 //! Joining a hive: what a hub matches a joining repository against, and the join
-//! operation that stands for its history (see "Joining" in docs/design.md).
+//! operation that stands for its history (see "Joining" in docs/internals/design.md).
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -93,7 +93,7 @@ impl NodeRepo {
 
     /// Creates the canonical operation that replicates this repository's current state in
     /// place of its operation history, and records that the current op head canonicalizes
-    /// to it. See "Joining" in docs/design.md.
+    /// to it. See "Joining" in docs/internals/design.md.
     pub fn create_join_operation(&mut self, description: &str) -> Result<OperationId, NodeError> {
         let head = self.merge_heads()?;
         if let Some(canonical) = self.canonical_of(&head) {

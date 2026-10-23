@@ -1,4 +1,4 @@
-//! The race catalogue (docs/races.md): concurrent changes on different machines, each
+//! The race catalogue (docs/internals/races.md): concurrent changes on different machines, each
 //! provoked deliberately against real repositories, colocated unless a test says
 //! otherwise, synced through the real protocol core and hub storage, and checked for the
 //! outcome jj itself would produce had the changes come from concurrent processes on one

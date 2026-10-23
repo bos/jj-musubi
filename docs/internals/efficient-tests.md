@@ -103,9 +103,10 @@ starts many.
   times a hop for an empty pack, and now starts none: 3,222 git processes in the default
   suite instead of 3,628. Making musubi faster makes its tests faster.
 - Keep a long-lived helper across cases. The conformance test started a Lean oracle (the
-  executable model it checks each step against, docs/conformance.md) for each case, 29 ms
-  before it answered anything. A case that passes now hands its oracle to the next; one that
-  fails drops it, since its state is then unknown. The test went from 17.1 seconds to 12.5.
+  executable model it checks each step against, docs/internals/conformance.md) for each
+  case, 29 ms before it answered anything. A case that passes now hands its oracle to the
+  next; one that fails drops it, since its state is then unknown. The test went from 17.1
+  seconds to 12.5.
 
 ## Don't compute what nothing checks
 

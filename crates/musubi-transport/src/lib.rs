@@ -5,7 +5,7 @@
 //! musubi needs very little from a transport: publish to a subject, subscribe to a subject,
 //! and request/reply with a timeout, all with payloads up to a size limit the transport
 //! reports. Delivery is best-effort; the protocol tolerates lost, duplicated, and reordered
-//! messages (see docs/protocol.md).
+//! messages (see docs/internals/protocol.md).
 
 use std::time::Duration;
 

@@ -1,4 +1,4 @@
-//! Content-addressed blobs and chunked transfer (docs/protocol.md, "Chunked blobs").
+//! Content-addressed blobs and chunked transfer (docs/internals/protocol.md, "Chunked blobs").
 //!
 //! A transfer session is keyed by the blob's id, so it is never confused with another
 //! blob's. Chunks may arrive lost, duplicated, or out of order: the receiver appends only

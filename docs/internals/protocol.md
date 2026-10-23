@@ -170,7 +170,7 @@ therefore takes one round trip, and one that pushes takes two.
   heads it accepted: the hub goes back to one it accepted earlier, with its sequence
   number, or, when what it lost leaves a hive's store corrupt, to the root, making the hive
   again, empty. The model takes what the hub keeps to be intact; a hive whose store a power
-  cut tore in a way it doesn't notice is made again by hand (docs/design.md, "Replacing
+  cut tore in a way it doesn't notice is made again by hand (docs/internals/design.md, "Replacing
   the hub"). The safety properties below that rest on the hub's history only growing
   (HubMonotone, KnownIsHubHistory, Locality, MergeOwnership) can then fail, and two nodes
   can merge the same heads. The rest hold still. So does liveness: nodes that knew the lost

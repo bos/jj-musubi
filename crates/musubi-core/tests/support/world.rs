@@ -1,5 +1,5 @@
 //! A hub and nodes running the real core over a network the test controls completely, with
-//! every step translated into Lean model actions (docs/conformance.md).
+//! every step translated into Lean model actions (docs/internals/conformance.md).
 
 use std::collections::BTreeSet;
 
@@ -55,7 +55,7 @@ pub struct World {
     pub trace: Vec<Value>,
     /// The operations each node last staged from a `Fetched` reply.
     last_staged: Vec<Option<Vec<Op>>>,
-    /// Whether the hub has gone back: MergeOwnership no longer holds (docs/protocol.md,
+    /// Whether the hub has gone back: MergeOwnership no longer holds (docs/internals/protocol.md,
     /// "Network and failures").
     went_back: bool,
     /// The heads the hub accepted and then lost, going back, with their sequence numbers:
@@ -540,7 +540,7 @@ impl World {
     /// A lying hub: a `Fetched` reply about `head` carrying `op`, which the hub never
     /// accepted, delivered straight to the node. Either `op` is not reachable from `head`, or
     /// `head` is not the head the node knows (it is `op`, say). The node must ignore it
-    /// (docs/protocol.md, "Fetch"): staging operations the hub never accepted is how
+    /// (docs/internals/protocol.md, "Fetch"): staging operations the hub never accepted is how
     /// Locality would break.
     pub fn rogue_ops_reply(&mut self, node: usize, head: Op, op: Op) {
         let parents = self.univ.borrow().parents[op as usize].clone();
@@ -584,7 +584,7 @@ impl World {
         self.cores[node].known().1
     }
 
-    // Properties (docs/protocol.md, "Properties").
+    // Properties (docs/internals/protocol.md, "Properties").
 
     fn check_merge_ownership(&self, node: usize, merge: Op, parents: &[Op]) {
         if self.went_back {

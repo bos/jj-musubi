@@ -688,10 +688,10 @@ impl World {
     }
 
     /// Recovers from a sync of node `m` that failed because of a known jj limitation
-    /// (docs/races.md): jj can't merge this machine's operations with the hive's, so musubi
-    /// pauses. Recovers as the error says, by reverting the newest of this machine's
-    /// operations the hive doesn't have, other than the recovery's own: reverting a revert
-    /// would put back what it reverted. Fails the case on any other error.
+    /// (docs/internals/races.md): jj can't merge this machine's operations with the hive's, so
+    /// musubi pauses. Recovers as the error says, by reverting the newest of this machine's
+    /// operations the hive doesn't have, other than the recovery's own: reverting a revert would
+    /// put back what it reverted. Fails the case on any other error.
     fn recover_unmergeable(&mut self, m: usize, what: &str, err: &anyhow::Error) {
         let ours = err
             .chain()

@@ -1,12 +1,12 @@
 //! Settings the whole hive shares that jj keeps outside its operations: git remote
-//! definitions, and chosen keys of jj's repo config (docs/design.md, "Hive settings").
+//! definitions, and chosen keys of jj's repo config (docs/internals/design.md, "Hive settings").
 //!
 //! Remote bookmarks replicate with the view, but which remotes exist, and where they point,
 //! is in each machine's git config. So musubi records the hive's settings in an attribute
 //! of an operation it makes whenever they change, and replicates them like any operation.
 //! Each setting carries the time it was written, by the writing machine's clock, and where
-//! machines disagree, the later write wins (docs/design.md, "Recording and merging"). Clock
-//! skew can make the wrong one win; that is accepted, for a rule anyone can predict.
+//! machines disagree, the later write wins (docs/internals/design.md, "Recording and merging").
+//! Clock skew can make the wrong one win; that is accepted, for a rule anyone can predict.
 
 use std::collections::BTreeMap;
 

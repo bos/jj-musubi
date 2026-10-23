@@ -1,5 +1,5 @@
 //! The hive's settings: this machine's git remotes and shared repo config, reconciled with
-//! the hive's (see docs/design.md, "Hive settings").
+//! the hive's (see docs/internals/design.md, "Hive settings").
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -91,13 +91,12 @@ impl NodeRepo {
 
     /// Brings this machine's settings and the hive's together: records this machine's
     /// changes for the hive, in an operation of its own, and applies the hive's here,
-    /// setting by setting, the later write winning (docs/design.md, "Hive settings"). A setting
-    /// that differs from what this machine last applied is a change, written when the file
-    /// holding it was last modified. A machine reconciling for the first time takes the
-    /// hive's value of every setting the hive has, and adds its own others. Remotes compare
-    /// by the repositories they name ([`hive_settings::Remote`]), so a machine's own
-    /// spelling of one is never a change. Returns whether it recorded a change, which then
-    /// needs uploading.
+    /// setting by setting, the later write winning (docs/internals/design.md, "Hive settings"). A
+    /// setting that differs from what this machine last applied is a change, written when the
+    /// file holding it was last modified. A machine reconciling for the first time takes the
+    /// hive's value of every setting the hive has, and adds its own others. Remotes compare by
+    /// the repositories they name ([`hive_settings::Remote`]), so a machine's own spelling of one
+    /// is never a change. Returns whether it recorded a change, which then needs uploading.
     pub fn reconcile_settings(&mut self) -> Result<bool, NodeError> {
         let head = self.merge_heads()?;
         let canonical = self.canonicalize(&head)?;

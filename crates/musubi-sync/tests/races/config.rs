@@ -1,4 +1,4 @@
-//! jj repo config the hive shares (docs/design.md, "Hive settings").
+//! jj repo config the hive shares (docs/internals/design.md, "Hive settings").
 
 use crate::fixture::Fixture;
 

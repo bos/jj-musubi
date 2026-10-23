@@ -1,6 +1,6 @@
 /-
-The conformance oracle (`docs/conformance.md`): reads one JSON request per line on stdin,
-writes one JSON reply per line on stdout, flushing after each. All protocol logic is in
+The conformance oracle (`docs/internals/conformance.md`): reads one JSON request per line on
+stdin, writes one JSON reply per line on stdout, flushing after each. All protocol logic is in
 `Musubi.Exec.execStep`; the codec is `Musubi.Exec.Json`.
 -/
 import Musubi.ExecJson

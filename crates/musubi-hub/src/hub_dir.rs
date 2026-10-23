@@ -214,8 +214,8 @@ impl HubDir {
 
     /// Makes hive `id`, whose store `why` found corrupt, again: empty, for its machines to
     /// fill, under its name and with the index joins match it by. The hive goes back to its
-    /// root, and machines that knew its later heads follow it (docs/protocol.md, "Network
-    /// and failures").
+    /// root, and machines that knew its later heads follow it (docs/internals/protocol.md,
+    /// "Network and failures").
     ///
     /// Its store goes under `removed/` until a day after the new one has accepted a head,
     /// and a new one takes its place, made whole beside it first, so that a failure leaves

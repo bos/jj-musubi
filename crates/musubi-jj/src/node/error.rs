@@ -34,7 +34,7 @@ pub enum NodeError {
     RepoLoader(#[from] RepoLoaderError),
     /// A jj 0.46 bug, until jj fixes it: jj cannot merge concurrent operations when the
     /// merge would rebase a merge commit onto the root commit, and until then every jj
-    /// command fails to load the repository (docs/races.md, "Known jj limitations").
+    /// command fails to load the repository (docs/internals/races.md, "Known jj limitations").
     #[error(
         "jj cannot merge this machine's concurrent operations: the merge would create a merge \
          commit on the root commit (a jj bug). On this machine, run `jj --at-op <head> op log \

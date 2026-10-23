@@ -1,10 +1,10 @@
 # Lean model of the musubi sync protocol
 
-This directory is a machine-checked Lean 4 model of [`docs/protocol.md`](../docs/protocol.md),
-and, in `Musubi/Refs.lean`, of the per-machine view state of [`docs/design.md`](../docs/design.md).
-It contains no `sorry` and adds no axioms. Every main theorem depends only on `propext`,
-`Classical.choice` and `Quot.sound`. Some depend on fewer, and `Musubi/Axioms.lean` prints
-the exact list.
+This directory is a machine-checked Lean 4 model of
+[`docs/internals/protocol.md`](../docs/internals/protocol.md), and, in `Musubi/Refs.lean`, of the
+per-machine view state of [`docs/internals/design.md`](../docs/internals/design.md). It contains
+no `sorry` and adds no axioms. Every main theorem depends only on `propext`, `Classical.choice`
+and `Quot.sound`. Some depend on fewer, and `Musubi/Axioms.lean` prints the exact list.
 
 ## Checking
 
@@ -47,14 +47,14 @@ The binary is `formal/.lake/build/bin/oracle`.
 | `Musubi/Regress.lean` | A hub that goes back to an earlier accepted head, as a power cut or a remade hive makes it: the extended system `RStep`, the invariant that survives, and convergence once the hub stops going back. |
 | `Musubi/Chunks.lean` | The chunked-blob model, its safety and its liveness. |
 | `Musubi/Scenario.lean` | A concrete reachable run: a lost Cas race, then fetch, advance, merge, and the merge accepted. It shows the model is not vacuous. |
-| `Musubi/Exec.lean` | The executable model: finite `EState`, the `Action` vocabulary of `docs/conformance.md`, and `execStep`. |
+| `Musubi/Exec.lean` | The executable model: finite `EState`, the `Action` vocabulary of `docs/internals/conformance.md`, and `execStep`. |
 | `Musubi/ExecSound.lean` | `exec_sound`, `abs_initE`, `exec_reachable`, `exec_inv`, and with the hub going back `exec_rsound`, `exec_rreachable`, `exec_invR`. |
 | `Musubi/ExecJson.lean` | The oracle's JSON codec and request handler (no protocol logic). |
 | `Musubi/ExecTest.lean` | `#guard` smoke tests of `execStep`, checked at build time. |
 | `Musubi/RegressScenario.lean` | A run of the executable model in which the hub goes back and two nodes then merge the same heads (`duplicateMerge`), so the extended system reaches states the durable one does not (`rreachable_not_reachable`). |
 | `Oracle.lean` | The `oracle` executable: a stdin/stdout loop around `ExecJson.handle`. |
 | `test/smoke.jsonl`, `test/smoke.expected`, `test/run_smoke.sh` | The oracle smoke test. |
-| `Musubi/Refs.lean` | Per-machine and shared state of a replicated view, for one git ref: jj's ref import and export against an adversarial `.git`, no spurious revert for local and remote bookmarks, and the verbatim-replication counterexample (docs/design.md, "Per-machine state in a replicated view"). Independent of the protocol model. |
+| `Musubi/Refs.lean` | Per-machine and shared state of a replicated view, for one git ref: jj's ref import and export against an adversarial `.git`, no spurious revert for local and remote bookmarks, and the verbatim-replication counterexample (docs/internals/design.md, "Per-machine state in a replicated view"). Independent of the protocol model. |
 | `Musubi/Axioms.lean` | `#print axioms` for every main theorem. |
 
 ## Correspondence with protocol.md
@@ -239,7 +239,7 @@ Chunked blobs (`Chunks.lean`, with `hash` assumed injective):
 
 ## The executable model and the conformance oracle
 
-`docs/conformance.md` is the contract. The chain from the proofs to the Rust core is:
+`docs/internals/conformance.md` is the contract. The chain from the proofs to the Rust core is:
 
 1. **Relational to executable.** `Musubi/Exec.lean` defines a finite, computable state
    `EState`. Operations, nodes and the ghost history are association lists; sets are lists;

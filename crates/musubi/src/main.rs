@@ -1,6 +1,7 @@
 //! `musubi`: replicate jj repositories between machines.
 
 mod agent;
+mod completion;
 mod config;
 mod control;
 mod daemon;
@@ -22,6 +23,8 @@ use std::time::Duration;
 use anyhow::Context as _;
 use clap::Parser;
 use clap::Subcommand;
+use clap::ValueHint;
+use clap_complete::ArgValueCandidates;
 use jj_lib::object_id::ObjectId as _;
 use musubi_hub::hub_dir::HiveInfo;
 use musubi_hub::hub_dir::JoinChoice;
@@ -84,7 +87,7 @@ enum Command {
         action: Option<HubAction>,
         /// The hub's directory [default: ./musubi-hub, or the current directory if it is a
         /// hub's].
-        #[arg(short, long)]
+        #[arg(short, long, value_hint = ValueHint::DirPath)]
         dir: Option<PathBuf>,
         /// The host name other machines ssh to this one by, for the commands it prints
         /// [default: this machine's host name]. Once given, the hub keeps it (in hub.toml).
@@ -114,7 +117,7 @@ enum Command {
     /// once the repository has synced.
     Join {
         /// Join this hive (a name, a prefix of one, or an id), whatever its remotes.
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(completion::hives))]
         hive: Option<String>,
         #[command(flatten)]
         member: Member,
@@ -125,11 +128,13 @@ enum Command {
     /// the daemon keeping it in sync from then on.
     Clone {
         /// The hive: a name, a prefix of one, or an id.
+        #[arg(add = ArgValueCandidates::new(completion::hives))]
         hive: String,
         /// The new repository's directory.
+        #[arg(value_hint = ValueHint::DirPath)]
         destination: PathBuf,
         /// The hub, as `musubi hub` prints it [default: this machine's default hub].
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(completion::hubs))]
         hub: Option<String>,
         /// This machine's name in the hive. Defaults to jj's `operation.hostname`.
         #[arg(long)]
@@ -161,6 +166,15 @@ enum Command {
         #[command(subcommand)]
         action: Option<DaemonAction>,
     },
+    /// Print a script that completes musubi's commands, flags, and paths in a shell.
+    ///
+    /// Run it in your shell's startup file, as `source <(musubi completion zsh)`, or save it
+    /// where your shell looks for completions.
+    #[command(after_long_help = completion::AS_YOU_TYPE)]
+    Completion {
+        /// The shell.
+        shell: completion::Shell,
+    },
     /// Tools for investigating a hive, not for everyday use.
     #[command(hide = true, subcommand)]
     Debug(Debug),
@@ -178,7 +192,7 @@ struct Member {
     full_history: bool,
     /// The hub, as `musubi hub` prints it: the name this machine ssh-es to the hub's machine
     /// by, or on that machine, the hub's directory [default: this machine's default hub].
-    #[arg(long)]
+    #[arg(long, add = ArgValueCandidates::new(completion::hubs))]
     hub: Option<String>,
 }
 
@@ -196,26 +210,28 @@ enum HubAction {
     /// Remove a hive from the hub. Its store moves to the hub's `removed/` directory.
     Rm {
         /// The hive: a name, a prefix of one, or an id.
+        #[arg(add = ArgValueCandidates::new(completion::hives))]
         hive: String,
         /// The hub, as `musubi hub` prints it [default: this machine's default hub].
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(completion::hubs))]
         hub: Option<String>,
     },
     /// Rename a hive.
     Rename {
         /// The hive: a name, a prefix of one, or an id.
+        #[arg(add = ArgValueCandidates::new(completion::hives))]
         hive: String,
         /// The hive's new name.
         new_name: String,
         /// The hub, as `musubi hub` prints it [default: this machine's default hub].
-        #[arg(long)]
+        #[arg(long, add = ArgValueCandidates::new(completion::hubs))]
         hub: Option<String>,
     },
     /// Relay stdin and stdout to this machine's hub: what other machines run over ssh to
     /// reach it.
     Connect {
         /// The hub's directory [default: the one `musubi hub` last served without --dir].
-        #[arg(short, long)]
+        #[arg(short, long, value_hint = ValueHint::DirPath)]
         dir: Option<PathBuf>,
     },
 }
@@ -271,13 +287,15 @@ fn parse_filter(filter: &str) -> anyhow::Result<tracing_subscriber::EnvFilter> {
 }
 
 fn main() -> anyhow::Result<()> {
+    completion::complete_if_asked();
     let cli = Cli::parse();
     tracing_subscriber::fmt()
         .with_env_filter(log_filter(&cli)?)
         .with_writer(std::io::stderr)
         .init();
     // Serving a hub, and `hub connect`, are for other machines, whose agents aren't this
-    // machine's; the daemon itself has the link, or the service manager's agent.
+    // machine's; the daemon itself has the link, or the service manager's agent. Every shell
+    // may print its completion script as it starts, which says nothing of whose agent to use.
     if !matches!(
         cli.command,
         Some(
@@ -285,6 +303,7 @@ fn main() -> anyhow::Result<()> {
                 action: None | Some(HubAction::Connect { .. }),
                 ..
             } | Command::Daemon { action: None }
+                | Command::Completion { .. }
         )
     ) && let Err(err) = agent::refresh()
     {
@@ -411,6 +430,7 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }),
         Command::Sync => sync(&cwd, &socket()?),
+        Command::Completion { shell } => completion::print_script(shell),
         Command::Debug(Debug::OpId { id }) => op_id(&cwd, &id),
     }
 }
@@ -747,13 +767,7 @@ fn list(start: &Path, socket: anyhow::Result<Socket>) -> anyhow::Result<()> {
             status,
         });
     }
-    // Every hub this machine knows of, the default first.
-    let mut hubs: Vec<String> = config.hub.iter().cloned().collect();
-    for copy in &copies {
-        if !hubs.contains(&copy.hive.hub) {
-            hubs.push(copy.hive.hub.clone());
-        }
-    }
+    let hubs = config.known_hubs(copies.iter().map(|copy| &copy.hive));
     if hubs.is_empty() {
         println!("No hubs yet: run `musubi hub` on one machine, then the join command it prints.");
     }
@@ -766,12 +780,7 @@ fn list(start: &Path, socket: anyhow::Result<Socket>) -> anyhow::Result<()> {
                     println!("  no hives yet");
                 }
                 for info in &hives {
-                    let machines = match info.machines.as_slice() {
-                        [] => "no machines yet".to_owned(),
-                        [one] => format!("1 machine: {one}"),
-                        all => format!("{} machines: {}", all.len(), all.join(", ")),
-                    };
-                    println!("  {}  {machines}", info.name);
+                    println!("  {}  {}", info.name, machines(info));
                     for copy in here.iter().filter(|c| c.hive.hive.to_string() == info.id) {
                         print_copy(copy);
                     }
@@ -812,6 +821,15 @@ fn list(start: &Path, socket: anyhow::Result<Socket>) -> anyhow::Result<()> {
         print_details(&located, &hive)?;
     }
     Ok(())
+}
+
+/// The machines in a hive, as `musubi list` shows them.
+fn machines(info: &HiveInfo) -> String {
+    match info.machines.as_slice() {
+        [] => "no machines yet".to_owned(),
+        [one] => format!("1 machine: {one}"),
+        all => format!("{} machines: {}", all.len(), all.join(", ")),
+    }
 }
 
 async fn list_hub(hub: &str) -> anyhow::Result<Vec<HiveInfo>> {

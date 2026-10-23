@@ -4,6 +4,13 @@ What changes in each release of musubi, and what to do on upgrading. Until 1.0, 
 change the protocol, so run the same release on the hub and every machine (see
 [Upgrading](README.md#upgrading)).
 
+## Unreleased
+
+- musubi completes its commands, flags, and hive and hub names in your shell, once you add a
+  line to your shell's startup file, and `musubi completion <shell>` prints a completion
+  script. See
+  [Complete commands in your shell](docs/reference/commands.md#complete-commands-in-your-shell).
+
 ## 0.1.0
 
 The first release. musubi keeps a jj repository in sync across your machines by replicating

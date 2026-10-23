@@ -55,6 +55,7 @@ These repo config keys are shared across a hive whatever `musubi.shared-config` 
 | `MUSUBI_SSH` | The ssh program to run, in place of `ssh`. |
 | `MUSUBI_SOCKET` | The daemon's control socket, in place of the usual one. Same as `--socket`. |
 | `MUSUBI_CONFIG_DIR` | One directory for musubi's config, state, and daemon socket, in place of the usual ones. Useful for running a second, separate musubi, as tests do. |
+| `COMPLETE` | Set by your shell to have musubi complete what you type. See [Complete commands in your shell](commands.md#complete-commands-in-your-shell). |
 
 On macOS and Linux, `musubi daemon install` passes the `MUSUBI_*` variables set when you run
 it, and your `PATH`, to the service that starts the daemon. On Windows, the daemon started at

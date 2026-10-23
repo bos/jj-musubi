@@ -46,6 +46,9 @@ Or build the latest code, which may not talk to a hub running a release:
 cargo install --locked --git https://github.com/bos/jj-musubi jj-musubi
 ```
 
+To have your shell complete musubi's commands and hive names, see
+[Complete commands in your shell](docs/reference/commands.md#complete-commands-in-your-shell).
+
 ## Quick start
 
 You need:

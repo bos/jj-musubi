@@ -63,6 +63,35 @@ it is running, and otherwise syncs by itself.
 Commands that take a hive accept its name, any prefix of the name that no other hive shares,
 or its id.
 
+## Complete commands in your shell
+
+musubi completes its commands, flags, and paths in bash, zsh, fish, elvish, and PowerShell,
+and also the names of hives and hubs. To have it do so, run the line for your shell in its
+startup file. Your shell then asks musubi as you type. The line sets up how it asks, which
+may change in a new release of musubi, so run it again, as by starting a new shell, after
+upgrading.
+
+| Shell | Startup file | Line |
+| --- | --- | --- |
+| bash | `~/.bashrc` | `source <(COMPLETE=bash musubi)` |
+| zsh | `~/.zshrc`, after `compinit` | `source <(COMPLETE=zsh musubi)` |
+| fish | `~/.config/fish/config.fish` | `COMPLETE=fish musubi \| source` |
+| elvish | `~/.config/elvish/rc.elv` | `eval (E:COMPLETE=elvish musubi \| slurp)` |
+| PowerShell | `$PROFILE` | `$env:COMPLETE = "powershell"; musubi \| Out-String \| Invoke-Expression; Remove-Item Env:\COMPLETE` |
+
+Completing a hive's name asks the default hub for its hives, and your shell waits up to two
+seconds for the answer. If none comes in time, as from a hub reached through a slow
+`ProxyCommand`, musubi completes the hives of this machine's copies on that hub instead.
+
+`musubi completion <shell>` instead prints a script that completes commands, flags, and
+paths, but not hive or hub names, without running musubi as you type. Use it in nushell, which
+completion as you type doesn't support, or to install a completion file with a package. It
+takes `bash`, `elvish`, `fish`, `nushell`, `powershell`, or `zsh`:
+
+```sh
+source <(musubi completion zsh)
+```
+
 ## Investigate
 
 `musubi debug` holds tools for investigating a hive, and is left out of `musubi --help`.

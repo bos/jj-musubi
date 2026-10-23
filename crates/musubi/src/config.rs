@@ -201,6 +201,17 @@ impl UserConfig {
             ),
         }
     }
+
+    /// Every hub this machine knows of, the default first, given its copies' hives.
+    pub fn known_hubs<'a>(&self, hives: impl IntoIterator<Item = &'a HiveConfig>) -> Vec<String> {
+        let mut hubs: Vec<String> = self.hub.iter().cloned().collect();
+        for hive in hives {
+            if !hubs.contains(&hive.hub) {
+                hubs.push(hive.hub.clone());
+            }
+        }
+        hubs
+    }
 }
 
 #[cfg(all(test, unix))]

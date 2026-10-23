@@ -124,6 +124,14 @@ fn musubi_fails(env: &TestEnv, logs: &Logs, repo: &TestRepo, args: &[&str]) -> S
     stderr
 }
 
+/// What the shell gets on completing the last of `words` as you type, as fish asks musubi
+/// for it: a candidate a line, with its help after a tab.
+fn completions(env: &TestEnv, logs: &Logs, repo: &TestRepo, words: &[&str]) -> String {
+    let mut command = repo.program(musubi());
+    command.env("COMPLETE", "fish").arg("--").args(words);
+    run(env, logs, command)
+}
+
 /// A `musubi hub` process serving `<root>/hub`.
 struct Hub {
     child: Child,
@@ -351,6 +359,12 @@ fn hub_join_sync_clone_and_list() {
     assert!(own < other, "{list}");
     assert!(list.contains("Machine:   beta"), "{list}");
 
+    // Completing as you type, the shell gets the hub's hives, and the hubs this machine knows.
+    let hives = completions(&env, &logs, &beta, &["musubi", "clone", "pr"]);
+    assert_eq!(hives, "project\t2 machines: alpha, beta\n");
+    let hubs = completions(&env, &logs, &beta, &["musubi", "join", "--hub", ""]);
+    assert_eq!(hubs, format!("{}\tthe default hub\n", hub.url));
+
     // Daemons keep the machines in sync on their own.
     alpha.write_file("b", "more");
     alpha.jj(&["commit", "-m", "picked up by the daemon"]);
@@ -388,6 +402,25 @@ fn hub_join_sync_clone_and_list() {
         list.contains("Daemon: running, serving 0 repositories;"),
         "{list}"
     );
+}
+
+/// `musubi completion` prints a script for each shell it names.
+#[test]
+fn completion_scripts_complete_the_commands() {
+    for shell in ["bash", "elvish", "fish", "nushell", "powershell", "zsh"] {
+        let out = Command::new(musubi())
+            .args(["completion", shell])
+            .env_clear()
+            .output()
+            .unwrap();
+        let script = String::from_utf8(out.stdout).unwrap();
+        assert!(
+            out.status.success(),
+            "{shell}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(script.contains("clone"), "{shell}: {script}");
+    }
 }
 
 /// A machine's daemon serves a repository joined after it started, without a restart, and
@@ -452,6 +485,14 @@ fn the_daemon_picks_up_new_repositories() {
 
     // A restarted hub serves the same hives, and the daemons connect to it again.
     hub.kill();
+    // Completing a hive's name falls back on this machine's copies when the hub is out of
+    // reach. An empty word completes the flags too.
+    let hives = completions(&env, &logs, &alpha, &["musubi", "clone", ""]);
+    let names: Vec<&str> = hives
+        .lines()
+        .filter(|line| !line.starts_with('-'))
+        .collect();
+    assert_eq!(names, ["alpha", "second"], "{hives}");
     let restarted = Hub::start(&env, &mut logs);
     assert!(
         restarted.greeting.starts_with("Serving 2 hives from"),

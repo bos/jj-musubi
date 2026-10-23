@@ -347,7 +347,11 @@ fn main() -> anyhow::Result<()> {
                 to: new_name,
             };
             if let HubWideReply::Hive(info) = hub::ask(&hub, request).await? {
-                println!("Renamed hive {hive} to {}", info.name);
+                if hive == info.name {
+                    println!("Hive {hive} already has that name");
+                } else {
+                    println!("Renamed hive {hive} to {}", info.name);
+                }
             }
             Ok(())
         }),
@@ -775,6 +779,23 @@ fn list(start: &Path, socket: anyhow::Result<Socket>) -> anyhow::Result<()> {
         let here: Vec<&Copy> = copies.iter().filter(|copy| &copy.hive.hub == hub).collect();
         match block_on(list_hub(hub)) {
             Ok(hives) => {
+                // A copy shows its hive's name while the hub is out of reach, so keep up with
+                // renames.
+                for copy in &here {
+                    if let Some(info) = hives.iter().find(|h| h.id == copy.hive.hive.to_string())
+                        && copy.hive.name.as_deref() != Some(info.name.as_str())
+                        // Unless a leave or a join has changed it since it was read.
+                        && HiveConfig::load(&copy.located.repo_path).ok().flatten().as_ref()
+                            == Some(&copy.hive)
+                    {
+                        let renamed = HiveConfig {
+                            name: Some(info.name.clone()),
+                            ..copy.hive.clone()
+                        };
+                        // Only for showing: failing to save it mustn't stop the listing.
+                        renamed.save(&copy.located.repo_path).ok();
+                    }
+                }
                 println!("Hub {hub}:");
                 if hives.is_empty() {
                     println!("  no hives yet");

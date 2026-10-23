@@ -28,9 +28,8 @@ musubi hub rename app work-app
 musubi hub rm work-app
 ```
 
-Renaming changes the name that commands take and `musubi list` shows under the hub. Copies
-keep syncing, but each copy goes on calling the hive by its old name in the details
-`musubi list` shows for it.
+Renaming changes the name that commands take and `musubi list` shows. Copies keep syncing,
+and each machine's copy takes the new name the next time `musubi list` runs there.
 
 Removing a hive moves its store to `removed/` in the hub's directory. Its machines keep
 everything they have, but their syncs fail, with `hub: this hub has no hive <id>`, until you

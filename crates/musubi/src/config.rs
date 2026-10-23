@@ -22,8 +22,8 @@ use uuid::Uuid;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HiveConfig {
     pub hive: Uuid,
-    /// The hive's name when this repository joined, for showing while the hub is out of
-    /// reach.
+    /// The hive's name as `musubi list` last heard it from the hub, or as it was when this
+    /// repository joined, for showing while the hub is out of reach.
     #[serde(default)]
     pub name: Option<String>,
     /// The hub: an ssh destination (see [`crate::ssh`]), or on the hub's machine, its

@@ -393,9 +393,27 @@ fn hub_join_sync_clone_and_list() {
     assert!(out.contains("Cloning hive project into"), "{out}");
     assert!(log(&gamma).contains("picked up by the daemon"));
 
+    // A renamed hive goes by its new name on every machine, once it has listed it.
+    let out = musubi_in(
+        &env,
+        &logs,
+        &alpha,
+        &["hub", "rename", "project", "renamed"],
+    );
+    assert!(out.contains("Renamed hive project to renamed"), "{out}");
+    let out = musubi_in(
+        &env,
+        &logs,
+        &alpha,
+        &["hub", "rename", "renamed", "renamed"],
+    );
+    assert!(out.contains("Hive renamed already has that name"), "{out}");
+    let list = musubi_in(&env, &logs, &beta, &[]);
+    assert!(list.contains("Hive:      renamed ("), "{list}");
+
     // Leaving stops the syncing.
     let out = musubi_in(&env, &logs, &beta, &["leave"]);
-    assert!(out.contains("no longer syncs with hive project"), "{out}");
+    assert!(out.contains("no longer syncs with hive renamed"), "{out}");
     let list = musubi_in(&env, &logs, &beta, &["list"]);
     assert!(!list.contains("here:"), "{list}");
     assert!(

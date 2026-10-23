@@ -80,13 +80,16 @@ async fn join(transport: &dyn Transport, request: JoinRequest) -> Result<Joined,
 }
 
 async fn sync(repo: &TestRepo, transport: Arc<dyn Transport>, hive: &str) {
+    driver(repo, transport, hive).sync().await.unwrap();
+}
+
+fn driver(repo: &TestRepo, transport: Arc<dyn Transport>, hive: &str) -> NodeDriver {
     let mut node = NodeRepo::open(&repo.repo_path(), &repo.settings()).unwrap();
     node.create_join_operation("musubi: join").unwrap();
     let blobs = repo.repo_path().join("musubi/blobs");
     let rpc = format!("musubi.{hive}.rpc");
     let remote = RemoteHub::new(transport, rpc, &blobs, TIMEOUT).unwrap();
-    let mut driver = NodeDriver::new(node, remote).unwrap();
-    driver.sync().await.unwrap();
+    NodeDriver::new(node, remote).unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -403,4 +406,58 @@ async fn a_corrupt_hive_is_made_again() {
         matches!(aside.as_slice(), [name] if name.starts_with(&hive) && name.ends_with(".corrupt")),
         "{aside:?}"
     );
+}
+
+/// After a power cut that lost a hive's last head and left that head's operation empty, as
+/// ext4 can leave a file new to it, the store still opens, but every request that reached
+/// the operation would fail. The hub finds what is torn as it first opens the hive, and
+/// makes it again, and its machine, which knew the lost head, fills it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hive_torn_past_its_head_is_made_again() {
+    let env = TestEnv::new();
+    let dir = env.root().join("hub");
+    std::fs::create_dir(&dir).unwrap();
+    let network = MemoryNetwork::new(1, 1024 * 1024);
+    let serve = || {
+        let server = HubServer::open(&dir).unwrap();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let serving = tokio::spawn(server.run(Arc::new(network.connect()), move || {
+            ready_tx.send(()).ok();
+        }));
+        (serving, ready_rx)
+    };
+    let (serving, ready) = serve();
+    ready.await.unwrap();
+    let client: Arc<dyn Transport> = Arc::new(network.connect());
+    let alpha = env.init_repo("alpha");
+    alpha.write_file("a", "a");
+    alpha.jj(&["commit", "-m", "first"]);
+    let hive = join(&*client, creating(join_request(&alpha)))
+        .await
+        .unwrap()
+        .hive
+        .id;
+    let mut alpha_node = driver(&alpha, client.clone(), &hive);
+    alpha_node.sync().await.unwrap();
+    alpha.write_file("a", "b");
+    alpha.jj(&["commit", "-m", "second"]);
+    alpha_node.sync().await.unwrap();
+    serving.abort();
+    serving.await.unwrap_err();
+    let heads = dir.join(&hive).join("heads");
+    let text = std::fs::read_to_string(&heads).unwrap();
+    let mut lines: Vec<&str> = text.lines().collect();
+    let lost = lines.pop().unwrap().split(' ').nth(1).unwrap();
+    let operation = dir.join(&hive).join("canonical/operations").join(lost);
+    std::fs::write(&operation, b"").unwrap();
+    std::fs::write(&heads, lines.join("\n") + "\n").unwrap();
+    let (_serving, ready) = serve();
+    ready.await.unwrap();
+    alpha.write_file("a", "c");
+    alpha.jj(&["commit", "-m", "third"]);
+    alpha_node.sync().await.unwrap();
+    let heads = std::fs::read_to_string(&heads).unwrap();
+    assert_eq!(heads.lines().count(), 2, "{heads}");
+    let aside = std::fs::read_dir(dir.join("removed")).unwrap().count();
+    assert_eq!(aside, 1);
 }

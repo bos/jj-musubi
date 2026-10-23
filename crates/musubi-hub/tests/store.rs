@@ -111,6 +111,128 @@ fn closure_and_head_persist() {
     assert!(ops.iter().all(|id| hub.is_accepted(id)));
 }
 
+/// What a power cut can leave in a store that still opens is torn: a view emptied, or
+/// gone, a pack cut short, and an object emptied. Empty markers git keeps beside its
+/// objects, and temporary files it or the hub hasn't written yet, aren't.
+#[test]
+fn torn_files_are_found() {
+    let env = TestEnv::new();
+    let repo = env.init_repo("alpha");
+    repo.write_file("f", "one");
+    repo.jj(&["commit", "-m", "one"]);
+    let mut node = NodeRepo::open(&repo.repo_path(), &repo.settings()).unwrap();
+    let head = node.canonical_heads().unwrap().pop().unwrap();
+    let hub_dir = env.root().join("hub");
+    let mut hub = HubStore::init(&hub_dir, Backend::Git).unwrap();
+    let ops = canonical_ancestry(&node, &head);
+    for id in &ops {
+        let op = node.canonical_store().read_operation(id).unwrap();
+        let view_bytes = node.canonical_store().view_bytes(&op.view_id).unwrap();
+        hub.canonical()
+            .import_view(&op.view_id, &view_bytes)
+            .unwrap();
+        let op_bytes = node.canonical_store().operation_bytes(id).unwrap();
+        hub.canonical().import_operation(id, &op_bytes).unwrap();
+    }
+    let wants: Vec<_> = node.required_commits(&ops).unwrap().into_iter().collect();
+    let bundle = tempfile::NamedTempFile::new().unwrap();
+    node.object_store()
+        .unwrap()
+        .export(&wants, &[], bundle.path())
+        .unwrap();
+    hub.object_store()
+        .import(bundle.path(), &wants, &[])
+        .unwrap();
+    hub.set_head(1, &head).unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(hub_dir.join("git"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    git(&["repack", "-a", "-d", "-q"]);
+    let objects = hub_dir.join("git/objects");
+    std::fs::create_dir_all(objects.join("ab")).unwrap();
+    std::fs::create_dir_all(objects.join("info")).unwrap();
+    for file in [
+        objects.join("pack/pack-0.keep"),
+        objects.join("pack/tmp_pack_x"),
+        objects.join("ab/tmp_obj_x"),
+        objects.join("info/alternates"),
+        hub_dir.join("extras/.tmpx"),
+    ] {
+        std::fs::write(file, b"").unwrap();
+    }
+    let hub = HubStore::open(&hub_dir).unwrap();
+    assert_eq!(hub.torn().unwrap(), Vec::<String>::new());
+
+    let view = hub.canonical().read_operation(&head).unwrap().view_id;
+    let view_file = hub_dir.join("canonical/views").join(view.hex());
+    let view_bytes = std::fs::read(&view_file).unwrap();
+    std::fs::write(&view_file, b"").unwrap();
+    let torn = hub.torn().unwrap();
+    assert!(
+        matches!(torn.as_slice(), [one] if one.starts_with(&format!("view {}", view.hex()))),
+        "{torn:?}"
+    );
+    std::fs::remove_file(&view_file).unwrap();
+    let torn = hub.torn().unwrap();
+    assert!(
+        matches!(torn.as_slice(), [one] if one.ends_with(&format!("of operation {} is missing", head.hex()))),
+        "{torn:?}"
+    );
+    std::fs::write(&view_file, view_bytes).unwrap();
+
+    // Git makes its objects read-only.
+    let rewrite = |path: &Path, bytes: &[u8]| {
+        std::fs::remove_file(path).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    };
+    let pack = std::fs::read_dir(objects.join("pack"))
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "pack"))
+        .expect("a pack");
+    let pack_bytes = std::fs::read(&pack).unwrap();
+    rewrite(&pack, &pack_bytes[..pack_bytes.len() - 100]);
+    assert_eq!(
+        hub.torn().unwrap(),
+        [format!("{} is cut short", pack.display())]
+    );
+    rewrite(&pack, &pack_bytes);
+
+    let id = git(&["hash-object", "-w", "--stdin"]);
+    let id = id.trim();
+    let loose = objects.join(&id[..2]).join(&id[2..]);
+    rewrite(&loose, b"");
+    assert_eq!(
+        hub.torn().unwrap(),
+        [format!("{} is empty", loose.display())]
+    );
+}
+
+/// A simple-backend store is looked over where its commits are, which can't be empty, and
+/// an intact one is left alone.
+#[test]
+fn torn_simple_commits_are_found() {
+    let env = TestEnv::new();
+    let hub_dir = env.root().join("hub");
+    let hub = HubStore::init(&hub_dir, Backend::Simple).unwrap();
+    let commit = hub_dir.join("simple/commits").join("ab".repeat(64));
+    std::fs::write(&commit, b"a commit").unwrap();
+    assert_eq!(hub.torn().unwrap(), Vec::<String>::new());
+    std::fs::write(&commit, b"").unwrap();
+    assert_eq!(
+        hub.torn().unwrap(),
+        [format!("{} is empty", commit.display())]
+    );
+}
+
 /// A heads file with a torn line, as a power cut can leave it, is corrupt: the hub is made
 /// again rather than recovered, and skipping the line would lose every head appended after
 /// it.

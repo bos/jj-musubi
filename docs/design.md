@@ -301,12 +301,18 @@ and ignore lower-epoch hubs from then on.
 
 Since an empty hub fills up this way, a hub needn't be durable, and it syncs nothing to disk:
 one that loses its state, to a power cut say, is deleted and made again, and the machines'
-repositories fill the new one. A hub does that itself for a hive whose store it finds
-corrupt as it opens it: the store goes under `removed/`, and the hive is made again, empty,
-under its id, name, and index. Machines that knew its later heads follow it back to its
-root, as they follow any hub that goes back (docs/protocol.md, "Network and failures"), and
-push what they have. The old store is deleted once it has been set aside a day and the new
-one has accepted a head, or the hive has been taken out of the hub.
+repositories fill the new one. A hub does that itself for a hive whose store it finds, as
+it first opens it, corrupt, or torn: an operation or view that isn't what its name says, an
+accepted operation's view missing, an object or extras file empty, as a power cut leaves a
+file new to the disk, or a git pack that doesn't end in the checksum its index records, as
+one cut short doesn't. Nothing tears while the hub runs, so it looks once a process; that
+reads the whole store, which a large hive's first request waits for. The
+store goes under `removed/`, and the hive is made again, empty, under its id, name, and
+index. Machines that knew its later heads follow it back to its root, as they
+follow any hub that goes back (docs/protocol.md, "Network and failures"), and push what
+they have; each but the first then fetches the whole hive again, as from a new hub. The old
+store is deleted once it has been set aside a day and the new one has accepted a head, or
+the hive has been taken out of the hub.
 
 Duplicate merges can occur in two cases. One is two hubs running at once for the same hive
 (split brain), if nodes on both sides reconnect to one hub at the same moment; epochs make

@@ -28,7 +28,6 @@ use crate::names;
 use crate::names::RemoteUrl;
 use crate::store;
 use crate::store::HubStore;
-use crate::store::StoreError;
 
 const HIVE_FILE: &str = "hive.toml";
 
@@ -145,6 +144,7 @@ impl HubDir {
     pub fn open(dir: &Path) -> anyhow::Result<Self> {
         finish_remakes(dir)?;
         let mut hives = BTreeMap::new();
+        let mut unindexed = vec![];
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
             let Some(id) = entry
@@ -162,25 +162,10 @@ impl HubDir {
             };
             let meta: HiveMeta = toml::from_str(&text)
                 .map_err(|err| anyhow::anyhow!("{}: {err}", meta_path.display()))?;
-            let index = match HiveIndex::load(&hive_dir) {
-                Some(index) => index,
-                None => {
-                    match HubStore::open(&hive_dir) {
-                        Ok(store) => {
-                            let index = HiveIndex::rebuild(&store)?;
-                            index.save(&hive_dir)?;
-                            index
-                        }
-                        // Found under `removed/` below, with the stores set aside before.
-                        Err(err) if store::is_corrupt(&err) => {
-                            let index = HiveIndex::default();
-                            remake(dir, &id, &hive_dir, &meta, &index, &err)?;
-                            index
-                        }
-                        Err(err) => return Err(err.into()),
-                    }
-                }
-            };
+            let index = HiveIndex::load(&hive_dir).unwrap_or_else(|| {
+                unindexed.push(id.clone());
+                HiveIndex::default()
+            });
             hives.insert(
                 id,
                 Hive {
@@ -197,21 +182,75 @@ impl HubDir {
             pending_lifetime: PENDING_LIFETIME,
             corrupt: set_aside(dir),
         };
+        for id in unindexed {
+            let index = HiveIndex::rebuild(&hubs.open_store(&id)?)?;
+            let hive = hubs.hives.get_mut(&id).expect("listed above");
+            index.save(&hive.dir)?;
+            hive.index = index;
+        }
         hubs.sweep_corrupt();
         Ok(hubs)
     }
 
-    /// Makes hive `id`, whose store `err` found corrupt, again: empty, for its machines to
+    /// Opens hive `id`'s store, making the hive again first if a power cut left the store
+    /// corrupt or torn ([`open_whole`]).
+    pub fn open_store(&mut self, id: &str) -> anyhow::Result<HubStore> {
+        let dir = self.hive(id)?.dir.clone();
+        match open_whole(&dir, true)? {
+            Opened::Whole(store) => Ok(*store),
+            Opened::Damaged(why) => {
+                self.remake(id, &why)?;
+                Ok(HubStore::open(&dir)?)
+            }
+        }
+    }
+
+    fn hive(&self, id: &str) -> anyhow::Result<&Hive> {
+        self.hives
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("no hive {id}"))
+    }
+
+    /// Makes hive `id`, whose store `why` found corrupt, again: empty, for its machines to
     /// fill, under its name and with the index joins match it by. The hive goes back to its
     /// root, and machines that knew its later heads follow it (docs/protocol.md, "Network
     /// and failures").
-    pub fn remake(&mut self, id: &str, err: &StoreError) -> anyhow::Result<()> {
-        let hive = self
-            .hives
-            .get(id)
-            .ok_or_else(|| anyhow::anyhow!("no hive {id}"))?;
-        let set_aside = remake(&self.dir, id, &hive.dir, &hive.meta, &hive.index, err)?;
-        self.corrupt.push(set_aside);
+    ///
+    /// Its store goes under `removed/` until a day after the new one has accepted a head,
+    /// and a new one takes its place, made whole beside it first, so that a failure leaves
+    /// the hive as it was, to be made again next time, and a crash between the two renames
+    /// leaves it for the hub to finish as it next starts.
+    pub fn remake(&mut self, id: &str, why: &dyn std::fmt::Display) -> anyhow::Result<()> {
+        let hive = self.hive(id)?;
+        let removed = self.dir.join("removed");
+        fs::create_dir_all(&removed)?;
+        let stamp = now();
+        let aside = removed.join(format!("{id}-{stamp}.corrupt"));
+        let staging = remade(&self.dir, id);
+        if staging.exists() {
+            fs::remove_dir_all(&staging)?;
+        }
+        HubStore::init(&staging, hive.meta.backend)?;
+        // Linked, not written again: a file new to the disk is what a power cut empties, and
+        // a hive whose own file won't parse stops the hub starting.
+        fs::hard_link(hive.dir.join(HIVE_FILE), staging.join(HIVE_FILE))?;
+        hive.index.save(&staging)?;
+        fs::rename(&hive.dir, &aside)?;
+        if let Err(err) = fs::rename(&staging, &hive.dir) {
+            fs::rename(&aside, &hive.dir).ok();
+            return Err(err.into());
+        }
+        tracing::warn!(
+            "hive {} ({id}) was corrupt ({why}), and is made again, empty, for its machines to \
+             fill; the corrupt store is in {}, until a day from now once they have",
+            hive.meta.name,
+            aside.display()
+        );
+        self.corrupt.push(SetAside {
+            id: id.to_owned(),
+            path: aside,
+            stamp,
+        });
         Ok(())
     }
 
@@ -520,55 +559,39 @@ fn has_any(backend: Backend, dir: &Path, commits: &[CommitId]) -> anyhow::Result
     Ok(missing.len() < commits.len())
 }
 
-/// Makes the hive `id` in `hive_dir`, of the hub in `hub_dir`, again: its store, which
-/// `err` found corrupt, goes under `removed/` until [`HubDir::sweep_corrupt`] deletes it, and
-/// a new, empty one takes its place, with the hive's `meta` and `index`. The new one is made
-/// whole beside it first, so that a failure leaves the hive as it was, to be made again
-/// next time, and a crash between the two renames leaves it for [`finish_remakes`].
-fn remake(
-    hub_dir: &Path,
-    id: &str,
-    hive_dir: &Path,
-    meta: &HiveMeta,
-    index: &HiveIndex,
-    err: &StoreError,
-) -> anyhow::Result<SetAside> {
-    let removed = hub_dir.join("removed");
-    fs::create_dir_all(&removed)?;
-    let stamp = now();
-    let aside = removed.join(format!("{id}-{stamp}.corrupt"));
-    let staging = remade(hub_dir, id);
-    if staging.exists() {
-        fs::remove_dir_all(&staging)?;
-    }
-    HubStore::init(&staging, meta.backend)?;
-    write_meta(&staging, meta)?;
-    index.save(&staging)?;
-    fs::rename(hive_dir, &aside)?;
-    if let Err(err) = fs::rename(&staging, hive_dir) {
-        fs::rename(&aside, hive_dir).ok();
-        return Err(err.into());
-    }
-    tracing::warn!(
-        "hive {} ({id}) was corrupt ({err}), and is made again, empty, for its machines to \
-         fill; the corrupt store is in {}, until a day from now once they have",
-        meta.name,
-        aside.display()
-    );
-    Ok(SetAside {
-        id: id.to_owned(),
-        path: aside,
-        stamp,
+/// A hive's store, opened as its hub first opens it.
+pub enum Opened {
+    Whole(Box<HubStore>),
+    /// Corrupt or torn, as said, and to be made again.
+    Damaged(String),
+}
+
+/// Opens the store in `dir`: one that won't open because it is corrupt, or, if `look` says
+/// to look over it, that opens but in which something is torn ([`HubStore::torn`]), is
+/// damaged. Nothing tears while the hub runs, so a store need be looked over only the first
+/// time a process opens it; that reads all of it. Fails if it can't tell, as when the hub
+/// is out of file descriptors.
+pub fn open_whole(dir: &Path, look: bool) -> anyhow::Result<Opened> {
+    let store = match HubStore::open(dir) {
+        Ok(store) => store,
+        Err(err) if store::is_corrupt(&err) => return Ok(Opened::Damaged(err.to_string())),
+        Err(err) => return Err(err.into()),
+    };
+    let torn = if look { store.torn()? } else { vec![] };
+    Ok(if torn.is_empty() {
+        Opened::Whole(Box::new(store))
+    } else {
+        Opened::Damaged(format!("torn: {}", torn.join("; ")))
     })
 }
 
-/// Where [`remake`] makes hive `id` of the hub in `hub_dir` again: not a hive's name, which
-/// is its id.
+/// Where [`HubDir::remake`] makes hive `id` of the hub in `hub_dir` again: not a hive's
+/// name, which is its id.
 fn remade(hub_dir: &Path, id: &str) -> PathBuf {
     hub_dir.join(format!(".{id}.remade"))
 }
 
-/// Finishes what [`remake`] began in the hub in `dir` before a crash: puts a hive made
+/// Finishes what [`HubDir::remake`] began in the hub in `dir` before a crash: puts a hive made
 /// again in place of the store it renamed away, and deletes one it never got as far as.
 fn finish_remakes(dir: &Path) -> anyhow::Result<()> {
     for entry in fs::read_dir(dir)?.flatten() {

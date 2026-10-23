@@ -59,6 +59,27 @@ pub enum CanonicalError {
     MalformedOperation(String),
 }
 
+impl CanonicalError {
+    /// Whether this error, reading a stored operation or view, says that it couldn't be
+    /// read, as when the process is out of file descriptors, rather than that what was read
+    /// is wrong: an I/O error other than the file being missing or short.
+    pub fn unreadable(&self) -> bool {
+        let mut source: Option<&(dyn std::error::Error + 'static)> = Some(self);
+        while let Some(err) = source {
+            if let Some(err) = err.downcast_ref::<io::Error>() {
+                return !matches!(
+                    err.kind(),
+                    io::ErrorKind::NotFound
+                        | io::ErrorKind::UnexpectedEof
+                        | io::ErrorKind::InvalidData
+                );
+            }
+            source = err.source();
+        }
+        false
+    }
+}
+
 /// What an operation or view arriving in a bundle turned out to be, once decoded.
 struct Admitted {
     kind: &'static str,
@@ -222,6 +243,38 @@ impl CanonicalStore {
             }
         }
         Ok(ids)
+    }
+
+    /// The stored operations and views that aren't what their names say, as a power cut
+    /// can leave one: empty, or cut short. Fails, rather than count a file torn, if one
+    /// can't be read for some other reason, as when the process is out of file descriptors.
+    pub fn torn(&self) -> Result<Vec<String>, CanonicalError> {
+        let mut torn = vec![];
+        for name in self.stored("operations")? {
+            // Not an id, but a file being written, say.
+            if let Some(id) = OperationId::try_from_hex(&name) {
+                let read = self.read_operation(&id).map(|op| blake2b_hash(&op));
+                judge(&mut torn, "operation", &name, id.as_bytes(), read)?;
+            }
+        }
+        for name in self.stored("views")? {
+            if let Some(id) = ViewId::try_from_hex(&name) {
+                let read = self.read_view(&id).map(|view| blake2b_hash(&view));
+                judge(&mut torn, "view", &name, id.as_bytes(), read)?;
+            }
+        }
+        Ok(torn)
+    }
+
+    /// The names of the files in the store's directory `dir`.
+    fn stored(&self, dir: &str) -> Result<Vec<String>, CanonicalError> {
+        let dir = self.path.join(dir);
+        let mut names = vec![];
+        for entry in fs::read_dir(&dir).map_err(io_err(&dir))? {
+            let entry = entry.map_err(io_err(&dir))?;
+            names.extend(entry.file_name().into_string());
+        }
+        Ok(names)
     }
 
     pub fn has_operation(&self, id: &OperationId) -> bool {
@@ -558,6 +611,24 @@ impl CanonicalStore {
     }
 }
 
+/// Adds the stored `kind` named `name` to `torn` if `read`, its hash once read, isn't
+/// `id`; fails if it couldn't be read at all.
+fn judge<H: AsRef<[u8]>>(
+    torn: &mut Vec<String>,
+    kind: &str,
+    name: &str,
+    id: &[u8],
+    read: Result<H, CanonicalError>,
+) -> Result<(), CanonicalError> {
+    match read {
+        Ok(hash) if hash.as_ref() == id => {}
+        Ok(_) => torn.push(format!("{kind} {name} is something else")),
+        Err(err) if err.unreadable() => return Err(err),
+        Err(err) => torn.push(format!("{kind} {name}: {err}")),
+    }
+    Ok(())
+}
+
 /// Whether `id` is the root view's, whose file every store has implicitly.
 fn is_root_view(id: &ViewId) -> bool {
     id.as_bytes().iter().all(|&b| b == 0)
@@ -852,6 +923,30 @@ mod tests {
         assert_eq!(expected.len(), 18);
         expected.remove(&root_commit);
         assert_eq!(store.required_commits(&[op_id]).unwrap(), expected);
+    }
+
+    /// What a power cut can leave in the store is torn: a file left empty, or holding
+    /// another's bytes. A file being written, which is no id, isn't.
+    #[test]
+    fn torn_files_are_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CanonicalStore::open(dir.path(), commit(0)).unwrap();
+        let mut view = View::make_root(commit(0));
+        view.head_ids.insert(commit(1));
+        let view_id = store.write_view(&view).unwrap();
+        view.head_ids.insert(commit(2));
+        let other = store.write_view(&view).unwrap();
+        let op_id = store
+            .write_operation(&operation(store.root_operation_id(), view_id.clone()))
+            .unwrap();
+        fs::write(dir.path().join("operations/.tmp1234"), b"").unwrap();
+        assert_eq!(store.torn().unwrap(), Vec::<String>::new());
+        fs::write(store.op_path(&op_id), b"").unwrap();
+        fs::copy(store.view_path(&other), store.view_path(&view_id)).unwrap();
+        let torn = store.torn().unwrap();
+        assert_eq!(torn.len(), 2, "{torn:?}");
+        assert!(torn[0].starts_with(&format!("operation {}", op_id.hex())));
+        assert_eq!(torn[1], format!("view {} is something else", view_id.hex()));
     }
 
     /// Stores a view encoded by hand, as a peer could send it.

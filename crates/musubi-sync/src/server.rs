@@ -18,9 +18,10 @@ use std::sync::mpsc;
 
 use bytes::Bytes;
 use musubi_hub::hub_dir::HubDir;
+use musubi_hub::hub_dir::Opened;
+use musubi_hub::hub_dir::open_whole;
 use musubi_hub::index::HiveIndex;
-use musubi_hub::store;
-use musubi_hub::store::StoreError;
+use musubi_hub::store::HubStore;
 use musubi_transport::Message;
 use musubi_transport::Transport;
 
@@ -188,11 +189,14 @@ fn spawn_worker(
             // on under any filter that shows anything.
             let _span = tracing::error_span!("hive", id = %id).entered();
             let mut service = None;
+            // Whether this hive's store has been looked over for what a power cut tore,
+            // which it need be once: nothing tears while the hub runs.
+            let mut looked = false;
             while let Ok(message) = receiver.recv() {
                 let limit = transport.max_payload();
                 let started = std::time::Instant::now();
                 let served = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    serve_one(&id, &dir, &mut service, &hubs, &message, limit)
+                    serve_one(&id, &dir, &mut service, &mut looked, &hubs, &message, limit)
                 }));
                 let reply = served.unwrap_or_else(|panic| {
                     // jj-lib panics on some malformed input, as a peer could send it. The
@@ -254,6 +258,7 @@ fn serve_one(
     id: &str,
     dir: &Path,
     service: &mut Option<HubService>,
+    looked: &mut bool,
     hubs: &Mutex<HubDir>,
     message: &Message,
     max_payload: usize,
@@ -261,23 +266,20 @@ fn serve_one(
     let service = match service {
         Some(service) => service,
         None => {
-            let adapter = match HubAdapter::open(dir) {
-                Ok(adapter) => adapter,
-                Err(err) => {
-                    let Some(corrupt) = err
-                        .downcast_ref::<StoreError>()
-                        .filter(|err| store::is_corrupt(err))
-                    else {
-                        return Err(err);
-                    };
+            // Looked over outside the lock, since that reads the whole store, and made
+            // again under it, if damaged.
+            let store = match open_whole(dir, !*looked)? {
+                Opened::Whole(store) => *store,
+                Opened::Damaged(why) => {
                     hubs.lock()
                         .unwrap_or_else(PoisonError::into_inner)
-                        .remake(id, corrupt)?;
-                    HubAdapter::open(dir)?
+                        .remake(id, &why)?;
+                    HubStore::open(dir)?
                 }
             };
+            *looked = true;
             tracing::info!("opened");
-            service.insert(HubService::new(adapter, dir)?)
+            service.insert(HubService::new(HubAdapter::new(store, dir)?, dir)?)
         }
     };
     let before = service.hub().store().head().1.clone();

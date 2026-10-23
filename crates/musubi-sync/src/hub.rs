@@ -31,7 +31,7 @@ impl HubAdapter {
         Self::new(HubStore::open(dir)?, dir)
     }
 
-    fn new(store: HubStore, dir: &Path) -> anyhow::Result<Self> {
+    pub fn new(store: HubStore, dir: &Path) -> anyhow::Result<Self> {
         let tmp = dir.join("tmp");
         open_bundle_dir(&tmp)?;
         Ok(Self { store, tmp })

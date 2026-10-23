@@ -105,10 +105,14 @@ These happen outside musubi, through `jj`:
 
 - `Learn(s, h)`: on receiving `Head`, `Accepted`, `Rejected`, `Incomplete`, or `Fetched`
   carrying `(s, h)`, if `s > known.seq` then `known := (s, h)`. Stale and duplicated
-  notifications are therefore harmless. A reply to the node's own request is never stale,
-  though, unless the hub has gone back (see "Network and failures"): one with
-  `s < known.seq`, or with `s = known.seq` and `h ≠ known.head`, makes the node restart,
-  forgetting `known`, and then learn `(s, h)`.
+  notifications are therefore harmless. A reply to the node's own request is another
+  matter: musubi's transports match it to the one request the node has outstanding, and
+  drop it if it comes after that request timed out, and the hub answers only after
+  everything the node learned before sending it. So a reply with `s < known.seq`, or with
+  `s = known.seq` and `h ≠ known.head`, means the hub has gone back (see "Network and
+  failures"), and makes the node restart, forgetting `known`, and then learn `(s, h)`. Over
+  a network that duplicates replies, as the model's does, the rule can fire on a stale one
+  too, which costs a restart, and a restart is always safe.
 - `Fetch`: send `Fetch(base, H)`, where `base` is any local operation the node knows the
   hub accepted, and `H` names objects of its heads. So that the node is never sent what it
   has, `base` is the newest `known.head` that was local and in `anc*(heads)`, which

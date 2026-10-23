@@ -658,6 +658,19 @@ impl Search {
         self.note(&tc);
     }
 
+    /// A power cut on the hub's machine: it loses the last heads it accepted, and comes back
+    /// at an older one.
+    #[rule]
+    fn hub_goes_back(&mut self, tc: TestCase) {
+        tc.assume(self.faults < MAX_FAULTS);
+        let lost = tc.draw(gs::integers::<usize>().min_value(1).max_value(3));
+        tc.assume(self.world.borrow().hub_seq() > 0);
+        self.faults += 1;
+        fired("hub_goes_back");
+        self.world.borrow_mut().hub_goes_back(lost);
+        self.note(&tc);
+    }
+
     /// A sync in which the reply to one request is lost after the hub handled it.
     #[rule]
     fn lose_reply(&mut self, tc: TestCase) {

@@ -118,6 +118,17 @@ impl Machine {
     }
 
     #[rule]
+    fn hub_goes_back(&mut self, tc: TestCase) {
+        tc.assume(self.crashes < 3);
+        let mut world = self.world.borrow_mut();
+        let seq = world.hub_seq();
+        tc.assume(seq > 0);
+        self.crashes += 1;
+        let back = tc.draw(gs::integers::<u64>().max_value(seq - 1));
+        world.hub_goes_back(back);
+    }
+
+    #[rule]
     fn crash_node(&mut self, tc: TestCase) {
         tc.assume(self.crashes < 3);
         self.crashes += 1;

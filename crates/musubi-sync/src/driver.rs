@@ -115,7 +115,6 @@ impl NodeDriver {
                  starting over from where it is",
                 short(head)
             );
-            self.restart();
         }
         let incomplete = matches!(
             reply,
@@ -125,7 +124,7 @@ impl NodeDriver {
             }
         );
         // Handling the reply imports its bundles, which go once it is dropped.
-        let handled = self.core.handle(&mut self.adapter, reply)?;
+        let handled = self.core.handle_reply(&mut self.adapter, reply)?;
         if let Handled::Learned {
             kind: HeadKind::Accepted,
             ..
@@ -166,7 +165,7 @@ impl NodeDriver {
 
     /// Forgets volatile protocol state, as after a crash.
     pub fn restart(&mut self) {
-        self.core.restart(self.adapter.root().clone());
+        self.core.restart();
     }
 }
 

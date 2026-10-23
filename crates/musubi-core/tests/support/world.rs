@@ -55,6 +55,13 @@ pub struct World {
     pub trace: Vec<Value>,
     /// The operations each node last staged from a `Fetched` reply.
     last_staged: Vec<Option<Vec<Op>>>,
+    /// Whether the hub has gone back: MergeOwnership no longer holds (docs/protocol.md,
+    /// "Network and failures").
+    went_back: bool,
+    /// The heads the hub accepted and then lost, going back, with their sequence numbers:
+    /// the properties that rest on its history only growing hold of its history together
+    /// with them.
+    lost: Vec<(u64, Op)>,
 }
 
 fn kind_name(kind: HeadKind) -> &'static str {
@@ -88,6 +95,8 @@ impl World {
             oracle,
             trace: vec![],
             last_staged: vec![None; nodes],
+            went_back: false,
+            lost: vec![],
         };
         if let Some(oracle) = &mut world.oracle {
             oracle.reset(nodes);
@@ -293,13 +302,22 @@ impl World {
         if !self.node_step(node, merge_objs) {
             return;
         }
+        self.round_trip(sent_before);
+    }
+
+    /// Delivers each request sent since `sent_before` to the hub, and its reply straight back.
+    fn round_trip(&mut self, sent_before: usize) {
         let mut i = sent_before;
         while i < self.net.len() {
             if matches!(self.net[i].payload, Payload::Request(..)) {
                 let replies_from = self.net.len();
                 self.deliver(i);
                 if replies_from < self.net.len() {
-                    self.deliver(replies_from);
+                    // Straight back, as an answer to the request, not any old reply.
+                    self.net[replies_from].delivered = true;
+                    if let Payload::Reply(node, reply) = self.net[replies_from].payload.clone() {
+                        self.node_handle(node, reply, true);
+                    }
                 }
             }
             i += 1;
@@ -309,7 +327,7 @@ impl World {
     fn deliver_payload(&mut self, payload: Payload) {
         match payload {
             Payload::Request(node, request) => self.hub_handle(node, request),
-            Payload::Reply(node, reply) => self.node_handle(node, reply),
+            Payload::Reply(node, reply) => self.node_handle(node, reply, false),
         }
     }
 
@@ -402,22 +420,35 @@ impl World {
         self.act(action);
     }
 
-    fn node_handle(&mut self, node: usize, reply: Rep) {
+    /// Has `node` take `reply`: `own` if it answers the request the node just sent, which
+    /// the node takes as saying where the hub is now (`NodeCore::handle_reply`).
+    fn node_handle(&mut self, node: usize, reply: Rep, own: bool) {
         let objects = match &reply {
             Reply::Objects { attachment, .. } => sorted(attachment.iter().copied()),
             Reply::Fetched { objects, .. } => sorted(objects.iter().copied()),
             Reply::Head { .. } => vec![],
         };
-        match self.cores[node].handle(&mut self.repos[node], reply).unwrap() {
-            Handled::Learned { kind, seq, head } => self.act(
-                json!({"kind": "learn", "node": node, "headKind": kind_name(kind), "seq": seq, "head": head}),
-            ),
+        let mut actions = vec![];
+        let handled = if own {
+            if self.cores[node].hub_went_back(&reply) {
+                actions.push(json!({"kind": "loseKnown", "node": node}));
+            }
+            self.cores[node].handle_reply(&mut self.repos[node], reply)
+        } else {
+            self.cores[node].handle(&mut self.repos[node], reply)
+        };
+        match handled.unwrap() {
+            Handled::Learned { kind, seq, head } => {
+                actions.push(json!({"kind": "learn", "node": node, "headKind": kind_name(kind), "seq": seq, "head": head}));
+                self.act_all(actions);
+            }
             Handled::Fetched { learned, staged } => {
-                let mut actions = vec![];
                 if let Some((seq, head)) = learned {
                     actions.push(json!({"kind": "learn", "node": node, "headKind": "head", "seq": seq, "head": head}));
                 }
-                actions.push(json!({"kind": "recvOps", "node": node, "ops": sorted(staged.iter().copied())}));
+                actions.push(
+                    json!({"kind": "recvOps", "node": node, "ops": sorted(staged.iter().copied())}),
+                );
                 let crashed = std::mem::take(&mut self.repos[node].crash_before_objects);
                 if crashed {
                     self.act_all(actions);
@@ -429,9 +460,14 @@ impl World {
                 self.last_staged[node] = Some(staged);
             }
             Handled::StagedObjects(_) => {
-                self.act(json!({"kind": "recvObjs", "node": node, "objs": objects}));
+                actions.push(json!({"kind": "recvObjs", "node": node, "objs": objects}));
+                self.act_all(actions);
             }
-            Handled::Ignored => {}
+            Handled::Ignored => {
+                if !actions.is_empty() {
+                    self.act_all(actions);
+                }
+            }
         }
     }
 
@@ -456,8 +492,23 @@ impl World {
     }
 
     pub fn crash_node(&mut self, node: usize) {
-        self.cores[node].restart(ROOT);
+        self.cores[node].restart();
         self.act(json!({"kind": "loseKnown", "node": node}));
+    }
+
+    /// The hub goes back to the head it accepted at `seq`, as a power cut can make it lose
+    /// the later ones (`hubRegress`).
+    pub fn hub_goes_back(&mut self, seq: u64) {
+        let lost: Vec<Op> = self.hist.drain(seq as usize + 1..).collect();
+        self.lost.extend((seq + 1..).zip(lost));
+        self.hub.head = self.hist[seq as usize];
+        self.hub.seq = seq;
+        self.went_back = true;
+        self.act(json!({"kind": "hubRegress", "seq": seq}));
+    }
+
+    pub fn hub_seq(&self) -> u64 {
+        self.hub.seq
     }
 
     pub fn crash_hub(&mut self) {
@@ -511,10 +562,19 @@ impl World {
         );
     }
 
-    /// The operations the hub has not accepted: candidates for a lying hub to offer.
+    /// The operations the hub has accepted, before going back or since.
+    fn ever_accepted(&self, univ: &Univ) -> BTreeSet<Op> {
+        let mut accepted = univ.ancestors(self.hub.head);
+        for &(_, head) in &self.lost {
+            accepted.extend(univ.ancestors(head));
+        }
+        accepted
+    }
+
+    /// The operations the hub has never accepted: candidates for a lying hub to offer.
     pub fn unaccepted_ops(&self) -> Vec<Op> {
         let univ = self.univ.borrow();
-        let accepted = univ.ancestors(self.hub.head);
+        let accepted = self.ever_accepted(&univ);
         (1..univ.next())
             .filter(|op| !accepted.contains(op))
             .collect()
@@ -527,6 +587,9 @@ impl World {
     // Properties (docs/protocol.md, "Properties").
 
     fn check_merge_ownership(&self, node: usize, merge: Op, parents: &[Op]) {
+        if self.went_back {
+            return;
+        }
         let univ = self.univ.borrow();
         let accepted = univ.ancestors(self.hub.head);
         assert!(
@@ -540,7 +603,7 @@ impl World {
     pub fn check_invariants(&self) {
         let univ = self.univ.borrow();
         assert!(self.hub.closed(self.hub.head), "HubClosed");
-        let accepted = univ.ancestors(self.hub.head);
+        let accepted = self.ever_accepted(&univ);
         for (n, repo) in self.repos.iter().enumerate() {
             for &x in &repo.lops {
                 assert!(
@@ -574,9 +637,8 @@ impl World {
                 "heads form an antichain"
             );
             let (seq, head) = *self.cores[n].known();
-            assert_eq!(
-                self.hist.get(seq as usize),
-                Some(&head),
+            assert!(
+                self.hist.get(seq as usize) == Some(&head) || self.lost.contains(&(seq, head)),
                 "KnownIsHubHistory on node {n}"
             );
         }
@@ -599,9 +661,9 @@ impl World {
         for _ in 0..30 {
             let mut changed = false;
             for node in 0..self.nodes() {
+                let sent_before = self.net.len();
                 self.poll(node);
-                self.deliver_latest();
-                self.deliver_latest();
+                self.round_trip(sent_before);
                 for _ in 0..200 {
                     let before = self.trace.len();
                     self.exchange(node, 0);
@@ -622,10 +684,6 @@ impl World {
             }
         }
         panic!("did not converge after quiescing\ntrace: {:#?}", self.trace);
-    }
-
-    fn deliver_latest(&mut self) {
-        self.deliver(self.net.len() - 1);
     }
 
     /// The Rust side's state in the oracle's JSON form.

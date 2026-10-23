@@ -53,6 +53,7 @@ pub const RULES: &[&str] = &[
     "crash_while_syncing",
     "lose_cache",
     "restart_hub",
+    "hub_goes_back",
     "lose_reply",
 ];
 

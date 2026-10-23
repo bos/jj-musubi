@@ -71,7 +71,7 @@ impl Hive {
     /// Restarts a node's protocol state, as after a crash.
     pub fn restart(&mut self, node: usize) {
         let member = &mut self.members[node];
-        member.core.restart(member.adapter.root().clone());
+        member.core.restart();
     }
 
     fn request(&mut self, node: usize, request: Request<OpId, Attachment>) -> anyhow::Result<()> {
@@ -99,26 +99,20 @@ impl Hive {
             }
             Reply::Head { .. } => {}
         }
-        if self.members[node].core.hub_went_back(&handled.reply) {
-            self.restart(node);
-        }
-        self.reply(node, handled.reply)?;
+        let member = &mut self.members[node];
+        member
+            .core
+            .handle_reply(&mut member.adapter, handled.reply)?;
         if let Some((seq, head)) = handled.publish {
-            for target in 0..self.members.len() {
+            for member in &mut self.members {
                 let notify = Reply::Head {
                     kind: HeadKind::Notify,
                     seq,
                     head: head.clone(),
                 };
-                self.reply(target, notify)?;
+                member.core.handle(&mut member.adapter, notify)?;
             }
         }
-        Ok(())
-    }
-
-    fn reply(&mut self, node: usize, reply: Reply<OpId, Attachment>) -> anyhow::Result<()> {
-        let member = &mut self.members[node];
-        member.core.handle(&mut member.adapter, reply)?;
         Ok(())
     }
 

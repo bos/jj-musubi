@@ -122,9 +122,11 @@ pub enum Handled<O> {
 }
 
 pub struct NodeCore<O> {
+    root: O,
     known: (u64, O),
     /// Staged operations to realize, in order: each one's parents are local or earlier,
-    /// and its objects are available. Planned by one walk, rather than one per step.
+    /// and its objects are available. Planned by one walk, rather than one per step, for
+    /// `known.head`, and dropped with it.
     plan: VecDeque<O>,
 }
 
@@ -142,7 +144,8 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
     /// A node that has just started: it knows only the root operation.
     pub fn new(root: O) -> Self {
         Self {
-            known: (0, root),
+            known: (0, root.clone()),
+            root,
             plan: VecDeque::new(),
         }
     }
@@ -319,7 +322,7 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
         match reply {
             Reply::Head { kind, seq, head } => {
                 if seq > self.known.0 {
-                    self.known = (seq, head.clone());
+                    self.learn(seq, head.clone());
                     Ok(Handled::Learned { kind, seq, head })
                 } else {
                     Ok(Handled::Ignored)
@@ -333,7 +336,7 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
                 objects,
             } => {
                 let learned = (seq > self.known.0).then(|| {
-                    self.known = (seq, head.clone());
+                    self.learn(seq, head.clone());
                     (seq, head.clone())
                 });
                 // Stage only operations in `anc*(known.head)`: the guard Locality, and so
@@ -369,8 +372,8 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
     /// after everything this node learned before sending it, but one that lost heads, as a
     /// power cut can make it, does. Taking such a reply for a stale one would leave the
     /// node deaf to the hub's announcements, and pushing what the hub rejects, again and
-    /// again: it [`restart`](Self::restart)s, and takes the reply. A notification can be
-    /// stale, and never counts.
+    /// again, so [`Self::handle_reply`] restarts first. A notification can be stale, and
+    /// never counts.
     pub fn hub_went_back<A>(&self, reply: &Reply<O, A>) -> bool {
         let (seq, head) = match reply {
             Reply::Head {
@@ -383,9 +386,32 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
         seq < self.known.0 || (seq == self.known.0 && *head != self.known.1)
     }
 
+    /// Adopts `(seq, head)`. A plan made for the head known before may realize operations
+    /// that aren't in `anc*(head)`, if the hub went back, so it goes.
+    fn learn(&mut self, seq: u64, head: O) {
+        self.known = (seq, head);
+        self.plan.clear();
+    }
+
+    /// Takes a reply to this node's own request, as [`Self::handle`] does, having first
+    /// [`restart`](Self::restart)ed if it says the hub went back ([`Self::hub_went_back`]).
+    pub fn handle_reply<R>(
+        &mut self,
+        repo: &mut R,
+        reply: Reply<O, R::Attachment>,
+    ) -> Result<Handled<O>, R::Error>
+    where
+        R: LocalRepo<Op = O>,
+    {
+        if self.hub_went_back(&reply) {
+            self.restart();
+        }
+        self.handle(repo, reply)
+    }
+
     /// Forgets everything volatile, as a restart does.
-    pub fn restart(&mut self, root: O) {
-        *self = Self::new(root);
+    pub fn restart(&mut self) {
+        *self = Self::new(self.root.clone());
     }
 }
 

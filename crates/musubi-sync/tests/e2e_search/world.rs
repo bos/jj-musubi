@@ -859,7 +859,9 @@ impl World {
         let handled = hub::handle(&mut hive.hub, request)?;
         if !lost {
             let member = &mut hive.members[m];
-            member.core.handle(&mut member.adapter, handled.reply)?;
+            member
+                .core
+                .handle_reply(&mut member.adapter, handled.reply)?;
         }
         if let Some((seq, head)) = handled.publish {
             for member in &mut hive.members {
@@ -883,6 +885,24 @@ impl World {
     /// Crashes the hub, which reopens its store.
     pub fn restart_hub(&mut self) {
         self.record("hub: restart".to_owned());
+        if let Err(err) = self.fx.hive.restart_hub() {
+            self.fail(&format!("restarting the hub: {err:#}"));
+        }
+    }
+
+    pub fn hub_seq(&self) -> u64 {
+        self.fx.hive.hub.store().head().0
+    }
+
+    /// Has the hub lose its last `lost` heads, but not its root, as a power cut can make
+    /// it, and restarts it.
+    pub fn hub_goes_back(&mut self, lost: usize) {
+        self.record(format!("hub: goes back {lost}"));
+        let heads = self.fx.env.root().join("hub/heads");
+        let text = fs::read_to_string(&heads).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        let kept = lines.len().saturating_sub(lost).max(1);
+        fs::write(&heads, lines[..kept].join("\n") + "\n").unwrap();
         if let Err(err) = self.fx.hive.restart_hub() {
             self.fail(&format!("restarting the hub: {err:#}"));
         }

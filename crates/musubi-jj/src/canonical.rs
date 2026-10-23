@@ -59,6 +59,49 @@ pub enum CanonicalError {
     MalformedOperation(String),
 }
 
+/// What an operation or view arriving in a bundle turned out to be, once decoded.
+struct Admitted {
+    kind: &'static str,
+    /// The error for one whose encoding names other commits than its decoding does.
+    malformed: fn(String) -> CanonicalError,
+    expected: String,
+    actual: String,
+    /// Whether its encoding names exactly the commits its decoding does.
+    names_its_commits: bool,
+}
+
+/// Moves `staged`, a decoded operation or view, to `dest`, if it is what it says it is.
+fn admit(staged: &Path, dest: &Path, checked: Admitted) -> Result<(), CanonicalError> {
+    let Admitted {
+        kind,
+        malformed,
+        expected,
+        actual,
+        names_its_commits,
+    } = checked;
+    let refused = if expected != actual {
+        Some(CanonicalError::HashMismatch {
+            kind,
+            expected,
+            actual,
+        })
+    } else if !names_its_commits {
+        Some(malformed(expected))
+    } else {
+        None
+    };
+    if let Some(err) = refused {
+        discard(staged);
+        return Err(err);
+    }
+    fs::rename(staged, dest).map_err(io_err(dest))
+}
+
+/// Removes a file staged for import, which it won't be.
+fn discard(staged: &Path) {
+    fs::remove_file(staged).ok();
+}
+
 fn io_err(path: &Path) -> impl FnOnce(io::Error) -> CanonicalError + '_ {
     move |source| CanonicalError::Io {
         path: path.to_owned(),
@@ -262,25 +305,25 @@ impl CanonicalStore {
         }
         let staged = self.path.join("incoming/operations").join(id.hex());
         fs::write(&staged, bytes).map_err(io_err(&staged))?;
-        let result = self.incoming.read_operation(id).block_on();
-        let op = match result {
-            Ok(op) => op,
-            Err(err) => {
-                fs::remove_file(&staged).ok();
-                return Err(err.into());
-            }
-        };
-        let actual = OperationId::new(blake2b_hash(&op).to_vec());
-        if actual == *id && !names_decoded_commits(bytes, encoded_op_commits, op_commit_ids(&op)) {
-            fs::remove_file(&staged).ok();
-            return Err(CanonicalError::MalformedOperation(id.hex()));
-        }
-        self.admit(
+        let op = self
+            .incoming
+            .read_operation(id)
+            .block_on()
+            .inspect_err(|_| discard(&staged))?;
+        admit(
             &staged,
             &self.op_path(id),
-            "operation",
-            id.hex(),
-            actual.hex(),
+            Admitted {
+                kind: "operation",
+                malformed: CanonicalError::MalformedOperation,
+                expected: id.hex(),
+                actual: OperationId::new(blake2b_hash(&op).to_vec()).hex(),
+                names_its_commits: names_decoded_commits(
+                    bytes,
+                    encoded_op_commits,
+                    op_commit_ids(&op),
+                ),
+            },
         )?;
         Ok(Some(op.parents))
     }
@@ -291,40 +334,26 @@ impl CanonicalStore {
         }
         let staged = self.path.join("incoming/views").join(id.hex());
         fs::write(&staged, bytes).map_err(io_err(&staged))?;
-        let view = match self.incoming.read_view(id).block_on() {
-            Ok(view) => view,
-            Err(err) => {
-                fs::remove_file(&staged).ok();
-                return Err(err.into());
-            }
-        };
-        let actual = ViewId::new(blake2b_hash(&view).to_vec());
-        if actual == *id
-            && !names_decoded_commits(bytes, encoded_view_commits, view_commit_ids(&view))
-        {
-            fs::remove_file(&staged).ok();
-            return Err(CanonicalError::MalformedView(id.hex()));
-        }
-        self.admit(&staged, &self.view_path(id), "view", id.hex(), actual.hex())
-    }
-
-    fn admit(
-        &self,
-        staged: &Path,
-        dest: &Path,
-        kind: &'static str,
-        expected: String,
-        actual: String,
-    ) -> Result<(), CanonicalError> {
-        if expected != actual {
-            fs::remove_file(staged).ok();
-            return Err(CanonicalError::HashMismatch {
-                kind,
-                expected,
-                actual,
-            });
-        }
-        fs::rename(staged, dest).map_err(io_err(dest))
+        let view = self
+            .incoming
+            .read_view(id)
+            .block_on()
+            .inspect_err(|_| discard(&staged))?;
+        admit(
+            &staged,
+            &self.view_path(id),
+            Admitted {
+                kind: "view",
+                malformed: CanonicalError::MalformedView,
+                expected: id.hex(),
+                actual: ViewId::new(blake2b_hash(&view).to_vec()).hex(),
+                names_its_commits: names_decoded_commits(
+                    bytes,
+                    encoded_view_commits,
+                    view_commit_ids(&view),
+                ),
+            },
+        )
     }
 
     /// Whether `ancestor` is in `anc*(heads)`.

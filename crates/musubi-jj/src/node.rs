@@ -63,8 +63,7 @@ pub struct NodeRepo {
     loader: RepoLoader,
     canonical: CanonicalStore,
     map: TranslationMap,
-    backend: Backend,
-    /// The repository's git repository, if its backend is git.
+    /// The repository's git repository, if its backend is git; otherwise it is simple.
     git: Option<NodeGit>,
     /// Whether every operation reachable from the op heads has been mapped since opening.
     heads_mapped: bool,
@@ -112,14 +111,13 @@ impl NodeRepo {
             ));
         }
         let store = loader.store();
-        let backend = Backend::of(store)
-            .ok_or_else(|| NodeError::UnsupportedBackend(store.backend().name().to_owned()))?;
+        let unsupported = || NodeError::UnsupportedBackend(store.backend().name().to_owned());
         // musubi runs the git jj runs for fetches and pushes, from jj's own setting, which jj
         // reads only for the git backend.
-        let git = match backend {
+        let git = match Backend::of(store).ok_or_else(unsupported)? {
             Backend::Git => {
                 let executable = GitSubprocessOptions::from_settings(settings)?.executable_path;
-                NodeGit::open(&executable, repo_path, store)
+                Some(NodeGit::open(&executable, repo_path, store).ok_or_else(unsupported)?)
             }
             Backend::Simple => None,
         };
@@ -138,7 +136,6 @@ impl NodeRepo {
             loader,
             canonical,
             map,
-            backend,
             git,
             heads_mapped: false,
             last_realized: None,
@@ -235,19 +232,25 @@ impl NodeRepo {
     pub fn object_store(&self) -> Result<Box<dyn ObjectStore + '_>, NodeError> {
         let store = self.loader.store();
         let store_path = self.repo_path.join("store");
-        match self.backend {
-            Backend::Git => {
-                let unsupported =
-                    || NodeError::UnsupportedBackend(store.backend().name().to_owned());
-                let git = self.git.as_ref().ok_or_else(unsupported)?;
-                let backend = jj_lib::git::get_git_backend(store).map_err(|_| unsupported())?;
-                Ok(Box::new(GitStore::for_node(
-                    git.executable(),
-                    &store_path,
-                    backend,
-                )))
-            }
-            Backend::Simple => Ok(Box::new(SimpleStore::new(&store_path))),
+        let Some(git) = &self.git else {
+            return Ok(Box::new(SimpleStore::new(&store_path)));
+        };
+        // As NodeGit::open found it.
+        let backend = jj_lib::git::get_git_backend(store)
+            .map_err(|_| NodeError::UnsupportedBackend(store.backend().name().to_owned()))?;
+        Ok(Box::new(GitStore::for_node(
+            git.executable(),
+            &store_path,
+            backend,
+        )))
+    }
+
+    /// The repository's backend, which [`Self::open`] checked is one musubi supports.
+    fn backend(&self) -> Backend {
+        if self.git.is_some() {
+            Backend::Git
+        } else {
+            Backend::Simple
         }
     }
 

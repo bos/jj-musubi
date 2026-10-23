@@ -177,7 +177,7 @@ impl NodeRepo {
             .into_iter()
             .collect();
         Ok(JoinSummary {
-            backend: self.backend,
+            backend: self.backend(),
             remotes: self.remotes()?,
             roots,
             remote_targets,

@@ -5,7 +5,6 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
-use std::io::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -21,6 +20,7 @@ use serde::Serialize;
 
 use super::NodeError;
 use super::NodeRepo;
+use crate::files;
 use crate::hive_settings;
 use crate::hive_settings::Entry;
 use crate::hive_settings::HiveSettings;
@@ -330,15 +330,7 @@ impl NodeRepo {
     fn write_settings_state(&self, state: &SettingsState) -> Result<(), NodeError> {
         let path = self.settings_state_path();
         let json = serde_json::to_vec_pretty(state).expect("settings serialize");
-        let dir = path.parent().expect("path has a parent");
-        let io_err = |source| NodeError::Io {
-            path: path.clone(),
-            source,
-        };
-        let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(io_err)?;
-        tmp.write_all(&json).map_err(io_err)?;
-        tmp.persist(&path).map_err(|err| io_err(err.error))?;
-        Ok(())
+        files::replace(&path, &json).map_err(|source| NodeError::Io { path, source })
     }
 }
 

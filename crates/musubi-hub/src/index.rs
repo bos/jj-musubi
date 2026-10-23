@@ -5,12 +5,12 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::Write as _;
 use std::path::Path;
 
 use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::OperationId;
+use musubi_jj::files;
 use musubi_jj::hive_settings;
 use musubi_jj::hive_settings::HiveSettings;
 use musubi_jj::workspaces;
@@ -39,12 +39,7 @@ impl HiveIndex {
 
     pub fn save(&self, hive_dir: &Path) -> std::io::Result<()> {
         let json = serde_json::to_vec_pretty(self).map_err(std::io::Error::other)?;
-        // Through its own handle: reopened truncating, ext4 would write it out as it closed
-        // (see `BundleWriter::create`).
-        let mut tmp = tempfile::NamedTempFile::new_in(hive_dir)?;
-        tmp.write_all(&json)?;
-        tmp.persist(hive_dir.join(FILE)).map_err(|err| err.error)?;
-        Ok(())
+        files::replace(&hive_dir.join(FILE), &json)
     }
 
     /// The index of everything `store` holds.

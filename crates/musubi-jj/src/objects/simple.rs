@@ -22,6 +22,7 @@ use super::bundle;
 use super::bundle::BundleWriter;
 use super::bundle::ObjectKind;
 use super::bundle::Record;
+use crate::files;
 
 /// A simple-backend store directory (`.jj/repo/store` on a node).
 pub struct SimpleStore {
@@ -168,9 +169,7 @@ impl ObjectStore for SimpleStore {
             };
             let path = self.path(kind, &id);
             if !path.exists() {
-                let mut tmp = tempfile::NamedTempFile::new_in(self.dir.join(kind.dir()))?;
-                io::Write::write_all(&mut tmp, &contents)?;
-                tmp.persist(&path).map_err(|err| err.error)?;
+                files::replace(&path, &contents)?;
             }
             Ok(())
         })?;

@@ -21,6 +21,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::SystemTime;
 
+use musubi_jj::files;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -141,10 +142,7 @@ impl BlobStore {
         if let Some(existing) = self.get(&id) {
             renew(&existing)?;
         } else {
-            let mut tmp = tempfile::NamedTempFile::new_in(self.dir.join("partial"))?;
-            tmp.write_all(bytes)?;
-            tmp.persist(self.complete_path(&id))
-                .map_err(|err| err.error)?;
+            files::replace_through(&self.dir.join("partial"), &self.complete_path(&id), bytes)?;
             self.whole().insert(id);
         }
         Ok((id, bytes.len() as u64))

@@ -14,7 +14,6 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
-use std::io::Write as _;
 use std::path::Path;
 
 use jj_lib::backend::CommitId;
@@ -23,6 +22,8 @@ use jj_lib::merge::trivial_merge;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::ref_name::WorkspaceNameBuf;
 use jj_lib::settings::JJRng;
+
+use crate::files;
 
 /// This machine's identity in the hive: a readable name plus a random suffix, `name#1a2b3c4d`,
 /// so that two machines with the same hostname are never confused. Stored on first use,
@@ -52,9 +53,7 @@ impl Machine {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;
         }
-        let mut tmp = tempfile::NamedTempFile::new_in(path.parent().unwrap_or(Path::new(".")))?;
-        tmp.write_all(key.as_bytes())?;
-        tmp.persist(path).map_err(|err| err.error)?;
+        files::replace(path, key.as_bytes())?;
         Ok(Self { key })
     }
 

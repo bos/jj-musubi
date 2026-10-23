@@ -105,17 +105,8 @@ impl DaemonSettings {
 /// Writes `path` so that only its owner can read it, and so that a reader finds either the
 /// old contents or the new ones.
 pub fn write_private(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
-    use std::io::Write as _;
-    let dir = path.parent().context("a file to write has no directory")?;
-    let write = || -> std::io::Result<()> {
-        // On Unix the temporary file is created readable only by its owner (0600), and the
-        // rename keeps that.
-        let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
-        tmp.write_all(contents)?;
-        tmp.persist(path).map_err(|err| err.error)?;
-        Ok(())
-    };
-    write().with_context(|| format!("writing {path:?}"))
+    // On Unix, readable only by its owner, as the temporary file `replace` writes through is.
+    musubi_jj::files::replace(path, contents).with_context(|| format!("writing {path:?}"))
 }
 
 /// The user's musubi config directory.

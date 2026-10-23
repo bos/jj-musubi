@@ -5,13 +5,13 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 use std::time::Instant;
 
 use jj_lib::backend::CommitId;
+use musubi_jj::files;
 use musubi_jj::objects::Backend;
 use musubi_jj::workspaces;
 use serde::Deserialize;
@@ -450,9 +450,7 @@ fn has_any(backend: Backend, dir: &Path, commits: &[CommitId]) -> anyhow::Result
 }
 
 fn write_meta(dir: &Path, meta: &HiveMeta) -> anyhow::Result<()> {
-    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
-    tmp.write_all(toml::to_string(meta)?.as_bytes())?;
-    tmp.persist(dir.join(HIVE_FILE))?;
+    files::replace(&dir.join(HIVE_FILE), toml::to_string(meta)?.as_bytes())?;
     Ok(())
 }
 

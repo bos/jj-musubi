@@ -3,6 +3,7 @@
 //! Internal to jj-musubi, with no stable API.
 
 pub mod canonical;
+pub mod files;
 pub mod format_guard;
 pub mod git_command;
 pub mod hive_settings;

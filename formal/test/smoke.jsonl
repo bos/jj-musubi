@@ -17,3 +17,8 @@
 {"op": "step", "action": {"kind": "recvObjs", "node": 1, "objs": [10]}}
 {"op": "step", "action": {"kind": "realize", "node": 1, "opId": 1}}
 {"op": "step", "action": {"kind": "advance", "node": 1}}
+{"op": "step", "action": {"kind": "hubRegress", "seq": 2}}
+{"op": "step", "action": {"kind": "hubRegress", "seq": 0}}
+{"op": "step", "action": {"kind": "getHead", "node": 1}}
+{"op": "step", "action": {"kind": "hubGetHead", "node": 1}}
+{"op": "step", "action": {"kind": "loseKnown", "node": 1}}

@@ -9,6 +9,7 @@ import Musubi.Regress
 import Musubi.Chunks
 import Musubi.Scenario
 import Musubi.ExecSound
+import Musubi.RegressScenario
 import Musubi.Refs
 
 open Musubi
@@ -52,10 +53,10 @@ open Musubi
 #print axioms realize_agree
 -- A hub that goes back
 #print axioms invR_reachable
-#print axioms rhubClosed
-#print axioms rhubHistory
-#print axioms rnodeClosed
-#print axioms rnoFeedback
+#print axioms hubClosedR
+#print axioms hubHistoryR
+#print axioms nodeClosedR
+#print axioms noFeedbackR
 #print axioms remake_reachable
 #print axioms pstepR_reachable
 #print axioms progressR
@@ -65,6 +66,8 @@ open Musubi
 #print axioms eventually_convergesR
 #print axioms maximal_run_convergesR
 #print axioms converged_all_acceptedR
+#print axioms RegressScenario.duplicateMerge
+#print axioms RegressScenario.rreachable_not_reachable
 -- Chunked blobs
 #print axioms Chunks.stored_identical
 #print axioms Chunks.session_finishes
@@ -75,6 +78,9 @@ open Musubi
 #print axioms Exec.abs_initE
 #print axioms Exec.exec_reachable
 #print axioms Exec.exec_inv
+#print axioms Exec.exec_rsound
+#print axioms Exec.exec_rreachable
+#print axioms Exec.exec_invR
 -- Per-machine and shared view state
 #print axioms Refs.noSpuriousRevert
 #print axioms Refs.import_moves_only_after_git

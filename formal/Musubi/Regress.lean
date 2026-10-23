@@ -2,16 +2,17 @@
 A hub that goes back. `protocol.md` requires the hub to keep `head`, `seq` and
 `closure(head)`, and the rest of the model assumes it does. musubi's hub syncs nothing to
 disk, so a power cut can lose the heads it accepted last, and a hub that finds a hive's store
-corrupt makes the hive again, empty. This file adds that failure, `hubRegress`, to the
-asynchronous model, as a separate system (`RStep`, `RReachable`) so that the theorems of
-`Safety.lean` and `Liveness.lean`, which do not hold once the hub can go back, keep their
-statements.
+corrupt makes the hive again, empty. This file adds that failure, the hub going back to a
+head it accepted (`State.regress`; the oracle's action `hubRegress`), to the asynchronous
+model, as a separate system (`RStep`, `RReachable`), so that the theorems of `Safety.lean`
+and `Liveness.lean`, which do not hold once the hub can go back, keep their statements.
 
 What still holds in every state of the extended system (`InvR`): the universe is a DAG, the
 hub's history is a chain ending in its head, the hub holds `closure(head)`, and every node's
-repository is closed with an antichain of heads. Locality, MergeOwnership and HubMonotone are
-not claimed: a node can hold operations of other nodes that the hub no longer has, so two
-nodes can come to merge the same heads.
+repository is closed with an antichain of heads. Locality, MergeOwnership, HubMonotone and
+KnownIsHubHistory do not hold: a node can hold operations of other nodes that the hub no
+longer has, and know a head the hub has forgotten, and two nodes can then merge the same
+heads (`duplicateMerge`).
 
 Liveness: a node that gets a reply to its own request carrying a head older than the one it
 knows, or another head at the same sequence number, restarts and takes the reply. With that
@@ -618,13 +619,13 @@ theorem invR_reachable {s : State} (h : RReachable N s) : InvR N s := by
 /-! ## Safety that survives -/
 
 /-- **HubClosed**, with a hub that goes back: `closure(head) ⊆ ops ∪ objects`. -/
-theorem rhubClosed {s : State} (h : RReachable N s) :
+theorem hubClosedR {s : State} (h : RReachable N s) :
     ∀ y, Anc s.U.par y s.hub.head → s.hub.ops y ∧ ∀ o ∈ s.U.objs y, s.hub.objs o :=
   (invR_reachable h).hubClosed
 
 /-- The hub's history is still a chain of strictly increasing heads from the root to its
 head, though going back drops its newest entries. -/
-theorem rhubHistory {s : State} (h : RReachable N s) :
+theorem hubHistoryR {s : State} (h : RReachable N s) :
     s.hub.hist 0 = root ∧ s.hub.hist s.hub.seq = s.hub.head ∧
     ∀ i, i < s.hub.seq →
       Anc s.U.par (s.hub.hist i) (s.hub.hist (i + 1)) ∧ s.hub.hist i ≠ s.hub.hist (i + 1) :=
@@ -632,7 +633,7 @@ theorem rhubHistory {s : State} (h : RReachable N s) :
   ⟨hI.hist0, hI.histHead, hI.histStep⟩
 
 /-- **NodeClosed**, with a hub that goes back: every node's repository stays whole. -/
-theorem rnodeClosed {s : State} (h : RReachable N s) (n : Nat) :
+theorem nodeClosedR {s : State} (h : RReachable N s) (n : Nat) :
     (∀ x p, (s.node n).lops x → p ∈ s.U.par x → (s.node n).lops p) ∧
     (∀ x o, (s.node n).lops x → o ∈ s.U.objs x → (s.node n).lobj o) ∧
     (∀ x, (s.node n).heads x → (s.node n).lops x) ∧
@@ -643,7 +644,7 @@ theorem rnodeClosed {s : State} (h : RReachable N s) (n : Nat) :
 
 /-- **No feedback**, with a hub that goes back: neither sync actions nor the hub going back
 create operations. -/
-theorem rnoFeedback {s s' : State} (hs : SyncStep N s s' ∨ ∃ i, s' = s.regress i) :
+theorem noFeedbackR {s s' : State} (hs : SyncStep N s s' ∨ ∃ i, s' = s.regress i) :
     s'.U = s.U := by
   rcases hs with hs | ⟨i, rfl⟩
   · exact noFeedback hs
@@ -701,8 +702,10 @@ theorem InvR.consistentAnc {s : State} (hI : InvR N s) {n : Nat} (hc : Consisten
 
 /-- The policy, with a hub that may have gone back. It is `PStep` but for two steps. A node
 takes the head in a reply to its own request whenever it differs from the one it knows,
-older or not: it restarts (`loseKnown`), then learns it. And it realizes only below a head
-in the hub's current history, as it does after a `Fetch`, whose reply it learns first. -/
+older or not: the Rust core's `NodeCore::handle_reply` restarts the node (`loseKnown`) and then
+learns it. And it realizes only below a head in the hub's current history: the Rust core
+clears its realization plan whenever `handle` changes `known`, and every sync starts with a
+`Fetch` whose reply sets `known`. -/
 inductive PStepR (N : Nat) : State → State → Prop
   | learn (s : State) (n : Nat) (hn : n < N) (hs : (s.node n).known ≠ (s.hub.seq, s.hub.head)) :
       PStepR N s (s.pLearn n)
@@ -734,36 +737,11 @@ inductive PStepsR (N : Nat) : State → State → Prop
 
 /-! ### Policy steps are runs of the extended system -/
 
-theorem pUpload_closedR {s : State} (hI : InvR N s) {n h : Nat}
-    (hacc : s.hub.head = (s.node n).known.2) : ClosedAt (s.pUpload n h) h := by
-  intro y hy
-  have hy' : Anc s.U.par y h := hy
-  have hk : Anc s.U.par (s.node n).known.2 s.hub.head := by rw [hacc]; exact Anc.refl
-  constructor
-  · show (s.hub.ops y ∨ s.upOps n h y)
-    by_cases hyk : Anc s.U.par y (s.node n).known.2
-    · exact Or.inl (hI.hubClosed y (hyk.trans hk)).1
-    · exact Or.inr ⟨hy', hyk⟩
-  · intro o ho
-    show s.hub.objs o ∨ s.upObjs n h o
-    by_cases hz : ∃ z, Anc s.U.par z (s.node n).known.2 ∧ o ∈ s.U.objs z
-    · obtain ⟨z, hz, hoz⟩ := hz
-      exact Or.inl ((hI.hubClosed z (hz.trans hk)).2 o hoz)
-    · exact Or.inr ⟨⟨y, hy', ho⟩, hz⟩
-
 theorem pUpload_rreachable {s : State} (h : RReachable N s) {n hd : Nat} (hn : n < N)
     (hh : (s.node n).heads hd) : RReachable N (s.pUpload n hd) := by
   have hI := invR_reachable h
-  have hl := hI.headsLocal n hd hh
-  have r1 := h.sync (SyncStep.uploadOps s n (s.upOps n hd) hn
-    (fun x hx => hI.lopsAnc hl hx.1))
-  have r2 := r1.sync (SyncStep.hubPutOps _ n (s.upOps n hd) (Or.inr rfl))
-  have r3 := r2.sync (SyncStep.uploadObjs _ n (s.upObjs n hd) hn
-    (fun o ho => by
-      obtain ⟨⟨y, hy, hoy⟩, -⟩ := ho
-      exact hI.lObjs n y o (hI.lopsAnc hl hy) hoy))
-  have r4 := r3.sync (SyncStep.hubPutObjs _ n (s.upObjs n hd) (Or.inr rfl))
-  exact r4.sync (SyncStep.push _ n (s.node n).known.2 hd hn hl)
+  exact pUpload_run (fun h st => h.sync st) h hn (hI.lParents n) (hI.lObjs n)
+    (hI.headsLocal n hd hh)
 
 /-- Every policy step is a run of the extended system. A node learns the hub's head with
 `learnUnfiltered`, which has the effect of `loseKnown` and then `learn`. -/
@@ -776,29 +754,15 @@ theorem pstepR_reachable {s s' : State} (h : RReachable N s) (hp : PStepR N s s'
     have r2 := r1.sync (SyncStep.hubGetHead _ n (Or.inr rfl))
     exact r2.sync (SyncStep.learnUnfiltered _ n .head s.hub.seq s.hub.head hn (Or.inr rfl))
   | realize n x hn hc hx hnl hp =>
-    have hxa : Anc s.U.par x s.hub.head := hx.trans (hI.consistentAnc hc)
-    have hc := hI.hubClosed x hxa
-    have r1 := h.sync (SyncStep.fetchOps s n (· = x) hn (fun y hy => hy ▸ hx))
-    have r2 := r1.sync (SyncStep.hubGetOps _ n (· = x) (Or.inr rfl))
-    have r3 := r2.sync (SyncStep.recvOps _ n (fun y => y = x ∧ s.hub.ops y) hn
-      (Or.inr rfl))
-    have r4 := r3.sync (SyncStep.fetchObjs _ n (· ∈ s.U.objs x) hn)
-    have r5 := r4.sync (SyncStep.hubGetObjs _ n (· ∈ s.U.objs x) (Or.inr rfl))
-    have r6 := r5.sync (SyncStep.recvObjs _ n
-      (fun o => o ∈ s.U.objs x ∧ s.hub.objs o) hn (Or.inr rfl))
-    refine r6.sync (SyncStep.realize _ n x hn ?_ ?_ ?_)
-    · simp [State.recvObjs, State.recvOps, State.setNode, State.send, hc.1]
-    · simpa [State.recvObjs, State.recvOps, State.setNode, State.send] using hp
-    · intro o ho
-      have ho' : o ∈ s.U.objs x := ho
-      simp [State.recvObjs, State.recvOps, State.setNode, State.send, ho', hc.2 o ho']
+    exact pRealize_run (fun h st => h.sync st) h hn hx
+      (hI.hubClosed x (hx.trans (hI.consistentAnc hc))) hp
   | advance n hn hk hna => exact h.sync (SyncStep.advance s n hn hk hna)
   | merge n L O hn hL h2 => exact h.env (EnvStep.merge s n L O hn hL h2)
   | pushAccept n hd hn hh hne hk hacc =>
     have r := pUpload_rreachable h hn ((hh hd).2 rfl)
     have r' := r.sync (SyncStep.casAccept _ n (s.node n).known.2 hd (Or.inr rfl)
       (fun e => hne ((show s.hub.head = hd from e).symm.trans hacc)) hacc hk
-      (pUpload_closedR hI hacc))
+      (pUpload_closed_of hI.hubClosed (by rw [hacc]; exact Anc.refl)))
     exact r'.sync (SyncStep.learnUnfiltered _ n .accepted (s.hub.seq + 1) hd hn
       (Or.inl (Or.inr rfl)))
   | pushIdem n hd hn hh hne hk hidem =>
@@ -1061,16 +1025,11 @@ theorem measureR_merge {s : State} (hI : InvR N s) {n : Nat} {L O : List Nat} (h
   have T : ∀ {a x : Nat}, x < s.U.next →
       (Anc (upd s.U.par s.U.next L) a x ↔ Anc s.U.par a x) :=
     fun hx => anc_upd_iff hI.parLt hLlt hx
-  have Tnew : ∀ {a : Nat}, Anc (upd s.U.par s.U.next L) a s.U.next ↔
-      a = s.U.next ∨ ∃ p ∈ L, Anc s.U.par a p := anc_upd_new hI.parLt hLlt
   have hpar : (s.mergeOp n L O).U.par = upd s.U.par s.U.next L := rfl
   have hhub : (s.mergeOp n L O).hub = s.hub := rfl
   have hother : ∀ i, i ≠ n → (s.mergeOp n L O).node i = s.node i :=
     fun i hi => createOp_node_ne hi
-  have hheads : ((s.mergeOp n L O).node n).heads = (· = s.U.next) := createOp_heads
   have hknown : ((s.mergeOp n L O).node n).known = (s.node n).known := createOp_known
-  have hlops : ((s.mergeOp n L O).node n).lops = fun y => (s.node n).lops y ∨ y = s.U.next :=
-    createOp_lops
   obtain ⟨a, b, ha, hb, hab⟩ := h2
   have hcons : ∀ i, Consistent (s.mergeOp n L O) i ↔ Consistent s i := by
     intro i
@@ -1100,53 +1059,13 @@ theorem measureR_merge {s : State} (hI : InvR N s) {n : Nat} {L O : List Nat} (h
   · intro _
     apply lex5_of
     right
-    refine ⟨cnt_congr (fun i _ => not_congr (hcons i)), Or.inr ⟨?_, Or.inr ⟨?_, Or.inr ⟨?_, ?_⟩⟩⟩⟩
+    obtain ⟨t1, t2, t3⟩ := merge_tail (O := O) hn hI.parLt hI.headLt (fun _ _ h => hI.headsLt h)
+      hk hL ⟨a, b, ha, hb, hab⟩
+    refine ⟨cnt_congr (fun i _ => not_congr (hcons i)), Or.inr ⟨?_, Or.inr ⟨t1, Or.inr ⟨t2, t3⟩⟩⟩⟩
     · apply sumN_congr; intro i _
       by_cases hi : i = n
       · subst hi; exact staleR_congr (by rw [hhub]) (by rw [hhub]) hknown
       · exact staleR_congr (by rw [hhub]) (by rw [hhub]) (by rw [hother i hi])
-    · apply sumN_congr; intro i _
-      unfold mMiss; rw [hhub, hpar]
-      apply cnt_congr; intro x hx
-      have hxl : x < s.U.next := by have := hI.headLt; omega
-      by_cases hi : i = n
-      · subst hi; rw [hlops, T hI.headLt]
-        constructor
-        · rintro ⟨h1, h2⟩; exact ⟨h1, fun h => h2 (Or.inl h)⟩
-        · rintro ⟨h1, h2⟩; exact ⟨h1, fun h => h.elim h2 (fun e => by omega)⟩
-      · rw [hother i hi, T hI.headLt]
-    · apply sumN_congr; intro i _
-      unfold mAdv; rw [hpar]
-      by_cases hi : i = n
-      · subst hi
-        rw [hheads, hknown]
-        have : (∃ h, h = s.U.next ∧ Anc (upd s.U.par s.U.next L) (s.node i).known.2 h) ↔
-            (∃ h, (s.node i).heads h ∧ Anc s.U.par (s.node i).known.2 h) := by
-          constructor
-          · rintro ⟨h, rfl, hA⟩
-            rcases Tnew.1 hA with e | ⟨p, hp, hA'⟩
-            · have := hk i; omega
-            · exact ⟨p, (hL p).1 hp, hA'⟩
-          · rintro ⟨h, hh, hA⟩
-            exact ⟨s.U.next, rfl, Tnew.2 (Or.inr ⟨h, (hL h).2 hh, hA⟩)⟩
-        exact ite_iff this
-      · rw [hother i hi]
-        have : (∃ h, (s.node i).heads h ∧ Anc (upd s.U.par s.U.next L) (s.node i).known.2 h) ↔
-            (∃ h, (s.node i).heads h ∧ Anc s.U.par (s.node i).known.2 h) := by
-          constructor
-          · rintro ⟨h, hh, hA⟩; exact ⟨h, hh, (T (hI.headsLt hh)).1 hA⟩
-          · rintro ⟨h, hh, hA⟩; exact ⟨h, hh, (T (hI.headsLt hh)).2 hA⟩
-        exact ite_iff this
-    · apply sumN_lt hn
-      · unfold mMulti; rw [hheads]
-        have h1 : ¬ ∃ a b, a = s.U.next ∧ b = s.U.next ∧ a ≠ b := by
-          rintro ⟨a, b, rfl, rfl, h⟩; exact h rfl
-        have h2 : ∃ a b, (s.node n).heads a ∧ (s.node n).heads b ∧ a ≠ b :=
-          ⟨a, b, (hL a).1 ha, (hL b).1 hb, hab⟩
-        simp only [h1, h2, ↓reduceIte]
-        omega
-      · intro i _ hi
-        unfold mMulti; rw [hother i hi]
 
 /-- An accepted push makes its node good. It was not good: its head is new to the hub. -/
 theorem measureR_pushAccept {s : State} (hI : InvR N s) {n hd : Nat} (hn : n < N)
@@ -1254,12 +1173,6 @@ theorem no_infinite_policy_runR {s : State} (h : RReachable N s) :
 
 /-! ### Progress -/
 
-theorem mem_headsListR {s : State} (hI : InvR N s) {n x : Nat} :
-    x ∈ headsList s n ↔ (s.node n).heads x := by
-  unfold headsList
-  simp only [List.mem_filter, List.mem_range, decide_eq_true_eq]
-  exact ⟨fun h => h.2, fun h => ⟨hI.headsLt h, h⟩⟩
-
 /-- **Progress**: in every state of the extended system that is not converged, some policy
 step is enabled. -/
 theorem progressR {s : State} (h : RReachable N s) (hc : ¬ Converged N s) :
@@ -1273,8 +1186,9 @@ theorem progressR {s : State} (h : RReachable N s) (hc : ¬ Converged N s) :
   -- 1. merge
   by_cases hmulti : ∃ a b, (s.node n).heads a ∧ (s.node n).heads b ∧ a ≠ b
   · obtain ⟨a, b, ha, hb, hab⟩ := hmulti
-    exact ⟨_, PStepR.merge s n (headsList s n) [] hn (fun x => mem_headsListR hI)
-      ⟨a, b, (mem_headsListR hI).2 ha, (mem_headsListR hI).2 hb, hab⟩⟩
+    have hmem := fun x => mem_headsList_of (s := s) (n := n) (x := x) (fun _ h => hI.headsLt h)
+    exact ⟨_, PStepR.merge s n (headsList s n) [] hn hmem
+      ⟨a, b, (hmem a).2 ha, (hmem b).2 hb, hab⟩⟩
   -- 2. learn
   by_cases hk : (s.node n).known ≠ (s.hub.seq, s.hub.head)
   · exact ⟨_, PStepR.learn s n hn hk⟩
@@ -1322,22 +1236,14 @@ theorem converged_quiescentR {s : State} (h : RReachable N s) (hc : Converged N 
   cases hp with
   | learn n hn hs => exact hs (hc n hn).2
   | realize n x hn _ hx hnl hp =>
-    rw [(hc n hn).2] at hx
-    have hl : (s.node n).lops s.hub.head := hI.headsLocal n _ (((hc n hn).1 _).2 rfl)
-    exact hnl (hI.lopsAnc hl hx)
-  | advance n hn hk hna =>
-    rw [(hc n hn).2] at hna
-    exact hna ⟨_, ((hc n hn).1 _).2 rfl, Anc.refl⟩
+    exact hnl (hc.lops_below hn (hI.lParents n) (hI.headsLocal n) hx)
+  | advance n hn hk hna => exact hna (hc.known_in_heads hn)
   | merge n L O hn hL h2 =>
     obtain ⟨a, b, ha, hb, hab⟩ := h2
-    exact hab ((((hc n hn).1 a).1 ((hL a).1 ha)).trans
-      (((hc n hn).1 b).1 ((hL b).1 hb)).symm)
-  | pushAccept n hd hn hh hne =>
-    apply hne; rw [(hc n hn).2]; exact ((hc n hn).1 hd).1 ((hh hd).2 rfl)
-  | pushIdem n hd hn hh hne =>
-    apply hne; rw [(hc n hn).2]; exact ((hc n hn).1 hd).1 ((hh hd).2 rfl)
-  | pushReject n hd hn hh hne =>
-    apply hne; rw [(hc n hn).2]; exact ((hc n hn).1 hd).1 ((hh hd).2 rfl)
+    exact hab (hc.heads_eq hn ((hL a).1 ha) ((hL b).1 hb))
+  | pushAccept n hd hn hh hne => exact hne (hc.head_known hn hh)
+  | pushIdem n hd hn hh hne => exact hne (hc.head_known hn hh)
+  | pushReject n hd hn hh hne => exact hne (hc.head_known hn hh)
 
 /-- A state of the extended system with no enabled policy step is converged, and
 conversely. -/

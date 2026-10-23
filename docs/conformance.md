@@ -8,14 +8,17 @@ trace format, an oracle built from the Lean model, and a refinement check run un
 
 Every behavior of the Rust core, at the level of abstraction of the model, is a behavior of
 the Lean model. The Lean safety theorems hold for every reachable model state, so they hold
-for every state the Rust core reaches.
+for every state the Rust core reaches. A run in which the hub goes back is a behavior of the
+extended model of `formal/Musubi/Regress.lean`, and the weaker invariant proved there holds
+in it.
 
 The chain has three links:
 
 1. **Relational model to executable model.** `formal/Musubi/Exec.lean` defines `execStep`
-   on finite states. `exec_sound` proves that whenever `execStep` accepts an action, the
-   corresponding relational `Step` exists between the abstracted states. The executable model
-   therefore never accepts anything the proofs don't cover.
+   on finite states. `exec_sound` proves that whenever `execStep` accepts an action other
+   than `hubRegress`, the corresponding relational `Step` exists between the abstracted
+   states, and `exec_rsound` that whenever it accepts any action, an `RStep` of the extended
+   model does. The executable model therefore never accepts anything the proofs don't cover.
 2. **Executable model to oracle.** `formal/Oracle.lean` is a thin JSON wrapper around
    `execStep`, built by `lake build oracle`. It contains no protocol logic of its own.
 3. **Oracle to Rust.** The Hegel conformance tests in `crates/musubi-core/tests/conformance.rs`
@@ -91,6 +94,7 @@ compared as sets.
 | `hubPushIncomplete` | `node`, `ops`, `objs`, `expected`, `new` | `SyncStep.hubPushIncomplete` |
 | `hubFetch` | `node`, `base`, `haves` | `SyncStep.hubFetch`: replies with a `head`, an `ops` and an `objs` message |
 | `crashHub` | none | `SyncStep.crashHub` |
+| `hubRegress` | `seq` | `RStep`'s `State.regress` (`Regress.lean`), the hub going back: `seq ≤ hub.seq`; `head := hist seq`, `seq := seq`, and nothing else changes |
 
 `headKind` is one of `head`, `accepted`, `rejected`, `incomplete`, `notify`. The Rust hub
 decides how to answer a `Push`, and the test sends whichever of `hubPushIdem`,
@@ -202,6 +206,8 @@ that it asks for them.
 | A node restarts | `loseKnown` (its staged files survive; `known` does not) |
 | A node restarts while taking in a `Fetched` reply, after staging its operations and before staging its objects (test rule) | `learn` if its head is newer, `recvOps`, then `loseKnown` |
 | The hub restarts | `crashHub` |
+| The hub goes back (test rule) | `hubRegress` |
+| A reply to the node's own request that says the hub went back (`NodeCore::handle_reply`) | `loseKnown`, then `learn` if the reply's `seq` is above 0 (at 0, the restarted node already knows `(0, root)`) |
 
 The test's objects have no structure, so the test's hub ignores `closure(base)` and leaves
 out exactly what the haves name, as the model's `hubFetch` does; a node's haves there are

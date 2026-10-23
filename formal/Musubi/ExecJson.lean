@@ -73,6 +73,7 @@ def decodeAction (j : Json) : Except String Action := do
       (← getNat j "expected") (← getNat j "new")
   | "hubFetch" => return .hubFetch (← node) (← getNat j "base") (← getNats j "haves")
   | "crashHub" => return .crashHub
+  | "hubRegress" => return .hubRegress (← getNat j "seq")
   | k => throw s!"unknown action kind {k}"
 
 /-! ## Encoding -/

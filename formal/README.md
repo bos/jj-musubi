@@ -48,9 +48,10 @@ The binary is `formal/.lake/build/bin/oracle`.
 | `Musubi/Chunks.lean` | The chunked-blob model, its safety and its liveness. |
 | `Musubi/Scenario.lean` | A concrete reachable run: a lost Cas race, then fetch, advance, merge, and the merge accepted. It shows the model is not vacuous. |
 | `Musubi/Exec.lean` | The executable model: finite `EState`, the `Action` vocabulary of `docs/conformance.md`, and `execStep`. |
-| `Musubi/ExecSound.lean` | `exec_sound`, `abs_initE`, `exec_reachable`, `exec_inv`. |
+| `Musubi/ExecSound.lean` | `exec_sound`, `abs_initE`, `exec_reachable`, `exec_inv`, and with the hub going back `exec_rsound`, `exec_rreachable`, `exec_invR`. |
 | `Musubi/ExecJson.lean` | The oracle's JSON codec and request handler (no protocol logic). |
 | `Musubi/ExecTest.lean` | `#guard` smoke tests of `execStep`, checked at build time. |
+| `Musubi/RegressScenario.lean` | A run of the executable model in which the hub goes back and two nodes then merge the same heads (`duplicateMerge`), so the extended system reaches states the durable one does not (`rreachable_not_reachable`). |
 | `Oracle.lean` | The `oracle` executable: a stdin/stdout loop around `ExecJson.handle`. |
 | `test/smoke.jsonl`, `test/smoke.expected`, `test/run_smoke.sh` | The oracle smoke test. |
 | `Musubi/Refs.lean` | Per-machine and shared state of a replicated view, for one git ref: jj's ref import and export against an adversarial `.git`, no spurious revert for local and remote bookmarks, and the verbatim-replication counterexample (docs/design.md, "Per-machine state in a replicated view"). Independent of the protocol model. |
@@ -141,27 +142,37 @@ Merged requests (`Merged.lean`):
 `known = (hub.seq, hub.head)`.
 
 A hub that goes back (`Regress.lean`). `protocol.md` requires the hub to keep `head`, `seq` and
-`closure(head)`; musubi's hub syncs nothing to disk, so it may not. `hubRegress` sets
-`head := hist i` and `seq := i` for any `i ≤ seq`; `RStep` is `Step` or `hubRegress`, and
-`RReachable` its reachable states. Making a hive again, empty, is `hubRegress` to 0 followed
-by `hubForget` (`remake_reachable`). The invariant `InvR` keeps the universe, the hub's
-history and closure, and each node's repository, but not what relates nodes to the hub's
-history, so Locality, MergeOwnership, HubMonotone and KnownIsHubHistory are not claimed
-there: after the hub goes back, nodes can hold operations the hub no longer has, and two
-nodes can merge the same heads.
+`closure(head)`; musubi's hub syncs nothing to disk, so it may not. `State.regress s i` (the
+oracle's action `hubRegress`) sets `head := hist i` and `seq := i` for any `i ≤ seq`;
+`RStep` is a `Step` or such a regression, and `RReachable` its reachable states. Making a
+hive again, empty, is a regression to 0 followed by `hubForget` (`remake_reachable`). The
+invariant `InvR` keeps the universe, the hub's history and closure, and each node's
+repository, but not what relates nodes to the hub's history, so Locality, MergeOwnership,
+HubMonotone and KnownIsHubHistory do not hold there: after the hub goes back, nodes can hold
+operations the hub no longer has, know heads it has forgotten, and merge the same heads
+(`duplicateMerge`, in `RegressScenario.lean`).
 
 - `invR_reachable`: `InvR` holds in every `RReachable` state.
-- `rhubClosed`, `rhubHistory`, `rnodeClosed`, `rnoFeedback`: HubClosed, the history chain,
+- `hubClosedR`, `hubHistoryR`, `nodeClosedR`, `noFeedbackR`: HubClosed, the history chain,
   NodeClosed and no feedback, with a hub that goes back.
+- `duplicateMerge`, `rreachable_not_reachable`: two nodes can create merges with the same
+  parents, which `noDuplicateMerge` rules out in every `Reachable` state.
 - `pstepR_reachable`, `progressR`, `measureR_decreases`, `no_infinite_policy_runR`,
   `eventually_convergesR`, `maximal_run_convergesR`, `terminal_iff_convergedR`,
   `converged_all_acceptedR`: liveness once the hub stops going back, for the policy `PStepR`.
-  It differs from `PStep` in two steps. A node learns the head in a reply to its own request
-  whenever it differs from the one it knows, older or not (`learnUnfiltered`, which has the
-  effect of `loseKnown` then `learn`), and it realizes only below a head in the hub's current
-  history (`Consistent`), as it does after a `Fetch` whose reply it has learned. Once
-  converged, every operation any node created is in `anc*(hub.head)`: a hive made again
+  Once converged, every operation any node created is in `anc*(hub.head)`: a hive made again
   fills from its machines.
+
+`PStepR` differs from `PStep` in two steps:
+
+- A node learns the head in a reply to its own request whenever it differs from the one it
+  knows, older or not. In the Rust core, `NodeCore::handle_reply` restarts the node and then
+  takes the reply, which is `loseKnown` then `learn`; `PStepR` uses `learnUnfiltered`, which
+  has the same effect.
+- A node realizes only below a head in the hub's current history (`Consistent`). The Rust
+  core clears its realization plan whenever `handle` changes `known`, so a plan never
+  outlives the head it was made for, and every sync starts with a `Fetch` whose reply sets
+  `known`: whatever a node realizes is below the head the hub has just named.
 
 The measure is `(nodes not good, inconsistent nodes, Σ staleness of consistent nodes,
 Σ missing ops, Σ pending advances, Σ pending merges)`. A node is good when its `known` is in
@@ -247,14 +258,19 @@ Chunked blobs (`Chunks.lean`, with `hash` assumed injective):
 
 Theorems (`Musubi/ExecSound.lean`):
 
-- `exec_sound : execStep N es a = .ok es' → Step N (abs es) (abs es')`. This has no
-  hypotheses. `execStep` first checks the one well-formedness property the decision
-  procedures rely on, that every recorded operation's parents are below it (`parOK`).
+- `exec_sound : a.goesBack = false → execStep N es a = .ok es' → Step N (abs es) (abs es')`.
+  Its only hypothesis is that the action is not `hubRegress`. `execStep` first checks the
+  one well-formedness property the decision procedures rely on, that every recorded
+  operation's parents are below it (`parOK`).
 - `abs_initE : abs initE = init`.
 - `exec_reachable : ExecReachable N es → Reachable N (abs es)`. Every state reached through
-  accepted actions from `initE` is relationally reachable, so every safety theorem holds in
-  it.
+  accepted actions other than `hubRegress` from `initE` is relationally reachable, so every
+  safety theorem holds in it.
 - `exec_inv : ExecReachable N es → Inv N (abs es)`.
+- `exec_rsound : execStep N es a = .ok es' → RStep N (abs es) (abs es')`, for every action.
+- `exec_rreachable : ExecRReachable N es → RReachable N (abs es)` and
+  `exec_invR : ExecRReachable N es → InvR N (abs es)`: with `hubRegress`, every state is a
+  state of the extended system, and `InvR` and the theorems of `Regress.lean` hold in it.
 
 Encoding choices:
 
@@ -271,6 +287,12 @@ Encoding choices:
   that deletes staged entries on realize will differ from the oracle's `sops`/`sobj`.
 - **No well-formedness bound on nodes.** The hub actions do not check `node < nodes`, just
   as the relational hub steps don't; a matching message in `net` already implies it.
+- **The hub going back.** `hubRegress i` sets the hub's `head` to the head it accepted at
+  `i` and its `seq` to `i`, and changes nothing else: stores, nodes and `net` stay, and so
+  does the ghost history, entries above `i` included. The next accept records entry
+  `i + 1`, which then shadows the old one, as the relational `hubAccept` overwrites it. The
+  ghost history is not part of the JSON state, so a test may equally truncate it to the
+  entries up to `i`.
 
 ## Why the reliable policy model is a sound abstraction for liveness
 

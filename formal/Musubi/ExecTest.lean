@@ -1,17 +1,13 @@
 /-
 Smoke test of the executable model, checked at build time: a two-node run (user op, upload,
-push, casAccept, a notification learned by the other node, fetch, realize, advance) and one
-rejected action. `test/smoke.jsonl` replays the same run through the oracle.
+push, casAccept, a notification learned by the other node, fetch, realize, advance), rejected
+actions, and the hub going back. `test/smoke.jsonl` replays the same run through the oracle.
 -/
 import Musubi.ExecSound
 
 namespace Musubi.Exec.Test
 
 open Musubi
-
-def run (N : Nat) (es : EState) : List Action → Except String EState
-  | [] => .ok es
-  | a :: as => do run N (← execStep N es a) as
 
 /-- Node 0 writes op 1 (requiring object 10) and pushes it before uploading. -/
 def pre : List Action := [.userOp 0 root [10], .push 0 root 1]
@@ -76,6 +72,22 @@ def merged : List Action :=
 #guard match run 2 initE (merged ++ [.userOp 1 1 [11], .pushAll 1 [2] [11] 1 2,
     .hubPushAccept 1 [2] [11] 1 2, .fetchAll 0 1 [11], .hubFetch 0 1 [11]]) with
   | .ok es => es.inNet (.ops 0 [2]) && es.inNet (.objs 0 [])
+  | .error _ => false
+
+-- The hub goes back only to a head it accepted, and keeps what it stores.
+#guard errorOf (run 2 initE (merged ++ [.hubRegress 2])) ==
+  "hubRegress: seq 2 is above the hub's seq 1"
+#guard match run 2 initE (merged ++ [.hubRegress 0]) with
+  | .ok es => es.hub.head == root && es.hub.seq == 0 && es.hub.ops.contains 1 &&
+      (es.nodeOf 1).known == (1, 1)
+  | .error _ => false
+
+-- A node that knew the head the hub forgot restarts, and learns the head the hub accepts
+-- next at the same sequence number.
+#guard match run 2 initE (merged ++ [.hubRegress 0, .userOp 0 root [], .pushAll 0 [2] [] root 2,
+    .hubPushAccept 0 [2] [] root 2, .loseKnown 1, .fetchAll 1 root [], .hubFetch 1 root [],
+    .learn 1 .head 1 2]) with
+  | .ok es => es.hub.head == 2 && es.hub.seq == 1 && (es.nodeOf 1).known == (1, 2)
   | .error _ => false
 
 end Musubi.Exec.Test

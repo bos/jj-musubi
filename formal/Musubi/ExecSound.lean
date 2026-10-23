@@ -1,7 +1,9 @@
 /-
 Soundness of the executable model: every action `execStep` accepts is a relational `Step`
-between the abstracted states, and `abs initE = init`. Hence every state reachable through
-`execStep` is `Reachable`, and all safety theorems apply to it.
+between the abstracted states, but for `hubRegress`, which is an `RStep`; and
+`abs initE = init`. Hence every state reachable through `execStep` without `hubRegress` is
+`Reachable`, and all safety theorems apply to it; with it, every state is `RReachable`, and
+the theorems of `Regress.lean` apply.
 -/
 import Musubi.Exec
 
@@ -400,7 +402,7 @@ theorem not_bcast_getHead (n : Nat) : ∀ s h, EMsg.getHead n ≠ .notifyAll s h
 macro "nb" : term => `(fun _ _ h => by cases h)
 
 theorem execCore_sound {N : Nat} {es es' : EState} {a : Action} (hlt : ParLt es.parF)
-    (h : execCore N es a = .ok es') : Step N (abs es) (abs es') := by
+    (hb : a.goesBack = false) (h : execCore N es a = .ok es') : Step N (abs es) (abs es') := by
   cases a with
   | userOp n p O =>
     simp only [execCore] at h
@@ -691,13 +693,32 @@ theorem execCore_sound {N : Nat} {es es' : EState} {a : Action} (hlt : ParLt es.
     simp only [execCore] at h
     cases h
     exact Or.inr (SyncStep.crashHub _)
+  | hubRegress i => cases hb
 
-/-- **Soundness of the executable model**: every action `execStep` accepts is a step of the
-relational model between the abstracted states. -/
-theorem exec_sound {N : Nat} {es es' : EState} {a : Action}
+theorem abs_regress (i : Nat) : abs (es.regress i) = (abs es).regress i := rfl
+
+/-- **Soundness of the executable model**: every action `execStep` accepts, other than the
+hub going back, is a step of the relational model between the abstracted states. -/
+theorem exec_sound {N : Nat} {es es' : EState} {a : Action} (hb : a.goesBack = false)
     (h : execStep N es a = .ok es') : Step N (abs es) (abs es') := by
   obtain ⟨hwf, h⟩ := req_ok h
-  exact execCore_sound (parOK_parLt hwf) h
+  exact execCore_sound (parOK_parLt hwf) hb h
+
+/-- **Soundness with a hub that goes back**: every action `execStep` accepts is a step of
+the extended system (`Regress.lean`). -/
+theorem exec_rsound {N : Nat} {es es' : EState} {a : Action}
+    (h : execStep N es a = .ok es') : RStep N (abs es) (abs es') := by
+  cases hb : a.goesBack with
+  | false => exact Or.inl (exec_sound hb h)
+  | true =>
+    cases a with
+    | hubRegress i =>
+      obtain ⟨-, h⟩ := req_ok h
+      simp only [execCore] at h
+      obtain ⟨hi, h⟩ := req_ok h
+      cases h
+      exact Or.inr ⟨i, of_decide_eq_true hi, abs_regress i⟩
+    | _ => cases hb
 
 /-- The executable initial state abstracts to the relational one. -/
 theorem abs_initE : abs initE = init := by
@@ -712,11 +733,17 @@ theorem abs_initE : abs initE = init := by
     show (∃ em ∈ ([] : List EMsg), em.covers m) = False
     simp
 
-/-- States reachable through `execStep` from `initE`. -/
+/-- States reachable through `execStep` from `initE`, with a hub that never goes back. -/
 inductive ExecReachable (N : Nat) : EState → Prop
   | init : ExecReachable N initE
-  | step {es es' : EState} (a : Action) : ExecReachable N es → execStep N es a = .ok es' →
-      ExecReachable N es'
+  | step {es es' : EState} (a : Action) : ExecReachable N es → a.goesBack = false →
+      execStep N es a = .ok es' → ExecReachable N es'
+
+/-- States reachable through `execStep` from `initE`, `hubRegress` included. -/
+inductive ExecRReachable (N : Nat) : EState → Prop
+  | init : ExecRReachable N initE
+  | step {es es' : EState} (a : Action) : ExecRReachable N es → execStep N es a = .ok es' →
+      ExecRReachable N es'
 
 /-- Every state reachable through `execStep` is abstractly reachable, so every safety
 theorem applies to it. -/
@@ -724,11 +751,41 @@ theorem exec_reachable {N : Nat} {es : EState} (h : ExecReachable N es) :
     Reachable N (abs es) := by
   induction h with
   | init => rw [abs_initE]; exact Reachable.init
-  | step a _ hs ih => exact ih.step (exec_sound hs)
+  | step a _ hb hs ih => exact ih.step (exec_sound hb hs)
 
 /-- For example: the invariant, hence HubClosed, Locality, MergeOwnership and the rest, hold
 in every executable state. -/
 theorem exec_inv {N : Nat} {es : EState} (h : ExecReachable N es) : Inv N (abs es) :=
   inv_reachable (exec_reachable h)
+
+/-- Every state reachable through `execStep`, the hub going back included, is a state of the
+extended system. -/
+theorem exec_rreachable {N : Nat} {es : EState} (h : ExecRReachable N es) :
+    RReachable N (abs es) := by
+  induction h with
+  | init => rw [abs_initE]; exact RReachable.init
+  | step a _ hs ih => exact ih.step (exec_rsound hs)
+
+/-- What survives the hub going back holds in every executable state. -/
+theorem exec_invR {N : Nat} {es : EState} (h : ExecRReachable N es) : InvR N (abs es) :=
+  invR_reachable (exec_rreachable h)
+
+/-- Runs actions in turn, stopping at the first one rejected. -/
+def run (N : Nat) (es : EState) : List Action → Except String EState
+  | [] => .ok es
+  | a :: as => do run N (← execStep N es a) as
+
+/-- A run of accepted actions stays among the states reachable through `execStep`. -/
+theorem run_rreachable {N : Nat} {as : List Action} {es es' : EState}
+    (h : ExecRReachable N es) (hr : run N es as = .ok es') : ExecRReachable N es' := by
+  induction as generalizing es with
+  | nil => cases hr; exact h
+  | cons a as ih =>
+    simp only [run] at hr
+    cases hs : execStep N es a with
+    | error e => rw [hs] at hr; cases hr
+    | ok es1 =>
+      rw [hs] at hr
+      exact ih (h.step a hs) hr
 
 end Musubi.Exec

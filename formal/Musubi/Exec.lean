@@ -1,10 +1,11 @@
 /-
 The executable model: finite, computable states, an `Action` vocabulary matching
 `docs/conformance.md`, and `execStep`, which evaluates every guard of the relational model and
-names the guard that failed. `exec_sound` proves that every accepted action is a `Step` of
-the relational model between the abstracted states.
+names the guard that failed. `exec_sound` proves that every accepted action other than
+`hubRegress` is a `Step` of the relational model between the abstracted states, and
+`exec_rsound` that every accepted action is an `RStep`.
 -/
-import Musubi.Safety
+import Musubi.Regress
 
 namespace Musubi.Exec
 
@@ -246,6 +247,12 @@ def sinceOpsL (es : EState) (b : Nat) : List Nat :=
 def sinceObjsL (es : EState) (b : Nat) (H : List Nat) : List Nat :=
   ((es.sinceOpsL b).flatMap es.objsF).filter (fun o => !H.contains o && es.hub.objs.contains o)
 
+/-- The hub goes back to the head it accepted at `i`. The ghost history is kept whole:
+`histF` finds the newest entry for a sequence number, so the next accept overwrites
+entry `i + 1` as the relational `hubAccept` does. -/
+def regress (es : EState) (i : Nat) : EState :=
+  { es with hub := { es.hub with head := es.hub.histF i, seq := i } }
+
 def hubAccept (es : EState) (d : Nat) : EState :=
   { es with hub := { es.hub with head := d, seq := es.hub.seq + 1,
                                  hist := (es.hub.seq + 1, d) :: es.hub.hist } }
@@ -306,7 +313,15 @@ inductive Action
   | hubPushIncomplete (node : Nat) (ops objs : List Nat) (expected new : Nat)
   | hubFetch (node base : Nat) (haves : List Nat)
   | crashHub
+  /-- The hub goes back to the head it accepted at `seq` (`Regress.lean`): not a `Step`, but
+  an `RStep`. -/
+  | hubRegress (seq : Nat)
   deriving Repr
+
+/-- Whether an action is the hub going back, which only the extended system allows. -/
+def Action.goesBack : Action → Bool
+  | .hubRegress _ => true
+  | _ => false
 
 /-- Check a guard; on failure, report `msg`. -/
 def req (c : Bool) (msg : Unit → String) (k : Unit → Except String EState) :
@@ -514,9 +529,14 @@ def execCore (N : Nat) (es : EState) : Action → Except String EState
     .ok (((es.send (.head n .head es.hub.seq es.hub.head)).send (.ops n (es.sinceOpsL b))).send
       (.objs n (es.sinceObjsL b H)))
   | .crashHub => .ok es
+  | .hubRegress i =>
+    req (decide (i ≤ es.hub.seq))
+      (fun _ => s!"hubRegress: seq {i} is above the hub's seq {es.hub.seq}") fun _ =>
+    .ok (es.regress i)
 
 /-- The executable step. The well-formedness check (parents below children) holds in every
-state reachable from `initE`; it is checked so that `exec_sound` needs no hypothesis. -/
+state reachable from `initE`; it is checked so that `exec_sound` needs no well-formedness
+hypothesis. -/
 def execStep (N : Nat) (es : EState) (a : Action) : Except String EState :=
   req es.parOK (fun _ => "internal: an operation has a parent not below it") fun _ =>
   execCore N es a

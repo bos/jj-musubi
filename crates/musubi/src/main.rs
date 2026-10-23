@@ -42,16 +42,29 @@ use crate::socket::Socket;
 #[command(
     name = "musubi",
     version,
-    about = "Replicate jj repositories between machines"
+    about = "Replicate jj repositories between machines",
+    after_help = "Run `musubi <command> --help` for more on a command. The user guide is at \
+                  https://github.com/bos/jj-musubi/blob/main/docs/README.md"
 )]
 struct Cli {
     /// The daemon's control socket, in place of the usual one.
-    #[arg(long, global = true, env = "MUSUBI_SOCKET", hide_env = true)]
+    #[arg(
+        long,
+        global = true,
+        env = "MUSUBI_SOCKET",
+        hide_env = true,
+        help_heading = "Global options"
+    )]
     socket: Option<String>,
     /// What to log, as a filter in `RUST_LOG`'s syntax: `debug`, or `info,musubi_sync=debug`.
     /// It applies to this command, not to a daemon it starts, which uses `[daemon] log` in
     /// the user config.
-    #[arg(long, global = true, value_name = "FILTER")]
+    #[arg(
+        long,
+        global = true,
+        value_name = "FILTER",
+        help_heading = "Global options"
+    )]
     log: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
@@ -61,6 +74,10 @@ struct Cli {
 enum Command {
     /// Run a hub, which stores hives and orders their updates. Serves every hive in its
     /// directory, to other machines over ssh.
+    ///
+    /// Runs until stopped, logging what it does. The first time, it creates the directory.
+    /// If this machine has no default hub yet, it becomes it. It prints the commands other
+    /// machines run to share a repository through it.
     #[command(args_conflicts_with_subcommands = true)]
     Hub {
         #[command(subcommand)]
@@ -76,15 +93,25 @@ enum Command {
     },
     /// Start a hive on the hub from the repository in the current directory, for other
     /// copies of it to join.
+    ///
+    /// Without a name, it is refused if the repository belongs in a hive the hub already
+    /// has: `musubi join` joins that one. It starts the daemon if it isn't running, and
+    /// returns once the repository has synced.
     Create {
         /// The hive's name [default: the repository's name on its forge, from its `origin`
-        /// remote, else the directory's name].
+        /// remote, else its first remote, else the directory's name].
         name: Option<String>,
         #[command(flatten)]
         member: Member,
     },
     /// Make the repository in the current directory part of the hive on the hub it shares
     /// history and a remote with.
+    ///
+    /// The hub chooses the hive that has some of the repository's history and one of its
+    /// remotes' URLs. It refuses a repository that matches no hive or several, and a fork,
+    /// which shares history but not a remote: choose a hive yourself with `--hive`, or start
+    /// a new one with `musubi create`. It starts the daemon if it isn't running, and returns
+    /// once the repository has synced.
     Join {
         /// Join this hive (a name, a prefix of one, or an id), whatever its remotes.
         #[arg(long)]
@@ -93,11 +120,15 @@ enum Command {
         member: Member,
     },
     /// Create a new colocated repository from a hive.
+    ///
+    /// It makes the repository, joins it to the hive, and returns once it has synced, with
+    /// the daemon keeping it in sync from then on.
     Clone {
         /// The hive: a name, a prefix of one, or an id.
         hive: String,
+        /// The new repository's directory.
         destination: PathBuf,
-        /// The hub, as `musubi hub` prints it [default: the one first joined].
+        /// The hub, as `musubi hub` prints it [default: this machine's default hub].
         #[arg(long)]
         hub: Option<String>,
         /// This machine's name in the hive. Defaults to jj's `operation.hostname`.
@@ -106,13 +137,26 @@ enum Command {
     },
     /// List the hub's hives, this machine's copies of them, and how their syncing goes
     /// (the default command).
+    ///
+    /// In a hive's repository, it also shows the repository's hive, hub and machine name,
+    /// where every machine's working copy is, and its last sync.
     #[command(alias = "status")]
     List,
     /// Stop syncing the repository in the current directory.
+    ///
+    /// The repository keeps everything it has, and the hive keeps everything it sent.
     Leave,
     /// Sync the repository in the current directory now.
+    ///
+    /// The daemon syncs by itself whenever the repository or its hive changes, so this is
+    /// rarely needed, except to see at once how a sync goes. It asks the daemon to sync, if
+    /// the daemon serves the repository, and otherwise syncs in this process.
     Sync,
     /// Run the daemon that keeps this machine's repositories in sync, or control it.
+    ///
+    /// Without a subcommand, it runs the daemon in the foreground, logging to standard
+    /// error. Other commands start it in the background when they need it, logging to
+    /// `daemon.log` in musubi's state directory, or under systemd, to the journal.
     Daemon {
         #[command(subcommand)]
         action: Option<DaemonAction>,
@@ -133,7 +177,7 @@ struct Member {
     #[arg(long)]
     full_history: bool,
     /// The hub, as `musubi hub` prints it: the name this machine ssh-es to the hub's machine
-    /// by, or on that machine, the hub's directory [default: the one first joined].
+    /// by, or on that machine, the hub's directory [default: this machine's default hub].
     #[arg(long)]
     hub: Option<String>,
 }
@@ -141,21 +185,29 @@ struct Member {
 #[derive(Subcommand)]
 enum Debug {
     /// Translate an operation id between this machine's id and the hive's.
-    OpId { id: String },
+    OpId {
+        /// An operation id, or a prefix of one: this machine's, or the hive's.
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
 enum HubAction {
     /// Remove a hive from the hub. Its store moves to the hub's `removed/` directory.
     Rm {
+        /// The hive: a name, a prefix of one, or an id.
         hive: String,
+        /// The hub, as `musubi hub` prints it [default: this machine's default hub].
         #[arg(long)]
         hub: Option<String>,
     },
     /// Rename a hive.
     Rename {
+        /// The hive: a name, a prefix of one, or an id.
         hive: String,
+        /// The hive's new name.
         new_name: String,
+        /// The hub, as `musubi hub` prints it [default: this machine's default hub].
         #[arg(long)]
         hub: Option<String>,
     },

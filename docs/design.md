@@ -301,7 +301,12 @@ and ignore lower-epoch hubs from then on.
 
 Since an empty hub fills up this way, a hub needn't be durable, and it syncs nothing to disk:
 one that loses its state, to a power cut say, is deleted and made again, and the machines'
-repositories fill the new one.
+repositories fill the new one. A hub does that itself for a hive whose store it finds
+corrupt as it opens it: the store goes under `removed/`, and the hive is made again, empty,
+under its id, name, and index. Machines that knew its later heads follow it back to its
+root, as they follow any hub that goes back (docs/protocol.md, "Network and failures"), and
+push what they have. The old store is deleted once it has been set aside a day and the new
+one has accepted a head, or the hive has been taken out of the hub.
 
 Duplicate merges can occur in two cases. One is two hubs running at once for the same hive
 (split brain), if nodes on both sides reconnect to one hub at the same moment; epochs make
@@ -563,10 +568,11 @@ A hub is meant for one person's machines, or a team that trusts each other: anyo
 reach it can read and write every hive on it. `musubi hub` serves a directory holding one
 subdirectory per hive, named by the hive's id, each with the hive's store (`canonical/`,
 `backend`, `git/` and `extras/` or `simple/`, `heads`, `blobs/`, `tmp/`), its `hive.toml`
-(name and backend), and its index. Removed hives move to `removed/`. Without `--dir` the
-hub serves `./musubi-hub`, or the current directory if it is a hub's, and takes a lock in
-the user's state directory, so that a second hub started the same way says where the first
-one is instead of starting; `--dir` runs more hubs on purpose.
+(name and backend), and its index. Removed hives move to `removed/`, as do corrupt stores
+(see "Moving the hub"). Without `--dir` the hub serves `./musubi-hub`, or the current
+directory if it is a hub's, and takes a lock in the user's state directory, so that a
+second hub started the same way says where the first one is instead of starting; `--dir`
+runs more hubs on purpose.
 
 The hub listens on a local socket that only its owner can reach, `run/hub.sock` in its
 directory, in a subdirectory only its owner can open (on Windows, a named pipe named after

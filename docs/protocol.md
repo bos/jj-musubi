@@ -164,7 +164,8 @@ therefore takes one round trip, and one that pushes takes two.
   outside `closure(head)`, and upload sessions.
 - musubi's hub persists nothing synchronously, though, so a power cut can lose the last
   heads it accepted: the hub goes back to one it accepted earlier, with its sequence
-  number. The safety properties below that rest on the hub's history only growing
+  number, or, when what it lost leaves a hive's store corrupt, to the root, making the hive
+  again, empty. The safety properties below that rest on the hub's history only growing
   (HubMonotone, KnownIsHubHistory, Locality, MergeOwnership) can then fail, and two nodes
   can merge the same heads. The rest hold still. So does liveness: nodes that knew the lost
   heads follow the hub back, by the rule in `Learn`, and once it stops going back they

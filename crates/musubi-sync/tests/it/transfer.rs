@@ -366,3 +366,43 @@ fn nodes_follow_a_hub_that_went_back() {
     assert_eq!(hive.members[a].core.known(), hive.members[b].core.known());
     assert_eq!(hive.members[a].core.known().0, hive.hub.store().head().0);
 }
+
+/// A hive whose store was corrupt, made again empty, fills from its machines' repositories
+/// as they sync, without their restarting: they follow it back to its root, then one pushes
+/// all it has, and one with nothing to push learns what the other pushed.
+#[test]
+fn a_remade_hive_fills_from_its_machines() {
+    let env = TestEnv::new();
+    let alpha = env.init_repo("alpha");
+    let beta = env.init_repo("beta");
+    let hub_dir = env.root().join("hub");
+    let mut hive = Hive::new(&hub_dir, Backend::Git).unwrap();
+    let a = join(&mut hive, &alpha);
+    let b = join(&mut hive, &beta);
+    for i in 0..3 {
+        alpha.write_file("f", &format!("{i}"));
+        alpha.jj(&["commit", "-m", &format!("before {i}")]);
+        hive.sync(a).unwrap();
+        hive.sync(b).unwrap();
+    }
+    // Torn by a power cut.
+    let heads = hub_dir.join("heads");
+    let mut torn = std::fs::read(&heads).unwrap();
+    torn.extend_from_slice(b"9 0123456789a");
+    std::fs::write(&heads, torn).unwrap();
+    // As the hub makes it again (`HubDir::remake`).
+    std::fs::rename(&hub_dir, env.root().join("corrupt")).unwrap();
+    musubi_hub::store::HubStore::init(&hub_dir, Backend::Git).unwrap();
+    hive.restart_hub().unwrap();
+    alpha.write_file("f", "after");
+    alpha.jj(&["commit", "-m", "after"]);
+    hive.sync(a).unwrap();
+    hive.sync(b).unwrap();
+    assert!(beta.jj(&["log", "-r", "all()"]).contains("after"));
+    assert_eq!(
+        hive.members[a].core.known(),
+        hive.members[b].core.known(),
+        "both know the head alpha pushed"
+    );
+    assert_eq!(hive.members[a].core.known().0, hive.hub.store().head().0);
+}

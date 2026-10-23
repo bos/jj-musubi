@@ -11,8 +11,8 @@
 //!   before any reply that depends on it. Its last line is the current head.
 //!
 //! None of it is synced to disk: a hub only gathers what its machines' repositories hold,
-//! so one that loses its state is deleted and made again (see "Moving the hub" in
-//! docs/design.md).
+//! so one that loses its state is made again, empty, and they fill it (see "Moving the hub"
+//! in docs/design.md).
 
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -112,8 +112,10 @@ impl HubStore {
 
     pub fn open(dir: &Path) -> Result<Self, StoreError> {
         let backend_path = dir.join("backend");
-        let name = fs::read_to_string(&backend_path).map_err(io_err(&backend_path))?;
-        let backend = Backend::parse(&name).ok_or(StoreError::UnknownBackend(name))?;
+        let name = fs::read(&backend_path).map_err(io_err(&backend_path))?;
+        let name = String::from_utf8_lossy(&name);
+        let backend =
+            Backend::parse(&name).ok_or_else(|| StoreError::UnknownBackend(name.into_owned()))?;
         let canonical = CanonicalStore::open(&dir.join("canonical"), backend.root_commit())?;
         let history = read_heads(dir)?;
         let mut store = Self {
@@ -325,11 +327,14 @@ impl HubStore {
     }
 }
 
-/// Reads the log of accepted heads. A line torn by a power cut makes it corrupt: the hub
+/// Reads the log of accepted heads. A line torn by a power cut makes it corrupt: the hive
 /// is made again rather than recovered (see "Moving the hub" in docs/design.md).
 fn read_heads(dir: &Path) -> Result<Vec<OperationId>, StoreError> {
     let path = dir.join("heads");
-    let text = fs::read_to_string(&path).map_err(io_err(&path))?;
+    let bytes = fs::read(&path).map_err(io_err(&path))?;
+    let Ok(text) = String::from_utf8(bytes) else {
+        return Err(StoreError::CorruptHead(path));
+    };
     let mut heads = vec![];
     for line in text.split_terminator('\n') {
         let parsed = line.split_once(' ').and_then(|(seq, id)| {
@@ -344,6 +349,32 @@ fn read_heads(dir: &Path) -> Result<Vec<OperationId>, StoreError> {
         return Err(StoreError::CorruptHead(path));
     }
     Ok(heads)
+}
+
+/// Whether `err`, opening a store, means it is corrupt, as a power cut can leave one, rather
+/// than that something failed for now, as when the hub is out of file descriptors.
+pub fn is_corrupt(err: &StoreError) -> bool {
+    match err {
+        StoreError::CorruptHead(_) | StoreError::UnknownBackend(_) => true,
+        StoreError::Io { source, .. } => source.kind() == io::ErrorKind::NotFound,
+        // An operation or view that won't decode; not one that couldn't be read.
+        StoreError::Canonical(err) => {
+            let mut source: Option<&(dyn std::error::Error + 'static)> = Some(err);
+            while let Some(err) = source {
+                if let Some(err) = err.downcast_ref::<io::Error>() {
+                    return matches!(
+                        err.kind(),
+                        io::ErrorKind::NotFound
+                            | io::ErrorKind::UnexpectedEof
+                            | io::ErrorKind::InvalidData
+                    );
+                }
+                source = err.source();
+            }
+            true
+        }
+        StoreError::Objects(_) => false,
+    }
 }
 
 fn append_head(dir: &Path, seq: u64, head: &OperationId) -> Result<(), StoreError> {

@@ -19,6 +19,8 @@ use std::sync::mpsc;
 use bytes::Bytes;
 use musubi_hub::hub_dir::HubDir;
 use musubi_hub::index::HiveIndex;
+use musubi_hub::store;
+use musubi_hub::store::StoreError;
 use musubi_transport::Message;
 use musubi_transport::Transport;
 
@@ -259,7 +261,21 @@ fn serve_one(
     let service = match service {
         Some(service) => service,
         None => {
-            let adapter = HubAdapter::open(dir)?;
+            let adapter = match HubAdapter::open(dir) {
+                Ok(adapter) => adapter,
+                Err(err) => {
+                    let Some(corrupt) = err
+                        .downcast_ref::<StoreError>()
+                        .filter(|err| store::is_corrupt(err))
+                    else {
+                        return Err(err);
+                    };
+                    hubs.lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .remake(id, corrupt)?;
+                    HubAdapter::open(dir)?
+                }
+            };
             tracing::info!("opened");
             service.insert(HubService::new(adapter, dir)?)
         }

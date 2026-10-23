@@ -362,3 +362,45 @@ async fn a_request_that_panics_the_hub_gets_an_error() {
         HubReply::Protocol(Reply::Fetched { .. })
     ));
 }
+
+/// A hive whose store a power cut left corrupt is made again, empty, when the hub next opens
+/// it, and its machine fills it: the corrupt store is set aside, not served.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_corrupt_hive_is_made_again() {
+    let env = TestEnv::new();
+    let dir = env.root().join("hub");
+    std::fs::create_dir(&dir).unwrap();
+    let network = MemoryNetwork::new(1, 1024 * 1024);
+    let server = HubServer::open(&dir).unwrap();
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(server.run(Arc::new(network.connect()), move || {
+        ready_tx.send(()).ok();
+    }));
+    ready_rx.await.unwrap();
+    let client: Arc<dyn Transport> = Arc::new(network.connect());
+    let alpha = env.init_repo("alpha");
+    alpha.write_file("a", "a");
+    alpha.jj(&["commit", "-m", "first"]);
+    let hive = join(&*client, creating(join_request(&alpha)))
+        .await
+        .unwrap()
+        .hive
+        .id;
+    // Torn before the hive's store was ever opened to serve it.
+    let heads = dir.join(&hive).join("heads");
+    let mut torn = std::fs::read(&heads).unwrap();
+    torn.extend_from_slice(b"1 0123456789a");
+    std::fs::write(&heads, torn).unwrap();
+    sync(&alpha, client.clone(), &hive).await;
+    // The root, and what alpha pushed.
+    let heads = std::fs::read_to_string(&heads).unwrap();
+    assert_eq!(heads.lines().count(), 2, "{heads}");
+    let aside: Vec<String> = std::fs::read_dir(dir.join("removed"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert!(
+        matches!(aside.as_slice(), [name] if name.starts_with(&hive) && name.ends_with(".corrupt")),
+        "{aside:?}"
+    );
+}

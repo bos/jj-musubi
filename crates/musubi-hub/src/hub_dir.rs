@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fs;
+use std::io::BufRead as _;
 use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -27,6 +28,7 @@ use crate::names;
 use crate::names::RemoteUrl;
 use crate::store;
 use crate::store::HubStore;
+use crate::store::StoreError;
 
 const HIVE_FILE: &str = "hive.toml";
 
@@ -92,6 +94,10 @@ pub struct Joined {
 /// repository has pushed it: long enough for its first sync to start.
 const PENDING_LIFETIME: Duration = Duration::from_secs(120);
 
+/// How long a hive's corrupt store, set aside when the hive was made again, stays once the
+/// new one has accepted a head: long enough for someone curious to look at it.
+const CORRUPT_LIFETIME: Duration = Duration::from_secs(24 * 3600);
+
 struct Hive {
     dir: PathBuf,
     meta: HiveMeta,
@@ -114,6 +120,17 @@ pub struct HubDir {
     dir: PathBuf,
     hives: BTreeMap<String, Hive>,
     pending_lifetime: Duration,
+    /// Corrupt stores set aside under `removed/` and not deleted yet (see
+    /// [`Self::sweep_corrupt`]).
+    corrupt: Vec<SetAside>,
+}
+
+/// A hive's corrupt store, set aside when the hive was made again.
+struct SetAside {
+    id: String,
+    path: PathBuf,
+    /// When it was set aside, in seconds since the epoch.
+    stamp: u64,
 }
 
 /// Errors that are the requester's to fix, worded for them.
@@ -126,6 +143,7 @@ fn refusal(err: impl std::fmt::Display) -> Refusal {
 impl HubDir {
     /// Opens the hub directory `dir`, which must exist, rebuilding any missing index.
     pub fn open(dir: &Path) -> anyhow::Result<Self> {
+        finish_remakes(dir)?;
         let mut hives = BTreeMap::new();
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
@@ -147,9 +165,20 @@ impl HubDir {
             let index = match HiveIndex::load(&hive_dir) {
                 Some(index) => index,
                 None => {
-                    let index = HiveIndex::rebuild(&HubStore::open(&hive_dir)?)?;
-                    index.save(&hive_dir)?;
-                    index
+                    match HubStore::open(&hive_dir) {
+                        Ok(store) => {
+                            let index = HiveIndex::rebuild(&store)?;
+                            index.save(&hive_dir)?;
+                            index
+                        }
+                        // Found under `removed/` below, with the stores set aside before.
+                        Err(err) if store::is_corrupt(&err) => {
+                            let index = HiveIndex::default();
+                            remake(dir, &id, &hive_dir, &meta, &index, &err)?;
+                            index
+                        }
+                        Err(err) => return Err(err.into()),
+                    }
                 }
             };
             hives.insert(
@@ -162,11 +191,54 @@ impl HubDir {
                 },
             );
         }
-        Ok(Self {
+        let mut hubs = Self {
             dir: dir.to_owned(),
             hives,
             pending_lifetime: PENDING_LIFETIME,
-        })
+            corrupt: set_aside(dir),
+        };
+        hubs.sweep_corrupt();
+        Ok(hubs)
+    }
+
+    /// Makes hive `id`, whose store `err` found corrupt, again: empty, for its machines to
+    /// fill, under its name and with the index joins match it by. The hive goes back to its
+    /// root, and machines that knew its later heads follow it (docs/protocol.md, "Network
+    /// and failures").
+    pub fn remake(&mut self, id: &str, err: &StoreError) -> anyhow::Result<()> {
+        let hive = self
+            .hives
+            .get(id)
+            .ok_or_else(|| anyhow::anyhow!("no hive {id}"))?;
+        let set_aside = remake(&self.dir, id, &hive.dir, &hive.meta, &hive.index, err)?;
+        self.corrupt.push(set_aside);
+        Ok(())
+    }
+
+    /// Deletes each corrupt store [`Self::remake`] set aside a day after it did, once the hive
+    /// made again has accepted a head, so that its machines have filled it, or is gone. In
+    /// the background: a store can be large, and the caller holds the hub.
+    fn sweep_corrupt(&mut self) {
+        let now = now();
+        let hives = &self.hives;
+        self.corrupt.retain(|SetAside { id, path, stamp }| {
+            if now.saturating_sub(*stamp) < CORRUPT_LIFETIME.as_secs() {
+                return true;
+            }
+            // Accepted a head: a line after the root's.
+            let replaced = hives.get(id).is_none_or(|hive| {
+                fs::File::open(hive.dir.join("heads"))
+                    .is_ok_and(|heads| std::io::BufReader::new(heads).lines().nth(1).is_some())
+            });
+            if replaced {
+                let (id, path) = (id.clone(), path.clone());
+                std::thread::spawn(move || match fs::remove_dir_all(&path) {
+                    Ok(()) => tracing::info!("deleted hive {id}'s corrupt store"),
+                    Err(err) => tracing::warn!("deleting {}: {err}", path.display()),
+                });
+            }
+            !replaced
+        });
     }
 
     /// How long a join counts for matching before its first push, for tests.
@@ -294,9 +366,7 @@ impl HubDir {
         let info = self.info(id).ok_or_else(|| format!("no hive {id}"))?;
         let removed = self.dir.join("removed");
         fs::create_dir_all(&removed).map_err(refusal)?;
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
+        let stamp = now();
         let hive = &self.hives[id];
         fs::rename(&hive.dir, removed.join(format!("{id}-{stamp}"))).map_err(refusal)?;
         self.hives.remove(id);
@@ -324,6 +394,7 @@ impl HubDir {
         if changed {
             hive.index.save(&hive.dir)?;
         }
+        self.sweep_corrupt();
         Ok(())
     }
 
@@ -449,6 +520,101 @@ fn has_any(backend: Backend, dir: &Path, commits: &[CommitId]) -> anyhow::Result
     Ok(missing.len() < commits.len())
 }
 
+/// Makes the hive `id` in `hive_dir`, of the hub in `hub_dir`, again: its store, which
+/// `err` found corrupt, goes under `removed/` until [`HubDir::sweep_corrupt`] deletes it, and
+/// a new, empty one takes its place, with the hive's `meta` and `index`. The new one is made
+/// whole beside it first, so that a failure leaves the hive as it was, to be made again
+/// next time, and a crash between the two renames leaves it for [`finish_remakes`].
+fn remake(
+    hub_dir: &Path,
+    id: &str,
+    hive_dir: &Path,
+    meta: &HiveMeta,
+    index: &HiveIndex,
+    err: &StoreError,
+) -> anyhow::Result<SetAside> {
+    let removed = hub_dir.join("removed");
+    fs::create_dir_all(&removed)?;
+    let stamp = now();
+    let aside = removed.join(format!("{id}-{stamp}.corrupt"));
+    let staging = remade(hub_dir, id);
+    if staging.exists() {
+        fs::remove_dir_all(&staging)?;
+    }
+    HubStore::init(&staging, meta.backend)?;
+    write_meta(&staging, meta)?;
+    index.save(&staging)?;
+    fs::rename(hive_dir, &aside)?;
+    if let Err(err) = fs::rename(&staging, hive_dir) {
+        fs::rename(&aside, hive_dir).ok();
+        return Err(err.into());
+    }
+    tracing::warn!(
+        "hive {} ({id}) was corrupt ({err}), and is made again, empty, for its machines to \
+         fill; the corrupt store is in {}, until a day from now once they have",
+        meta.name,
+        aside.display()
+    );
+    Ok(SetAside {
+        id: id.to_owned(),
+        path: aside,
+        stamp,
+    })
+}
+
+/// Where [`remake`] makes hive `id` of the hub in `hub_dir` again: not a hive's name, which
+/// is its id.
+fn remade(hub_dir: &Path, id: &str) -> PathBuf {
+    hub_dir.join(format!(".{id}.remade"))
+}
+
+/// Finishes what [`remake`] began in the hub in `dir` before a crash: puts a hive made
+/// again in place of the store it renamed away, and deletes one it never got as far as.
+fn finish_remakes(dir: &Path) -> anyhow::Result<()> {
+    for entry in fs::read_dir(dir)?.flatten() {
+        let name = entry.file_name();
+        let Some(id) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix('.')?.strip_suffix(".remade"))
+        else {
+            continue;
+        };
+        let hive_dir = dir.join(id);
+        if hive_dir.exists() {
+            fs::remove_dir_all(entry.path())?;
+        } else {
+            fs::rename(entry.path(), hive_dir)?;
+        }
+    }
+    Ok(())
+}
+
+/// Now, in seconds since the epoch.
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// The corrupt stores set aside under `removed/` in the hub in `dir`.
+fn set_aside(dir: &Path) -> Vec<SetAside> {
+    let Ok(entries) = fs::read_dir(dir.join("removed")) else {
+        return vec![];
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let (id, stamp) = name.strip_suffix(".corrupt")?.rsplit_once('-')?;
+            Some(SetAside {
+                id: id.to_owned(),
+                path: entry.path(),
+                stamp: stamp.parse().ok()?,
+            })
+        })
+        .collect()
+}
+
 fn write_meta(dir: &Path, meta: &HiveMeta) -> anyhow::Result<()> {
     files::replace(&dir.join(HIVE_FILE), toml::to_string(meta)?.as_bytes())?;
     Ok(())
@@ -553,5 +719,123 @@ mod tests {
         };
         let joined = hubs.join(&third).unwrap();
         assert_eq!(joined.hive.machines, ["mac-0000", "mac-1111", "mac-2222"]);
+    }
+
+    /// A hive whose store is corrupt is made again, empty, from what the hub knows of it,
+    /// though what is corrupt is the store's own record of its backend.
+    #[test]
+    fn a_hive_is_made_again_whatever_is_corrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut hubs = HubDir::open(dir.path()).unwrap();
+        let id = hubs
+            .join(&creating(request("alpha", "https://example.com/a")))
+            .unwrap()
+            .hive
+            .id;
+        let hive_dir = dir.path().join(&id);
+        fs::write(hive_dir.join("backend"), b"").unwrap();
+        let Err(err) = HubStore::open(&hive_dir) else {
+            panic!("opened a store with no backend");
+        };
+        assert!(store::is_corrupt(&err), "{err}");
+        hubs.remake(&id, &err).unwrap();
+        let store = HubStore::open(&hive_dir).unwrap();
+        assert_eq!(store.backend(), Backend::Git);
+        assert_eq!(store.head().0, 0);
+        assert_eq!(hubs.info(&id).unwrap().name, "a");
+    }
+
+    /// A hive whose store is corrupt and whose index needs rebuilding no longer keeps the
+    /// hub from starting: it is made again as the hub starts.
+    #[test]
+    fn a_corrupt_hive_is_made_again_as_the_hub_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = HubDir::open(dir.path())
+            .unwrap()
+            .join(&creating(request("alpha", "https://example.com/a")))
+            .unwrap()
+            .hive
+            .id;
+        let hive_dir = dir.path().join(&id);
+        fs::remove_file(hive_dir.join("index.json")).unwrap();
+        let mut heads = fs::read(hive_dir.join("heads")).unwrap();
+        heads.extend_from_slice(b"1 0123");
+        fs::write(hive_dir.join("heads"), heads).unwrap();
+        let hubs = HubDir::open(dir.path()).unwrap();
+        assert_eq!(hubs.info(&id).unwrap().name, "a");
+        assert_eq!(HubStore::open(&hive_dir).unwrap().head().0, 0);
+        assert_eq!(set_aside(dir.path()).len(), 1);
+    }
+
+    /// A remake a crash interrupted between its renames is finished as the hub starts, and
+    /// one interrupted before them is undone.
+    #[test]
+    fn remakes_a_crash_interrupted_are_finished() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut hubs = HubDir::open(dir.path()).unwrap();
+        let mut join = |name: &str| {
+            hubs.join(&creating(request(
+                name,
+                &format!("https://example.com/{name}"),
+            )))
+            .unwrap()
+            .hive
+            .id
+        };
+        let (renamed, begun) = (join("alpha"), join("beta"));
+        fs::rename(dir.path().join(&renamed), remade(dir.path(), &renamed)).unwrap();
+        fs::create_dir(remade(dir.path(), &begun)).unwrap();
+        let hubs = HubDir::open(dir.path()).unwrap();
+        for id in [&renamed, &begun] {
+            assert!(hubs.info(id).is_some(), "lost {id}");
+            assert!(!remade(dir.path(), id).exists());
+        }
+    }
+
+    /// A store set aside as corrupt goes a day after it was, once the hive made again has
+    /// accepted a head: not while the hive is still empty, nor sooner.
+    #[test]
+    fn corrupt_stores_go_a_day_after_they_are_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = HubDir::open(dir.path())
+            .unwrap()
+            .join(&creating(request("alpha", "https://example.com/a")))
+            .unwrap()
+            .hive
+            .id;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let aside = |age: u64| {
+            dir.path()
+                .join("removed")
+                .join(format!("{id}-{}.corrupt", now - age))
+        };
+        let (new, old) = (aside(60), aside(CORRUPT_LIFETIME.as_secs() + 60));
+        for aside in [&new, &old] {
+            fs::create_dir_all(aside).unwrap();
+        }
+        // As a hub started since finds them.
+        let mut hubs = HubDir::open(dir.path()).unwrap();
+        assert!(
+            new.exists() && old.exists(),
+            "swept before the hive was filled"
+        );
+        let heads = dir.path().join(&id).join("heads");
+        let filled = format!(
+            "{}1 {}\n",
+            fs::read_to_string(&heads).unwrap(),
+            "ab".repeat(64)
+        );
+        fs::write(&heads, filled).unwrap();
+        hubs.sweep_corrupt();
+        // Deleted in the background.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while old.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(new.exists(), "swept within a day");
+        assert!(!old.exists(), "kept a day after the hive was filled");
     }
 }

@@ -169,6 +169,7 @@ upgrading.
 - [docs/conformance.md](docs/conformance.md): how the Rust code is checked against the Lean
   model.
 - [docs/testing.md](docs/testing.md): the test layers.
+- [docs/efficient-tests.md](docs/efficient-tests.md): how to keep tests fast, and why.
 
 ## Development
 

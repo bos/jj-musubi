@@ -2,7 +2,8 @@
 
 Each layer of testing guards against a different risk, so a test belongs at the narrowest
 layer that can catch its bug. Several layers use Hegel, the Rust port of Python's Hypothesis,
-for property-based and stateful tests.
+for property-based and stateful tests. [efficient-tests.md](efficient-tests.md) says how to
+keep a test cheap.
 
 | Layer | Where | Guards against | Cost |
 | --- | --- | --- | --- |

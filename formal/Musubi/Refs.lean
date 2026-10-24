@@ -30,7 +30,7 @@ For a remote bookmark `x@origin`, which is shared, the record of `refs/remotes/o
   that into the bookmark tracking it (`remote_reset_without_export`), with no `git` command
   having run. jj skips the export of a conflicted remote bookmark, so musubi writes one of
   its sides to `.git` itself, the same on every machine (`export_conflicted_remote_bookmarks`
-  in `node.rs`); the import then resolves the conflict to that side. A ref update that fails
+  in `node/git.rs`); the import then resolves the conflict to that side. A ref update that fails
   for another reason still ends this way.
 
 Only one ref and a linear op history are modeled. Concurrent op heads appear only in
@@ -98,12 +98,14 @@ structure Machine (T : Type) where
 /-- jj's export of a local bookmark (`export_refs`). If the bookmark matches `git_refs` there
 is nothing to write, but `x@git` catches up with a resolved bookmark. Otherwise the update of
 `refs/heads/x` is a compare-and-swap against `git_refs`, refused for a conflicted bookmark,
-the root commit, or a conflicted record. A failed update changes nothing, so it is the same
-as not exporting. -/
+the root commit, or a conflicted record. jj counts it a success, too, if `.git` already has
+the bookmark's value (`move_git_ref`, `create_git_ref` and `delete_git_ref` in jj-lib), which
+it can if git moved the ref there since the last import, and records it as exported. A
+failed update changes nothing, so it is the same as not exporting. -/
 def exportLocal (s : Machine T) : Machine T :=
   if s.v.L = s.v.K then
     if resolved s.v.L then { s with v := { s.v with R := s.v.L } } else s
-  else if writable s.v.L = true ∧ resolved s.v.K = true ∧ s.G = s.v.K then
+  else if writable s.v.L = true ∧ resolved s.v.K = true ∧ (s.G = s.v.K ∨ s.G = s.v.L) then
     { s with v := { s.v with R := s.v.L, K := s.v.L }, G := s.v.L }
   else s
 
@@ -139,7 +141,7 @@ theorem exportLocal_inv {s : Machine T} (hs : LInv s) : LInv (exportLocal s) := 
     · rw [ite_eq_right h2]
       exact hs
   · rw [ite_eq_right h1]
-    by_cases h2 : writable s.v.L = true ∧ resolved s.v.K = true ∧ s.G = s.v.K
+    by_cases h2 : writable s.v.L = true ∧ resolved s.v.K = true ∧ (s.G = s.v.K ∨ s.G = s.v.L)
     · rw [ite_eq_left h2]
       exact fun _ => ⟨rfl, rfl⟩
     · rw [ite_eq_right h2]
@@ -218,9 +220,11 @@ theorem merge_in_sync {b f₁ f₂ g : T}
 
 /-- jj's export of a remote bookmark: a compare-and-swap of `refs/remotes/origin/x` from
 `git_refs` to `x@origin`, refused for a conflicted remote bookmark, the root commit, or a
-conflicted record. jj records no `@git` copy of a remote bookmark. -/
+conflicted record, and a success if `.git` already has `x@origin`'s value, as for a local
+bookmark. jj records no `@git` copy of a remote bookmark. -/
 def exportRemote (s : Machine T) : Machine T :=
-  if s.v.R ≠ s.v.K ∧ writable s.v.R = true ∧ resolved s.v.K = true ∧ s.G = s.v.K then
+  if s.v.R ≠ s.v.K ∧ writable s.v.R = true ∧ resolved s.v.K = true ∧
+      (s.G = s.v.K ∨ s.G = s.v.R) then
     { s with v := { s.v with K := s.v.R }, G := s.v.R }
   else s
 
@@ -251,7 +255,8 @@ def RInv (s : Machine T) : Prop :=
 
 theorem exportRemote_inv {s : Machine T} (hs : RInv s) : RInv (exportRemote s) := by
   unfold exportRemote
-  by_cases h : s.v.R ≠ s.v.K ∧ writable s.v.R = true ∧ resolved s.v.K = true ∧ s.G = s.v.K
+  by_cases h : s.v.R ≠ s.v.K ∧ writable s.v.R = true ∧ resolved s.v.K = true ∧
+      (s.G = s.v.K ∨ s.G = s.v.R)
   · rw [ite_eq_left h]
     exact ⟨writable_resolved _ h.2.1, fun _ => ⟨rfl, rfl⟩⟩
   · rw [ite_eq_right h]
@@ -262,7 +267,7 @@ theorem advance_inv {s : Machine T} {l c : T} (hs : RInv s) (hc : c = s.G ∨ wr
   obtain ⟨hg, hsync⟩ := hs
   unfold exportRemote realizeRemote
   simp only
-  by_cases h : c ≠ s.v.K ∧ writable c = true ∧ resolved s.v.K = true ∧ s.G = s.v.K
+  by_cases h : c ≠ s.v.K ∧ writable c = true ∧ resolved s.v.K = true ∧ (s.G = s.v.K ∨ s.G = c)
   · rw [ite_eq_left h]
     exact ⟨writable_resolved _ h.2.1, fun _ => ⟨rfl, rfl⟩⟩
   · rw [ite_eq_right h]
@@ -274,7 +279,7 @@ theorem advance_inv {s : Machine T} {l c : T} (hs : RInv s) (hc : c = s.G ∨ wr
     · exact hcK.trans hK
     · rcases hc with hc | hw
       · exact hc
-      · exact absurd ⟨hcK, hw, hK ▸ hg, hK.symm⟩ h
+      · exact absurd ⟨hcK, hw, hK ▸ hg, Or.inl hK.symm⟩ h
 
 theorem RStep.inv {s t : Machine T} (h : RStep s t) (hs : RInv s) : RInv t := by
   cases h with

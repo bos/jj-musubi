@@ -69,3 +69,23 @@ way, but run one at a time: each measures time.
 `just bench-smoke` runs every script once, as briefly as each allows, against the small
 repository and a debug build, in a directory of its own; CI runs it on Linux, so that the
 scripts keep up with the CLI. It measures nothing.
+
+## The canonical store
+
+`crates/musubi-jj/examples/canonical.rs` measures the canonical store alone, without
+machines, a hub or the network: how it keeps up as the operation log grows long, as busy
+agents make it. It builds a store of `OPS` operations, each a snapshot of a working copy in
+a repository with 400 heads and 200 bookmarks, then times opening the store, walking
+every operation's parents as a hub does on opening it, and what a join does: exporting
+every operation, working out which commits they need, and importing them into an empty
+store. It also prints the log's size, and on the run that builds the store, one view's.
+
+```sh
+cargo run --release -p musubi-jj --example canonical -- /dev/shm/canonical 200000
+cargo run --release -p musubi-jj --example canonical -- /dev/shm/canonical 200000 --import-only
+```
+
+A store the directory holds already, built to the end, is used as it is, whatever `OPS`
+says, so a second run skips building it.
+`--import-only` times only the import, of the bundle the last run exported, for profiling
+it, as under `perf record`.

@@ -22,7 +22,7 @@ Each document answers a different question:
   correspond to the protocol?
 - [Releasing](releasing.md): How is a release made?
 - [Benchmarks](../../bench/README.md): How does musubi compare with git and jj's own fetch and
-  push on the wire?
+  push on the wire? How does the canonical store keep up with a long operation log?
 
 Keep each rule in the document that owns it, and link to it from others. These documents
 describe the current system; jj's history records how it got here.

@@ -2,6 +2,7 @@
 //! everything the crate depends on, again after every change to it.
 
 mod faults;
+mod gc;
 mod network;
 mod serve;
 mod server;

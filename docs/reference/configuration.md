@@ -99,7 +99,7 @@ inherits that command's `RUST_LOG`, which takes the setting's place.
 | Path | Holds |
 | --- | --- |
 | State directory: `~/.local/state/musubi` (`%APPDATA%\musubi`) | `state.toml`, which lists the repositories the daemon serves, and the hub this machine saved as its default; `daemon.log`; `hub_key`, the machine's ssh key for reaching hubs; `ssh-agent`, a link to the latest ssh agent, for the daemon; locks. |
-| `.jj/repo/musubi/` in each repository | The repository's membership (`hive.toml`), this machine's identity in it (`machine`), its last sync (`status.json`), and musubi's own record of the hive's operations. Removing it, or copying it into another repository, confuses musubi: use `musubi leave` and `musubi clone`. |
+| `.jj/repo/musubi/` in each repository | The repository's membership (`hive.toml`), this machine's identity in it (`machine`), its last sync (`status.json`), when the daemon last cleaned up after jj in it (`gc`, and `gc.lock`, which it locks meanwhile), and musubi's own record of the hive's operations. Removing it, or copying it into another repository, confuses musubi: use `musubi leave` and `musubi clone`. |
 
 The daemon's control socket is `$XDG_RUNTIME_DIR/musubi/daemon.sock` on Linux,
 `$TMPDIR/musubi/daemon.sock` on macOS, and the named pipe `\\.\pipe\musubi-<user>` on

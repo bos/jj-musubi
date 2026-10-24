@@ -143,6 +143,15 @@ impl Hive {
         anyhow::bail!("node {node} did not settle")
     }
 
+    /// Polls the hub, as a sync starts by doing, and takes in what it sends, staging the
+    /// operations and objects it fetches, without realizing them.
+    pub fn fetch(&mut self, node: usize) -> anyhow::Result<()> {
+        let member = &mut self.members[node];
+        member.adapter.before_sync()?;
+        let poll = member.core.poll(&member.adapter)?;
+        self.request(node, poll)
+    }
+
     /// Has the node record its settings changes, as a sync starts by doing, without reaching
     /// the hub, as a machine that is offline does. Returns whether it recorded one.
     pub fn record_settings(&mut self, node: usize) -> anyhow::Result<bool> {

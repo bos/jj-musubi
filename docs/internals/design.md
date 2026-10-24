@@ -508,6 +508,22 @@ might delete, which Windows forbids.
 - On battery, musubi defers that gc until an import on mains power. It asks `pmset` on
   macOS, and on Linux defers when no mains or USB supply is online and the machine's own
   battery is discharging. Elsewhere it can't tell, and doesn't defer.
+- On a machine, the daemon also cleans up what jj's own gc (`jj util gc`) would, short of
+  pruning git objects (`crates/musubi-jj/src/gc.rs`). jj leaves behind segments of its
+  extras table that newer ones replaced, and a keep ref for every commit it wrote or
+  imported: thousands a week in a busy repository. The daemon removes those, and the
+  operations no op head reaches, once two weeks old, as jj's gc does, leaving keep refs
+  only for the heads of jj's index, which has every commit a reachable operation refers to,
+  its view's and the predecessors it records alike. It deletes no object: that the keep
+  refs it removes held stays, kept by the gc above, and nothing the protocol needs depends
+  on what it removes. A `git gc` that does prune, as the user's git or `jj util gc` may run,
+  can then remove objects fetched for operations not yet realized, which nothing refers to
+  yet; the node fetches them again before realizing the operations. It runs after a sync
+  that worked, on a thread of its own, one repository at a time, and only once there is
+  enough to clean up (over 1,000 extras files or 10,000 keep refs), a week after it last ran,
+  even if it failed partway, with one op head, not on battery, and not while another process runs it. The
+  hub never runs it: there, what git can't reach from the head is history the hive still
+  needs.
 - A node reopens the repository before it imports objects, since jj-lib's git backend
   can't read packs added after it opened it.
 - jj commits carry `change-id` and conflict headers by default, so for nearly every commit the
@@ -679,7 +695,8 @@ Replicating an op abandon, as a record that the new history supersedes the old f
 machine to apply, is not built yet.
 
 `jj util gc` only removes data that is no longer reachable locally, so it needs no special
-handling. Neither the hub nor the nodes ever delete an operation or an object.
+handling. Neither the hub nor the nodes ever delete an object, and the daemon's own
+cleanup on a machine (see "Objects") deletes only operations that no op head reaches.
 
 ## Transport
 

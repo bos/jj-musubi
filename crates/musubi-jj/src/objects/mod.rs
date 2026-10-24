@@ -26,6 +26,7 @@ mod simple;
 pub use git::GitObjects;
 pub use git::GitStore;
 pub use git::Incompleteness;
+pub use git::KEEP_REFS;
 pub use power::on_battery;
 pub use simple::SimpleStore;
 

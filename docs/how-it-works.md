@@ -74,6 +74,11 @@ musubi never writes to working-copy files. It changes only what `jj` itself keep
 operation log, commits, and, in a colocated repository, the `.git` refs that track bookmarks,
 and the git remotes and repo config that the hive shares.
 
+Since every machine keeps every operation and commit of its hive, the daemon also cleans up
+what `jj util gc` would, once enough has built up, at most once a week, and not on battery:
+operations nothing reachable from the current one needs, and files jj no longer reads,
+nothing less than two weeks old. Unlike `jj util gc`, it deletes no git object.
+
 When another machine rewrites the commit your working copy is on, by rebasing its parent,
 say, jj treats your working copy as stale, just as it would after a rebase in another
 workspace on the same machine. Your next `jj` command stops and suggests

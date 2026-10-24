@@ -6,6 +6,10 @@ change the protocol, so run the same release on the hub and every machine (see
 
 ## Unreleased
 
+- On each machine, the daemon cleans up what `jj util gc` would, short of deleting git
+  objects, so that a busy hive's copies stop growing with files jj no longer reads: replaced
+  extras segments, keep refs beyond the heads, and operations nothing reachable needs, once
+  two weeks old. It runs once enough has built up, at most once a week, and not on battery.
 - The hub's store of each hive, and each machine's copy of the shared history
   (`.jj/repo/musubi/canonical`), are now one log, with views kept as deltas: an operation
   and its view take about a kilobyte, where they took two files and the view's full size.

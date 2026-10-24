@@ -12,6 +12,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::PoisonError;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -54,6 +56,9 @@ const POLL_INTERVAL: Duration = Duration::from_secs(30);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 const REPORT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How often a repository that syncs is checked for whether gc is due, which counts its
+/// cruft, and on macOS starts a process to ask whether the machine is on battery.
+const GC_CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 /// A repository's replication state, written after every sync attempt, by the daemon or by
 /// `musubi sync` without one.
@@ -470,6 +475,7 @@ async fn serve_async(
     let mut woke_early = false;
     // Why the hub was out of reach when last asked, to log once rather than at every retry.
     let mut unreachable: Option<String> = None;
+    let mut gc_checked: Option<std::time::Instant> = None;
     tracing::info!("serving in hive {}", hive.display_name());
     loop {
         // After a failure, try again once the backoff has passed, rather than waiting for
@@ -587,6 +593,10 @@ async fn serve_async(
                 backoff = Duration::from_millis(500);
                 retry = false;
                 woke_early = false;
+                if gc_checked.is_none_or(|checked| checked.elapsed() >= GC_CHECK_INTERVAL) {
+                    gc_checked = Some(std::time::Instant::now());
+                    collect_garbage(&located);
+                }
             }
             Err(err) => {
                 tracing::warn!("{err:#}");
@@ -614,6 +624,45 @@ async fn serve_async(
                 backoff = (backoff * 2).min(MAX_BACKOFF);
             }
         }
+    }
+}
+
+/// Whether a gc runs, in any repository the daemon serves: one at a time is enough.
+static COLLECTING: AtomicBool = AtomicBool::new(false);
+
+/// Starts a gc in the repository on a thread of its own, if it is due (see `musubi_jj::gc`)
+/// and none is running, so that syncs go on meanwhile.
+fn collect_garbage(located: &Located) {
+    if !musubi_jj::gc::due(&located.repo_path, SystemTime::now())
+        || COLLECTING.swap(true, Ordering::AcqRel)
+    {
+        return;
+    }
+    let (workspace_root, repo_path) = (located.workspace_root.clone(), located.repo_path.clone());
+    let spawned = std::thread::Builder::new()
+        .name(format!("gc {}", repo_path.display()))
+        .spawn(move || {
+            /// Lets the next gc start once this one ends, however it ends.
+            struct Done;
+            impl Drop for Done {
+                fn drop(&mut self) {
+                    COLLECTING.store(false, Ordering::Release);
+                }
+            }
+            let _done = Done;
+            let collected = crate::settings::load(&workspace_root, &repo_path)
+                .and_then(|settings| Ok(musubi_jj::gc::collect_if_due(&repo_path, &settings)?));
+            match collected {
+                Ok(true) => tracing::info!("collected garbage in {}", repo_path.display()),
+                Ok(false) => {}
+                Err(err) => {
+                    tracing::warn!("collecting garbage in {}: {err:#}", repo_path.display());
+                }
+            }
+        });
+    if let Err(err) = spawned {
+        COLLECTING.store(false, Ordering::Release);
+        tracing::warn!("starting gc: {err}");
     }
 }
 

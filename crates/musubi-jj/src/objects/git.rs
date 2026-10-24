@@ -1,7 +1,9 @@
 //! The git backend's objects: packfiles built and indexed by the `git` binary, which jj
 //! already requires for fetch and push, plus the backend extras jj cannot derive from them.
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::fs;
 use std::io;
@@ -11,6 +13,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::process::Stdio;
 use std::thread;
+use std::time::SystemTime;
 
 use jj_lib::backend::CommitId;
 use jj_lib::git_backend::CHANGE_ID_COMMIT_HEADER;
@@ -39,6 +42,9 @@ use crate::git_command::run_err;
 /// Where a hub's repository names the commits its head requires (see
 /// [`GitObjects::mark_head`]).
 const HEAD_REFS: &str = "refs/musubi/head/";
+
+/// Where jj keeps a ref to each commit it writes or imports, so that git's gc keeps it.
+pub const KEEP_REFS: &str = "refs/jj/keep/";
 
 /// git's defaults for `gc.auto` and `gc.autoPackLimit`.
 const GC_AUTO: i64 = 6700;
@@ -528,6 +534,76 @@ impl GitObjects {
         }
     }
 
+    /// Leaves jj's keep refs as jj's own gc does (`recreate_no_gc_refs` in jj-lib's git
+    /// backend): one for each of `heads`, and of the rest only those a loose ref written
+    /// after `keep_newer` holds, which a jj command may be writing meanwhile. Unlike jj's
+    /// gc, nothing is pruned afterwards: the objects that the removed refs held stay, as
+    /// [`Self::maintain`] keeps every object. Returns how many refs it removed.
+    pub fn rebuild_keep_refs(
+        &self,
+        heads: &HashSet<CommitId>,
+        keep_newer: SystemTime,
+    ) -> Result<usize, ObjectError> {
+        let repo = self.gix()?;
+        let mut kept = HashSet::new();
+        // Each ref to remove, with what it holds.
+        let mut removed: BTreeMap<String, String> = BTreeMap::new();
+        for reference in repo
+            .references()
+            .map_err(gix_err)?
+            .prefixed(KEEP_REFS)
+            .map_err(gix_err)?
+        {
+            let reference = reference.map_err(gix_err)?;
+            let name = reference.name().as_bstr().to_string();
+            let Some(id) = reference.target().try_id().map(|id| id.to_owned()) else {
+                continue;
+            };
+            let id = CommitId::from_bytes(id.as_bytes());
+            let named = name.strip_prefix(KEEP_REFS) == Some(id.hex().as_str());
+            let new = fs::metadata(self.git_dir().join(&name))
+                .and_then(|meta| meta.modified())
+                .is_ok_and(|at| at > keep_newer);
+            if named && (new || heads.contains(&id)) {
+                kept.insert(id);
+            } else if !new {
+                removed.insert(name, id.hex());
+            }
+        }
+        let mut input = String::new();
+        for head in heads.difference(&kept) {
+            let name = format!("{KEEP_REFS}{}", head.hex());
+            // A ref of that name holding something else is replaced rather than removed.
+            match removed.remove(&name) {
+                Some(old) => writeln!(input, "update {name} {} {old}", head.hex()),
+                None => writeln!(input, "update {name} {}", head.hex()),
+            }
+            .expect("writing to a String");
+        }
+        for (name, old) in &removed {
+            writeln!(input, "delete {name} {old}").expect("writing to a String");
+        }
+        let count = removed.len();
+        if !input.is_empty() {
+            self.run(&["update-ref", "--stdin"], Some(input.into_bytes()))?;
+        }
+        Ok(count)
+    }
+
+    /// Removes the segments of jj's extras table, in `store_path`'s `extra`, that newer ones
+    /// replaced, as jj's gc does, if written before `keep_newer`.
+    pub fn collect_extras(
+        &self,
+        store_path: &Path,
+        keep_newer: SystemTime,
+    ) -> Result<(), ObjectError> {
+        let table_store = extras_table_store(store_path, &self.gix()?);
+        let head = table_store.get_head()?;
+        table_store
+            .gc(&head, keep_newer)
+            .map_err(|err| ObjectError::Io(err.source))
+    }
+
     fn command(&self, args: &[&str]) -> Command {
         self.repo.command(args)
     }
@@ -852,6 +928,61 @@ mod tests {
                 .unwrap();
             assert!(output.status.success(), "git {args:?}: {output:?}");
             String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        }
+    }
+
+    /// Keep refs as jj's gc leaves them: one for each head, made if missing; of the rest,
+    /// only those whose loose ref is new; a ref named for one commit but holding another
+    /// counts as not a head's, and one with a head's name holding something else is
+    /// replaced. No object goes.
+    #[test]
+    fn keep_refs_are_left_as_jjs_gc_leaves_them() {
+        let dir = musubi_testutil::tempdir();
+        let run = init(dir.path());
+        run(&["init", "--quiet", "--initial-branch=main"]);
+        let commit = |message: &str| {
+            run(&["commit", "--quiet", "--allow-empty", "-m", message]);
+            run(&["rev-parse", "HEAD"])
+        };
+        let [head, old, new, misnamed, missing] =
+            ["head", "old", "new", "misnamed", "missing"].map(commit);
+        let keep = |name: &str, target: &str| {
+            run(&["update-ref", &format!("{KEEP_REFS}{name}"), target]);
+        };
+        keep(&head, &head);
+        keep(&old, &old);
+        keep(&new, &new);
+        keep(&misnamed, &old);
+        // A ref of a head's name, holding something else.
+        keep(&missing, &old);
+        let git_dir = dir.path().join(".git");
+        let cutoff = SystemTime::now() - std::time::Duration::from_secs(60);
+        for name in [&head, &old, &misnamed, &missing] {
+            fs::File::options()
+                .write(true)
+                .open(git_dir.join(format!("{KEEP_REFS}{name}")))
+                .unwrap()
+                .set_modified(cutoff - std::time::Duration::from_secs(60))
+                .unwrap();
+        }
+        let objects = GitObjects::new(Path::new("git"), &git_dir);
+        let heads: HashSet<CommitId> = [&head, &missing]
+            .into_iter()
+            .map(|hex| CommitId::try_from_hex(hex).unwrap())
+            .collect();
+        assert_eq!(objects.rebuild_keep_refs(&heads, cutoff).unwrap(), 2);
+        let refs = run(&[
+            "for-each-ref",
+            "--format=%(refname:lstrip=3) %(objectname)",
+            KEEP_REFS,
+        ]);
+        let mut expected = [&head, &new, &missing]
+            .map(|hex| format!("{hex} {hex}"))
+            .to_vec();
+        expected.sort();
+        assert_eq!(refs.lines().collect::<Vec<_>>(), expected);
+        for hex in [&head, &old, &new, &misnamed, &missing] {
+            run(&["cat-file", "-e", hex]);
         }
     }
 

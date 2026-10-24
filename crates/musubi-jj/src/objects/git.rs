@@ -44,13 +44,8 @@ const HEAD_REFS: &str = "refs/musubi/head/";
 const GC_AUTO: i64 = 6700;
 const GC_AUTO_PACK_LIMIT: i64 = 50;
 
-/// For a gc that deletes nothing, reachable or not (see [`GitObjects::maintain`]).
-const NEVER_PRUNE: [&str; 4] = [
-    "-c",
-    "gc.pruneExpire=never",
-    "-c",
-    "gc.worktreePruneExpire=never",
-];
+/// For a gc that deletes no object, reachable or not (see [`GitObjects::maintain`]).
+const NEVER_PRUNE: [&str; 2] = ["-c", "gc.pruneExpire=never"];
 
 /// How many objects a hub's repository holds before a bitmap index is worth writing.
 const BITMAP_AFTER: u64 = 10_000;

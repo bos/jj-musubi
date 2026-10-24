@@ -21,6 +21,11 @@ use crate::OpId;
 use crate::open_bundle_dir;
 use crate::temp_bundle;
 
+/// Up to how much later than its `musubi.forget-after` a daemon forgets an unused copy, a
+/// different time on each machine (`NodeRepo::expire_idle`): one machine's forget reaches
+/// the others, which then have nothing to forget, before their own time comes.
+const EXPIRY_STAGGER: std::time::Duration = std::time::Duration::from_secs(300);
+
 pub struct NodeAdapter {
     repo: NodeRepo,
     tmp: PathBuf,
@@ -88,13 +93,19 @@ impl NodeAdapter {
         Ok(())
     }
 
-    /// What a node does once its policy has nothing left to do: reconcile its settings, and
-    /// show other machines' workspaces again. Both run; either may write an operation to
-    /// upload, and then it returns true, since the policy has more to do.
+    /// What a node does once its policy has nothing left to do, having just fetched the
+    /// hive's head: reconcile its settings, show other machines' workspaces again, record
+    /// this copy's `musubi.forget-after` if it changed, and forget the copies that have gone
+    /// unused for longer than theirs. Each runs; any may write an operation to upload, and
+    /// then it returns true, since the policy has more to do.
     pub fn when_idle(&mut self) -> anyhow::Result<bool> {
         let settings = self.reconcile_settings(false)?;
         let workspaces = self.show_other_workspaces()?;
-        Ok(settings || workspaces)
+        let recorded = self.repo.record_forget_after()?;
+        let forgotten = self
+            .repo
+            .expire_idle(std::time::SystemTime::now(), EXPIRY_STAGGER)?;
+        Ok(settings || workspaces || recorded || !forgotten.is_empty())
     }
 
     /// The repository, for tests that act on it, as by crashing it.

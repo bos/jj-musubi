@@ -96,9 +96,25 @@ so that a script tearing down a machine knows its last work didn't get out. Once
 syncs, the other machines stop showing it until it's next used. `musubi leave --force` leaves
 anyway, without telling the hive.
 
+A copy can be forgotten once it goes unused for long enough. `musubi join`, `create` and
+`clone` set how long, as `musubi.forget-after` in the repository's config, and say what they
+set: `6h` when an agent runs them, as on a short-lived machine that may go away without
+leaving, and `never` otherwise. A value in your user config wins, as an agent's machine image
+might set, and so does the one a copy had when it last joined. Change it with `jj config`:
+
+```sh
+jj config set --repo musubi.forget-after '2 days'   # or 30m, '1h 30m', 1week, never
+```
+
+The daemon tells the hive when it changes, which counts as using the copy. Each machine's
+daemon forgets a copy unused for longer than its setting, as `musubi forget` would, a few
+minutes later on one machine than another, and the copy comes back as soon as it's used again.
+In a repository, `musubi list` shows each copy, when it was last used, and when it will be
+forgotten.
+
 A machine that went away without leaving, as a short-lived machine can, or whose copy was
-deleted, stays in the hive until it is forgotten. Forget it on any other machine, by the name
-its working copy has there:
+deleted, stays in the hive until it is forgotten. Forget it now, on any other machine, by the
+name its working copy has there:
 
 ```sh
 musubi forget laptop

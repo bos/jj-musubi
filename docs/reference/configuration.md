@@ -36,6 +36,7 @@ musubi reads these as `jj` would in the repository, so any of jj's config files 
 
 | Key | Effect |
 | --- | --- |
+| `musubi.forget-after` | How long this copy may go unused before the hive forgets it: `never`, or a duration such as `6h`, `1h 30m` or `2 days`: numbers with units from `s`, `min` or `m`, `h` or `hours`, `d` or `days`, `w` or `weeks`, and so on, at least a second. `M` is months, not minutes. `musubi join`, `create` and `clone` set it, unless jj's config sets it already: `6h` when an agent runs them, `never` otherwise. Never shared across a hive. See [Take a repository or machine out](../guides/manage.md#take-a-repository-or-machine-out). |
 | `musubi.shared-config` | A list of more repo config keys for the hive to share, such as `["aliases.l"]`. It is shared itself. See [Share settings](../guides/working-across-machines.md#share-settings). |
 | `musubi.share-credentials` | `true` to share the user and password an https remote URL may carry. Off by default; set it per machine. |
 | `operation.hostname` | This machine's name in a hive, unless `--machine` gives another. |

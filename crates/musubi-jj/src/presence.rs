@@ -10,12 +10,15 @@
 //! (`UMax` in the model), which decides presence at the operation's descendants without walking
 //! the history again: [`Presence::merge`] and [`Presence::apply`] are `umax_merge`,
 //! `umax_work` and `umax_forget`. It keeps each copy's latest work, whether or not a forget saw
-//! it, too ([`Presence::worked`]), which the model leaves out: it decides nothing about
-//! presence, only what a forgotten copy's own workspaces are.
+//! it, too ([`Presence::worked`]), and the `musubi.forget-after` the copy last recorded
+//! ([`Presence::forget_after`]), which the model leaves out: they decide nothing about
+//! presence, only what a forgotten copy's own workspaces are, and when a daemon forgets a
+//! copy that has gone unused.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use jj_lib::op_store::OperationMetadata;
 
@@ -28,11 +31,38 @@ pub const FORGET_ATTRIBUTE: &str = "musubi.forget";
 /// copy's machine key.
 pub const WORK_ATTRIBUTE: &str = "musubi.work";
 
-/// What an operation is to presence: whose work it is, and which copies it forgets.
+/// The attribute of an operation recording its copy's `musubi.forget-after`, as
+/// [`format_forget_after`] writes it: how long the copy may go unused before a daemon forgets
+/// it. The operation is the copy's work, and changes nothing else.
+pub const FORGET_AFTER_ATTRIBUTE: &str = "musubi.forget-after";
+
+/// How long a copy may go unused before a daemon forgets it, `None` for never: from
+/// `never`, or a duration as `humantime` reads one, such as `6h`, `1h 30m` or `2 days`.
+/// `None` if it is neither, or less than a second.
+pub fn parse_forget_after(text: &str) -> Option<Option<Duration>> {
+    let text = text.trim();
+    if text == "never" {
+        return Some(None);
+    }
+    let after = humantime::parse_duration(text).ok()?;
+    (after >= Duration::from_secs(1)).then_some(Some(after))
+}
+
+/// A `musubi.forget-after` as [`parse_forget_after`] reads it: `6h`, `1h 30m`, `never`.
+pub fn format_forget_after(after: Option<Duration>) -> String {
+    match after {
+        Some(after) => humantime::format_duration(after).to_string(),
+        None => "never".to_owned(),
+    }
+}
+
+/// What an operation is to presence: whose work it is, which copies it forgets, and the
+/// `musubi.forget-after` it records for the copy whose work it is.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Kind {
     pub work: Option<String>,
     pub forgets: BTreeSet<String>,
+    pub forget_after: Option<Option<Duration>>,
 }
 
 impl Kind {
@@ -50,7 +80,15 @@ impl Kind {
             .get(FORGET_ATTRIBUTE)
             .map(|keys| keys.split_whitespace().map(str::to_owned).collect())
             .unwrap_or_default();
-        Self { work, forgets }
+        let forget_after = metadata
+            .attributes
+            .get(FORGET_AFTER_ATTRIBUTE)
+            .and_then(|text| parse_forget_after(text));
+        Self {
+            work,
+            forgets,
+            forget_after,
+        }
     }
 }
 
@@ -63,6 +101,9 @@ pub struct Presence<Op> {
     latest: BTreeMap<String, BTreeSet<Op>>,
     known: Arc<BTreeSet<String>>,
     worked: Arc<BTreeMap<String, BTreeSet<Op>>>,
+    /// Each copy's latest operations recording its `musubi.forget-after`, with what they
+    /// record.
+    forget_after: Arc<BTreeMap<String, BTreeMap<Op, Option<Duration>>>>,
 }
 
 impl<Op> Default for Presence<Op> {
@@ -71,6 +112,7 @@ impl<Op> Default for Presence<Op> {
             latest: BTreeMap::new(),
             known: Arc::default(),
             worked: Arc::default(),
+            forget_after: Arc::default(),
         }
     }
 }
@@ -102,6 +144,26 @@ impl<Op: Clone + Ord> Presence<Op> {
         self.worked.get(copy)
     }
 
+    /// How long a copy may go unused before a daemon forgets it, as it last recorded
+    /// (`None` for never, as for a copy that has recorded nothing). Where it recorded
+    /// different values on two lines of history that a merge joined, the longer.
+    pub fn forget_after(&self, copy: &str) -> Option<Duration> {
+        let records = self.forget_after.get(copy)?;
+        let mut longest = Some(Duration::ZERO);
+        for after in records.values() {
+            longest = match (longest, after) {
+                (Some(a), Some(b)) => Some(a.max(*b)),
+                _ => None,
+            };
+        }
+        longest
+    }
+
+    /// Whether a copy has recorded a `musubi.forget-after`.
+    pub fn has_forget_after(&self, copy: &str) -> bool {
+        self.forget_after.contains_key(copy)
+    }
+
     /// Presence before an operation's own effect, from its parents' (`umax_merge`): the
     /// latest work of each copy that the parents keep, each kept unless a parent whose
     /// history has it doesn't keep it, as when a forget there saw it, or later work there
@@ -119,39 +181,42 @@ impl<Op: Clone + Ord> Presence<Op> {
         }
         let mut known = parents[0].1.known.clone();
         let mut worked = parents[0].1.worked.clone();
+        let mut forget_after = parents[0].1.forget_after.clone();
         for (_, presence) in &parents[1..] {
             if !Arc::ptr_eq(&known, &presence.known) && !known.is_superset(&presence.known) {
                 Arc::make_mut(&mut known).extend(presence.known.iter().cloned());
             }
             if !Arc::ptr_eq(&worked, &presence.worked) {
                 for (copy, ops) in presence.worked.iter() {
-                    let Some(have) = worked.get(copy) else {
-                        Arc::make_mut(&mut worked).insert(copy.clone(), ops.clone());
-                        continue;
+                    let merged = match worked.get(copy) {
+                        None => ops.clone(),
+                        Some(have) if have.is_superset(ops) => continue,
+                        Some(have) => latest_of(have, ops, &mut is_ancestor)?,
                     };
-                    if have.is_superset(ops) {
-                        continue;
-                    }
-                    // Each set is the latest already: only one of each against the other's
-                    // can be older.
-                    let new: Vec<&Op> = ops.difference(have).collect();
-                    let mut older: BTreeSet<&Op> = BTreeSet::new();
-                    for a in have.difference(ops) {
-                        for &b in &new {
-                            if is_ancestor(a, b)? {
-                                older.insert(a);
-                            } else if is_ancestor(b, a)? {
-                                older.insert(b);
-                            }
+                    Arc::make_mut(&mut worked).insert(copy.clone(), merged);
+                }
+            }
+            if !Arc::ptr_eq(&forget_after, &presence.forget_after) {
+                for (copy, records) in presence.forget_after.iter() {
+                    let merged = match forget_after.get(copy) {
+                        None => records.clone(),
+                        Some(have) if records.keys().all(|op| have.contains_key(op)) => continue,
+                        Some(have) => {
+                            let ops = latest_of(
+                                &have.keys().cloned().collect(),
+                                &records.keys().cloned().collect(),
+                                &mut is_ancestor,
+                            )?;
+                            ops.into_iter()
+                                .map(|op| {
+                                    let after = have.get(&op).or_else(|| records.get(&op));
+                                    let after = *after.expect("an operation from either side");
+                                    (op, after)
+                                })
+                                .collect()
                         }
-                    }
-                    let latest: BTreeSet<Op> = have
-                        .iter()
-                        .chain(new)
-                        .filter(|op| !older.contains(op))
-                        .cloned()
-                        .collect();
-                    Arc::make_mut(&mut worked).insert(copy.clone(), latest);
+                    };
+                    Arc::make_mut(&mut forget_after).insert(copy.clone(), merged);
                 }
             }
         }
@@ -187,6 +252,7 @@ impl<Op: Clone + Ord> Presence<Op> {
             latest,
             known,
             worked,
+            forget_after,
         })
     }
 
@@ -202,12 +268,42 @@ impl<Op: Clone + Ord> Presence<Op> {
             self.latest
                 .insert(copy.clone(), BTreeSet::from([op.clone()]));
             Arc::make_mut(&mut self.worked).insert(copy.clone(), BTreeSet::from([op.clone()]));
+            if let Some(after) = kind.forget_after {
+                Arc::make_mut(&mut self.forget_after)
+                    .insert(copy.clone(), BTreeMap::from([(op.clone(), after)]));
+            }
         }
         for copy in &kind.forgets {
             self.latest.remove(copy);
         }
         self
     }
+}
+
+/// The latest of two sets of operations, each its own latest already: their union, but for
+/// any that is an ancestor of one only the other has.
+fn latest_of<Op: Clone + Ord, E>(
+    have: &BTreeSet<Op>,
+    theirs: &BTreeSet<Op>,
+    is_ancestor: &mut impl FnMut(&Op, &Op) -> Result<bool, E>,
+) -> Result<BTreeSet<Op>, E> {
+    let new: Vec<&Op> = theirs.difference(have).collect();
+    let mut older: BTreeSet<&Op> = BTreeSet::new();
+    for a in have.difference(theirs) {
+        for &b in &new {
+            if is_ancestor(a, b)? {
+                older.insert(a);
+            } else if is_ancestor(b, a)? {
+                older.insert(b);
+            }
+        }
+    }
+    Ok(have
+        .iter()
+        .chain(new)
+        .filter(|op| !older.contains(op))
+        .cloned()
+        .collect())
 }
 
 #[cfg(test)]
@@ -286,6 +382,74 @@ mod tests {
         assert!(!p[4].is_present("k"));
         assert_eq!(p[4].worked("k"), Some(&BTreeSet::from([1])));
         assert_eq!(p[6].worked("k"), Some(&BTreeSet::from([1, 5])));
+    }
+
+    #[test]
+    fn forget_after_reads_and_writes() {
+        let hours = |h: u64| Some(Some(Duration::from_secs(h * 3600)));
+        assert_eq!(parse_forget_after("6h"), hours(6));
+        assert_eq!(parse_forget_after("6 hours"), hours(6));
+        assert_eq!(
+            parse_forget_after(" 1h 30m "),
+            Some(Some(Duration::from_secs(5400)))
+        );
+        assert_eq!(
+            parse_forget_after("1h30m"),
+            Some(Some(Duration::from_secs(5400)))
+        );
+        assert_eq!(parse_forget_after("2days"), hours(48));
+        assert_eq!(parse_forget_after("never"), Some(None));
+        for bad in ["", "6", "h", "0h", "500ms", "6x", "-1h", "Never"] {
+            assert_eq!(parse_forget_after(bad), None, "{bad:?}");
+        }
+        assert_eq!(
+            format_forget_after(Some(Duration::from_secs(6 * 3600))),
+            "6h"
+        );
+        assert_eq!(
+            format_forget_after(Some(Duration::from_secs(5400))),
+            "1h 30m"
+        );
+        assert_eq!(format_forget_after(None), "never");
+        for text in ["6h", "1h 30m", "9days", "45s", "1week", "never"] {
+            let after = parse_forget_after(text).unwrap();
+            assert_eq!(parse_forget_after(&format_forget_after(after)), Some(after));
+        }
+    }
+
+    /// A copy's `musubi.forget-after` is the last it recorded, which forgets leave; where
+    /// it recorded two on lines a merge joins, the longer; never, if it recorded none.
+    #[test]
+    fn forget_after_is_the_last_recorded() {
+        let set = |copy: &str, after: Option<u64>| Kind {
+            forget_after: Some(after.map(|h| Duration::from_secs(h * 3600))),
+            ..work(copy)
+        };
+        let parents = vec![
+            vec![],     // 0: k works
+            vec![0],    // 1: k records 6h
+            vec![1],    // 2: a daemon forgets k
+            vec![1],    // 3: k records 1h
+            vec![0],    // 4: k, on another line, records 2h
+            vec![3, 4], // 5: merge
+            vec![2, 3], // 6: merge
+        ];
+        let kinds = vec![
+            work("k"),
+            set("k", Some(6)),
+            forget("k"),
+            set("k", Some(1)),
+            set("k", Some(2)),
+            Kind::default(),
+            Kind::default(),
+        ];
+        let p = presences(&parents, &kinds);
+        let hours = |h: u64| Some(Duration::from_secs(h * 3600));
+        assert_eq!(p[0].forget_after("k"), None);
+        assert!(!p[0].has_forget_after("k"));
+        assert_eq!(p[2].forget_after("k"), hours(6));
+        assert_eq!(p[5].forget_after("k"), hours(2));
+        assert_eq!(p[6].forget_after("k"), hours(1));
     }
 
     /// A forget concurrent with work it didn't see leaves the copy present; one that saw all

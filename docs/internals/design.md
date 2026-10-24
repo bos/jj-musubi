@@ -274,6 +274,33 @@ forget goes with the next sync, and the copy's next work brings it back. A copy 
 by any route, a forgotten one included, gives each workspace whose commit is hidden a new
 `@` (`give_back_working_copies`): no next work of its brings it back, to do it then.
 
+## Copies that go unused
+
+Each copy records how long it may go unused before the hive forgets it, its
+`musubi.forget-after`, in an operation that is its work and changes nothing else:
+`musubi.work = <key>` and `musubi.forget-after = 6h` (or `never`). Its daemon writes one
+when the value jj's config gives differs from the one the copy last recorded
+(`record_forget_after`), reading the repo config afresh each time, as settings are; a copy
+that has recorded nothing is never forgotten, so one that is set to `never` writes nothing.
+`musubi join`, `create` and `clone` put the value in the repo config, `6h` if an agent's
+environment variable is set and `never` otherwise, unless jj's config sets it already.
+
+`Presence` keeps each copy's latest recording operations and what they record, through
+forgets, merged as `worked` is; where two lines of history recorded different values, the
+longer holds. A daemon, once idle after fetching the hive's head (`NodeAdapter::when_idle`),
+forgets each present copy other than its own whose latest work ended longer ago than its
+`musubi.forget-after`, by the work's timestamp and the daemon's clock (`expire_idle`), as
+`musubi forget` does: it is an ordinary forget, so everything the presence rule proves holds
+of it. Clock skew only moves when a copy is forgotten, but a copy whose clock runs behind a
+daemon's by more than its setting is forgotten after each of its operations, and shown again
+by the next: machines' clocks are assumed close, as jj's timestamps assume. The key is
+never shared across a hive, whatever `musubi.shared-config` says (`config_keys`): an agent's
+`6h` mustn't reach a person's copy. Each machine adds its own delay of up
+to five minutes, from a hash of its key and the copy's, so that one machine's forget usually
+reaches the others before their own time comes; duplicates are harmless anyway. The hub
+takes no part. The end-to-end search sets forget-after values and runs `expire_idle` on a
+clock it moves on two hours, with no delay.
+
 ## Hive settings
 
 Some settings must agree across the hive but live outside jj's operations. Remote

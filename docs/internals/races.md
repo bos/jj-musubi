@@ -59,6 +59,8 @@ back (docs/internals/design.md, "Copies that go away").
 | A machine's own workspace is named with a `/`, as `feat/x` | Its own, shared as `alpha/feat/x`. | `own_workspaces_with_a_slash_are_own` |
 | …and named like another machine's, as `beta/x`, before that machine joins or after | Its own all the same, while the hive has forgotten this machine too, and after `jj undo` of forgetting it; it shows that machine as `beta-1a2b`. | `own_workspaces_named_like_another_machine_are_own` |
 | A copy leaves, its empty working-copy commit abandoned by its forget, or leaves after another machine forgot it | It gets a new working-copy commit, as jj gives a workspace whose commit is abandoned: no next work of its shows it again. | `a_copy_that_leaves_gets_a_new_working_copy` |
+| A copy is unused for longer than its `musubi.forget-after` | Any other machine's daemon forgets it, as `musubi forget` would, and it comes back with its next work. A copy that recorded none, or `never`, isn't forgotten, nor is a machine's own copy by its own daemon. | `unused_copies_are_forgotten_after_their_forget_after` |
+| A forgotten copy changes its `musubi.forget-after` | Recording it is the copy's work, so the copy shows again, and is forgotten by the new value. | `changing_forget_after_is_work` |
 | A copy that left joins again | It shows again at once: joining is its work. | `a_copy_that_left_shows_again_once_it_joins` |
 | A machine rewrites the working-copy commit of a copy the hive has forgotten | No machine sees it as a working copy, so no workspace moves with it; the copy follows the rewrite itself, as jj would have moved it. | `a_forgotten_working_copy_follows_its_rewrite` |
 

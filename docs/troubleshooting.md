@@ -157,6 +157,21 @@ that the repository leaves with all of its work, and jj couldn't: it says why be
 parentheses. Most often the working copy is stale, as after another machine rewrote its
 commit: `jj workspace update-stale` updates it. Then run `musubi leave` again.
 
+### "musubi.forget-after is neither `never` nor a duration such as `6h`; taking it for never"
+
+The daemon logs this when jj's config gives `musubi.forget-after` a value it can't read, and
+then never has the hive forget this copy. Set it to `never`, or to a duration of at least a
+second, numbers with units such as `6h`, `1h 30m` or `2 days`: `jj config set --repo
+musubi.forget-after 6h`.
+
+### "musubi.forget-after in your user config is neither `never` nor a duration such as `6h`; fix it and run this again"
+
+`musubi join`, `create` or `clone` found a `musubi.forget-after` it can't read, in the config
+the message names, here your user config, or in another, such as your repo config, and joined
+nothing. Set it there to `never` or a duration, as above, or unset it there (`jj config unset
+--user musubi.forget-after`, or `--repo` for the repo config) to have the command choose, then
+run the command again.
+
 ### "no machine laptop shows here in hive app; `jj workspace list` names those that do"
 
 `musubi forget` names a machine as its working copies are named here: `laptop` for

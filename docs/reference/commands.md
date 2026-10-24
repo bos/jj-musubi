@@ -20,6 +20,10 @@ musubi <command> --help
 | `leave` | Take the repository you're in out of its hive, telling the hive, and stop syncing it. It keeps everything it has. `--force` leaves without telling the hive, if its hub can't be reached. |
 | `forget <machine>` | Forget another machine's copy that went away without leaving, by the name its working copy has here: `laptop` for `laptop/default@`, or `laptop-1a2b` for `laptop-1a2b/default@`. The name `musubi list` gives it will do too, if no other machine has that name. |
 
+`create`, `join` and `clone` set the copy's `musubi.forget-after`, unless jj's config sets it
+already: `6h` when an agent runs them, `never` otherwise. See
+[Take a repository or machine out](../guides/manage.md#take-a-repository-or-machine-out).
+
 `create`, `join`, and `clone` take:
 
 - `--hub <hub>`: the hub, as `musubi hub` prints it. Leave it out to use this machine's
@@ -35,7 +39,7 @@ your choosing. See [Set up a hub and machines](../guides/set-up.md).
 
 | Command | Use it to |
 | --- | --- |
-| `list` | Show the hubs' hives, this machine's copies of them, and whether each is syncing. In a hive's repository, also show its details. `status` is an alias. |
+| `list` | Show the hubs' hives, this machine's copies of them, and whether each is syncing. In a hive's repository, also show its details: each machine's working copies, and each copy in the hive, when it was last used, and when it will be forgotten. `status` is an alias. |
 | `sync` | Sync the repository you're in now, and see at once whether it worked. |
 | `top` | Watch what flows through the hubs, and which machines are offline, behind, or failing, as it happens. |
 

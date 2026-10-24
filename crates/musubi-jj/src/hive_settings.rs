@@ -374,6 +374,8 @@ pub fn config_keys(value: &str) -> Vec<String> {
         .map(|keys| {
             keys.iter()
                 .filter_map(toml::Value::as_str)
+                // Each copy's own: an agent's `6h` mustn't reach a person's copy.
+                .filter(|key| *key != crate::node::FORGET_AFTER_KEY)
                 .map(str::to_owned)
                 .collect()
         })
@@ -498,6 +500,8 @@ mod tests {
             config_keys(r#"["aliases.x", 'ui.y']"#),
             ["aliases.x", "ui.y"]
         );
+        // Each copy's own.
+        assert_eq!(config_keys(r#"["musubi.forget-after", "ui.y"]"#), ["ui.y"]);
     }
 
     #[test]

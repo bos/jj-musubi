@@ -387,6 +387,52 @@ impl World {
         self.ledger.record(m, &what, &before, &after, false);
     }
 
+    /// Machine `m` sets its copy's `musubi.forget-after` to `value`, as `musubi join` does,
+    /// and records it in the hive, as its daemon does once idle. Records what changed.
+    pub fn set_forget_after(&mut self, m: usize, value: &str) {
+        let before = self.seen(m);
+        self.record(format!(
+            "{}: jj config set --repo musubi.forget-after {value}",
+            self.machine(m)
+        ));
+        self.fx
+            .repo(m)
+            .jj(&["config", "set", "--repo", "musubi.forget-after", value]);
+        if let Err(err) = self.fx.node(m).record_forget_after() {
+            self.fail(&format!(
+                "recording musubi.forget-after failed on {}: {err}",
+                self.machine(m)
+            ));
+        }
+        let after = self.seen(m);
+        let what = self.trace.last().cloned().unwrap_or_default();
+        self.ledger.record(m, &what, &before, &after, false);
+    }
+
+    /// Machine `m`'s daemon, two hours on by its clock, forgets every other copy that has
+    /// gone unused for longer than its `musubi.forget-after`. Records what changed.
+    pub fn expire_idle(&mut self, m: usize) {
+        let before = self.seen(m);
+        self.record(format!(
+            "{}: forget the copies unused two hours on",
+            self.machine(m)
+        ));
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(2 * 3600);
+        if let Err(err) = self
+            .fx
+            .node(m)
+            .expire_idle(later, std::time::Duration::ZERO)
+        {
+            self.fail(&format!(
+                "forgetting unused copies failed on {}: {err}",
+                self.machine(m)
+            ));
+        }
+        let after = self.seen(m);
+        let what = self.trace.last().cloned().unwrap_or_default();
+        self.ledger.record(m, &what, &before, &after, false);
+    }
+
     /// Like `jj_in`, but a failure whose message contains one of `refusals` (a refusal jj
     /// makes before changing anything) is returned rather than failing the test.
     pub fn try_jj_in(

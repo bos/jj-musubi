@@ -38,6 +38,7 @@ use crate::translation_map::TranslationMap;
 use crate::workspaces::Machine;
 
 mod error;
+mod expiry;
 mod git;
 mod git_config;
 mod join;
@@ -49,6 +50,8 @@ mod view;
 mod working_copies;
 
 pub use error::NodeError;
+pub use expiry::Activity;
+pub use expiry::FORGET_AFTER_KEY;
 use git::Colocation;
 use git::NodeGit;
 pub use join::JoinSummary;

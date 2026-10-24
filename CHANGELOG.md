@@ -6,6 +6,13 @@ change the protocol, so run the same release on the hub and every machine (see
 
 ## Unreleased
 
+- A hive forgets a copy that has gone unused for longer than its `musubi.forget-after`, as
+  `musubi forget` would, and shows it again once it's used. `musubi join`, `create` and
+  `clone` set it, and say what they set: `6h` when an agent runs them (`CODEX_THREAD_ID`,
+  `CODEX_SESSION_ID` or `CLAUDE_CODE_SESSION_ID` is set), `never` otherwise, unless jj's
+  config sets it already. Copies that joined before have none, and are never forgotten
+  until one is set: `jj config set --repo musubi.forget-after 6h`. `musubi list` shows each
+  copy, when it was last used, and when it will be forgotten.
 - `musubi leave` now takes the repository out of its hive: it records what changed in the
   working copy and tells the hive, with the copy's last work, so that the other machines
   stop showing its working copy and the hub stops counting it. It keeps its working copy. It

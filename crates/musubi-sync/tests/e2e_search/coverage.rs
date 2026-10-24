@@ -41,6 +41,8 @@ pub const RULES: &[&str] = &[
     "workspace_forget",
     "forget_other_workspace",
     "forget_copy",
+    "set_forget_after",
+    "expire_idle",
     "origin_advance",
     "fetch",
     "push",
@@ -136,6 +138,14 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
     (
         "work_a_forget_didnt_see_keeps_the_copy",
         Some(&["forget_copy", "sync_partial", "commit"]),
+    ),
+    (
+        "unused_copies_are_forgotten_after_their_forget_after",
+        Some(&["set_forget_after", "expire_idle"]),
+    ),
+    (
+        "changing_forget_after_is_work",
+        Some(&["set_forget_after", "expire_idle", "commit"]),
     ),
     // The search's machines never leave.
     ("leaving_sticks_through_a_merge", None),

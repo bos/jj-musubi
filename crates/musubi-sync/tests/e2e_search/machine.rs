@@ -517,6 +517,27 @@ impl Search {
         self.note(&tc);
     }
 
+    /// Sets this copy's `musubi.forget-after`, as `musubi join` does, to an hour or never,
+    /// and records it, as the daemon does.
+    #[rule]
+    fn set_forget_after(&mut self, tc: TestCase) {
+        let m = self.machine(&tc);
+        let value = ["1h", "never"][pick(&tc, 2)];
+        fired("set_forget_after");
+        self.world.borrow_mut().set_forget_after(m, value);
+        self.note(&tc);
+    }
+
+    /// A daemon, two hours on, forgets the other copies unused for longer than their
+    /// `musubi.forget-after`.
+    #[rule]
+    fn expire_idle(&mut self, tc: TestCase) {
+        let m = self.machine(&tc);
+        fired("expire_idle");
+        self.world.borrow_mut().expire_idle(m);
+        self.note(&tc);
+    }
+
     // The shared remote.
 
     /// Someone outside the hive pushes to origin's `main`.

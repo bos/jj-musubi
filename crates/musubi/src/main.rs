@@ -118,6 +118,10 @@ enum Command {
     /// which shares history but not a remote: choose a hive yourself with `--hive`, or start
     /// a new one with `musubi create`. It starts the daemon if it isn't running, and returns
     /// once the repository has synced.
+    ///
+    /// Unless jj's config sets it already, it sets `musubi.forget-after` in the repository's
+    /// config: how long the copy may go unused before the hive forgets it, `6h` when an agent
+    /// runs it, `never` otherwise. `musubi create` and `musubi clone` do too.
     Join {
         /// Join this hive (a name, a prefix of one, or an id), whatever its remotes.
         #[arg(long, add = ArgValueCandidates::new(completion::hives))]
@@ -147,7 +151,8 @@ enum Command {
     /// (the default command).
     ///
     /// In a hive's repository, it also shows the repository's hive, hub and machine name,
-    /// where every machine's working copy is, and its last sync.
+    /// where every machine's working copy is, each copy in the hive, when it was last used,
+    /// and when it will be forgotten (`musubi.forget-after`), and its last sync.
     #[command(alias = "status")]
     List,
     /// Watch what flows through the hubs, and what is wrong, as it happens.
@@ -549,6 +554,7 @@ fn join(start: &Path, choice: JoinChoice, member: &Member, socket: &Socket) -> a
         ),
     };
     let remaking = matches!(choice, JoinChoice::Remake { .. });
+    configured_forget_after(settings::load(&located.workspace_root, &located.repo_path)?.config())?;
     set_machine_name(&located, machine)?;
     let node = located.open()?;
     let summary = node.join_summary()?;
@@ -670,6 +676,8 @@ fn become_node(
         node: machine,
     };
     config.save(&located.repo_path)?;
+    drop(node);
+    set_forget_after(located)?;
     UserState::add_repo(&located.workspace_root)?;
     if UserState::save_default_hub(hub)? {
         println!(
@@ -678,6 +686,96 @@ fn become_node(
         );
     }
     Ok(())
+}
+
+/// The environment variables that say an agent is running musubi, as the devbox tool
+/// detects agents.
+const AGENT_VARIABLES: [&str; 3] = [
+    "CODEX_THREAD_ID",
+    "CODEX_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ID",
+];
+
+/// How long an agent's copy may go unused before the hive forgets it, by default.
+const AGENT_FORGET_AFTER: &str = "6h";
+
+/// Sets `musubi.forget-after` in the repository's config, unless jj's config sets it
+/// already: `6h` if an agent is joining, as on a short-lived machine, `never` otherwise. A
+/// value in the user's config, as an agent's image might set, wins, and so does the one
+/// set when the repository last joined. Says which.
+fn set_forget_after(located: &Located) -> anyhow::Result<()> {
+    let key = musubi_jj::node::FORGET_AFTER_KEY;
+    let settings = settings::load(&located.workspace_root, &located.repo_path)?;
+    let name: jj_lib::config::ConfigNamePathBuf = key.parse()?;
+    let (value, how) = match configured_forget_after(settings.config())? {
+        Some((source, after)) => (
+            musubi_jj::presence::format_forget_after(after),
+            format!("as your {source} config says"),
+        ),
+        None => {
+            let agent = AGENT_VARIABLES
+                .iter()
+                .any(|var| std::env::var_os(var).is_some());
+            let value = if agent { AGENT_FORGET_AFTER } else { "never" };
+            let path = settings::repo_config_path(&located.repo_path)?
+                .context("this repository has no config of its own")?;
+            let mut file = jj_lib::config::ConfigFile::load_or_empty(
+                jj_lib::config::ConfigSource::Repo,
+                &path,
+            )?;
+            file.set_value(&name, value)?;
+            file.save()?;
+            let why = if agent {
+                "since an agent is joining it"
+            } else {
+                "since a person, not an agent, is joining it"
+            };
+            (value.to_owned(), why.to_owned())
+        }
+    };
+    match value.as_str() {
+        "never" => println!(
+            "The hive keeps this copy however long it goes unused, {how}. To have it forgotten \
+             once unused for 6 hours: jj config set --repo {key} 6h"
+        ),
+        after => println!(
+            "The hive forgets this copy once it goes unused for {after}, {how}. To keep it: jj \
+             config set --repo {key} never"
+        ),
+    }
+    Ok(())
+}
+
+/// `musubi.forget-after` as `config` sets it, and where: `None` if nothing does. Fails if
+/// its value is neither `never` nor a duration, before a command joining a copy writes
+/// anything.
+fn configured_forget_after(
+    config: &jj_lib::config::StackedConfig,
+) -> anyhow::Result<Option<(jj_lib::config::ConfigSource, Option<Duration>)>> {
+    let key = musubi_jj::node::FORGET_AFTER_KEY;
+    let name: jj_lib::config::ConfigNamePathBuf = key.parse()?;
+    let Some((source, value)) = config
+        .layers()
+        .iter()
+        .rev()
+        .filter(|layer| layer.source != jj_lib::config::ConfigSource::Default)
+        .find_map(|layer| {
+            let item = layer.look_up_item(&name).ok()??;
+            Some((layer.source, item.as_str().map(str::to_owned)))
+        })
+    else {
+        return Ok(None);
+    };
+    let after = value
+        .as_deref()
+        .and_then(musubi_jj::presence::parse_forget_after)
+        .with_context(|| {
+            format!(
+                "{key} in your {source} config is neither `never` nor a duration such as `6h`; \
+                 fix it and run this again"
+            )
+        })?;
+    Ok(Some((source, after)))
 }
 
 /// Has the daemon, started if need be, serve the repository, and reports its first sync.
@@ -743,6 +841,7 @@ fn clone(
     socket: &Socket,
 ) -> anyhow::Result<()> {
     let hub = UserState::hub(hub)?;
+    configured_forget_after(&settings::user_config()?)?;
     let reply = block_on(ask_preparing(
         &hub,
         HubWideRequest::Resolve {
@@ -952,10 +1051,16 @@ fn leave_once(
     hive: &HiveConfig,
     removed: &mut BTreeMap<jj_lib::ref_name::WorkspaceNameBuf, jj_lib::backend::CommitId>,
 ) -> anyhow::Result<bool> {
+    let mut node = located.open()?;
+    // A change to this copy's `musubi.forget-after` the daemon hasn't recorded yet goes up
+    // before the forget, not after it, as the sync would otherwise record it, bringing the
+    // copy back.
+    node.record_forget_after()?;
     // Gone already, as after a leave that couldn't tell the hive, it syncs what it has.
-    for (name, commit) in located.open()?.forget_self()?.unwrap_or_default() {
+    for (name, commit) in node.forget_self()?.unwrap_or_default() {
         removed.entry(name).or_insert(commit);
     }
+    drop(node);
     match block_on(daemon::sync_once(located, hive)) {
         Ok(_) => {}
         // Nothing to tell a hive that is over.
@@ -1164,6 +1269,18 @@ fn describe(status: Option<&Status>) -> String {
     }
 }
 
+/// A duration in its largest whole unit, as `musubi list` shows how long ago or how soon:
+/// `40s`, `12m`, `3h`, `2d`.
+fn roughly(duration: Duration) -> String {
+    let secs = duration.as_secs();
+    match secs {
+        0..60 => format!("{secs}s"),
+        60..3_600 => format!("{}m", secs / 60),
+        3_600..86_400 => format!("{}h", secs / 3_600),
+        _ => format!("{}d", secs / 86_400),
+    }
+}
+
 /// The current repository's replication state, in detail.
 fn print_details(located: &Located, hive: &HiveConfig) -> anyhow::Result<()> {
     println!();
@@ -1178,6 +1295,38 @@ fn print_details(located: &Located, hive: &HiveConfig) -> anyhow::Result<()> {
     for (workspace, commit) in node.machine_workspaces()? {
         let short = &commit.hex()[..12];
         println!("             {workspace}@ is at {short}");
+    }
+    let now = std::time::SystemTime::now();
+    for (index, copy) in node.activity()?.iter().enumerate() {
+        let label = if index == 0 {
+            "  Copies:    "
+        } else {
+            "             "
+        };
+        let this = if copy.key == node.machine().key() {
+            " (this one)"
+        } else {
+            ""
+        };
+        let since = now.duration_since(copy.last_work).unwrap_or_default();
+        let forgotten = match copy.forget_after {
+            None => "never forgotten".to_owned(),
+            Some(after) => {
+                let after_text = musubi_jj::presence::format_forget_after(Some(after));
+                match after.checked_sub(since) {
+                    Some(left) if !left.is_zero() => format!(
+                        "forgotten once unused for {after_text}, in {}",
+                        roughly(left)
+                    ),
+                    _ => format!("forgotten once unused for {after_text}, any moment now"),
+                }
+            }
+        };
+        println!(
+            "{label}{}{this}: last used {} ago, {forgotten}",
+            copy.name,
+            roughly(since)
+        );
     }
     if let Some(status) = Status::load(&located.repo_path) {
         println!("  Last sync: {}", describe(Some(&status)));

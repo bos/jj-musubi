@@ -342,6 +342,15 @@ fn hub_join_sync_clone_and_list() {
         "{out}"
     );
     assert!(log(&beta).contains("from alpha"));
+    // A person joined it, so the hive keeps it however long it goes unused, and says so.
+    assert!(
+        out.contains("The hive keeps this copy however long it goes unused, since a person"),
+        "{out}"
+    );
+    assert_eq!(
+        beta.jj(&["config", "get", "musubi.forget-after"]).trim(),
+        "never"
+    );
 
     // The first join saved the hub: from now on no command needs --hub.
     let list = musubi_in(&env, &logs, &beta, &[]);
@@ -362,6 +371,10 @@ fn hub_join_sync_clone_and_list() {
     let other = list.find("  alpha/alpha@ is at").expect(&list);
     assert!(own < other, "{list}");
     assert!(list.contains("Machine:   beta"), "{list}");
+    assert!(
+        list.contains("beta (this one): last used ") && list.contains("never forgotten"),
+        "{list}"
+    );
 
     // Completing as you type, the shell gets the hub's hives, and the hubs this machine knows.
     let hives = completions(&env, &logs, &beta, &["musubi", "clone", "pr"]);
@@ -407,15 +420,37 @@ fn hub_join_sync_clone_and_list() {
         "{translated}"
     );
 
+    // A `musubi.forget-after` that isn't one fails a clone before it makes anything.
+    beta.jj(&["config", "set", "--user", "musubi.forget-after", "soon"]);
+    let delta = env.root().join("delta");
+    let err = musubi_fails(
+        &env,
+        &logs,
+        &beta,
+        &["clone", "proj", delta.to_str().unwrap()],
+    );
+    assert!(err.contains("neither `never` nor a duration"), "{err}");
+    assert!(!delta.exists());
+    beta.jj(&["config", "unset", "--user", "musubi.forget-after"]);
+
     // A new machine clones the hive by a prefix of its name.
     let gamma = env.repo_handle("gamma");
     let mut clone = alpha.program(musubi());
     // A relative destination, through a parent, lands where it says.
     clone.args(["clone", "proj", "../gamma", "--machine", "gamma"]);
     clone.current_dir(env.root().join("home"));
+    // An agent clones it, so the hive forgets gamma's copy once it goes unused for 6h.
+    clone.env("CLAUDE_CODE_SESSION_ID", "a session");
     let out = run(&env, &logs, clone);
     assert!(out.contains("Cloning hive project into"), "{out}");
     assert!(log(&gamma).contains("picked up by the daemon"));
+    assert!(
+        out.contains("The hive forgets this copy once it goes unused for 6h, since an agent"),
+        "{out}"
+    );
+    wait_for(&logs, "beta to hear gamma's musubi.forget-after", || {
+        musubi_in(&env, &logs, &beta, &[]).contains("forgotten once unused for 6h, in 5h")
+    });
 
     // A machine forgotten elsewhere drops out of the hive, though its daemon still syncs,
     // until it's next used.

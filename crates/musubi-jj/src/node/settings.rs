@@ -213,7 +213,7 @@ impl NodeRepo {
         self.write_shared_config(&from.config, &to.config)
     }
 
-    fn repo_config_file(&self) -> Result<Option<ConfigFile>, NodeError> {
+    pub(super) fn repo_config_file(&self) -> Result<Option<ConfigFile>, NodeError> {
         let Some(path) = &self.repo_config else {
             return Ok(None);
         };

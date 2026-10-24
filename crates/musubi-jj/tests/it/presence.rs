@@ -84,6 +84,7 @@ fn computed(ops: &[Op]) -> Vec<BTreeMap<u64, BTreeSet<usize>>> {
         let kind = Kind {
             work: op.work.map(|k| k.to_string()),
             forgets: op.forgets.iter().map(u64::to_string).collect(),
+            ..Kind::default()
         };
         let presence = Presence::merge(&parents, is_ancestor)
             .unwrap()

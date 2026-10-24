@@ -24,8 +24,8 @@ async-trait = "0.1.89"
 blake3 = "1"
 bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
-# Its dynamic completion is unstable: its interface with the scripts it prints may change.
-clap_complete = { version = "4.6.5", features = ["unstable-dynamic"] }
+# Only 4.6: its dynamic completion is unstable, outside semver, so a minor release may break it.
+clap_complete = { version = "~4.6.5", features = ["unstable-dynamic"] }
 clap_complete_nushell = "4.6"
 etcetera = "0.11"
 futures = "0.3.32"
@@ -38,9 +38,12 @@ pollster = "1.0.1"
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 tarpc = { version = "0.38", features = ["serde-transport", "serde-transport-json"] }
 tempfile = "3"
-gix = { version = "=0.88.0", default-features = false }
+# jj-lib's, so that musubi builds no second copy.
+gix = { version = "0.88", default-features = false }
+# Exact: a `reproduce_failure` blob replays only with the version of Hegel that made it.
 hegeltest = "=0.50.2"
-prost = "=0.14.4"
+# jj-lib's: musubi decodes jj-lib's protobuf types with it.
+prost = "0.14.4"
 # The same as jj-cli's, so that musubi builds no second copy.
 ratatui = { version = "0.30.2", features = ["crossterm"] }
 reflink-copy = "0.1.30"

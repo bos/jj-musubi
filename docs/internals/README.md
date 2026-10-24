@@ -12,6 +12,8 @@ Each document answers a different question:
   properties does that guarantee?
 - [Race catalogue](races.md): What happens when machines change the same thing at once, and
   which test pins each outcome?
+- [Testing philosophy](testing-philosophy.md): What must a test protect, what evidence does
+  each kind of change need, and how do you know a test works?
 - [Testing](testing.md): Which layers of tests are there, what does each guard against, and
   where does a new test belong?
 - [Efficient tests](efficient-tests.md): How should a new test be written so that the suite

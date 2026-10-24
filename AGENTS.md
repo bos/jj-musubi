@@ -24,9 +24,10 @@ two minutes, so each check runs once, run by whoever owns it.
 
 ## Tests
 
-Write new tests as docs/internals/efficient-tests.md says. Restructure an existing test to fit it,
-or measure as it describes, only when making tests faster is the task; otherwise run the checks as
-above.
+Before adding, changing, removing, or reviewing a test, read
+[docs/internals/testing-philosophy.md](docs/internals/testing-philosophy.md). Write new tests as
+docs/internals/efficient-tests.md says. Restructure an existing test to fit it, or measure as it
+describes, only when making tests faster is the task; otherwise run the checks as above.
 
 ## Reviews
 

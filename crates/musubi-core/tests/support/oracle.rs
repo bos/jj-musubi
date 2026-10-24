@@ -81,6 +81,42 @@ impl Oracle {
                 .to_owned())
         }
     }
+
+    /// The model state's liveness measures and whether it has converged
+    /// (docs/internals/conformance.md, "Liveness").
+    pub fn measure(&mut self) -> Measure {
+        let reply = self.call(&json!({"op": "measure"}));
+        assert_eq!(reply["ok"], true, "oracle measure failed: {reply}");
+        Measure {
+            measure: numbers(&reply, "measure"),
+            rmeasure: numbers(&reply, "rmeasure"),
+            converged: reply["converged"] == true,
+        }
+    }
+
+    /// What a policy `Push` of `new` from `node` uploads: `upOps` and `upObjs`, sorted.
+    pub fn upload(&mut self, node: usize, new: u64) -> (Vec<u64>, Vec<u64>) {
+        let reply = self.call(&json!({"op": "upload", "node": node, "new": new}));
+        assert_eq!(reply["ok"], true, "oracle upload failed: {reply}");
+        (numbers(&reply, "ops"), numbers(&reply, "objs"))
+    }
+}
+
+fn numbers(reply: &Value, key: &str) -> Vec<u64> {
+    serde_json::from_value(reply[key].clone())
+        .unwrap_or_else(|err| panic!("bad {key} in oracle reply {reply}: {err}"))
+}
+
+/// The oracle's answer to a `measure` request. Each measure is compared lexicographically,
+/// as `Vec`s are.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Measure {
+    /// `measure` of `Liveness.lean`, proved to fall only from states the hub reached
+    /// without going back.
+    pub measure: Vec<u64>,
+    /// `rmeasure` of `Regress.lean`, which falls whether or not it has.
+    pub rmeasure: Vec<u64>,
+    pub converged: bool,
 }
 
 impl Drop for Oracle {

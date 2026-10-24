@@ -173,6 +173,20 @@ def presenceReply (ops : List Presence.EOp) : Json :=
   Json.mkObj [("ok", Json.bool true),
     ("presence", Json.arr ((List.range ops.length).map atOp).toArray)]
 
+/-! ## Liveness (`Exec.lean`, "The liveness measure") -/
+
+/-- The session state's measures, and whether it has converged. -/
+def measureReply (N : Nat) (es : EState) : Json :=
+  let (a, b, c, d, e) := es.measureE N
+  let (a', b', c', d', e', f') := es.rmeasureE N
+  Json.mkObj [("ok", Json.bool true), ("measure", toJson #[a, b, c, d, e]),
+    ("rmeasure", toJson #[a', b', c', d', e', f']), ("converged", Json.bool (es.convergedE N))]
+
+/-- What node `n` uploads with a policy `Push` of `new`: `upOps` and `upObjs`. -/
+def uploadReply (es : EState) (n new : Nat) : Json :=
+  Json.mkObj [("ok", Json.bool true), ("ops", nats (es.upOpsL n new)),
+    ("objs", nats (es.upObjsL n new))]
+
 /-! ## Request handling -/
 
 /-- The oracle's session: the node count and current state, once `reset`. -/
@@ -199,6 +213,15 @@ def handle (sess : Session) (line : String) : Json × Session :=
           match execStep N es a with
           | .error e => (errReply e, sess)
           | .ok es' => (okReply N es', some (N, es'))
+    | .ok "measure" =>
+      match sess with
+      | none => (errReply "bad request: measure before reset", sess)
+      | some (N, es) => (measureReply N es, sess)
+    | .ok "upload" =>
+      match sess, getNat j "node", getNat j "new" with
+      | none, _, _ => (errReply "bad request: upload before reset", sess)
+      | _, .error e, _ | _, _, .error e => (errReply s!"bad request: {e}", sess)
+      | some (_, es), .ok n, .ok new => (uploadReply es n new, sess)
     | .ok "presence" =>
       match j.getObjValAs? (Array Json) "ops" >>= fun ops => ops.toList.mapM decodeEOp with
       | .error e => (errReply s!"bad request: {e}", sess)

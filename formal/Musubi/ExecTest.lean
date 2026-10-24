@@ -90,4 +90,22 @@ def merged : List Action :=
   | .ok es => es.hub.head == 2 && es.hub.seq == 1 && (es.nodeOf 1).known == (1, 2)
   | .error _ => false
 
+-- The merged run: the push uploads `upOps` and `upObjs`, and the measure falls along it to
+-- convergence. Only node 0's op is dirty; then node 1 is a sequence number behind and lacks
+-- op 1; then it has yet to advance.
+#guard match run 2 initE [.userOp 0 root [10]] with
+  | .ok es => es.upOpsL 0 1 == [1] && es.upObjsL 0 1 == [10] &&
+      es.measureE 2 == (1, 0, 0, 0, 0) && !es.convergedE 2
+  | .error _ => false
+#guard match run 2 initE (merged.take 4) with
+  | .ok es => es.measureE 2 == (0, 1, 1, 0, 0) && es.rmeasureE 2 == (0, 0, 1, 1, 0, 0)
+  | .error _ => false
+#guard match run 2 initE (merged.take 10) with
+  | .ok es => es.measureE 2 == (0, 0, 0, 1, 0) && !es.convergedE 2
+  | .error _ => false
+#guard match run 2 initE merged with
+  | .ok es => es.measureE 2 == (0, 0, 0, 0, 0) && es.rmeasureE 2 == (0, 0, 0, 0, 0, 0) &&
+      es.convergedE 2
+  | .error _ => false
+
 end Musubi.Exec.Test

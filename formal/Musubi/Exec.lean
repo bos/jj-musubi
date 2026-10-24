@@ -541,4 +541,83 @@ def execStep (N : Nat) (es : EState) (a : Action) : Except String EState :=
   req es.parOK (fun _ => "internal: an operation has a parent not below it") fun _ =>
   execCore N es a
 
+/-! ## The liveness measure
+
+`measure` and `Converged` of `Liveness.lean`, and `rmeasure` of `Regress.lean`, on a finite
+state, with what a policy `Push` uploads. `ExecSound.lean` proves each equal to its relational
+counterpart on `abs es`. The conformance test asks the oracle for them while it runs the Rust
+policy to convergence (docs/internals/conformance.md, "Liveness"). -/
+
+/-- `cnt` with a decidable predicate. -/
+def cntE : Nat → (Nat → Bool) → Nat
+  | 0, _ => 0
+  | B + 1, p => cntE B p + (if p B then 1 else 0)
+
+namespace EState
+
+/-- `dirty`: one of node `n`'s heads is not accepted. -/
+def dirtyE (es : EState) (n : Nat) : Bool :=
+  (es.nodeOf n).heads.any fun h => !ancB es.parF h es.hub.head
+
+/-- `mStale`. -/
+def staleE (es : EState) (n : Nat) : Nat := es.hub.seq - (es.nodeOf n).known.1
+
+/-- `mMiss`: the accepted operations node `n` lacks. -/
+def missE (es : EState) (n : Nat) : Nat :=
+  let A := ancL es.parF es.hub.head
+  cntE (es.hub.head + 1) fun x => A.contains x && !(es.nodeOf n).lops.contains x
+
+/-- `mAdv`: whether node `n` has yet to advance to `known.head`. -/
+def advE (es : EState) (n : Nat) : Nat :=
+  if (es.nodeOf n).heads.any (ancB es.parF (es.nodeOf n).known.2) then 0 else 1
+
+/-- `mMulti`: whether node `n` has two heads to merge. -/
+def multiE (es : EState) (n : Nat) : Nat :=
+  if (es.nodeOf n).heads.any (fun a => (es.nodeOf n).heads.any (a != ·)) then 1 else 0
+
+/-- `measure`, the measure of `Liveness.lean`. -/
+def measureE (N : Nat) (es : EState) : Nat × Nat × Nat × Nat × Nat :=
+  (cntE N es.dirtyE, sumN N es.staleE, sumN N es.missE, sumN N es.advE, sumN N es.multiE)
+
+/-- `Converged`: every node's heads are `{hub.head}`, and it knows the hub's head. -/
+def convergedE (N : Nat) (es : EState) : Bool :=
+  (List.range N).all fun n =>
+    (es.nodeOf n).heads.contains es.hub.head && (es.nodeOf n).heads.all (· == es.hub.head) &&
+      (es.nodeOf n).known == (es.hub.seq, es.hub.head)
+
+/-- `Consistent`: node `n`'s `known` is in the hub's current history. -/
+def consistentE (es : EState) (n : Nat) : Bool :=
+  decide ((es.nodeOf n).known.1 ≤ es.hub.seq) &&
+    es.hub.histF (es.nodeOf n).known.1 == (es.nodeOf n).known.2
+
+/-- `Settled`: node `n` has one head, accepted and comparable with every head in the hub's
+history. -/
+def settledE (es : EState) (n : Nat) : Bool :=
+  match (es.nodeOf n).heads with
+  | [] => false
+  | x :: _ =>
+    (es.nodeOf n).heads.all (· == x) && ancB es.parF x es.hub.head &&
+      (List.range (es.hub.seq + 1)).all fun i =>
+        ancB es.parF x (es.hub.histF i) || ancB es.parF (es.hub.histF i) x
+
+/-- `mStaleR`. -/
+def staleRE (es : EState) (n : Nat) : Nat :=
+  if es.consistentE n then es.hub.seq - (es.nodeOf n).known.1 else 0
+
+/-- `rmeasure`, the measure of `Regress.lean`, for a hub that may have gone back. -/
+def rmeasureE (N : Nat) (es : EState) : Nat × Nat × Nat × Nat × Nat × Nat :=
+  (cntE N (fun n => !(es.consistentE n && es.settledE n)), cntE N (fun n => !es.consistentE n),
+    sumN N es.staleRE, sumN N es.missE, sumN N es.advE, sumN N es.multiE)
+
+/-- `upOps`: what node `n` uploads to push `h`, `anc*(h) \ anc*(known.head)`. -/
+def upOpsL (es : EState) (n h : Nat) : List Nat :=
+  (ancL es.parF h).filter fun y => !ancB es.parF y (es.nodeOf n).known.2
+
+/-- `upObjs`: the objects of `closure(h) \ closure(known.head)`. -/
+def upObjsL (es : EState) (n h : Nat) : List Nat :=
+  let below := (ancL es.parF (es.nodeOf n).known.2).flatMap es.objsF
+  ((ancL es.parF h).flatMap es.objsF).filter fun o => !below.contains o
+
+end EState
+
 end Musubi.Exec

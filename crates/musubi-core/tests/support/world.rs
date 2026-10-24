@@ -22,6 +22,7 @@ use super::model::Op;
 use super::model::ROOT;
 use super::model::SharedUniv;
 use super::model::Univ;
+use super::oracle::Measure;
 use super::oracle::Oracle;
 
 type Req = Request<Op, Vec<Obj>>;
@@ -62,6 +63,14 @@ pub struct World {
     /// the properties that rest on its history only growing hold of its history together
     /// with them.
     lost: Vec<(u64, Op)>,
+}
+
+/// What of a node `World::quiesce` watches across an exchange.
+struct NodeView {
+    lops: BTreeSet<Op>,
+    heads: BTreeSet<Op>,
+    known: (u64, Op),
+    crash_pending: bool,
 }
 
 fn kind_name(kind: HeadKind) -> &'static str {
@@ -207,6 +216,7 @@ impl World {
             Step::Advanced(_) => self.act(json!({"kind": "advance", "node": node})),
             Step::Send(requests) => {
                 for request in requests {
+                    self.check_upload(node, &request);
                     self.send_request(node, request);
                 }
             }
@@ -256,6 +266,27 @@ impl World {
         drop(univ);
         self.send(vec![model], Payload::Request(node, request));
         self.act(action);
+    }
+
+    /// A policy `Push` uploads exactly what the model's policy step does, `upOps` and
+    /// `upObjs`, as the liveness proofs assume (`Merged.lean`).
+    fn check_upload(&mut self, node: usize, request: &Req) {
+        let (
+            Some(oracle),
+            Request::Push {
+                ops, objects, new, ..
+            },
+        ) = (&mut self.oracle, request)
+        else {
+            return;
+        };
+        let (up_ops, up_objs) = oracle.upload(node, *new);
+        assert_eq!(
+            (sorted(ops.iter().copied()), sorted(objects.iter().copied())),
+            (up_ops, up_objs),
+            "node {node}'s push of {new} does not upload upOps and upObjs\ntrace: {:#?}",
+            self.trace
+        );
     }
 
     /// A push the policy would never make: `Cas(expected, new)` for any local `new`, without
@@ -656,24 +687,47 @@ impl World {
 
     /// Stops environment actions, makes the network reliable, and runs every node's policy
     /// until nothing changes. Panics if that takes too long: livelock.
+    ///
+    /// With an oracle, it checks the policy against the liveness proofs as it goes
+    /// (docs/internals/conformance.md, "Liveness"): each exchange that changes a node's
+    /// operations, heads or `known` makes the model's measures fall, and one that doesn't
+    /// leaves them where they were or lower. `measure` is checked only while the hub has
+    /// never gone back.
     pub fn quiesce(&mut self) {
         self.trace.push(json!({"marker": "quiesce"}));
+        let mut measure = self.measure();
         for _ in 0..30 {
             let mut changed = false;
             for node in 0..self.nodes() {
+                // Each turn starts with a `Fetch`, whose reply makes the node's `known` a head
+                // in the hub's current history, as `PStepR.realize` requires before the node
+                // realizes anything: after the hub goes back, `NodeCore::step` would
+                // otherwise realize below a head the hub has lost.
+                let before = self.node_view(node);
                 let sent_before = self.net.len();
                 self.poll(node);
                 self.round_trip(sent_before);
+                self.check_measure(node, before, &mut measure);
                 for _ in 0..200 {
-                    let before = self.trace.len();
+                    let before = self.node_view(node);
+                    let trace_before = self.trace.len();
                     self.exchange(node, 0);
-                    if self.trace.len() == before {
+                    if self.trace.len() == trace_before {
                         break;
                     }
+                    self.check_measure(node, before, &mut measure);
                     changed = true;
                 }
             }
             if !changed && self.converged() {
+                // A cross-check of the oracle's `convergedE`: the states already agree.
+                if let Some(measure) = self.measure() {
+                    assert!(
+                        measure.converged,
+                        "converged, but not in the Lean model\ntrace: {:#?}",
+                        self.trace
+                    );
+                }
                 let univ = self.univ.borrow();
                 let accepted = univ.ancestors(self.hub.head);
                 assert!(
@@ -684,6 +738,64 @@ impl World {
             }
         }
         panic!("did not converge after quiescing\ntrace: {:#?}", self.trace);
+    }
+
+    /// The oracle's measures of the current state, with an oracle.
+    fn measure(&mut self) -> Option<Measure> {
+        self.oracle.as_mut().map(Oracle::measure)
+    }
+
+    /// The parts of a node the measures read, which an exchange that changes the node
+    /// changes. Only with an oracle: nothing else checks them.
+    fn node_view(&self, node: usize) -> Option<NodeView> {
+        let repo = &self.repos[node];
+        self.has_oracle().then(|| NodeView {
+            lops: repo.lops.clone(),
+            heads: repo.heads.clone(),
+            known: *self.cores[node].known(),
+            crash_pending: repo.crash_before_objects,
+        })
+    }
+
+    /// After one of `node`'s exchanges in `quiesce`: the measure falls if the exchange
+    /// changed the node, and does not rise if it didn't. `measure` falls only while
+    /// the hub has never gone back; `rmeasure` falls whether or not it has.
+    fn check_measure(
+        &mut self,
+        node: usize,
+        before: Option<NodeView>,
+        measure: &mut Option<Measure>,
+    ) {
+        let (Some(before), Some(after), Some(new)) = (before, self.node_view(node), self.measure())
+        else {
+            return;
+        };
+        // A crash the test armed before quiescing is no policy step: start afresh from it.
+        let crashed = before.crash_pending && !after.crash_pending;
+        let old = measure.replace(new.clone()).unwrap();
+        if crashed {
+            return;
+        }
+        let changed =
+            (&before.lops, &before.heads, before.known) != (&after.lops, &after.heads, after.known);
+        let fell = |old: &Vec<u64>, new: &Vec<u64>| {
+            if changed { new < old } else { new <= old }
+        };
+        let what = if changed { "fall" } else { "stay or fall" };
+        assert!(
+            self.went_back || fell(&old.measure, &new.measure),
+            "node {node}'s exchange did not make the measure {what}: {:?} to {:?}\ntrace: {:#?}",
+            old.measure,
+            new.measure,
+            self.trace
+        );
+        assert!(
+            fell(&old.rmeasure, &new.rmeasure),
+            "node {node}'s exchange did not make rmeasure {what}: {:?} to {:?}\ntrace: {:#?}",
+            old.rmeasure,
+            new.rmeasure,
+            self.trace
+        );
     }
 
     /// The Rust side's state in the oracle's JSON form.

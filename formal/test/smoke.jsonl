@@ -1,5 +1,7 @@
 {"op": "reset", "nodes": 2}
 {"op": "step", "action": {"kind": "userOp", "node": 0, "parent": 0, "objs": [10]}}
+{"op": "measure"}
+{"op": "upload", "node": 0, "new": 1}
 {"op": "step", "action": {"kind": "push", "node": 0, "expected": 0, "new": 1}}
 {"op": "step", "action": {"kind": "casAccept", "node": 0, "expected": 0, "new": 1}}
 {"op": "step", "action": {"kind": "uploadOps", "node": 0, "ops": [1]}}
@@ -17,6 +19,7 @@
 {"op": "step", "action": {"kind": "recvObjs", "node": 1, "objs": [10]}}
 {"op": "step", "action": {"kind": "realize", "node": 1, "opId": 1}}
 {"op": "step", "action": {"kind": "advance", "node": 1}}
+{"op": "measure"}
 {"op": "step", "action": {"kind": "hubRegress", "seq": 2}}
 {"op": "step", "action": {"kind": "hubRegress", "seq": 0}}
 {"op": "step", "action": {"kind": "getHead", "node": 1}}

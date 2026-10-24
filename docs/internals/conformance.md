@@ -26,6 +26,11 @@ The chain has three links:
    each one with the oracle. It fails on any action the oracle rejects, or any difference
    between the Rust state and the oracle's state. Hegel shrinks failures to a minimal trace.
 
+That carries safety, not liveness. The test also runs the nodes to convergence, which
+catches a node that never gets there, but not one whose steps the termination proof does
+not cover, or whose pushes don't upload what the proof assumes. So it also checks the Rust
+policy against the liveness proofs ([Liveness](#liveness)).
+
 ## The abstraction
 
 The conformance test runs the real Rust core (the hub's `hub::handle` and `NodeCore`) against
@@ -52,7 +57,12 @@ request gets exactly one reply.
 ```json
 {"op": "reset", "nodes": 3}
 {"op": "step", "action": <action>}
+{"op": "measure"}
+{"op": "upload", "node": 0, "new": 4}
 ```
+
+`measure` and `upload` read the session's state and leave it as it was
+([Liveness](#liveness)).
 
 ### Actions
 
@@ -179,6 +189,8 @@ Deliberately broken versions of the core, each caught:
 | Node realizes an operation before its parents | invariants and conformance |
 | Node realizes an operation before its objects arrive | invariants and conformance |
 | Node learns a head whose `seq` equals the one it knows | conformance only: harmless, but not a model step |
+| Node's `Push` uploads every operation since the root, not since `known.head` | conformance only: not `upOps` |
+| Node with two heads pushes one of them before merging | conformance only: the push raises the other nodes' staleness, and the measure rises; the run still converges |
 
 `just mutants` runs cargo-mutants over `hub.rs` and `node.rs`; the property and conformance
 tests should kill every mutant it makes.
@@ -209,7 +221,55 @@ The test's objects have no structure, so the test's hub ignores `closure(base)` 
 out exactly what the haves name, as the model's `hubFetch` does; a node's haves there are
 every object it holds.
 
-## Presence
+## Liveness
+
+`formal/Musubi/Liveness.lean` proves that once users stop, nodes following the policy
+(`PStep`) converge: a lexicographic measure falls on every policy step, and some step is
+enabled until every node is at the hub's head. `Regress.lean` proves the same of a hub that
+has gone back, with the policy `PStepR` and the measure `rmeasure`. `Merged.lean` shows that
+the merged `Push` and `Fetch` reach states that agree with policy steps on everything the
+measure reads, provided a `Push` uploads `upOps` and `upObjs`: `anc*(new) \ anc*(known.head)`
+and the objects of `closure(new) \ closure(known.head)`. `Merged.lean` covers only a hub that
+has never gone back; after it has, that the merged requests serve the policy rests on this
+test alone.
+
+`formal/Musubi/Exec.lean` computes these on the oracle's state: `measureE`, `rmeasureE`,
+`convergedE`, `upOpsL` and `upObjsL`, proved equal to `measure`, `rmeasure`, `Converged`,
+`upOps` and `upObjs` of the abstracted state (`measureE_eq`, `rmeasureE_eq`,
+`convergedE_iff`, `mem_upOpsL`, `mem_upObjsL`, in `ExecSound.lean`). The oracle answers with
+them:
+
+```json
+{"op": "measure"}
+{"ok": true, "measure": [1, 0, 0, 0, 0], "rmeasure": [1, 0, 0, 0, 0, 0], "converged": false}
+{"op": "upload", "node": 0, "new": 1}
+{"ok": true, "ops": [1], "objs": [10]}
+```
+
+`measure` is `(dirty nodes, Σ staleness, Σ missing ops, Σ pending advances, Σ pending
+merges)`; `rmeasure` is `(nodes not good, inconsistent nodes, Σ staleness of consistent nodes,
+Σ missing ops, Σ pending advances, Σ pending merges)` (formal/README.md). Both compare
+lexicographically.
+
+The conformance test checks:
+
+- Every `Push` the policy sends (not a rogue one) carries exactly `upOps` and `upObjs`.
+- `World::quiesce`, which stops users and runs every node's policy over a reliable network,
+  asks for the measures after each exchange: a node's `Fetch` and the reply, or one policy
+  step and the replies to what it sent. An exchange that changes the node's operations,
+  heads or `known` must make the measure fall, and any other must leave it where it was or
+  lower. `rmeasure` must do so in every case; `measure` only while the hub has never gone
+  back, since its proof needs every state to be `Reachable`. Each node's turn starts with a
+  `Fetch`, whose reply puts its `known` in the hub's current history before it realizes
+  anything, as `PStepR` requires. A crash the test armed before
+  quiescing, which happens when the node next stages a `Fetched` reply, is not a policy step,
+  so the check starts afresh after it.
+- Once the Rust side has converged, so has the oracle's state. The states already agree
+  after every action, so this cross-checks `convergedE`.
+
+The measure falling shows that the policy's steps are ones the termination proof covers, not
+that each is a `PStep`. Hub-only work, such as storing a rejected push's upload, changes
+nothing the measures read.
 
 `formal/Musubi/Presence.lean` proves which copies a hive shows when copies go away
 ([design.md](design.md#copies-that-go-away)). musubi computes it with `Presence::merge` and

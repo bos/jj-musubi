@@ -71,7 +71,10 @@ heads it lost, and MergeOwnership no longer is: two nodes can then merge the sam
 (`formal/Musubi/RegressScenario.lean`). A final `quiesce` step stops environment actions,
 makes the network reliable, and runs every node's policy until nothing changes. The test
 then checks liveness: every node's heads are `{hub.head}`, and every created operation is
-in its ancestry. A bound on quiescence steps turns livelock into a failure.
+in its ancestry. A bound on quiescence steps turns livelock into a failure. `conformance`
+also asks the Lean model for its liveness measures after each exchange while quiescing, and
+requires them to fall whenever the exchange changes the node, and every push the policy
+sends to upload what the liveness proofs assume (docs/internals/conformance.md, "Liveness").
 
 Operations here are abstract: ids, parents, and object sets. No jj repository is involved.
 

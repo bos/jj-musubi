@@ -83,6 +83,11 @@ open Musubi
 #print axioms Exec.exec_rsound
 #print axioms Exec.exec_rreachable
 #print axioms Exec.exec_invR
+#print axioms Exec.measureE_eq
+#print axioms Exec.rmeasureE_eq
+#print axioms Exec.convergedE_iff
+#print axioms Exec.mem_upOpsL
+#print axioms Exec.mem_upObjsL
 -- Per-machine and shared view state
 #print axioms Refs.noSpuriousRevert
 #print axioms Refs.import_moves_only_after_git

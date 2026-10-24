@@ -788,4 +788,134 @@ theorem run_rreachable {N : Nat} {as : List Action} {es es' : EState}
       rw [hs] at hr
       exact ih (h.step a hs) hr
 
+/-! ## The liveness measure -/
+
+theorem cnt_cntE {B : Nat} {P : Nat → Prop} {p : Nat → Bool}
+    (h : ∀ x, x < B → (P x ↔ p x = true)) : cnt B P = cntE B p := by
+  induction B with
+  | zero => rfl
+  | succ B ih =>
+    simp only [cnt, cntE]
+    rw [ih (fun x hx => h x (Nat.lt_succ_of_lt hx))]
+    by_cases hp : p B = true
+    · simp [hp, (h B (Nat.lt_succ_self B)).2 hp]
+    · have hP : ¬ P B := fun hP => hp ((h B (Nat.lt_succ_self B)).1 hP)
+      simp [hp, hP]
+
+theorem ite_bool {P : Prop} {inst : Decidable P} {b : Bool} (h : P ↔ b = true) {x y : Nat} :
+    @ite _ P inst x y = (if b = true then x else y) := by
+  by_cases hb : b = true
+  · simp [hb, h.2 hb]
+  · have hP : ¬ P := fun hP => hb (h.1 hP)
+    simp [hb, hP]
+
+theorem ancB_eq_false {par : Nat → List Nat} (hlt : ParLt par) {a x : Nat} :
+    ancB par a x = false ↔ ¬ Anc par a x := by
+  rw [← ancB_iff hlt]; simp
+
+variable {es : EState}
+
+theorem missE_eq (hlt : ParLt es.parF) (n : Nat) : es.missE n = mMiss (abs es) n := by
+  unfold EState.missE mMiss
+  symm
+  apply cnt_cntE
+  intro x _
+  simp [abs, ENode.abs, setP, mem_ancL hlt]
+
+theorem advE_eq (hlt : ParLt es.parF) (n : Nat) : es.advE n = mAdv (abs es) n := by
+  unfold EState.advE mAdv
+  symm
+  apply ite_bool
+  simp [abs, ENode.abs, setP, ancB_iff hlt]
+
+theorem multiE_eq (n : Nat) : es.multiE n = mMulti (abs es) n := by
+  unfold EState.multiE mMulti
+  symm
+  apply ite_bool
+  simp [abs, ENode.abs, setP]
+
+/-- The executable measure is the measure of `Liveness.lean`. -/
+theorem measureE_eq {N : Nat} (hok : es.parOK = true) : es.measureE N = measure N (abs es) := by
+  have hlt := parOK_parLt hok
+  unfold EState.measureE measure mDirty
+  have e1 : cnt N (dirty (abs es)) = cntE N es.dirtyE := by
+    apply cnt_cntE
+    intro n _
+    simp [dirty, EState.dirtyE, abs, ENode.abs, setP, ancB_eq_false hlt]
+  rw [e1, sumN_congr (fun n _ => missE_eq hlt n), sumN_congr (fun n _ => advE_eq hlt n),
+    sumN_congr (fun n _ => multiE_eq n)]
+  rfl
+
+/-- The executable convergence check is `Converged`. -/
+theorem convergedE_iff {N : Nat} : es.convergedE N = true ↔ Converged N (abs es) := by
+  unfold EState.convergedE Converged
+  simp only [List.all_eq_true, List.mem_range, Bool.and_eq_true, List.contains_iff_mem,
+    beq_iff_eq]
+  constructor
+  · rintro h n hn
+    obtain ⟨⟨hc, ha⟩, hk⟩ := h n hn
+    refine ⟨fun y => ⟨fun hy => ?_, fun hy => ?_⟩, hk⟩
+    · exact ha y hy
+    · rw [hy]; exact hc
+  · rintro h n hn
+    obtain ⟨hh, hk⟩ := h n hn
+    exact ⟨⟨(hh _).2 rfl, fun y hy => (hh y).1 hy⟩, hk⟩
+
+theorem consistentE_iff (n : Nat) : es.consistentE n = true ↔ Consistent (abs es) n := by
+  simp [EState.consistentE, Consistent, abs, ENode.abs]
+
+theorem settledE_iff (hlt : ParLt es.parF) (n : Nat) :
+    es.settledE n = true ↔ Settled (abs es) n := by
+  unfold EState.settledE Settled
+  simp only [abs, ENode.abs, setP]
+  generalize (es.nodeOf n).heads = hs
+  cases hs with
+  | nil => simp
+  | cons x t =>
+    simp only [List.all_eq_true, List.mem_range, Bool.and_eq_true, Bool.or_eq_true,
+      beq_iff_eq, ancB_iff hlt]
+    constructor
+    · rintro ⟨⟨hall, hx⟩, hc⟩
+      refine ⟨x, fun y => ⟨fun hy => hall y hy, fun hy => hy ▸ List.mem_cons_self⟩, hx,
+        fun i hi => hc i (Nat.lt_succ_of_le hi)⟩
+    · rintro ⟨z, hz, hx, hc⟩
+      have hxz : x = z := (hz x).1 List.mem_cons_self
+      subst hxz
+      exact ⟨⟨fun y hy => (hz y).1 hy, hx⟩, fun i hi => hc i (Nat.le_of_lt_succ hi)⟩
+
+/-- The executable measure is the measure of `Regress.lean`. -/
+theorem rmeasureE_eq {N : Nat} (hok : es.parOK = true) :
+    es.rmeasureE N = rmeasure N (abs es) := by
+  have hlt := parOK_parLt hok
+  unfold EState.rmeasureE rmeasure mBad mIncons
+  have e1 : cnt N (fun n => ¬ Good (abs es) n) =
+      cntE N (fun n => !(es.consistentE n && es.settledE n)) := by
+    apply cnt_cntE
+    intro n _
+    simp only [Good, Bool.not_eq_true', Bool.and_eq_false_iff]
+    rw [← consistentE_iff, ← settledE_iff hlt]
+    cases es.consistentE n <;> cases es.settledE n <;> simp
+  have e2 : cnt N (fun n => ¬ Consistent (abs es) n) = cntE N (fun n => !es.consistentE n) := by
+    apply cnt_cntE
+    intro n _
+    rw [← consistentE_iff]
+    cases es.consistentE n <;> simp
+  have e3 : sumN N (mStaleR (abs es)) = sumN N es.staleRE := by
+    apply sumN_congr
+    intro n _
+    unfold mStaleR EState.staleRE
+    exact ite_bool (consistentE_iff n).symm
+  rw [e1, e2, e3, sumN_congr (fun n _ => missE_eq hlt n), sumN_congr (fun n _ => advE_eq hlt n),
+    sumN_congr (fun n _ => multiE_eq n)]
+
+/-- What a policy `Push` uploads, `upOps`. -/
+theorem mem_upOpsL (hlt : ParLt es.parF) {n h y : Nat} :
+    y ∈ es.upOpsL n h ↔ (abs es).upOps n h y := by
+  simp [EState.upOpsL, State.upOps, abs, ENode.abs, mem_ancL hlt, ancB_eq_false hlt]
+
+/-- And its objects, `upObjs`. -/
+theorem mem_upObjsL (hlt : ParLt es.parF) {n h o : Nat} :
+    o ∈ es.upObjsL n h ↔ (abs es).upObjs n h o := by
+  simp [EState.upObjsL, State.upObjs, abs, ENode.abs, mem_ancL hlt]
+
 end Musubi.Exec

@@ -226,8 +226,17 @@ impl Search {
         let mut world = self.world.borrow_mut();
         let commit = choose(&tc, &world.observe(m).conflicted());
         let tool = [":ours", ":theirs"][pick(&tc, 2)];
-        fired("resolve");
-        world.jj(m, &["resolve", "-r", &commit, "--tool", tool]);
+        // jj's built-in tools resolve only conflicts of two sides, and jj refuses others, as
+        // a merge of three machines' work can make.
+        let resolved = world.try_jj_in(
+            m,
+            0,
+            &["resolve", "-r", &commit, "--tool", tool],
+            &["At most 2 sides are supported"],
+        );
+        if resolved.is_ok() {
+            fired("resolve");
+        }
         drop(world);
         self.note(&tc);
     }

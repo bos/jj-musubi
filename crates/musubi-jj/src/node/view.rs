@@ -54,6 +54,18 @@ impl PerMachine {
         }
     }
 
+    /// Whether the `git` remote has a ref with no target, as jj keeps a tracked one while
+    /// its local bookmark is there.
+    pub(super) fn has_absent_remote_ref(&self) -> bool {
+        self.git_remote.as_ref().is_some_and(|remote| {
+            remote
+                .bookmarks
+                .values()
+                .chain(remote.tags.values())
+                .any(|remote_ref| remote_ref.target.is_absent())
+        })
+    }
+
     /// Removes these fields from `view`.
     fn strip(view: &mut View) {
         view.git_refs.clear();
@@ -454,14 +466,12 @@ impl NodeRepo {
         let mut merged = self.workspaces_of(first)?;
         let mut merged_parents = vec![first.clone()];
         for other in rest {
-            let base = match self
-                .canonical
-                .closest_common_ancestors(&merged_parents, std::slice::from_ref(other))?
-                .first()
-            {
-                Some(base) => self.workspaces_of(base)?,
-                None => BTreeMap::new(),
-            };
+            let base = self.base_of(
+                &merged_parents,
+                other,
+                |op| self.workspaces_of(op),
+                |ops| self.merged_workspaces(ops),
+            )?;
             let theirs = self.workspaces_of(other)?;
             let keys: BTreeSet<WorkspaceNameBuf> = merged
                 .keys()
@@ -486,33 +496,49 @@ impl NodeRepo {
         Ok(merged)
     }
 
+    /// The base a merge of `ours` with `theirs` merges three-way against, as jj merges
+    /// operations: what `of` gives for their closest common ancestor, or where there are
+    /// several, as in a criss-cross merge, those merged by `merge`, as jj merges them into one
+    /// base first; nothing, if they have none.
+    fn base_of<T: Default>(
+        &self,
+        ours: &[OperationId],
+        theirs: &OperationId,
+        of: impl Fn(&OperationId) -> Result<T, NodeError>,
+        merge: impl Fn(&[OperationId]) -> Result<T, NodeError>,
+    ) -> Result<T, NodeError> {
+        let ancestors = self
+            .canonical
+            .closest_common_ancestors(ours, std::slice::from_ref(theirs))?;
+        match ancestors.as_slice() {
+            [] => Ok(T::default()),
+            [one] => of(one),
+            several => merge(several),
+        }
+    }
+
+    /// The heads of a canonical operation's view.
+    fn heads_of(&self, op: &OperationId) -> Result<BTreeSet<CommitId>, NodeError> {
+        if op == self.canonical.root_operation_id() {
+            return Ok(BTreeSet::new());
+        }
+        let view = self.canonical.read_operation_view(op)?;
+        Ok(view.head_ids.into_iter().collect())
+    }
+
     /// The heads of canonical operations' views merged three-way, as jj merges views: a head
     /// that a parent dropped since their merge base is gone, and one a parent added is there.
-    /// Where they have several closest common ancestors, a head of any of them counts as in
-    /// the base.
     fn merged_heads(&self, parents: &[OperationId]) -> Result<BTreeSet<CommitId>, NodeError> {
-        let heads_of = |op: &OperationId| -> Result<BTreeSet<CommitId>, NodeError> {
-            if op == self.canonical.root_operation_id() {
-                return Ok(BTreeSet::new());
-            }
-            let view = self.canonical.read_operation_view(op)?;
-            Ok(view.head_ids.into_iter().collect())
-        };
+        let heads_of = |op: &OperationId| self.heads_of(op);
         let Some((first, rest)) = parents.split_first() else {
             return Ok(BTreeSet::new());
         };
         let mut merged = heads_of(first)?;
         let mut merged_parents = vec![first.clone()];
         for other in rest {
-            // In a criss-cross merge, a head of any of the closest common ancestors: never
-            // one a parent hid since one of them. jj merges them into one base instead.
-            let mut base = BTreeSet::new();
-            for ancestor in self
-                .canonical
-                .closest_common_ancestors(&merged_parents, std::slice::from_ref(other))?
-            {
-                base.extend(heads_of(&ancestor)?);
-            }
+            let base = self.base_of(&merged_parents, other, heads_of, |ops| {
+                self.merged_heads(ops)
+            })?;
             let theirs = heads_of(other)?;
             let all: BTreeSet<&CommitId> = merged.iter().chain(&theirs).chain(&base).collect();
             let next = all

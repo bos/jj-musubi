@@ -568,6 +568,15 @@ impl NodeRepo {
                 fields_of(&self.merge_base(&ops, &other_op)?)?,
                 fields_of(&other_op)?,
             );
+            // jj keeps a tracked remote ref with no target only while its local bookmark is
+            // there, which these fields don't say: merging, it may drop one, and then merge a
+            // side that brings it back as from nothing, untracked. Its merge decides those.
+            if [&base, &merged, &theirs]
+                .iter()
+                .any(|fields| fields.has_absent_remote_ref())
+            {
+                return Ok(None);
+            }
             if theirs != base {
                 if merged != base {
                     return Ok(None);

@@ -138,8 +138,21 @@ To stop using musubi on a machine altogether:
 
 1. Take each of its repositories out with `musubi leave`. `musubi list` lists them.
 2. Run `musubi daemon uninstall`, which stops the daemon and stops it starting at login.
-3. On the hub's machine, remove the machine's line from `~/.ssh/authorized_keys`: the one
-   ending in `musubi@<host>`.
+3. If a hub runs on this machine, stop it (`musubi hub uninstall`, if `musubi hub install`
+   runs it at login), delete its directory, and remove the other machines' lines, those
+   ending in `musubi@<host>`, from `~/.ssh/authorized_keys` here.
+   Move the hub first if other machines still use it: see [Replace or move a
+   hub](#replace-or-move-a-hub).
+4. Delete what musubi kept: `.jj/repo/musubi/` in each of those repositories, and its state
+   directory, `~/.local/state/musubi` unless you set `XDG_STATE_HOME` or `MUSUBI_STATE_DIR`
+   (`%APPDATA%\musubi` on Windows). [Files and
+   directories](../reference/configuration.md#files-and-directories) lists everything musubi
+   writes.
+5. Unset its settings: `jj config list --user musubi` lists them, and
+   `jj config unset --user <key>` unsets each. In each of those repositories, do the same
+   with `--repo`, for `musubi.forget-after`.
+6. On the hub's machine, if that is another, remove this machine's line from
+   `~/.ssh/authorized_keys`: the one ending in `musubi@<host>`.
 
 ## Upgrade musubi
 
@@ -189,7 +202,7 @@ And don't let a file-syncing tool, such as Dropbox or Syncthing, sync a copy too
 
 Every machine keeps everything it has synced, so losing a hub, whether its directory or its
 whole machine, loses no work. Start a new hub at the address machines use for the old one, as
-in [Set up a hub and machines](set-up.md#start-the-hub). The new hub knows none of the hives,
+in [Set up a hub and machines](setup.md#start-the-hub). The new hub knows none of the hives,
 so syncs fail, saying the hub has no record of the repository's hive. Make each hive again
 from one machine's copy:
 

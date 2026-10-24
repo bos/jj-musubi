@@ -32,7 +32,7 @@ explains hubs, hives, and copies.
 `create` and `join` also take `--full-history`, to share the repository's whole operation
 history rather than its current state, and `join` takes `--hive <name>` to join a hive of your
 choosing. All three set the copy's [`musubi.forget-after`](configuration.md#settings)
-unless jj's config sets it already. See [Set up a hub and machines](../guides/set-up.md).
+unless jj's config sets it already. See [Set up a hub and machines](../guides/setup.md).
 
 ## See how syncing goes
 

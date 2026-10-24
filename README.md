@@ -102,7 +102,7 @@ musubi clone jj-musubi ~/src/jj-musubi --hub devbox
 ```
 
 To keep the daemon running across reboots, run `musubi daemon install` on each machine.
-[Set up a hub and machines](docs/guides/set-up.md) covers each step in more depth.
+[Set up a hub and machines](docs/guides/setup.md) covers each step in more depth.
 
 ## Day to day
 
@@ -130,7 +130,7 @@ and macOS), or under systemd, to `journalctl --user -u musubi`. See
 ## Learn more
 
 - [How musubi works](docs/how-it-works.md): what replicates, and what stays on each machine.
-- [Set up a hub and machines](docs/guides/set-up.md): ssh, keeping the hub running, forks,
+- [Set up a hub and machines](docs/guides/setup.md): ssh, keeping the hub running, forks,
   machine names, and more than one repository.
 - [Work across machines](docs/guides/working-across-machines.md): stale working copies, undo,
   concurrent changes, and shared remotes and config.

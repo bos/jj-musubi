@@ -125,18 +125,27 @@ jj config set --user 'colors.machine' yellow
 
 ## Files and directories
 
+These are every file musubi writes. Its settings are in jj's config files, as
+[Settings](#settings) says. To remove them all from a machine, see [Take a repository or
+machine out](../guides/manage.md#take-a-repository-or-machine-out).
+
 ### On every machine
 
 | Path | Holds |
 | --- | --- |
-| State directory: `~/.local/state/musubi` (`$XDG_STATE_HOME/musubi`; `%APPDATA%\musubi` on Windows) | `state.toml`, which lists the copies the daemon syncs, each with its machine key and where it is, and this machine's default hub; `daemon.log`; `hub.log`, the log of a hub launchd runs; `hub_key`, the machine's ssh key for reaching hubs; `ssh-agent`, a link to the latest ssh agent, for the daemon; locks. |
-| `.jj/repo/musubi/` in each repository | The repository's hive (`hive.toml`, which records its hive, its jj config id, and whether it joined, left, or its hive was removed), this machine's identity in it (`machine`), its last sync (`status.json`), when the daemon last cleaned up after jj in it (`gc`, and `gc.lock` while it does), and musubi's own record of the hive's operations. Removing it, or copying it into another repository, confuses musubi: use `musubi leave` and `musubi clone`. |
+| The state directory: `$XDG_STATE_HOME/musubi`, so `~/.local/state/musubi` on Linux and macOS unless you set `XDG_STATE_HOME`; `%APPDATA%\musubi` on Windows; or `$MUSUBI_STATE_DIR` | `state.toml`, which lists the copies the daemon syncs, each with its machine key and where it is, and this machine's default hub; `daemon.log`; `hub_key` and `hub_key.pub`, the machine's ssh key for reaching hubs; `ssh-agent`, a link to the latest ssh agent, for the daemon; `login-service`, while `musubi daemon install` has the daemon start at login; on the hub's machine, `hub.path`, the directory a hub started without `--dir` serves, `hub.log`, the log of a hub launchd runs, and `hub-login-service`, while `musubi hub install` has the hub run at login; the running daemon's process id; locks. |
+| `.jj/repo/musubi/` in each repository | The repository's hive (`hive.toml`, which records its hive, its jj config id, and whether it joined, left, or its hive was removed), this machine's identity in it (`machine`), its last sync (`status.json`), when the daemon last cleaned up after jj in it (`gc`, and `gc.lock` while it does), and musubi's own record of the hive's operations. `musubi leave` records in `hive.toml` that the copy left, removes `status.json`, and keeps the rest. Removing it from a repository that syncs, or copying it into another repository, confuses musubi: use `musubi leave` and `musubi clone`. |
+| Each repository's jj repo config and git config | The settings a hive shares: the git remotes, and the repo config keys that [Share settings](../guides/working-across-machines.md#share-settings) lists. Also `musubi.forget-after`, which `musubi join`, `create` and `clone` set. jj keeps the repo config outside the repository; `jj config path --repo` prints where. |
+| What `musubi daemon install` adds | On macOS, `~/Library/LaunchAgents/io.github.bos.musubi.plist`; on Linux, `~/.config/systemd/user/musubi.service` (in `$XDG_CONFIG_HOME` if set); on Windows, the value `musubi` under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. `musubi daemon uninstall` removes it. |
+| What `musubi hub install` adds | On macOS, `~/Library/LaunchAgents/io.github.bos.musubi.hub.plist`; on Linux, `~/.config/systemd/user/musubi-hub.service` (in `$XDG_CONFIG_HOME` if set). `musubi hub uninstall` removes it. |
 
 The daemon's control socket is `$XDG_RUNTIME_DIR/musubi/daemon.sock` on Linux (without
 `XDG_RUNTIME_DIR`, `musubi-<uid>/daemon.sock` in `$TMPDIR` or `/tmp`),
-`$TMPDIR/musubi/daemon.sock` on macOS, and the named pipe `\\.\pipe\musubi-<user>` on Windows. Its
-directory must belong to you and be writable by no one else, or musubi won't use it. `--socket`,
-`MUSUBI_SOCKET`, or `musubi.daemon.socket` choose another.
+`$TMPDIR/musubi/daemon.sock` on macOS, and the named pipe `\\.\pipe\musubi-<user>` on
+Windows. With `MUSUBI_STATE_DIR` set, it is `daemon.sock` in that directory instead (on
+Windows, a pipe named after it). Its directory must belong to you and be writable by no one
+else, or musubi won't use it. `--socket`, `MUSUBI_SOCKET`, or `musubi.daemon.socket` choose
+another.
 
 ### On the hub's machine
 
@@ -148,6 +157,12 @@ The hub's directory, `~/musubi-hub` by default, holds:
 | `<hive id>/` | One directory per hive: its name, in `hive.toml`, and its operations and objects. |
 | `removed/` | Hives that `musubi hub remove` removed, each emptied a day later and kept, empty, as the record that it was removed. Also, for a day or so, stores the hub found corrupt and made again. |
 | `run/hub.sock` | The socket the hub listens on, which only you can reach. |
+| `hub.lock` | A lock that keeps a second hub from serving the directory. |
+
+Outside it, each machine that reaches the hub over ssh adds a line to
+`~/.ssh/authorized_keys`, ending in `musubi@<host>`, that lets its `hub_key` run only
+`musubi hub connect`. See [The ssh key musubi
+adds](../guides/setup.md#the-ssh-key-musubi-adds).
 
 Nothing in the hub's directory needs backing up: every machine keeps what it synced, so losing
 the directory loses no work. See

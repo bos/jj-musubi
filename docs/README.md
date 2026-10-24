@@ -10,7 +10,7 @@ up, what to expect day to day, and what to do when something goes wrong.
 
 ## Guides
 
-- [Set up a hub and machines](guides/set-up.md)
+- [Set up a hub and machines](guides/setup.md)
 - [Work across machines](guides/working-across-machines.md)
 - [Manage hives, machines, and hubs](guides/manage.md)
 

@@ -478,8 +478,10 @@ fn hub_join_sync_clone_and_list() {
     // until it's next used.
     let out = musubi_in(&env, &logs, &alpha, &["forget", "gamma"]);
     assert!(out.contains("Forgot gamma"), "{out}");
-    let list = musubi_in(&env, &logs, &alpha, &["list"]);
-    assert!(list.contains("project  2 machines: alpha, beta"), "{list}");
+    // The hub counts gamma out once it has the forget, which `musubi forget`'s sync sends.
+    wait_for(&logs, "the hub to count gamma out", || {
+        musubi_in(&env, &logs, &alpha, &["list"]).contains("project  2 machines: alpha, beta")
+    });
     wait_for(&logs, "gamma's daemon to hear it was forgotten", || {
         musubi_in(&env, &logs, &gamma, &[]).contains("forgotten by the hive")
     });

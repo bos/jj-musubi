@@ -88,6 +88,9 @@ pub struct Ledger {
     git_targets: BTreeSet<String>,
     /// The commits pushed to the shared remote, which a fetch brings back (`pushed`).
     pushed: BTreeSet<String>,
+    /// The changes each bookmark and tag (as `View::conflicted_names` names them) was set
+    /// to by a command.
+    set_to: BTreeMap<String, BTreeSet<String>>,
     /// Divergence and conflicts already present at the last full convergence.
     divergent_before: BTreeSet<String>,
     conflicted_before: BTreeSet<String>,
@@ -143,6 +146,28 @@ impl Ledger {
                 .entry(change.clone())
                 .or_default()
                 .push(what.to_owned());
+        }
+        let change_of: BTreeMap<&String, &String> = after
+            .changes
+            .iter()
+            .flat_map(|(change, commits)| commits.iter().map(move |commit| (commit, change)))
+            .collect();
+        for (kind, names, targets) in [
+            ("bookmark", &bookmarks, &after.bookmarks),
+            ("tag", &tags, &after.tags),
+        ] {
+            for name in names {
+                let changes = targets
+                    .get(name)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .filter_map(|commit| change_of.get(commit).map(|c| (*c).clone()));
+                self.set_to
+                    .entry(format!("{kind} {name}"))
+                    .or_default()
+                    .extend(changes);
+            }
         }
         for name in &bookmarks {
             self.bookmarks.entry(name.clone()).or_default().insert(m);
@@ -322,16 +347,33 @@ impl Ledger {
                     .iter()
                     .any(|c| ids.contains(&c.id) && divergence.contains(&c.change))
             });
+            let (kind, name) = conflicted.split_once(' ').unwrap();
+            let changers = if kind == "bookmark" {
+                self.bookmarks.get(name)
+            } else {
+                self.tags.get(name)
+            };
+            // A bookmark set to a commit that another machine's command rewrote or abandoned
+            // meanwhile follows the rewrite where a node merges the two, as jj moves a
+            // bookmark (not a tag) to its commit's rewrite, or its parent; a move made not
+            // knowing of that then conflicts with it. jj does the same on one machine, with an
+            // operation at an older one. A merge's own rewrites don't count: those are
+            // musubi's.
+            let followed_rewrite = kind == "bookmark"
+                && self.set_to.get(&conflicted).is_some_and(|changes| {
+                    changes.iter().any(|change| {
+                        self.rewrites.get(change).is_some_and(|machines| {
+                            machines
+                                .iter()
+                                .any(|m| changers.is_none_or(|ms| !ms.contains(m)))
+                        })
+                    })
+                });
             if !on_divergence
+                && !followed_rewrite
                 && !self.conflict_explained(&conflicted)
                 && !abandoned_merge(&conflicted)
             {
-                let (kind, name) = conflicted.split_once(' ').unwrap();
-                let changers = if kind == "bookmark" {
-                    self.bookmarks.get(name)
-                } else {
-                    self.tags.get(name)
-                };
                 spurious.push(format!("{conflicted} (changed by {changers:?})"));
             }
         }

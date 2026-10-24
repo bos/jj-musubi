@@ -395,3 +395,63 @@ makes it the longest test after the protocol's conformance test, so it starts ne
 shrinking a failure takes minutes, and nextest lets the test run for six. Before the model's
 export said what jj does, the first run of 10 cases failed: git moved `x` to a commit, then
 musubi realized a move of `x` to it.
+
+## Chunked blobs
+
+`formal/Musubi/Chunks.lean` proves that a finished blob is the one sent, despite corrupt,
+stale or duplicated chunks, and that every transfer finishes once chunks are delivered
+([protocol.md](protocol.md#chunked-blobs)). musubi's receiver, `BlobStore::receive`
+(`crates/musubi-sync/src/blobs.rs`), follows a narrower design than the model's: it keeps
+only a contiguous prefix, reports its length rather than the missing ranges, and checks the
+hash when the prefix reaches the length the chunk claims, with no `Finish`. Its state is a
+byte string and a flag, so, as for the per-machine refs, the test keeps a copy of the model
+in Rust rather than running an oracle. The chain has two links:
+
+1. **Refinement.** `Chunks.receive` is the prefix receiver, and `PStep` its steps: a chunk
+   delivered with any claimed length, and a sweep of the partial blob or the stored one.
+   For an injective hash, as `stored_identical` assumes, each is a run of the model's
+   `CStep`s (`preach_abs`): a chunk taken is `recv`, one dropped no step, a hash match is
+   `finishOk` then `crashRecv`, a mismatch is `crashRecv`, a chunk of a stored blob is
+   `finishStored`, and the sweeps are `crashRecv` and `evict`. So `stored_identical` holds of it. A sender that resends from the prefix it
+   reports finishes (`prefix_finishes`).
+2. **The steps.** The Hegel test `receive_follows_the_prefix_model` keeps a Rust copy of
+   `receive`, taking the hash to be injective as the proofs do. It delivers up to 40 chunks
+   at any offset up to one past the blob's end, some corrupt, some running past the end,
+   some claiming a length one short or one long, and among them sweeps that remove the
+   partial blob, the stored one, or both, so that chunks also reach a stored blob. After
+   each, the reply, the partial file's bytes and whether the blob is stored must be the
+   model's. Then a sender resends from the prefix it was last told, and the blob must be
+   stored, and be the one sent, within `2 ⌈len / chunk⌉ + 1` resends (3 for an empty
+   blob): `⌈len / chunk⌉` to reach the end of a corrupt prefix and start over, as many
+   again from the start (the steps of `prefix_finishes`'s measure), and one that finds the
+   prefix gone after a sweep.
+
+| `BlobStore` | Model |
+| --- | --- |
+| `partial/<id>` | `PState.pre` |
+| `complete/<id>` | `PState.store` |
+| `Received::Prefix(n)`, `Received::Complete` | `some n`, `none` |
+| `sweep` of the partial blob, of the stored one | `sweepPartial` (`crashRecv`), `sweepStored` (`evict`) |
+| A chunk in the middle of a write when the process dies | `inject` of the part written, claiming a length past it |
+
+What tying them found:
+
+- **The model never dropped a stored blob,** which a sweep of old blobs does, on the hub
+  and on every machine. `CStep.evict` now does, after which a later chunk starts the
+  transfer again; every theorem still holds. The code broke no property of the model.
+- **Not covered.** A blob the receiver adds itself (`insert_file`, `insert_bytes`) during a
+  transfer, which only the uploading machine does; a stored blob a power cut left torn,
+  which `get` removes; and two receives of one blob at once, which the hub and the
+  downloader don't make. The proof's sender resends one chunk at a time, where musubi's
+  senders send windows of eight. A window from the prefix the receiver last reported starts
+  with the proof's resend, and the rest are chunks the safety proof allows any time. One
+  from a stale prefix, the receiver having started over or swept the blob, takes nothing,
+  and its replies give the real prefix: the test's extra resend.
+
+```sh
+cargo nextest run -p musubi-sync -E 'test(/^blobs::/)'
+```
+
+The test makes 200 cases, about a millisecond each. Dropping the check that the prefix is
+the length the chunk claims, so that a blob is stored when a chunk claims one byte too few,
+fails it at once.

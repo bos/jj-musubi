@@ -4,8 +4,10 @@
 //! blob's. Chunks may arrive lost, duplicated, or out of order: the receiver appends only
 //! bytes that extend what it has contiguously, reports how much that is, and checks the
 //! hash once everything has arrived, starting over on a mismatch. A receiver that already
-//! has the blob reports it complete at once. This is the protocol `formal/Musubi/Chunks.lean`
-//! verifies.
+//! has the blob reports it complete at once. `formal/Musubi/Chunks.lean` models this
+//! receiver (`receive`), proves it a refinement of the protocol's model, and proves that a
+//! sender resending from the prefix it reports finishes; `receive_follows_the_prefix_model`
+//! checks it against that model (docs/internals/conformance.md, "Chunked blobs").
 
 use std::collections::HashSet;
 use std::fs;
@@ -315,51 +317,130 @@ mod tests {
         assert_eq!(received, Received::Prefix(0));
     }
 
-    /// Chunks delivered in any order, duplicated, some corrupt, some lost and resent:
-    /// once the receiver reports the blob complete, its content is exactly what was sent.
+    /// The prefix receiver of `formal/Musubi/Chunks.lean` (`PState`): the prefix it has,
+    /// and whether it has stored the blob. Its hash is taken to be injective, as the proofs
+    /// take it, so the hash check compares the prefix with the blob.
+    #[derive(Default)]
+    struct Prefix {
+        pre: Vec<u8>,
+        stored: bool,
+    }
+
+    impl Prefix {
+        /// `Chunks.receive`.
+        fn receive(&mut self, blob: &[u8], total: u64, offset: u64, data: &[u8]) -> Received {
+            if self.stored {
+                return Received::Complete;
+            }
+            // `extend`
+            let have = self.pre.len() as u64;
+            if offset <= have && have < offset + data.len() as u64 {
+                let skip = usize::try_from(have - offset).unwrap();
+                self.pre.extend_from_slice(&data[skip..]);
+            }
+            let have = self.pre.len() as u64;
+            if have < total {
+                return Received::Prefix(have);
+            }
+            let finished = self.pre == blob && have == total;
+            self.pre.clear();
+            if finished {
+                self.stored = true;
+                Received::Complete
+            } else {
+                Received::Prefix(0)
+            }
+        }
+    }
+
+    /// Makes a file older than any sweep's cutoff here, if it exists.
+    fn age(path: &Path) {
+        if let Ok(file) = OpenOptions::new().write(true).open(path) {
+            file.set_modified(SystemTime::UNIX_EPOCH).unwrap();
+        }
+    }
+
+    /// `receive` takes the prefix receiver's steps, which `Chunks.lean` proves are runs of
+    /// its chunked-blob model's (`preach_abs`), so that a stored blob is the one sent. Chunks
+    /// arrive in any order, duplicated, corrupt, running past the blob's end or claiming the
+    /// wrong length; sweeps remove the partial blob, the stored one, or both; and chunks keep
+    /// coming once the blob is stored. After each step the reply, the partial blob and
+    /// whether the blob is stored are the model's. Then a sender that resends from the
+    /// prefix it was last told finishes within the resends that `prefix_finishes`'s measure
+    /// comes to: to the end of a corrupt prefix, and from the start again; and one more for a
+    /// sweep it wasn't told of.
     #[hegel::test(test_cases = 200)]
-    fn chunked_transfer_survives_any_delivery_order(tc: TestCase) {
-        let dir = tempfile::tempdir().unwrap();
+    fn receive_follows_the_prefix_model(tc: TestCase) {
+        let dir = musubi_testutil::tempdir();
         let store = BlobStore::open(dir.path()).unwrap();
         let len = tc.draw(gs::integers::<usize>().max_value(300));
         let blob: Vec<u8> = (0..len).map(|i| (i * 7 % 251) as u8).collect();
         let id = BlobId::of_bytes(&blob);
         let chunk = tc.draw(gs::integers::<usize>().min_value(1).max_value(64));
-        let mut done = false;
-        for _ in 0..1000 {
-            // The sender learns the receiver's prefix and sends some chunk at or after a
-            // random point, possibly corrupted.
-            let offset = tc.draw(gs::integers::<usize>().max_value(len));
-            let end = (offset + chunk).min(len);
-            let mut data = blob[offset..end].to_vec();
-            if !data.is_empty() && tc.draw(gs::integers::<u8>().max_value(9)) == 0 {
-                data[0] ^= 1;
+        let mut model = Prefix::default();
+        let mut told = 0;
+        let step = |model: &mut Prefix, total: usize, offset: usize, data: &[u8]| {
+            let (total, offset) = (total as u64, offset as u64);
+            let received = store.receive(&id, total, offset, data).unwrap();
+            assert_eq!(received, model.receive(&blob, total, offset, data));
+            let partial = fs::read(store.partial_path(&id)).unwrap_or_default();
+            assert_eq!(partial, model.pre);
+            assert_eq!(store.get(&id).is_some(), model.stored);
+            received
+        };
+        for _ in 0..tc.draw(gs::integers::<usize>().max_value(40)) {
+            if tc.draw(gs::integers::<u8>().max_value(7)) == 0 {
+                // `sweepPartial`, `sweepStored`, or both.
+                let partial = tc.draw(gs::booleans());
+                let stored = tc.draw(gs::booleans());
+                if partial {
+                    age(&store.partial_path(&id));
+                    model.pre.clear();
+                }
+                if stored {
+                    age(&store.complete_path(&id));
+                    model.stored = false;
+                }
+                store.sweep(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1));
+                assert_eq!(
+                    fs::read(store.partial_path(&id)).unwrap_or_default(),
+                    model.pre
+                );
+                assert_eq!(store.get(&id).is_some(), model.stored);
+                continue;
             }
-            match store
-                .receive(&id, len as u64, offset as u64, &data)
-                .unwrap()
-            {
-                Received::Complete => {
-                    done = true;
-                    break;
-                }
-                Received::Prefix(have) => {
-                    // The well-behaved retransmission from the reported prefix.
-                    let have = usize::try_from(have).unwrap();
-                    let end = (have + chunk).min(len);
-                    if let Received::Complete = store
-                        .receive(&id, len as u64, have as u64, &blob[have..end])
-                        .unwrap()
-                    {
-                        done = true;
-                        break;
-                    }
-                }
+            // `send` or `inject`, then `recv`.
+            let offset = tc.draw(gs::integers::<usize>().max_value(len + 1));
+            let end = (offset + tc.draw(gs::integers::<usize>().max_value(chunk))).min(len);
+            let mut data = blob[offset.min(len)..end.max(offset.min(len))].to_vec();
+            match tc.draw(gs::integers::<u8>().max_value(9)) {
+                0 if !data.is_empty() => data[0] ^= 1,
+                1 => data.push(0),
+                _ => {}
+            }
+            let total = match tc.draw(gs::integers::<u8>().max_value(9)) {
+                0 => len.saturating_sub(1),
+                1 => len + 1,
+                _ => len,
+            };
+            if let Received::Prefix(have) = step(&mut model, total, offset, &data) {
+                told = usize::try_from(have).unwrap();
             }
         }
-        assert!(done, "transfer did not finish");
-        let (total, data) = store.read(&id, 0, len + 1).unwrap();
-        assert_eq!(total, len as u64);
-        assert_eq!(data, blob);
+        let resends = 2 * len.div_ceil(chunk).max(1) + 1;
+        let mut finished = false;
+        for _ in 0..resends {
+            let from = told.min(len);
+            let end = (told + chunk).min(len);
+            match step(&mut model, len, told, &blob[from..end.max(from)]) {
+                Received::Complete => {
+                    finished = true;
+                    break;
+                }
+                Received::Prefix(have) => told = usize::try_from(have).unwrap(),
+            }
+        }
+        assert!(finished, "transfer did not finish in {resends} resends");
+        assert_eq!(store.read(&id, 0, len + 1).unwrap(), (len as u64, blob));
     }
 }

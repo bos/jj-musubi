@@ -227,8 +227,14 @@ A sender need not wait for one chunk's acknowledgement before sending the next: 
 up to eight chunks in flight, uploading and downloading, so that a transfer costs a round
 trip per eight chunks. The model lets a sender send any chunk at any time, so this needs
 nothing more. The musubi receiver keeps only bytes that extend what it has contiguously, as
-if the others had been lost. An attachment of at most a quarter of the transport's message
-limit travels inline in its message, which takes no session at all.
+if the others had been lost. It reports the length of that prefix, not the missing ranges,
+and checks the hash as soon as the prefix reaches the length a chunk claims, with no
+`Finish`. A crash keeps the partial blob; a sweep of old blobs removes it, or the stored
+blob. `formal/Musubi/Chunks.lean` proves, for an injective hash, each of its steps a run of
+the model's, and that a sender resending from the prefix it reports finishes; a test checks
+the receiver against that model (conformance.md, "Chunked blobs"). An attachment of at most
+a quarter of the transport's message limit travels inline in its message, which takes no
+session at all.
 
 ## Verification
 

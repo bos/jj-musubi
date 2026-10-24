@@ -60,6 +60,8 @@ inductive CStep : CState → CState → Prop
   | finishStored (s : CState) (d : List Nat) (hd : s.store = some d) (hh : hash d = hash b) :
       CStep s s
   | crashRecv (s : CState) : CStep s { s with got := fun _ => none }
+  /-- The store drops the blob, as a sweep of old blobs does. -/
+  | evict (s : CState) : CStep s { s with store := none }
   | crashSender (s : CState) : CStep s s
 
 inductive CReach : CState → Prop
@@ -88,6 +90,7 @@ theorem stored_identical (hinj : ∀ x y, hash x = hash y → x = y) {s : CState
     cases hs with
     | finishOk hcomp hh =>
       simp at hd; subst hd; exact finish_identical hinj hh
+    | evict => simp at hd
     | _ => exact ih hd
 
 end safety
@@ -259,5 +262,254 @@ theorem session_finishes (hinj : ∀ x y, hash x = hash y → x = y) (hlim : 0 <
     exact ⟨u, LSteps.head hs' hu, hus⟩
 
 end livenessProofs
+
+/-! ## The prefix receiver
+
+musubi's receiver, `BlobStore::receive`, follows a narrower design than `CStep`'s: it keeps
+only a contiguous prefix of the blob, dropping a chunk that starts past it; reports the
+prefix's length rather than the missing ranges; and checks the hash as soon as the prefix
+reaches the length the chunk claims, rather than at an explicit `Finish`. A sweep removes the
+partial blob, the stored one, or both. Every step it takes is a run of `CStep`s
+(`preach_abs`), so `stored_identical` holds of it; and a sender that resends from the prefix
+it reports finishes (`prefix_finishes`). -/
+
+/-- The prefix receiver's state: the prefix it has (`partial/<id>`), its store's entry for the
+blob (`complete/<id>`), and the network. -/
+structure PState where
+  pre : List Nat
+  store : Option (List Nat)
+  net : Chunk → Prop
+
+def initP : PState := { pre := [], store := none, net := fun _ => False }
+
+/-- The state of the full model that a prefix receiver's state stands for. -/
+def absP (s : PState) : CState := { got := fun i => s.pre[i]?, store := s.store, net := s.net }
+
+/-- Chunk `c` extends `pre`: it starts within or at the end of it, and ends past it. -/
+def Extends (pre : List Nat) (c : Chunk) : Prop :=
+  c.off ≤ pre.length ∧ pre.length < c.off + c.data.length
+
+instance (pre : List Nat) (c : Chunk) : Decidable (Extends pre c) := by
+  unfold Extends; infer_instance
+
+/-- What the receiver keeps of chunk `c`: the bytes past `pre`, if `c` extends it. -/
+def extend (pre : List Nat) (c : Chunk) : List Nat :=
+  if Extends pre c then pre ++ c.data.drop (pre.length - c.off) else pre
+
+section prefixDefs
+
+variable (hash : List Nat → Nat) (b : List Nat) (limit : Nat)
+
+/-- `BlobStore::receive`, given chunk `c` of the blob `b`, whose length it is told is `total`.
+The reply is `some n` for `Received::Prefix(n)` and `none` for `Received::Complete`. -/
+def receive (s : PState) (c : Chunk) (total : Nat) : PState × Option Nat :=
+  match s.store with
+  | some _ => (s, none)
+  | none =>
+    let p := extend s.pre c
+    if p.length < total then ({ s with pre := p }, some p.length)
+    else if hash p = hash b ∧ p.length = total then ({ s with pre := [], store := some p }, none)
+    else ({ s with pre := [] }, some 0)
+
+/-- Steps of the prefix receiver. A chunk is delivered with any claimed length, since the
+length travels with the chunk. A crash of the receiving process keeps the partial blob, so it
+is no step; one in the middle of a write leaves part of a chunk, which `inject` covers. -/
+inductive PStep : PState → PState → Prop
+  | send (s : PState) (off len : Nat) (hlen : len ≤ limit) :
+      PStep s { s with net := fun c => s.net c ∨ c = honest b off len }
+  | inject (s : PState) (c : Chunk) : PStep s { s with net := fun c' => s.net c' ∨ c' = c }
+  | recv (s : PState) (c : Chunk) (total : Nat) (hc : s.net c) :
+      PStep s (receive hash b s c total).1
+  | sweepPartial (s : PState) : PStep s { s with pre := [] }
+  | sweepStored (s : PState) : PStep s { s with store := none }
+
+inductive PReach : PState → Prop
+  | init : PReach initP
+  | step {s s' : PState} : PReach s → PStep hash b limit s s' → PReach s'
+
+/-- Reliable steps of the prefix receiver: the sender sends the honest chunk at the prefix
+the receiver reports, with the blob's length, and the network delivers it. -/
+inductive PLStep : PState → PState → Prop
+  | resend (s : PState) (hs : s.store = none) :
+      PLStep s (receive hash b { s with net := fun c => s.net c ∨ c = honest b s.pre.length limit }
+        (honest b s.pre.length limit) b.length).1
+
+inductive PLSteps : PState → PState → Prop
+  | refl (s : PState) : PLSteps s s
+  | head {s t u : PState} : PLStep hash b limit s t → PLSteps t u → PLSteps s u
+
+end prefixDefs
+
+section prefixProofs
+
+variable {hash : List Nat → Nat} {b : List Nat} {limit : Nat}
+
+theorem got_nil : (fun (i : Nat) => ([] : List Nat)[i]?) = fun _ => none := by
+  funext i; simp
+
+/-- Keeping the bytes of a chunk that extends the prefix is `fill`. -/
+theorem extend_fill {pre : List Nat} {c : Chunk} (h : Extends pre c) :
+    (fun i => (extend pre c)[i]?) = fill (fun i => pre[i]?) c := by
+  funext i
+  obtain ⟨h1, _⟩ := h
+  simp only [extend, Extends, true_and, *, ↓reduceIte, fill]
+  by_cases hi : i < pre.length
+  · rw [List.getElem?_append_left hi, List.getElem?_eq_getElem hi]; rfl
+  · have hle : pre.length ≤ i := Nat.le_of_not_lt hi
+    rw [List.getElem?_append_right hle, List.getElem?_drop, List.getElem?_eq_none hle]
+    simp only [Option.none_or, Nat.le_trans h1 hle, ↓reduceIte]
+    congr 1; omega
+
+theorem assembled_self (l : List Nat) : assembled (fun i => l[i]?) l.length = l := by
+  apply List.ext_getElem
+  · simp [assembled]
+  · intro i h1 h2
+    simp [assembled, List.getElem?_eq_getElem h2]
+
+theorem complete_self (l : List Nat) : complete (fun i => l[i]?) l.length := by
+  intro i hi; simp [List.getElem?_eq_getElem hi]
+
+/-- **Refinement**: every state the prefix receiver reaches stands for one the full model
+reaches, through a run of `CStep`s: `recv` for a chunk taken and none for one dropped,
+`finishOk` and `crashRecv` for one that finishes the blob, `crashRecv` for a hash mismatch,
+`finishStored` for a chunk of a stored blob, and `crashRecv` and `evict` for sweeps. -/
+theorem preach_abs (hinj : ∀ x y, hash x = hash y → x = y) {s : PState}
+    (h : PReach hash b limit s) : CReach hash b limit (absP s) := by
+  induction h with
+  | init =>
+    have e : absP initP = initC := by simp only [absP, initP, initC, got_nil]
+    rw [e]; exact CReach.init
+  | @step s _ _ hs ih =>
+    cases hs with
+    | send off len hlen => exact ih.step (CStep.send _ off len hlen)
+    | inject c => exact ih.step (CStep.inject _ c)
+    | sweepPartial =>
+      have e : absP { s with pre := [] } = { absP s with got := fun _ => none } := by
+        simp only [absP, got_nil]
+      rw [e]; exact ih.step (CStep.crashRecv _)
+    | sweepStored => exact ih.step (CStep.evict _)
+    | recv c total hc =>
+      cases hst : s.store with
+      | some d =>
+        have hd : (absP s).store = some d := hst
+        have hdb := stored_identical hinj ih hd
+        simp only [receive, hst]
+        exact ih.step (CStep.finishStored _ d hd (by rw [hdb]))
+      | none =>
+        have h1 : CReach hash b limit (absP { s with pre := extend s.pre c }) := by
+          by_cases hx : Extends s.pre c
+          · have e : absP { s with pre := extend s.pre c } =
+                { absP s with got := fill (absP s).got c } := by
+              simp only [absP, extend_fill hx]
+            rw [e]; exact ih.step (CStep.recv _ c hc)
+          · have e : extend s.pre c = s.pre := by simp [extend, hx]
+            rw [e]; exact ih
+        rw [hst] at h1
+        simp only [receive, hst]
+        split
+        · exact h1
+        · split
+          · rename_i hok
+            obtain ⟨hh, _⟩ := hok
+            have hpb := hinj _ _ hh
+            have h2 := h1.step (CStep.finishOk _ (by rw [← hpb]; exact complete_self _)
+              (by simp only [absP]; rw [← hpb, assembled_self, hpb]))
+            have h3 := h2.step (CStep.crashRecv _)
+            have e : absP { s with pre := [], store := some (extend s.pre c) } =
+                { { absP { s with pre := extend s.pre c } with
+                    store := some (assembled (absP { s with pre := extend s.pre c }).got
+                      b.length) } with got := fun _ => none } := by
+              simp only [absP, got_nil]; rw [← hpb, assembled_self]
+            rw [e]; exact h3
+          · have e : absP { pre := [], store := none, net := s.net } =
+                { absP s with got := fun _ => none } := by
+              simp only [absP, got_nil, hst]
+            rw [e]; exact ih.step (CStep.crashRecv _)
+
+/-- **Prefix safety**: a blob the prefix receiver stores is `b`. -/
+theorem prefix_stored_identical (hinj : ∀ x y, hash x = hash y → x = y) {s : PState}
+    (h : PReach hash b limit s) {d : List Nat} (hd : s.store = some d) : d = b :=
+  stored_identical (s := absP s) hinj (preach_abs hinj h) hd
+
+theorem plstep_reach {s s' : PState} (h : PReach hash b limit s)
+    (hs : PLStep hash b limit s s') : PReach hash b limit s' := by
+  cases hs with
+  | resend hst =>
+    have h1 := h.step (PStep.send s s.pre.length limit (Nat.le_refl _))
+    exact h1.step (PStep.recv _ _ b.length (Or.inr rfl))
+
+/-- The honest chunk at the prefix adds the blob's bytes that follow it, if any. -/
+theorem extend_honest (p : List Nat) (lim : Nat) :
+    extend p (honest b p.length lim) = p ++ (b.drop p.length).take lim := by
+  unfold extend honest Extends
+  split
+  · simp
+  · rename_i hx
+    have : ((b.drop p.length).take lim).length = 0 := by simp at hx ⊢; omega
+    rw [List.length_eq_zero_iff.mp this, List.append_nil]
+
+theorem prefix_extend {p : List Nat} (h : p <+: b) (lim : Nat) :
+    p ++ (b.drop p.length).take lim <+: b := by
+  rw [List.prefix_iff_eq_take.mp h, List.length_take, Nat.min_eq_left h.length_le,
+    ← List.take_add]
+  exact List.take_prefix _ _
+
+open Classical in
+/-- The measure: (not yet stored, the prefix is not a prefix of `b`, bytes missing). -/
+noncomputable def pmeasure (b : List Nat) (s : PState) : Nat × Nat × Nat :=
+  (if s.store = none then 1 else 0, if s.pre <+: b then 0 else 1, b.length - s.pre.length)
+
+open Classical in
+theorem pmeasure_decreases (hlim : 0 < limit) {s s' : PState}
+    (hs : PLStep hash b limit s s') : Lex3 (pmeasure b s') (pmeasure b s) := by
+  cases hs with
+  | resend hst =>
+    simp only [receive, hst, extend_honest]
+    generalize hq : s.pre ++ (b.drop s.pre.length).take limit = q
+    have hpq : s.pre <+: q := hq ▸ List.prefix_append _ _
+    have hqlen : q.length = s.pre.length + min limit (b.length - s.pre.length) := by
+      rw [← hq]; simp
+    split
+    · rename_i hlt
+      have hpre : (q <+: b) = (s.pre <+: b) :=
+        propext ⟨hpq.trans, fun h => hq ▸ prefix_extend h limit⟩
+      unfold pmeasure
+      simp only [hst, hpre]
+      refine Prod.Lex.right _ (Prod.Lex.right _ ?_)
+      omega
+    · split
+      · unfold pmeasure
+        simp only [hst, reduceCtorEq, ↓reduceIte]
+        exact Prod.Lex.left _ _ Nat.zero_lt_one
+      · rename_i _ hbad
+        have hnp : ¬ s.pre <+: b := by
+          intro hp
+          have hqb : q <+: b := hq ▸ prefix_extend hp limit
+          have hqe : q = b := hqb.eq_of_length (by have := hqb.length_le; omega)
+          exact hbad ⟨congrArg hash hqe, congrArg List.length hqe⟩
+        unfold pmeasure
+        simp only [hst, hnp, List.nil_prefix, ↓reduceIte]
+        exact Prod.Lex.right _ (Prod.Lex.left _ _ Nat.zero_lt_one)
+
+/-- No infinite run of resends from the prefix. -/
+theorem plstep_wf (hlim : 0 < limit) : WellFounded (fun s' s => PLStep hash b limit s s') :=
+  Subrelation.wf (fun hs => pmeasure_decreases hlim hs) (InvImage.wf (pmeasure b) lex3_wf)
+
+/-- **Prefix liveness**: from any reachable state, a sender that resends from the prefix the
+receiver reports finishes the transfer, with the receiver storing exactly `b`. -/
+theorem prefix_finishes (hinj : ∀ x y, hash x = hash y → x = y) (hlim : 0 < limit)
+    {s : PState} (h : PReach hash b limit s) :
+    ∃ s', PLSteps hash b limit s s' ∧ s'.store = some b := by
+  refine WellFounded.induction (C := fun s => PReach hash b limit s →
+    ∃ s', PLSteps hash b limit s s' ∧ s'.store = some b)
+    (plstep_wf (hash := hash) (b := b) hlim) s (fun s ih h => ?_) h
+  cases hst : s.store with
+  | some d => exact ⟨s, PLSteps.refl s, by rw [hst, prefix_stored_identical hinj h hst]⟩
+  | none =>
+    have hs' := PLStep.resend (hash := hash) (b := b) (limit := limit) s hst
+    obtain ⟨u, hu, hus⟩ := ih _ hs' (plstep_reach h hs')
+    exact ⟨u, PLSteps.head hs' hu, hus⟩
+
+end prefixProofs
 
 end Musubi.Chunks

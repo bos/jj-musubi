@@ -47,7 +47,7 @@ The binary is `formal/.lake/build/bin/oracle`.
 | `Musubi/Liveness.lean` | The reliable policy model `PStep`, simulation into the async model, the measure, progress, termination and convergence. |
 | `Musubi/Merged.lean` | The merged `Push` and `Fetch` exchanges reach states that agree with policy steps on everything the measure and convergence depend on. |
 | `Musubi/Regress.lean` | A hub that goes back to an earlier accepted head, as a power cut or a remade hive makes it: the extended system `RStep`, the invariant that survives, and convergence once the hub stops going back. |
-| `Musubi/Chunks.lean` | The chunked-blob model, its safety and its liveness. |
+| `Musubi/Chunks.lean` | The chunked-blob model, its safety and its liveness; and musubi's receiver, which keeps only a prefix, proved a refinement of it, with its own liveness. |
 | `Musubi/Scenario.lean` | A concrete reachable run: a lost Cas race, then fetch, advance, merge, and the merge accepted. It shows the model is not vacuous. |
 | `Musubi/Exec.lean` | The executable model: finite `EState`, the `Action` vocabulary of `docs/internals/conformance.md`, and `execStep`; and the liveness measures, convergence, and what a policy `Push` uploads, computed (`measureE`, `rmeasureE`, `convergedE`, `upOpsL`, `upObjsL`). |
 | `Musubi/ExecSound.lean` | `exec_sound`, `abs_initE`, `exec_reachable`, `exec_inv`, and with the hub going back `exec_rsound`, `exec_rreachable`, `exec_invR`, `exec_remake`; `measureE_eq`, `rmeasureE_eq`, `convergedE_iff`, `mem_upOpsL`, `mem_upObjsL`. |
@@ -87,6 +87,7 @@ The binary is `formal/.lake/build/bin/oracle`.
 | Node crash, hub crash | `crashNode`, `crashHub`, plus the relaxations `loseKnown`, `loseVolatile` and `hubForget` (see below) |
 | Policy (reliable, atomic exchanges) | `PStep`: `learn`, `realize`, `advance`, `merge`, `pushAccept`, `pushIdem`, `pushReject` |
 | Chunked blob session | `Chunks.CState`, `Chunks.CStep` (full model), `Chunks.LStep` (reliable delivery) |
+| musubi's receiver (`BlobStore::receive`) | `Chunks.PState`, `Chunks.receive`, `Chunks.PStep`, `Chunks.PLStep` (resending from the prefix) |
 
 ## Main theorems
 
@@ -192,6 +193,11 @@ Chunked blobs (`Chunks.lean`, with `hash` assumed injective):
   was sent. This holds even when the network injects arbitrary corrupt or stale chunks.
 - `session_finishes`: from every reachable state, reliable delivery finishes the session and
   stores exactly the sent blob.
+- `preach_abs`: for an injective hash, every state musubi's prefix receiver reaches
+  (`PReach`) stands for one the full model reaches, each of its steps a run of `CStep`s. So `prefix_stored_identical`: a
+  blob it stores is the one sent.
+- `prefix_finishes`: from every state the prefix receiver reaches, a sender that resends
+  from the prefix it reports finishes, and the receiver stores exactly the sent blob.
 
 ## Modeling choices
 
@@ -337,6 +343,16 @@ header lists what it still leaves out: tracking state, which the test sidesteps 
 jj track `y@origin` automatically, and merges of the record across op heads, which the test
 avoids by keeping one op head.
 
+## Testing the prefix receiver
+
+The prefix receiver's state is a byte string and a flag, so, as for `Refs.lean`, its test
+keeps a copy of `Chunks.receive` in Rust rather than asking an oracle
+(docs/internals/conformance.md, "Chunked blobs"). `receive_follows_the_prefix_model`, in
+`crates/musubi-sync/src/blobs.rs`, delivers chunks of every kind to `BlobStore::receive`,
+sweeps its partial and stored blobs, and requires each reply, the partial blob and whether
+the blob is stored to be the model's, then the transfer to finish within the resends that
+`prefix_finishes`'s measure allows.
+
 ## Why the reliable policy model is a sound abstraction for liveness
 
 `PStep` lets a node perform one policy action as an atomic, successful request/reply
@@ -416,3 +432,5 @@ newer head, which decreases its staleness.
   - Ignore duplicate and overlapping bytes.
   - Check `hash(assembled) = id` at `Finish`, and restart on a mismatch.
   - Treat a stored blob as finished.
+  - A receiver may keep only a contiguous prefix, report its length, and check the hash once
+    it reaches the claimed length, as musubi's does (`preach_abs`).

@@ -73,6 +73,9 @@ open Musubi
 -- Chunked blobs
 #print axioms Chunks.stored_identical
 #print axioms Chunks.session_finishes
+#print axioms Chunks.preach_abs
+#print axioms Chunks.prefix_stored_identical
+#print axioms Chunks.prefix_finishes
 -- Non-vacuity
 #print axioms Scenario.scenario
 -- Executable model

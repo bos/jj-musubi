@@ -10,6 +10,7 @@ keep a test cheap.
 | Formal model | `formal/` (Lean) | Protocol design errors: lost operations, dangling references, duplicate merges, livelock | Proof effort, no runtime |
 | Protocol property tests | `crates/musubi-core/tests` | The Rust state machines departing from the model | Milliseconds per case |
 | Presence conformance | `crates/musubi-jj/tests/it/presence.rs` | Which copies musubi shows departing from the Lean model's rule (docs/internals/conformance.md, "Presence") | A millisecond per case |
+| Chunked blob conformance | `crates/musubi-sync/src/blobs.rs` | The blob receiver departing from the prefix receiver of `formal/Musubi/Chunks.lean` (docs/internals/conformance.md, "Chunked blobs") | A millisecond per case |
 | Per-machine refs conformance | `crates/musubi-jj/tests/it/ref_laws.rs`, `crates/musubi-sync/tests/races/refs.rs` | jj's ref merge, import and export, and musubi's realization, departing from `formal/Musubi/Refs.lean` (docs/internals/conformance.md, "Per-machine refs") | ~0.3 s per case |
 | Race catalogue | `crates/musubi-sync/tests/races` | Concurrent changes on different machines resolving differently from jj's local behavior (docs/internals/races.md) | ~0.3 s per test |
 | Unit tests | `#[cfg(test)]` modules | Pure logic: URL normalization and hive names across forges, matching joining repositories to hives | Microseconds |

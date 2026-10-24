@@ -52,16 +52,18 @@ A Hegel state machine owns a hub and several nodes, all of them sans-IO state ma
 - delivery: deliver any message in flight, in any order, or deliver one again; a message
   never delivered is lost;
 - misbehavior: a node pushes without uploading, a hub replies with operations it never
-  accepted, or a hub forgets uploads it never accepted;
+  accepted, or a hub forgets everything outside `closure(head)`, uploads it never accepted
+  among them;
 - failure: crash a node or the hub, keeping only persistent state, or crash a node partway
   through taking in a fetch; or send the hub back to an earlier head, as a power cut that
-  loses the last heads it accepted would (`hubRegress` in the oracle). A node whose own
-  request gets a reply with a head older than it knows, or another at the same sequence
-  number, starts over from that reply (`loseKnown`, then `learn`).
+  loses the last heads it accepted would (`hubRegress` in the oracle); or make the hive
+  again, empty, as the hub does one whose store is corrupt (`hubRegress` to 0, then
+  `hubForget`). A node whose own request gets a reply with a head older than it knows, or
+  another at the same sequence number, starts over from that reply (`loseKnown`, then
+  `learn`).
 
 Two tests run this machine: `protocol_invariants`, and `conformance`, which also checks every
-step against the Lean model (docs/internals/conformance.md) and so leaves out the hub forgetting
-uploads, which the model's oracle can't express.
+step against the Lean model (docs/internals/conformance.md).
 
 After every rule the test checks the model's safety invariants (docs/internals/protocol.md,
 "Properties"): HubClosed, HubMonotone, NodeClosed, Locality, MergeOwnership, that a node

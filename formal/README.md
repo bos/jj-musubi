@@ -50,7 +50,7 @@ The binary is `formal/.lake/build/bin/oracle`.
 | `Musubi/Chunks.lean` | The chunked-blob model, its safety and its liveness. |
 | `Musubi/Scenario.lean` | A concrete reachable run: a lost Cas race, then fetch, advance, merge, and the merge accepted. It shows the model is not vacuous. |
 | `Musubi/Exec.lean` | The executable model: finite `EState`, the `Action` vocabulary of `docs/internals/conformance.md`, and `execStep`; and the liveness measures, convergence, and what a policy `Push` uploads, computed (`measureE`, `rmeasureE`, `convergedE`, `upOpsL`, `upObjsL`). |
-| `Musubi/ExecSound.lean` | `exec_sound`, `abs_initE`, `exec_reachable`, `exec_inv`, and with the hub going back `exec_rsound`, `exec_rreachable`, `exec_invR`; `measureE_eq`, `rmeasureE_eq`, `convergedE_iff`, `mem_upOpsL`, `mem_upObjsL`. |
+| `Musubi/ExecSound.lean` | `exec_sound`, `abs_initE`, `exec_reachable`, `exec_inv`, and with the hub going back `exec_rsound`, `exec_rreachable`, `exec_invR`, `exec_remake`; `measureE_eq`, `rmeasureE_eq`, `convergedE_iff`, `mem_upOpsL`, `mem_upObjsL`. |
 | `Musubi/ExecJson.lean` | The oracle's JSON codec and request handler (no protocol logic). |
 | `Musubi/ExecTest.lean` | `#guard` smoke tests of `execStep`, checked at build time. |
 | `Musubi/RegressScenario.lean` | A run of the executable model in which the hub goes back and two nodes then merge the same heads (`duplicateMerge`), so the extended system reaches states the durable one does not (`rreachable_not_reachable`). |
@@ -276,6 +276,10 @@ Theorems (`Musubi/ExecSound.lean`):
 - `exec_rreachable : ExecRReachable N es → RReachable N (abs es)` and
   `exec_invR : ExecRReachable N es → InvR N (abs es)`: with `hubRegress`, every state is a
   state of the extended system, and `InvR` and the theorems of `Regress.lean` hold in it.
+- `exec_remake : ExecRReachable N es → run N es remakeActions = .ok es' →
+  abs es' = (abs es).remake`. `remakeActions` is `hubRegress 0`, then `hubForget [root] []`:
+  a hive made again, empty, as `HubDir::remake` makes one, and as the conformance test's
+  `remake` rule does. `remake_reachable` proves it a run of the extended system.
 - `measureE_eq : es.parOK = true → es.measureE N = measure N (abs es)`, `rmeasureE_eq` the
   same for `rmeasure`, and `convergedE_iff : es.convergedE N = true ↔ Converged N (abs es)`.
   `mem_upOpsL` and `mem_upObjsL`: `upOpsL` and `upObjsL` list `upOps` and `upObjs`. The oracle
@@ -304,6 +308,9 @@ Encoding choices:
   `i + 1`, which then shadows the old one, as the relational `hubAccept` overwrites it. The
   ghost history is not part of the JSON state, so a test may equally truncate it to the
   entries up to `i`.
+- **The hub forgetting.** `hubForget ops objs` makes the hub's stores `ops` and `objs`,
+  which must be among what it stores and hold `closure(head)`: the action names what the
+  hub keeps, as `SyncStep.hubForget` does.
 
 ## Testing the per-machine refs model
 

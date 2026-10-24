@@ -3,7 +3,8 @@ Soundness of the executable model: every action `execStep` accepts is a relation
 between the abstracted states, but for `hubRegress`, which is an `RStep`; and
 `abs initE = init`. Hence every state reachable through `execStep` without `hubRegress` is
 `Reachable`, and all safety theorems apply to it; with it, every state is `RReachable`, and
-the theorems of `Regress.lean` apply.
+the theorems of `Regress.lean` apply. A hive made again (`remakeActions`) is `State.remake`
+(`exec_remake`).
 -/
 import Musubi.Exec
 
@@ -693,6 +694,13 @@ theorem execCore_sound {N : Nat} {es es' : EState} {a : Action} (hlt : ParLt es.
     simp only [execCore] at h
     cases h
     exact Or.inr (SyncStep.crashHub _)
+  | hubForget S O =>
+    simp only [execCore] at h
+    obtain ⟨h1, h⟩ := req_ok h; obtain ⟨h2, h⟩ := req_ok h; obtain ⟨h3, h⟩ := req_ok h
+    cases h
+    simp only [List.all_eq_true, List.contains_iff_mem] at h1 h2
+    exact Or.inr (SyncStep.hubForget _ (setP S) (setP O) (fun x hx => h1 x hx)
+      (fun o ho => h2 o ho) ((closedB_iff (es := es.forget S O) hlt).1 h3))
   | hubRegress i => cases hb
 
 theorem abs_regress (i : Nat) : abs (es.regress i) = (abs es).regress i := rfl
@@ -787,6 +795,37 @@ theorem run_rreachable {N : Nat} {as : List Action} {es es' : EState}
     | ok es1 =>
       rw [hs] at hr
       exact ih (h.step a hs) hr
+
+/-- **A hive made again** (`HubDir::remake`): going back to the root and then keeping only
+the root, as `remakeActions` does, is `State.remake`, which `remake_reachable` proves a run of
+the extended system. -/
+theorem exec_remake {N : Nat} {es es' : EState} (h : ExecRReachable N es)
+    (hr : run N es remakeActions = .ok es') : abs es' = (abs es).remake := by
+  simp only [remakeActions, run] at hr
+  cases h1 : execStep N es (.hubRegress 0) with
+  | error e => rw [h1] at hr; cases hr
+  | ok es1 =>
+    rw [h1] at hr
+    simp only [bind, Except.bind] at hr
+    cases h2 : execStep N es1 (.hubForget [root] []) with
+    | error e => rw [h2] at hr; cases hr
+    | ok es2 =>
+      rw [h2] at hr
+      cases hr
+      obtain ⟨-, h1⟩ := req_ok h1
+      simp only [execCore] at h1
+      obtain ⟨-, h1⟩ := req_ok h1
+      cases h1
+      obtain ⟨-, h2⟩ := req_ok h2
+      simp only [execCore] at h2
+      obtain ⟨-, h2⟩ := req_ok h2; obtain ⟨-, h2⟩ := req_ok h2; obtain ⟨-, h2⟩ := req_ok h2
+      cases h2
+      have h0 : es.hub.histF 0 = root := (exec_invR h).hist0
+      refine state_ext rfl ?_ rfl rfl
+      show Hub.mk _ _ _ _ _ = Hub.mk _ _ _ _ _
+      congr 1
+      · funext x; simp [setP, EState.forget]
+      · funext o; simp [setP, EState.forget]
 
 /-! ## The liveness measure -/
 

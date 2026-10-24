@@ -528,13 +528,14 @@ impl World {
     }
 
     /// The hub goes back to the head it accepted at `seq`, as a power cut can make it lose
-    /// the later ones (`hubRegress`).
+    /// the later ones (`hubRegress`). Going back to where it is changes nothing, and the
+    /// properties that need a hub that never went back still hold.
     pub fn hub_goes_back(&mut self, seq: u64) {
         let lost: Vec<Op> = self.hist.drain(seq as usize + 1..).collect();
+        self.went_back |= !lost.is_empty();
         self.lost.extend((seq + 1..).zip(lost));
         self.hub.head = self.hist[seq as usize];
         self.hub.seq = seq;
-        self.went_back = true;
         self.act(json!({"kind": "hubRegress", "seq": seq}));
     }
 
@@ -555,17 +556,26 @@ impl World {
     }
 
     /// A hub that garbage-collects everything outside `closure(head)`, including uploads it
-    /// acknowledged but never accepted. The model allows this (`hubForget`); it is not in
-    /// the oracle's vocabulary, so only runs without an oracle use it.
+    /// acknowledged but never accepted, as the model allows (`hubForget`).
     pub fn hub_forget(&mut self) {
-        assert!(self.oracle.is_none(), "hubForget is not an oracle action");
         let univ = self.univ.borrow();
         let keep = univ.ancestors(self.hub.head);
         let objs = univ.objs_of(keep.iter().copied());
         self.hub.ops.retain(|op| keep.contains(op));
         self.hub.objs.retain(|obj| objs.contains(obj));
         drop(univ);
-        self.trace.push(json!({"kind": "hubForget"}));
+        let (ops, objs) = (
+            sorted(self.hub.ops.iter().copied()),
+            sorted(self.hub.objs.iter().copied()),
+        );
+        self.act(json!({"kind": "hubForget", "ops": ops, "objs": objs}));
+    }
+
+    /// The hive is made again, empty, as `HubDir::remake` makes one whose store is corrupt:
+    /// the hub goes back to the root, then forgets everything else (`remake_reachable`).
+    pub fn remake(&mut self) {
+        self.hub_goes_back(0);
+        self.hub_forget();
     }
 
     /// A lying hub: a `Fetched` reply about `head` carrying `op`, which the hub never

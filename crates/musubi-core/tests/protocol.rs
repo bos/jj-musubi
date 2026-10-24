@@ -16,6 +16,8 @@ use std::rc::Rc;
 use hegel::TestCase;
 use hegel::generators as gs;
 use musubi_core::message::HeadKind;
+use serde_json::Value;
+use serde_json::json;
 use support::oracle::Oracle;
 use support::world::World;
 
@@ -111,10 +113,15 @@ impl Machine {
     #[rule]
     fn hub_forgets(&mut self, tc: TestCase) {
         tc.assume(self.crashes < 3);
-        let mut world = self.world.borrow_mut();
-        tc.assume(!world.has_oracle());
         self.crashes += 1;
-        world.hub_forget();
+        self.world.borrow_mut().hub_forget();
+    }
+
+    #[rule]
+    fn remake(&mut self, tc: TestCase) {
+        tc.assume(self.crashes < 3);
+        self.crashes += 1;
+        self.world.borrow_mut().remake();
     }
 
     #[rule]
@@ -316,4 +323,124 @@ fn objects_lost_in_a_crash_are_fetched_again() {
     );
     world.quiesce();
     world.check_invariants();
+}
+
+/// Sends `node`'s `Fetch`, has the hub answer it, and the node take the answer, as a reply
+/// to no request of its own: the node has restarted already. Returns the request's index.
+fn fetch(world: &mut World, node: usize) -> usize {
+    world.poll(node);
+    let request = world.net_len() - 1;
+    world.deliver(request);
+    world.deliver(request + 1);
+    request
+}
+
+/// `RegressScenario.trace` (formal/Musubi/RegressScenario.lean), through the core and the
+/// oracle: once the hub has gone back, two nodes merge the same heads (`duplicateMerge`).
+/// Then every node converges, `rmeasure` falling as it does. The trace restarts A and B
+/// before they fetch, so here they crash, rather than restart on the hub's reply
+/// (`NodeCore::handle_reply`), which would record `loseKnown` after the `Fetch`.
+/// Named for CI's conformance job, which has the oracle.
+#[test]
+fn regress_scenario_conformance() {
+    let mut world = World::new(3, Some(Oracle::spawn()));
+    world.user_op(0, 0, 0);
+    world.user_op(2, 0, 0);
+    // A pushes 1; B fetches it.
+    world.exchange(0, 0);
+    let b_fetch = fetch(&mut world, 1);
+    world.node_step(1, 0);
+    world.node_step(1, 0);
+    // The hub goes back; C pushes 2, and doesn't hear back.
+    world.hub_goes_back(0);
+    world.node_step(2, 0);
+    world.deliver(world.net_len() - 1);
+    // A catches up and merges.
+    world.crash_node(0);
+    fetch(&mut world, 0);
+    for _ in 0..3 {
+        world.node_step(0, 0);
+    }
+    // So does B, its first `Fetch` delivered again.
+    world.crash_node(1);
+    world.deliver(b_fetch);
+    world.deliver(world.net_len() - 1);
+    for _ in 0..3 {
+        world.node_step(1, 0);
+    }
+    let fetch_all = |node: usize| json!({"kind": "fetchAll", "node": node, "base": 0, "haves": []});
+    let hub_fetch = |node: usize| json!({"kind": "hubFetch", "node": node, "base": 0, "haves": []});
+    let push = |kind: &str, node: usize, op: u64| json!({"kind": kind, "node": node, "ops": [op], "objs": [], "expected": 0, "new": op});
+    let learn = |node: usize, kind: &str, head: u64| json!({"kind": "learn", "node": node, "headKind": kind, "seq": 1, "head": head});
+    let (recv_ops, recv_objs, realize, advance, merge, lose_known) = (
+        |node: usize, op: u64| json!({"kind": "recvOps", "node": node, "ops": [op]}),
+        |node: usize| json!({"kind": "recvObjs", "node": node, "objs": []}),
+        |node: usize, op: u64| json!({"kind": "realize", "node": node, "opId": op}),
+        |node: usize| json!({"kind": "advance", "node": node}),
+        |node: usize| json!({"kind": "merge", "node": node, "parents": [1, 2], "objs": []}),
+        |node: usize| json!({"kind": "loseKnown", "node": node}),
+    );
+    let user_op = |node: usize| json!({"kind": "userOp", "node": node, "parent": 0, "objs": []});
+    let trace: Vec<Value> = vec![
+        user_op(0),
+        user_op(2),
+        push("pushAll", 0, 1),
+        push("hubPushAccept", 0, 1),
+        learn(0, "accepted", 1),
+        fetch_all(1),
+        hub_fetch(1),
+        learn(1, "head", 1),
+        recv_ops(1, 1),
+        recv_objs(1),
+        realize(1, 1),
+        advance(1),
+        json!({"kind": "hubRegress", "seq": 0}),
+        push("pushAll", 2, 2),
+        push("hubPushAccept", 2, 2),
+        lose_known(0),
+        fetch_all(0),
+        hub_fetch(0),
+        learn(0, "head", 2),
+        recv_ops(0, 2),
+        recv_objs(0),
+        realize(0, 2),
+        advance(0),
+        merge(0),
+        lose_known(1),
+        hub_fetch(1),
+        learn(1, "head", 2),
+        recv_ops(1, 2),
+        recv_objs(1),
+        realize(1, 2),
+        advance(1),
+        merge(1),
+    ];
+    assert_eq!(world.trace, trace);
+    // The merges are operations 3 and 4.
+    assert!(world.local_ops(0).contains(&3) && world.local_ops(1).contains(&4));
+    world.quiesce();
+    world.check_invariants();
+}
+
+/// A hive made again, empty (`HubDir::remake`), is filled again by its machines: each takes
+/// the hub's reply as saying it went back, and pushes everything it has.
+#[test]
+fn remade_hive_conformance() {
+    let mut world = World::new(2, Some(Oracle::spawn()));
+    world.user_op(0, 0, 1);
+    world.quiesce();
+    world.user_op(1, 1, 1);
+    world.exchange(1, 0);
+    world.user_op(0, 1, 1);
+    world.remake();
+    let before = world.trace.len();
+    world.quiesce();
+    world.check_invariants();
+    // Nothing crashed: each restart is the core's, on a reply.
+    for node in 0..2 {
+        assert!(
+            world.trace[before..].contains(&json!({"kind": "loseKnown", "node": node})),
+            "node {node} did not take the hub's reply as saying it went back"
+        );
+    }
 }

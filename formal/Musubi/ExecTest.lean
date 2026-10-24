@@ -1,7 +1,8 @@
 /-
 Smoke test of the executable model, checked at build time: a two-node run (user op, upload,
 push, casAccept, a notification learned by the other node, fetch, realize, advance), rejected
-actions, and the hub going back. `test/smoke.jsonl` replays the same run through the oracle.
+actions, the hub going back, and a hive made again. `test/smoke.jsonl` replays the same run
+through the oracle.
 -/
 import Musubi.ExecSound
 
@@ -80,6 +81,17 @@ def merged : List Action :=
 #guard match run 2 initE (merged ++ [.hubRegress 0]) with
   | .ok es => es.hub.head == root && es.hub.seq == 0 && es.hub.ops.contains 1 &&
       (es.nodeOf 1).known == (1, 1)
+  | .error _ => false
+
+-- The hub forgets only what it stores, and keeps `closure(head)`. Made again, it holds the
+-- root alone, and nodes keep what they knew.
+#guard errorOf (run 2 initE (merged ++ [.hubForget [root, 2] []])) ==
+  "hubForget: ops [0, 2] not all stored at hub"
+#guard errorOf (run 2 initE (merged ++ [.hubForget [root] [10]])) ==
+  "hubForget: closure of head 1 not kept (missing op 1)"
+#guard match run 2 initE (merged ++ remakeActions) with
+  | .ok es => es.hub.head == root && es.hub.seq == 0 && es.hub.ops == [root] &&
+      es.hub.objs.isEmpty && (es.nodeOf 1).known == (1, 1) && (es.nodeOf 1).lops.contains 1
   | .error _ => false
 
 -- A node that knew the head the hub forgot restarts, and learns the head the hub accepts

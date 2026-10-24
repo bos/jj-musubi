@@ -83,6 +83,7 @@ open Musubi
 #print axioms Exec.exec_rsound
 #print axioms Exec.exec_rreachable
 #print axioms Exec.exec_invR
+#print axioms Exec.exec_remake
 #print axioms Exec.measureE_eq
 #print axioms Exec.rmeasureE_eq
 #print axioms Exec.convergedE_iff

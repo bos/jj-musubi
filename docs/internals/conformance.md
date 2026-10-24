@@ -8,9 +8,9 @@ trace format, an oracle built from the Lean model, and a refinement check run un
 
 Every behavior of the Rust core, at the level of abstraction of the model, is a behavior of
 the Lean model. The Lean safety theorems hold for every reachable model state, so they hold
-for every state the Rust core reaches. A run in which the hub goes back is a behavior of the
-extended model of `formal/Musubi/Regress.lean`, and the weaker invariant proved there holds
-in it.
+for every state the Rust core reaches. A run in which the hub goes back, or the hive is made
+again, is a behavior of the extended model of `formal/Musubi/Regress.lean`, and the weaker
+invariant proved there holds in it.
 
 The chain has three links:
 
@@ -104,6 +104,7 @@ compared as sets.
 | `hubPushIncomplete` | `node`, `ops`, `objs`, `expected`, `new` | `SyncStep.hubPushIncomplete` |
 | `hubFetch` | `node`, `base`, `haves` | `SyncStep.hubFetch`: replies with a `head`, an `ops` and an `objs` message |
 | `crashHub` | none | `SyncStep.crashHub` |
+| `hubForget` | `ops`, `objs` | `SyncStep.hubForget`: the hub keeps only `ops` and `objs`, which must be among what it stores and hold `closure(head)` |
 | `hubRegress` | `seq` | `RStep`'s `State.regress` (`Regress.lean`), the hub going back: `seq ≤ hub.seq`; `head := hist seq`, `seq := seq`, and nothing else changes |
 
 `headKind` is one of `head`, `accepted`, `rejected`, `incomplete`, `notify`. The Rust hub
@@ -215,6 +216,8 @@ tests should kill every mutant it makes.
 | A node restarts while taking in a `Fetched` reply, after staging its operations and before staging its objects (test rule) | `learn` if its head is newer, `recvOps`, then `loseKnown` |
 | The hub restarts | `crashHub` |
 | The hub goes back (test rule) | `hubRegress` |
+| The hub forgets every operation and object outside `closure(head)` (test rule) | `hubForget` with what it keeps |
+| The hive is made again, empty, as `HubDir::remake` makes one whose store is corrupt (test rule) | `hubRegress` to 0, then `hubForget` keeping only the root: `State.remake` (`exec_remake`), a run of the extended model (`remake_reachable`) |
 | A reply to the node's own request that says the hub went back (`NodeCore::handle_reply`) | `loseKnown`, then `learn` if the reply's `seq` is above 0 (at 0, the restarted node already knows `(0, root)`) |
 
 The test's objects have no structure, so the test's hub ignores `closure(base)` and leaves
@@ -266,6 +269,15 @@ The conformance test checks:
   so the check starts afresh after it.
 - Once the Rust side has converged, so has the oracle's state. The states already agree
   after every action, so this cross-checks `convergedE`.
+
+Two fixed runs check what the search may reach only rarely. `regress_scenario_conformance`
+drives the core through `RegressScenario.trace`, requires the actions it records to be that
+trace, so that nodes A and B both merge heads `{1, 2}` (`duplicateMerge`), and then
+quiesces. The trace restarts A and B before they fetch, so the test crashes them, rather
+than have them restart on the hub's reply. `remade_hive_conformance` makes a hive again
+under nodes that know heads it has lost, and requires each to take the hub's reply as
+saying it went back (`NodeCore::handle_reply`) and fill it again. Their names end in
+`conformance`, as CI selects the tests that need the oracle.
 
 The measure falling shows that the policy's steps are ones the termination proof covers, not
 that each is a `PStep`. Hub-only work, such as storing a rejected push's upload, changes

@@ -3,7 +3,8 @@ The executable model: finite, computable states, an `Action` vocabulary matching
 `docs/internals/conformance.md`, and `execStep`, which evaluates every guard of the relational
 model and names the guard that failed. `exec_sound` proves that every accepted action other than
 `hubRegress` is a `Step` of the relational model between the abstracted states, and `exec_rsound`
-that every accepted action is an `RStep`.
+that every accepted action is an `RStep`. A hive made again (`remakeActions`: the hub goes back to
+the root, then forgets all else) is `State.remake` (`exec_remake`).
 -/
 import Musubi.Regress
 
@@ -253,6 +254,10 @@ entry `i + 1` as the relational `hubAccept` does. -/
 def regress (es : EState) (i : Nat) : EState :=
   { es with hub := { es.hub with head := es.hub.histF i, seq := i } }
 
+/-- The hub keeps only `S` and `O` of what it stores (`hubForget`). -/
+def forget (es : EState) (S O : List Nat) : EState :=
+  { es with hub := { es.hub with ops := S, objs := O } }
+
 def hubAccept (es : EState) (d : Nat) : EState :=
   { es with hub := { es.hub with head := d, seq := es.hub.seq + 1,
                                  hist := (es.hub.seq + 1, d) :: es.hub.hist } }
@@ -313,6 +318,9 @@ inductive Action
   | hubPushIncomplete (node : Nat) (ops objs : List Nat) (expected new : Nat)
   | hubFetch (node base : Nat) (haves : List Nat)
   | crashHub
+  /-- The hub keeps only `ops` and `objs` of what it stores, which must hold
+  `closure(head)`. -/
+  | hubForget (ops objs : List Nat)
   /-- The hub goes back to the head it accepted at `seq` (`Regress.lean`): not a `Step`, but
   an `RStep`. -/
   | hubRegress (seq : Nat)
@@ -529,6 +537,15 @@ def execCore (N : Nat) (es : EState) : Action → Except String EState
     .ok (((es.send (.head n .head es.hub.seq es.hub.head)).send (.ops n (es.sinceOpsL b))).send
       (.objs n (es.sinceObjsL b H)))
   | .crashHub => .ok es
+  | .hubForget S O =>
+    req (S.all es.hub.ops.contains)
+      (fun _ => s!"hubForget: ops {showL S} not all stored at hub") fun _ =>
+    req (O.all es.hub.objs.contains)
+      (fun _ => s!"hubForget: objects {showL O} not all stored at hub") fun _ =>
+    req ((es.forget S O).closedB es.hub.head)
+      (fun _ => s!"hubForget: closure of head {es.hub.head} not kept ({(es.forget S O).missingMsg es.hub.head})")
+      fun _ =>
+    .ok (es.forget S O)
   | .hubRegress i =>
     req (decide (i ≤ es.hub.seq))
       (fun _ => s!"hubRegress: seq {i} is above the hub's seq {es.hub.seq}") fun _ =>
@@ -540,6 +557,10 @@ hypothesis. -/
 def execStep (N : Nat) (es : EState) (a : Action) : Except String EState :=
   req es.parOK (fun _ => "internal: an operation has a parent not below it") fun _ =>
   execCore N es a
+
+/-- A hive made again, empty (`HubDir::remake`): the hub goes back to the root, then keeps
+only the root. -/
+def remakeActions : List Action := [.hubRegress 0, .hubForget [root] []]
 
 /-! ## The liveness measure
 

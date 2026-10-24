@@ -25,4 +25,6 @@
 {"op": "step", "action": {"kind": "getHead", "node": 1}}
 {"op": "step", "action": {"kind": "hubGetHead", "node": 1}}
 {"op": "step", "action": {"kind": "loseKnown", "node": 1}}
+{"op": "step", "action": {"kind": "hubForget", "ops": [], "objs": [10]}}
+{"op": "step", "action": {"kind": "hubForget", "ops": [0], "objs": []}}
 {"op": "presence", "ops": [{"parents": [], "work": 7, "forgets": []}, {"parents": [0], "work": null, "forgets": [7]}, {"parents": [0], "work": 7, "forgets": []}, {"parents": [1, 2], "work": null, "forgets": []}, {"parents": [1], "work": null, "forgets": []}, {"parents": [3, 4], "work": null, "forgets": []}]}

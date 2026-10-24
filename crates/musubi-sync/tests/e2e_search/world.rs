@@ -369,6 +369,24 @@ impl World {
         self.jj_in(m, 0, args)
     }
 
+    /// Machine `m` forgets machine `o`'s copy, as `musubi forget` does, which abandons its
+    /// working-copy commits that are empty. Records what changed.
+    pub fn forget_copy(&mut self, m: usize, o: usize) {
+        let before = self.seen(m);
+        let key = self.fx.machine_key(o);
+        let name = self.machine(o);
+        self.record(format!("{}: musubi forget {name}", self.machine(m)));
+        if let Err(err) = self.fx.node(m).forget_copy(&key, name) {
+            self.fail(&format!(
+                "musubi forget {name} failed on {}: {err}",
+                self.machine(m)
+            ));
+        }
+        let after = self.seen(m);
+        let what = self.trace.last().cloned().unwrap_or_default();
+        self.ledger.record(m, &what, &before, &after, false);
+    }
+
     /// Like `jj_in`, but a failure whose message contains one of `refusals` (a refusal jj
     /// makes before changing anything) is returned rather than failing the test.
     pub fn try_jj_in(

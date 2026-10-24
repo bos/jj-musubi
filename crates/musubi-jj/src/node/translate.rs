@@ -14,6 +14,7 @@ use super::NodeRepo;
 use super::join::fingerprint;
 use crate::format_guard;
 use crate::format_guard::FormatError;
+use crate::presence::Kind;
 use crate::remote_url::without_credentials;
 use crate::workspaces;
 
@@ -126,7 +127,6 @@ impl NodeRepo {
                     .expect("parents canonicalized first")
             })
             .collect();
-        let view = self.canonical_view(id, view, &parents, op.commit_predecessors.as_ref())?;
         let mut metadata = op.metadata.clone();
         if let Some((prefix, target)) = target_of(&metadata.description)
             && let Some(canonical) = self.canonical_of(&target)
@@ -147,13 +147,18 @@ impl NodeRepo {
         metadata.workspace_name = metadata
             .workspace_name
             .map(|name| workspaces::workspace_key(self.machine.key(), name.as_str()));
+        let kind = Kind::of(&metadata);
+        let (view, presence) =
+            self.canonical_view(id, view, &parents, op.commit_predecessors.as_ref(), &kind)?;
         let canonical_op = StoreOperation {
             view_id: self.canonical.write_view(&view)?,
             parents,
             metadata,
             commit_predecessors: op.commit_predecessors.clone(),
         };
-        Ok(self.canonical.write_operation(&canonical_op)?)
+        let canonical = self.canonical.write_operation(&canonical_op)?;
+        self.remember_presence(canonical.clone(), presence.apply(&canonical, &kind));
+        Ok(canonical)
     }
 
     /// Refuses operations whose files contain fields this jj-lib would drop.

@@ -208,3 +208,47 @@ tests should kill every mutant it makes.
 The test's objects have no structure, so the test's hub ignores `closure(base)` and leaves
 out exactly what the haves name, as the model's `hubFetch` does; a node's haves there are
 every object it holds.
+
+## Presence
+
+`formal/Musubi/Presence.lean` proves which copies a hive shows when copies go away
+([design.md](design.md#copies-that-go-away)). musubi computes it with `Presence::merge` and
+`Presence::apply` (`crates/musubi-jj/src/presence.rs`), from each operation's parents'
+presence alone. The chain has three links:
+
+1. **The incremental rule.** What `Presence` keeps for each copy present, its latest work
+   that no forget saw (`UMax`), follows from the parents' alone as the Rust computes it
+   (`umax_merge`, `umax_work`, `umax_forget`), and says whether the copy is present
+   (`present_iff_umax`).
+2. **Relational to executable.** `formal/Musubi/PresenceExec.lean` defines the rule on a
+   finite history: `presentB` and `latestB`, proved to compute `Present` and `UMax`
+   (`presentB_iff`, `mem_latestB`). The oracle answers with them.
+3. **Oracle to Rust.** The Hegel test `presence::conformance`, in
+   `crates/musubi-jj/tests/it/presence.rs`, makes histories of up to 12 operations and 3
+   copies, each operation work by one copy or a forget of some, never both, as musubi makes
+   them. It computes every operation's presence with `Presence::merge` and `apply`, and
+   requires it to equal the oracle's, copy by copy, latest work included.
+
+The test checks the rule, not where it is applied: that `canonical_view` publishes exactly
+the present copies' workspaces, and realizing keeps a forgotten copy's own, is for the race
+catalogue (`crates/musubi-sync/tests/races/forget.rs`) to check.
+
+### Request and reply
+
+```json
+{"op": "presence", "ops": [{"parents": [], "work": 7, "forgets": []}, {"parents": [0], "work": null, "forgets": [7]}]}
+{"ok": true, "presence": [[{"copy": 7, "latest": [0]}], []]}
+```
+
+Operation `i` is the `i`th of `ops`, and its parents must come before it. `work` is the copy
+the operation is work by, or `null`, and `forgets` the copies it forgets. The reply has, for
+each operation, the copies present there, ascending, each with its latest work that no
+forget saw. A presence request leaves the oracle's session as it was.
+
+```sh
+cargo nextest run -p musubi-jj -E 'test(/^presence::/)'
+```
+
+`MUSUBI_CONFORMANCE_CASES` sets the number of histories, 300 by default: each takes the
+oracle about a millisecond. Dropping the check that a parent whose history has a copy's work
+keeps it, which lets a forget's merge bring the copy back, fails within a few histories.

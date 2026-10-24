@@ -12,6 +12,7 @@ import Musubi.ExecSound
 import Musubi.RegressScenario
 import Musubi.Refs
 import Musubi.Presence
+import Musubi.PresenceExec
 
 open Musubi
 
@@ -106,3 +107,9 @@ open Musubi
 #print axioms Presence.Hist.redundant_forget_noop
 #print axioms Presence.Hist.concurrent_forget_noop
 #print axioms Presence.Hist.present_iff_latest
+#print axioms Presence.Hist.present_iff_umax
+#print axioms Presence.Hist.umax_work
+#print axioms Presence.Hist.umax_forget
+#print axioms Presence.Hist.umax_merge
+#print axioms Presence.EHist.presentB_iff
+#print axioms Presence.EHist.mem_latestB

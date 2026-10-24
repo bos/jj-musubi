@@ -54,10 +54,11 @@ The binary is `formal/.lake/build/bin/oracle`.
 | `Musubi/ExecJson.lean` | The oracle's JSON codec and request handler (no protocol logic). |
 | `Musubi/ExecTest.lean` | `#guard` smoke tests of `execStep`, checked at build time. |
 | `Musubi/RegressScenario.lean` | A run of the executable model in which the hub goes back and two nodes then merge the same heads (`duplicateMerge`), so the extended system reaches states the durable one does not (`rreachable_not_reachable`). |
-| `Oracle.lean` | The `oracle` executable: a stdin/stdout loop around `ExecJson.handle`. |
+| `Oracle.lean` | The `oracle` executable: a stdin/stdout loop around `ExecJson.handle`, which also answers presence requests with `PresenceExec.lean`. |
 | `test/smoke.jsonl`, `test/smoke.expected`, `test/run_smoke.sh` | The oracle smoke test. |
 | `Musubi/Refs.lean` | Per-machine and shared state of a replicated view, for one git ref: jj's ref import and export against an adversarial `.git`, no spurious revert for local and remote bookmarks, and the verbatim-replication counterexample (docs/internals/design.md, "Per-machine state in a replicated view"). Independent of the protocol model. |
-| `Musubi/Presence.lean` | Which copies a hive shows, when copies go away without leaving: a copy is present while it has work that no forget of it saw. Every machine agrees, only work brings a copy back, `musubi leave` sticks, work concurrent with a forget survives, forgetting can't loop along a line of history, duplicate forgets are harmless, and presence can be decided from a copy's latest work and its forgets. Independent of the protocol model. |
+| `Musubi/Presence.lean` | Which copies a hive shows, when copies go away without leaving: a copy is present while it has work that no forget of it saw. Every machine agrees, only work brings a copy back, `musubi leave` sticks, work concurrent with a forget survives, forgetting can't loop along a line of history, duplicate forgets are harmless, and presence can be decided from a copy's latest work and its forgets. What musubi keeps of each copy, its latest work that no forget saw (`UMax`), follows from an operation's parents' alone (`umax_merge`). Independent of the protocol model. |
+| `Musubi/PresenceExec.lean` | The presence rule on a finite history, executable: `presentB` and `latestB`, proved to compute `Present` and `UMax`, which the oracle answers presence requests with (docs/internals/conformance.md, "Presence"). |
 | `Musubi/Axioms.lean` | `#print axioms` for every main theorem. |
 
 ## Correspondence with protocol.md

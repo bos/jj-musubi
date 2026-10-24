@@ -2,6 +2,7 @@
 //! advancing the op heads to them.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::thread;
@@ -112,6 +113,9 @@ impl NodeRepo {
                 None => {
                     let later = order[i + 1..].iter().map(|(id, _)| id).chain(next);
                     let run = self.run_after(id, op, later)?;
+                    // So that the threads making views each find the presence before theirs
+                    // remembered, rather than each reading the history below it.
+                    self.presence(id)?;
                     let mut views = self.local_views(&run, &per_machine).into_iter();
                     let view = views
                         .next()
@@ -126,7 +130,10 @@ impl NodeRepo {
                     view
                 }
             };
+            let view = self.with_own_workspaces(id, op, &parents, view)?;
+            let own = self.own_of(&view);
             let realization = self.realize_one(id, op, parents, view, per_machine)?;
+            self.last_own = Some((realization.id.clone(), Arc::new(own)));
             self.write_later(realization, id.clone())?;
         }
         Ok(self.local_of(canonical).expect("realized above"))
@@ -200,7 +207,7 @@ impl NodeRepo {
     ) -> Vec<Result<LocalView, NodeError>> {
         let make = |part: &[(OperationId, StoreOperation)]| -> Vec<_> {
             part.iter()
-                .map(|(_, op)| self.local_view(op, per_machine))
+                .map(|(id, op)| self.local_view(id, op, per_machine))
                 .collect()
         };
         if ops.len() == 1 {
@@ -303,6 +310,7 @@ impl NodeRepo {
                 self.map.forget(local, canonical);
             }
             self.last_realized = None;
+            self.last_own = None;
             self.prepared = None;
             std::panic::resume_unwind(panic);
         }
@@ -311,6 +319,7 @@ impl NodeRepo {
                 self.map.forget(local, canonical);
             }
             self.last_realized = None;
+            self.last_own = None;
             self.prepared = None;
             return Err(err);
         }
@@ -342,8 +351,118 @@ impl NodeRepo {
             locals.push(local);
         }
         self.last_realized = None;
+        self.last_own = None;
         self.prepared = None;
         locals
+    }
+
+    /// `local`, the local view of canonical operation `canonical_id`, with this machine's own
+    /// workspaces if the hive has forgotten this machine there: as the realization of its
+    /// parent with the machine's latest work has them (`latest_work_parent`), following the
+    /// operation's rewrites. They are still its working copies, and the hive shows them again
+    /// with its next work. A view that has this machine's workspaces, or where it is present
+    /// without any, is left as it is.
+    fn with_own_workspaces(
+        &mut self,
+        canonical_id: &OperationId,
+        op: &StoreOperation,
+        parents: &[OperationId],
+        local: LocalView,
+    ) -> Result<LocalView, NodeError> {
+        if local.names.keys().any(|key| self.is_own_key(key)) {
+            return Ok(local);
+        }
+        let source = self.latest_work_parent(&op.parents)?;
+        let mut own = match (parents.get(source), &self.last_own) {
+            (None, _) => return Ok(local),
+            (Some(parent), Some((last, own))) if parent == last => (**own).clone(),
+            (Some(parent), _) => {
+                // It may still be being written.
+                self.settle()?;
+                let op_store = self.loader.op_store();
+                let parent_view = op_store
+                    .read_view(&op_store.read_operation(parent).block_on()?.view_id)
+                    .block_on()?;
+                let parent_canonical = self.canonical_of(parent).expect("parents realized first");
+                self.own_of_view(parent_view.wc_commit_ids, &parent_canonical)?
+            }
+        };
+        if own.is_empty() || self.presence(canonical_id)?.is_present(self.machine.key()) {
+            return Ok(local);
+        }
+        workspaces::follow_rewrites(&mut own, op.commit_predecessors.as_ref());
+        let LocalView {
+            mut view, names, ..
+        } = local;
+        let shown: HashSet<&WorkspaceNameBuf> = names.values().collect();
+        for (name, commit) in own {
+            if !shown.contains(&name) {
+                view.wc_commit_ids.insert(name, commit);
+            }
+        }
+        // The id the op store gives it, worked out as it does.
+        let id = jj_lib::op_store::ViewId::new(blake2b_hash(&view).to_vec());
+        Ok(LocalView { view, id, names })
+    }
+
+    /// Which of a canonical operation's parents has this machine's latest work in its history:
+    /// one whose history has every other's (`Presence::worked`), so that a merge of a forget
+    /// that saw the machine's latest work with an operation that saw only earlier work keeps
+    /// the machine's workspaces as they are now. The first, if they agree or none has all.
+    fn latest_work_parent(&self, parents: &[OperationId]) -> Result<usize, NodeError> {
+        if parents.len() < 2 {
+            return Ok(0);
+        }
+        let key = self.machine.key();
+        let worked: Vec<BTreeSet<OperationId>> = parents
+            .iter()
+            .map(|parent| {
+                Ok(self
+                    .presence(parent)?
+                    .worked(key)
+                    .cloned()
+                    .unwrap_or_default())
+            })
+            .collect::<Result<_, NodeError>>()?;
+        if worked.iter().all(|ops| *ops == worked[0]) {
+            return Ok(0);
+        }
+        'parents: for (index, mine) in worked.iter().enumerate() {
+            for theirs in &worked {
+                for op in theirs.difference(mine) {
+                    let mut seen = false;
+                    for later in mine {
+                        if self.canonical.is_ancestor_of(op, later)? {
+                            seen = true;
+                            break;
+                        }
+                    }
+                    if !seen {
+                        continue 'parents;
+                    }
+                }
+            }
+            return Ok(index);
+        }
+        Ok(0)
+    }
+
+    /// This machine's own workspaces in a local view: every one but those named for another
+    /// machine's.
+    fn own_of(&self, local: &LocalView) -> BTreeMap<WorkspaceNameBuf, jj_lib::backend::CommitId> {
+        let others: HashSet<&WorkspaceNameBuf> = local
+            .names
+            .iter()
+            .filter(|(key, _)| !self.is_own_key(key))
+            .map(|(_, name)| name)
+            .collect();
+        local
+            .view
+            .wc_commit_ids
+            .iter()
+            .filter(|(name, _)| !others.contains(name))
+            .map(|(name, commit)| (name.clone(), commit.clone()))
+            .collect()
     }
 
     /// Realizes one canonical operation whose parents are realized, as `parents`, without

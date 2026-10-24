@@ -17,4 +17,5 @@ import Musubi.ExecTest
 import Musubi.RegressScenario
 import Musubi.Refs
 import Musubi.Presence
+import Musubi.PresenceExec
 import Musubi.Axioms

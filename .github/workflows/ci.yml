@@ -88,8 +88,8 @@ jobs:
           sudo systemctl start "user@$(id -u).service"
           echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
           echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
-      # The conformance test needs the Lean oracle; the conformance job runs it.
-      - run: cargo nextest run --workspace --locked -E "not test(=conformance)"
+      # The conformance tests need the Lean oracle; the conformance job runs them.
+      - run: cargo nextest run --workspace --locked -E "not test(/conformance$/)"
         env:
           # Runners are thrown away, so the test may install a login service for real.
           MUSUBI_TEST_LOGIN_SERVICE: "1"
@@ -126,6 +126,6 @@ jobs:
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-nextest
-      - run: cargo nextest run -p musubi-core --locked -E "test(=conformance)"
+      - run: cargo nextest run -p musubi-core -p musubi-jj --locked -E "test(/conformance$/)"
         env:
           MUSUBI_ORACLE: ${{ github.workspace }}/formal/.lake/build/bin/oracle

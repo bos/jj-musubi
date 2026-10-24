@@ -9,6 +9,7 @@ keep a test cheap.
 | --- | --- | --- | --- |
 | Formal model | `formal/` (Lean) | Protocol design errors: lost operations, dangling references, duplicate merges, livelock | Proof effort, no runtime |
 | Protocol property tests | `crates/musubi-core/tests` | The Rust state machines departing from the model | Milliseconds per case |
+| Presence conformance | `crates/musubi-jj/tests/it/presence.rs` | Which copies musubi shows departing from the Lean model's rule (docs/internals/conformance.md, "Presence") | A millisecond per case |
 | Race catalogue | `crates/musubi-sync/tests/races` | Concurrent changes on different machines resolving differently from jj's local behavior (docs/internals/races.md) | ~0.3 s per test |
 | Unit tests | `#[cfg(test)]` modules | Pure logic: URL normalization and hive names across forges, matching joining repositories to hives | Microseconds |
 | Example tests | each crate's `tests/` | jj integration details: translation, git refs, objects, joins, transports, the hub's hives, the CLI | ~0.2–0.5 s per test |
@@ -32,7 +33,7 @@ makes a RAM disk for the run, which makes the suite three times as fast; a bare
 after a run, for inspecting a failure, and puts them on the disk.
 
 CI runs clippy and the default suite on Linux, macOS and Windows, since each compiles code
-the others don't, and on Linux checks the Lean model, runs the conformance test against its
+the others don't, and on Linux checks the Lean model, runs the conformance tests against its
 oracle, and runs each benchmark script once (`just bench-smoke`). The Search workflow runs
 the end-to-end search nightly on Linux, each shard on a runner of its own, with a seed that
 changes from run to run. A failing shard uploads its example database; its output gives the

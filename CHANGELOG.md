@@ -6,6 +6,24 @@ change the protocol, so run the same release on the hub and every machine (see
 
 ## Unreleased
 
+- `musubi leave` now takes the repository out of its hive: it records what changed in the
+  working copy and tells the hive, with the copy's last work, so that the other machines
+  stop showing its working copy and the hub stops counting it. It keeps its working copy. It
+  fails if the hub can't be reached, where it used to leave without a word, which scripts
+  that run it may need to allow for; `musubi leave --force` leaves without telling the hive.
+- `musubi forget <machine>` forgets a machine that went away without leaving. The other
+  machines stop showing its working copy, and the hub stops counting it. If it's still
+  there, it comes back as soon as it's used. See
+  [Take a repository or machine out](docs/guides/manage.md#take-a-repository-or-machine-out).
+- Two machines that share a name are shown as `laptop-1a2b/default@` and
+  `laptop-3c4d/default@` from then on, even after one leaves, so that a name never moves to
+  another machine. On upgrading, a machine that shares its name with any machine its hive
+  has had, even one long gone, is shown that way from then on, as `mac-2222/default@` where
+  it was `mac/default@`.
+- On upgrading, a copy in which no `jj` command has recorded an operation since it joined
+  stops showing on the other machines until one does: earlier releases didn't record joining
+  as the copy's own. Upgrade every machine together: a machine on an earlier release that
+  another forgets loses its own working copy.
 - musubi completes its commands, flags, and hive and hub names in your shell, once you add a
   line to your shell's startup file, and `musubi completion <shell>` prints a completion
   script. See

@@ -10,6 +10,8 @@ use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::PoisonError;
 
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -139,6 +141,10 @@ pub struct CanonicalStore {
     root_commit_id: CommitId,
     store: Arc<SimpleOpStore>,
     incoming: SimpleOpStore,
+    /// Generation numbers of stored operations (the root 0, otherwise one more than the
+    /// largest parent's), which bound ancestry searches. A stored operation never changes,
+    /// so neither does its entry.
+    generations: Mutex<HashMap<OperationId, u64>>,
 }
 
 impl CanonicalStore {
@@ -163,6 +169,7 @@ impl CanonicalStore {
             root_commit_id: root_commit_id.clone(),
             store: Arc::new(SimpleOpStore::load(path, root_data())),
             incoming: SimpleOpStore::load(&incoming_path, root_data()),
+            generations: Mutex::new(HashMap::new()),
         })
     }
 
@@ -439,6 +446,93 @@ impl CanonicalStore {
                 return Ok(true);
             }
             if id == *self.root_operation_id() || !seen.insert(id.clone()) {
+                continue;
+            }
+            stack.extend(self.read_operation(&id)?.parents);
+        }
+        Ok(false)
+    }
+
+    /// The generation of stored operation `id`: the root's is 0, and any other's one more than
+    /// its largest parent's. The first call reads the whole history below `id`.
+    pub fn generation(&self, id: &OperationId) -> Result<u64, CanonicalError> {
+        let mut generations = self
+            .generations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let mut stack = vec![id.clone()];
+        while let Some(op) = stack.last().cloned() {
+            if generations.contains_key(&op) {
+                stack.pop();
+                continue;
+            }
+            if op == *self.root_operation_id() {
+                generations.insert(op, 0);
+                stack.pop();
+                continue;
+            }
+            let parents = self.read_operation(&op)?.parents;
+            let missing: Vec<OperationId> = parents
+                .iter()
+                .filter(|p| !generations.contains_key(*p))
+                .cloned()
+                .collect();
+            if missing.is_empty() {
+                let generation = parents.iter().map(|p| generations[p]).max().unwrap_or(0) + 1;
+                generations.insert(op, generation);
+                stack.pop();
+            } else {
+                stack.extend(missing);
+            }
+        }
+        Ok(generations[id])
+    }
+
+    /// Records the generation of `id`, whose `parents` have theirs recorded, as a walk that
+    /// reads it anyway can, so that [`Self::generation`] needn't read it again.
+    pub fn note_generation(&self, id: &OperationId, parents: &[OperationId]) {
+        let mut generations = self
+            .generations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if generations.contains_key(id) {
+            return;
+        }
+        let root = self.root_operation_id();
+        let parent_generations: Option<Vec<u64>> = parents
+            .iter()
+            .map(|p| {
+                if p == root {
+                    Some(0)
+                } else {
+                    generations.get(p).copied()
+                }
+            })
+            .collect();
+        if let Some(parent_generations) = parent_generations {
+            let generation = parent_generations.into_iter().max().unwrap_or(0) + 1;
+            generations.insert(id.clone(), generation);
+        }
+    }
+
+    /// Whether `ancestor` is in `anc*(op)`, both stored. Operations whose generation is no
+    /// higher than `ancestor`'s cannot lead to it, so the search never enters them.
+    pub fn is_ancestor_of(
+        &self,
+        ancestor: &OperationId,
+        op: &OperationId,
+    ) -> Result<bool, CanonicalError> {
+        if ancestor == op {
+            return Ok(true);
+        }
+        let target = self.generation(ancestor)?;
+        let mut seen = HashSet::new();
+        let mut stack = vec![op.clone()];
+        while let Some(id) = stack.pop() {
+            if id == *ancestor {
+                return Ok(true);
+            }
+            if !seen.insert(id.clone()) || self.generation(&id)? <= target {
                 continue;
             }
             stack.extend(self.read_operation(&id)?.parents);

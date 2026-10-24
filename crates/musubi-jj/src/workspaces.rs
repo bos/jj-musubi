@@ -8,7 +8,8 @@
 //! touch them. jj moves them as it moves any workspace when it rewrites or abandons their
 //! commits, and canonicalization takes those moves, but no other change a machine makes to
 //! another machine's workspaces: adding, forgetting or renaming them stays local, and the next
-//! realization shows them again.
+//! realization shows them again. Only a forget of the whole copy, which musubi writes, removes
+//! them (`crate::presence`).
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -96,6 +97,14 @@ pub fn machine_name(key: &str) -> &str {
 fn short_id(key: &str) -> &str {
     key.split_once('#')
         .map_or("", |(_, id)| &id[..id.floor_char_boundary(4)])
+}
+
+/// Both names under which a machine's workspaces can be shown, `name` and `name-1a2b`
+/// (see [`display_names`]): which one depends on the other machines, and changes as they come
+/// and go.
+pub fn display_forms(key: &str) -> [String; 2] {
+    let name = machine_name(key);
+    [name.to_owned(), format!("{name}-{}", short_id(key))]
 }
 
 /// The canonical key of `workspace` on `machine`.

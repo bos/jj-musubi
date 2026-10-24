@@ -113,7 +113,8 @@ it, such as `laptop/default@`, and `jj op log` shows what every machine did.
 
 - `musubi` (or `musubi list`) shows the hub's hives, this machine's copies of them, and how
   their syncing goes, and in a hive's repository, its details.
-- `musubi sync` syncs the current repository now; `musubi leave` stops syncing it.
+- `musubi sync` syncs the current repository now; `musubi leave` takes it out of its hive.
+- `musubi forget <machine>` forgets a machine that went away without leaving.
 - `musubi daemon install` starts the daemon at login; `musubi daemon start`, `stop` and
   `restart` control it.
 - `musubi hub rename` and `musubi hub remove` manage the hub's hives.

@@ -4,6 +4,7 @@
 use std::collections::BTreeSet;
 
 use jj_lib::backend::CommitId;
+use jj_lib::ref_name::WorkspaceNameBuf;
 use jj_lib::repo::ReadonlyRepo;
 use jj_lib::repo::Repo as _;
 use pollster::FutureExt as _;
@@ -12,14 +13,16 @@ use super::NodeError;
 use super::NodeRepo;
 use super::index_err;
 use super::is_visible;
-use super::view::key_workspace;
 
 impl NodeRepo {
     /// Shows other machines' workspaces in this machine's view again where they went
     /// missing: forgotten here, or dropped when jj merged a forget with concurrent
     /// operations, a removal winning. They are the other machines' own, so this machine's
     /// changes to them never count (see `canonical_view`), and the canonical view still has
-    /// them. Returns whether it wrote an operation, which then needs uploading.
+    /// them. Drops other machines' workspaces under names the hive no longer gives them, as
+    /// `jj undo` brings back (`names_other_machine`), unless jj's workspace store says this
+    /// machine has a working copy for one. Returns whether it wrote an operation, which then
+    /// needs uploading.
     pub fn show_other_workspaces(&mut self) -> Result<bool, NodeError> {
         let repo = self.merged_repo()?;
         let canonical = self.canonicalize(repo.op_id())?;
@@ -27,7 +30,9 @@ impl NodeRepo {
             return Ok(false);
         }
         let view = self.canonical.read_operation_view(&canonical)?;
-        let names = self.local_names(&view);
+        let known = self.presence(&canonical)?;
+        let names = self.local_names(&view, &known)?;
+        let machines = self.machines_of(&view, known.known());
         let hive_heads: Vec<CommitId> = view.head_ids.iter().cloned().collect();
         let mut tx = repo.start_transaction();
         let mut shown = false;
@@ -54,9 +59,31 @@ impl NodeRepo {
                 .map_err(index_err)?;
             shown = true;
         }
+        let shown_names: BTreeSet<&WorkspaceNameBuf> = names.values().collect();
+        let own = self.own_names(&canonical)?;
+        let stale: Vec<WorkspaceNameBuf> = repo
+            .view()
+            .wc_commit_ids()
+            .keys()
+            .filter(|name| {
+                !shown_names.contains(name)
+                    && !own.contains(*name)
+                    && self.names_other_machine(name, &machines)
+                    && !self.may_be_registered(name)
+            })
+            .cloned()
+            .collect();
+        for name in &stale {
+            tx.repo_mut()
+                .remove_workspace(name)
+                .block_on()
+                .map_err(index_err)?;
+            shown = true;
+        }
         if !shown {
             return Ok(false);
         }
+        tx.repo_mut().rebase_descendants().block_on()?;
         tx.commit("musubi: show other machines' workspaces")
             .block_on()?;
         Ok(true)
@@ -66,38 +93,63 @@ impl NodeRepo {
     /// a fresh working-copy commit, as jj does when it abandons a working-copy commit
     /// locally. When another machine abandons it, that machine's jj already gave the
     /// workspace a new commit, which arrives with the operation; this covers the rest, such
-    /// as an abandon on a machine that had forgotten this machine's workspace. Returns the
-    /// workspaces it moved.
+    /// as an abandon on a machine that had forgotten this machine's workspace. A commit that
+    /// was rewritten, as one can be while the hive has forgotten this machine and no other
+    /// machine sees it as a working copy, is followed to its rewrite instead, as jj would
+    /// have moved the workspace. Returns the workspaces it moved.
+    ///
+    /// While the hive has forgotten this machine, an abandoned working copy stays where it is
+    /// rather than get a new commit, which the other machines would see as an empty commit
+    /// of no one's: the machine's next `jj` command rewrites it, as a snapshot, say, and that
+    /// work shows it again.
     pub fn replace_abandoned_working_copies(&mut self) -> Result<Vec<String>, NodeError> {
+        self.replace_hidden_working_copies(false)
+    }
+
+    /// [`Self::replace_abandoned_working_copies`], giving even a machine the hive has
+    /// forgotten new commits if `even_forgotten`, as one that has left.
+    pub(super) fn replace_hidden_working_copies(
+        &mut self,
+        even_forgotten: bool,
+    ) -> Result<Vec<String>, NodeError> {
         // Merge through `merged_repo`, which exports to `.git`: a bare `load_at_head` would
         // merge without exporting the bookmarks the merge moves.
         let repo = self.merged_repo()?;
         let canonical = self.canonicalize(repo.op_id())?;
-        let own: BTreeSet<String> = self
-            .workspaces_of(&canonical)?
-            .into_keys()
-            .filter(|key| self.is_own_key(key))
-            .map(|key| key_workspace(&key).to_owned())
-            .collect();
-        let mut abandoned = vec![];
-        for (name, wc) in repo.view().wc_commit_ids() {
-            // Other machines replace their own.
-            if own.contains(name.as_str()) && !is_visible(&repo, wc)? {
-                abandoned.push((name.clone(), wc.clone()));
+        let forgotten =
+            !even_forgotten && !self.presence(&canonical)?.is_present(self.machine.key());
+        let mut hidden = vec![];
+        // Other machines replace their own.
+        for (name, wc) in self.own_workspaces(&repo, &canonical)? {
+            if !is_visible(&repo, &wc)? {
+                hidden.push((name, wc));
             }
         }
-        if abandoned.is_empty() {
+        if hidden.is_empty() {
             return Ok(vec![]);
         }
         let mut tx = repo.start_transaction();
-        let mut moved = vec![];
-        for (name, wc) in abandoned {
+        let (mut abandoned, mut rewritten) = (vec![], vec![]);
+        for (name, wc) in hidden {
+            let wc_commit = repo.store().get_commit_async(&wc).block_on()?;
+            if let Some(rewrite) = visible_rewrite(&repo, wc_commit.change_id())? {
+                let rewrite = repo.store().get_commit_async(&rewrite).block_on()?;
+                tx.repo_mut()
+                    .edit(name.clone(), &rewrite)
+                    .block_on()
+                    .map_err(index_err)?;
+                rewritten.push(name.as_str().to_owned());
+                continue;
+            }
+            if forgotten {
+                continue;
+            }
             // Where jj would have put the new working copy had this happened on this machine:
             // the nearest visible ancestor along first parents, except that an ancestor that
             // was rewritten, not abandoned, is replaced by its rewrite. A rewrite keeps the
             // change id, so it's the change's one visible commit; a change with none was
             // abandoned, and one with several diverged, so neither says where to go.
-            let mut parent = repo.store().get_commit_async(&wc).block_on()?;
+            let mut parent = wc_commit;
             while !is_visible(&repo, parent.id())? {
                 if parent.id() != &wc
                     && let Some(rewrite) = visible_rewrite(&repo, parent.change_id())?
@@ -111,14 +163,28 @@ impl NodeRepo {
                 parent = repo.store().get_commit_async(&first).block_on()?;
             }
             tx.repo_mut().check_out(name.clone(), &parent).block_on()?;
-            moved.push(name.as_str().to_owned());
+            abandoned.push(name.as_str().to_owned());
         }
-        let description = format!(
-            "musubi: new working copy for {} (abandoned elsewhere)",
-            moved.join(", ")
-        );
-        tx.commit(description).block_on()?;
-        Ok(moved)
+        if abandoned.is_empty() && rewritten.is_empty() {
+            return Ok(vec![]);
+        }
+        let mut description = vec![];
+        if !abandoned.is_empty() {
+            description.push(format!(
+                "new working copy for {} (abandoned elsewhere)",
+                abandoned.join(", ")
+            ));
+        }
+        if !rewritten.is_empty() {
+            description.push(format!(
+                "working copy of {} follows its rewrite elsewhere",
+                rewritten.join(", ")
+            ));
+        }
+        tx.commit(format!("musubi: {}", description.join("; ")))
+            .block_on()?;
+        abandoned.extend(rewritten);
+        Ok(abandoned)
     }
 }
 

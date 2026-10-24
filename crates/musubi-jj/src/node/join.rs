@@ -29,6 +29,8 @@ use super::NodeRepo;
 use super::index_err;
 use crate::hive_settings;
 use crate::objects::Backend;
+use crate::presence;
+use crate::presence::Kind;
 use crate::translation_map::whole_id;
 
 /// What a hub matches a joining repository against: see [`NodeRepo::join_summary`].
@@ -128,22 +130,34 @@ impl NodeRepo {
     /// to it. See "Joining" in docs/internals/design.md.
     pub fn create_join_operation(&mut self, description: &str) -> Result<OperationId, NodeError> {
         let head = self.merge_heads()?;
-        if let Some(canonical) = self.canonical_of(&head) {
-            return Ok(canonical);
-        }
         // A repository that was part of a hive before, and left, has canonical history
         // already: if its head descends from it, carry on from it, as any operation does. A
         // join operation on the root would hide that history from the head, and the head the
         // old hub last accepted, which this node keeps, would no longer be reachable from it:
         // which musubi takes for an op abandon, whichever hive the repository joins.
-        if self.descends_from_canonical(&head)? {
-            return self.canonicalize(&head);
+        let carried = match self.canonical_of(&head) {
+            Some(canonical) => Some(canonical),
+            None if self.descends_from_canonical(&head)? => Some(self.canonicalize(&head)?),
+            None => None,
+        };
+        if carried.is_some() {
+            return self.mark_joined(description);
         }
         let op = self.loader.op_store().read_operation(&head).block_on()?;
         self.check_format(&head, &op)?;
         let view = self.loader.op_store().read_view(&op.view_id).block_on()?;
         let root = self.canonical.root_operation_id().clone();
-        let view = self.canonical_view(&head, view, std::slice::from_ref(&root), None)?;
+        // Joining is this machine's work: it is present from its join on.
+        let attributes = BTreeMap::from([(
+            presence::WORK_ATTRIBUTE.to_owned(),
+            self.machine.key().to_owned(),
+        )]);
+        let kind = Kind {
+            work: Some(self.machine.key().to_owned()),
+            ..Kind::default()
+        };
+        let (view, presence) =
+            self.canonical_view(&head, view, std::slice::from_ref(&root), None, &kind)?;
         let settings = self.loader.settings();
         let now = settings
             .operation_timestamp()
@@ -161,13 +175,33 @@ impl NodeRepo {
                 username: settings.operation_username().to_owned(),
                 is_snapshot: false,
                 workspace_name: None,
-                attributes: BTreeMap::new(),
+                attributes,
             },
             commit_predecessors: Some(BTreeMap::new()),
         };
         let canonical = self.canonical.write_operation(&join)?;
+        self.remember_presence(canonical.clone(), presence.apply(&canonical, &kind));
         self.record_join(head, &op, canonical.clone())?;
         Ok(canonical)
+    }
+
+    /// Makes joining this machine's work, as it is: if the hive would not show this machine
+    /// as of its op head, as after it left or with its whole history joined, an operation
+    /// that changes nothing else says so. Returns the canonical form of the op head.
+    pub fn mark_joined(&mut self, description: &str) -> Result<OperationId, NodeError> {
+        let head = self.merge_heads()?;
+        let canonical = self.canonicalize(&head)?;
+        if self.presence(&canonical)?.is_present(self.machine.key()) {
+            return Ok(canonical);
+        }
+        let repo = self.repo_at(&head)?;
+        let mut tx = repo.start_transaction();
+        tx.set_attribute(
+            presence::WORK_ATTRIBUTE.to_owned(),
+            self.machine.key().to_owned(),
+        );
+        let joined = tx.commit(description).block_on()?;
+        self.canonicalize(joined.op_id())
     }
 
     /// What a hub needs to know to decide which hive this repository belongs to.

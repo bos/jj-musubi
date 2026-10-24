@@ -503,6 +503,20 @@ impl Search {
         self.note(&tc);
     }
 
+    /// Forgets another machine's copy, as `musubi forget` does: every machine stops showing
+    /// it until that machine's next work.
+    #[rule]
+    fn forget_copy(&mut self, tc: TestCase) {
+        let m = self.machine(&tc);
+        let mut world = self.world.borrow_mut();
+        let others: Vec<usize> = (0..world.nodes()).filter(|&o| o != m).collect();
+        let o = others[pick(&tc, others.len())];
+        fired("forget_copy");
+        world.forget_copy(m, o);
+        drop(world);
+        self.note(&tc);
+    }
+
     // The shared remote.
 
     /// Someone outside the hive pushes to origin's `main`.

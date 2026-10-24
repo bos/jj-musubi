@@ -159,9 +159,12 @@ impl World {
         }
     }
 
-    /// Each machine has its own workspaces, and their working copies are visible. (It
-    /// shows the other machines' too, as `machine/workspace`: `check_other_workspaces`.)
+    /// Each machine has its own workspaces, and their working copies are visible, but for a
+    /// machine the hive has forgotten, whose working copy can stay on the hidden commit its
+    /// forget abandoned until its next work. (It shows the other machines' too, as
+    /// `machine/workspace`: `check_other_workspaces`.)
     fn check_workspaces(&self, views: &[View]) {
+        let shown = self.fx.shown_machines();
         for (m, view) in views.iter().enumerate() {
             let listed: BTreeSet<String> = self
                 .raw_jj(m, &["workspace", "list", "-T", "name ++ \"\\n\""])
@@ -178,6 +181,9 @@ impl World {
                     "{} lists workspaces {listed:?}, expected {expected:?}",
                     self.machine(m)
                 ));
+            }
+            if !shown.contains(&self.fx.machine_key(m)) {
+                continue;
             }
             let visible: BTreeSet<String> = view.commits.iter().map(|c| c.id.clone()).collect();
             for (name, wc) in self.working_copies(m) {

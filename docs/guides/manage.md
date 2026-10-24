@@ -84,22 +84,30 @@ removed, so that no copy brings it back. To share the repository again, start a 
 
 ## Take a repository or machine out
 
-In a repository, `musubi leave` stops syncing it. The repository keeps everything it has,
-and the other machines keep everything it sent. Leaving doesn't tell the hub, though: the
-other machines go on showing the machine's last working copy, as `laptop/default@`, and the
-hub goes on counting the machine. Forgetting that workspace on another machine doesn't last,
-since each machine's workspaces are its own: the next sync shows it again.
+In a repository, `musubi leave` takes it out of its hive. It records what changed in the
+working copy, then tells the hive, with the copy's last work, so that the other machines stop
+showing its working copy, as `laptop/default@`, and the hub stops counting the machine. Then
+it stops syncing. The repository keeps everything it has, its working copy included, and the
+other machines keep everything it sent: a working-copy commit with changes stays as an
+ordinary commit, and an empty one goes.
 
-To take a machine out of a hive for good, remove its workspace from the machine itself
-before it leaves:
+If the hub can't be reached, `musubi leave` fails, and the repository stays part of its hive,
+so that a script tearing down a machine knows its last work didn't get out. Once it next
+syncs, the other machines stop showing it until it's next used. `musubi leave --force` leaves
+anyway, without telling the hive.
+
+A machine that went away without leaving, as a short-lived machine can, or whose copy was
+deleted, stays in the hive until it is forgotten. Forget it on any other machine, by the name
+its working copy has there:
 
 ```sh
-jj workspace forget default
-musubi sync
-musubi leave
+musubi forget laptop
 ```
 
-That leaves the repository on that machine without a working copy.
+The other machines stop showing `laptop/default@` as they sync, and the hub stops counting it.
+If the copy is still there after all, it comes back with the next `jj` command run in it that
+records an operation: one that changes something, or snapshots a change to the working
+copy. A command that only reads, with nothing changed, records none.
 
 To sync a copy again after it has left, run `musubi join` in it. It carries on from the
 history it shared, so a copy that joins a different hive brings its old hive's history along,

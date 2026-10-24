@@ -16,8 +16,8 @@ Each document answers a different question:
   where does a new test belong?
 - [Efficient tests](efficient-tests.md): How should a new test be written so that the suite
   stays fast?
-- [Conformance](conformance.md): How is the Rust protocol core checked against the Lean
-  model?
+- [Conformance](conformance.md): How are the Rust protocol core, and which copies a hive
+  shows, checked against the Lean model?
 - [The Lean model](../../formal/README.md): What does the model prove, and how does it
   correspond to the protocol?
 - [Releasing](releasing.md): How is a release made?

@@ -180,6 +180,59 @@ impl Fixture {
             .collect()
     }
 
+    /// Machine `index`'s identity in the hive, the key its workspaces are under.
+    pub fn machine_key(&self, index: usize) -> String {
+        self.hive.members[index]
+            .adapter
+            .repo()
+            .machine()
+            .key()
+            .to_owned()
+    }
+
+    /// The node of machine `index`, to act on as musubi's commands do.
+    pub fn node(&mut self, index: usize) -> &mut NodeRepo {
+        self.hive.members[index].adapter.repo_mut()
+    }
+
+    /// The names of the workspaces in machine `index`'s view, read in process, so that
+    /// reading them snapshots nothing: a snapshot is work, which would bring a machine the
+    /// hive has forgotten back.
+    pub fn workspace_names(&self, index: usize) -> BTreeSet<String> {
+        self.load(index)
+            .view()
+            .wc_commit_ids()
+            .keys()
+            .map(|name| name.as_str().to_owned())
+            .collect()
+    }
+
+    /// The machines whose workspaces the hub's head has: those present, with workspaces.
+    pub fn shown_machines(&self) -> BTreeSet<String> {
+        self.hub_workspaces()
+            .iter()
+            .filter_map(|key| key.split_once('/'))
+            .map(|(machine, _)| machine.to_owned())
+            .collect()
+    }
+
+    /// The workspaces the hub's head has, by key: `<machine key>/<workspace>`.
+    fn hub_workspaces(&self) -> BTreeSet<String> {
+        let store = self.hive.hub.store();
+        let head = store.head().1;
+        if head == store.canonical().root_operation_id() {
+            return BTreeSet::new();
+        }
+        store
+            .canonical()
+            .read_operation_view(head)
+            .unwrap()
+            .wc_commit_ids
+            .into_keys()
+            .map(|key| key.as_str().to_owned())
+            .collect()
+    }
+
     /// The repository at its head, read in process: unlike a `jj` command, reading it
     /// snapshots nothing and imports nothing from git.
     fn load(&self, index: usize) -> Arc<ReadonlyRepo> {
@@ -196,10 +249,10 @@ impl Fixture {
     /// The hive's invariants once synced: running `jj` everywhere and syncing again
     /// reaches a fixed point within a few rounds (each machine's next command may reset its
     /// own git HEAD after a rebase, which replicates once, but nothing ping-pongs); then
-    /// every machine agrees on visible commits and bookmarks, each machine shows the other
-    /// machines' working copies where they are, each colocated repository's git branches
-    /// match its bookmarks that are not conflicted or on the root commit, and `jj status`
-    /// changes nothing.
+    /// every machine agrees on visible commits and bookmarks, each machine shows the
+    /// working copies of the other machines the hive hasn't forgotten, where they are, each
+    /// colocated repository's git branches match its bookmarks that are not conflicted or on
+    /// the root commit, and `jj status` changes nothing.
     pub fn assert_converged(&mut self) {
         let mut settled = false;
         for _ in 0..3 {
@@ -231,21 +284,28 @@ impl Fixture {
                     .collect()
             })
             .collect();
-        let own = |ws: &BTreeMap<String, String>| -> Vec<String> {
-            ws.iter()
-                .filter(|(name, _)| !name.contains('/'))
-                .map(|(_, commit)| commit.clone())
-                .collect()
+        let shown_machines = self.shown_machines();
+        let keys: Vec<String> = (0..self.repos.len()).map(|i| self.machine_key(i)).collect();
+        // A machine's own workspaces: those named without a `/`, and those the hub's head
+        // gives it, as `beta/x` of `alpha#1a2b/beta/x`.
+        let published = self.hub_workspaces();
+        let is_own = |index: usize, name: &str| {
+            !name.contains('/') || published.contains(&format!("{}/{name}", keys[index]))
         };
         for (index, shown) in workspaces.iter().enumerate() {
             let mut shown: Vec<String> = shown
                 .iter()
-                .filter(|(name, _)| name.contains('/'))
+                .filter(|(name, _)| !is_own(index, name))
                 .map(|(_, commit)| commit.clone())
                 .collect();
             let mut actual: Vec<String> = (0..self.repos.len())
-                .filter(|&other| other != index)
-                .flat_map(|other| own(&workspaces[other]))
+                .filter(|&other| other != index && shown_machines.contains(&keys[other]))
+                .flat_map(|other| {
+                    workspaces[other]
+                        .iter()
+                        .filter(move |(name, _)| is_own(other, name))
+                        .map(|(_, commit)| commit.clone())
+                })
                 .collect();
             shown.sort();
             actual.sort();

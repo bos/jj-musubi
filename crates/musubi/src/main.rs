@@ -175,10 +175,30 @@ enum Command {
         #[arg(long)]
         once: bool,
     },
-    /// Stop syncing the repository in the current directory.
+    /// Take the repository in the current directory out of its hive, and stop syncing it.
     ///
-    /// The repository keeps everything it has, and the hive keeps everything it sent.
-    Leave,
+    /// It records what changed in the working copy, then tells the hive, with this copy's
+    /// last work, so that the other machines stop showing its working copies. The repository
+    /// keeps everything it has, its working copy included, and the hive keeps everything it
+    /// sent. If the hive can't be told, it fails, and the repository stays part of the hive.
+    Leave {
+        /// Leave even if the hive can't be told. The other machines go on showing this copy
+        /// until one of them forgets it.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Forget another machine's copy of this repository: the other machines stop showing its
+    /// working copies, and the hub stops counting it.
+    ///
+    /// For a machine that went away without `musubi leave`, as a short-lived machine can.
+    /// Its working-copy commit is abandoned if it's empty, and otherwise stays as an ordinary
+    /// commit. If the copy is still there, the hive shows it again as soon as it's used.
+    Forget {
+        /// The machine, as its working copies are named here: `laptop` for `laptop/default@`,
+        /// or `laptop-1a2b` for `laptop-1a2b/default@`. The name `musubi list` gives it will
+        /// do too, if no other machine has that name.
+        machine: String,
+    },
     /// Sync the repository in the current directory now.
     ///
     /// The daemon syncs by itself whenever the repository or its hive changes, so this is
@@ -427,7 +447,8 @@ fn main() -> anyhow::Result<()> {
             },
             socket(),
         ),
-        Command::Leave => leave(&cwd, &socket()?),
+        Command::Leave { force } => leave(&cwd, &socket()?, force),
+        Command::Forget { machine } => forget(&cwd, &machine, &socket()?),
         Command::Daemon { action: None } => daemon::run(&socket()?),
         Command::Daemon {
             action: Some(DaemonAction::Start),
@@ -633,8 +654,11 @@ fn become_node(
 ) -> anyhow::Result<()> {
     let mut node = located.open()?;
     let machine = node.machine().name().to_owned();
-    if !full_history {
-        node.create_join_operation(&format!("musubi: {machine} joins the hive"))?;
+    let description = format!("musubi: {machine} joins the hive");
+    if full_history {
+        node.mark_joined(&description)?;
+    } else {
+        node.create_join_operation(&description)?;
     }
     let config = HiveConfig {
         hive: hive
@@ -753,6 +777,13 @@ fn sync_directly(located: &Located) -> anyhow::Result<Synced> {
 
 /// Syncs through the daemon when it serves the repository, else directly.
 fn sync(start: &Path, socket: &Socket) -> anyhow::Result<()> {
+    let synced = sync_quietly(start, socket)?;
+    println!("Synced (hive at #{}).", synced.seq);
+    Ok(())
+}
+
+/// [`sync`], saying nothing.
+fn sync_quietly(start: &Path, socket: &Socket) -> anyhow::Result<Synced> {
     let located = Located::find(start)?;
     let hive =
         HiveConfig::load(&located.repo_path)?.context("this repository is not part of a hive")?;
@@ -785,32 +816,188 @@ fn sync(start: &Path, socket: &Socket) -> anyhow::Result<()> {
             Err(err) => return Err(err),
         },
     };
-    println!("Synced (hive at #{}).", synced.seq);
-    Ok(())
+    Ok(synced)
 }
 
-fn leave(start: &Path, socket: &Socket) -> anyhow::Result<()> {
+fn leave(start: &Path, socket: &Socket, force: bool) -> anyhow::Result<()> {
     let located = Located::find(start)?;
     let hive =
         HiveConfig::load(&located.repo_path)?.context("this repository is not part of a hive")?;
-    block_on(async {
-        if let Some(client) = daemon::running(socket).await? {
-            client
-                .remove(
-                    control::context(Duration::from_secs(120)),
-                    located.workspace_root.clone(),
-                )
-                .await?
-                .map_err(anyhow::Error::msg)?;
-        }
-        Ok(())
+    // So that the daemon doesn't sync it meanwhile.
+    let served = block_on(async {
+        let Some(client) = daemon::running(socket).await? else {
+            return Ok(false);
+        };
+        client
+            .remove(
+                control::context(Duration::from_secs(120)),
+                located.workspace_root.clone(),
+            )
+            .await?
+            .map_err(anyhow::Error::msg)?;
+        Ok::<_, anyhow::Error>(true)
     })?;
+    let name = hive.display_name();
+    let told = match snapshot(&located) {
+        Err(err) => Err(("record what changed in the working copy".to_owned(), err)),
+        Ok(()) => tell_the_hive(&located, &hive)
+            .map_err(|err| (format!("tell hive {name} that this repository leaves"), err)),
+    };
+    if let Err((doing, err)) = told {
+        if !force {
+            if served {
+                // As before: the daemon serves it again.
+                block_on(async {
+                    if let Some(client) = daemon::running(socket).await? {
+                        let context = control::context(Duration::from_secs(10));
+                        client
+                            .add(context, located.workspace_root.clone())
+                            .await
+                            .ok();
+                    }
+                    Ok::<_, anyhow::Error>(())
+                })
+                .ok();
+            }
+            anyhow::bail!(
+                "couldn't {doing} ({err:#}), so this repository is still part of hive {name}; \
+                 `musubi leave --force` leaves without telling it"
+            );
+        }
+        eprintln!("Couldn't {doing} ({err:#}); leaving anyway.");
+    }
+    // No next work of a copy out of its hive shows it there again: a working copy the hive
+    // abandoned gets a new commit now.
+    if let Err(err) = located
+        .open()
+        .and_then(|mut node| Ok(node.give_back_working_copies()?))
+    {
+        eprintln!("Couldn't give this repository's working copies new commits ({err:#}).");
+    }
     daemon::leave_hive(&located, &hive)?;
     println!(
-        "This repository no longer syncs with hive {}. Everything it has stays.",
-        hive.display_name()
+        "This repository has left hive {name}, and no longer syncs with it. Everything it \
+         has stays."
     );
     Ok(())
+}
+
+/// Records what changed in the working copy, as any `jj` command would first, so that it
+/// leaves with the rest of this copy's work.
+fn snapshot(located: &Located) -> anyhow::Result<()> {
+    let mut jj = Process::new("jj");
+    musubi_jj::git_command::without_repository_env(&mut jj);
+    let output = jj
+        .args(["util", "snapshot"])
+        .current_dir(&located.workspace_root)
+        .output()
+        .context("running `jj util snapshot`")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(())
+}
+
+/// How many times `musubi leave` forgets this copy and syncs, while work done here meanwhile
+/// goes up with the forget and keeps the copy in the hive.
+const LEAVE_ATTEMPTS: usize = 3;
+
+/// Forgets this machine's copy and syncs, so that the hive has this copy's last work and
+/// knows it left, and puts this copy's working copies back here, whether or not it could.
+fn tell_the_hive(located: &Located, hive: &HiveConfig) -> anyhow::Result<()> {
+    let mut removed: BTreeMap<jj_lib::ref_name::WorkspaceNameBuf, jj_lib::backend::CommitId> =
+        BTreeMap::new();
+    let mut told = Err(anyhow::anyhow!("never tried"));
+    for _ in 0..LEAVE_ATTEMPTS {
+        match leave_once(located, hive, &mut removed) {
+            Ok(true) => {
+                told = Ok(());
+                break;
+            }
+            // A `jj` command run here meanwhile went up too, and its work, which the forget
+            // didn't see, keeps the copy in the hive: forget it again.
+            Ok(false) => {
+                told = Err(anyhow::anyhow!(
+                    "work done in this repository while it left kept it in the hive"
+                ));
+            }
+            Err(err) => {
+                told = Err(err);
+                break;
+            }
+        }
+    }
+    if !removed.is_empty() {
+        let removed: Vec<_> = removed.into_iter().collect();
+        if let Err(err) = located
+            .open()
+            .and_then(|mut node| Ok(node.restore_workspaces(&removed)?))
+        {
+            eprintln!(
+                "Couldn't put back this repository's working copies ({err:#}). `jj op log` \
+                 lists `musubi: leave`; `jj op restore` to the operation before it brings them \
+                 back."
+            );
+        }
+    }
+    told
+}
+
+/// One round of [`tell_the_hive`]: forgets this copy, recording the workspaces that removes,
+/// and syncs. Returns whether the hive's head, and this copy's, have it gone.
+fn leave_once(
+    located: &Located,
+    hive: &HiveConfig,
+    removed: &mut BTreeMap<jj_lib::ref_name::WorkspaceNameBuf, jj_lib::backend::CommitId>,
+) -> anyhow::Result<bool> {
+    // Gone already, as after a leave that couldn't tell the hive, it syncs what it has.
+    for (name, commit) in located.open()?.forget_self()?.unwrap_or_default() {
+        removed.entry(name).or_insert(commit);
+    }
+    match block_on(daemon::sync_once(located, hive)) {
+        Ok(_) => {}
+        // Nothing to tell a hive that is over.
+        Err(err) if HiveGone::of(&err) == Some(HiveGone::Removed) => return Ok(true),
+        Err(err) => return Err(err),
+    }
+    let mut node = located.open()?;
+    Ok(!node.present_copies()?.1.is_present(node.machine().key()))
+}
+
+fn forget(start: &Path, machine: &str, socket: &Socket) -> anyhow::Result<()> {
+    let located = Located::find(start)?;
+    let hive =
+        HiveConfig::load(&located.repo_path)?.context("this repository is not part of a hive")?;
+    let mut node = located.open()?;
+    let this =
+        |node: &NodeRepo| machine == node.machine().name() || machine == node.machine().key();
+    // One this machine hasn't heard of yet may have joined since it last synced.
+    let key = match node.machine_named(machine)? {
+        Some(key) => key,
+        None if this(&node) => anyhow::bail!(
+            "{machine} is this machine; `musubi leave` takes this repository out of hive {}",
+            hive.display_name()
+        ),
+        None => {
+            drop(node);
+            sync_quietly(start, socket)?;
+            node = located.open()?;
+            node.machine_named(machine)?.with_context(|| {
+                format!(
+                    "no machine {machine} shows here in hive {}; `jj workspace list` names \
+                     those that do",
+                    hive.display_name()
+                )
+            })?
+        }
+    };
+    if node.forget_copy(&key, machine)? {
+        println!("Forgot {machine}: the other machines stop showing it as they sync.");
+    }
+    drop(node);
+    sync(start, socket)
 }
 
 /// A repository on this machine that is part of a hive.
@@ -985,6 +1172,9 @@ fn print_details(located: &Located, hive: &HiveConfig) -> anyhow::Result<()> {
     println!("  Hub:       {}", hive.hub);
     println!("  Machine:   {}", hive.node);
     let mut node = located.open()?;
+    if !node.present_copies()?.1.is_present(node.machine().key()) {
+        println!("             forgotten by the hive, which shows it again once it's used");
+    }
     for (workspace, commit) in node.machine_workspaces()? {
         let short = &commit.hex()[..12];
         println!("             {workspace}@ is at {short}");

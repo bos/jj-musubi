@@ -40,6 +40,7 @@ pub const RULES: &[&str] = &[
     "workspace_rename",
     "workspace_forget",
     "forget_other_workspace",
+    "forget_copy",
     "origin_advance",
     "fetch",
     "push",
@@ -81,6 +82,10 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         Some(&["forget_other_workspace"]),
     ),
     (
+        "other_machines_workspaces_are_theirs_through_a_merge",
+        Some(&["forget_other_workspace", "at_op"]),
+    ),
+    (
         "forgotten_working_copies_dont_keep_rewritten_parents",
         Some(&["forget_other_workspace", "rebase_revision"]),
     ),
@@ -111,6 +116,45 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
     (
         "abandoning_another_machines_working_copy_commit",
         Some(&["abandon_other_wc"]),
+    ),
+    (
+        "a_forgotten_copy_comes_back_with_its_next_work",
+        Some(&["forget_copy", "commit"]),
+    ),
+    (
+        "a_forgotten_copy_keeps_its_working_copy_through_a_run",
+        Some(&["forget_copy"]),
+    ),
+    (
+        "a_forgotten_copy_keeps_its_latest_workspaces_through_a_merge",
+        Some(&["setup:three_machines", "workspace_add", "forget_copy"]),
+    ),
+    (
+        "a_rewrite_before_a_forget_sticks_through_a_merge",
+        Some(&["rewrite_under_other_wc", "forget_copy", "sync_partial"]),
+    ),
+    (
+        "work_a_forget_didnt_see_keeps_the_copy",
+        Some(&["forget_copy", "sync_partial", "commit"]),
+    ),
+    // The search's machines never leave.
+    ("leaving_sticks_through_a_merge", None),
+    ("a_copy_that_leaves_gets_a_new_working_copy", None),
+    ("a_copy_that_left_shows_again_once_it_joins", None),
+    // The search names workspaces without a `/`.
+    ("own_workspaces_with_a_slash_are_own", None),
+    ("own_workspaces_named_like_another_machine_are_own", None),
+    (
+        "undoing_a_forget_brings_back_nothing",
+        Some(&["forget_copy", "undo"]),
+    ),
+    (
+        "concurrent_forgets_agree",
+        Some(&["setup:three_machines", "forget_copy"]),
+    ),
+    (
+        "a_forgotten_working_copy_follows_its_rewrite",
+        Some(&["forget_copy", "edit_unsnapshotted", "describe"]),
     ),
     (
         "other_machines_working_copies_follow_rewrites",

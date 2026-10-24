@@ -106,7 +106,9 @@ Replicating views verbatim corrupts the second kind.
   `jj op restore` restore every workspace's position. The machine that owns the workspace
   adopts those moves, as a second workspace on one machine does: its working copy becomes
   stale. Nothing else a machine does to another machine's workspaces counts: adding,
-  forgetting or renaming them stays local, and the next sync shows them again. Where
+  forgetting or renaming them stays local, and the next sync shows them again. Only a forget
+  of the whole copy, which musubi writes, removes them ([Copies that go
+  away](#copies-that-go-away)). Where
   concurrent operations disagree about a workspace, musubi merges it three-way as jj does,
   so a machine's removal of its own workspace wins over another machine moving it
   meanwhile. If a machine that has forgotten another's workspace then abandons that
@@ -180,6 +182,97 @@ Translation applies to every backend. Canonical operations are always written by
 pinned jj-lib, while local operations may be older files in legacy formats, so even with
 nothing to strip the two need not share ids. An operation has one id on the hub and its own
 local id on each machine. `musubi debug op-id` translates between them.
+
+## Copies that go away
+
+A copy that goes away without `musubi leave`, as a short-lived machine's does, would otherwise
+stay in its hive for good: every machine would go on showing its last working copy, and the
+hub counting it. So a hive forgets copies: `musubi forget` forgets another machine's, and
+`musubi leave` this machine's own. Forgetting is soft: a copy that is still there comes back
+as soon as it is used.
+
+Operations are *work* by a copy, a *forget* of copies, or neither:
+
+- Work by a copy is an operation the copy chose to make: one of its own `jj` commands, which
+  the canonical `workspace_name` says it made, or an operation musubi makes for it with
+  `musubi.work = <key>`, its join, or joining again after leaving.
+- A forget has `musubi.forget = <keys>`. `musubi forget` and `musubi leave` write one, which
+  removes the copy's workspaces from the view as `jj workspace forget` would, abandoning each
+  working-copy commit that is empty.
+- Neither: merges, and the other operations musubi writes, for settings, new working copies,
+  or showing workspaces again.
+
+A copy is *present* at an operation when some of its work in the operation's history is in
+the history of no forget of it there. A forget removes only the work it saw, and only work
+brings a copy back. [formal/Musubi/Presence.lean](../../formal/README.md) proves that every
+machine agrees on it; that it can't loop, nothing but work bringing a copy back; that
+`musubi leave` sticks however its forget is merged; and that work done meanwhile survives a
+forget that didn't see it.
+
+An operation's canonical view has a machine's workspaces exactly when the machine is present
+there (`canonical_view`). This machine's own go in only if it is present, so nothing musubi
+writes here brings it back. Another's are merged three-way, as before, but over only the
+parents where it is present: one where it isn't lacks its workspaces because a forget saw its
+work, not because it removed them. The hub counts the machines with workspaces in its head's
+view, so it counts present machines, unchanged.
+
+Each machine keeps, for each copy present at a canonical operation, its latest work there
+that no forget saw, and computes an operation's from its parents' (`Presence::merge` and
+`apply`, proved in `umax_merge`): a copy's work is its latest; a forget leaves it nothing; a
+merge keeps each latest work its parents keep unless a parent whose history has it doesn't
+keep it. Only merges need an ancestry test, which generation numbers bound. An open
+repository remembers presence at the few hundred canonical operations asked about last, so
+the first it is asked about reads the history below it, as the protocol's generation
+numbers already do: as a daemon starts, and in each `musubi list`, `forget` and `leave`.
+Realizing a run of operations asks about the run's first before its threads start, so that
+each thread reads only the run below its own. The oracle checks the Rust against the model
+([conformance.md](conformance.md#presence)).
+
+Which workspaces in a local view are this machine's own needs care once machines come and
+go, and must depend only on history, so that canonicalizing stays deterministic. musubi
+names other machines' workspaces `<machine>/<workspace>`, and the canonical parents say
+which of those names are whose. The names are chosen among every machine the history has
+known, present or forgotten (`Presence::known`), so a machine keeps its name as others come
+and go, and a forgotten machine's is never another's. But `jj undo` and `jj op restore` bring
+back older views, with names the hive no longer gives: a forgotten machine's, or one shown
+plainly before another machine of its name joined. A name whose prefix is either name a
+known machine other than this one can have, `laptop` or `laptop-1a2b`, is this machine's
+own only if its own names as of a canonical parent have it already, or the operation made
+it: it is in none of the views of the operation's parents here. An operation that restores
+an older view makes none: a name is its own if it was in this machine's own names as of the
+view it restores, or, for a revert, as of that operation's parents (`canonical_view`).
+Otherwise `canonical_view` doesn't publish it, and `show_other_workspaces` drops it from the
+view, unless jj's workspace store says this machine has a working copy for it. This
+machine's own names as of a canonical operation are its workspaces in the view, or, where
+the hive has forgotten it, as of its latest work, which `Presence` keeps through forgets
+(`own_names`); they also decide when another machine is shown as `laptop-1a2b` to keep
+clear of them (`local_names`). So a workspace of this machine's own named `laptop/x` stays
+its own whether it was made before a machine `laptop` joined or after, while the hive has
+forgotten this machine, and through `jj undo`, and that machine is shown as `laptop-1a2b`,
+as two machines that share a name are. The end-to-end search found the alternative, taking
+every such name for this machine's, nesting machines' workspaces in each other's.
+
+A machine the hive has forgotten keeps its own working copies. Realizing an operation whose
+canonical view leaves it out, it keeps its workspaces as the realization of the parent with
+its latest work had them (`Presence::worked`), following the operation's rewrites
+(`with_own_workspaces`): at a merge of a forget that saw its latest work with an operation
+that saw only earlier work, the forget's. Where another machine rewrote its working-copy
+commit, as one can while no other machine sees it as a working copy, it follows the rewrite
+(`replace_abandoned_working_copies`). Where the forget abandoned an empty one, it stays on
+the hidden commit: a new one would be an empty commit of no one's on every other machine.
+jj's next snapshot, or any command that rewrites `@`, makes a new visible commit of it, and
+that work publishes the machine's workspaces again.
+
+`musubi leave` snapshots the working copy (`jj util snapshot`), forgets this copy with an
+operation that removes its workspaces here, and syncs, so that the forget reaches the hub
+after all of the copy's work, and with it. A `jj` command run in the copy meanwhile is work
+the forget didn't see, which goes up too and keeps the copy present, so `leave` checks
+presence at the hub's head, and forgets and syncs again, up to three times. Then it puts the
+workspaces back here, in an operation it never sends, and leaves. If it can't snapshot or
+sync, it puts them back as they were and stays, unless `--force` says to leave anyway: the
+forget goes with the next sync, and the copy's next work brings it back. A copy that leaves
+by any route, a forgotten one included, gives each workspace whose commit is hidden a new
+`@` (`give_back_working_copies`): no next work of its brings it back, to do it then.
 
 ## Hive settings
 

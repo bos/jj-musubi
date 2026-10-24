@@ -11,6 +11,7 @@ mod fixture;
 mod bookmarks;
 mod changes;
 mod config;
+mod forget;
 mod found;
 mod history;
 mod remotes;

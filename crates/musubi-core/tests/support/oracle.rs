@@ -55,7 +55,8 @@ impl Oracle {
         }
     }
 
-    fn call(&mut self, request: &Value) -> Value {
+    /// Sends one request, and returns the reply.
+    pub fn call(&mut self, request: &Value) -> Value {
         writeln!(self.stdin, "{request}").unwrap();
         self.stdin.flush().unwrap();
         let mut line = String::new();

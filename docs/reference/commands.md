@@ -17,7 +17,8 @@ musubi <command> --help
 | `create [<name>]` | Start a hive from the repository you're in, for other copies to join. |
 | `join` | Add this machine's copy of a repository to the hive it belongs in. In a copy that is part of a hive, make the hive again on a hub that has lost it, or on another hub given with `--hub`. |
 | `clone <hive> <dir>` | Make a new copy of a hive on this machine. |
-| `leave` | Stop syncing the repository you're in. It keeps everything it has. |
+| `leave` | Take the repository you're in out of its hive, telling the hive, and stop syncing it. It keeps everything it has. `--force` leaves without telling the hive, if its hub can't be reached. |
+| `forget <machine>` | Forget another machine's copy that went away without leaving, by the name its working copy has here: `laptop` for `laptop/default@`, or `laptop-1a2b` for `laptop-1a2b/default@`. The name `musubi list` gives it will do too, if no other machine has that name. |
 
 `create`, `join`, and `clone` take:
 

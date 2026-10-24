@@ -9,6 +9,7 @@ pub mod git_command;
 pub mod hive_settings;
 pub mod node;
 pub mod objects;
+pub mod presence;
 mod protobuf;
 pub mod remote_url;
 mod translation_map;

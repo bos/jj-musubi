@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::thread;
 
 use jj_lib::backend::CommitId;
@@ -40,6 +41,7 @@ mod error;
 mod git;
 mod git_config;
 mod join;
+mod presence;
 mod realize;
 mod settings;
 mod translate;
@@ -84,6 +86,17 @@ pub struct NodeRepo {
     /// the per-machine fields they were made with: used only while those are what the
     /// operations inherit (see [`Self::realize_pending`]).
     prepared: Option<(Arc<PerMachine>, HashMap<OperationId, LocalView>)>,
+    /// The last operation realized here, with this machine's own workspaces in its view:
+    /// what the next one keeps where the hive has forgotten this machine.
+    last_own: Option<(
+        OperationId,
+        Arc<BTreeMap<jj_lib::ref_name::WorkspaceNameBuf, CommitId>>,
+    )>,
+    /// Presence at the canonical operations asked about lately (see [`Self::presence`]).
+    presences: Mutex<presence::PresenceMemo>,
+    /// This machine's own workspace names as of its latest work, while the hive has forgotten
+    /// it (`own_names_in`): the same for every operation until its next work.
+    worked_names: Mutex<presence::WorkedNames>,
 }
 
 impl Drop for NodeRepo {
@@ -139,7 +152,10 @@ impl NodeRepo {
             git,
             heads_mapped: false,
             last_realized: None,
+            last_own: None,
             prepared: None,
+            presences: Mutex::default(),
+            worked_names: Mutex::default(),
             unwritten: vec![],
             joins: BTreeMap::new(),
             settings: HashMap::new(),

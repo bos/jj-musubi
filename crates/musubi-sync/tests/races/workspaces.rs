@@ -97,6 +97,43 @@ fn other_machines_workspaces_are_theirs() {
     assert_eq!(names(&hive, 0), ["alpha", "beta/beta"]);
 }
 
+/// The same at a merge with a line of history from before the other machine's working copy
+/// existed, which never had its commit, or from before that machine joined: the hive keeps
+/// the commit, and the other machine its working copy.
+#[test]
+fn other_machines_workspaces_are_theirs_through_a_merge() {
+    for before_join in [false, true] {
+        let mut hive = Fixture::new(&["alpha", "beta"]);
+        // Newest first, down to the root, above which alpha adds its workspace and names it:
+        // from before alpha joined, so from before beta was known.
+        let ops = hive
+            .repo(0)
+            .jj(&["op", "log", "--no-graph", "-T", "id ++ \"\\n\""]);
+        let ops: Vec<&str> = ops.lines().collect();
+        let old = if before_join {
+            ops[ops.len() - 3]
+        } else {
+            ops[0]
+        }
+        .to_owned();
+        hive.commit(1, "b", "from beta");
+        hive.sync();
+        let beta_wc = working_copy(&hive, 1);
+        hive.repo(0).jj(&["workspace", "forget", "beta/beta"]);
+        hive.repo(0)
+            .jj(&["--at-op", &old, "bookmark", "create", "x", "-r", "@"]);
+        hive.sync();
+        hive.sync();
+        assert_eq!(
+            working_copy(&hive, 1),
+            beta_wc,
+            "before_join: {before_join}"
+        );
+        hive.assert_converged();
+        assert_eq!(names(&hive, 0), ["alpha", "beta/beta"]);
+    }
+}
+
 /// A machine that forgot another machine's workspace no longer sees its empty working-copy
 /// commit, so jj leaves that commit behind when this machine rewrites its parent. The hive
 /// mustn't keep it, which would bring the old parent back as a divergent copy: the other

@@ -35,7 +35,11 @@ A forget removes the work it saw, and only work brings a copy back. For any oper
   (`concurrent_forget_noop`), and a forget made where its copy is already absent changes
   nothing (`redundant_forget_noop`);
 - presence can be decided from the copy's latest work and its forgets
-  (`present_iff_latest`).
+  (`present_iff_latest`);
+- what a machine keeps of each copy present, its latest work that no forget saw (`UMax`),
+  follows from an operation's parents' alone (`umax_merge`, `umax_work`, `umax_forget`), and
+  says whether the copy is present (`present_iff_umax`). `crates/musubi-jj/src/presence.rs`
+  computes it so, and `PresenceExec.lean` checks it, through the oracle.
 
 Not modeled: where the working copies are (presence decides only whether a copy's working
 copies are in the view), how a daemon judges a copy idle (the theorems hold whatever it
@@ -382,6 +386,111 @@ theorem present_iff_latest (hlt : ParLt h.par) {x k : Nat} :
     · exact hn ⟨f, hf, hF, Anc.trans hwm hmf⟩
   · rintro ⟨m, ⟨hmx, hmW, _⟩, hno⟩
     exact ⟨m, hmx, hmW, fun ⟨f, hf, hF, hA⟩ => hno f hf hF hA⟩
+
+/-! ## What a machine keeps
+
+Each machine keeps, for every copy present at an operation, its latest work there that no
+forget saw (`UMax`), and computes it for an operation from its parents' alone
+(`umax_merge`, `umax_work`, `umax_forget`): `Presence::merge` and `Presence::apply` in
+`crates/musubi-jj/src/presence.rs`. A copy is present exactly where it has some
+(`present_iff_umax`). -/
+
+/-- Work `w` by `k` in `anc*(x)` that no forget of `k` there saw. -/
+def Uncov (x k w : Nat) : Prop := Anc h.par w x ∧ h.work w k ∧ ¬ h.Covered (h.AncOf x) k w
+
+/-- `c` is latest such work: no other has `c` in its `anc*`. -/
+def UMax (x k c : Nat) : Prop := h.Uncov x k c ∧ ∀ c', h.Uncov x k c' → Anc h.par c c' → c' = c
+
+theorem exists_umax_above (hlt : ParLt h.par) {y k w : Nat} (hu : h.Uncov y k w) :
+    ∃ m, h.UMax y k m ∧ Anc h.par w m := by
+  obtain ⟨m, ⟨hmu, hwm⟩, hmax⟩ :=
+    exists_max_le (Q := fun m => h.Uncov y k m ∧ Anc h.par w m) ⟨hu, Anc.refl⟩
+      (fun m hm => hm.1.1.le hlt)
+  refine ⟨m, ⟨hmu, fun c' hc' hmc' => ?_⟩, hwm⟩
+  exact Nat.le_antisymm (hmax c' ⟨hc', Anc.trans hwm hmc'⟩) (hmc'.le hlt)
+
+theorem present_iff_umax (hlt : ParLt h.par) {x k : Nat} :
+    h.Present x k ↔ ∃ c, h.UMax x k c := by
+  constructor
+  · rintro ⟨w, hw, hW, hn⟩
+    obtain ⟨m, hm, -⟩ := h.exists_umax_above hlt ⟨hw, hW, hn⟩
+    exact ⟨m, hm⟩
+  · rintro ⟨c, ⟨hcx, hW, hn⟩, -⟩
+    exact ⟨c, hcx, hW, hn⟩
+
+theorem uncov_work (hlt : ParLt h.par) (hwf : h.WellFormed) {x k : Nat} (hW : h.work x k) :
+    h.Uncov x k x := by
+  refine ⟨Anc.refl, hW, fun ⟨f, hf, hFk, hA⟩ => hwf.2 x k k hW ?_⟩
+  have := Anc.antisymm hlt hf hA
+  subst this
+  exact hFk
+
+/-- A copy's work is its own latest. -/
+theorem umax_work (hlt : ParLt h.par) (hwf : h.WellFormed) {x k c : Nat} (hW : h.work x k) :
+    h.UMax x k c ↔ c = x := by
+  constructor
+  · rintro ⟨⟨hcx, -, -⟩, hmax⟩
+    exact (hmax x (h.uncov_work hlt hwf hW) hcx).symm
+  · rintro rfl
+    exact ⟨h.uncov_work hlt hwf hW, fun c' hc' hcc' => Anc.antisymm hlt hc'.1 hcc'⟩
+
+/-- A forget leaves its copy nothing. -/
+theorem umax_forget {x k c : Nat} (hF : h.forget x k) : ¬ h.UMax x k c :=
+  fun ⟨⟨hcx, _, hn⟩, _⟩ => hn ⟨x, Anc.refl, hF, hcx⟩
+
+/-- Coverage at an operation that doesn't forget `k` is coverage at one of its parents. -/
+theorem covered_parents {x k w : Nat} (hF : ¬ h.forget x k)
+    (hc : h.Covered (h.AncOf x) k w) : ∃ p ∈ h.par x, h.Covered (h.AncOf p) k w := by
+  obtain ⟨f, hf, hFk, hA⟩ := hc
+  rcases anc_cases hf with rfl | ⟨p, hp, hfp⟩
+  · exact absurd hFk hF
+  · exact ⟨p, hp, f, hfp, hFk, hA⟩
+
+theorem uncov_parent {x p k w : Nat} (hp : p ∈ h.par x) (hwp : Anc h.par w p)
+    (hu : h.Uncov x k w) : h.Uncov p k w :=
+  ⟨hwp, hu.2.1, fun hc => hu.2.2 (h.covered_mono (Anc.parent hp) hc)⟩
+
+/-- Work after work that no forget saw, in the same history, no forget saw either. -/
+theorem uncov_above {x k w w' : Nat} (hu : h.Uncov x k w) (hW : h.work w' k)
+    (hww' : Anc h.par w w') (hw'x : Anc h.par w' x) : h.Uncov x k w' :=
+  ⟨hw'x, hW, fun ⟨f, hf, hFk, hA⟩ => hu.2.2 ⟨f, hf, hFk, Anc.trans hww' hA⟩⟩
+
+theorem umax_parent {x p k c : Nat} (hp : p ∈ h.par x) (hcp : Anc h.par c p)
+    (hm : h.UMax x k c) : h.UMax p k c :=
+  ⟨h.uncov_parent hp hcp hm.1, fun c' hc' hcc' =>
+    hm.2 c' (h.uncov_above hm.1 hc'.2.1 hcc' (Anc.trans hc'.1 (Anc.parent hp))) hcc'⟩
+
+/-- An operation that is neither work by `k` nor a forget of it keeps the latest work its
+parents keep for `k`, each unless a parent whose history has it doesn't keep it: a forget
+there saw it, or later work there followed it. -/
+theorem umax_merge (hlt : ParLt h.par) {x k c : Nat} (hW : ¬ h.work x k)
+    (hF : ¬ h.forget x k) :
+    h.UMax x k c ↔
+      (∃ p ∈ h.par x, h.UMax p k c) ∧ (∀ p ∈ h.par x, Anc h.par c p → h.UMax p k c) := by
+  constructor
+  · intro hm
+    have hne : c ≠ x := fun e => hW (e ▸ hm.1.2.1)
+    obtain ⟨p, hp, hcp⟩ : ∃ p ∈ h.par x, Anc h.par c p := by
+      rcases anc_cases hm.1.1 with e | hb
+      · exact absurd e hne
+      · exact hb
+    exact ⟨⟨p, hp, h.umax_parent hp hcp hm⟩, fun p' hp' hcp' => h.umax_parent hp' hcp' hm⟩
+  · rintro ⟨⟨p₀, hp₀, hm₀⟩, hclose⟩
+    have hu : h.Uncov x k c := by
+      refine ⟨Anc.trans hm₀.1.1 (Anc.parent hp₀), hm₀.1.2.1, fun hc => ?_⟩
+      obtain ⟨p, hp, f, hfp, hFk, hcf⟩ := h.covered_parents hF hc
+      exact (hclose p hp (Anc.trans hcf hfp)).1.2.2 ⟨f, hfp, hFk, hcf⟩
+    refine ⟨hu, fun c' hc' hcc' => ?_⟩
+    have hne : c' ≠ x := fun e => hW (e ▸ hc'.2.1)
+    obtain ⟨p', hp', hc'p'⟩ : ∃ p ∈ h.par x, Anc h.par c' p := by
+      rcases anc_cases hc'.1 with e | hb
+      · exact absurd e hne
+      · exact hb
+    obtain ⟨m, hm, hc'm⟩ := h.exists_umax_above hlt (h.uncov_parent hp' hc'p' hc')
+    have hmc : m = c :=
+      (hclose p' hp' (Anc.trans hcc' hc'p')).2 m hm.1 (Anc.trans hcc' hc'm)
+    subst hmc
+    exact Anc.antisymm hlt hc'm hcc'
 
 end Hist
 

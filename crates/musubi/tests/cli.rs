@@ -411,11 +411,21 @@ fn hub_join_sync_clone_and_list() {
     let gamma = env.repo_handle("gamma");
     let mut clone = alpha.program(musubi());
     // A relative destination, through a parent, lands where it says.
-    clone.args(["clone", "proj", "../gamma"]);
+    clone.args(["clone", "proj", "../gamma", "--machine", "gamma"]);
     clone.current_dir(env.root().join("home"));
     let out = run(&env, &logs, clone);
     assert!(out.contains("Cloning hive project into"), "{out}");
     assert!(log(&gamma).contains("picked up by the daemon"));
+
+    // A machine forgotten elsewhere drops out of the hive, though its daemon still syncs,
+    // until it's next used.
+    let out = musubi_in(&env, &logs, &alpha, &["forget", "gamma"]);
+    assert!(out.contains("Forgot gamma"), "{out}");
+    let list = musubi_in(&env, &logs, &alpha, &["list"]);
+    assert!(list.contains("project  2 machines: alpha, beta"), "{list}");
+    wait_for(&logs, "gamma's daemon to hear it was forgotten", || {
+        musubi_in(&env, &logs, &gamma, &[]).contains("forgotten by the hive")
+    });
 
     // A renamed hive goes by its new name on every machine, once it has listed it.
     let out = musubi_in(
@@ -435,9 +445,18 @@ fn hub_join_sync_clone_and_list() {
     let list = musubi_in(&env, &logs, &beta, &[]);
     assert!(list.contains("Hive:      renamed ("), "{list}");
 
-    // Leaving stops the syncing.
+    // Leaving takes the copy out of the hive, and stops the syncing.
     let out = musubi_in(&env, &logs, &beta, &["leave"]);
-    assert!(out.contains("no longer syncs with hive renamed"), "{out}");
+    assert!(out.contains("has left hive renamed"), "{out}");
+    wait_for(&logs, "alpha's daemon to drop beta's working copy", || {
+        !alpha.jj(&["workspace", "list"]).contains("beta/")
+    });
+    // It keeps its working copy.
+    let workspaces = beta.jj(&["workspace", "list"]);
+    assert!(
+        workspaces.lines().any(|line| line.starts_with("beta: ")),
+        "{workspaces}"
+    );
     let list = musubi_in(&env, &logs, &beta, &["list"]);
     assert!(!list.contains("here:"), "{list}");
     assert!(
@@ -794,6 +813,50 @@ fn a_sync_says_at_once_that_the_hub_is_gone() {
     );
     let out = musubi_in(&env, &logs, &alpha, &["sync"]);
     assert!(out.contains("Synced (hive at #"), "{out}");
+}
+
+/// `musubi leave` with its hub gone fails, leaving the repository part of its hive, served
+/// and with its working copy; `--force` leaves without telling the hive.
+#[test]
+fn leaving_needs_the_hub_unless_forced() {
+    let env = TestEnv::new();
+    let mut logs = Logs::default();
+    let mut hub = Hub::start(&env, &mut logs);
+    // Stopped before the hub.
+    let mut daemons = Daemons::default();
+    let alpha = env.init_repo("alpha");
+    logs.daemon_of(&env, &alpha);
+    daemons.of(&alpha);
+    alpha.write_file("a", "a");
+    alpha.jj(&["commit", "-m", "start"]);
+    musubi_in(&env, &logs, &alpha, &["create", "--hub", &hub.url]);
+    hub.kill();
+    let err = musubi_fails(&env, &logs, &alpha, &["leave"]);
+    assert!(err.contains("still part of hive"), "{err}");
+    assert!(alpha.repo_path().join("musubi/hive.toml").exists());
+    // It keeps its working copy, though on the empty commit its forget abandoned.
+    let workspaces = alpha.jj(&["workspace", "list", "--ignore-working-copy"]);
+    assert!(
+        workspaces.lines().any(|line| line.starts_with("alpha: ")),
+        "{workspaces}"
+    );
+    let list = musubi_in(&env, &logs, &alpha, &["list"]);
+    assert!(list.contains("here:"), "{list}");
+    assert!(log(&alpha).contains("start"));
+    let out = musubi_in(&env, &logs, &alpha, &["leave", "--force"]);
+    assert!(out.contains("has left hive"), "{out}");
+    assert!(!alpha.repo_path().join("musubi/hive.toml").exists());
+    // With a new commit to work on, which no next work of its in the hive will make now.
+    let at = alpha.jj(&[
+        "log",
+        "--ignore-working-copy",
+        "-r",
+        "@",
+        "--no-graph",
+        "-T",
+        "if(hidden, \"hidden\", \"visible\")",
+    ]);
+    assert_eq!(at.trim(), "visible");
 }
 
 /// The daemon reopens the repository after a failed sync, so it carries on after changes

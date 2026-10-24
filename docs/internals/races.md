@@ -29,7 +29,7 @@ named after the machine (`beta/default`) (docs/internals/design.md).
 | Race | Outcome | Test |
 | --- | --- | --- |
 | Two machines both use workspace `default` | Fine: each keeps its own `default@`, and shows the other's as `alpha/default@` or `beta/default@`. | `machines_may_share_a_workspace_name` |
-| A machine forgets another machine's workspace | Local only: nothing changes elsewhere, not even an empty working-copy commit, which `jj workspace forget` would otherwise abandon. The next sync shows the workspace again, even if the other machine has done nothing since. | `other_machines_workspaces_are_theirs` |
+| A machine forgets another machine's workspace | Local only: nothing changes elsewhere, not even an empty working-copy commit, which `jj workspace forget` would otherwise abandon. The next sync shows the workspace again, even if the other machine has done nothing since. So too when the forget merges with a line of history from before that working copy existed, or before that machine joined. | `other_machines_workspaces_are_theirs`, `other_machines_workspaces_are_theirs_through_a_merge` |
 | A machine forgets another machine's workspace, then rewrites or abandons the parent of its empty `@` | jj, no longer seeing that `@`, leaves it on the old parent. musubi lets it go rather than bring the old parent back as a divergent copy, and the other machine gets a fresh `@` where jj would have moved it: on the rewritten parent, or on the abandoned parent's own parent. Since a rewrite keeps the change id, a parent moved with `jj rebase -r` counts as rewritten, as it does when jj merges concurrent operations, though a local `jj rebase -r` would have left the working copy behind. | `forgotten_working_copies_dont_keep_rewritten_parents`, `forgotten_working_copies_follow_an_abandon_to_the_parent`, `forgotten_working_copies_follow_a_parent_rebased_by_an_abandon`, `forgotten_working_copies_follow_a_moved_parent` |
 | A machine forgets another machine's workspace, then, before syncing, abandons its `@`, which the forget left visible: it has edits, or another commit is built on it | As it would had the workspace still been there: the abandon stands, and the other machine gets a fresh `@` on the parent. musubi keeps a forgotten `@` visible only where the forget abandoned it. | `forgotten_working_copies_can_be_abandoned`, `forgotten_working_copies_built_on_can_be_abandoned` |
 | A machine adds, then forgets, a secondary workspace | Every machine shows it while it exists. | `secondary_workspaces_show_everywhere` |
@@ -40,6 +40,27 @@ named after the machine (`beta/default`) (docs/internals/design.md).
 | A machine renames or forgets its workspace while another machine rewrites its working copy | The rename or forget wins, as when jj merges concurrent operations on one machine: musubi merges workspaces three-way as jj does, removals first. | `e2e_smoke`, `workspace_merge_matches_jj` |
 | Several machines share a hostname | Told apart by a random suffix in each machine's stored identity, and shown as `mac-1a2b/default`. | `machines_sharing_a_hostname_are_told_apart` |
 | A workspace name git can't store as a ref, an import in a repository that isn't colocated, or a git remote named after a machine | Nothing happens: other machines' working copies are never git refs, so git can't drop them, and jj's import never abandons work because of them. | `git_never_sees_other_machines_working_copies` |
+
+## Copies that go away
+
+A forget of a copy removes the copy's work it saw, and only the copy's own work brings it
+back (docs/internals/design.md, "Copies that go away").
+
+| Race | Outcome | Test |
+| --- | --- | --- |
+| A machine forgets another machine's copy | Every machine stops showing its working copies; its empty working-copy commit is abandoned, and its work stays. The forgotten copy keeps its working copy, on the hidden commit, with no new one for the others to see, and stays forgotten however often its daemon syncs, until its next work. | `a_forgotten_copy_comes_back_with_its_next_work` |
+| …and the forgotten copy realizes the forget together with the operation before it | It keeps its working copy, as its realization of that operation had it. | `a_forgotten_copy_keeps_its_working_copy_through_a_run` |
+| …and the forget, which saw the copy add a workspace, merges with work from before it | The copy keeps its workspaces as its latest work left them, whichever parent the merge lists first. | `a_forgotten_copy_keeps_its_latest_workspaces_through_a_merge` |
+| A machine forgets a copy that is working meanwhile | The work the forget didn't see keeps the copy. | `work_a_forget_didnt_see_keeps_the_copy` |
+| …having rewritten the copy's working-copy commit before forgetting it | The merge keeps the old commit hidden, beside its rewrite, and the copy, present by its work, follows the rewrite. | `a_rewrite_before_a_forget_sticks_through_a_merge` |
+| A copy leaves while another machine pushes | It merges its forget with the push, and stays gone. Its working-copy commit, which has changes, stays as an ordinary commit, and it keeps its working copy. | `leaving_sticks_through_a_merge` |
+| Two machines forget the same copy at once | They agree. A forget of a copy already gone writes nothing. | `concurrent_forgets_agree` |
+| A machine undoes its forget of another copy, or restores a view from before it | The forget stands: only the copy's own work brings it back. The copy's workspaces come back in that machine's view, under names the hive no longer gives them, and it takes them for no machine's, its own included, and drops them as it syncs. | `undoing_a_forget_brings_back_nothing` |
+| A machine's own workspace is named with a `/`, as `feat/x` | Its own, shared as `alpha/feat/x`. | `own_workspaces_with_a_slash_are_own` |
+| …and named like another machine's, as `beta/x`, before that machine joins or after | Its own all the same, while the hive has forgotten this machine too, and after `jj undo` of forgetting it; it shows that machine as `beta-1a2b`. | `own_workspaces_named_like_another_machine_are_own` |
+| A copy leaves, its empty working-copy commit abandoned by its forget, or leaves after another machine forgot it | It gets a new working-copy commit, as jj gives a workspace whose commit is abandoned: no next work of its shows it again. | `a_copy_that_leaves_gets_a_new_working_copy` |
+| A copy that left joins again | It shows again at once: joining is its work. | `a_copy_that_left_shows_again_once_it_joins` |
+| A machine rewrites the working-copy commit of a copy the hive has forgotten | No machine sees it as a working copy, so no workspace moves with it; the copy follows the rewrite itself, as jj would have moved it. | `a_forgotten_working_copy_follows_its_rewrite` |
 
 ## Bookmarks and tags
 

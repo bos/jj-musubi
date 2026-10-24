@@ -25,9 +25,6 @@ pub struct NodeAdapter {
     repo: NodeRepo,
     tmp: PathBuf,
     base_path: PathBuf,
-    /// Generation numbers of canonical operations (root 0, otherwise one more than the
-    /// largest parent's), which bound ancestry searches.
-    generations: RefCell<HashMap<OpId, u64>>,
     /// `anc*(base)` for the most recent `base` asked about.
     base_ancestry: RefCell<Option<(OpId, HashSet<OpId>)>>,
     /// The parents of operations a fetch staged that were not local, until they are
@@ -50,7 +47,6 @@ impl NodeAdapter {
             base_path: musubi_dir.join("accepted_base"),
             repo,
             tmp,
-            generations: RefCell::new(HashMap::new()),
             base_ancestry: RefCell::new(None),
             staged: HashMap::new(),
             staged_children: HashMap::new(),
@@ -110,57 +106,9 @@ impl NodeAdapter {
         self.repo.canonical_store().root_operation_id()
     }
 
-    fn generation(&self, op: &OpId) -> anyhow::Result<u64> {
-        let store = self.repo.canonical_store();
-        let mut generations = self.generations.borrow_mut();
-        let mut stack = vec![op.clone()];
-        while let Some(id) = stack.last().cloned() {
-            if generations.contains_key(&id) {
-                stack.pop();
-                continue;
-            }
-            if id == *self.root() {
-                generations.insert(id, 0);
-                stack.pop();
-                continue;
-            }
-            let parents = store.read_operation(&id)?.parents;
-            let missing: Vec<OpId> = parents
-                .iter()
-                .filter(|p| !generations.contains_key(*p))
-                .cloned()
-                .collect();
-            if missing.is_empty() {
-                let generation = parents.iter().map(|p| generations[p]).max().unwrap_or(0) + 1;
-                generations.insert(id, generation);
-                stack.pop();
-            } else {
-                stack.extend(missing);
-            }
-        }
-        Ok(generations[op])
-    }
-
-    /// `ancestor ∈ anc*(op)` over the canonical graph. Operations whose generation is no
-    /// higher than `ancestor`'s cannot lead to it, so the search never enters them.
+    /// `ancestor ∈ anc*(op)` over the canonical graph.
     fn canonical_is_ancestor(&self, ancestor: &OpId, op: &OpId) -> anyhow::Result<bool> {
-        if ancestor == op {
-            return Ok(true);
-        }
-        let target = self.generation(ancestor)?;
-        let store = self.repo.canonical_store();
-        let mut seen = HashSet::new();
-        let mut stack = vec![op.clone()];
-        while let Some(id) = stack.pop() {
-            if id == *ancestor {
-                return Ok(true);
-            }
-            if !seen.insert(id.clone()) || self.generation(&id)? <= target {
-                continue;
-            }
-            stack.extend(store.read_operation(&id)?.parents);
-        }
-        Ok(false)
+        Ok(self.repo.canonical_store().is_ancestor_of(ancestor, op)?)
     }
 
     /// Makes `base_ancestry` hold `anc*(base)`, extending what it held where `base` descends

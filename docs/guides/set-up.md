@@ -208,7 +208,7 @@ musubi join --machine work-laptop
 ```
 
 Two machines may share a name: musubi tells them apart by an id of its own, and shows them as
-`laptop-1a2b/default@` and `laptop-3c4d/default@`.
+`laptop-1a2b/default@` and `laptop-3c4d/default@`, from then on, even once one has left.
 
 ## Bring the operation history
 

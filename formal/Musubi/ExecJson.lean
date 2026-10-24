@@ -4,6 +4,7 @@ only; no protocol logic.
 -/
 import Lean.Data.Json
 import Musubi.Exec
+import Musubi.PresenceExec
 
 namespace Musubi.Exec.Json
 
@@ -154,6 +155,24 @@ def okReply (N : Nat) (es : EState) : Json :=
 def errReply (e : String) : Json :=
   Json.mkObj [("ok", Json.bool false), ("error", Json.str e)]
 
+/-! ## Presence (`PresenceExec.lean`) -/
+
+def decodeEOp (j : Json) : Except String Presence.EOp := do
+  let parents ← getNats j "parents"
+  let work ← j.getObjValAs? (Option Nat) "work"
+  let forgets ← getNats j "forgets"
+  pure { parents, work, forgets }
+
+/-- For each operation, the copies present there, each with its latest work that no forget
+saw, both in order. -/
+def presenceReply (ops : List Presence.EOp) : Json :=
+  let copies := sortNats (Presence.EHist.copies ops)
+  let atOp (x : Nat) : Json :=
+    Json.arr ((copies.filter (Presence.EHist.presentB ops x)).map fun k =>
+      Json.mkObj [("copy", toJson k), ("latest", nats (Presence.EHist.latestB ops x k))]).toArray
+  Json.mkObj [("ok", Json.bool true),
+    ("presence", Json.arr ((List.range ops.length).map atOp).toArray)]
+
 /-! ## Request handling -/
 
 /-- The oracle's session: the node count and current state, once `reset`. -/
@@ -180,6 +199,12 @@ def handle (sess : Session) (line : String) : Json × Session :=
           match execStep N es a with
           | .error e => (errReply e, sess)
           | .ok es' => (okReply N es', some (N, es'))
+    | .ok "presence" =>
+      match j.getObjValAs? (Array Json) "ops" >>= fun ops => ops.toList.mapM decodeEOp with
+      | .error e => (errReply s!"bad request: {e}", sess)
+      | .ok ops =>
+        if Presence.EHist.orderedB ops then (presenceReply ops, sess)
+        else (errReply "presence: an operation's parents must come before it", sess)
     | .ok op => (errReply s!"bad request: unknown op {op}", sess)
 
 end Musubi.Exec.Json

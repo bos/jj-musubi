@@ -105,6 +105,11 @@ edits it hasn't snapshotted yet stay on the laptop, as they would in any workspa
 A machine's name defaults to jj's `operation.hostname`. Choose another with `--machine` when
 you join.
 
+A machine that leaves with `musubi leave`, or that another machine forgets with
+`musubi forget`, stops showing. If it's still there, it comes back as soon as it is used.
+[Take a repository or machine out](guides/manage.md#take-a-repository-or-machine-out) says
+more.
+
 ## When machines change the same thing
 
 The rule is that changes made on different machines combine exactly as jj combines changes

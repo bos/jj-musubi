@@ -4,5 +4,6 @@
 mod format_guard_props;
 mod git_executable;
 mod join;
+mod presence;
 mod translation;
 mod workspace_merge;

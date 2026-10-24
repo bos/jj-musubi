@@ -125,11 +125,55 @@ The repository is already in a hive, and `musubi create` or `musubi join --hive`
 in another. To put it in another hive, run `musubi leave` first. To move it, hive and all, to
 another hub, run `musubi join --hub <hub>` instead.
 
+### "couldn't tell hive app that this repository leaves (...), so this repository is still part of hive app; ..."
+
+`musubi leave` couldn't reach the hub, with this copy's last work and its leaving, so the
+repository is still part of the hive, and the daemon syncs it again. The other machines stop
+showing it once it next syncs, until it's next used. Run `musubi leave` again once the hub can
+be reached, or `musubi leave --force` to leave without telling the hive: the other machines
+go on showing this copy until one of them forgets it with `musubi forget`.
+
+"work done in this repository while it left kept it in the hive" says the same of a `jj`
+command run in the repository while `musubi leave` ran, three times over: stop what is
+running `jj` there, and run `musubi leave` again.
+
+### "Couldn't put back this repository's working copies (...)"
+
+`musubi leave` takes this copy's working copies out of the view as it tells the hive, then
+puts them back here, and couldn't. jj then says a workspace has no working-copy commit. `jj op
+log` lists the operation `musubi: leave`: `jj op restore` to the operation before it brings
+them back.
+
+### "Couldn't give this repository's working copies new commits (...)"
+
+The repository has left its hive, but `musubi leave` couldn't give a working copy whose
+commit the hive abandoned a new one, as it does for every copy that leaves. `jj new @-`, in
+the workspace, makes one.
+
+### "couldn't record what changed in the working copy (...), so this repository is still part of hive app; ..."
+
+`musubi leave` first records what changed in the working copy, as any `jj` command would, so
+that the repository leaves with all of its work, and jj couldn't: it says why between the
+parentheses. Most often the working copy is stale, as after another machine rewrote its
+commit: `jj workspace update-stale` updates it. Then run `musubi leave` again.
+
+### "no machine laptop shows here in hive app; `jj workspace list` names those that do"
+
+`musubi forget` names a machine as its working copies are named here: `laptop` for
+`laptop/default@`, or by the name `musubi list` gives it, if no other machine has that name.
+No machine with working copies shown here has that name: it was forgotten already, it left,
+or it is shown by another name, such as `laptop-1a2b` when it shares its name with another
+machine, even one long gone. `jj workspace list` shows which.
+
+### "laptop is this machine; `musubi leave` takes this repository out of hive app"
+
+`musubi forget` forgets other machines' copies. To take this one out, run `musubi leave`.
+
 ### "the hub lacks this repository's hive, but won't make it again: ..."
 
 `musubi join` would make this copy's hive again, but the copy belongs in a hive the hub has,
-which someone made again meanwhile with `musubi create`, say. Run `musubi leave`, then
-`musubi join`, to join that one.
+which someone made again meanwhile with `musubi create`, say. Run `musubi leave --force`,
+then `musubi join`, to join that one.
 
 ### "musubi needs all of a repository's history, and this one is a shallow clone ..."
 
@@ -177,11 +221,11 @@ A similar message, "operation ... realizes canonical operation ... but no longer
 parents (was `jj op abandon` run?)", has the same cause and the same remedy.
 
 musubi can't yet sync this copy again. The other machines keep the operations you abandoned.
-To carry on here, run `musubi leave`, make a new copy with `musubi clone`, and bring across
-any work this copy made since its last sync.
+To carry on here, run `musubi leave --force`, make a new copy with `musubi clone`, and bring
+across any work this copy made since its last sync.
 
 If `musubi join` or `musubi create` says this, the operations were abandoned while the copy
-was out of its hive, and it isn't in one: skip `musubi leave`. A `musubi create` that failed
+was out of its hive, and it isn't in one: skip `musubi leave --force`. A `musubi create` that failed
 this way leaves an empty hive on the hub; remove it with `musubi hub remove`.
 
 ### "unknown field ... (written by a newer jj?)"

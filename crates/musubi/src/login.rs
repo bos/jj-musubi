@@ -175,7 +175,7 @@ mod platform {
     }
 
     pub fn log_hint() -> String {
-        super::file_log_hint()
+        file_log_hint()
     }
 }
 
@@ -251,7 +251,7 @@ mod platform {
     }
 
     pub fn log_hint() -> String {
-        super::file_log_hint()
+        file_log_hint()
     }
 }
 

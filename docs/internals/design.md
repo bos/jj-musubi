@@ -442,14 +442,15 @@ hive again, as from a new hub, since the hub can't tell what it has. The old sto
 deleted once it has been set aside a day and the new one has accepted a head, or the hive
 has been taken out of the hub.
 
-A power cut can also leave a file the hub wrote just before it empty, or cut short, in a
-store that still opens: an operation or view, or a git object. The hub doesn't look for
-that, since it reads only its heads and accepted operations to open a store, and looking
-over every view for torn files would read gigabytes for a repository with thousands of
-branches and operations. Such a file is rare, needing a cut within a minute or so of the
-write. A hive stuck on one, the syncs that reach it failing on the same file, is made
-again by hand: stop the hub, delete the hive's `heads`, and start it again. The hub then
-finds the store corrupt and makes the hive again under its id, for its machines to fill.
+A power cut can also leave a file the hub wrote just before it cut short or garbled: the
+end of the hive's log of operations and views, or a git object. The hub finds the first as
+it opens the store, which reads the log up to the last whole record: if what it lost
+includes an operation the hub had accepted, the store is corrupt, and the hive is made
+again as above. It doesn't look for the second, since that would read every object. Such a
+file is rare, needing a cut within a minute or so of the write. A hive stuck on one, the
+syncs that reach it failing on the same object, is made again by hand: stop the hub,
+delete the hive's `heads`, and start it again. The hub then finds the store corrupt and
+makes the hive again under its id, for its machines to fill.
 
 Duplicate merges can occur in two cases. One is two hubs serving the same hive at once
 (split brain): nodes that synced through different hubs can each merge the same work once
@@ -545,17 +546,32 @@ head the node has, and the objects they require. Its push carries its upload alo
 compare-and-swap. A sync that brings something new therefore takes one round trip, and one
 that pushes two.
 
-Views are stored whole for every operation, and a repository with thousands of remote
+jj stores a whole view for every operation, and a repository with thousands of remote
 bookmarks can have megabyte-sized views, while consecutive views usually differ in a few
-bookmarks.  In transit, musubi compresses a bundle's operations and views together with
-           zstd, and sends each view as a delta against its operation's first parent's view:
-           the view compressed with the parent's as a prefix that zstd may refer back to, a
-           few hundred bytes for a view of any size. A view a parent has is not sent at all.
-           The receiver always has the parents' views: a bundle holds the ancestors of a
-           head that aren't ancestors of a base the receiver has, parents first, so each
-           parent is either earlier in the bundle or one the receiver has already. Ids
-           remain those of the uncompressed views, and the receiver checks them after
-           reconstructing each one. Stores keep views whole and uncompressed, as jj does.
+bookmarks. In transit, musubi compresses a bundle's operations and views together with
+zstd, and sends each view as a delta against its operation's first parent's view: the view
+compressed with the parent's as a prefix that zstd may refer back to, a few hundred bytes
+for a view of any size. A view a parent has is not sent at all. The receiver always has the
+parents' views: a bundle holds the ancestors of a head that aren't ancestors of a base the
+receiver has, parents first, so each parent is either earlier in the bundle or one the
+receiver has already. Ids remain those of the uncompressed views, and the receiver checks
+them after reconstructing each one.
+
+musubi's own stores keep views as deltas too: the hub's, and each machine's copy of the
+shared history, `.jj/repo/musubi/canonical`. jj's op store on the machine keeps them whole,
+as jj needs. A store is one log, appended to (`crates/musubi-jj/src/canonical/log.rs`):
+operations as encoded, and each view, in a normal form whose bytes depend only on its
+content, as a delta against the view before it in the log. Every 128th view is compressed
+whole, so that rebuilding one never applies more than 127 deltas, and the view rebuilt last
+is kept, since the next one asked for usually follows it. A busy repository's operation and
+view then take about a kilobyte together, where jj's two files take two blocks of the
+disk and the view's full size. Each record carries a checksum, and a scan stops at the
+first that fails, so damage to the log loses only what was written after it. Writers append
+under a lock file, so that the daemon and a command can share a store, and the next writer
+cuts off what a scan stopped at before appending. jj-lib decodes views only from files, so
+a view is decoded, or encoded, by writing it to a scratch op store and reading it back.
+Operations, read at every step of a walk over the history, are decoded by musubi, and each
+read checks that the result hashes to the operation's id.
 
 ## Joining
 

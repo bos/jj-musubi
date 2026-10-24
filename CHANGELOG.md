@@ -6,6 +6,12 @@ change the protocol, so run the same release on the hub and every machine (see
 
 ## Unreleased
 
+- The hub's store of each hive, and each machine's copy of the shared history
+  (`.jj/repo/musubi/canonical`), are now one log, with views kept as deltas: an operation
+  and its view take about a kilobyte, where they took two files and the view's full size.
+  Stores made before aren't read. On upgrading, a hub makes each hive again, as for a
+  corrupt store, and its machines fill it; a machine's copy made before can't sync, so make
+  it again with `musubi clone`.
 - A hive forgets a copy that has gone unused for longer than its `musubi.forget-after`, as
   `musubi forget` would, and shows it again once it's used. `musubi join`, `create` and
   `clone` set it, and say what they set: `6h` when an agent runs them (`CODEX_THREAD_ID`,

@@ -190,6 +190,10 @@ translation map and the joins, among whole lines, any torn anywhere names nothin
 whole ones are read. The hub's log of heads, cut where a line ends, reads as the heads before
 the cut, and cut anywhere else is corrupt; and a store whose `heads` or `backend` a crash or a
 disk damaged opens as it was or is corrupt, to be made again, never failing as if for now.
+The canonical store's log, damaged from any point on (cut short, zero-filled, garbled, or
+grown with zeros), reads each operation and view back as written or not at all, loses only
+what was written after the damage, and is whole again once the next record is appended;
+two writers sharing one log each find what the other appended.
 
 ## Generated end-to-end tests
 

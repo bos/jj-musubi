@@ -1,11 +1,15 @@
 //! The canonical op store: replicated operations, written by this jj-lib.
 //!
-//! It is an ordinary jj `SimpleOpStore` in its own directory, so canonical ids are ordinary
-//! jj operation and view ids. Files received from peers are verified by decoding and
-//! re-hashing before they enter the store; this works because every canonical file was
-//! written by the same pinned jj-lib, so decoding and re-hashing round-trips exactly.
+//! Canonical ids are ordinary jj operation and view ids, and the operations and views are
+//! encoded as jj's simple op store encodes them, but they are kept in one log (see
+//! `canonical/log.rs`): operations as encoded, and views as deltas. Operations and views
+//! received from peers are verified by decoding and re-hashing before they enter the
+//! store; this works because every canonical one was written by the same pinned jj-lib, so
+//! decoding and re-hashing round-trips exactly.
 
-use std::fs;
+mod codec;
+mod log;
+
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
@@ -17,22 +21,26 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
+use async_trait::async_trait;
 use jj_lib::backend::CommitId;
 use jj_lib::content_hash::blake2b_hash;
+use jj_lib::object_id::HexPrefix;
 use jj_lib::object_id::ObjectId as _;
-use jj_lib::op_store::OpStore as _;
+use jj_lib::object_id::PrefixResolution;
+use jj_lib::op_store::OpStore;
 use jj_lib::op_store::OpStoreError;
+use jj_lib::op_store::OpStoreResult;
 use jj_lib::op_store::Operation;
 use jj_lib::op_store::OperationId;
 use jj_lib::op_store::RemoteRef;
 use jj_lib::op_store::RemoteView;
-use jj_lib::op_store::RootOperationData;
 use jj_lib::op_store::View;
 use jj_lib::op_store::ViewId;
-use jj_lib::simple_op_store::SimpleOpStore;
 use pollster::FutureExt as _;
 use thiserror::Error;
 
+use self::codec::ViewCodec;
+use self::log::Log;
 use crate::objects::ObjectError;
 use crate::objects::bundle;
 use crate::objects::bundle::BundleWriter;
@@ -93,8 +101,8 @@ struct Admitted {
     names_its_commits: bool,
 }
 
-/// Moves `staged`, a decoded operation or view, to `dest`, if it is what it says it is.
-fn admit(staged: &Path, dest: &Path, checked: Admitted) -> Result<(), CanonicalError> {
+/// Whether an operation or view is what it says it is, and may be stored.
+fn admit(checked: Admitted) -> Result<(), CanonicalError> {
     let Admitted {
         kind,
         malformed,
@@ -102,27 +110,17 @@ fn admit(staged: &Path, dest: &Path, checked: Admitted) -> Result<(), CanonicalE
         actual,
         names_its_commits,
     } = checked;
-    let refused = if expected != actual {
-        Some(CanonicalError::HashMismatch {
+    if expected != actual {
+        Err(CanonicalError::HashMismatch {
             kind,
             expected,
             actual,
         })
     } else if !names_its_commits {
-        Some(malformed(expected))
+        Err(malformed(expected))
     } else {
-        None
-    };
-    if let Some(err) = refused {
-        discard(staged);
-        return Err(err);
+        Ok(())
     }
-    fs::rename(staged, dest).map_err(io_err(dest))
-}
-
-/// Removes a file staged for import, which it won't be.
-fn discard(staged: &Path) {
-    fs::remove_file(staged).ok();
 }
 
 fn io_err(path: &Path) -> impl FnOnce(io::Error) -> CanonicalError + '_ {
@@ -137,38 +135,173 @@ fn io_err(path: &Path) -> impl FnOnce(io::Error) -> CanonicalError + '_ {
 pub type Imported = (OperationId, Option<Vec<OperationId>>);
 
 pub struct CanonicalStore {
-    path: PathBuf,
-    root_commit_id: CommitId,
-    store: Arc<SimpleOpStore>,
-    incoming: SimpleOpStore,
+    shared: Arc<Shared>,
     /// Generation numbers of stored operations (the root 0, otherwise one more than the
     /// largest parent's), which bound ancestry searches. A stored operation never changes,
     /// so neither does its entry.
     generations: Mutex<HashMap<OperationId, u64>>,
 }
 
+/// The store as jj's [`OpStore`], for jj's walks over operations.
+#[derive(Debug)]
+struct Shared {
+    path: PathBuf,
+    root_commit_id: CommitId,
+    root_operation_id: OperationId,
+    root_view_id: ViewId,
+    log: Log,
+    views: ViewCodec,
+}
+
+impl Shared {
+    fn log_err(&self) -> impl FnOnce(io::Error) -> CanonicalError + '_ {
+        io_err(&self.path)
+    }
+
+    fn not_found(kind: &str, hex: String) -> OpStoreError {
+        OpStoreError::ObjectNotFound {
+            object_type: kind.to_owned(),
+            hash: hex,
+            source: None,
+        }
+    }
+
+    fn read_error(
+        kind: &str,
+        hex: String,
+        source: impl Into<Box<dyn std::error::Error + Send + Sync>>,
+    ) -> OpStoreError {
+        OpStoreError::ReadObject {
+            object_type: kind.to_owned(),
+            hash: hex,
+            source: source.into(),
+        }
+    }
+
+    fn operation_bytes(&self, id: &OperationId) -> Result<Vec<u8>, CanonicalError> {
+        self.log
+            .operation(id)
+            .map_err(self.log_err())?
+            .ok_or_else(|| Self::not_found("operation", id.hex()).into())
+    }
+
+    fn view_bytes(&self, id: &ViewId) -> Result<Vec<u8>, CanonicalError> {
+        self.log
+            .view(id)
+            .map_err(self.log_err())?
+            .ok_or_else(|| Self::not_found("view", id.hex()).into())
+    }
+
+    fn read_operation(&self, id: &OperationId) -> Result<Operation, CanonicalError> {
+        if *id == self.root_operation_id {
+            return Ok(Operation::make_root(self.root_view_id.clone()));
+        }
+        let bytes = self.operation_bytes(id)?;
+        let op = codec::decode_operation(&bytes, &self.root_operation_id)
+            .map_err(|err| Self::read_error("operation", id.hex(), err))?;
+        // A stored operation was checked as it arrived; this checks the decoding, which is
+        // musubi's rather than jj's.
+        let actual = OperationId::new(blake2b_hash(&op).to_vec());
+        if actual != *id {
+            return Err(CanonicalError::HashMismatch {
+                kind: "operation",
+                expected: id.hex(),
+                actual: actual.hex(),
+            });
+        }
+        Ok(op)
+    }
+
+    fn read_view(&self, id: &ViewId) -> Result<View, CanonicalError> {
+        if *id == self.root_view_id {
+            return Ok(View::make_root(self.root_commit_id.clone()));
+        }
+        Ok(self.views.decode(id, &self.view_bytes(id)?)?)
+    }
+
+    fn write_operation(&self, op: &Operation) -> Result<OperationId, CanonicalError> {
+        let id = OperationId::new(blake2b_hash(op).to_vec());
+        self.log
+            .append_operation(&id, &codec::encode_operation(op))
+            .map_err(self.log_err())?;
+        Ok(id)
+    }
+
+    fn write_view(&self, view: &View) -> Result<ViewId, CanonicalError> {
+        let (id, encoded) = self.views.encode(view)?;
+        let normal =
+            normal_view(&encoded).ok_or_else(|| CanonicalError::MalformedView(id.hex()))?;
+        self.log.append_view(&id, &normal).map_err(self.log_err())?;
+        Ok(id)
+    }
+}
+
+/// An error from the store, as jj's [`OpStore`] reports one.
+fn op_store_error(err: CanonicalError) -> OpStoreError {
+    match err {
+        CanonicalError::OpStore(err) => err,
+        err => OpStoreError::Other(err.into()),
+    }
+}
+
+#[async_trait]
+impl OpStore for Shared {
+    fn name(&self) -> &'static str {
+        "musubi_canonical"
+    }
+
+    fn root_operation_id(&self) -> &OperationId {
+        &self.root_operation_id
+    }
+
+    async fn read_view(&self, id: &ViewId) -> OpStoreResult<View> {
+        Self::read_view(self, id).map_err(op_store_error)
+    }
+
+    async fn write_view(&self, contents: &View) -> OpStoreResult<ViewId> {
+        Self::write_view(self, contents).map_err(op_store_error)
+    }
+
+    async fn read_operation(&self, id: &OperationId) -> OpStoreResult<Operation> {
+        Self::read_operation(self, id).map_err(op_store_error)
+    }
+
+    async fn write_operation(&self, contents: &Operation) -> OpStoreResult<OperationId> {
+        Self::write_operation(self, contents).map_err(op_store_error)
+    }
+
+    async fn resolve_operation_id_prefix(
+        &self,
+        prefix: &HexPrefix,
+    ) -> OpStoreResult<PrefixResolution<OperationId>> {
+        self.log
+            .resolve_prefix(prefix, &self.root_operation_id)
+            .map_err(|err| OpStoreError::Other(err.into()))
+    }
+
+    async fn gc(&self, _: &[OperationId], _: std::time::SystemTime) -> OpStoreResult<()> {
+        Err(OpStoreError::Other(
+            "the canonical store keeps every operation".into(),
+        ))
+    }
+}
+
 impl CanonicalStore {
     /// Opens the store at `path`, creating it if needed. `root_commit_id` is the backend's
     /// root commit, which the root view refers to.
     pub fn open(path: &Path, root_commit_id: CommitId) -> Result<Self, CanonicalError> {
-        let incoming_path = path.join("incoming");
-        for dir in [
-            "operations",
-            "views",
-            "incoming/operations",
-            "incoming/views",
-        ] {
-            let dir = path.join(dir);
-            fs::create_dir_all(&dir).map_err(io_err(&dir))?;
-        }
-        let root_data = || RootOperationData {
-            root_commit_id: root_commit_id.clone(),
+        let log = Log::open(path).map_err(io_err(path))?;
+        let views = ViewCodec::new(path, root_commit_id.clone()).map_err(io_err(path))?;
+        let shared = Shared {
+            path: path.join("log"),
+            root_commit_id,
+            root_operation_id: OperationId::from_bytes(&[0; log::ID_LEN]),
+            root_view_id: ViewId::from_bytes(&[0; log::ID_LEN]),
+            log,
+            views,
         };
         Ok(Self {
-            path: path.to_owned(),
-            root_commit_id: root_commit_id.clone(),
-            store: Arc::new(SimpleOpStore::load(path, root_data())),
-            incoming: SimpleOpStore::load(&incoming_path, root_data()),
+            shared: Arc::new(shared),
             generations: Mutex::new(HashMap::new()),
         })
     }
@@ -184,7 +317,7 @@ impl CanonicalStore {
             |ids: &[OperationId]| -> Result<Vec<jj_lib::operation::Operation>, CanonicalError> {
                 ids.iter()
                     .map(|id| {
-                        let store: Arc<dyn jj_lib::op_store::OpStore> = self.store.clone();
+                        let store: Arc<dyn OpStore> = self.shared.clone();
                         Ok(jj_lib::operation::Operation::new(
                             store,
                             id.clone(),
@@ -199,15 +332,15 @@ impl CanonicalStore {
     }
 
     pub fn root_operation_id(&self) -> &OperationId {
-        self.store.root_operation_id()
+        &self.shared.root_operation_id
     }
 
     pub fn read_operation(&self, id: &OperationId) -> Result<Operation, CanonicalError> {
-        Ok(self.store.read_operation(id).block_on()?)
+        self.shared.read_operation(id)
     }
 
     pub fn read_view(&self, id: &ViewId) -> Result<View, CanonicalError> {
-        Ok(self.store.read_view(id).block_on()?)
+        self.shared.read_view(id)
     }
 
     /// The view of the operation `id`.
@@ -216,109 +349,82 @@ impl CanonicalStore {
     }
 
     pub fn write_operation(&self, op: &Operation) -> Result<OperationId, CanonicalError> {
-        Ok(self.store.write_operation(op).block_on()?)
+        self.shared.write_operation(op)
     }
 
     pub fn write_view(&self, view: &View) -> Result<ViewId, CanonicalError> {
-        Ok(self.store.write_view(view).block_on()?)
+        self.shared.write_view(view)
     }
 
     /// Resolves a hex prefix of a canonical operation id.
     pub fn resolve_prefix(&self, prefix: &str) -> Result<Option<OperationId>, CanonicalError> {
-        let Some(prefix) = jj_lib::object_id::HexPrefix::try_from_hex(prefix) else {
+        let Some(prefix) = HexPrefix::try_from_hex(prefix) else {
             return Ok(None);
         };
-        match self.store.resolve_operation_id_prefix(&prefix).block_on()? {
-            jj_lib::object_id::PrefixResolution::SingleMatch(id) => Ok(Some(id)),
+        let resolved = self
+            .shared
+            .log
+            .resolve_prefix(&prefix, self.root_operation_id())
+            .map_err(self.shared.log_err())?;
+        match resolved {
+            PrefixResolution::SingleMatch(id) => Ok(Some(id)),
             _ => Ok(None),
         }
     }
 
     /// Whether any operation but the root is stored.
     pub fn has_operations(&self) -> Result<bool, CanonicalError> {
-        let dir = self.path.join("operations");
-        for entry in fs::read_dir(&dir).map_err(io_err(&dir))? {
-            let entry = entry.map_err(io_err(&dir))?;
-            if entry
-                .file_name()
-                .to_str()
-                .and_then(OperationId::try_from_hex)
-                .is_some()
-            {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        Ok(!self.operation_ids()?.is_empty())
     }
 
     /// Every stored operation except the root, in no particular order.
     pub fn operation_ids(&self) -> Result<Vec<OperationId>, CanonicalError> {
-        let dir = self.path.join("operations");
-        let entries = fs::read_dir(&dir).map_err(io_err(&dir))?;
-        let mut ids = vec![];
-        for entry in entries {
-            let entry = entry.map_err(io_err(&dir))?;
-            if let Some(id) = entry
-                .file_name()
-                .to_str()
-                .and_then(OperationId::try_from_hex)
-            {
-                ids.push(id);
-            }
-        }
-        Ok(ids)
+        self.shared
+            .log
+            .operation_ids()
+            .map_err(self.shared.log_err())
     }
 
-    /// The stored operations and views that aren't what their names say, as a power cut
-    /// can leave one: empty, or cut short. Fails, rather than count a file torn, if one
+    /// What isn't what its id says it is, as a power cut can leave it: a stored operation or
+    /// view that doesn't read back as what it hashes to, and anything after the last whole
+    /// record, which a scan doesn't read. Fails, rather than count something torn, if it
     /// can't be read for some other reason, as when the process is out of file descriptors.
     pub fn torn(&self) -> Result<Vec<String>, CanonicalError> {
         let mut torn = vec![];
-        for name in self.stored("operations")? {
-            // Not an id, but a file being written, say.
-            if let Some(id) = OperationId::try_from_hex(&name) {
-                let read = self.read_operation(&id).map(|op| blake2b_hash(&op));
-                judge(&mut torn, "operation", &name, id.as_bytes(), read)?;
-            }
+        for id in self.operation_ids()? {
+            let read = self.read_operation(&id).map(|op| blake2b_hash(&op));
+            judge(&mut torn, "operation", &id.hex(), id.as_bytes(), read)?;
         }
-        for name in self.stored("views")? {
-            if let Some(id) = ViewId::try_from_hex(&name) {
-                let read = self.read_view(&id).map(|view| blake2b_hash(&view));
-                judge(&mut torn, "view", &name, id.as_bytes(), read)?;
-            }
+        let views = self.shared.log.view_ids().map_err(self.shared.log_err())?;
+        for id in views {
+            let read = self.read_view(&id).map(|view| blake2b_hash(&view));
+            judge(&mut torn, "view", &id.hex(), id.as_bytes(), read)?;
+        }
+        let unread = self.shared.log.unread().map_err(self.shared.log_err())?;
+        if unread > 0 {
+            torn.push(format!("{unread} bytes after the last whole record"));
         }
         Ok(torn)
     }
 
-    /// The names of the files in the store's directory `dir`.
-    fn stored(&self, dir: &str) -> Result<Vec<String>, CanonicalError> {
-        let dir = self.path.join(dir);
-        let mut names = vec![];
-        for entry in fs::read_dir(&dir).map_err(io_err(&dir))? {
-            let entry = entry.map_err(io_err(&dir))?;
-            names.extend(entry.file_name().into_string());
-        }
-        Ok(names)
-    }
-
     pub fn has_operation(&self, id: &OperationId) -> bool {
-        id == self.root_operation_id() || self.op_path(id).exists()
+        id == self.root_operation_id() || self.shared.log.has_operation(id).unwrap_or(false)
     }
 
     pub fn has_view(&self, id: &ViewId) -> bool {
-        is_root_view(id) || self.view_path(id).exists()
+        is_root_view(id) || self.shared.log.has_view(id).unwrap_or(false)
     }
 
     /// The encoded operation, as sent to peers. Not defined for the root operation, which
     /// every store has implicitly.
     pub fn operation_bytes(&self, id: &OperationId) -> Result<Vec<u8>, CanonicalError> {
-        let path = self.op_path(id);
-        fs::read(&path).map_err(io_err(&path))
+        self.shared.operation_bytes(id)
     }
 
+    /// The encoded view, in normal form (see `normal_view`). Not defined for the root
+    /// view, which every store has implicitly.
     pub fn view_bytes(&self, id: &ViewId) -> Result<Vec<u8>, CanonicalError> {
-        let path = self.view_path(id);
-        fs::read(&path).map_err(io_err(&path))
+        self.shared.view_bytes(id)
     }
 
     /// Every commit the stored operations `ops` require but the backend's root commit, which
@@ -333,7 +439,7 @@ impl CanonicalStore {
         &self,
         ops: &[OperationId],
     ) -> Result<BTreeSet<CommitId>, CanonicalError> {
-        let len = self.root_commit_id.as_bytes().len();
+        let len = self.shared.root_commit_id.as_bytes().len();
         let mut named: HashSet<Vec<u8>> = HashSet::new();
         let mut found = |id: &[u8]| {
             (id.len() == len).then(|| {
@@ -359,7 +465,7 @@ impl CanonicalStore {
             encoded_view_commits(&view, &mut found)
                 .ok_or_else(|| CanonicalError::MalformedView(view_id.hex()))?;
         }
-        named.remove(self.root_commit_id.as_bytes());
+        named.remove(self.shared.root_commit_id.as_bytes());
         Ok(named.into_iter().map(CommitId::new).collect())
     }
 
@@ -380,57 +486,46 @@ impl CanonicalStore {
         if self.has_operation(id) {
             return Ok(None);
         }
-        let staged = self.path.join("incoming/operations").join(id.hex());
-        fs::write(&staged, bytes).map_err(io_err(&staged))?;
-        let op = self
-            .incoming
-            .read_operation(id)
-            .block_on()
-            .inspect_err(|_| discard(&staged))?;
-        admit(
-            &staged,
-            &self.op_path(id),
-            Admitted {
-                kind: "operation",
-                malformed: CanonicalError::MalformedOperation,
-                expected: id.hex(),
-                actual: OperationId::new(blake2b_hash(&op).to_vec()).hex(),
-                names_its_commits: names_decoded_commits(
-                    bytes,
-                    encoded_op_commits,
-                    op_commit_ids(&op),
-                ),
-            },
-        )?;
+        let op = codec::decode_operation(bytes, self.root_operation_id())
+            .map_err(|err| Shared::read_error("operation", id.hex(), err))?;
+        admit(Admitted {
+            kind: "operation",
+            malformed: CanonicalError::MalformedOperation,
+            expected: id.hex(),
+            actual: OperationId::new(blake2b_hash(&op).to_vec()).hex(),
+            names_its_commits: names_decoded_commits(bytes, encoded_op_commits, op_commit_ids(&op)),
+        })?;
+        self.shared
+            .log
+            .append_operation(id, bytes)
+            .map_err(self.shared.log_err())?;
         Ok(Some(op.parents))
     }
 
+    /// Verifies and stores a view received from a peer, in normal form (see
+    /// `normal_view`). It is the normal form that is decoded and checked, since that is
+    /// what the store will hold.
     pub fn import_view(&self, id: &ViewId, bytes: &[u8]) -> Result<(), CanonicalError> {
         if self.has_view(id) {
             return Ok(());
         }
-        let staged = self.path.join("incoming/views").join(id.hex());
-        fs::write(&staged, bytes).map_err(io_err(&staged))?;
-        let view = self
-            .incoming
-            .read_view(id)
-            .block_on()
-            .inspect_err(|_| discard(&staged))?;
-        admit(
-            &staged,
-            &self.view_path(id),
-            Admitted {
-                kind: "view",
-                malformed: CanonicalError::MalformedView,
-                expected: id.hex(),
-                actual: ViewId::new(blake2b_hash(&view).to_vec()).hex(),
-                names_its_commits: names_decoded_commits(
-                    bytes,
-                    encoded_view_commits,
-                    view_commit_ids(&view),
-                ),
-            },
-        )
+        let normal = normal_view(bytes).ok_or_else(|| CanonicalError::MalformedView(id.hex()))?;
+        let view = self.shared.views.decode(id, &normal)?;
+        admit(Admitted {
+            kind: "view",
+            malformed: CanonicalError::MalformedView,
+            expected: id.hex(),
+            actual: ViewId::new(blake2b_hash(&view).to_vec()).hex(),
+            names_its_commits: names_decoded_commits(
+                &normal,
+                encoded_view_commits,
+                view_commit_ids(&view),
+            ),
+        })?;
+        self.shared
+            .log
+            .append_view(id, &normal)
+            .map_err(self.shared.log_err())
     }
 
     /// Whether `ancestor` is in `anc*(heads)`.
@@ -681,45 +776,38 @@ impl CanonicalStore {
         Ok(ops)
     }
 
-    /// A stored view's bytes as a function of its content alone, which view deltas are
-    /// between. A store's bytes for a view are this jj-lib's encoding of it, as written where
-    /// the view was made or in the normal form a delta rebuilt it in, but jj encodes
-    /// `head_ids`, a set, and `wc_commit_ids`, a map, in hash order, and rewrites a view's
-    /// file whenever it writes the same view again: two stores can hold different bytes for
-    /// one view, and the store's own can change. Sorting the top-level fields, and the
-    /// entries of those two among them, leaves nothing to chance, without decoding the view.
-    /// The result is a valid encoding of the same view. (Bytes from a peer that jj-lib did
-    /// not write may normalize differently; then a delta against them fails on arrival.)
+    /// A stored view in normal form (see `normal_view`), which is how the store holds
+    /// it.
     fn normal_view_bytes(&self, id: &ViewId) -> Result<Vec<u8>, CanonicalError> {
-        /// `head_ids` and `wc_commit_ids`.
-        const UNORDERED: [u32; 2] = [1, 8];
-        let malformed = || CanonicalError::MalformedView(id.hex());
-        let encoded = self.view_bytes(id)?;
-        let mut fields = top_level_fields(&encoded).ok_or_else(malformed)?;
-        // Stable, so other repeated fields keep their order.
-        fields.sort_by(|(number, bytes), (other_number, other_bytes)| {
-            number.cmp(other_number).then_with(|| {
-                if UNORDERED.contains(number) {
-                    bytes.cmp(other_bytes)
-                } else {
-                    std::cmp::Ordering::Equal
-                }
-            })
-        });
-        let mut normal = Vec::with_capacity(encoded.len());
-        for (_, bytes) in fields {
-            normal.extend_from_slice(bytes);
-        }
-        Ok(normal)
+        self.view_bytes(id)
     }
+}
 
-    fn op_path(&self, id: &OperationId) -> PathBuf {
-        self.path.join("operations").join(id.hex())
+/// A view's bytes as a function of its content alone, which view deltas are between, and
+/// which the store holds. jj encodes `head_ids`, a set, and `wc_commit_ids`, a map, in
+/// hash order, so two stores can be given different bytes for one view. Sorting the
+/// top-level fields, and the entries of those two among them, leaves nothing to chance,
+/// without decoding the view. The result is a valid encoding of the same view, for any
+/// encoding this jj-lib writes. `None` if `encoded` isn't a protobuf message.
+fn normal_view(encoded: &[u8]) -> Option<Vec<u8>> {
+    /// `head_ids` and `wc_commit_ids`.
+    const UNORDERED: [u32; 2] = [1, 8];
+    let mut fields = top_level_fields(encoded)?;
+    // Stable, so other repeated fields keep their order.
+    fields.sort_by(|(number, bytes), (other_number, other_bytes)| {
+        number.cmp(other_number).then_with(|| {
+            if UNORDERED.contains(number) {
+                bytes.cmp(other_bytes)
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        })
+    });
+    let mut normal = Vec::with_capacity(encoded.len());
+    for (_, bytes) in fields {
+        normal.extend_from_slice(bytes);
     }
-
-    fn view_path(&self, id: &ViewId) -> PathBuf {
-        self.path.join("views").join(id.hex())
-    }
+    Some(normal)
 }
 
 /// Adds the stored `kind` named `name` to `torn` if `read`, its hash once read, isn't
@@ -972,6 +1060,8 @@ mod tests {
 
     use std::collections::BTreeMap;
 
+    use std::fs;
+
     use jj_lib::merge::Merge;
     use jj_lib::op_store::RefTarget;
     use jj_lib::op_store::RemoteRefState;
@@ -1036,28 +1126,38 @@ mod tests {
         assert_eq!(store.required_commits(&[op_id]).unwrap(), expected);
     }
 
-    /// What a power cut can leave in the store is torn: a file left empty, or holding
-    /// another's bytes. A file being written, which is no id, isn't.
+    /// What a power cut can leave in the store is torn: a record cut short, or garbled. A
+    /// scan stops there, so what comes before it still reads, `torn` reports the rest, and
+    /// the next write cuts it off.
     #[test]
-    fn torn_files_are_found() {
-        let dir = tempfile::tempdir().unwrap();
+    fn torn_records_are_found() {
+        let dir = musubi_testutil::tempdir();
         let store = CanonicalStore::open(dir.path(), commit(0)).unwrap();
-        let mut view = View::make_root(commit(0));
-        view.head_ids.insert(commit(1));
-        let view_id = store.write_view(&view).unwrap();
-        view.head_ids.insert(commit(2));
-        let other = store.write_view(&view).unwrap();
-        let op_id = store
-            .write_operation(&operation(store.root_operation_id(), view_id.clone()))
-            .unwrap();
-        fs::write(dir.path().join("operations/.tmp1234"), b"").unwrap();
+        let view_id = store.write_view(&view_with_heads(1)).unwrap();
+        let op = operation(store.root_operation_id(), view_id.clone());
+        let op_id = store.write_operation(&op).unwrap();
         assert_eq!(store.torn().unwrap(), Vec::<String>::new());
-        fs::write(store.op_path(&op_id), b"").unwrap();
-        fs::copy(store.view_path(&other), store.view_path(&view_id)).unwrap();
+        let log = dir.path().join("log");
+        let len = fs::metadata(&log).unwrap().len();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&log)
+            .unwrap()
+            .set_len(len - 1)
+            .unwrap();
+
+        let store = CanonicalStore::open(dir.path(), commit(0)).unwrap();
+        assert!(!store.has_operation(&op_id));
+        assert_eq!(store.read_view(&view_id).unwrap(), view_with_heads(1));
         let torn = store.torn().unwrap();
-        assert_eq!(torn.len(), 2, "{torn:?}");
-        assert!(torn[0].starts_with(&format!("operation {}", op_id.hex())));
-        assert_eq!(torn[1], format!("view {} is something else", view_id.hex()));
+        assert_eq!(torn.len(), 1, "{torn:?}");
+        assert!(
+            torn[0].ends_with("bytes after the last whole record"),
+            "{torn:?}"
+        );
+        assert_eq!(store.write_operation(&op).unwrap(), op_id);
+        assert_eq!(store.torn().unwrap(), Vec::<String>::new());
+        assert_eq!(store.read_operation(&op_id).unwrap(), op);
     }
 
     /// Stores a view encoded by hand, as a peer could send it.

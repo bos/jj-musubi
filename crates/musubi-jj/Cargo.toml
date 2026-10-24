@@ -8,6 +8,8 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+async-trait.workspace = true
+blake3.workspace = true
 futures.workspace = true
 gix.workspace = true
 humantime.workspace = true

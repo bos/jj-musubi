@@ -283,14 +283,24 @@ def du(path):
     return int(out.split()[0]) * 1024
 
 
-def dir_stats(path):
-    n, size = 0, 0
-    if os.path.isdir(path):
-        for entry in os.scandir(path):
-            if entry.is_file():
-                n += 1
-                size += entry.stat().st_size
-    return n, size
+def log_stats(path):
+    """Operations and views in a canonical store's log, and the bytes their records take."""
+    stats = dict(n_ops=0, ops_bytes=0, n_views=0, views_bytes=0)
+    if not os.path.exists(path):
+        return stats
+    with open(path, "rb") as f:
+        data = f.read()
+    at = 0
+    # `tag:u8 len:u32 check:[u8; 8] body`; a record cut short ends the log.
+    while at + 13 <= len(data):
+        tag, length = data[at], int.from_bytes(data[at + 1 : at + 5], "little")
+        if at + 13 + length > len(data):
+            break
+        kind = "ops" if tag == 1 else "views"
+        stats[f"n_{kind}"] += 1
+        stats[f"{kind}_bytes"] += 13 + length
+        at += 13 + length
+    return stats
 
 
 def hive_dir(hub):
@@ -303,8 +313,7 @@ def hive_dir(hub):
 def hub_stats(hub):
     # Before the hive exists, its paths are missing, which counts as empty.
     hive = hive_dir(hub) or f"{hub}/no-hive"
-    n_ops, ops_bytes = dir_stats(f"{hive}/canonical/operations")
-    n_views, views_bytes = dir_stats(f"{hive}/canonical/views")
+    log = log_stats(f"{hive}/canonical/log")
     n_packs, pack_bytes = 0, 0
     pdir = f"{hive}/git/objects/pack"
     if os.path.isdir(pdir):
@@ -313,10 +322,7 @@ def hub_stats(hub):
                 n_packs += 1
                 pack_bytes += entry.stat().st_size
     return dict(
-        n_ops=n_ops,
-        ops_bytes=ops_bytes,
-        n_views=n_views,
-        views_bytes=views_bytes,
+        **log,
         n_packs=n_packs,
         pack_bytes=pack_bytes,
     )

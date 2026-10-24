@@ -38,6 +38,7 @@ const UNIT: &str = "musubi.service";
 const RUN_VALUE: &str = "musubi";
 
 /// The environment the daemon needs from the shell that installed it.
+#[cfg_attr(windows, allow(dead_code, reason = "macOS and Linux only"))]
 fn environment() -> Vec<(String, String)> {
     std::env::vars()
         .filter(|(name, _)| {
@@ -226,7 +227,10 @@ mod platform {
 
 #[cfg(windows)]
 mod platform {
-    use super::*;
+    use super::Path;
+    use super::RUN_VALUE;
+    use super::file_log_hint;
+    use super::run;
 
     const KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 

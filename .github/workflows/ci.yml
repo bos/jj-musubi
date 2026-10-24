@@ -63,11 +63,17 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - run: rustup toolchain install stable --profile minimal --component clippy && rustup default stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-nextest,just
+      # The lint job runs on Linux, which compiles none of the code for macOS or Windows.
+      # Bash, so that just finds sh on Windows.
+      - name: Lint
+        if: runner.os != 'Linux'
+        shell: bash
+        run: just lint
       - name: Install jj
         shell: bash
         run: |

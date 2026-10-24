@@ -31,12 +31,12 @@ makes a RAM disk for the run, which makes the suite three times as fast; a bare
 `cargo nextest run` uses the disk. Setting `MUSUBI_KEEP_TEST_DIRS` keeps the directories
 after a run, for inspecting a failure, and puts them on the disk.
 
-CI runs the default suite on Linux, macOS and Windows, and on Linux checks the Lean model,
-runs the conformance test against its oracle, and runs each benchmark script once
-(`just bench-smoke`). The Search workflow runs the end-to-end search nightly on Linux, each
-shard on a runner of its own, with a seed that changes from run to run. A failing shard
-uploads its example database; its output gives the seed and a `reproduce_failure` attribute
-for replaying the failure locally.
+CI runs clippy and the default suite on Linux, macOS and Windows, since each compiles code
+the others don't, and on Linux checks the Lean model, runs the conformance test against its
+oracle, and runs each benchmark script once (`just bench-smoke`). The Search workflow runs
+the end-to-end search nightly on Linux, each shard on a runner of its own, with a seed that
+changes from run to run. A failing shard uploads its example database; its output gives the
+seed and a `reproduce_failure` attribute for replaying the failure locally.
 
 ## Protocol property tests
 

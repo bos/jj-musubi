@@ -216,6 +216,28 @@ impl Drop for Hub {
     }
 }
 
+/// Removes `dir`, retrying for a while: on Windows a process just killed, or one it
+/// started, can hold files in it open a little longer, which Windows refuses to remove as
+/// a sharing violation (error 32). Any other error fails at once.
+fn remove_dir_when_free(dir: &Path) {
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match fs::remove_dir_all(dir) {
+            Ok(()) => return,
+            Err(e)
+                if cfg!(windows)
+                    && e.raw_os_error() == Some(ERROR_SHARING_VIOLATION)
+                    && Instant::now() < deadline =>
+            {
+                eprintln!("retrying removing {}: {e}", dir.display());
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            Err(e) => panic!("removing {}: {e}", dir.display()),
+        }
+    }
+}
+
 /// Stops the daemons of the machines it was given when dropped.
 #[derive(Default)]
 struct Daemons(Vec<Command>);
@@ -717,7 +739,7 @@ fn copies_make_a_lost_hive_again() {
     let mut daemons = Daemons::default();
     let (alpha, beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
     hub.kill();
-    fs::remove_dir_all(&hub.dir).unwrap();
+    remove_dir_when_free(&hub.dir);
     hub = Hub::start(&env, &mut logs);
     assert!(
         hub.greeting.starts_with("Created a new hub"),

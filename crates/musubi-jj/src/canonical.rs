@@ -264,6 +264,10 @@ pub struct CanonicalStore {
     /// largest parent's), which bound ancestry searches. A stored operation never changes,
     /// so neither does its entry.
     generations: Mutex<HashMap<OperationId, u64>>,
+    /// In tests, what another process does between an import's checking a batch and its
+    /// appending it.
+    #[cfg(test)]
+    meanwhile: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 /// The store as jj's [`OpStore`], for jj's walks over operations.
@@ -451,6 +455,8 @@ impl CanonicalStore {
         Ok(Self {
             shared: Arc::new(shared),
             generations: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            meanwhile: Mutex::new(None),
         })
     }
 
@@ -1014,6 +1020,15 @@ impl CanonicalStore {
         let mut stored: Vec<Option<Vec<OperationId>>> = vec![None; batch.items.len()];
         for ((at, _, _), parents) in new.iter().zip(verified) {
             stored[*at] = Some(parents?);
+        }
+        #[cfg(test)]
+        if let Some(meanwhile) = self
+            .meanwhile
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            meanwhile();
         }
         self.shared
             .log
@@ -1911,6 +1926,59 @@ mod tests {
                 assert!(fresh.has_operation(op));
             }
         }
+    }
+
+    /// Another process can append a view that an import has checked, but not yet appended,
+    /// in other bytes, which the log then keeps. A delta in the import made against the
+    /// import's bytes for it is then made again, not stored as it came against bytes the log
+    /// doesn't hold.
+    #[test]
+    fn a_delta_whose_base_another_process_appends_first_is_made_again() {
+        let dir = musubi_testutil::tempdir();
+        let root_commit = CommitId::from_bytes(&[0; 20]);
+        let sender = CanonicalStore::open(&dir.path().join("sender"), root_commit.clone()).unwrap();
+        let root = sender.root_operation_id().clone();
+        let base_view = sender.write_view(&view_with_heads(30)).unwrap();
+        let base = sender
+            .write_operation(&operation(&root, base_view.clone()))
+            .unwrap();
+        let view = view_with_heads(31);
+        let child_view = sender.write_view(&view).unwrap();
+        let child = sender
+            .write_operation(&operation(&base, child_view.clone()))
+            .unwrap();
+        let normal = sender.view_bytes(&base_view).unwrap();
+        // The base in other bytes, in normal form too: an unknown field after the rest.
+        let other = [normal.as_slice(), &[0x9a, 0x06, 0x01, 0x00]].concat();
+        assert_eq!(normal_view(&other).as_deref(), Some(other.as_slice()));
+        let delta = bundle::view_delta(&other, &sender.view_bytes(&child_view).unwrap()).unwrap();
+        let bundle_file = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+        let mut writer = BundleWriter::create(bundle_file.path()).unwrap();
+        writer.view(base_view.as_bytes(), &other).unwrap();
+        writer
+            .operation(base.as_bytes(), &sender.operation_bytes(&base).unwrap())
+            .unwrap();
+        writer
+            .view_delta_made(child_view.as_bytes(), base_view.as_bytes(), &delta)
+            .unwrap();
+        writer
+            .operation(child.as_bytes(), &sender.operation_bytes(&child).unwrap())
+            .unwrap();
+        writer.finish().unwrap();
+
+        let receiver_dir = dir.path().join("receiver");
+        let receiver = CanonicalStore::open(&receiver_dir, root_commit.clone()).unwrap();
+        let elsewhere = CanonicalStore::open(&receiver_dir, root_commit.clone()).unwrap();
+        let (id, bytes) = (base_view.clone(), normal.clone());
+        *receiver.meanwhile.lock().unwrap() = Some(Box::new(move || {
+            elsewhere.import_view(&id, &bytes).unwrap();
+        }));
+        receiver.import_operations(bundle_file.path()).unwrap();
+        drop(receiver);
+        let fresh = CanonicalStore::open(&receiver_dir, root_commit).unwrap();
+        assert_eq!(fresh.view_bytes(&base_view).unwrap(), normal);
+        assert_eq!(fresh.read_view(&child_view).unwrap(), view);
+        assert_eq!(fresh.torn().unwrap(), Vec::<String>::new());
     }
 
     fn view_with_heads(heads: u8) -> View {

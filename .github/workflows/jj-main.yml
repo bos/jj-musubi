@@ -1,0 +1,73 @@
+name: jj main
+
+# musubi built and tested against jj's main branch rather than the release it pins, so that
+# changes to jj-lib that will break musubi show up before a release brings them. Nightly, and
+# by hand against any commit of jj. It changes nothing in the repository: the job rewrites
+# its own checkout (.github/scripts/use-jj-checkout.sh) and builds jj from the same source.
+on:
+  schedule:
+    - cron: "47 5 * * *"
+  workflow_dispatch:
+    inputs:
+      rev:
+        description: jj branch, tag or full commit id (default main)
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jj-main-${{ inputs.rev || 'main' }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: Test against jj main
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Outside the workspace, or cargo takes jj's crates for members of musubi's.
+      - name: Fetch jj
+        env:
+          REV: ${{ inputs.rev || 'main' }}
+        run: |
+          jj="$RUNNER_TEMP/jj"
+          git init -q "$jj"
+          git -C "$jj" fetch -q --depth 1 https://github.com/jj-vcs/jj "$REV"
+          git -C "$jj" checkout -q FETCH_HEAD
+          echo "JJ_SRC=$jj" >> "$GITHUB_ENV"
+          echo "jj: $(git -C "$jj" log -1 --format='%H %cs %s')" >> "$GITHUB_STEP_SUMMARY"
+      - run: .github/scripts/use-jj-checkout.sh "$JJ_SRC"
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      # Resolved before the cache keys on Cargo.lock, so that the key follows jj's
+      # dependencies and a run falls back to the last cache when they change.
+      - run: cargo update --workspace
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: jj-main
+          cache-on-failure: true
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: cargo-nextest
+      # The jj the tests run, built with the jj-lib musubi links.
+      - name: Build jj
+        run: |
+          cargo build -p jj-cli --bin jj
+          mkdir -p "$RUNNER_TEMP/bin"
+          cp target/debug/jj "$RUNNER_TEMP/bin/"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - run: jj --version && git --version
+      # The conformance tests check musubi's logic, which no jj changes, against the Lean
+      # oracle, which this job doesn't build; nextest still compiles them. The test of a jj
+      # 0.46 bug fails as it should once jj fixes it (jj-vcs/jj#8076, fixed after 0.46), so
+      # it's left out until musubi moves past 0.46 and drops it.
+      - run: >-
+          cargo nextest run --workspace
+          -E "not test(/conformance$/) and not test(=history::root_parent_merge_bug_is_explained)"

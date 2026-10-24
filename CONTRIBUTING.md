@@ -52,8 +52,9 @@ just bench-smoke    # every benchmark script, once (see bench/README.md)
 
 CI (`.github/workflows/ci.yml`) runs the lints on Linux, the tests on Linux, macOS, and
 Windows, and the Lean proofs and conformance tests on Linux. The Search workflow runs the
-end-to-end search nightly. [docs/internals/testing.md](docs/internals/testing.md) explains
-every layer of tests, and which a change belongs in, and
+end-to-end search nightly, and the jj main workflow runs the tests against jj's main branch
+nightly. [docs/internals/testing.md](docs/internals/testing.md) explains every layer of tests,
+and which a change belongs in, and
 [docs/internals/efficient-tests.md](docs/internals/efficient-tests.md) how to write a new test
 so that the suite stays fast.
 

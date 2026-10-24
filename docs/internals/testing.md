@@ -41,6 +41,13 @@ the end-to-end search nightly on Linux, each shard on a runner of its own, with 
 changes from run to run. A failing shard uploads its example database; its output gives the
 seed and a `reproduce_failure` attribute for replaying the failure locally.
 
+The jj main workflow builds musubi and jj from jj's main branch nightly and runs the tests
+CI's test job does, so that changes to jj-lib that will break musubi show up before a release
+brings them. To do the same locally against any checkout of jj outside this workspace, run
+`.github/scripts/use-jj-checkout.sh <jj checkout>`, build the matching jj with
+`cargo build -p jj-cli --bin jj`, put it on `PATH`, and run the tests with the workflow's
+filter. Afterwards, `jj restore` the files the script rewrote, and `Cargo.lock`.
+
 ## Protocol property tests
 
 A Hegel state machine owns a hub and several nodes, all of them sans-IO state machines from

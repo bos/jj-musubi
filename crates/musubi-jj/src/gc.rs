@@ -42,11 +42,12 @@ pub const INTERVAL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// jj's default, so that what a jj command is writing meanwhile is never taken for garbage.
 pub const KEEP_NEWER: Duration = Duration::from_secs(14 * 24 * 60 * 60);
 
-/// Files in jj's extras table, almost all replaced segments, worth cleaning up.
-const EXTRAS_FILES: usize = 1_000;
+/// Files in jj's extras table, almost all replaced segments, worth cleaning up: few in this
+/// module's tests, which a small repository has.
+const EXTRAS_FILES: usize = if cfg!(test) { 2 } else { 1_000 };
 
 /// Keep refs worth cutting down to the heads.
-const KEEP_REFS_COUNT: usize = 10_000;
+const KEEP_REFS_COUNT: usize = if cfg!(test) { 2 } else { 10_000 };
 
 #[derive(Debug, Error)]
 pub enum GcError {
@@ -120,18 +121,41 @@ impl Cruft {
 /// failed, in the last [`INTERVAL`]; there is enough to clean up; and the machine isn't on
 /// battery.
 pub fn due(repo_path: &Path, now: SystemTime) -> bool {
-    let last = fs::metadata(marker(repo_path)).and_then(|meta| meta.modified());
-    let recent = last.is_ok_and(|last| now.duration_since(last).is_ok_and(|age| age < INTERVAL));
+    due_unless(repo_path, now, crate::objects::on_battery)
+}
+
+/// [`due`], with `on_battery` saying whether the machine is.
+fn due_unless(repo_path: &Path, now: SystemTime, on_battery: impl Fn() -> bool) -> bool {
     // Asked last: on macOS, it starts a process.
-    !recent && Cruft::of(repo_path).worth_collecting() && !crate::objects::on_battery()
+    waited(repo_path, now) && Cruft::of(repo_path).worth_collecting() && !on_battery()
+}
+
+/// Whether [`INTERVAL`] has passed since gc last ran, or failed, by `now`.
+fn waited(repo_path: &Path, now: SystemTime) -> bool {
+    let last = fs::metadata(marker(repo_path)).and_then(|meta| meta.modified());
+    !last.is_ok_and(|last| now.duration_since(last).is_ok_and(|age| age < INTERVAL))
 }
 
 /// Runs gc in the repository if it is [`due`], unless another process is running it, and
 /// records when it ran, or failed to, so that it waits [`INTERVAL`] before trying again.
 /// Returns whether it ran.
 pub fn collect_if_due(repo_path: &Path, settings: &UserSettings) -> Result<bool, GcError> {
-    let now = SystemTime::now();
-    if !due(repo_path, now) {
+    collect_if_due_at(
+        repo_path,
+        settings,
+        SystemTime::now(),
+        crate::objects::on_battery,
+    )
+}
+
+/// [`collect_if_due`] as at `now`, with `on_battery` saying whether the machine is.
+fn collect_if_due_at(
+    repo_path: &Path,
+    settings: &UserSettings,
+    now: SystemTime,
+    on_battery: impl Fn() -> bool + Copy,
+) -> Result<bool, GcError> {
+    if !due_unless(repo_path, now, on_battery) {
         return Ok(false);
     }
     let lock_path = repo_path.join("musubi/gc.lock");
@@ -147,7 +171,7 @@ pub fn collect_if_due(repo_path: &Path, settings: &UserSettings) -> Result<bool,
         Err(fs::TryLockError::Error(err)) => return Err(io_err(&lock_path)(err)),
     }
     // Another process may have run it while this one waited to look.
-    if !due(repo_path, now) {
+    if !due_unless(repo_path, now, on_battery) {
         return Ok(false);
     }
     let collected = collect(repo_path, settings, now - KEEP_NEWER);
@@ -202,4 +226,142 @@ pub fn collect(
         tracing::info!("removed {removed} keep refs");
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use musubi_testutil::TestEnv;
+    use musubi_testutil::TestRepo;
+
+    use super::*;
+
+    const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+
+    fn mains() -> bool {
+        false
+    }
+
+    /// A repository in a hive, as far as gc is concerned, with a commit, and so enough to
+    /// clean up for this module's tests.
+    fn repo(env: &TestEnv) -> TestRepo {
+        let repo = env.init_repo("alpha");
+        fs::create_dir_all(repo.repo_path().join("musubi")).unwrap();
+        repo.write_file("f", "1");
+        repo.jj(&["commit", "-m", "one"]);
+        assert!(Cruft::of(&repo.repo_path()).worth_collecting());
+        repo
+    }
+
+    /// gc runs when due, then waits a week; on battery, it waits for mains power.
+    #[test]
+    fn a_run_waits_a_week() {
+        let env = TestEnv::new();
+        let repo = repo(&env);
+        let path = repo.repo_path();
+        let now = SystemTime::now();
+        assert!(!due_unless(&path, now, || true));
+        assert!(!collect_if_due_at(&path, &repo.settings(), now, || true).unwrap());
+        assert!(collect_if_due_at(&path, &repo.settings(), now, mains).unwrap());
+        assert!(!waited(&path, now + DAY));
+        assert!(!collect_if_due_at(&path, &repo.settings(), now + DAY, mains).unwrap());
+        assert!(waited(&path, now + INTERVAL));
+    }
+
+    /// Whether the machine is on battery is asked only once gc would otherwise run: on
+    /// macOS, asking starts a process.
+    #[test]
+    fn the_battery_is_asked_last() {
+        let env = TestEnv::new();
+        let repo = repo(&env);
+        let path = repo.repo_path();
+        let now = SystemTime::now();
+        assert!(collect_if_due_at(&path, &repo.settings(), now, mains).unwrap());
+        assert!(!due_unless(&path, now + DAY, || panic!(
+            "asked about the battery"
+        )));
+    }
+
+    /// A run that fails waits a week too, rather than trying again at every check.
+    #[test]
+    fn a_failed_run_waits_a_week_too() {
+        let env = TestEnv::new();
+        let repo = repo(&env);
+        let path = repo.repo_path();
+        // jj's extras table, made unreadable: the keep refs still make it worth collecting.
+        let extra = path.join("store/extra");
+        fs::rename(&extra, path.join("extra-aside")).unwrap();
+        fs::write(&extra, "not a directory").unwrap();
+        let now = SystemTime::now();
+        assert!(due_unless(&path, now, mains));
+        assert!(collect_if_due_at(&path, &repo.settings(), now, mains).is_err());
+        assert!(!waited(&path, now + DAY));
+        assert!(waited(&path, now + INTERVAL));
+    }
+
+    /// With several op heads, gc waits for them to be merged, and doesn't count that as a
+    /// run: it runs at the next check once they are.
+    #[test]
+    fn several_op_heads_wait_for_a_merge() {
+        let env = TestEnv::new();
+        let repo = repo(&env);
+        let path = repo.repo_path();
+        repo.jj(&["--at-op", "@-", "describe", "-m", "concurrently"]);
+        let now = SystemTime::now();
+        assert!(!collect_if_due_at(&path, &repo.settings(), now, mains).unwrap());
+        assert!(waited(&path, now + DAY));
+        // Any jj command merges them.
+        repo.jj(&["status"]);
+        assert!(collect_if_due_at(&path, &repo.settings(), now + DAY, mains).unwrap());
+    }
+
+    /// While another process holds the lock, gc leaves the run to it.
+    #[test]
+    fn another_process_running_it_is_left_to() {
+        let env = TestEnv::new();
+        let repo = repo(&env);
+        let path = repo.repo_path();
+        let held = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path.join("musubi/gc.lock"))
+            .unwrap();
+        held.lock().unwrap();
+        let now = SystemTime::now();
+        assert!(!collect_if_due_at(&path, &repo.settings(), now, mains).unwrap());
+        assert!(waited(&path, now + DAY));
+        drop(held);
+        assert!(collect_if_due_at(&path, &repo.settings(), now, mains).unwrap());
+    }
+
+    /// Operations no op head reaches go, as after `jj op abandon`, once old enough.
+    #[test]
+    fn unreachable_operations_go() {
+        let env = TestEnv::new();
+        let repo = repo(&env);
+        let path = repo.repo_path();
+        repo.jj(&["describe", "-m", "two"]);
+        let old = repo.jj(&["op", "log", "--no-graph", "-n", "1", "-T", "id"]);
+        let old = path.join("op_store/operations").join(old.trim());
+        repo.jj(&["describe", "-m", "three"]);
+        repo.jj(&["op", "abandon", "..@-"]);
+        assert!(old.exists());
+        let later = SystemTime::now() + DAY;
+        assert!(collect(&path, &repo.settings(), later).unwrap());
+        assert!(!old.exists(), "{} is still there", old.display());
+        repo.jj(&["log"]);
+    }
+
+    /// Cruft is counted where the git repository is inside `.jj` too.
+    #[test]
+    fn cruft_is_counted_without_colocation() {
+        let env = TestEnv::new();
+        let repo = env.init_non_colocated_repo("beta");
+        repo.write_file("f", "1");
+        repo.jj(&["commit", "-m", "one"]);
+        let cruft = Cruft::of(&repo.repo_path());
+        assert!(cruft.extras_files > 0 && cruft.keep_refs > 0, "{cruft:?}");
+    }
 }

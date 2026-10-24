@@ -1,25 +1,28 @@
 //! Bookmarks in a colocated repository, against `formal/Musubi/Refs.lean`
 //! (docs/internals/conformance.md, "Per-machine refs"). Hegel moves refs with git, runs
-//! `jj` commands, fetches, and has another machine move bookmarks for musubi to realize here,
-//! its export succeeding or failing. Beside the real machine it keeps the model's `Machine`
-//! for each ref it follows, with jj's own `merge_ref_targets` as the model's merge
-//! (`ref_laws` checks that it obeys the laws the model assumes), and steps each as the
-//! model's `LStep`s or `RStep`s that the real action performs. After every action each
-//! bookmark, its remote bookmark and whether the bookmark tracks it, jj's record of the git
-//! ref, and the git ref itself must be the model's, and the model's invariants `LInv` and
-//! `RInv` must hold. The slots carry tracking states, as `TSlot`, and step as its functions,
-//! whose targets are `Slot`'s.
+//! `jj` commands, `jj undo` and `jj op restore`, fetches, and has another machine move
+//! bookmarks, move a tag or fetch, for musubi to realize here, its export succeeding or
+//! failing. Beside the real machine it keeps the model's `Machine` for each ref it follows,
+//! with jj's own `merge_ref_targets` as the model's merge (`ref_laws` checks that it obeys
+//! the laws the model assumes), and steps each as the model's `LStep`s or `CStep`s that the
+//! real action performs. After every action each bookmark, its remote bookmark and whether
+//! the bookmark tracks it, jj's record of the git ref, and the git ref itself must be the
+//! model's, and the model's invariants `LInv` and `CInv` must hold, unless a restore of a
+//! slot that isn't `Restorable` left the record behind, as only it may
+//! (`restoreLocal_inv`, `restoreRemote_cinv`, `restore_reverts`). The slots carry tracking
+//! states, as `TSlot`, and step as its functions, whose targets are `Slot`'s.
 //!
 //! Op heads are concurrent twice over: a `jj` command at an older operation (`--at-op`), which
 //! the next command merges with the head, as jj's `TSlot.merge`; and the other machine moving
-//! a bookmark before it has this machine's latest operations, so that it merges them, and this
-//! machine realizes that merge, as `realizeMerge`, which is `TSlot.merge`
-//! (`realizeMerge_eq`).
+//! a bookmark or fetching before it has this machine's latest operations, so that it merges
+//! them, and this machine realizes that merge, as `realizeMerge`, which is `TSlot.merge`
+//! (`realizeMerge_eq`). Two fetches merge so to a conflicted `y@origin`, one side of which
+//! musubi writes to `.git` (`exportConflicted`), the same on both machines.
 //!
 //! The refs are a local bookmark `x`, which git moves; a local bookmark `y`, which git
-//! doesn't; and `y@origin`, which `y` tracks, which git moves and fetches move. The model has
-//! one ref per machine; here `y` and `y@origin` share the bookmark `y`, so a step of one is a
-//! `set` of the other.
+//! doesn't; `y@origin`, which `y` tracks, which git moves and fetches move; and a tag `t`,
+//! which git moves, and whose slot is a local bookmark's. The model has one ref per machine;
+//! here `y` and `y@origin` share the bookmark `y`, so a step of one is a `set` of the other.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -57,21 +60,26 @@ enum Ref {
     Y,
     /// `L` is `y`, `R` is `y@origin`, and `K` is `git_refs["refs/remotes/origin/y"]`.
     Origin,
+    /// `L` is the tag `t`, `R` is `t@git`, and `K` is `git_refs["refs/tags/t"]`: a local
+    /// bookmark's slot, which jj imports and exports as it does `x`'s.
+    T,
 }
 
 impl Ref {
-    const ALL: [Self; 3] = [Self::X, Self::Y, Self::Origin];
+    const ALL: [Self; 4] = [Self::X, Self::Y, Self::Origin, Self::T];
 
+    /// The bookmark, or for `T` the tag.
     fn bookmark(self) -> &'static str {
         match self {
             Self::X => "x",
             Self::Y | Self::Origin => "y",
+            Self::T => "t",
         }
     }
 
     fn remote(self) -> &'static RemoteName {
         match self {
-            Self::X | Self::Y => REMOTE_NAME_FOR_LOCAL_GIT_REPO,
+            Self::X | Self::Y | Self::T => REMOTE_NAME_FOR_LOCAL_GIT_REPO,
             Self::Origin => RemoteName::new("origin"),
         }
     }
@@ -81,7 +89,13 @@ impl Ref {
             Self::X => "refs/heads/x",
             Self::Y => "refs/heads/y",
             Self::Origin => "refs/remotes/origin/y",
+            Self::T => "refs/tags/t",
         }
+    }
+
+    /// One of `refs`, drawn.
+    fn draw(tc: &TestCase, refs: &[Self]) -> Self {
+        refs[tc.draw(gs::integers::<usize>().max_value(refs.len() - 1))]
     }
 }
 
@@ -100,6 +114,10 @@ struct Machine {
     v: Slot,
     g: RefTarget,
     moved: bool,
+    /// Ghost: a `jj undo` or `jj op restore` since the last import left a record that
+    /// doesn't match `.git`, which `restoreLocal_inv` and `restoreRemote_cinv` allow only
+    /// where the restored slot isn't `Restorable`.
+    restored: bool,
 }
 
 /// The model's `RefAlg` instance: jj's merge, and its notions of resolved and writable.
@@ -118,6 +136,21 @@ impl Alg {
 
     fn writable(&self, t: &RefTarget) -> bool {
         Self::resolved(t) && t.as_normal() != Some(self.repo.store().root_commit_id())
+    }
+
+    /// `Sides.side`: the side of a conflict that musubi writes to `.git`
+    /// (`export_conflicted_remote_bookmarks`), the one committed last, then the greatest
+    /// commit id; none if no side is present.
+    fn side(&self, t: &RefTarget) -> Option<RefTarget> {
+        t.iter()
+            .step_by(2)
+            .flatten()
+            .map(|id| {
+                let commit = self.repo.store().get_commit(id).unwrap();
+                (commit.committer().timestamp.timestamp.0, id.clone())
+            })
+            .max()
+            .map(|(_, id)| RefTarget::normal(id))
     }
 }
 
@@ -227,6 +260,7 @@ impl Machine {
         let (v, set) = self.v.import(alg, &self.g);
         self.v = v;
         self.moved = false;
+        self.restored = false;
         set
     }
 
@@ -268,21 +302,76 @@ impl Machine {
         }
     }
 
-    /// `LInv`.
-    fn local_inv(&self) -> bool {
-        self.moved || (self.v.r == self.g && self.v.k == self.g)
+    /// musubi's export of a conflicted remote bookmark (`exportConflicted`,
+    /// `export_conflicted_remote_bookmarks`): its side, written to `.git` if that holds a
+    /// value the hive knows of, a term of the conflict or the record, and to the record.
+    fn export_conflicted(&mut self, alg: &Alg) {
+        let v = &mut self.v;
+        if Alg::resolved(&v.r) {
+            return;
+        }
+        let Some(side) = alg.side(&v.r) else {
+            return;
+        };
+        if self.g != side {
+            let actual = self.g.as_normal();
+            let known = v.r.iter().any(|term| term.as_ref() == actual)
+                || (Alg::resolved(&v.k) && v.k.as_normal() == actual);
+            if !known {
+                return;
+            }
+            self.g = side.clone();
+        }
+        v.k = side;
     }
 
-    /// `RInv`.
-    fn remote_inv(&self) -> bool {
-        Alg::resolved(&self.g) && self.local_inv()
+    /// The model's invariant for `r`: `LInv`, or for `y@origin` `CInv`, which is `RInv`
+    /// but for a conflicted remote bookmark whose side musubi wrote.
+    fn strict_inv(&self, alg: &Alg, r: Ref) -> bool {
+        if r != Ref::Origin {
+            return self.moved || (self.v.r == self.g && self.v.k == self.g);
+        }
+        Alg::resolved(&self.g)
+            && (self.moved
+                || (self.v.k == self.g
+                    && (self.v.r == self.g
+                        || (!Alg::resolved(&self.v.r)
+                            && alg.side(&self.v.r).as_ref() == Some(&self.g)))))
     }
+
+    /// `strict_inv`, but where a restore left the record behind (`restored`).
+    fn inv(&self, alg: &Alg, r: Ref) -> bool {
+        self.restored || self.strict_inv(alg, r)
+    }
+
+    /// `Restorable`: whether restoring `o` here keeps the invariant, as the export puts
+    /// `.git` back or there is nothing to put back. For a remote bookmark (`remote`) that is
+    /// about its target, otherwise about the bookmark's.
+    fn restorable(&self, alg: &Alg, o: &Slot, remote: bool) -> bool {
+        let target = if remote { &o.r } else { &o.l };
+        alg.writable(target) || *target == self.v.k || o.r == self.v.r
+    }
+}
+
+/// The shared fields of the refs: `x`, `t`, and `y@origin`'s slot with no `K`.
+type Shared = (RefTarget, RefTarget, Slot);
+
+/// The shared fields of the refs whose slots are `slot`'s.
+fn shared(slot: impl Fn(Ref) -> Slot) -> Shared {
+    (
+        slot(Ref::X).l,
+        slot(Ref::T).l,
+        Slot {
+            k: RefTarget::absent(),
+            ..slot(Ref::Origin)
+        },
+    )
 }
 
 /// The model's machines, one for each ref, keeping the bookmark `y` the same in `Y`'s and
 /// `Origin`'s.
 #[derive(Clone, Debug)]
-struct Model([Machine; 3]);
+struct Model([Machine; 4]);
 
 impl Model {
     fn get(&self, r: Ref) -> &Machine {
@@ -317,11 +406,12 @@ impl Model {
         }
     }
 
-    /// `TSlot.realizeLocal` of `x` and `y`, and `realizeRemote` of `y@origin`, from the
-    /// canonical view's `x` and `y@origin` slots: the shared fields, without dropping
-    /// anything.
-    fn realize(&mut self, x: &Slot, origin: &Slot) {
-        self.at(Ref::X).v.l = x.l.clone();
+    /// `TSlot.realizeLocal` of `x`, `y` and `t`, and `realizeRemote` of `y@origin`, from
+    /// the canonical view's slots: the shared fields, without dropping anything.
+    fn realize(&mut self, canonical: &Shared) {
+        let (x, t, origin) = canonical;
+        self.at(Ref::X).v.l = x.clone();
+        self.at(Ref::T).v.l = t.clone();
         self.at(Ref::Y).v.l = origin.l.clone();
         let v = &mut self.at(Ref::Origin).v;
         v.l = origin.l.clone();
@@ -329,8 +419,40 @@ impl Model {
         v.tr = origin.tr;
     }
 
+    fn shared(&self) -> Shared {
+        shared(|r| self.get(r).v.clone())
+    }
+
+    /// `jj undo` or `jj op restore` to an operation whose view is `view`: each ref's slot as
+    /// there, but `K`, as `view_with_desired_portions_restored` in jj-cli restores it, then
+    /// jj's export. Where that leaves a record that doesn't match `.git`, the ghost
+    /// `restored`, which only an unrestorable slot may set.
+    fn restore(&mut self, alg: &Alg, view: &View) {
+        let mut restorable = [true; 4];
+        for r in Ref::ALL {
+            let o = slot(view, r);
+            let m = self.at(r);
+            restorable[r as usize] = m.restorable(alg, &o, r == Ref::Origin);
+            m.v = Slot {
+                k: m.v.k.clone(),
+                ..o
+            };
+        }
+        self.export(alg, false, false);
+        for r in Ref::ALL {
+            let m = self.at(r);
+            if !m.inv(alg, r) {
+                assert!(
+                    !restorable[r as usize],
+                    "{r:?}: a restorable slot left the record behind: {m:?}"
+                );
+                m.restored = true;
+            }
+        }
+    }
+
     /// jj's merge of op heads, `first` merged with `second` against `base`.
-    fn merge(alg: &Alg, base: &Self, first: &Self, second: &Self) -> [Slot; 3] {
+    fn merge(alg: &Alg, base: &Self, first: &Self, second: &Self) -> [Slot; 4] {
         Ref::ALL.map(|r| Slot::merge(alg, &base.get(r).v, &first.get(r).v, &second.get(r).v))
     }
 
@@ -351,11 +473,16 @@ impl Model {
         self.slots() != before
     }
 
-    /// jj's export of every ref, `x`'s update failing if `x_locked`.
-    fn export(&mut self, alg: &Alg, x_locked: bool) {
+    /// jj's export of every ref, `x`'s update failing if `x_locked`, then, if `musubi`
+    /// exports, its export of a conflicted `y@origin`.
+    fn export(&mut self, alg: &Alg, x_locked: bool, musubi: bool) {
         self.at(Ref::X).export_local(alg, !x_locked);
         self.at(Ref::Y).export_local(alg, true);
         self.at(Ref::Origin).export_remote(alg);
+        self.at(Ref::T).export_local(alg, true);
+        if musubi {
+            self.at(Ref::Origin).export_conflicted(alg);
+        }
     }
 
     /// A `jj` command: an import, exported if it changed the view, since jj exports only a
@@ -363,21 +490,22 @@ impl Model {
     /// changed the view.
     fn jj(&mut self, alg: &Alg, change: impl FnOnce(&mut Self)) {
         if self.import(alg, &Ref::ALL) {
-            self.export(alg, false);
+            self.export(alg, false, false);
         }
         let before = self.slots();
         change(self);
         if self.slots() != before {
-            self.export(alg, false);
+            self.export(alg, false, false);
         }
     }
 }
 
 /// The repository the machines start from: `base`, `one` and `two` in a line, `three`
-/// beside them, each kept visible by a bookmark of its own, and `x`, `y` and `y@origin`, which
-/// `y` tracks, at `one`. Both machines track `y@origin` automatically, as the model assumes:
-/// without it, jj forgets that `y` tracks `y@origin` once both are gone, and merges nothing
-/// into `y` when `y@origin` comes back (docs/internals/conformance.md, "Per-machine refs").
+/// beside them, each kept visible by a bookmark of its own, and `x`, the tag `t`, `y` and
+/// `y@origin`, which `y` tracks, at `one`. Both machines track `y@origin` automatically, as
+/// the model assumes: without it, jj forgets that `y` tracks `y@origin` once both are gone,
+/// and merges nothing into `y` when `y@origin` comes back (docs/internals/conformance.md,
+/// "Per-machine refs").
 fn hive() -> Fixture {
     Fixture::recorded(&["alpha", "beta"], "refs", |hive| {
         let origin = hive.env.root().join("origin.git");
@@ -387,6 +515,7 @@ fn hive() -> Fixture {
         repo.jj(&["new", "-m", "two"]);
         repo.jj(&["bookmark", "create", "keep-two", "-r", "@"]);
         repo.jj(&["bookmark", "create", "x", "-r", "@-"]);
+        repo.jj(&["tag", "set", "t", "-r", "@-"]);
         repo.jj(&["new", "@--", "-m", "three"]);
         repo.jj(&["bookmark", "create", "keep-three", "-r", "@"]);
         repo.jj(&["new"]);
@@ -464,7 +593,12 @@ impl Refs {
         ];
         let model = Model(Ref::ALL.map(|r| {
             let (v, g) = read(&repo, r);
-            Machine { v, g, moved: false }
+            Machine {
+                v,
+                g,
+                moved: false,
+                restored: false,
+            }
         }));
         let head = (repo.op_id().clone(), model.clone());
         let mut refs = Self {
@@ -507,11 +641,15 @@ impl Refs {
             let (v, g) = read(&repo, r);
             assert_eq!(v, model.v, "{r:?}: bookmark, remote bookmark and git_refs");
             assert_eq!(g, model.g, "{r:?}: .git's {}", r.git_ref());
-            let inv = match r {
-                Ref::X | Ref::Y => model.local_inv(),
-                Ref::Origin => model.remote_inv(),
-            };
-            assert!(inv, "{r:?}: the model's invariant fails: {model:?}");
+            assert!(
+                model.inv(&self.alg, r),
+                "{r:?}: the model's invariant fails: {model:?}"
+            );
+            // Once the record is back, as a realization's export can put it, the invariant
+            // holds again in full.
+            if model.strict_inv(&self.alg, r) {
+                self.model.at(r).restored = false;
+            }
         }
     }
 
@@ -530,8 +668,9 @@ impl Refs {
         op.parent_ids().to_vec()
     }
 
-    /// Has machine `index` move `bookmark` to `l` with a `jj` command, or if `l` is where
-    /// it is, run a `jj` command that changes nothing; at the operation `at`, if given.
+    /// Has machine `index` move `bookmark` (or the tag) to `l` with a `jj` command, or if `l`
+    /// is where it is, run a `jj` command that changes nothing; at the operation `at`, if
+    /// given.
     fn jj_set(
         &self,
         index: usize,
@@ -555,14 +694,20 @@ impl Refs {
             } else {
                 id.hex()
             };
-            jj(&[
-                "bookmark",
-                "set",
-                bookmark.bookmark(),
-                "-r",
-                &rev,
-                "--allow-backwards",
-            ]);
+            if bookmark == Ref::T {
+                jj(&["tag", "set", "t", "-r", &rev, "--allow-move"]);
+            } else {
+                jj(&[
+                    "bookmark",
+                    "set",
+                    bookmark.bookmark(),
+                    "-r",
+                    &rev,
+                    "--allow-backwards",
+                ]);
+            }
+        } else if bookmark == Ref::T {
+            jj(&["tag", "delete", "t"]);
         } else {
             jj(&["bookmark", "delete", bookmark.bookmark()]);
         }
@@ -601,11 +746,22 @@ fn read(repo: &ReadonlyRepo, r: Ref) -> (Slot, RefTarget) {
 
 fn slot(view: &View, r: Ref) -> Slot {
     let name = RefName::new(r.bookmark());
-    let local = view.local_bookmarks.get(name).cloned();
-    let remote = view
-        .remote_views
-        .get(r.remote())
-        .and_then(|remote| remote.bookmarks.get(name));
+    let (local, remote) = if r == Ref::T {
+        (
+            view.local_tags.get(name),
+            view.remote_views
+                .get(r.remote())
+                .and_then(|remote| remote.tags.get(name)),
+        )
+    } else {
+        (
+            view.local_bookmarks.get(name),
+            view.remote_views
+                .get(r.remote())
+                .and_then(|remote| remote.bookmarks.get(name)),
+        )
+    };
+    let local = local.cloned();
     Slot {
         l: local.unwrap_or_else(RefTarget::absent),
         r: remote.map_or_else(RefTarget::absent, |remote| remote.target.clone()),
@@ -665,7 +821,7 @@ impl Refs {
             theirs.at(r).g = self.model.get(r).g.clone();
         }
         theirs.bookmark_set(&self.alg, bookmark, l);
-        theirs.export(&self.alg, false);
+        theirs.export(&self.alg, false, false);
         for r in Ref::ALL {
             let g = theirs.get(r).g.clone();
             self.model.at(r).g = g;
@@ -706,22 +862,22 @@ impl Refs {
         self.check();
     }
 
-    /// The other machine moves `x` to `moved_to`, or if none, fetches `y` after it moved in
-    /// `origin` to `upstream`, and both sync, the update of `x` failing if `locked`, while
-    /// git's lock on `refs/heads/x` is held: an `advance` of each ref, and the export. If
-    /// `concurrent`, the other machine acts before it has this machine's latest operations,
-    /// so that when it syncs, it merges them with its own, and this machine realizes the
-    /// merge: `realizeMerge`, which is jj's merge (`realizeMerge_eq`), against the operation
-    /// both last synced at. It moves `x` then, since concurrent fetches would merge to a
-    /// conflicted remote bookmark, which `RStep.advance` doesn't admit.
+    /// The other machine moves `x` or `t` (`moved`), or if none, fetches `y` after it moved
+    /// in `origin` to `upstream`, and both sync, the update of `x` failing if `locked`, while
+    /// git's lock on `refs/heads/x` is held: an `advance` of each ref, and the export, with
+    /// musubi's of a conflicted `y@origin`. If `concurrent`, the other machine acts before it
+    /// has this machine's latest operations, so that when it syncs, it merges them with its
+    /// own, and this machine realizes the merge: `realizeMerge`, which is jj's merge
+    /// (`realizeMerge_eq`), against the operation both last synced at. Two fetches merge so
+    /// to a conflicted `y@origin` if both moved it, and the side musubi writes for it must
+    /// be the same on both machines.
     fn musubi_realizes_with(
         &mut self,
-        moved_to: Option<RefTarget>,
+        moved: Option<(Ref, RefTarget)>,
         upstream: RefTarget,
         locked: bool,
         concurrent: bool,
     ) {
-        assert!(!concurrent || moved_to.is_some());
         self.fixture.hive.sync(HERE).unwrap();
         if !concurrent {
             // Both up to date, so that what this machine realizes follows its op head.
@@ -730,25 +886,32 @@ impl Refs {
         }
         let (synced_op, base) = self.synced.clone();
         let ours = self.head();
-        match &moved_to {
+        match &moved {
             None => {
                 self.push_upstream(upstream);
                 self.fixture.repo(THERE).jj(&["git", "fetch"]);
             }
-            Some(c) => {
-                // The other machine's `x` is this one's when they last synced.
-                let current = base.get(Ref::X).v.l.clone();
-                self.jj_set(THERE, Ref::X, c, &current, None);
+            Some((r, c)) => {
+                // The other machine's ref is this one's when they last synced.
+                let current = base.get(*r).v.l.clone();
+                self.jj_set(THERE, *r, c, &current, None);
             }
         }
         // What the other machine's operations leave in the hive, the shared fields of its
         // view, are what this machine's model says the other's command made of them: the
         // other machine's own refs changed nothing.
         let there = self.fixture.load(THERE);
-        let x = slot(there.view().store_view(), Ref::X);
-        let origin = slot(there.view().store_view(), Ref::Origin);
+        let view = there.view().store_view();
+        let canonical = shared(|r| slot(view, r));
         let mut expected = base.clone();
-        match moved_to {
+        // The other machine's command imports first, and resolves a conflicted `y@origin` to
+        // the side musubi wrote there, as this machine's import would
+        // (`conflicted_import_agrees`).
+        if let Some(side) = self.conflicted_side(&expected) {
+            expected.at(Ref::Origin).g = side;
+            expected.import(&self.alg, &[Ref::Origin]);
+        }
+        match moved {
             None => {
                 let (theirs, _) = expected
                     .get(Ref::Origin)
@@ -760,16 +923,12 @@ impl Refs {
                     ..theirs
                 };
             }
-            Some(c) => expected.set(Ref::X, c),
+            Some((r, c)) => expected.set(r, c),
         }
-        let shared = |model: &Model| {
-            let (x, origin) = (&model.get(Ref::X).v, &model.get(Ref::Origin).v);
-            (x.l.clone(), origin.l.clone(), origin.r.clone(), origin.tr)
-        };
         assert_eq!(
-            (x.l.clone(), origin.l.clone(), origin.r.clone(), origin.tr),
-            shared(&expected),
-            "the other machine's x, y and y@origin"
+            canonical,
+            expected.shared(),
+            "the other machine's x, t, y and y@origin"
         );
         self.fixture.hive.sync(THERE).unwrap();
         let lock = self
@@ -784,20 +943,23 @@ impl Refs {
         if locked {
             std::fs::remove_file(&lock).unwrap();
         }
-        // `LStep.advance` for `x` and `y`, and `RStep.advance` for `y@origin`, then the
+        // `LStep.advance` for `x`, `y` and `t`, and `CStep.advance` for `y@origin`, then the
         // export, if there was anything to realize: a fetch that brings nothing new makes no
         // operation.
-        if shared(&expected) != shared(&base) {
-            // `RStep.advance`'s precondition, which offering no root commit keeps.
+        if expected.shared() != base.shared() {
+            // `CStep.advance`'s precondition, which offering no root commit keeps.
             let g = self.model.at(Ref::Origin).g.clone();
-            assert!(origin.r == g || self.alg.writable(&origin.r));
+            let advances = |r: &RefTarget| {
+                *r == g || self.alg.writable(r) || (!Alg::resolved(r) && self.alg.side(r).is_some())
+            };
+            assert!(advances(&canonical.2.r));
             if ours == synced_op {
-                self.model.realize(&x, &origin);
+                self.model.realize(&canonical);
             } else {
                 // Theirs is realized here from the base, its record the base's, and merged
                 // with ours as the other machine merged them.
                 let mut theirs = base.clone();
-                theirs.realize(&x, &origin);
+                theirs.realize(&canonical);
                 let parents = self.merge_parents();
                 assert!(
                     parents.contains(&ours),
@@ -811,39 +973,102 @@ impl Refs {
                 for (r, v) in Ref::ALL.into_iter().zip(merged) {
                     self.model.at(r).v = v;
                 }
-                let r = &self.model.get(Ref::Origin).v.r;
-                assert!(*r == g || self.alg.writable(r));
+                assert!(advances(&self.model.get(Ref::Origin).v.r));
             }
-            self.model.export(&self.alg, locked);
+            self.model.export(&self.alg, locked, true);
         }
         self.check();
+        // Every machine writes the same side of a conflicted `y@origin` to its `.git`.
+        if let Some(side) = self.conflicted_side(&self.model) {
+            let (there, g) = read(&self.fixture.load(THERE), Ref::Origin);
+            assert_eq!(
+                there.r,
+                self.model.get(Ref::Origin).v.r,
+                "the other machine's y@origin"
+            );
+            assert_eq!(g, side, "the other machine's refs/remotes/origin/y");
+        }
         self.synced = (self.head(), self.model.clone());
+    }
+
+    /// The side musubi writes for `y@origin` in `model`, if it is conflicted.
+    fn conflicted_side(&self, model: &Model) -> Option<RefTarget> {
+        let r = &model.get(Ref::Origin).v.r;
+        if Alg::resolved(r) {
+            None
+        } else {
+            self.alg.side(r)
+        }
+    }
+
+    /// `jj undo`, or if `target`, `jj op restore` to it: as a `jj` command, its import, then
+    /// `Model::restore` of the operation it restores, read from its description, if it made
+    /// one. jj refuses to undo a merge operation, or one made in another workspace.
+    fn jj_restores_to(&mut self, target: Option<OperationId>) {
+        let before = self.head();
+        let repo = self.fixture.repo(HERE);
+        let output = match &target {
+            None => repo.jj_output(&["undo"]),
+            Some(op) => repo.jj_output(&["op", "restore", &op.hex()]),
+        };
+        if self.model.import(&self.alg, &Ref::ALL) {
+            self.model.export(&self.alg, false, false);
+        }
+        let repo = self.fixture.load(HERE);
+        let description = &repo.operation().metadata().description;
+        let restored = (repo.op_id() != &before)
+            .then(|| {
+                description
+                    .strip_prefix("undo: restore to operation ")
+                    .or_else(|| description.strip_prefix("restore to operation "))
+            })
+            .flatten();
+        match restored {
+            Some(hex) => {
+                let op = OperationId::try_from_hex(hex).unwrap();
+                if let Some(target) = &target {
+                    assert_eq!(&op, target);
+                }
+                let op = block_on(repo.loader().load_operation(&op)).unwrap();
+                let view = block_on(op.view()).unwrap();
+                self.model.restore(&self.alg, view.store_view());
+            }
+            // jj makes no operation if the restored view is the current one, as when the
+            // operation undone changed only `git_refs`, which a restore keeps.
+            None => assert!(
+                !output.status.success()
+                    || String::from_utf8_lossy(&output.stderr).contains("Nothing changed."),
+                "restored nothing"
+            ),
+        }
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                target.is_none()
+                    && (stderr.contains("Cannot undo a merge operation")
+                        || stderr.contains("Refusing to undo operation")),
+                "{stderr}"
+            );
+        }
+        self.check();
     }
 }
 
 #[hegel::state_machine]
 impl Refs {
-    /// `git update-ref` moves or deletes `refs/heads/x` or `refs/remotes/origin/y`:
-    /// `LStep.gitMove` or `RStep.gitMove`.
+    /// `git update-ref` moves or deletes `refs/heads/x`, `refs/tags/t` or
+    /// `refs/remotes/origin/y`: `LStep.gitMove` or `RStep.gitMove`.
     #[rule(weight = 2)]
     fn git_moves(&mut self, tc: TestCase) {
-        let r = if tc.draw(gs::booleans()) {
-            Ref::X
-        } else {
-            Ref::Origin
-        };
+        let r = Ref::draw(&tc, &[Ref::X, Ref::T, Ref::Origin]);
         let g = self.target(&tc, false, &self.model.get(r).g);
         self.git_moves_to(r, g);
     }
 
-    /// A `jj` command that moves `x` or `y`, or changes nothing (`Model::jj`).
+    /// A `jj` command that moves `x`, `y` or `t`, or changes nothing (`Model::jj`).
     #[rule]
     fn jj_runs(&mut self, tc: TestCase) {
-        let bookmark = if tc.draw(gs::booleans()) {
-            Ref::X
-        } else {
-            Ref::Y
-        };
+        let bookmark = Ref::draw(&tc, &[Ref::X, Ref::T, Ref::Y]);
         let current = self.imported(bookmark);
         let l = if tc.draw(gs::booleans()) {
             self.target(&tc, true, &current)
@@ -853,18 +1078,26 @@ impl Refs {
         self.jj_sets(bookmark, l);
     }
 
-    /// A `jj` command at the operation before the latest action moves `x` or `y`, and the
-    /// next merges it with the head.
+    /// A `jj` command at the operation before the latest action moves `x`, `y` or `t`, and
+    /// the next merges it with the head.
     #[rule]
     fn jj_runs_at_older_op(&mut self, tc: TestCase) {
-        let bookmark = if tc.draw(gs::booleans()) {
-            Ref::X
-        } else {
-            Ref::Y
-        };
+        let bookmark = Ref::draw(&tc, &[Ref::X, Ref::T, Ref::Y]);
         let current = self.older.1.get(bookmark).v.l.clone();
         let l = self.target(&tc, true, &current);
         self.jj_sets_at_older_op(bookmark, l);
+    }
+
+    /// `jj undo`, or `jj op restore` to the operation before the latest action or to the one
+    /// both machines last synced at.
+    #[rule]
+    fn jj_restores(&mut self, tc: TestCase) {
+        let target = match tc.draw(gs::integers::<u8>().max_value(2)) {
+            0 => None,
+            1 => Some(self.older.0.clone()),
+            _ => Some(self.synced.0.clone()),
+        };
+        self.jj_restores_to(target);
     }
 
     /// `y` moves in `origin`, and `jj git fetch` fetches it.
@@ -874,39 +1107,48 @@ impl Refs {
         self.jj_fetches_from(upstream);
     }
 
-    /// The other machine moves `x`, or fetches `y` after it moved in `origin`, with or
-    /// without this machine's latest operations, and both sync (`musubi_realizes_with`).
+    /// The other machine moves `x` or `t`, or fetches `y` after it moved in `origin`, with
+    /// or without this machine's latest operations, and both sync (`musubi_realizes_with`).
     #[rule(weight = 2)]
     fn musubi_realizes(&mut self, tc: TestCase) {
         let concurrent = tc.draw(gs::booleans());
-        // Concurrent fetches merge to a conflicted remote bookmark, which musubi exports
-        // itself (`export_conflicted_remote_bookmarks`), outside the model.
-        let fetch = !concurrent && tc.draw(gs::booleans());
+        let fetch = tc.draw(gs::booleans());
         let locked = tc.draw(gs::booleans());
-        let moved_to = (!fetch).then(|| {
-            let current = self.synced_or_current(concurrent);
-            self.target(&tc, true, &current)
+        let moved = (!fetch).then(|| {
+            let r = Ref::draw(&tc, &[Ref::X, Ref::T]);
+            // The other machine's: as when they last synced, if it is behind, or else as
+            // here.
+            let current = if concurrent {
+                self.synced.1.get(r).v.l.clone()
+            } else {
+                self.model.get(r).v.l.clone()
+            };
+            (r, self.target(&tc, true, &current))
         });
         let upstream = self.target(&tc, false, &self.upstream);
-        self.musubi_realizes_with(moved_to, upstream, locked, concurrent);
-    }
-}
-
-impl Refs {
-    /// `x` as the other machine has it: as when they last synced, if it is behind, or else
-    /// as here.
-    fn synced_or_current(&self, concurrent: bool) -> RefTarget {
-        if concurrent {
-            self.synced.1.get(Ref::X).v.l.clone()
-        } else {
-            self.model.get(Ref::X).v.l.clone()
-        }
+        self.musubi_realizes_with(moved, upstream, locked, concurrent);
     }
 }
 
 #[hegel::test(test_cases = refs_cases(), suppress_health_check = [HealthCheck::TooSlow])]
 fn bookmarks_conform_to_refs_model(tc: TestCase) {
     hegel::stateful::machine(Refs::new()).steps(10).run(tc);
+}
+
+/// `restore_reverts`, as jj does it, with no sync: `x` at the root commit, which jj can't
+/// export, then moved to `two` and exported, then `jj undo`, which restores `x` to the root
+/// and `x@git` to `one`, but keeps `git_refs` at `two`. The next `jj` command takes `.git`'s
+/// `two` for a move made with git, and makes `x` a conflict.
+#[test]
+fn undo_of_an_unexportable_bookmark_conflicts_it() {
+    let mut refs = Refs::new();
+    refs.jj_sets(Ref::X, RefTarget::normal(refs.commits[0].clone()));
+    refs.jj_sets(Ref::X, RefTarget::normal(refs.commits[3].clone()));
+    refs.jj_restores_to(None);
+    assert!(refs.model.get(Ref::X).restored);
+    let y = refs.imported(Ref::Y);
+    refs.jj_sets(Ref::Y, y);
+    assert!(!refs.model.get(Ref::X).v.l.is_resolved());
 }
 
 /// How many cases to make: `MUSUBI_CONFORMANCE_CASES`, as for the other conformance tests,

@@ -119,6 +119,15 @@ open Musubi
 #print axioms Refs.shortcutUnguarded_untracks
 #print axioms Refs.realize_not_WF
 #print axioms Refs.firstBase_reverts
+#print axioms Refs.restoreLocal_inv
+#print axioms Refs.restoreLocal_reach
+#print axioms Refs.restoreRemote_inv
+#print axioms Refs.restoreRemote_cinv
+#print axioms Refs.restore_reverts
+#print axioms Refs.CReach.inv
+#print axioms Refs.conflictedNoSpuriousRevert
+#print axioms Refs.conflicted_import_agrees
+#print axioms Refs.conflicted_resolves
 -- Which copies a hive shows
 #print axioms Presence.Hist.present_local
 #print axioms Presence.Hist.present_congr

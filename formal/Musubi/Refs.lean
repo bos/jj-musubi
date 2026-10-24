@@ -27,10 +27,27 @@ For a remote bookmark `x@origin`, which is shared, the record of `refs/remotes/o
   import (`remoteNoSpuriousRevert`);
 - otherwise, the import resets the remote bookmark to this machine's `.git` value and merges
   that into the bookmark tracking it (`remote_reset_without_export`), with no `git` command
-  having run. jj skips the export of a conflicted remote bookmark, so musubi writes one of
-  its sides to `.git` itself, the same on every machine
-  (`export_conflicted_remote_bookmarks` in `node/git.rs`); the import then resolves the
-  conflict to that side. A ref update that fails for another reason still ends this way.
+  having run. A ref update that fails for another reason ends this way;
+- jj skips the export of a conflicted remote bookmark, which the merge of two machines'
+  fetches makes, so musubi writes one of its sides to `.git` itself (`exportConflicted`,
+  `export_conflicted_remote_bookmarks` in `node/git.rs`). With that step (`CStep`), an import
+  changes nothing unless git moved the ref, or resolves the conflict to that side
+  (`conflictedNoSpuriousRevert`, not vacuously: `conflicted_resolves`), and every machine
+  whose views share the bookmark and remote bookmark imports the same
+  (`conflicted_import_agrees`), whichever value the hive knew of its `.git` held before
+  musubi's export: any other is a move made with git.
+
+A tag `t` is a local bookmark's slot: `L` is `t`, `R` is `t@git`, which jj always tracks, and
+`K` is `git_refs["refs/tags/t"]`, which jj imports and exports as it does a local bookmark's,
+so the theorems about local bookmarks are about tags too.
+
+`jj undo` and `jj op restore` restore an older view's bookmark and remote bookmarks, `x@git`
+included, but not `git_refs`, then export (`restoreLocal`, `restoreRemote`). Where the export
+can write the restored bookmark, or there is nothing to write, the invariant holds after
+(`restoreLocal_inv`, `restoreRemote_inv`, `restoreRemote_cinv`); where it can't, as for the
+root commit or a conflict, the record stays behind `.git`, and the next import moves the
+bookmark with no `git` command having run (`restore_reverts`). That is jj's: no musubi step
+takes part, and other machines realize only the restored shared fields.
 
 Concurrent op heads, which a `jj` command at an older operation makes, or one that loaded the
 head before musubi published, are merged as jj merges views (`Slot.merge3`, `TSlot.merge`):
@@ -69,7 +86,14 @@ What the model still leaves out, as testing it against jj showed
   tracking state of a remote ref with no target differs.
 - Merges of more than two heads, which jj and musubi merge one at a time, and criss-cross
   merges, whose base is itself a merge, are not modeled as runs; nor are concurrent heads of
-  remote bookmarks, though `merge3_synced` is about any slot.
+  remote bookmarks, though `merge3_synced` is about any slot. A conflicted remote bookmark
+  enters `CStep` only by musubi's realization, as of a merge another machine made; a `jj`
+  command merging this machine's own heads to one is jj's merge, whose import resolves it to
+  this machine's `.git`.
+- A restore that brings back a conflicted remote bookmark isn't `RestorableRemote`, unless
+  the remote bookmark is that conflict already: jj writes no side, so this machine's next
+  import resolves the conflict to its own `.git` value, where another machine that realizes
+  the restore first resolves it to musubi's side, and the hive merges the two.
 -/
 
 namespace Musubi.Refs
@@ -365,6 +389,270 @@ theorem remote_reset_without_export {s : Machine T} {l c : T} (hs : RInv s)
   simp only [ht]
   refine ⟨hm, rfl, rfl, ?_⟩
   simp [Slot.import, realizeRemote, Ne.symm hc]
+
+/-! ## Restores
+
+`jj undo` and `jj op restore` restore an older view of this machine's: its bookmarks and
+remote bookmarks, `x@git` among them, but not `git_refs`, which stays as it is
+(`view_with_desired_portions_restored` in jj-cli). The command's transaction then exports, so
+`.git` follows the restored bookmark where it can. All of it is jj's code; musubi replicates
+only the shared fields of the result, which another machine realizes as any other operation
+(`LStep.advance`, `RStep.advance`). -/
+
+/-- `jj undo` or `jj op restore` to an operation whose view had the slot `o`, then jj's
+export. -/
+def restoreLocal (o : Slot T) (s : Machine T) : Machine T :=
+  exportLocal { s with v := { o with K := s.v.K } }
+
+/-- The export puts `.git` back to the restored bookmark, or there is nothing to put back:
+the restored bookmark is writable or `git_refs`'s value, or the restored record is the
+current one. -/
+def Restorable (o : Slot T) (s : Machine T) : Prop :=
+  writable o.L = true ∨ o.L = s.v.K ∨ o.R = s.v.R
+
+theorem exportLocal_moved (s : Machine T) : (exportLocal s).moved = s.moved := by
+  unfold exportLocal; split <;> (try split) <;> rfl
+
+/-- **A restorable restore keeps the invariant**, while `.git` holds a resolved value, as
+git's refs do. The restored machine is then one `LReach` reaches (`restoreLocal_reach`), and
+`noSpuriousRevert` holds of its runs. -/
+theorem restoreLocal_inv {o : Slot T} {s : Machine T} (hs : LInv s)
+    (hg : s.moved = false → resolved s.G = true) (h : Restorable o s) :
+    LInv (restoreLocal o s) := by
+  intro hm
+  rw [restoreLocal, exportLocal_moved] at hm
+  obtain ⟨hR, hK⟩ := hs hm
+  have hG := hg hm
+  unfold restoreLocal exportLocal
+  simp only
+  by_cases h1 : o.L = s.v.K
+  · have hr : resolved o.L = true := by rw [h1, hK]; exact hG
+    rw [ite_eq_left h1, ite_eq_left hr]
+    exact ⟨h1.trans hK, hK⟩
+  · rw [ite_eq_right h1]
+    by_cases h2 : writable o.L = true ∧ resolved s.v.K = true ∧ (s.G = s.v.K ∨ s.G = o.L)
+    · rw [ite_eq_left h2]
+      exact ⟨rfl, rfl⟩
+    · rw [ite_eq_right h2]
+      refine ⟨?_, hK⟩
+      rcases h with hw | hk | hr
+      · exact absurd ⟨hw, hK ▸ hG, Or.inl hK.symm⟩ h2
+      · exact absurd hk h1
+      · exact hr.trans hR
+
+theorem restoreLocal_reach {o : Slot T} {s : Machine T} (hs : LReach s)
+    (hg : s.moved = false → resolved s.G = true) (h : Restorable o s) :
+    LReach (restoreLocal o s) :=
+  LReach.init (restoreLocal_inv hs.inv hg h)
+
+/-- `jj undo` or `jj op restore` of a remote bookmark: `x@origin` and its bookmark as in the
+older view, `git_refs` as it is, then jj's export: `RStep.advance` without its
+precondition. -/
+def restoreRemote (o : Slot T) (s : Machine T) : Machine T :=
+  exportRemote { s with v := { o with K := s.v.K } }
+
+/-- As `Restorable`, for the remote bookmark's target. -/
+def RestorableRemote (o : Slot T) (s : Machine T) : Prop :=
+  writable o.R = true ∨ o.R = s.v.K ∨ o.R = s.v.R
+
+theorem restoreRemote_inv {o : Slot T} {s : Machine T} (hs : RInv s)
+    (h : RestorableRemote o s) : RInv (restoreRemote o s) := by
+  have heq : restoreRemote o s = exportRemote { s with v := realizeRemote o.L o.R s.v } := rfl
+  rw [heq]
+  by_cases hm : s.moved = false
+  · obtain ⟨hR, hK⟩ := hs.2 hm
+    apply advance_inv hs
+    rcases h with hw | hk | hr
+    · exact Or.inr hw
+    · exact Or.inl (hk.trans hK)
+    · exact Or.inl (hr.trans hR)
+  · exact exportRemote_inv ⟨hs.1, fun h => absurd h hm⟩
+
+/-! ## Conflicted remote bookmarks
+
+Concurrent fetches on two machines merge to a conflicted remote bookmark, which jj's export
+skips. After jj's export of each realization, musubi writes one of its sides to
+`refs/remotes/origin/x` itself (`export_conflicted_remote_bookmarks` in `node/git.rs`), where
+`.git` holds a value the hive knows of: a term of the conflict, or the record. It chooses the
+side the same way on every machine, so that every machine's next import resolves the
+conflict to it. -/
+
+/-- The side musubi writes for a conflict: the one committed last, then the greatest commit
+id, the same on every machine, and none if no side is present; and whether a value is one of
+a conflict's terms, absent included. -/
+class Sides (T : Type) [RefAlg T] where
+  side : T → Option T
+  term : T → T → Bool
+  side_resolved : ∀ t c, side t = some c → resolved c = true
+
+open Sides
+
+section Conflicts
+
+variable [Sides T]
+
+/-- musubi's export of a conflicted remote bookmark: its side, to `.git` and the record, if
+`.git` holds the side, a term, or the record's value. Any other value git put there since, and
+musubi leaves it for the import to take, as `moved` says. -/
+def exportConflicted (s : Machine T) : Machine T :=
+  match side s.v.R with
+  | some c =>
+    if resolved s.v.R = false ∧
+        (s.G = c ∨ term s.v.R s.G = true ∨ (resolved s.v.K = true ∧ s.G = s.v.K)) then
+      { s with v := { s.v with K := c }, G := c }
+    else s
+  | none => s
+
+/-- `RStep`, but musubi may realize a conflict with a side, as the merge of two machines'
+fetches, and exports it with `exportConflicted`. -/
+inductive CStep : Machine T → Machine T → Prop
+  | gitMove (s : Machine T) (g : T) :
+      resolved g = true → CStep s { s with G := g, moved := true }
+  | jjImport (s : Machine T) : CStep s { s with v := s.v.import s.G, moved := false }
+  | jjExport (s : Machine T) : CStep s (exportRemote s)
+  | set (s : Machine T) (l : T) : CStep s { s with v := { s.v with L := l } }
+  | fetch (s : Machine T) (r : T) :
+      resolved r = true → CStep s { s with v := s.v.import r, G := r, moved := false }
+  | advance (s : Machine T) (l c : T) :
+      (c = s.G ∨ writable c = true ∨ (resolved c = false ∧ (side c).isSome)) →
+      CStep s (exportConflicted (exportRemote { s with v := realizeRemote l c s.v }))
+
+/-- `RInv`, but the remote bookmark may be a conflict whose side `.git` and the record
+have. -/
+def CInv (s : Machine T) : Prop :=
+  resolved s.G = true ∧ (s.moved = false → s.v.K = s.G ∧
+    (s.v.R = s.G ∨ (resolved s.v.R = false ∧ side s.v.R = some s.G)))
+
+omit [DecidableEq T] in
+theorem RInv.toC {s : Machine T} (h : RInv s) : CInv s :=
+  ⟨h.1, fun hm => ⟨(h.2 hm).2, Or.inl (h.2 hm).1⟩⟩
+
+theorem exportRemote_cinv {s : Machine T} (hs : CInv s) : CInv (exportRemote s) := by
+  unfold exportRemote
+  by_cases h : s.v.R ≠ s.v.K ∧ writable s.v.R = true ∧ resolved s.v.K = true ∧
+      (s.G = s.v.K ∨ s.G = s.v.R)
+  · rw [ite_eq_left h]
+    exact ⟨writable_resolved _ h.2.1, fun _ => ⟨rfl, Or.inl rfl⟩⟩
+  · rw [ite_eq_right h]
+    exact hs
+
+/-- On a resolved remote bookmark, musubi's export does nothing. -/
+theorem exportConflicted_resolved {s : Machine T} (h : resolved s.v.R = true) :
+    exportConflicted s = s := by
+  unfold exportConflicted
+  split
+  · rw [ite_eq_right (fun h' => by rw [h] at h'; exact Bool.noConfusion h'.1)]
+  · rfl
+
+/-- musubi's export of a realization, conflicted or not. -/
+theorem cadvance_inv {s : Machine T} {l c : T} (hs : CInv s)
+    (hc : c = s.G ∨ writable c = true ∨ (resolved c = false ∧ (side c).isSome)) :
+    CInv (exportConflicted (exportRemote { s with v := realizeRemote l c s.v })) := by
+  obtain ⟨hg, hsync⟩ := hs
+  unfold exportRemote realizeRemote
+  simp only
+  by_cases h : c ≠ s.v.K ∧ writable c = true ∧ resolved s.v.K = true ∧ (s.G = s.v.K ∨ s.G = c)
+  · rw [ite_eq_left h, exportConflicted_resolved (writable_resolved _ h.2.1)]
+    exact ⟨writable_resolved _ h.2.1, fun _ => ⟨rfl, Or.inl rfl⟩⟩
+  · rw [ite_eq_right h]
+    by_cases hr : resolved c = true
+    · rw [exportConflicted_resolved hr]
+      refine ⟨hg, fun hm => ?_⟩
+      obtain ⟨hK, _⟩ := hsync hm
+      refine ⟨hK, Or.inl ?_⟩
+      by_cases hcK : c = s.v.K
+      · exact hcK.trans hK
+      · rcases hc with hc | hw | ⟨hx, _⟩
+        · exact hc
+        · exact absurd ⟨hcK, hw, hK ▸ hg, Or.inl hK.symm⟩ h
+        · rw [hr] at hx; exact Bool.noConfusion hx
+    · have hr' : resolved c = false := by simpa using hr
+      unfold exportConflicted
+      simp only
+      split
+      · next d hd =>
+        by_cases hw : resolved c = false ∧
+            (s.G = d ∨ term c s.G = true ∨ (resolved s.v.K = true ∧ s.G = s.v.K))
+        · rw [ite_eq_left hw]
+          exact ⟨side_resolved _ _ hd, fun _ => ⟨rfl, Or.inr ⟨hr', hd⟩⟩⟩
+        · rw [ite_eq_right hw]
+          refine ⟨hg, fun hm => absurd ⟨hr', Or.inr (Or.inr ?_)⟩ hw⟩
+          obtain ⟨hK, _⟩ := hsync hm
+          exact ⟨hK ▸ hg, hK.symm⟩
+      · next hd =>
+        refine ⟨hg, fun hm => ?_⟩
+        rcases hc with hc | hw | ⟨_, hx⟩
+        · rw [hc] at hr'; rw [hg] at hr'; exact Bool.noConfusion hr'
+        · rw [writable_resolved _ hw] at hr'; exact Bool.noConfusion hr'
+        · rw [hd] at hx; exact Bool.noConfusion hx
+
+theorem CStep.inv {s t : Machine T} (h : CStep s t) (hs : CInv s) : CInv t := by
+  cases h with
+  | gitMove g hg => exact ⟨hg, fun hm => by simp at hm⟩
+  | jjImport => exact ⟨hs.1, fun _ => ⟨rfl, Or.inl rfl⟩⟩
+  | jjExport => exact exportRemote_cinv hs
+  | set => exact hs
+  | fetch r hr => exact ⟨hr, fun _ => ⟨rfl, Or.inl rfl⟩⟩
+  | advance l c hc => exact cadvance_inv hs hc
+
+inductive CReach : Machine T → Prop
+  | init {s : Machine T} : CInv s → CReach s
+  | step {s t : Machine T} : CReach s → CStep s t → CReach t
+
+theorem CReach.inv {s : Machine T} (h : CReach s) : CInv s := by
+  induction h with
+  | init h => exact h
+  | step _ hst ih => exact hst.inv ih
+
+/-- `restoreRemote_inv`, with conflicts: a restorable restore keeps `CInv`. -/
+theorem restoreRemote_cinv {o : Slot T} {s : Machine T} (hs : CInv s)
+    (h : RestorableRemote o s) : CInv (restoreRemote o s) := by
+  unfold restoreRemote
+  by_cases hm : s.moved = false
+  · obtain ⟨hK, hR⟩ := hs.2 hm
+    have keep : o.R = s.G → CInv { s with v := { o with K := s.v.K } } :=
+      fun ho => ⟨hs.1, fun _ => ⟨hK, Or.inl ho⟩⟩
+    rcases h with hw | hk | hr
+    · by_cases hoK : o.R = s.v.K
+      · exact exportRemote_cinv (keep (hoK.trans hK))
+      · unfold exportRemote
+        simp only
+        rw [ite_eq_left ⟨hoK, hw, hK ▸ hs.1, Or.inl hK.symm⟩]
+        exact ⟨writable_resolved _ hw, fun _ => ⟨rfl, Or.inl rfl⟩⟩
+    · exact exportRemote_cinv (keep (hk.trans hK))
+    · exact exportRemote_cinv ⟨hs.1, fun _ => ⟨hK, hr ▸ hR⟩⟩
+  · exact exportRemote_cinv ⟨hs.1, fun h => absurd h hm⟩
+
+/-- **No spurious revert, with conflicts.** Unless git moved the ref, an import changes
+nothing, or resolves a conflicted remote bookmark to the side musubi chose, which depends
+only on the remote bookmark, shared by every machine. -/
+theorem conflictedNoSpuriousRevert {s : Machine T} (h : CReach s) (hm : s.moved = false) :
+    s.v.import s.G = s.v ∨ (resolved s.v.R = false ∧ side s.v.R = some s.G) := by
+  obtain ⟨hK, hR | hc⟩ := h.inv.2 hm
+  · exact Or.inl (Slot.import_self hR hK)
+  · exact Or.inr hc
+
+/-- **Every machine resolves a conflict alike.** Two machines whose views share the bookmark
+and the remote bookmark, as after both realized the same operation, and whose git didn't
+move the ref, import to the same bookmark and remote bookmark: whichever known value each
+`.git` held, musubi's export replaced it with the side. -/
+theorem conflicted_import_agrees {s s' : Machine T} (h : CReach s) (h' : CReach s')
+    (hm : s.moved = false) (hm' : s'.moved = false) (hL : s.v.L = s'.v.L)
+    (hR : s.v.R = s'.v.R) :
+    (s.v.import s.G).L = (s'.v.import s'.G).L ∧ (s.v.import s.G).R = (s'.v.import s'.G).R := by
+  have hG : s.G = s'.G := by
+    obtain ⟨hg, hi⟩ := h.inv
+    obtain ⟨hg', hi'⟩ := h'.inv
+    rcases (hi hm).2 with e | ⟨r, e⟩ <;> rcases (hi' hm').2 with e' | ⟨r', e'⟩
+    · exact e.symm.trans (hR.trans e')
+    · rw [← hR, e, hg] at r'; exact Bool.noConfusion r'
+    · rw [hR, e', hg'] at r; exact Bool.noConfusion r
+    · rw [hR, e'] at e; exact (Option.some.inj e).symm
+  unfold Slot.import
+  rw [hG, hL, hR]
+  exact ⟨rfl, rfl⟩
+
+end Conflicts
 
 /-! ## Merges of concurrent op heads
 
@@ -921,6 +1209,30 @@ example : (⟨Tgt.commit 2, .commit 2, .commit 2⟩ : Slot Tgt).import (.commit 
     ⟨.commit 1, .commit 1, .commit 1⟩ := by
   simp [Slot.import, RefAlg.merge]
 
+/-- Every conflict's side is `2`; no value is a term. -/
+instance : Sides Tgt where
+  side t := if t = .conflict then some (.commit 2) else none
+  term _ _ := false
+  side_resolved t c h := by
+    by_cases ht : t = .conflict
+    · simp only [ht, ite_true, Option.some.injEq] at h
+      subst h
+      rfl
+    · simp [ht] at h
+
+/-- The conflicted disjunct of `conflictedNoSpuriousRevert` isn't vacuous: musubi realizes a
+conflict of the bookmark and its remote bookmark, as the merge of two machines' fetches, and
+writes its side; the import then resolves both to it. -/
+theorem conflicted_resolves :
+    let s : Machine Tgt := ⟨⟨.commit 1, .commit 1, .commit 1⟩, .commit 1, false⟩
+    let t := exportConflicted (exportRemote { s with v := realizeRemote .conflict .conflict s.v })
+    CReach t ∧ t.moved = false ∧ t.G = .commit 2 ∧ t.v.L = .conflict ∧
+      (t.v.import t.G).L = .commit 2 ∧ (t.v.import t.G).R = .commit 2 := by
+  intro s t
+  have h0 : CReach s := CReach.init ⟨rfl, fun _ => ⟨rfl, Or.inl rfl⟩⟩
+  refine ⟨CReach.step h0 (CStep.advance _ _ _ (Or.inr (Or.inr ⟨rfl, rfl⟩))), ?_⟩
+  decide
+
 /-! ## What merges do that the theorems exclude -/
 
 /-- **Two heads that both changed the record.** A `jj` command loads the op head `b`, with the
@@ -942,6 +1254,26 @@ theorem concurrent_records_revert :
   have h4 := FReach.step h3 (FStep.left (HStep.set _ (.commit 1)))
   have h5 := FReach.step h4 (FStep.left (HStep.jjExport _))
   exact ⟨_, h5, by decide, by decide, by decide⟩
+
+/-- **A restore that isn't `Restorable` can revert.** `x` is at the root commit, which jj
+can't export, while `x@git` and `.git` are at `1`. A `jj` command moves `x` to `2` and exports
+it. `jj undo` then restores `x` to the root, and `x@git` to `1`, but `git_refs` stays at `2`,
+as `.git` has it; the export can't write the root, so the record stays behind. The next import
+takes `.git`'s `2` for a move made with git since `1`, and makes `x` a conflict, with no `git`
+command having run. Every step is jj's: musubi is not involved, and on other machines, which
+realize only the restored bookmark, nothing like it happens. -/
+theorem restore_reverts :
+    let s : Machine Tgt := ⟨⟨.commit 0, .commit 1, .commit 1⟩, .commit 1, false⟩
+    let u := exportLocal { s with v := { s.v with L := .commit 2 } }
+    let t := restoreLocal s.v u
+    LReach s ∧ LReach u ∧ ¬Restorable s.v u ∧ t.moved = false ∧
+      (t.v.import t.G).L ≠ t.v.L := by
+  intro s u t
+  have h0 : LReach s := LReach.init (fun _ => ⟨rfl, rfl⟩)
+  have h1 := LReach.step h0 (LStep.set _ (.commit 2))
+  refine ⟨h0, LReach.step h1 (LStep.jjExport _), ?_⟩
+  unfold Restorable
+  decide
 
 /-- **#56, first shape.** One head has a tracked `x@git` with no target, kept while `x`
 exists; the other deleted `x` and left the record as the base had it. jj's merge deletes `x`

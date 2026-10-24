@@ -54,9 +54,32 @@ impl PerMachine {
         }
     }
 
+    /// These fields merged with `theirs` against `base`, if at most one of the two differs
+    /// from `base`: that one, as jj's merge has it. `None` where jj's merge must decide:
+    /// where both differ, or where any has a tracked remote ref with no target. jj keeps one
+    /// only while its local bookmark is there, which these fields don't say: merging, it may
+    /// drop one, then merge a side that brings it back as from nothing, untracked (#56).
+    /// This is `shortcut` in formal/Musubi/Refs.lean, which agrees with jj's merge wherever it
+    /// applies (`shortcut_agrees`).
+    pub(super) fn merged_trivially(base: &Self, merged: Self, theirs: Self) -> Option<Self> {
+        if [base, &merged, &theirs]
+            .iter()
+            .any(|fields| fields.has_absent_remote_ref())
+        {
+            return None;
+        }
+        if theirs == *base {
+            Some(merged)
+        } else if merged == *base {
+            Some(theirs)
+        } else {
+            None
+        }
+    }
+
     /// Whether the `git` remote has a ref with no target, as jj keeps a tracked one while
     /// its local bookmark is there.
-    pub(super) fn has_absent_remote_ref(&self) -> bool {
+    fn has_absent_remote_ref(&self) -> bool {
         self.git_remote.as_ref().is_some_and(|remote| {
             remote
                 .bookmarks
@@ -587,4 +610,401 @@ impl NodeRepo {
 /// The workspace part of a machine-qualified key.
 pub(super) fn key_workspace(key: &WorkspaceName) -> &str {
     workspaces::split_key(key.as_str()).map_or(key.as_str(), |(_, workspace)| workspace)
+}
+
+#[cfg(test)]
+mod tests {
+    //! jj's merge of one bookmark's views, against `TSlot.merge` in formal/Musubi/Refs.lean,
+    //! and `PerMachine::merged_trivially` against jj's merge wherever it applies
+    //! (`shortcut_agrees`). docs/internals/conformance.md, "Per-machine refs".
+
+    use hegel::TestCase;
+    use hegel::generators as gs;
+    use jj_lib::default_backend_factories::default_backend_factories;
+    use jj_lib::op_store::RemoteRef;
+    use jj_lib::op_store::RemoteRefState;
+    use jj_lib::operation::Operation;
+    use jj_lib::ref_name::GitRefName;
+    use jj_lib::ref_name::RefName;
+    use jj_lib::repo::ReadonlyRepo;
+    use jj_lib::repo::RepoLoader;
+    use musubi_testutil::TestEnv;
+
+    use super::*;
+
+    /// The model's `TSlot` for `x`: the bookmark, `x@git` and whether it is tracked, and
+    /// `git_refs["refs/heads/x"]`.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct Slot {
+        l: RefTarget,
+        r: RefTarget,
+        tr: bool,
+        k: RefTarget,
+    }
+
+    const X: &str = "refs/heads/x";
+
+    impl Slot {
+        fn norm(mut self) -> Self {
+            if self.r.is_absent() && (!self.tr || self.l.is_absent()) {
+                self.tr = false;
+            }
+            self
+        }
+
+        /// `TSlot.merge`.
+        fn merge(repo: &ReadonlyRepo, b: &Self, v: &Self, w: &Self) -> Self {
+            let merge = |a: &RefTarget, b: &RefTarget, c: &RefTarget| {
+                jj_lib::refs::merge_ref_targets(repo.index(), a, b, c)
+                    .block_on()
+                    .unwrap()
+            };
+            let r = if b.l == w.l {
+                v.clone()
+            } else {
+                Self {
+                    l: merge(&v.l, &b.l, &w.l),
+                    ..v.clone()
+                }
+                .norm()
+            };
+            let k = merge(&v.k, &b.k, &w.k);
+            if b.r == w.r && b.tr == w.tr {
+                Self { k, ..r }
+            } else {
+                Self {
+                    l: merge(&v.l, &b.l, &w.l),
+                    r: merge(&r.r, &b.r, &w.r),
+                    tr: if r.tr == b.tr { w.tr } else { r.tr },
+                    k,
+                }
+                .norm()
+            }
+        }
+
+        /// `repo`'s view with `x` as this slot has it, verbatim.
+        fn view(&self, repo: &ReadonlyRepo) -> View {
+            let mut view = repo.view().store_view().clone();
+            let name = RefName::new("x").to_owned();
+            if self.l.is_present() {
+                view.local_bookmarks.insert(name.clone(), self.l.clone());
+            }
+            if self.r.is_present() || self.tr {
+                let state = if self.tr {
+                    RemoteRefState::Tracked
+                } else {
+                    RemoteRefState::New
+                };
+                let remote_ref = RemoteRef {
+                    target: self.r.clone(),
+                    state,
+                };
+                view.remote_views
+                    .entry(REMOTE_NAME_FOR_LOCAL_GIT_REPO.to_owned())
+                    .or_default()
+                    .bookmarks
+                    .insert(name, remote_ref);
+            }
+            if self.k.is_present() {
+                view.git_refs.insert(X.into(), self.k.clone());
+            }
+            view
+        }
+
+        /// `x` in `view`.
+        fn of(view: &View) -> Self {
+            let name = RefName::new("x");
+            let remote = view
+                .remote_views
+                .get(REMOTE_NAME_FOR_LOCAL_GIT_REPO)
+                .and_then(|remote| remote.bookmarks.get(name));
+            Self {
+                l: view
+                    .local_bookmarks
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(RefTarget::absent),
+                r: remote.map_or_else(RefTarget::absent, |remote| remote.target.clone()),
+                tr: remote.is_some_and(|remote| remote.state == RemoteRefState::Tracked),
+                k: view
+                    .git_refs
+                    .get(GitRefName::new(X))
+                    .cloned()
+                    .unwrap_or_else(RefTarget::absent),
+            }
+        }
+    }
+
+    /// A repository with a commit `one` on the root, and `two`, `three` and `four` beside
+    /// each other on `one`, so that jj's merge resolves no conflict of them by ancestry.
+    /// The commits are made in process, which starts no `jj`.
+    fn repository() -> (TestEnv, Arc<ReadonlyRepo>, [CommitId; 4]) {
+        let env = TestEnv::new();
+        let repo = env.init_repo("alpha");
+        let loader = RepoLoader::init_from_file_system(
+            &repo.settings(),
+            &repo.repo_path(),
+            &default_backend_factories(),
+        )
+        .unwrap();
+        let loaded = loader.load_at_head().block_on().unwrap();
+        let tree = loaded.store().empty_merged_tree();
+        let mut tx = loaded.start_transaction();
+        let mut commit = |parent: &CommitId, name: &str| {
+            tx.repo_mut()
+                .new_commit(vec![parent.clone()], tree.clone())
+                .set_description(name)
+                .write()
+                .block_on()
+                .unwrap()
+                .id()
+                .clone()
+        };
+        let one = commit(loaded.store().root_commit_id(), "one");
+        let [two, three, four] = ["two", "three", "four"].map(|name| commit(&one, name));
+        let loaded = tx.commit("commits").block_on().unwrap();
+        (env, loaded, [one, two, three, four])
+    }
+
+    /// An operation with `parents` and `repo`'s view with `x` as `slot` has it, ending `ms`
+    /// milliseconds after `repo`'s.
+    fn op_at(
+        repo: &ReadonlyRepo,
+        parents: &[&Operation],
+        slot: &Slot,
+        name: &str,
+        ms: i64,
+    ) -> Operation {
+        let mut store_op = repo.operation().store_operation().clone();
+        store_op.parents = parents.iter().map(|op| op.id().clone()).collect();
+        store_op.metadata.description = name.to_owned();
+        store_op.metadata.time.end.timestamp.0 += ms;
+        store_op.view_id = repo
+            .op_store()
+            .write_view(&slot.view(repo))
+            .block_on()
+            .unwrap();
+        let id = repo
+            .op_store()
+            .write_operation(&store_op)
+            .block_on()
+            .unwrap();
+        repo.loader().load_operation(&id).block_on().unwrap()
+    }
+
+    /// jj's merge of `v` with `w` against `b`, each an operation of its own, as
+    /// `realize::merged_by_jj` merges them; and the per-machine fields of all four.
+    fn jj_merge(repo: &ReadonlyRepo, b: &Slot, v: &Slot, w: &Slot) -> (Slot, [PerMachine; 4]) {
+        let head = repo.operation();
+        let (b, v, w) = (
+            op_at(repo, &[head], b, "b", 0),
+            op_at(repo, &[head], v, "v", 0),
+            op_at(repo, &[head], w, "w", 0),
+        );
+        let mut tx = repo
+            .loader()
+            .load_at(&v)
+            .block_on()
+            .unwrap()
+            .start_transaction();
+        tx.merge_operation(&b, &w).block_on().unwrap();
+        let merged = tx.repo().view().store_view();
+        let fields = |op: &Operation| PerMachine::of(op.view().block_on().unwrap().store_view());
+        (
+            Slot::of(merged),
+            [fields(&b), fields(&v), fields(&w), PerMachine::of(merged)],
+        )
+    }
+
+    /// Checks jj's merge of `v` with `w` against `b`: it is the model's, and the shortcut,
+    /// where it applies, is jj's. Returns jj's merge, and what the shortcut gave.
+    fn check(repo: &ReadonlyRepo, b: &Slot, v: &Slot, w: &Slot) -> (Slot, Option<PerMachine>) {
+        let (merged, [base, ours, theirs, jj]) = jj_merge(repo, b, v, w);
+        assert_eq!(
+            merged,
+            Slot::merge(repo, b, v, w),
+            "TSlot.merge of {v:?} with {w:?} against {b:?}"
+        );
+        let shortcut = PerMachine::merged_trivially(&base, ours, theirs);
+        if let Some(fields) = &shortcut {
+            assert_eq!(
+                *fields, jj,
+                "the shortcut, of {v:?} with {w:?} against {b:?}"
+            );
+        }
+        (merged, shortcut)
+    }
+
+    thread_local!(static REPO: (TestEnv, Arc<ReadonlyRepo>, [CommitId; 4]) = repository());
+
+    /// A slot: the bookmark absent or at either commit; `x@git` none, tracked with no
+    /// target, or at either commit, tracked or not; and `git_refs` absent or at the first
+    /// commit. Not every one is a view jj makes, but musubi's realization makes some that
+    /// jj doesn't (`realize_not_WF`).
+    fn slot(tc: &TestCase, commits: &[CommitId; 4]) -> Slot {
+        let target = |n: usize| match n {
+            0 => RefTarget::absent(),
+            n => RefTarget::normal(commits[n - 1].clone()),
+        };
+        let r = tc.draw(gs::integers::<usize>().max_value(2));
+        Slot {
+            l: target(tc.draw(gs::integers::<usize>().max_value(2))),
+            r: target(r),
+            tr: tc.draw(gs::booleans()),
+            k: target(tc.draw(gs::integers::<usize>().max_value(1))),
+        }
+    }
+
+    #[hegel::test(test_cases = 200)]
+    fn merges_conform_to_refs_model(tc: TestCase) {
+        REPO.with(|(_, repo, commits)| {
+            let b = slot(&tc, commits);
+            // Often one side keeps the base's per-machine fields, where the shortcut applies.
+            let mut v = slot(&tc, commits);
+            let mut w = slot(&tc, commits);
+            match tc.draw(gs::integers::<usize>().max_value(2)) {
+                0 => {
+                    w = Slot {
+                        l: w.l,
+                        ..b.clone()
+                    }
+                }
+                1 => {
+                    v = Slot {
+                        l: v.l,
+                        ..b.clone()
+                    }
+                }
+                _ => {}
+            }
+            check(repo, &b, &v, &w);
+        });
+    }
+
+    /// #56: a tracked `x@git` with no target, kept while `x` exists, where the other side
+    /// deleted `x` and kept the base's per-machine fields. jj drops it; the shortcut took it
+    /// (`shortcutUnguarded_keeps_absent`).
+    #[test]
+    fn merge_drops_tracked_absent_remote_ref() {
+        REPO.with(|(_, repo, [one, ..])| {
+            let one = RefTarget::normal(one.clone());
+            let none = || RefTarget::absent();
+            let b = Slot {
+                l: one.clone(),
+                r: none(),
+                tr: false,
+                k: none(),
+            };
+            let v = Slot {
+                l: one,
+                r: none(),
+                tr: true,
+                k: none(),
+            };
+            let w = Slot {
+                l: none(),
+                r: none(),
+                tr: false,
+                k: none(),
+            };
+            let (merged, shortcut) = check(repo, &b, &v, &w);
+            assert_eq!(
+                merged,
+                Slot {
+                    l: none(),
+                    r: none(),
+                    tr: false,
+                    k: none()
+                }
+            );
+            assert_eq!(shortcut, None);
+        });
+    }
+
+    /// #56: the base and one side have a tracked `x@git` with no target; the other has no
+    /// `x` and `x@git` at `two`, as after importing git's creation of `refs/heads/x` there and
+    /// then deleting `x`, the export of that failing. jj drops the absent ref with `x`, then
+    /// merges the other's as from nothing, untracked; the shortcut took it tracked
+    /// (`shortcutUnguarded_untracks`).
+    #[test]
+    fn merge_untracks_remote_ref() {
+        REPO.with(|(_, repo, [one, two, ..])| {
+            let (one, two) = (
+                RefTarget::normal(one.clone()),
+                RefTarget::normal(two.clone()),
+            );
+            let none = || RefTarget::absent();
+            let b = Slot {
+                l: one,
+                r: none(),
+                tr: true,
+                k: none(),
+            };
+            let w = Slot {
+                l: none(),
+                r: two.clone(),
+                tr: true,
+                k: two.clone(),
+            };
+            let (merged, shortcut) = check(repo, &b, &b, &w);
+            assert_eq!(
+                merged,
+                Slot {
+                    l: none(),
+                    r: two.clone(),
+                    tr: false,
+                    k: two
+                }
+            );
+            assert_eq!(shortcut, None);
+        });
+    }
+
+    /// A criss-cross merge, whose heads have two closest common ancestors: jj merges against
+    /// the two merged, and so must musubi (`firstBase_reverts`). This machine moved the
+    /// bookmark to `two` in one ancestor, which the other kept the base's; both were merged
+    /// twice; then this machine moved it to `three`, exporting it, and another to `four`,
+    /// whose export failed. Against the ancestors merged the record is at `three`, as `.git`
+    /// is; against the one that kept the base's it would be a conflict, which jj resolves
+    /// only where the commits are in a line, so here they are beside each other.
+    #[test]
+    fn criss_cross_merges_per_machine_fields_as_jj() {
+        REPO.with(|(_, repo, [one, two, three, four])| {
+            let at = |id: &CommitId| RefTarget::normal(id.clone());
+            let slot = |l: &CommitId, r: &CommitId| Slot {
+                l: at(l),
+                r: at(r),
+                tr: true,
+                k: at(r),
+            };
+            for swap in [false, true] {
+                let head = repo.operation();
+                let name = |n: &str| format!("{n} {swap}");
+                // Each ancestor ends first once, as jj orders them by end time.
+                let (kept_ms, moved_ms) = if swap { (2, 1) } else { (1, 2) };
+                let base = op_at(repo, &[head], &slot(one, one), &name("base"), 0);
+                let kept = op_at(repo, &[&base], &slot(one, one), &name("kept"), kept_ms);
+                let moved = op_at(repo, &[&base], &slot(two, two), &name("moved"), moved_ms);
+                let parents = [&kept, &moved];
+                let merge1 = op_at(repo, &parents, &slot(two, two), &name("merge1"), 3);
+                let merge2 = op_at(repo, &parents, &slot(two, two), &name("merge2"), 3);
+                let ours = op_at(repo, &[&merge1], &slot(three, three), &name("ours"), 4);
+                let theirs = op_at(repo, &[&merge2], &slot(four, two), &name("theirs"), 4);
+                let (jj, _) = repo
+                    .loader()
+                    .merge_operations(vec![ours.clone(), theirs.clone()], None, None, [])
+                    .block_on()
+                    .unwrap();
+                assert_eq!(Slot::of(jj.view().store_view()).r, at(three));
+                let jj = PerMachine::of(jj.view().store_view());
+                let merged = super::super::realize::merged_by_jj(
+                    repo.loader(),
+                    ours,
+                    &[theirs.id().clone()],
+                )
+                .unwrap();
+                assert_eq!(*merged, jj);
+            }
+        });
+    }
 }

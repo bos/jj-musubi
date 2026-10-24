@@ -18,6 +18,7 @@ use jj_lib::operation::Operation;
 use jj_lib::ref_name::WorkspaceName;
 use jj_lib::ref_name::WorkspaceNameBuf;
 use jj_lib::repo::Repo as _;
+use jj_lib::repo::RepoLoader;
 use pollster::FutureExt as _;
 
 use super::CANONICAL_ATTRIBUTE;
@@ -545,16 +546,17 @@ impl NodeRepo {
         // operation, whose only ancestor is the root, means indexing all its commits anew: a
         // second or more for a large repository. Usually it isn't needed.
         if let Some(merged) = self.merged_trivially(&first_op, rest)? {
-            debug_assert_eq!(*merged, *self.merged_by_jj(first_op, rest)?);
+            debug_assert_eq!(*merged, *merged_by_jj(&self.loader, first_op, rest)?);
             return Ok(merged);
         }
-        self.merged_by_jj(first_op, rest)
+        merged_by_jj(&self.loader, first_op, rest)
     }
 
     /// The per-machine fields of `first_op` and `rest` merged three-way, if at most one of
     /// them differs from its base, which the merge then takes: another machine's join
     /// operation's are its base's, the root's, as, usually, are those of other machines'
-    /// operations.
+    /// operations. `None` where jj's merge must decide (`PerMachine::merged_trivially`), or
+    /// where a merge has several bases.
     fn merged_trivially(
         &self,
         first_op: &Operation,
@@ -564,58 +566,18 @@ impl NodeRepo {
         let mut ops = vec![first_op.clone()];
         for other in rest {
             let other_op = self.loader.load_operation(other).block_on()?;
-            let (base, theirs) = (
-                fields_of(&self.merge_base(&ops, &other_op)?)?,
-                fields_of(&other_op)?,
-            );
-            // jj keeps a tracked remote ref with no target only while its local bookmark is
-            // there, which these fields don't say: merging, it may drop one, and then merge a
-            // side that brings it back as from nothing, untracked. Its merge decides those.
-            if [&base, &merged, &theirs]
-                .iter()
-                .any(|fields| fields.has_absent_remote_ref())
-            {
+            // Several bases would need jj's merge of them, which costs what this saves.
+            let Some(base) = single_base(&self.loader, &ops, &other_op)? else {
                 return Ok(None);
-            }
-            if theirs != base {
-                if merged != base {
-                    return Ok(None);
-                }
-                merged = theirs;
+            };
+            let (base, theirs) = (fields_of(&base)?, fields_of(&other_op)?);
+            match PerMachine::merged_trivially(&base, merged, theirs) {
+                Some(next) => merged = next,
+                None => return Ok(None),
             }
             ops.push(other_op);
         }
         Ok(Some(Arc::new(merged)))
-    }
-
-    /// The per-machine fields of `first_op` and `rest` merged three-way by jj.
-    fn merged_by_jj(
-        &self,
-        first_op: Operation,
-        rest: &[OperationId],
-    ) -> Result<Arc<PerMachine>, NodeError> {
-        let repo = self.loader.load_at(&first_op).block_on()?;
-        let mut tx = repo.start_transaction();
-        let mut merged = vec![first_op];
-        for other in rest {
-            let other_op = self.loader.load_operation(other).block_on()?;
-            let base = self.merge_base(&merged, &other_op)?;
-            tx.merge_operation(&base, &other_op).block_on()?;
-            merged.push(other_op);
-        }
-        Ok(Arc::new(PerMachine::of(tx.repo().view().store_view())))
-    }
-
-    /// The base a merge of `ops` with `other` merges three-way against.
-    fn merge_base(&self, ops: &[Operation], other: &Operation) -> Result<Operation, NodeError> {
-        let bases = op_walk::closest_common_ancestors(ops.to_vec(), [other.clone()]).block_on()?;
-        // Several closest common ancestors would need jj's recursive merge. Per-machine
-        // fields only describe this machine's `.git`, and the op head's export corrects
-        // them, so the first base is good enough.
-        Ok(match bases.into_iter().next() {
-            Some(base) => base,
-            None => self.loader.root_operation().block_on(),
-        })
     }
 
     /// Realizes a canonical operation and publishes it as an op head, in place of the op
@@ -745,4 +707,67 @@ impl NodeRepo {
 /// The per-machine fields of a local operation's view.
 fn fields_of(op: &Operation) -> Result<PerMachine, NodeError> {
     Ok(PerMachine::of(op.view().block_on()?.store_view()))
+}
+
+/// The per-machine fields of `first_op` and `rest` merged three-way by jj.
+pub(super) fn merged_by_jj(
+    loader: &RepoLoader,
+    first_op: Operation,
+    rest: &[OperationId],
+) -> Result<Arc<PerMachine>, NodeError> {
+    let repo = loader.load_at(&first_op).block_on()?;
+    let mut tx = repo.start_transaction();
+    let mut merged = vec![first_op];
+    for other in rest {
+        let other_op = loader.load_operation(other).block_on()?;
+        let base = merge_base(loader, &merged, &other_op)?;
+        tx.merge_operation(&base, &other_op).block_on()?;
+        merged.push(other_op);
+    }
+    Ok(Arc::new(PerMachine::of(tx.repo().view().store_view())))
+}
+
+/// The closest common ancestor of `ops` and `other`, or the root if they have none; `None`
+/// if they have several.
+fn single_base(
+    loader: &RepoLoader,
+    ops: &[Operation],
+    other: &Operation,
+) -> Result<Option<Operation>, NodeError> {
+    let mut bases = op_walk::closest_common_ancestors(ops.to_vec(), [other.clone()]).block_on()?;
+    Ok(match bases.len() {
+        0 => Some(loader.root_operation().block_on()),
+        1 => Some(bases.remove(0)),
+        _ => None,
+    })
+}
+
+/// The base a merge of `ops` with `other` merges three-way against, as jj's
+/// `merge_operations` has it: their closest common ancestor, or where there are several,
+/// as in a criss-cross merge, those merged first, recursively, into an operation that is
+/// written but not published. Against the first of them instead, a merged record can be a
+/// conflict that matches neither `.git` nor jj's merge, which the export can't correct and
+/// the next import merges into the bookmark (`firstBase_reverts` in
+/// formal/Musubi/Refs.lean).
+pub(super) fn merge_base(
+    loader: &RepoLoader,
+    ops: &[Operation],
+    other: &Operation,
+) -> Result<Operation, NodeError> {
+    let mut bases = op_walk::closest_common_ancestors(ops.to_vec(), [other.clone()]).block_on()?;
+    match bases.len() {
+        0 => return Ok(loader.root_operation().block_on()),
+        1 => return Ok(bases.remove(0)),
+        _ => {}
+    }
+    let first = bases[0].clone();
+    // jj's merge rebases descendants, which can panic, as in `merge_heads`; jj's own merge
+    // of these operations would too. Then the first base, as musubi had before.
+    match catch_jj_panic(|| Ok(loader.merge_operations(bases, None, None, []).block_on())) {
+        Ok(merged) => Ok(merged?.0.operation().clone()),
+        Err(reason) => {
+            tracing::warn!("merging the bases of a criss-cross merge: {reason}");
+            Ok(first)
+        }
+    }
 }

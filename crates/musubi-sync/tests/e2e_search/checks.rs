@@ -50,6 +50,9 @@ impl World {
         for m in 0..self.nodes() {
             self.record_merges(m);
         }
+        for m in 0..self.nodes() {
+            self.check_imports(m);
+        }
         let views: Vec<View> = (0..self.nodes()).map(|m| self.view_at_head(m)).collect();
         self.check_heads();
         self.check_operations();

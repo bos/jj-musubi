@@ -23,6 +23,7 @@ use musubi_testutil::TestRepo;
 
 use crate::fixture::Fixture;
 use crate::fixture::TestClock;
+use crate::imports::Imports;
 use crate::ledger::Ledger;
 use crate::ledger::Seen;
 use crate::origin::Origin;
@@ -101,6 +102,8 @@ pub struct World {
     /// What each machine saw at its op heads, when it last looked.
     seen: Vec<Option<(Vec<String>, Seen)>>,
     pub ledger: Ledger,
+    /// What the no-spurious-revert check knows of each machine (`imports`).
+    pub imports: Imports,
     /// Machines whose repository changed in ways no recorded command has loaded since.
     pub touched: BTreeSet<usize>,
     /// Operations reverted so far to get past jj's failure to merge operations.
@@ -186,6 +189,7 @@ impl World {
             baseline_keys: vec![],
             seen: vec![None; setup.nodes],
             ledger: Ledger::default(),
+            imports: Imports::default(),
             touched: BTreeSet::new(),
             unmergeable_reverts: 0,
             recovery_ops: BTreeSet::new(),
@@ -205,6 +209,7 @@ impl World {
         }
         let view = world.view_at_head(0);
         world.ledger.reset(&view);
+        world.start_imports();
         world
     }
 
@@ -489,6 +494,8 @@ impl World {
                 self.record(format!("  (refused: {first})"));
                 return Err(stderr);
             }
+            // A command imports before it fails: judge that first.
+            self.check_imports(m);
             self.fail(&format!(
                 "`jj {}` failed on {place}:\n{stderr}",
                 full.join(" ")

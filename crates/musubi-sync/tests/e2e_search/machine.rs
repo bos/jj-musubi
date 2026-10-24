@@ -598,6 +598,7 @@ impl Search {
             .map(|c| c.change.clone());
         fired("git_set_branch");
         world.ledger.git_move(change.as_deref());
+        world.git_moves(m, &format!("refs/heads/{name}"));
         world.git(m, &["update-ref", &format!("refs/heads/{name}"), &target]);
         drop(world);
         self.note(&tc);
@@ -609,6 +610,7 @@ impl Search {
         let mut world = self.world.borrow_mut();
         let branch = choose(&tc, &world.git_branches(m));
         fired("git_delete_branch");
+        world.git_moves(m, &format!("refs/heads/{branch}"));
         world.git(m, &["update-ref", "-d", &format!("refs/heads/{branch}")]);
         drop(world);
         self.note(&tc);
@@ -727,5 +729,14 @@ impl Search {
     #[invariant(always_run)]
     fn repositories_load(&mut self, _: TestCase) {
         self.world.borrow_mut().check_loads();
+    }
+
+    /// Every import of git refs follows a git move (`imports`).
+    #[invariant(always_run)]
+    fn no_spurious_revert(&mut self, _: TestCase) {
+        let mut world = self.world.borrow_mut();
+        for m in 0..world.nodes() {
+            world.check_imports(m);
+        }
     }
 }

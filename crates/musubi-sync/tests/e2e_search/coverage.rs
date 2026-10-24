@@ -69,6 +69,11 @@ pub const EVENTS: &[&str] = &[
     "setup:empty",
     "push:accepted",
     "crash:writes_in_flight",
+    // Imports of git refs, by what explains each ref they changed (`imports`).
+    "import:git_move",
+    "import:conflicted_remote",
+    "import:undo",
+    "import:concurrent_records",
 ];
 
 /// Each catalogue row, by test name, with the rules and events that together exercise it

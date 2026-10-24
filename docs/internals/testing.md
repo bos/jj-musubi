@@ -243,14 +243,28 @@ once in the middle, the hive syncs to a fixed point, and the test checks:
   conflicted or on the root commit, which git can't hold, and a further `jj status`
   imports nothing;
 - every operation made on any machine appears in every machine's `jj op log`;
-- no change diverges, and no bookmark or tag conflicts, unless jj would do the same with
-  the same concurrent operations on one machine. A ledger of which machine's commands
-  rewrote what explains each: two machines rewrote it, or a command at an older operation
-  or a git-side move did; or a commit holds it visible that jj can't move, such as a
-  descendant of a commit rewritten two ways, a target of a conflicted bookmark, or a branch
-  imported from git. A bookmark on a merge commit that is abandoned conflicts between the
-  merge's parents. Two commits of a change with the same parents and contents are the same
-  rebase done twice, which the hub's sequencing exists to prevent.
+- no change diverges, and no bookmark or tag conflicts, unless jj makes the same of the
+  same operations in one repository. A reference (`e2e_search/reference.rs`) rebuilds the
+  hub's history in a jj repository of its own, operation by operation, with the same
+  parents: each machine's commands, and the operations musubi writes for it such as a
+  forget, as the hive has them, and each merge as jj's own merge of the same parents, in
+  the same order, as concurrent processes on one machine would be merged. Where jj's merge
+  gives what the hive's did, comparing commits by contents, change ids and parents, the
+  reference goes on from the hive's operation; where it doesn't, from its own, applying
+  later operations three-way as jj applies a concurrent one, until the two agree again
+  past every point where they parted. A merge that makes a change diverge into commits
+  jj's merge of the same parents doesn't make, or a name conflict with terms jj's lacks,
+  is musubi's doing, and so is any such excess at the hive's head over the reference's;
+  the failure lists where the merges parted. So that the hive's history can stand for one
+  repository's, every machine's realization of each operation must have the hive's view
+  of it, and no operation but a merge may make anything diverge or conflict unless what it
+  did explains it: a fetch, an undo or restore, or an import of git refs.
+  Merges staged through the hub are judged as staged: a node that merges part of another
+  machine's work and later the rest makes what jj makes of the same two merges.
+- no change has two commits with the same parents and contents that two merges rewrote
+  from one commit: the same rebase done twice, which the hub's sequencing exists to
+  prevent. A ledger of which machine's commands rewrote what tells it from rewrites that
+  commands make alike.
 
 To keep the search effective:
 

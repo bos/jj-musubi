@@ -568,21 +568,6 @@ impl Search {
         let pushed = world.try_jj_in(m, 0, &["git", "push", "--bookmark", &name], PUSH_REFUSALS);
         if pushed.is_ok() {
             fired("push:accepted");
-            // The remote's branch now names this commit, which another machine's fetch
-            // brings back even after the hive rewrote it, as on one machine.
-            let commit = world.raw_jj(
-                m,
-                &[
-                    "log",
-                    "--ignore-working-copy",
-                    "--no-graph",
-                    "-r",
-                    &name,
-                    "-T",
-                    "commit_id",
-                ],
-            );
-            world.ledger.pushed(commit.trim());
         }
         drop(world);
         self.note(&tc);
@@ -603,7 +588,7 @@ impl Search {
             .find(|c| c.id == target)
             .map(|c| c.change.clone());
         fired("git_set_branch");
-        world.ledger.git_move(name, change.as_deref());
+        world.ledger.git_move(change.as_deref());
         world.git(m, &["update-ref", &format!("refs/heads/{name}"), &target]);
         drop(world);
         self.note(&tc);
@@ -615,7 +600,6 @@ impl Search {
         let mut world = self.world.borrow_mut();
         let branch = choose(&tc, &world.git_branches(m));
         fired("git_delete_branch");
-        world.ledger.git_move(&branch, None);
         world.git(m, &["update-ref", "-d", &format!("refs/heads/{branch}")]);
         drop(world);
         self.note(&tc);

@@ -166,14 +166,6 @@ impl View {
         names
     }
 
-    pub fn bookmark_targets(&self) -> BTreeMap<String, BTreeSet<String>> {
-        self.names(|c| &c.bookmarks)
-    }
-
-    pub fn tag_targets(&self) -> BTreeMap<String, BTreeSet<String>> {
-        self.names(|c| &c.tags)
-    }
-
     /// Other machines' workspaces, `machine/workspace`, with their working copies.
     pub fn other_workspaces(&self) -> BTreeMap<String, String> {
         let mut workspaces = BTreeMap::new();

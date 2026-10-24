@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
+use crate::reference::Reference;
 use crate::view::View;
 use crate::world::World;
 
@@ -54,8 +55,11 @@ impl World {
         self.check_operations();
         self.check_tags();
         self.check_workspaces(&views);
-        self.check_divergence(&views[0]);
-        self.check_conflicts(&views[0]);
+        let mut reference = Reference::build(self);
+        self.check_history(&mut reference);
+        let beyond = reference.beyond_jj();
+        self.check_divergence(&views[0], &mut reference, &beyond);
+        self.check_conflicts(&reference, &beyond);
         self.check_other_workspaces();
         let view = self.view_at_head(0);
         self.ledger.reset(&view);
@@ -197,10 +201,13 @@ impl World {
         }
     }
 
-    /// A change diverges only if two machines, or a command at an older operation,
-    /// rewrote it since the hive last converged.
-    fn check_divergence(&self, view: &View) {
-        let spurious = self.ledger.spurious_divergence(view, |a, b| {
+    /// A change diverges only as jj diverges it given the same operations in one repository
+    /// (`Reference::beyond_jj`), and never by the same rebase done twice, which the
+    /// hub's sequencing exists to prevent: the ledger finds two alike commits of a change
+    /// that no two commands explain, and the reference confirms that two merges rewrote one
+    /// commit alike (`Reference::same_rebase_twice`).
+    fn check_divergence(&self, view: &View, reference: &mut Reference, beyond: &[String]) {
+        let alike = self.ledger.alike_commits(view, |a, b| {
             let diff = self.raw_jj(
                 0,
                 &[
@@ -235,14 +242,25 @@ impl World {
             };
             diff.is_empty() && !rewritten_from(a, b) && !rewritten_from(b, a)
         });
+        let mut spurious: Vec<String> = beyond
+            .iter()
+            .filter_map(|made| made.strip_suffix(" diverges"))
+            .map(|change| format!("{change} (more than jj makes)"))
+            .collect();
+        for change in &alike {
+            if reference.same_rebase_twice(change) {
+                spurious.push(format!("{change} (the same rebase twice)"));
+            }
+        }
         if !spurious.is_empty() {
             let details: Vec<String> = spurious
                 .iter()
                 .map(|c| {
+                    let change = c.split(' ').next().unwrap_or(c);
                     format!(
                         "{c} (rewritten by {:?}: {:?})",
-                        self.ledger.rewriters(c.split(' ').next().unwrap_or(c)),
-                        self.ledger.history(c.split(' ').next().unwrap_or(c))
+                        self.ledger.rewriters(change),
+                        self.ledger.history(change)
                     )
                 })
                 .collect();
@@ -259,8 +277,9 @@ impl World {
                 }
             }
             self.fail(&format!(
-                "spurious divergence: {}\n{history}\n{}",
+                "spurious divergence: {}\n{history}\nwhere jj's merges differ from the hive's:\n{}\n{}",
                 details.join(", "),
+                reference.deviations.join("\n"),
                 self.raw_jj(0, &["op", "log", "-n", "40", "--no-graph"])
             ));
         }
@@ -311,34 +330,42 @@ impl World {
         out
     }
 
-    /// A bookmark or tag is conflicted only if two machines, git, or a command at an older
-    /// operation changed it since the hive last converged.
-    fn check_conflicts(&self, view: &View) {
-        let spurious = self.ledger.spurious_conflicts(view, |conflicted| {
-            let (kind, name) = conflicted.split_once(' ').unwrap();
-            // The parents of each commit the name moved away from, then the commits it
-            // might point to now.
-            let template = concat!(
-                r#"if(!remote, removed_targets.map(|c| c.parents().map(|p| p.commit_id())"#,
-                r#".join(",")).join(";") ++ "\t" ++ added_targets.map(|c| c.commit_id())"#,
-                r#".join(",") ++ "\n")"#,
-            );
-            let listed = self.raw_jj(
-                0,
-                &["--ignore-working-copy", kind, "list", name, "-T", template],
-            );
-            listed.lines().any(|line| {
-                let Some((removed, added)) = line.split_once('\t') else {
-                    return false;
-                };
-                let added: BTreeSet<&str> = added.split(',').collect();
-                removed
-                    .split(';')
-                    .any(|parents| parents.split(',').collect::<BTreeSet<_>>() == added)
-            })
-        });
+    /// A bookmark or tag is conflicted only as jj conflicts it given the same operations in
+    /// one repository (`Reference::beyond_jj`).
+    fn check_conflicts(&self, reference: &Reference, beyond: &[String]) {
+        let spurious: Vec<&str> = beyond
+            .iter()
+            .filter_map(|made| made.strip_suffix(" conflicts"))
+            .collect();
         if !spurious.is_empty() {
-            self.fail(&format!("spurious conflicts: {}", spurious.join(", ")));
+            self.fail(&format!(
+                "spurious conflicts: {}\nwhere jj's merges differ from the hive's:\n{}",
+                spurious.join(", "),
+                reference.deviations.join("\n")
+            ));
+        }
+    }
+
+    /// The hive's history is one repository's: every machine realized each operation as
+    /// the hive has it; its own operations are as the hive has them but for what musubi
+    /// keeps visible for other machines, which makes nothing diverge or conflict; no
+    /// operation but a merge made anything diverge or conflict that what it did doesn't
+    /// explain; and no merge made more of either than jj's merge of the same parents. With
+    /// these, divergence and conflicts at the head can be judged against the reference.
+    fn check_history(&self, reference: &mut Reference) {
+        let realizations = reference.check_realizations(self);
+        if !realizations.is_empty() {
+            self.fail(&format!(
+                "realizations differ from the hive's operations: {}",
+                realizations.join(", ")
+            ));
+        }
+        if !reference.unexplained.is_empty() {
+            self.fail(&format!(
+                "operations made changes diverge or names conflict, unlike jj: {}\nwhere jj's merges differ from the hive's:\n{}",
+                reference.unexplained.join("\n"),
+                reference.deviations.join("\n")
+            ));
         }
     }
 

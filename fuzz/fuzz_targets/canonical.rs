@@ -1,5 +1,5 @@
 //! Operations and views received from peers (`musubi_jj::canonical`): importing one never
-//! panics, but in jj-lib, which the hub allows, opening its store again
+//! panics, but in jj-lib or jj-core, which the hub allows, opening its store again
 //! (`musubi_sync::server`); one admitted reads back as what it hashes to; and none, admitted
 //! or not, leaves the store torn.
 
@@ -7,9 +7,6 @@
 
 use std::cell::RefCell;
 use std::fs;
-use std::panic;
-use std::panic::AssertUnwindSafe;
-use std::sync::Once;
 
 use jj_lib::backend::CommitId;
 use jj_lib::content_hash::blake2b_hash;
@@ -17,6 +14,7 @@ use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::OperationId;
 use jj_lib::op_store::ViewId;
 use libfuzzer_sys::fuzz_target;
+use musubi_fuzz::refusing_jj_lib_panics;
 use musubi_fuzz::scratch;
 use musubi_jj::canonical::CanonicalError;
 use musubi_jj::canonical::CanonicalStore;
@@ -105,22 +103,4 @@ fn admit(
         assert_eq!(store.operation_bytes(&id).unwrap(), bytes);
     }
     Outcome::Admitted
-}
-
-/// What `import` returns, or `None` if it panicked in jj-lib, which panics on some malformed
-/// input. A panic anywhere else is passed on to the fuzzer.
-fn refusing_jj_lib_panics<T>(import: impl FnOnce() -> T) -> Option<T> {
-    static HOOK: Once = Once::new();
-    HOOK.call_once(|| {
-        let fuzzer_hook = panic::take_hook();
-        panic::set_hook(Box::new(move |info| {
-            let in_jj_lib = info
-                .location()
-                .is_some_and(|at| at.file().contains("/jj-lib-"));
-            if !in_jj_lib {
-                fuzzer_hook(info);
-            }
-        }));
-    });
-    panic::catch_unwind(AssertUnwindSafe(import)).ok()
 }

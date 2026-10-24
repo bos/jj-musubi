@@ -257,9 +257,9 @@ fn spawn_worker(
                     serve_one(&hive, &mut service, &message, limit, &mut counted)
                 }));
                 let reply = served.unwrap_or_else(|panic| {
-                    // jj-lib panics on some malformed input, as a peer could send it. The
-                    // hive's service may be left half-changed: the next request opens it
-                    // afresh.
+                    // jj-lib and jj-core panic on some malformed input, as a peer could send
+                    // it. The hive's service may be left half-changed: the next request opens
+                    // it afresh.
                     service = None;
                     Err(anyhow::anyhow!(
                         "the hub failed: {}",

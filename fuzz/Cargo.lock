@@ -1756,6 +1756,7 @@ dependencies = [
  "musubi-sync",
  "musubi-transport",
  "pollster",
+ "prost",
  "serde",
  "tempfile",
 ]

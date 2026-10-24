@@ -19,6 +19,7 @@ musubi-jj = { path = "../crates/musubi-jj" }
 musubi-sync = { path = "../crates/musubi-sync" }
 musubi-transport = { path = "../crates/musubi-transport" }
 pollster = "1.0.1"
+prost = "0.14"
 serde = "1"
 tempfile = "3"
 
@@ -53,6 +54,13 @@ bench = false
 [[bin]]
 name = "greeting"
 path = "fuzz_targets/greeting.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "import"
+path = "fuzz_targets/import.rs"
 test = false
 doc = false
 bench = false

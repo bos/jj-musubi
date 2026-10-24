@@ -188,8 +188,16 @@ decoder of what a peer sends. Each checks more than that nothing panics:
 - `canonical`: operations and views imported into a canonical store, under an id they don't
   hash to and then under the one they do, which reaches the checks past the hash. One
   admitted reads back as what it hashes to, and none, admitted or refused, leaves the store
-  holding anything that isn't what its name says. A panic in jj-lib, which panics on some
-  malformed input, counts as a refusal, as it does on the hub; a panic anywhere else fails.
+  holding anything that isn't what its name says. A panic in jj-lib, or in jj-core beneath
+  it, which panic on some malformed input, counts as a refusal, as it does on the hub; a
+  panic anywhere else fails.
+- `import`: bundles of a small history imported into a canonical store, each view in one of
+  three encodings that decode to it or in bytes of the fuzzer's, whole or as a delta against
+  any encoding of any view before it, some sent twice or with a byte changed, some without
+  their operation. Whatever the store makes of a bundle, it holds nothing that isn't what
+  its id says, in normal form, and it stores a bundle as musubi makes one whole, as sent,
+  which the fuzzer's first input, of no bytes, is. Panics in jj-lib and jj-core count as
+  refusals, as for `canonical`.
 
 `just fuzz bundle` runs one until stopped, and takes libFuzzer's options after the target, as
 in `just fuzz bundle -max_total_time=300`; `just fuzz-smoke` runs each briefly, to check that

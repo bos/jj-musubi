@@ -103,7 +103,7 @@ struct Admitted {
 
 /// `work` done on each of `items`, by as many workers as are worth it, each numbered and
 /// given a share in order, with the results in order. A panic in a worker is passed on as it
-/// is: jj-lib panics on some malformed views.
+/// is: jj-lib and jj-core panic on some malformed views.
 fn in_parallel<T: Sync, R: Send>(items: &[T], work: impl Fn(usize, &T) -> R + Sync) -> Vec<R> {
     let workers = std::thread::available_parallelism()
         .map_or(1, |n| n.get())
@@ -139,9 +139,9 @@ fn in_parallel<T: Sync, R: Send>(items: &[T], work: impl Fn(usize, &T) -> R + Sy
     })
 }
 
-/// How many views an import verifies, in parallel, before appending them: few in tests, so
-/// that they cross batches.
-const IMPORT_BATCH: usize = if cfg!(test) { 2 } else { 512 };
+/// How many views an import verifies, in parallel, before appending them: few in tests and
+/// fuzzing, so that they cross batches.
+const IMPORT_BATCH: usize = if cfg!(any(test, fuzzing)) { 2 } else { 512 };
 
 /// How many records, of operations and views, an import takes in before appending them.
 const IMPORT_ITEMS: usize = 4096;

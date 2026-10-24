@@ -15,6 +15,7 @@ mod expiry;
 mod forget;
 mod found;
 mod history;
+mod refs;
 mod remotes;
 mod repositories;
 mod workspaces;

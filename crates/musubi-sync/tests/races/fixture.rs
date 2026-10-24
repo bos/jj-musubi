@@ -33,12 +33,23 @@ impl Fixture {
     /// (`musubi_testutil::recorded`), and each test gets a copy, with nodes that know
     /// nothing of the hub yet, as after a restart.
     pub fn new(names: &[&str]) -> Self {
+        Self::recorded(names, "", |_| {})
+    }
+
+    /// As `new`, with `setup` run on the hive once it is synced, before it is recorded under
+    /// `key`, a name of its own for the setup.
+    pub fn recorded(names: &[&str], key: &str, setup: impl FnOnce(&mut Self)) -> Self {
         let base = Path::new(env!("CARGO_TARGET_TMPDIR"));
-        let name = format!("fixture-{}", names.join("-"));
+        let mut name = format!("fixture-{}", names.join("-"));
+        if !key.is_empty() {
+            name = format!("{name}-{key}");
+        }
         let saved = musubi_testutil::recorded(base, &name, |dir| {
             let env = TestEnv::new();
             let repos = names.iter().map(|name| env.init_repo(name)).collect();
-            let Self { env, repos, hive } = Self::join(env, repos);
+            let mut fixture = Self::join(env, repos);
+            setup(&mut fixture);
+            let Self { env, repos, hive } = fixture;
             // Its nodes finish writing what they realized as they close.
             drop(hive);
             // Where jj keeps each repository's config, which a copy keeps in the same place
@@ -235,7 +246,7 @@ impl Fixture {
 
     /// The repository at its head, read in process: unlike a `jj` command, reading it
     /// snapshots nothing and imports nothing from git.
-    fn load(&self, index: usize) -> Arc<ReadonlyRepo> {
+    pub fn load(&self, index: usize) -> Arc<ReadonlyRepo> {
         let repo = self.repo(index);
         let loader = RepoLoader::init_from_file_system(
             &repo.settings(),

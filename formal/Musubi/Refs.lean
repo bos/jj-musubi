@@ -29,12 +29,29 @@ For a remote bookmark `x@origin`, which is shared, the record of `refs/remotes/o
 - otherwise, the import resets the remote bookmark to this machine's `.git` value and merges
   that into the bookmark tracking it (`remote_reset_without_export`), with no `git` command
   having run. jj skips the export of a conflicted remote bookmark, so musubi writes one of
-  its sides to `.git` itself, the same on every machine (`export_conflicted_remote_bookmarks`
-  in `node/git.rs`); the import then resolves the conflict to that side. A ref update that fails
-  for another reason still ends this way.
+  its sides to `.git` itself, the same on every machine
+  (`export_conflicted_remote_bookmarks` in `node/git.rs`); the import then resolves the
+  conflict to that side. A ref update that fails for another reason still ends this way.
 
 Only one ref and a linear op history are modeled. Concurrent op heads appear only in
 `merge_in_sync`, a fact about `merge` not connected to the step relations.
+
+What else the model leaves out of jj, as testing it against jj showed
+(`crates/musubi-sync/tests/races/refs.rs`, docs/internals/conformance.md, "Per-machine refs"):
+
+- Tracking. `Slot.import` merges into the bookmark as from a tracked remote bookmark. jj keeps
+  a tracked remote bookmark with no target only while its local bookmark exists, so once git
+  or a fetch deletes `refs/remotes/origin/x` and the import deletes `x` with it, jj forgets
+  that `x` tracked it. When the ref comes back, jj imports it untracked and leaves `x` absent,
+  unless `remotes.origin.auto-track-bookmarks` covers `x`; the model sets `x`. git moved the
+  ref both times, so this is no spurious revert, but it is a step jj doesn't take.
+- The record across op heads. jj merges concurrent op heads' views field by field, each
+  remote ref's target and tracking state separately (`merge_remote_refs`), and musubi's
+  realization of a merge operation merges the per-machine fields the same way
+  (`inherited_per_machine` in `node/realize.rs`). Two heads that each imported or exported
+  a different value merge to a conflicted record, which matches neither `.git` nor either
+  head; no step here makes one, and `merge_in_sync` only says when the merge is one of the
+  heads' values. The test keeps a single op head.
 -/
 
 namespace Musubi.Refs

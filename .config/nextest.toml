@@ -18,3 +18,11 @@ slow-timeout = { period = "300s", terminate-after = 12 }
 [[profile.default.overrides]]
 filter = "test(=conformance)"
 priority = 100
+
+# Each case of the per-machine refs conformance test runs real `jj`, `git` and syncs. It is
+# the next longest, so it starts next; and shrinking a failure takes minutes, so it has long
+# enough for Hegel to report one, which it does when it gives up shrinking at five.
+[[profile.default.overrides]]
+filter = "test(=refs::bookmarks_conform_to_refs_model)"
+priority = 90
+slow-timeout = { period = "60s", terminate-after = 6 }

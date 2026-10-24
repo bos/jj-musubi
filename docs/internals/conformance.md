@@ -312,3 +312,74 @@ cargo nextest run -p musubi-jj -E 'test(/^presence::/)'
 `MUSUBI_CONFORMANCE_CASES` sets the number of histories, 300 by default: each takes the
 oracle about a millisecond. Dropping the check that a parent whose history has a copy's work
 keeps it, which lets a forget's merge bring the copy back, fails within a few histories.
+
+## Per-machine refs
+
+`formal/Musubi/Refs.lean` proves that, for one git ref of a colocated repository, an import
+changes a bookmark only if git moved the ref (`noSpuriousRevert`, `remoteNoSpuriousRevert`),
+whatever musubi realizes, assuming jj's ref merge obeys three laws (`RefAlg`). Its state is a
+few ref targets, so the test keeps a copy of the model in Rust rather than running an oracle.
+The chain has two links:
+
+1. **The laws.** `ref_laws::merge_ref_targets_obeys_ref_alg`, in
+   `crates/musubi-jj/tests/it/ref_laws.rs`, checks `merge a b b = a`, `merge b b c = c` and
+   `merge a b a = a` for jj-lib's `merge_ref_targets` on 300 triples of targets from a small
+   real repository: absent, one commit (the root among them), or a conflict of three or five
+   terms, any of them absent. jj resolves these before looking at commits
+   (`trivial_merge`), so a failure means a jj upgrade changed that.
+2. **The steps.** `refs::bookmarks_conform_to_refs_model`, in
+   `crates/musubi-sync/tests/races/refs.rs`, is a Hegel state machine over two colocated
+   repositories synced through an in-process hub, as in the race catalogue. It follows a
+   local bookmark `x`, which git moves; a local bookmark `y`, which git doesn't; and
+   `y@origin`, which `y` tracks and git and fetches move. Beside the real machine it keeps
+   the model's `Machine` for each of the three, with jj's `merge_ref_targets` as the merge,
+   and steps them as each real action does:
+
+   | Real action | Model steps |
+   | --- | --- |
+   | `git update-ref` moves or deletes `refs/heads/x` or `refs/remotes/origin/y` | `gitMove` |
+   | A `jj` command moves `x` or `y` (`jj bookmark set`, `jj bookmark delete`), or changes nothing (`jj status`) | `jjImport` of every ref; `jjExport` of every ref if that changed the view; then, if the command moves a bookmark, `set` and `jjExport` of every ref |
+   | `y` moves in `origin`, and `jj git fetch` fetches it | as a `jj` command, whose change is `RStep.fetch` |
+   | The other machine moves `x` or fetches `y`, and both sync, with `refs/heads/x.lock` held here or not | `LStep.advance` of `x` and `y` and `RStep.advance` of `y@origin`, then `jjExport` of every ref, except where the lock makes `x`'s update fail; nothing if there was nothing to realize |
+
+   jj imports `x@git`, `y@git` and `y@origin` in that order, and the two refs of `y` share
+   the bookmark, so an import of one is a `set` of the other. jj exports only a transaction
+   with changes, which is why a `jj` command that imports nothing exports nothing, and a
+   failed export waits for a command that changes something. After every action the test
+   requires, for each ref, the bookmark, the remote bookmark, its `git_refs` entry and the
+   git ref to be the model's, `LInv` (`RInv` for `y@origin`) to hold, and the repository to
+   have one op head. It also checks that the other machine's command left its bookmarks as
+   the model says, so that its own refs reverted nothing either.
+
+What the test found, and how it is kept within the model:
+
+- **An update to the value git already has succeeds.** jj's export counts an update of a
+  ref a success if `.git` already has the new value (`move_git_ref`, `create_git_ref`,
+  `delete_git_ref`), and records it, though `.git` didn't have `git_refs`'s value. That
+  happens when git moves `refs/heads/x` to a commit and musubi then realizes another
+  machine's move of `x` there. The model's `exportLocal` and `exportRemote` were stricter,
+  and now say so; every theorem still holds.
+- **Tracking.** The model merges into a bookmark as from a tracked remote bookmark. jj keeps
+  a tracked remote bookmark with no target only while its bookmark exists, so once git or a
+  fetch deletes `refs/remotes/origin/y` and the import deletes `y` with it, jj forgets that
+  `y` tracked it. When `y@origin` comes back, jj imports it untracked and leaves `y` absent,
+  where the model sets `y`. The test has both machines track `y` automatically
+  (`remotes.origin.auto-track-bookmarks`), as the model assumes; without that, a deletion
+  and a fetch fail it.
+- **Not covered.** One op head throughout, so neither jj's merge of concurrent op heads'
+  records nor musubi's (`inherited_per_machine`), which `merge_in_sync` describes but no
+  step makes; no remote ref locked, since `RStep.advance` admits only exports that can
+  succeed (a failed one ends as `remote_reset_without_export` says);
+  no conflicted remote bookmark, so not `export_conflicted_remote_bookmarks`; and no tags.
+
+```sh
+cargo nextest run -p musubi-jj -E 'test(/^ref_laws::/)'
+cargo nextest run -p musubi-sync -E 'test(/^refs::/)'
+```
+
+The state machine makes 12 cases of up to 10 actions, about 4 seconds on 32 cores, which
+makes it the longest test after the protocol's conformance test, so it starts next;
+`MUSUBI_CONFORMANCE_CASES` sets the number. Each case runs real `jj`, `git` and syncs, so
+shrinking a failure takes minutes, and nextest lets the test run for six. Before the model's
+export said what jj does, the first run of 10 cases failed: git moved `x` to a commit, then
+musubi realized a move of `x` to it.

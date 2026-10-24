@@ -56,7 +56,7 @@ The binary is `formal/.lake/build/bin/oracle`.
 | `Musubi/RegressScenario.lean` | A run of the executable model in which the hub goes back and two nodes then merge the same heads (`duplicateMerge`), so the extended system reaches states the durable one does not (`rreachable_not_reachable`). |
 | `Oracle.lean` | The `oracle` executable: a stdin/stdout loop around `ExecJson.handle`, which also answers measure and upload requests, and presence requests with `PresenceExec.lean`. |
 | `test/smoke.jsonl`, `test/smoke.expected`, `test/run_smoke.sh` | The oracle smoke test. |
-| `Musubi/Refs.lean` | Per-machine and shared state of a replicated view, for one git ref: jj's ref import and export against an adversarial `.git`, no spurious revert for local and remote bookmarks, and the verbatim-replication counterexample (docs/internals/design.md, "Per-machine state in a replicated view"). Independent of the protocol model. |
+| `Musubi/Refs.lean` | Per-machine and shared state of a replicated view, for one git ref: jj's ref import and export against an adversarial `.git`, no spurious revert for local and remote bookmarks, and the verbatim-replication counterexample (docs/internals/design.md, "Per-machine state in a replicated view"). Independent of the protocol model. Tested against jj itself (below). |
 | `Musubi/Presence.lean` | Which copies a hive shows, when copies go away without leaving: a copy is present while it has work that no forget of it saw. Every machine agrees, only work brings a copy back, `musubi leave` sticks, work concurrent with a forget survives, forgetting can't loop along a line of history, duplicate forgets are harmless, and presence can be decided from a copy's latest work and its forgets. What musubi keeps of each copy, its latest work that no forget saw (`UMax`), follows from an operation's parents' alone (`umax_merge`). Independent of the protocol model. |
 | `Musubi/PresenceExec.lean` | The presence rule on a finite history, executable: `presentB` and `latestB`, proved to compute `Present` and `UMax`, which the oracle answers presence requests with (docs/internals/conformance.md, "Presence"). |
 | `Musubi/Axioms.lean` | `#print axioms` for every main theorem. |
@@ -304,6 +304,31 @@ Encoding choices:
   `i + 1`, which then shadows the old one, as the relational `hubAccept` overwrites it. The
   ghost history is not part of the JSON state, so a test may equally truncate it to the
   entries up to `i`.
+
+## Testing the per-machine refs model
+
+`Musubi/Refs.lean` has no oracle: its state is a few ref targets, so the test keeps a copy
+of the model in Rust instead, beside real repositories (docs/internals/conformance.md,
+"Per-machine refs"):
+
+- `ref_laws` (`crates/musubi-jj/tests/it/ref_laws.rs`) checks that jj-lib's
+  `merge_ref_targets` obeys the three `RefAlg` laws, on absent, resolved and conflicted
+  targets from a small real repository.
+- `refs` (`crates/musubi-sync/tests/races/refs.rs`) runs a Hegel state machine over two
+  colocated repositories and a hub: git moves `refs/heads/x` and `refs/remotes/origin/y`,
+  `jj` commands move bookmarks and fetch, and the other machine moves bookmarks for musubi
+  to realize, with git's lock on `refs/heads/x` held or not. It steps a Rust copy of
+  `Machine` for `x`, `y` and `y@origin` through the `LStep`s and `RStep`s each action
+  performs, with jj's merge as the `RefAlg` instance, and after every action requires the
+  real bookmark, remote bookmark, `git_refs` entry and git ref to be the model's, and
+  `LInv` and `RInv` to hold.
+
+The test found that `exportLocal` and `exportRemote` were stricter than jj: jj counts an
+update a success if `.git` already has the new value, as after git moved the ref there and
+musubi realized the same move. They now say so; every theorem still holds. The model's
+header lists what it still leaves out: tracking state, which the test sidesteps by having
+jj track `y@origin` automatically, and merges of the record across op heads, which the test
+avoids by keeping one op head.
 
 ## Why the reliable policy model is a sound abstraction for liveness
 

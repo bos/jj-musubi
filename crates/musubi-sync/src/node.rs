@@ -85,13 +85,19 @@ impl NodeAdapter {
     /// Gets ready to sync. A repository made shallow or partial since it joined can't send
     /// what its new work requires, and the hub would refuse it. Settings changed here go up
     /// with the sync, and once the node has the hive's head, the hive's settings apply here.
-    /// Op heads may have changed since the last step: a fetch's haves should say so.
+    /// Other machines' workspaces that this machine forgot show again before anything
+    /// arrives to merge with: `jj workspace forget` abandoned an empty working-copy commit
+    /// here, which the hive keeps, and a merge with the abandon would rebase off it what its
+    /// machine built on it meanwhile. Op heads may have changed since the last step: a
+    /// fetch's haves should say so.
     pub fn before_sync(&mut self) -> anyhow::Result<()> {
         self.repo.check_complete()?;
         self.reconcile_settings(true)?;
+        self.show_other_workspaces()?;
         self.heads()?;
         Ok(())
     }
+
 
     /// What a node does once its policy has nothing left to do, having just fetched the
     /// hive's head: reconcile its settings, show other machines' workspaces again, record

@@ -12,7 +12,6 @@ use musubi_core::hub;
 use musubi_core::message::HeadKind;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
-use musubi_core::node::LocalRepo as _;
 use musubi_core::node::Step;
 use musubi_jj::node::NodeError;
 use musubi_jj::node::NodeRepo;
@@ -883,7 +882,7 @@ impl World {
         };
         let poll = {
             let member = &mut self.fx.hive.members[m];
-            member.adapter.heads()?;
+            member.adapter.before_sync()?;
             member.core.poll(&member.adapter)?
         };
         deliver(self, poll)?;

@@ -97,6 +97,37 @@ fn other_machines_workspaces_are_theirs() {
     assert_eq!(names(&hive, 0), ["alpha", "beta/beta"]);
 }
 
+/// The same while the other machine builds on its working-copy commit: `jj workspace
+/// forget` abandons the empty commit here, but the hive keeps it, so the merge with what
+/// the other machine built leaves that where it was, with the working copy beneath it.
+#[test]
+fn forgetting_another_machines_workspace_moves_nothing_built_on_it() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(1, "b", "from beta");
+    hive.commit(0, "a", "from alpha");
+    hive.sync();
+    let beta_wc = working_copy(&hive, 1);
+    let moved = hive.commit_id(1, "from alpha");
+    hive.repo(1).jj(&["rebase", "-r", &moved, "-o", &beta_wc]);
+    hive.hive.sync(1).unwrap();
+    hive.repo(0).jj(&["workspace", "forget", "beta/beta"]);
+    hive.sync();
+    hive.assert_converged();
+    assert_eq!(working_copy(&hive, 1), beta_wc);
+    for m in 0..2 {
+        let parent = hive.repo(m).jj(&[
+            "log",
+            "--no-graph",
+            "-r",
+            "description(exact:'from alpha\n')-",
+            "-T",
+            "commit_id",
+        ]);
+        assert_eq!(parent, beta_wc, "on {}", hive.repo(m).machine());
+    }
+    assert_eq!(names(&hive, 0), ["alpha", "beta/beta"]);
+}
+
 /// The same at a merge with a line of history from before the other machine's working copy
 /// existed, which never had its commit, or from before that machine joined: the hive keeps
 /// the commit, and the other machine its working copy.

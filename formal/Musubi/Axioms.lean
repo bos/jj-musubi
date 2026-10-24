@@ -11,6 +11,7 @@ import Musubi.Scenario
 import Musubi.ExecSound
 import Musubi.RegressScenario
 import Musubi.Refs
+import Musubi.Presence
 
 open Musubi
 
@@ -90,3 +91,18 @@ open Musubi
 #print axioms Refs.merge_in_sync
 #print axioms Refs.remoteNoSpuriousRevert
 #print axioms Refs.remote_reset_without_export
+-- Which copies a hive shows
+#print axioms Presence.Hist.present_local
+#print axioms Presence.Hist.present_congr
+#print axioms Presence.Hist.work_present
+#print axioms Presence.Hist.forget_absent
+#print axioms Presence.Hist.only_work_returns
+#print axioms Presence.Hist.absence_persists
+#print axioms Presence.Hist.leave_sticks
+#print axioms Presence.Hist.unseen_work_survives
+#print axioms Presence.Hist.forgets_need_fresh_work
+#print axioms Presence.Hist.no_forget_after_complete
+#print axioms Presence.Hist.forget_chain_bounded
+#print axioms Presence.Hist.redundant_forget_noop
+#print axioms Presence.Hist.concurrent_forget_noop
+#print axioms Presence.Hist.present_iff_latest

@@ -12,6 +12,7 @@ use std::time::SystemTime;
 use musubi_jj::node::NodeRepo;
 use musubi_jj::objects::Backend;
 use musubi_sync::hive::Hive;
+use musubi_sync::hub::HubAdapter;
 use musubi_testutil::TestEnv;
 use musubi_testutil::TestRepo;
 
@@ -390,7 +391,9 @@ fn a_remade_hive_fills_from_its_machines() {
     let mut torn = std::fs::read(&heads).unwrap();
     torn.extend_from_slice(b"9 0123456789a");
     std::fs::write(&heads, torn).unwrap();
-    // As the hub makes it again (`HubDir::remake`).
+    // As the hub makes it again (`HubDir::remake`), which it does when opening the store
+    // fails, so with the store closed: Windows can't rename a directory with files open in it.
+    hive.hub = HubAdapter::init(&env.root().join("meanwhile"), Backend::Git).unwrap();
     std::fs::rename(&hub_dir, env.root().join("corrupt")).unwrap();
     musubi_hub::store::HubStore::init(&hub_dir, Backend::Git).unwrap();
     hive.restart_hub().unwrap();

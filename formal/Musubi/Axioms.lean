@@ -101,6 +101,24 @@ open Musubi
 #print axioms Refs.merge_in_sync
 #print axioms Refs.remoteNoSpuriousRevert
 #print axioms Refs.remote_reset_without_export
+#print axioms Refs.merge3_synced
+#print axioms Refs.FReach.inv
+#print axioms Refs.fork_merge_inv
+#print axioms Refs.fork_merged_reach
+#print axioms Refs.fork_noSpuriousRevert
+#print axioms Refs.concurrent_records_revert
+#print axioms Refs.TSlot.import_toSlot
+#print axioms Refs.TSlot.import_self
+#print axioms Refs.TSlot.track_toSlot
+#print axioms Refs.TSlot.exportLocal_toSlot
+#print axioms Refs.TSlot.merge_toSlot
+#print axioms Refs.TSlot.merge_WF
+#print axioms Refs.shortcut_agrees
+#print axioms Refs.realizeMerge_eq
+#print axioms Refs.shortcutUnguarded_keeps_absent
+#print axioms Refs.shortcutUnguarded_untracks
+#print axioms Refs.realize_not_WF
+#print axioms Refs.firstBase_reverts
 -- Which copies a hive shows
 #print axioms Presence.Hist.present_local
 #print axioms Presence.Hist.present_congr

@@ -283,6 +283,12 @@ fn spawn_worker(
                     "answered {received} bytes with {sent} in {:?}",
                     started.elapsed()
                 );
+                // A failure is counted before the reply goes, so that whoever asks next, as
+                // `musubi top` does, finds it counted.
+                if let Err(message) = &done {
+                    let (received, sent) = if counted { (0, 0) } else { (received, sent) };
+                    lock_activity(&activity).failed(&id, received, sent, message, Instant::now());
+                }
                 let reply_to = message.reply.as_deref().unwrap_or_default();
                 if let Err(err) = runtime.block_on(transport.publish(reply_to, Bytes::from(reply)))
                 {
@@ -295,36 +301,29 @@ fn spawn_worker(
                     tracing::warn!("could not announce the new head: {err}");
                 }
                 let now = Instant::now();
-                match done {
-                    // What a new head brought takes reading its operations again, so it waits
-                    // until the reply has gone.
-                    Ok(Some(since)) => {
-                        let summarized = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                            service
-                                .as_ref()
-                                .map(|service| summarize(service.hub().store(), &since))
-                        }));
-                        match summarized {
-                            Ok(Some(Ok(accepted))) => {
-                                lock_activity(&activity).summarized(&id, accepted, now);
-                            }
-                            Ok(Some(Err(err))) => {
-                                tracing::warn!("could not summarize the new head: {err:#}");
-                            }
-                            Ok(None) => {}
-                            Err(panic) => {
-                                service = None;
-                                tracing::warn!(
-                                    "could not summarize the new head: {}",
-                                    panic_message(panic.as_ref())
-                                );
-                            }
+                // What a new head brought takes reading its operations again, so it waits
+                // until the reply has gone.
+                if let Ok(Some(since)) = done {
+                    let summarized = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                        service
+                            .as_ref()
+                            .map(|service| summarize(service.hub().store(), &since))
+                    }));
+                    match summarized {
+                        Ok(Some(Ok(accepted))) => {
+                            lock_activity(&activity).summarized(&id, accepted, now);
                         }
-                    }
-                    Ok(None) => {}
-                    Err(message) => {
-                        let (received, sent) = if counted { (0, 0) } else { (received, sent) };
-                        lock_activity(&activity).failed(&id, received, sent, &message, now);
+                        Ok(Some(Err(err))) => {
+                            tracing::warn!("could not summarize the new head: {err:#}");
+                        }
+                        Ok(None) => {}
+                        Err(panic) => {
+                            service = None;
+                            tracing::warn!(
+                                "could not summarize the new head: {}",
+                                panic_message(panic.as_ref())
+                            );
+                        }
                     }
                 }
             }

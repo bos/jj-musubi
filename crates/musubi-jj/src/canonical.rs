@@ -139,8 +139,9 @@ fn in_parallel<T: Sync, R: Send>(items: &[T], work: impl Fn(usize, &T) -> R + Sy
     })
 }
 
-/// How many views an import verifies, in parallel, before appending them.
-const IMPORT_BATCH: usize = 512;
+/// How many views an import verifies, in parallel, before appending them: few in tests, so
+/// that they cross batches.
+const IMPORT_BATCH: usize = if cfg!(test) { 2 } else { 512 };
 
 /// How many records, of operations and views, an import takes in before appending them.
 const IMPORT_ITEMS: usize = 4096;
@@ -537,10 +538,11 @@ impl CanonicalStore {
             .map_err(self.shared.log_err())
     }
 
-    /// What isn't what its id says it is, as a power cut can leave it: a stored operation or
-    /// view that doesn't read back as what it hashes to, and anything after the last whole
-    /// record, which a scan doesn't read. Fails, rather than count something torn, if it
-    /// can't be read for some other reason, as when the process is out of file descriptors.
+    /// What isn't what its id says it is, as a power cut can leave it: a stored operation
+    /// or view that doesn't read back as what it hashes to, or a view not in normal form,
+    /// and anything after the last whole record, which a scan doesn't read. Fails, rather
+    /// than count something torn, if it can't be read for some other reason, as when the
+    /// process is out of file descriptors.
     pub fn torn(&self) -> Result<Vec<String>, CanonicalError> {
         let mut torn = vec![];
         for id in self.operation_ids()? {
@@ -551,6 +553,12 @@ impl CanonicalStore {
         for id in views {
             let read = self.read_view(&id).map(|view| blake2b_hash(&view));
             judge(&mut torn, "view", &id.hex(), id.as_bytes(), read)?;
+            // Deltas sent on, and those stored as they came, are against the normal form.
+            if let Ok(bytes) = self.view_bytes(&id)
+                && normal_view(&bytes).is_none_or(|normal| normal != bytes)
+            {
+                torn.push(format!("view {} isn't in normal form", id.hex()));
+            }
         }
         let unread = self.shared.log.unread().map_err(self.shared.log_err())?;
         if unread > 0 {
@@ -1375,6 +1383,8 @@ mod tests {
 
     use std::fs;
 
+    use hegel::TestCase;
+    use hegel::generators as gs;
     use jj_lib::merge::Merge;
     use jj_lib::op_store::RefTarget;
     use jj_lib::op_store::RemoteRefState;
@@ -1768,6 +1778,139 @@ mod tests {
         let receiver = CanonicalStore::open(&receiver_dir, root_commit).unwrap();
         assert_eq!(receiver.read_view(&child_view).unwrap(), view);
         assert_eq!(receiver.torn().unwrap(), Vec::<String>::new());
+    }
+
+    /// Bundles a peer could send: each view in one of three encodings that decode to it (the
+    /// sender's normal form; its heads reversed; and with an unknown field after them, which
+    /// is in normal form but isn't the sender's), whole, or as a delta made against any encoding of any view before
+    /// it; some sent twice; across bundles imported in turn by two stores sharing a log, as
+    /// the daemon and a command do, with batches small enough to cross. Whatever an import
+    /// makes of each, refusing it or not, everything stored reads back, from the log opened
+    /// afresh, as what its id says. And a bundle as musubi makes one, in the sender's normal
+    /// form with deltas against the view before, is taken whole.
+    #[hegel::test(test_cases = 200)]
+    fn imports_store_only_what_reads_back_as_its_id(tc: TestCase) {
+        use jj_lib::protos::simple_op_store as proto;
+
+        let dir = musubi_testutil::tempdir();
+        let root_commit = commit(0);
+        let sender = CanonicalStore::open(&dir.path().join("sender"), root_commit.clone()).unwrap();
+        let count = tc.draw(gs::integers::<usize>().min_value(1).max_value(10));
+        // Each view's id and the sender's bytes for it, and the operation it is the view of.
+        let mut views: Vec<(ViewId, Vec<u8>)> = vec![];
+        let mut ops: Vec<OperationId> = vec![];
+        let mut parent = sender.root_operation_id().clone();
+        for _ in 0..count {
+            let heads = tc.draw(gs::integers::<u8>().min_value(1).max_value(12));
+            let first = tc.draw(gs::integers::<u8>().min_value(1).max_value(8));
+            let mut view = View::make_root(root_commit.clone());
+            view.head_ids = (first..first + heads).map(commit).collect();
+            let view_id = sender.write_view(&view).unwrap();
+            let op = sender
+                .write_operation(&operation(&parent, view_id.clone()))
+                .unwrap();
+            views.push((view_id.clone(), sender.view_bytes(&view_id).unwrap()));
+            ops.push(op.clone());
+            parent = op;
+        }
+        let encode = |jj: &[u8], how: u8| -> Vec<u8> {
+            match how {
+                0 => jj.to_vec(),
+                1 => {
+                    let mut view = proto::View::decode(jj).unwrap();
+                    view.head_ids.reverse();
+                    view.encode_to_vec()
+                }
+                // A length-delimited field 99, which jj's schema doesn't have.
+                _ => [jj, &[0x9a, 0x06, 0x01, 0x00]].concat(),
+            }
+        };
+        let honest = tc.draw(gs::booleans());
+        let receiver_dir = dir.path().join("receiver");
+        let receivers = [
+            CanonicalStore::open(&receiver_dir, root_commit.clone()).unwrap(),
+            CanonicalStore::open(&receiver_dir, root_commit.clone()).unwrap(),
+        ];
+        // The encoding each view went in first: a delta against it makes the view again, so
+        // that the receiver takes it in, where a delta against another fails its check.
+        let mut sent = vec![0; count];
+        let mut next = 0;
+        while next < count {
+            let size = tc
+                .draw(gs::integers::<usize>().min_value(1).max_value(count - next))
+                .min(count - next);
+            let path = dir.path().join(format!("bundle-{next}"));
+            let mut writer = BundleWriter::create(&path).unwrap();
+            for i in next..next + size {
+                let (view_id, jj) = &views[i];
+                let times = if honest {
+                    1
+                } else {
+                    tc.draw(gs::integers::<u8>().min_value(1).max_value(2))
+                };
+                for time in 0..times {
+                    let how = if honest {
+                        0
+                    } else {
+                        tc.draw(gs::integers::<u8>().max_value(2))
+                    };
+                    if time == 0 {
+                        sent[i] = how;
+                    }
+                    let contents = encode(jj, how);
+                    // Honest: a delta against the view before, as an export makes one.
+                    let base = match (i, tc.draw(gs::integers::<u8>().max_value(3))) {
+                        (0, _) => None,
+                        _ if honest => Some((i - 1, 0)),
+                        // Mostly against the view before, as bundles are, in the encoding
+                        // it went in, across batches and within them.
+                        (_, 0) => Some((i - 1, sent[i - 1])),
+                        (_, 1) => {
+                            let at = tc.draw(gs::integers::<usize>().max_value(i - 1));
+                            Some((at, sent[at]))
+                        }
+                        (_, 2) => Some((
+                            tc.draw(gs::integers::<usize>().max_value(i - 1)),
+                            tc.draw(gs::integers::<u8>().max_value(2)),
+                        )),
+                        _ => None,
+                    };
+                    match base {
+                        Some((at, base_how)) if views[at].0 != *view_id => {
+                            let (base_id, base_jj) = &views[at];
+                            let delta =
+                                bundle::view_delta(&encode(base_jj, base_how), &contents).unwrap();
+                            writer
+                                .view_delta_made(view_id.as_bytes(), base_id.as_bytes(), &delta)
+                                .unwrap();
+                        }
+                        _ => writer.view(view_id.as_bytes(), &contents).unwrap(),
+                    }
+                }
+                writer
+                    .operation(ops[i].as_bytes(), &sender.operation_bytes(&ops[i]).unwrap())
+                    .unwrap();
+            }
+            writer.finish().unwrap();
+            let receiver = &receivers[tc.draw(gs::integers::<usize>().max_value(1))];
+            let imported = receiver.import_operations(&path);
+            if honest {
+                imported.unwrap();
+            }
+            let fresh = CanonicalStore::open(&receiver_dir, root_commit.clone()).unwrap();
+            assert_eq!(fresh.torn().unwrap(), Vec::<String>::new());
+            next += size;
+        }
+        if honest {
+            let fresh = CanonicalStore::open(&receiver_dir, root_commit).unwrap();
+            for ((view_id, _), op) in views.iter().zip(&ops) {
+                assert_eq!(
+                    blake2b_hash(&fresh.read_view(view_id).unwrap()).as_slice(),
+                    view_id.as_bytes()
+                );
+                assert!(fresh.has_operation(op));
+            }
+        }
     }
 
     fn view_with_heads(heads: u8) -> View {

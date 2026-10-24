@@ -2,7 +2,8 @@
 
 Start with [CONTRIBUTING.md](../../CONTRIBUTING.md) for setup and checks, and
 [AGENTS.md](../../AGENTS.md) for the repository's working agreement. For using musubi, see
-the [user guide](../README.md).
+the [user guide](../README.md). These documents use the terms defined in the design's
+[Vocabulary](design.md#vocabulary): hive, node, hub, canonical operation, realization.
 
 Each document answers a different question:
 
@@ -23,23 +24,26 @@ Each document answers a different question:
 - [The Lean model](../../formal/README.md): What does the model prove, and how does it
   correspond to the protocol?
 - [Releasing](releasing.md): How is a release made?
-- [Benchmarks](../../bench/README.md): How does musubi compare with git and jj's own fetch and
-  push on the wire? How does the canonical store keep up with a long operation log?
+- [Benchmarks](../../bench/README.md): How does musubi compare with git and jj's own clone,
+  fetch and push, in time and bytes on the wire? How does the canonical store keep up with a
+  long operation log?
 
-Keep each rule in the document that owns it, and link to it from others. These documents
-describe the current system; jj's history records how it got here.
+Keep each rule in the document that owns it, and link to it from others. Describe the
+current system; jj's history records how it got here.
 
 ## Finding the code
 
 The crates, from the bottom up:
 
-- [musubi-core](../../crates/musubi-core/src/lib.rs) is the sync protocol as sans-IO state
-  machines, [hub.rs](../../crates/musubi-core/src/hub.rs) and
+- [musubi-core](../../crates/musubi-core/src/lib.rs) is the sync protocol as state machines
+  that do no I/O, [hub.rs](../../crates/musubi-core/src/hub.rs) and
   [node.rs](../../crates/musubi-core/src/node.rs), which correspond to the Lean model. It
   knows nothing of jj, storage, or networks.
 - [musubi-transport](../../crates/musubi-transport/src/lib.rs) carries messages: in memory,
   for the hub and tests, or over a byte stream, for local sockets and ssh.
-- [musubi-jj](../../crates/musubi-jj/src/lib.rs) is everything that touches jj-lib. The
+- [musubi-jj](../../crates/musubi-jj/src/lib.rs) is everything that touches jj-lib.
+  [canonical.rs](../../crates/musubi-jj/src/canonical.rs) is the canonical store, the log of
+  canonical operations that the hub and each machine keep. The
   [node](../../crates/musubi-jj/src/node.rs) module translates between local and canonical
   operations ([translate](../../crates/musubi-jj/src/node/translate.rs),
   [realize](../../crates/musubi-jj/src/node/realize.rs)), joins hives, and reconciles hive

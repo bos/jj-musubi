@@ -1,12 +1,29 @@
 # Lean model of the musubi sync protocol
 
-This directory is a machine-checked Lean 4 model of
-[`docs/internals/protocol.md`](../docs/internals/protocol.md); in `Musubi/Refs.lean`, of the
-per-machine view state of [`docs/internals/design.md`](../docs/internals/design.md); and in
-`Musubi/Presence.lean`, of which copies a hive shows, as proposed in
-[issue #47](https://github.com/bos/jj-musubi/issues/47). It contains no `sorry` and adds no
-axioms. Every main theorem depends only on `propext`, `Classical.choice`
-and `Quot.sound`. Some depend on fewer, and `Musubi/Axioms.lean` prints the exact list.
+This directory holds machine-checked Lean 4 models of the following. Hive, node, hub and the
+other terms are those of [design.md, "Vocabulary"](../docs/internals/design.md#vocabulary).
+
+- The sync protocol of [protocol.md](../docs/internals/protocol.md), with its safety and
+  liveness properties, and what still holds when the hub goes back to an earlier head.
+- Chunked blob transfer (`Musubi/Chunks.lean`), from the same document.
+- The per-machine state of a replicated view, for one git ref (`Musubi/Refs.lean`; [design.md,
+  "Per-machine state in a replicated
+  view"](../docs/internals/design.md#per-machine-state-in-a-replicated-view)).
+- Which copies a hive shows, one copy being one machine's repository (`Musubi/Presence.lean`;
+  [design.md, "Copies that go away"](../docs/internals/design.md#copies-that-go-away)).
+
+The last three are separate models, independent of the protocol model's state.
+
+No proof is left unfinished (Lean's `sorry`) and the model adds no axioms. Every main theorem
+depends only on Lean's standard `propext`, `Classical.choice` and `Quot.sound`, some on fewer;
+`Musubi/Axioms.lean` prints each one's list.
+
+The models are state machines, states and a step relation, except the presence model, which is
+stated over any operation history. The protocol's is `Step N`, for `N` nodes, and `Reachable N s`
+says that state `s` can be reached from `init`. Sets are predicates (`OSet`), so
+`(s.node n).lops x` reads "`x ∈ local(n)`". *Ghost* state, such as each operation's creator,
+exists only to state properties: no step reads it. [Correspondence with
+protocol.md](#correspondence-with-protocolmd) maps the rest of the notation.
 
 ## Checking
 
@@ -18,48 +35,41 @@ lake build
 ```
 
 The toolchain is pinned to `leanprover/lean4:v4.35.0` in `lean-toolchain`. The model uses
-only core Lean: there is no Mathlib and there are no dependencies. A clean build of the proofs
-and the oracle takes about 5 seconds. The build prints the `#print axioms` report from
-`Musubi/Axioms.lean` and runs the `#guard` smoke tests in `Musubi/ExecTest.lean`.
+only core Lean: no Mathlib, no dependencies. A clean build of the proofs and the oracle takes
+about 5 seconds. It prints the axioms report of `Musubi/Axioms.lean` and runs the `#guard`
+smoke tests in `Musubi/ExecTest.lean`.
 
-To build and run only the conformance oracle:
-
-```sh
-cd formal
-lake build oracle
-.lake/build/bin/oracle < test/smoke.jsonl
-./test/run_smoke.sh   # replays test/smoke.jsonl and diffs against test/smoke.expected
-```
-
-The binary is `formal/.lake/build/bin/oracle`.
+`./test/run_smoke.sh` builds the conformance oracle alone (`lake build oracle`), replays
+`test/smoke.jsonl` through it and diffs the output against `test/smoke.expected`. The binary
+is `formal/.lake/build/bin/oracle`.
 
 ## Files
 
 | File | Contents |
 | --- | --- |
 | `Musubi/Basic.lean` | Sets as predicates (`OSet`), point update `upd`, counting `cnt`, sums `sumN`. |
-| `Musubi/Dag.lean` | `Anc` (`anc*`), `ParLt` (acyclicity), `maxSet` (`max`), and how `anc*` is preserved when a fresh op is created. |
+| `Musubi/Dag.lean` | `Anc` (`anc*`), `ParLt` (parents have smaller ids, so the graph is acyclic), `maxSet` (`max`), and how `anc*` is preserved when a fresh op is created. |
 | `Musubi/Model.lean` | The asynchronous model: state, messages, transitions, `EnvStep`, `SyncStep`, `Step`, `Reachable`. |
 | `Musubi/Invariant.lean` | The inductive invariant `Inv` and the message invariant `MsgOK`. |
 | `Musubi/PreserveEnv.lean` | `Inv` is preserved by `UserOp`, `Merge` and message sends. |
 | `Musubi/PreserveSync.lean` | `Inv` is preserved by every sync, hub and crash step; `inv_reachable`. |
-| `Musubi/Safety.lean` | The safety properties and no-feedback. |
-| `Musubi/Liveness.lean` | The reliable policy model `PStep`, simulation into the async model, the measure, progress, termination and convergence. |
-| `Musubi/Merged.lean` | The merged `Push` and `Fetch` exchanges reach states that agree with policy steps on everything the measure and convergence depend on. |
-| `Musubi/Regress.lean` | A hub that goes back to an earlier accepted head, as a power cut or a remade hive makes it: the extended system `RStep`, the invariant that survives, and convergence once the hub stops going back. |
-| `Musubi/Chunks.lean` | The chunked-blob model, its safety and its liveness; and musubi's receiver, which keeps only a prefix, proved a refinement of it, with its own liveness. |
-| `Musubi/Scenario.lean` | A concrete reachable run: a lost Cas race, then fetch, advance, merge, and the merge accepted. It shows the model is not vacuous. |
-| `Musubi/Exec.lean` | The executable model: finite `EState`, the `Action` vocabulary of `docs/internals/conformance.md`, and `execStep`; and the liveness measures, convergence, and what a policy `Push` uploads, computed (`measureE`, `rmeasureE`, `convergedE`, `upOpsL`, `upObjsL`). |
-| `Musubi/ExecSound.lean` | `exec_sound`, `abs_initE`, `exec_reachable`, `exec_inv`, and with the hub going back `exec_rsound`, `exec_rreachable`, `exec_invR`, `exec_remake`; `measureE_eq`, `rmeasureE_eq`, `convergedE_iff`, `mem_upOpsL`, `mem_upObjsL`. |
+| `Musubi/Safety.lean` | The safety properties and no feedback. |
+| `Musubi/Liveness.lean` | The policy model `PStep`, its simulation in the asynchronous model, the measure, progress, termination and convergence. |
+| `Musubi/Merged.lean` | The merged `Push` and `Fetch` exchanges reach states that agree with policy steps on everything the measure and convergence read. |
+| `Musubi/Regress.lean` | A hub that goes back to an earlier accepted head, as after a power cut or a remade hive: the extended system `RStep`, the invariant that survives, and convergence once the hub stops going back. |
+| `Musubi/Scenario.lean` | A concrete reachable run (a lost Cas race, then fetch, advance, merge, and the merge accepted), showing the model is not vacuous. |
+| `Musubi/RegressScenario.lean` | A run of the executable model in which the hub goes back and two nodes then merge the same heads. |
+| `Musubi/Chunks.lean` | The chunked-blob model, its safety and liveness; and musubi's receiver, which keeps only a prefix, proved a refinement of it, with its own liveness. |
+| `Musubi/Exec.lean` | The executable model: finite `EState`, the `Action`s of [conformance.md](../docs/internals/conformance.md), `execStep`; and the liveness measures, convergence, and what a policy `Push` uploads, computed (`measureE`, `rmeasureE`, `convergedE`, `upOpsL`, `upObjsL`). |
+| `Musubi/ExecSound.lean` | Soundness of `execStep` and of those computations ([below](#the-executable-model-and-the-conformance-oracle)). |
 | `Musubi/ExecJson.lean` | The oracle's JSON codec and request handler (no protocol logic). |
 | `Musubi/ExecTest.lean` | `#guard` smoke tests of `execStep`, checked at build time. |
-| `Musubi/RegressScenario.lean` | A run of the executable model in which the hub goes back and two nodes then merge the same heads (`duplicateMerge`), so the extended system reaches states the durable one does not (`rreachable_not_reachable`). |
-| `Oracle.lean` | The `oracle` executable: a stdin/stdout loop around `ExecJson.handle`, which also answers measure and upload requests, and presence requests with `PresenceExec.lean`. |
-| `test/smoke.jsonl`, `test/smoke.expected`, `test/run_smoke.sh` | The oracle smoke test. |
-| `Musubi/Refs.lean` | Per-machine and shared state of a replicated view, for one git ref: jj's ref import and export against an adversarial `.git`, no spurious revert for local and remote bookmarks and tags, and the verbatim-replication counterexample; musubi's export of a conflicted remote bookmark, after which every machine's import resolves it alike; `jj undo` and `jj op restore`, which keep the invariant where jj's export can write the restored bookmark, and otherwise can revert (`restore_reverts`); merges of concurrent op heads with tracking states, where a merge keeps the invariant unless both heads changed the record, and musubi's realization of a merge is jj's merge (docs/internals/design.md, "Per-machine state in a replicated view"). Independent of the protocol model. Tested against jj itself (below). |
-| `Musubi/Presence.lean` | Which copies a hive shows, when copies go away without leaving: a copy is present while it has work that no forget of it saw. Every machine agrees, only work brings a copy back, `musubi leave` sticks, work concurrent with a forget survives, forgetting can't loop along a line of history, duplicate forgets are harmless, and presence can be decided from a copy's latest work and its forgets. What musubi keeps of each copy, its latest work that no forget saw (`UMax`), follows from an operation's parents' alone (`umax_merge`). Independent of the protocol model. |
-| `Musubi/PresenceExec.lean` | The presence rule on a finite history, executable: `presentB` and `latestB`, proved to compute `Present` and `UMax`, which the oracle answers presence requests with (docs/internals/conformance.md, "Presence"). |
+| `Musubi/Refs.lean` | Per-machine refs, for one git ref: imports, exports, merges, conflicted remote bookmarks, and `jj undo` and `jj op restore`. |
+| `Musubi/Presence.lean` | Which copies a hive shows. |
+| `Musubi/PresenceExec.lean` | The presence rule on a finite history, executable, for the oracle. |
 | `Musubi/Axioms.lean` | `#print axioms` for every main theorem. |
+| `Oracle.lean` | The `oracle` executable: a stdin/stdout loop around `ExecJson.handle`, which also answers measure, upload and presence requests. |
+| `test/smoke.jsonl`, `test/smoke.expected`, `test/run_smoke.sh` | The oracle smoke test. |
 
 ## Correspondence with protocol.md
 
@@ -84,17 +94,18 @@ The binary is `formal/.lake/build/bin/oracle`.
 | `Merge` | `EnvStep.merge` → `State.mergeOp` |
 | `Learn`, `Fetch`, `Realize`, `Advance`, `Upload`, `Push` | `SyncStep.learn`, `.fetchOps`/`.fetchObjs`/`.recvOps`/`.recvObjs`, `.realize`, `.advance`, `.uploadOps`/`.uploadObjs`, `.push` |
 | Message loss, duplication, delay, reordering | `s.net` holds every message ever sent; any message in it may be handled any number of times, or never. |
-| Node crash, hub crash | `crashNode`, `crashHub`, plus the relaxations `loseKnown`, `loseVolatile` and `hubForget` (see below) |
+| Node crash, hub crash | `crashNode`, `crashHub`, plus the relaxations `loseKnown`, `loseVolatile` and `hubForget` ([Modeling choices](#modeling-choices)) |
 | Policy (reliable, atomic exchanges) | `PStep`: `learn`, `realize`, `advance`, `merge`, `pushAccept`, `pushIdem`, `pushReject` |
 | Chunked blob session | `Chunks.CState`, `Chunks.CStep` (full model), `Chunks.LStep` (reliable delivery) |
 | musubi's receiver (`BlobStore::receive`) | `Chunks.PState`, `Chunks.receive`, `Chunks.PStep`, `Chunks.PLStep` (resending from the prefix) |
 
 ## Main theorems
 
-All quantify over `Reachable N s`: every state of the full asynchronous system with `N`
-nodes reachable from `init`.
+Unless it says otherwise, a protocol theorem holds in every state `Reachable N s`: every state of
+the full asynchronous system with `N` nodes. The properties are stated in
+[protocol.md, "Properties"](../docs/internals/protocol.md#properties).
 
-Safety (`Safety.lean`):
+### Safety (`Safety.lean`)
 
 - `hubClosed`: `closure(hub.head) ⊆ ops ∪ objects`.
 - `hubMonotone`: for every step `s → s'`, `s.hub.head ∈ anc*(s'.hub.head)`.
@@ -112,17 +123,26 @@ Safety (`Safety.lean`):
 - `noDuplicateMerge`: merges created by different nodes have different parent sets.
 - `mergeNeverRepeats`: a new merge never repeats the parent set of any earlier merge, from
   any node.
-- `advance_result`: after `Advance`, `|heads| ≥ 2` or `heads = {known.head}`. This is the
-  claim in policy step 3.
+- `advance_result`: after `Advance`, `|heads| ≥ 2` or `heads = {known.head}`, as step 3 of
+  [protocol.md, "Policy"](../docs/internals/protocol.md#policy) claims.
 
-No feedback:
+### No feedback
 
-- `noFeedback`: every `SyncStep`, including `Realize`, hub handling and crashes, leaves the
-  operation universe unchanged.
-- `envCreatesOne`: each environment step creates exactly one operation.
-- `converged_quiescent`: a converged state enables no policy step.
+- `noFeedback` (`Safety.lean`): every `SyncStep`, including `Realize`, hub handling and
+  crashes, leaves the operation universe unchanged.
+- `envCreatesOne` (`Safety.lean`): each environment step creates exactly one operation.
+- `converged_quiescent` (`Liveness.lean`): a converged state enables no policy step.
 
-Liveness (`Liveness.lean`):
+### Liveness (`Liveness.lean`)
+
+Liveness is proved for the policy model `PStep`: users have stopped (there is no `UserOp`), and
+each node takes the policy's actions as atomic request/reply exchanges that succeed, nodes and
+actions scheduled in any order. `Merge` is a policy step, because musubi loads the repository
+and jj merges. [Why the policy model suffices](#why-the-policy-model-suffices-for-liveness)
+explains why this covers the real, lossy system.
+
+`Converged N s` means that every node `n < N` has `heads = {hub.head}` and
+`known = (hub.seq, hub.head)`.
 
 - `pstep_reachable`: every policy step is a finite run of the asynchronous model.
 - `progress`: if a reachable state is not converged, some policy step is enabled.
@@ -133,92 +153,204 @@ Liveness (`Liveness.lean`):
   is converged, and a converged state cannot be extended.
 - `converged_all_accepted`: once converged, every created operation is in `anc*(hub.head)`.
 
-Merged requests (`Merged.lean`):
+The measure is
+`(dirty nodes, Σ staleness, Σ missing ops, Σ pending advances, Σ pending merges)`, compared
+lexicographically. A node is dirty when one of its heads is not accepted; its staleness is
+`hub.seq - known.seq`; its missing ops are the accepted operations it lacks; it has an advance
+pending when `known.head` is below none of its heads, and a merge pending when it has two or
+more heads. Contention is bounded by the first component: an accepted push cleans the pushing
+node, a clean node never becomes dirty once users stop, and only accepted pushes move the hub
+head, so the head moves at most once per dirty node, at most `N` times. Every lost Cas race
+teaches the loser a newer head, which lowers its staleness.
 
-- `pushAccept_merged`, `pushIdem_merged`, `pushReject_merged`: a merged `Push` exchange
-  reaches a state that agrees with the corresponding policy step's up to the network and
-  staging.
-- `fetch_merged`: a merged `Fetch` exchange does the same for `PStep.learn`, and stages
-  every operation the node lacks below the head, with its objects at hand.
+### Merged requests (`Merged.lean`)
+
+Policy steps exchange the fine-grained messages (`GetHead`, `PutOps`, `Cas` and the rest);
+musubi sends the merged `Push` and `Fetch` instead. Each merged exchange is a run of the model
+that ends in a state agreeing with the policy step's on everything but the network and what
+is staged (`AgreeUpToStaging`).
+
+- `pushAccept_merged`, `pushIdem_merged`, `pushReject_merged`: for a merged `Push` exchange
+  and the corresponding policy step.
+- `fetch_merged`: for a merged `Fetch` exchange and `PStep.learn`; it also stages every
+  operation the node lacks below the head, with its objects at hand.
 - `realize_agree`: realizing a staged operation agrees with `PStep.realize`.
 - `measure_agree`, `converged_agree`: the measure and convergence see no difference.
 
-`Converged N s` means that every node `n < N` has `heads = {hub.head}` and
-`known = (hub.seq, hub.head)`.
+### A hub that goes back (`Regress.lean`)
 
-A hub that goes back (`Regress.lean`). `protocol.md` requires the hub to keep `head`, `seq` and
-`closure(head)`; musubi's hub syncs nothing to disk, so it may not. `State.regress s i` (the
-oracle's action `hubRegress`) sets `head := hist i` and `seq := i` for any `i ≤ seq`;
-`RStep` is a `Step` or such a regression, and `RReachable` its reachable states. Making a
-hive again, empty, is a regression to 0 followed by `hubForget` (`remake_reachable`). The
-invariant `InvR` keeps the universe, the hub's history and closure, and each node's
-repository, but not what relates nodes to the hub's history, so Locality, MergeOwnership,
-HubMonotone and KnownIsHubHistory do not hold there: after the hub goes back, nodes can hold
-operations the hub no longer has, know heads it has forgotten, and merge the same heads
-(`duplicateMerge`, in `RegressScenario.lean`).
+[protocol.md](../docs/internals/protocol.md) requires the hub to keep `head`, `seq` and
+`closure(head)`, but musubi's hub syncs nothing to disk, so a power cut can lose the last heads it
+accepted ([protocol.md, "Network and
+failures"](../docs/internals/protocol.md#network-and-failures)). `State.regress s i` (the oracle's
+action `hubRegress`) sets `head := hist i` and `seq := i` for any `i ≤ seq`. `RStep` is a `Step`
+or such a regression, and `RReachable` its reachable states. Making a hive again, empty, is a
+regression to 0 followed by `hubForget` (`remake_reachable`).
+
+The invariant `InvR` keeps the universe, the hub's history and closure, and each node's
+repository, but nothing relating nodes to the hub's history. So Locality, MergeOwnership,
+HubMonotone and KnownIsHubHistory do not hold here: after the hub goes back, nodes can hold
+operations the hub no longer has, know heads it has forgotten, and merge the same heads.
 
 - `invR_reachable`: `InvR` holds in every `RReachable` state.
 - `hubClosedR`, `hubHistoryR`, `nodeClosedR`, `noFeedbackR`: HubClosed, the history chain,
   NodeClosed and no feedback, with a hub that goes back.
-- `duplicateMerge`, `rreachable_not_reachable`: two nodes can create merges with the same
-  parents, which `noDuplicateMerge` rules out in every `Reachable` state.
+- `duplicateMerge`, `rreachable_not_reachable` (`RegressScenario.lean`): two nodes can create
+  merges with the same parents, which `noDuplicateMerge` rules out in every `Reachable` state.
 - `pstepR_reachable`, `progressR`, `measureR_decreases`, `no_infinite_policy_runR`,
   `eventually_convergesR`, `maximal_run_convergesR`, `terminal_iff_convergedR`,
   `converged_all_acceptedR`: liveness once the hub stops going back, for the policy `PStepR`.
   Once converged, every operation any node created is in `anc*(hub.head)`: a hive made again
   fills from its machines.
 
-`PStepR` differs from `PStep` in two steps:
+`PStepR` differs from `PStep` in two steps, each as the Rust core takes it:
 
 - A node learns the head in a reply to its own request whenever it differs from the one it
-  knows, older or not. In the Rust core, `NodeCore::handle_reply` restarts the node and then
-  takes the reply, which is `loseKnown` then `learn`; `PStepR` uses `learnUnfiltered`, which
-  has the same effect.
-- A node realizes only below a head in the hub's current history (`Consistent`). The Rust
-  core clears its realization plan whenever `handle` changes `known`, so a plan never
-  outlives the head it was made for, and every sync starts with a `Fetch` whose reply sets
-  `known`: whatever a node realizes is below the head the hub has just named.
+  knows, older or not (`learnUnfiltered`). `NodeCore::handle_reply` restarts the node and
+  then takes the reply: `loseKnown`, then `learn`, to the same effect.
+- A node realizes only below a head in the hub's current history (`Consistent`). The core
+  drops its realization plan whenever `handle` changes `known`, and starts every sync with a
+  `Fetch` whose reply sets `known`, so whatever it realizes is below the head the hub has just
+  named.
 
-The measure is `(nodes not good, inconsistent nodes, Σ staleness of consistent nodes,
-Σ missing ops, Σ pending advances, Σ pending merges)`. A node is good when its `known` is in
-the hub's current history and it has one head, accepted and comparable with every head in
-that history. The dirty count of `Liveness.lean` does not work here: after the hub goes
+The measure `rmeasure` is `(nodes not good, inconsistent nodes, Σ staleness of consistent
+nodes, Σ missing ops, Σ pending advances, Σ pending merges)`. A node is good when its `known`
+is in the hub's current history and it has one head, accepted and comparable with every head
+in that history. The dirty count of `Liveness.lean` does not work here: after the hub goes
 back, a node can hold two accepted heads that are not comparable, and merging them makes it
 dirty. A good node stays good under every policy step of every node, and an accepted push
 makes its node good, so the hub head moves at most once per node that is not good.
 
-Chunked blobs (`Chunks.lean`, with `hash` assumed injective):
+### Chunked blobs (`Chunks.lean`)
+
+Each theorem assumes `hash` injective.
 
 - `stored_identical`: in every reachable state, a finished (stored) blob equals the blob that
-  was sent. This holds even when the network injects arbitrary corrupt or stale chunks.
+  was sent, even when the network injects arbitrary corrupt or stale chunks.
 - `session_finishes`: from every reachable state, reliable delivery finishes the session and
   stores exactly the sent blob.
-- `preach_abs`: for an injective hash, every state musubi's prefix receiver reaches
-  (`PReach`) stands for one the full model reaches, each of its steps a run of `CStep`s. So `prefix_stored_identical`: a
+- `preach_abs`: every state musubi's prefix receiver reaches (`PReach`) stands for one the
+  full model reaches, each of its steps a run of `CStep`s. Hence `prefix_stored_identical`: a
   blob it stores is the one sent.
 - `prefix_finishes`: from every state the prefix receiver reaches, a sender that resends
   from the prefix it reports finishes, and the receiver stores exactly the sent blob.
 
+### Per-machine refs (`Refs.lean`)
+
+The model covers one git ref of a colocated repository: jj's import and export, with git an
+adversary that can move the ref at any time, and jj's ref merge an abstract three-way merge
+obeying three laws (`RefAlg`), which the test `ref_laws` checks against jj-lib.
+
+- `noSpuriousRevert`: an import changes a local bookmark only if git moved its ref, whatever
+  musubi realizes and whether or not its export succeeds. `remoteNoSpuriousRevert`: the same
+  for a remote bookmark, as long as every realization is exported before a `jj` command can
+  import. A tag's slot is a local bookmark's, so these hold for tags too.
+- `conflictedNoSpuriousRevert`, `conflicted_import_agrees`: jj skips the export of a conflicted
+  remote bookmark, which two machines' fetches merge to, so musubi writes one of its sides to
+  `.git` itself (`exportConflicted`). Then an import changes nothing unless git moved the ref,
+  or resolves the conflict to that side (not vacuously: `conflicted_resolves`), and every
+  machine imports the same.
+- `restoreLocal_inv`, `restoreRemote_inv`, `restoreRemote_cinv`: `jj undo` and `jj op restore`
+  keep the invariant where jj's export can write the restored bookmark. Where it can't, as for
+  the root commit or a conflict, the next import moves the bookmark with no `git` command
+  having run (`restore_reverts`): jj's behaviour, in which no musubi step takes part.
+- `verbatim_reverts`: replicating the per-machine record verbatim instead reverts another
+  machine's move of a bookmark with no git move at all.
+- `fork_merge_inv`, `fork_noSpuriousRevert`: a merge of concurrent op heads keeps the
+  invariant unless both heads changed the record; if both did, the next import can move the
+  bookmark (`concurrent_records_revert`), as jj does without musubi.
+- `realizeMerge_eq`: musubi's realization of a merge, tracking states included, is jj's merge.
+  Merging the per-machine fields against only the first of several closest common ancestors
+  would leave a record the export can't correct, and the next import would move the bookmark
+  (`firstBase_reverts`).
+
+Commit graphs, rebases and jj's conflict algebra are not modeled. The file's header lists
+what else it leaves out: tracking in the linear steps; the tracking state of an absent
+`x@git`, which musubi's realization keeps and jj would drop (`realize_not_WF`); as runs,
+merges of more than two heads, criss-cross merges, and concurrent heads of remote bookmarks;
+and a restore that brings back a conflicted remote bookmark, which jj resolves to this
+machine's `.git` value rather than musubi's side.
+
+### Presence (`Presence.lean`)
+
+A copy is present at an operation while some of its work in the operation's history was seen by no
+forget of it ([design.md, "Copies that go away"](../docs/internals/design.md#copies-that-go-away)
+defines work and forgets). For any operation graph:
+
+- `present_local`, `present_congr`: presence depends only on the operation's history, so
+  every machine agrees.
+- `only_work_returns`, `absence_persists`: only work brings a copy back. Hence `leave_sticks`:
+  `musubi leave` sticks however its forget is merged, given that the forget follows all of the
+  copy's work and nothing made later is pushed.
+- `unseen_work_survives`: work concurrent with a forget survives it.
+- `forgets_need_fresh_work`, `no_forget_after_complete`, `forget_chain_bounded`: forgetting
+  can't loop along a line of history.
+- `redundant_forget_noop`, `concurrent_forget_noop`: duplicate forgets are harmless.
+- `present_iff_latest`: presence can be decided from a copy's latest work and its forgets.
+- `umax_merge`, `umax_work`, `umax_forget`, `present_iff_umax`: what musubi keeps of each
+  copy, its latest work that no forget saw (`UMax`), follows from an operation's parents'
+  alone, and says whether the copy is present.
+
+## Why the policy model suffices for liveness
+
+The liveness theorems are about `PStep`, whose exchanges never fail; the policy's priority
+order is one schedule among those it allows. This is why that covers the real system. Points 1
+and 4 are theorems; 2 and 3 are argued here, not proved; 5 is checked by a test.
+
+1. **Each `PStep` is a run of the real system** (`pstep_reachable`), so every safety invariant
+   holds along a policy run. The implementation sends the merged requests instead, and
+   `Merged.lean` shows their runs end in states the measure and `Converged` can't tell from
+   the policy step's ([Merged requests](#merged-requests-mergedlean)).
+2. **Failures only delay.** A failed exchange (lost request or reply, crash, hub restart)
+   leaves persistent state unchanged, or changes it in a way a retry absorbs:
+   - Storing is idempotent.
+   - `Learn` ignores stale and duplicate sequence numbers.
+   - `Cas` with `new = head` answers `Accepted` and changes nothing.
+   - Realizing an operation that is already local adds nothing.
+   - A `Cas` that was accepted but whose reply was lost has exactly the hub-side effect of
+     `pushAccept`. The node's next `Fetch` performs the remaining `Learn`.
+   - Stored-but-unacknowledged uploads only grow hub stores, which the measure ignores.
+
+   With eventual delivery, each retried exchange eventually completes. The run of
+   persistent-state changes is then a `PStep` run, interleaved with steps the measure
+   ignores.
+3. **Stale in-flight messages are finitely many** once users stop:
+   - A stale `Cas(e, d)` can change the hub at most once, because the head never returns to
+     `e`, and it can only move the head forward.
+   - Stale head-carrying replies only raise `known.seq`, which is bounded by `hub.seq`.
+   - Stale `Fetched` and `Ops` replies only stage accepted operations, and stale uploads
+     only grow hub stores.
+
+   After them, `eventually_converges` applies again from the then-current state, because it
+   holds from every reachable state, whatever messages are still in flight.
+4. **Termination does not depend on fairness among nodes.** `measure_decreases` holds for
+   every policy step, so no schedule runs forever, and `progress` gives a node following the
+   policy something to do until convergence.
+5. **The Rust policy's steps make the measure fall**, and its pushes upload `upOps` and
+   `upObjs`, as `Merged.lean` assumes. For a hub that has gone back, which `Merged.lean`
+   doesn't cover, the test alone stands for it ([conformance.md,
+   "Liveness"](../docs/internals/conformance.md#liveness)).
+
 ## Modeling choices
 
-- **Operation universe.** Op ids are `Nat`s. Creating an operation assigns the fresh id
-  `next` and fixes its parents and objects. The invariant keeps parents' ids smaller than
-  their children's (`ParLt`), which makes the graph acyclic. `objs(x)` is taken as already
-  closed under object reachability.
+- **Operation universe.** Creating an operation assigns the fresh id `next` and fixes its
+  parents and objects. The invariant keeps parents' ids smaller than their children's
+  (`ParLt`), which makes the graph acyclic. `objs(x)` is taken as already closed under
+  object reachability.
 - **Sets** are predicates. The node and hub stores are sets of ids. Payload contents are
   global (`par`, `objs`), which models content addressing: equal ids have equal bytes.
 - **Network.** `s.net` is the set of every message ever sent. Delivery does not remove a
   message, so it can be duplicated, delayed, reordered or lost. Requests and replies are
   separate messages. Request ids are not modeled: a node accepts any reply addressed to it,
-  which over-approximates matching replies to outstanding requests. This over-approximation
-  also covers a node crash losing its in-flight requests.
-- **Atomic payloads.** `Push`, `Fetched` and the other bulky payloads are atomic messages
-  carrying sets, as `protocol.md` specifies at this level. `Chunks.lean` justifies the
-  atomicity: a finished blob is exactly the sent bytes, so a payload arrives whole or not at
+  which over-approximates matching replies to outstanding requests, and also covers a node
+  crash losing its in-flight requests.
+- **Atomic payloads.** `Push`, `Fetched` and the other bulky payloads are atomic messages carrying
+  sets, as [protocol.md](../docs/internals/protocol.md) specifies at this level. `Chunks.lean`
+  justifies this: a finished blob is exactly the sent bytes, so a payload arrives whole or not at
   all.
 - **The ancestry check** uses the global `parents`. It matters only once the closure check
-  has passed, which means every operation in `closure(new)` is stored, so this agrees with a
-  check over the hub's stored operations.
+  has passed, when every operation in `closure(new)` is stored, so it agrees with a check
+  over the hub's stored operations.
 - **Cas order.** `new = head` is answered `Accepted(seq, head)` before the other conditions
   are checked (`casIdem`).
 - **Node-side guards are weakened where safety does not need them**, so the safety theorems
@@ -231,37 +363,61 @@ Chunked blobs (`Chunks.lean`, with `hash` assumed injective):
   - `Learn` is also allowed without its staleness filter (`learnUnfiltered`), so `known`
     can move backwards.
 
-  The policy's own actions are instances of these weakened ones. Only one node-side guard
-  carries weight: `GetOps` requests only operations in `anc*(known.head)`. The merged
-  `Fetch` needs none, since the hub chooses the operations, all of them accepted.
-- **Proven-safe relaxations of durability.** `loseKnown` lets a restarting node lose `known`
-  (reset to `(0, root)`) while keeping `staged`, which is what the Rust node does.
-  `loseVolatile` lets it lose `staged` as well. `hubForget` lets the hub lose or garbage-collect any
-  operations and objects outside `closure(head)`. All safety theorems hold with these steps
-  included.
+  The policy's own actions are instances of these. Only one node-side guard carries weight:
+  `GetOps` requests only operations in `anc*(known.head)`. The merged `Fetch` needs none,
+  since the hub chooses the operations, all of them accepted.
+- **Relaxations of durability, proved safe.** `loseKnown` lets a restarting node lose `known`
+  (reset to `(0, root)`) while keeping `staged`, as the Rust node does. `loseVolatile` lets it
+  lose `staged` as well. `hubForget` lets the hub lose or garbage-collect any operations and
+  objects outside `closure(head)`. All safety theorems hold with these steps included.
 - **Ghost state.** `creator`, `isMerge` and `birth` record each op's creator, whether it is a
-  merge, and the hub `seq` at its creation. `hist` records the history of accepted heads.
-  None of them affects any transition.
-- **Translation layer.** It is not modeled. As `protocol.md` requires, the model assumes
-  that `canon` is injective on reachable local operations, that `canon(realize(C)) = C`, and
-  that realization never creates a canonical operation. Under those assumptions, the
-  properties over canonical ids carry over to each node's local op log.
+  merge, and the hub `seq` at its creation; `hist` records the history of accepted heads.
+- **Translation layer.** It is not modeled. The model assumes what [protocol.md, "Translation
+  layer"](../docs/internals/protocol.md#translation-layer) requires: `canon` is injective on
+  reachable local operations, `canon(realize(C)) = C`, and realization never creates a canonical
+  operation. Under those assumptions, the properties over canonical ids carry over to each node's
+  local op log.
+
+## What the proofs assume of the implementation
+
+The model takes some steps as atomic and some state as durable; the code must make them so.
+[protocol.md](../docs/internals/protocol.md) states each rule
+(["Hub"](../docs/internals/protocol.md#hub), ["Policy"](../docs/internals/protocol.md#policy),
+["Chunked blobs"](../docs/internals/protocol.md#chunked-blobs)); these are the ones the proofs
+rest on:
+
+- **Hub:** a `Cas`'s checks and its update of `head` and `seq` form one critical section. The
+  new `head` and `seq` are written before the reply or notification goes out, so that they
+  survive the process crashing: replying first and then losing the update would break
+  HubMonotone and KnownIsHubHistory. (A power cut can still lose them; that is
+  [`Regress.lean`](#a-hub-that-goes-back-regresslean).) `closure(head)` is durable whenever
+  `head` is. Every `Head`, `Accepted`, `Rejected` and `Incomplete` carries a `(seq, head)`
+  the hub actually had.
+- **Node:** stage and realize only operations in `anc*` of a head the hub accepted; push only
+  local operations; `Merge` takes all current heads as parents. No other node-side check is
+  needed for safety: the `Upload` and `Push` guards, the order of policy steps, and `Learn`'s
+  filter matter only for liveness and efficiency.
+- **Chunks:** use unique session ids, or tag chunks with the blob id; ignore duplicate and
+  overlapping bytes; check `hash(assembled) = id` at `Finish`, and restart on a mismatch;
+  treat a stored blob as finished. A receiver may instead keep only a contiguous prefix,
+  report its length, and check the hash once it reaches the claimed length, as musubi's does
+  (`preach_abs`).
 
 ## The executable model and the conformance oracle
 
-`docs/internals/conformance.md` is the contract. The chain from the proofs to the Rust core is:
+The relational model can't be run, since its sets are predicates. To check the Rust core
+against it, `Musubi/Exec.lean` gives a version that can, and `Oracle.lean` serves it as JSON.
+[conformance.md](../docs/internals/conformance.md) is the contract, and describes the test
+that checks the Rust core against the oracle.
 
-1. **Relational to executable.** `Musubi/Exec.lean` defines a finite, computable state
-   `EState`. Operations, nodes and the ghost history are association lists; sets are lists;
-   `net` is a list read as a set. `abs : EState → State` maps it to the relational state.
+1. **Relational to executable.** `EState` is a finite, computable state. Operations, nodes
+   and the ghost history are association lists; sets are lists; `net` is a list read as a
+   set. `abs : EState → State` maps it to the relational state.
    `execStep N es a : Except String EState` evaluates every guard of the matching relational
-   step:
-   - `anc*` is decided by one downward sweep from the descendant (`ancL`), which is exact
-     because parents have smaller ids;
-   - `ClosedAt`, `maxSet` and membership in `net` are decided directly; set-valued message
-     fields are compared as sets.
-
-   On failure, `execStep` returns `"<action>: <failed guard>"`.
+   step, and on failure returns `"<action>: <failed guard>"`. It decides `anc*` by one
+   downward sweep from the descendant (`ancL`), exact because parents have smaller ids, and
+   `ClosedAt`, `maxSet` and membership in `net` directly; set-valued message fields are
+   compared as sets.
 2. **Executable to oracle.** `Oracle.lean` reads requests and writes replies, one JSON object
    per line, flushing after each. A rejected or malformed request leaves the state unchanged.
    Decoding, encoding and the request loop are in `Musubi/ExecJson.lean`; all protocol
@@ -271,184 +427,55 @@ Theorems (`Musubi/ExecSound.lean`):
 
 - `exec_sound : a.goesBack = false → execStep N es a = .ok es' → Step N (abs es) (abs es')`.
   Its only hypothesis is that the action is not `hubRegress`. `execStep` first checks the
-  one well-formedness property the decision procedures rely on, that every recorded
-  operation's parents are below it (`parOK`).
+  one well-formedness property its decision procedures rely on: every recorded operation's
+  parents are below it (`parOK`).
 - `abs_initE : abs initE = init`.
-- `exec_reachable : ExecReachable N es → Reachable N (abs es)`. Every state reached through
-  accepted actions other than `hubRegress` from `initE` is relationally reachable, so every
-  safety theorem holds in it.
+- `exec_reachable : ExecReachable N es → Reachable N (abs es)`: every state reached from
+  `initE` through accepted actions other than `hubRegress` is relationally reachable, so
+  every safety theorem holds in it.
 - `exec_inv : ExecReachable N es → Inv N (abs es)`.
 - `exec_rsound : execStep N es a = .ok es' → RStep N (abs es) (abs es')`, for every action.
 - `exec_rreachable : ExecRReachable N es → RReachable N (abs es)` and
   `exec_invR : ExecRReachable N es → InvR N (abs es)`: with `hubRegress`, every state is a
-  state of the extended system, and `InvR` and the theorems of `Regress.lean` hold in it.
+  state of the extended system, and the theorems of `Regress.lean` hold in it.
 - `exec_remake : ExecRReachable N es → run N es remakeActions = .ok es' →
   abs es' = (abs es).remake`. `remakeActions` is `hubRegress 0`, then `hubForget [root] []`:
-  a hive made again, empty, as `HubDir::remake` makes one, and as the conformance test's
+  a hive made again, empty, as `HubDir::remake` makes one and as the conformance test's
   `remake` rule does. `remake_reachable` proves it a run of the extended system.
 - `measureE_eq : es.parOK = true → es.measureE N = measure N (abs es)`, `rmeasureE_eq` the
   same for `rmeasure`, and `convergedE_iff : es.convergedE N = true ↔ Converged N (abs es)`.
   `mem_upOpsL` and `mem_upObjsL`: `upOpsL` and `upObjsL` list `upOps` and `upObjs`. The oracle
-  answers `measure` and `upload` requests with them, and the conformance test checks the Rust
-  policy's pushes and its run to convergence against them (docs/internals/conformance.md,
-  "Liveness").
+  answers `measure` and `upload` requests with them.
 
-Encoding choices:
+`PresenceExec.lean` does the same for presence: `presentB` and `latestB` are proved to compute
+`Present` and `UMax` (`presentB_iff`, `mem_latestB`), and the oracle answers presence requests
+with them, as [conformance.md, "Presence"](../docs/internals/conformance.md#presence) describes.
+
+Where the executable model differs from the relational one, or its JSON needs a note
+([conformance.md](../docs/internals/conformance.md) gives the [wire
+format](../docs/internals/conformance.md#wire-format), and what fakes of the model's state must
+match, such as staging never being cleared):
 
 - **Notifications.** The hub's publication of a new head is one internal `EMsg.notifyAll`,
-  which denotes `head n notify seq head` for every node `n`. In JSON it appears as one
-  `head` message with `headKind: "notify"` per node `n < nodes`.
-- **Sorting.** State arrays are sorted ascending without duplicates. Operation parent lists
-  are also sorted; the order of parents never matters to the model. `net` is sorted by
+  which stands for `head n notify seq head` for every node `n`, and appears in JSON as one
+  such message per node.
+- **Sorting.** State arrays are sorted ascending without duplicates, operation parent lists
+  included (the order of parents never matters to the model), and `net` by
   `(msg, node, compact JSON of the whole message)`.
 - **Extra guards.** `userOp` and `merge` also check that their parents are below `next`.
-  These checks are implied by the invariant, so they never fire in a reachable state.
-- **Staging is never cleared.** `realize` adds the op to `lops` and its objects to `lobj`,
-  but leaves them in `sops`/`sobj`, and only `loseVolatile` empties staging. A fake repo
-  that deletes staged entries on realize will differ from the oracle's `sops`/`sobj`.
-- **No well-formedness bound on nodes.** The hub actions do not check `node < nodes`, just
-  as the relational hub steps don't; a matching message in `net` already implies it.
-- **The hub going back.** `hubRegress i` sets the hub's `head` to the head it accepted at
-  `i` and its `seq` to `i`, and changes nothing else: stores, nodes and `net` stay, and so
-  does the ghost history, entries above `i` included. The next accept records entry
-  `i + 1`, which then shadows the old one, as the relational `hubAccept` overwrites it. The
-  ghost history is not part of the JSON state, so a test may equally truncate it to the
-  entries up to `i`.
-- **The hub forgetting.** `hubForget ops objs` makes the hub's stores `ops` and `objs`,
-  which must be among what it stores and hold `closure(head)`: the action names what the
-  hub keeps, as `SyncStep.hubForget` does.
+  The invariant implies these checks, so they never fire in a reachable state.
+- **No bound on nodes.** The hub actions do not check `node < nodes`, just as the relational
+  hub steps don't; a matching message in `net` already implies it.
+- **The hub going back.** `hubRegress i` changes only the hub's `head` and `seq`: stores,
+  nodes and `net` stay, and so does the ghost history, entries above `i` included. The next
+  accept records entry `i + 1`, which then shadows the old one, as the relational
+  `hubAccept` overwrites it. The ghost history is not part of the JSON state, so a test may
+  equally truncate it to the entries up to `i`.
+- **The hub forgetting.** `hubForget ops objs` names what the hub keeps, as
+  `SyncStep.hubForget` does.
 
-## Testing the per-machine refs model
-
-`Musubi/Refs.lean` has no oracle: its state is a few ref targets, so the test keeps a copy
-of the model in Rust instead, beside real repositories (docs/internals/conformance.md,
-"Per-machine refs"):
-
-- `ref_laws` (`crates/musubi-jj/tests/it/ref_laws.rs`) checks that jj-lib's
-  `merge_ref_targets` obeys the three `RefAlg` laws, on absent, resolved and conflicted
-  targets from a small real repository.
-- `refs` (`crates/musubi-sync/tests/races/refs.rs`) runs a Hegel state machine over two
-  colocated repositories and a hub: git moves `refs/heads/x`, `refs/tags/t` and
-  `refs/remotes/origin/y`, `jj` commands move bookmarks and the tag and fetch, `jj undo`
-  and `jj op restore` restore older operations, a `jj` command at an older operation moves
-  one and the next merges its operation with the head, and the other machine moves a
-  bookmark or the tag, or fetches, for musubi to realize, with git's lock on `refs/heads/x`
-  held or not, and with or without this machine's latest operations, so that this machine
-  realizes the other's merge of them: of two fetches, a conflicted `y@origin`. It steps a
-  Rust copy of `TSlot` for `x`, `t`, `y` and `y@origin` through the steps each action
-  performs, merges, restores and musubi's export of a conflicted remote bookmark
-  (`exportConflicted`, with jj's commit times for `Sides`) included, with jj's merge as the
-  `RefAlg` instance, and after every action requires the real bookmark, tag, remote
-  bookmark and its tracking state, `git_refs` entry and git ref to be the model's, and
-  `LInv` and `CInv` to hold, except where a restore that isn't `Restorable` left the record
-  behind, as `restore_reverts` shows it may. It also requires the other machine to have
-  written the same side of a conflicted `y@origin` to its `.git`.
-
-The test found that `exportLocal` and `exportRemote` were stricter than jj: jj counts an
-update a success if `.git` already has the new value, as after git moved the ref there and
-musubi realized the same move. They now say so; every theorem still holds. Modeling merges
-found that musubi merged the per-machine fields of a criss-cross merge against the first
-of its bases, where jj merges against the bases merged; the record could then be left a
-conflict the export can't correct, and the next import would move the bookmark
-(`firstBase_reverts`). musubi now merges as jj does. The model's header lists what it still
-leaves out: tracking in the linear steps, which the test sidesteps by having jj track
-`y@origin` automatically; the tracking state of an absent `x@git` that musubi's realization
-keeps and jj would drop (`realize_not_WF`); as runs, merges of more than two heads,
-criss-cross merges, and concurrent heads of remote bookmarks; and a restore that brings back
-a conflicted remote bookmark, which jj resolves to this machine's `.git` value rather than
-musubi's side. A restore that `jj` can't export back, as of a bookmark at the root commit,
-leaves a record that the next import takes for a move made with git (`restore_reverts`):
-jj's behaviour, with or without musubi, which `undo_of_an_unexportable_bookmark_conflicts_it`
-confirms with jj alone.
-
-## Testing the prefix receiver
-
-The prefix receiver's state is a byte string and a flag, so, as for `Refs.lean`, its test
-keeps a copy of `Chunks.receive` in Rust rather than asking an oracle
-(docs/internals/conformance.md, "Chunked blobs"). `receive_follows_the_prefix_model`, in
-`crates/musubi-sync/src/blobs.rs`, delivers chunks of every kind to `BlobStore::receive`,
-sweeps its partial and stored blobs, and requires each reply, the partial blob and whether
-the blob is stored to be the model's, then the transfer to finish within the resends that
-`prefix_finishes`'s measure allows.
-
-## Why the reliable policy model is a sound abstraction for liveness
-
-`PStep` lets a node perform one policy action as an atomic, successful request/reply
-exchange. Nodes and actions may be scheduled in any order; the policy's priority order is
-one particular schedule. `Merge` is a policy action, because musubi loads the repo and jj
-merges. `UserOp` is absent, because environment activity has stopped.
-
-1. **Each `PStep` is a run of the real system** (`pstep_reachable`). So every policy run
-   stays inside the reachable states, and all safety invariants hold along it. The
-   implementation exchanges the merged requests instead, and `Merged.lean` shows that
-   those runs end in states that agree with the policy step's on the universe, the hub, and
-   each node's operations, objects, heads and `known`, differing only in the network and in
-   what is staged (`AgreeUpToStaging`). The measure and `Converged` read nothing else
-   (`measure_agree`, `converged_agree`). `pushAccept_merged`, `pushIdem_merged` and
-   `pushReject_merged` cover pushes. `fetch_merged` covers `PStep.learn`, and leaves every
-   operation the node lacks below the head staged with its objects at hand, so that
-   `Realize` takes each in turn with the effect of `PStep.realize` (`realize_agree`).
-2. **Failures only delay.** A failed exchange (lost request or reply, crash, hub restart)
-   leaves persistent state unchanged, or changes it in a way that a retry absorbs:
-   - Storing is idempotent.
-   - `Learn` ignores stale and duplicate sequence numbers.
-   - `Cas` with `new = head` answers `Accepted` and changes nothing.
-   - Realizing an operation that is already local adds nothing.
-   - A `Cas` that was accepted but whose reply was lost has exactly the hub-side effect of
-     `pushAccept`. The node's next `Fetch` performs the remaining `Learn`.
-   - Stored-but-unacknowledged uploads only grow hub stores, which the measure ignores.
-
-   With eventual delivery, each retried exchange eventually completes. The run of
-   persistent-state changes is then a `PStep` run, interleaved with steps the measure
-   ignores.
-3. **Stale in-flight messages are finitely many** when environment activity stops:
-   - A stale `Cas(e, d)` can change the hub at most once, because the head never returns to
-     `e`, and it can only move the head forward.
-   - Stale head-carrying replies only raise `known.seq`, which is bounded by `hub.seq`.
-   - Stale `Fetched` and `Ops` replies only stage accepted operations, and stale uploads
-     only grow hub stores.
-
-   After them, `eventually_converges` applies again from the then-current state, because it
-   holds from every reachable state, whatever messages are still in flight.
-4. **Termination does not depend on fairness among nodes.** `measure_decreases` holds for
-   every policy step, so no schedule runs forever. `progress` guarantees that a node
-   following the policy always has something to do until convergence.
-5. **The Rust policy's steps make the measure fall.** The conformance test runs the Rust
-   core to convergence and requires the measure to fall after every exchange that changes a
-   node, and every policy `Push` to upload `upOps` and `upObjs`, as `Merged.lean` assumes
-   (docs/internals/conformance.md, "Liveness"). With a hub that has gone back, it checks
-   `rmeasure`; `Merged.lean` has no counterpart there, so the test alone stands for it.
-
-**Contention.** The measure is
-`(dirty nodes, Σ staleness, Σ missing ops, Σ pending advances, Σ pending merges)`, ordered
-lexicographically. A node is dirty when one of its heads is not accepted. An accepted push
-cleans the pushing node. Without `UserOp`, a clean node never becomes dirty, and only
-accepted pushes move the hub head. So once environment activity stops, the hub head changes
-at most once per dirty node, at most `N` times. Every lost Cas race teaches the loser a
-newer head, which decreases its staleness.
-
-## Obligations for the Rust implementation
-
-- **Hub:**
-  - A `Cas`'s checks and the update of `head` and `seq` form one critical section.
-  - The new `head` and `seq` are written before the reply or notification is sent, so that
-    they survive the hub's process crashing. If the hub replied first and then lost the
-    update in a crash, HubMonotone and KnownIsHubHistory would fail. (A power cut can still
-    lose them, since musubi's hub syncs nothing to disk; `Regress.lean` covers a hub that
-    goes back.)
-  - `closure(head)` is durable whenever `head` is.
-  - Every `Head`, `Accepted`, `Rejected` and `Incomplete` message carries a pair
-    `(seq, head)` that the hub actually had.
-- **Node:**
-  - Stage and realize only operations in `anc*` of a head the hub accepted.
-  - Push only local operations.
-  - `Merge` takes all current heads as parents.
-  - No other node-side check is needed for safety. The Upload and Push guards, the order of
-    policy steps, and `Learn`'s filter matter only for liveness and efficiency.
-- **Chunks:**
-  - Use unique session ids, or tag chunks with the blob id.
-  - Ignore duplicate and overlapping bytes.
-  - Check `hash(assembled) = id` at `Finish`, and restart on a mismatch.
-  - Treat a stored blob as finished.
-  - A receiver may keep only a contiguous prefix, report its length, and check the hash once
-    it reaches the claimed length, as musubi's does (`preach_abs`).
+`Refs.lean` and the prefix receiver of `Chunks.lean` have no executable model or oracle: their
+state is small, so their tests keep a Rust copy of the model beside the real code and step both
+together. [conformance.md](../docs/internals/conformance.md) describes those tests, in
+["Per-machine refs"](../docs/internals/conformance.md#per-machine-refs) and ["Chunked
+blobs"](../docs/internals/conformance.md#chunked-blobs).

@@ -1,45 +1,44 @@
 # Command reference
 
-Built-in help is the reference for every flag:
+Every musubi command, grouped by task. Built-in help is the reference for flags: `-h` gives a
+summary, and `--help` the full text.
 
 ```sh
 musubi --help
 musubi <command> --help
 ```
 
-`-h` gives a summary, and `--help` the full text. Running `musubi` with no command is
-`musubi list`.
+Running `musubi` with no command is `musubi list`. [How musubi works](../how-it-works.md)
+explains hubs, hives, and copies.
 
 ## Share repositories
 
 | Command | Use it to |
 | --- | --- |
 | `create [<name>]` | Start a hive from the repository you're in, for other copies to join. |
-| `join` | Add this machine's copy of a repository to the hive it belongs in. In a copy that is part of a hive, make the hive again on a hub that has lost it, or on another hub given with `--hub`. |
+| `join` | Add this machine's copy of a repository to the hive it belongs in. In a copy already part of a hive, make the hive again on a hub that has lost it, or on another hub given with `--hub`. |
 | `clone <hive> <dir>` | Make a new copy of a hive on this machine. |
 | `leave` | Take the repository you're in out of its hive, telling the hive, and stop syncing it. It keeps everything it has. `--force` leaves without telling the hive, if its hub can't be reached. |
-| `forget <machine>` | Forget another machine's copy that went away without leaving, by the name its working copy has here: `laptop` for `laptop/default@`, or `laptop-1a2b` for `laptop-1a2b/default@`. The name `musubi list` gives it will do too, if no other machine has that name. |
-
-`create`, `join` and `clone` set the copy's `musubi.forget-after`, unless jj's config sets it
-already: `6h` when an agent runs them, `never` otherwise. See
-[Take a repository or machine out](../guides/manage.md#take-a-repository-or-machine-out).
+| `forget <machine>` | Forget another machine's copy that went away without leaving. Name the machine as its working copies are named here: `laptop` for `laptop/default@`, or `laptop-1a2b` for `laptop-1a2b/default@`. The name `musubi list` gives it also works, if no other machine has that name. |
 
 `create`, `join`, and `clone` take:
 
-- `--hub <hub>`: the hub, as `musubi hub` prints it. Leave it out to use this machine's
-  default hub: the first it used, unless `musubi.hub` in jj's config names another.
-- `--machine <name>`: this machine's name in the hive, which other machines show its
-  working copy under. It defaults to jj's `operation.hostname`.
+- `--hub <hub>`: the hub, as `musubi hub` prints it. Without it, they use this machine's
+  default hub: the first it used, unless [`musubi.hub`](configuration.md#this-machines)
+  names another.
+- `--machine <name>`: this machine's name in the hive, which other machines show its working
+  copies under. It defaults to jj's `operation.hostname`.
 
 `create` and `join` also take `--full-history`, to share the repository's whole operation
-history rather than its current state, and `join` takes `--hive <name>` to join a hive of
-your choosing. See [Set up a hub and machines](../guides/set-up.md).
+history rather than its current state, and `join` takes `--hive <name>` to join a hive of your
+choosing. All three set the copy's [`musubi.forget-after`](configuration.md#settings)
+unless jj's config sets it already. See [Set up a hub and machines](../guides/set-up.md).
 
 ## See how syncing goes
 
 | Command | Use it to |
 | --- | --- |
-| `list` | Show the hubs' hives, this machine's copies of them, and whether each is syncing. In a hive's repository, also show its details: each machine's working copies, and each copy in the hive, when it was last used, and when it will be forgotten. `status` is an alias. |
+| `list` | Show the hubs' hives, this machine's copies of them, and whether each is syncing. In a hive's repository, also show each machine's working copies, and each copy in the hive with when it was last used and when it will be forgotten. `status` is an alias. |
 | `sync` | Sync the repository you're in now, and see at once whether it worked. |
 | `top` | Watch what flows through the hubs, and which machines are offline, behind, or failing, as it happens. |
 
@@ -63,19 +62,18 @@ it is running, and otherwise syncs by itself.
 | --- | --- |
 | `hub` | Run a hub, in the foreground. `--dir` chooses its directory, and `--advertise` the host name it tells other machines to use. |
 | `hub rename <hive> <new-name>` | Rename a hive. |
-| `hub remove <hive>` | Remove a hive from the hub, by its whole name or id. Each machine's copy leaves it as it hears. `rm` is short for it. |
+| `hub remove <hive>` | Remove a hive from the hub. Each machine's copy leaves it as it hears. `rm` is an alias. |
 | `hub connect` | Relay standard input and output to this machine's hub. Other machines run it over ssh; you don't need to. |
 
 Commands that take a hive accept its name, any prefix of the name that no other hive shares,
-or its id; `hub remove` takes only a whole name or an id.
+or its id. `hub remove` takes only a whole name or an id.
 
 ## Complete commands in your shell
 
-musubi completes its commands, flags, and paths in bash, zsh, fish, elvish, and PowerShell,
-and also the names of hives and hubs. To have it do so, run the line for your shell in its
-startup file. Your shell then asks musubi as you type. The line sets up how it asks, which
-may change in a new release of musubi, so run it again, as by starting a new shell, after
-upgrading.
+musubi completes its commands, flags, and paths, and the names of hives and hubs, in bash,
+zsh, fish, elvish, and PowerShell. Add the line for your shell to its startup file; your shell
+then asks musubi as you type. How it asks can change between releases, so start a new shell
+after upgrading.
 
 | Shell | Startup file | Line |
 | --- | --- | --- |
@@ -85,14 +83,14 @@ upgrading.
 | elvish | `~/.config/elvish/rc.elv` | `eval (E:COMPLETE=elvish musubi \| slurp)` |
 | PowerShell | `$PROFILE` | `$env:COMPLETE = "powershell"; musubi \| Out-String \| Invoke-Expression; Remove-Item Env:\COMPLETE` |
 
-Completing a hive's name asks the default hub for its hives, and your shell waits up to two
-seconds for the answer. If none comes in time, as from a hub reached through a slow
-`ProxyCommand`, musubi completes the hives of this machine's copies on that hub instead.
+To complete a hive's name, musubi asks the default hub for its hives, and your shell waits up
+to two seconds for the answer. If none comes in time, as through a slow `ProxyCommand`, musubi
+completes the hives of this machine's copies on that hub instead.
 
-`musubi completion <shell>` instead prints a script that completes commands, flags, and
-paths, but not hive or hub names, without running musubi as you type. Use it in nushell, which
-completion as you type doesn't support, or to install a completion file with a package. It
-takes `bash`, `elvish`, `fish`, `nushell`, `powershell`, or `zsh`:
+`musubi completion <shell>` instead prints a static script, which completes commands, flags,
+and paths but not hive or hub names. Use it for nushell, which completion as you type doesn't
+support, or to install a completion file with a package. It takes `bash`, `elvish`, `fish`,
+`nushell`, `powershell`, or `zsh`:
 
 ```sh
 source <(musubi completion zsh)
@@ -100,7 +98,7 @@ source <(musubi completion zsh)
 
 ## Investigate
 
-`musubi debug` holds tools for investigating a hive, and is left out of `musubi --help`.
+`musubi debug` holds tools for investigating a hive. It is left out of `musubi --help`.
 
 | Command | Use it to |
 | --- | --- |

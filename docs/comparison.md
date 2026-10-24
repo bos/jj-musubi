@@ -14,16 +14,16 @@ what they carry between machines, what they leave behind, and how much you do by
 
 ## File syncing: Dropbox, Syncthing, iCloud, rsync, NFS
 
-jj's storage is designed so that copies of a repository changed on different machines can be
-merged by a file-syncing tool. jj's
-[concurrency docs](https://docs.jj-vcs.dev/latest/technical/concurrency/) say that in that
-case "no changes to the repo will be lost", and that conflicting changes "will appear as
-conflicts", but also that there are "known bugs in this area", that "with the Git backend,
+jj's storage is designed so that a file-syncing tool can merge copies of a repository changed
+on different machines. jj's
+[concurrency docs](https://docs.jj-vcs.dev/latest/technical/concurrency/) say that then "no
+changes to the repo will be lost", and that conflicting changes "will appear as conflicts".
+They also say that there are "known bugs in this area", that "with the Git backend,
 repository corruption is possible because the backend is not entirely lock-free", and that
 colocated repositories are the least tested. jj's issue tracker has reports of locking errors,
 missing objects, and stray file changes from repositories synced this way.
 
-File syncing also syncs the working copy, so two machines fight over the same checkout, and
+File syncing also syncs the working copy, so two machines fight over one checkout, and over
 the state jj keeps about each machine, such as its workspaces and what it last saw in `.git`.
 musubi replicates only the repository, through jj's own code, and keeps each machine's
 working copy and per-machine state its own.
@@ -34,16 +34,17 @@ in between, or when you want ignored files and build output carried along too.
 ## Pushing and fetching through a git remote
 
 You can push work in progress to a remote from one machine and fetch it on another, with
-`jj git push --change @` and `jj git fetch`. That carries only commits a bookmark points to.
-It leaves behind the operation log, so `jj undo` and `jj op log` stay per-machine, and any
-commit without a bookmark, including the other machine's working copy unless you push it. jj
-also refuses by default to push a commit with no description, or with conflicts, and on the
-other machine, fetched bookmarks start out untracked and so immutable, until you track them.
-Each move takes a push on one machine and a fetch on the other.
+`jj git push --change @` and `jj git fetch`. That carries only commits a bookmark points to,
+so it leaves behind any commit without one, including the other machine's working copy unless
+you push it. It leaves behind the operation log too, so `jj undo` and `jj op log` stay
+per-machine. By default, jj refuses to push a commit with no description or with conflicts,
+and on the other machine, fetched bookmarks start out untracked, and so immutable, until you
+track them. Each move takes a push on one machine and a fetch on the other.
 
 Recent jj releases make fetched rewrites behave better: since jj 0.42, `jj git fetch` rebases
-local descendants of a commit that was rewritten elsewhere. But a commit rewritten on both
-machines still shows up as divergent, as it would with musubi.
+local descendants of a commit that was rewritten elsewhere, where the rewritten commit keeps its
+change id. But a commit rewritten on both machines still shows up as divergent, as it would with
+musubi.
 
 A remote remains the way to share work with other people, and needs no hub. musubi works
 alongside it: a fetch or push on any machine in a hive updates every machine's remote
@@ -53,7 +54,7 @@ bookmarks.
 
 Instead of syncing, you can do all your work on one machine, reached from the others with
 ssh, `tmux` or `mosh`, or an editor's remote mode such as VS Code's Remote-SSH. There is one
-repository and nothing to sync. But every keystroke and build goes over the link, and you
+repository and nothing to sync, but every keystroke and build goes over the link, and you
 can't work while it is down.
 
 That suits a machine that is always reachable and builds faster than the others. musubi suits
@@ -67,4 +68,4 @@ with no date. [jj-sync](https://github.com/allouis/jj-sync) is a script that pus
 fetches work in progress through a git remote under refs of its own, without the operation
 log.
 
-The facts about other tools here were checked on October 23, 2026.
+The facts about other tools here were checked on October 24, 2026.

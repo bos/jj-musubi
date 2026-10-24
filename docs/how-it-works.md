@@ -1,9 +1,9 @@
 # How musubi works
 
 musubi makes several machines' copies of one jj repository behave like workspaces of a single
-repository. This page explains what that means in practice: what moves between machines, what
-stays on each, and what you see when machines change the same thing at once. For the design
-behind it, see [docs/internals/design.md](internals/design.md).
+repository. This page explains what moves between machines, what stays on each, and what you
+see when machines change the same thing at once. For the design behind it, see
+[docs/internals/design.md](internals/design.md).
 
 ## Hubs, hives, and machines
 
@@ -24,14 +24,13 @@ flowchart LR
   D3 <-->|ssh| H
 ```
 
-- A **hub** is a `musubi hub` process on one machine that is usually on. It keeps a full copy
-  of each repository it serves and decides the order in which updates land. It never makes
+- A **hub** is a `musubi hub` process on a machine that is usually on. It keeps a full copy of
+  each repository it serves and decides the order in which updates are accepted. It never makes
   changes of its own.
 - A **hive** is one repository as the hub knows it: a name, such as `app`, and every
   machine's copy of it. One hub serves any number of hives.
-- Each **machine** that takes part runs one **daemon**, which keeps every repository on that
-  machine in its hive in sync. The hub's own machine can have copies too, as `devbox` does
-  above.
+- Each **machine** runs one **daemon**, which keeps every copy on that machine in sync with
+  its hive. The hub's machine can have copies too, as `devbox` does above.
 
 Other machines reach the hub over ssh, so wherever you can `ssh devbox`, musubi works. The
 daemon reconnects by itself after a network change or a sleep.
@@ -39,9 +38,9 @@ daemon reconnects by itself after a network change or a sleep.
 ## What moves between machines
 
 musubi replicates jj's [operation log](https://docs.jj-vcs.dev/latest/operation-log/), not
-just branches. Every `jj` command that changes the repository records an operation, and the
-daemon sends each new one, with the commits it needs, to the hub, which passes it on to the
-other machines. They show up in `jj op log` there within a second or so.
+just branches. Every `jj` command that changes the repository records an operation; the daemon
+sends each new one, with the commits it needs, to the hub, which passes it on to the other
+machines. It shows up in `jj op log` there within a second or so.
 
 | Shared across the hive | Each machine's own |
 | --- | --- |
@@ -52,7 +51,7 @@ other machines. They show up in `jj op log` there within a second or so.
 | Git remotes: their names and URLs | The commit index, which jj rebuilds |
 | Repo config that decides what is safe to rewrite or push | |
 
-See [Share settings](guides/working-across-machines.md#share-settings) for which remotes and
+[Share settings](guides/working-across-machines.md#share-settings) says which remotes and
 repo config the hive shares, and how machines agree on them.
 
 Every snapshot of a working copy replicates too, so a file that jj snapshots reaches every
@@ -70,30 +69,21 @@ Because the operation log replicates, the rest of jj's behaviour carries across 
 
 ## Working copies stay put
 
-musubi never writes to working-copy files. It changes only what `jj` itself keeps, the
-operation log, commits, and, in a colocated repository, the `.git` refs that track bookmarks,
-and the git remotes and repo config that the hive shares.
+musubi never writes to working-copy files. It changes only what jj keeps (the operation log
+and commits, and in a colocated repository, the `.git` refs that track bookmarks), and the
+git remotes and repo config that the hive shares.
 
-Since every machine keeps every operation and commit of its hive, the daemon also cleans up
-what `jj util gc` would, once enough has built up, at most once a week, and not on battery:
-operations nothing reachable from the current one needs, and files jj no longer reads,
-nothing less than two weeks old. Unlike `jj util gc`, it deletes no git object.
-
-When another machine rewrites the commit your working copy is on, by rebasing its parent,
-say, jj treats your working copy as stale, just as it would after a rebase in another
-workspace on the same machine. Your next `jj` command stops and suggests
-`jj workspace update-stale`, which updates the files. Any edits you hadn't snapshotted yet
-are snapshotted first, so nothing is lost: at worst, the working-copy change becomes
-divergent.
-
-To have jj update stale working copies by itself, set `snapshot.auto-update-stale = true`.
-musubi doesn't set it for you: with it on, any `jj` command, even `jj log`, can change files
-under a running build or an open editor.
+When another machine rewrites the commit your working copy is on, by rebasing its parent, say,
+jj treats your working copy as stale, as it would after a rebase in another workspace on the
+same machine, and your next `jj` command stops until you update the files. [When another
+machine rewrites your working
+copy](guides/working-across-machines.md#when-another-machine-rewrites-your-working-copy) says
+what to do, and why musubi doesn't make jj do it by itself.
 
 ## Other machines' workspaces
 
-Each machine keeps its own workspaces: every machine has its own `default@`. It also shows
-every other machine's working copy, as a workspace named after that machine:
+Every machine has its own workspaces, its own `default@` among them, and also shows every
+other machine's working copy as a workspace named after that machine:
 
 ```text
 @  vruxwmqv me@example.com 2026-10-23 10:14:02 default@ 3f2a1c9e
@@ -103,31 +93,30 @@ every other machine's working copy, as a workspace named after that machine:
 ◆  zzzzzzzz root() 00000000
 ```
 
-You can build on another machine's working copy with `jj new laptop/default@`, or see what it
-is doing with `jj diff -r laptop/default@`. Those are the commits the laptop last snapshotted:
-edits it hasn't snapshotted yet stay on the laptop, as they would in any workspace.
+`laptop/default@` is the commit the laptop last snapshotted: edits it hasn't snapshotted yet
+stay on the laptop, as they would in any workspace. You can diff it or build on it like any
+revision; see [See what other machines are
+doing](guides/working-across-machines.md#see-what-other-machines-are-doing).
 
-A machine's name defaults to jj's `operation.hostname`. Choose another with `--machine` when
-you join.
-
-A machine that leaves with `musubi leave`, or that another machine forgets with
-`musubi forget`, stops showing. If it's still there, it comes back as soon as it is used.
-[Take a repository or machine out](guides/manage.md#take-a-repository-or-machine-out) says
-more.
+A machine's name defaults to jj's `operation.hostname`; choose another with `--machine` when
+you join. A machine that leaves with `musubi leave`, or that another machine forgets with
+`musubi forget`, stops showing, and comes back if it's used again. See [Take a repository or
+machine out](guides/manage.md#take-a-repository-or-machine-out).
 
 ## When machines change the same thing
 
-The rule is that changes made on different machines combine exactly as jj combines changes
-made by concurrent `jj` commands on one machine, and every machine ends up with the same
-result. A bookmark moved to different commits on two machines is conflicted everywhere, and a
-change rewritten on two machines is divergent everywhere, until you resolve it once, on any
-machine. See [When machines change the same
-thing](guides/working-across-machines.md#when-machines-change-the-same-thing).
+Changes made on different machines combine exactly as jj combines changes made by concurrent
+`jj` commands on one machine, and every machine ends up with the same result. A bookmark moved
+to different commits on two machines is conflicted everywhere, and a change rewritten on two
+machines is divergent everywhere, until you resolve it once, on any machine.
+[Work across machines](guides/working-across-machines.md#when-machines-change-the-same-thing)
+says how.
 
-The hub orders updates: one machine's update lands, and the next is merged with it before it
-lands too. That merge happens once, on the machine that made the later change, so the hive
-never gets two copies of the same rebase. [docs/internals/races.md](internals/races.md)
-lists every case musubi tests, with its outcome.
+When two machines send updates at once, the hub accepts the first and turns the other away;
+that machine merges its update with the first and sends the result. So each merge happens
+once, on the machine that made the later change, and the hive never gets two copies of the
+same rebase. [docs/internals/races.md](internals/races.md) lists every case musubi tests,
+with its outcome.
 
 ## Offline machines
 
@@ -136,17 +125,24 @@ reconnects, its daemon fetches what it missed, merges its own work with it, and 
 result, as for any concurrent change. Meanwhile, `musubi list` shows its syncs failing, which
 is expected.
 
+## Disk space
+
+Every machine keeps every operation and commit of its hive, so the daemon cleans up what
+`jj util gc` would: operations that nothing reachable from the current one needs, and files jj
+no longer reads, none less than two weeks old. It runs once enough has built up, at most once
+a week, and not on battery. Unlike `jj util gc`, it deletes no git object.
+
 ## Operation ids differ between machines
 
 Each machine records its own git refs and workspaces in its operations, so the same operation
 has a different id on each machine and on the hub. Anything that names an operation, such as
 `jj op restore <id>`, takes this machine's id. To find the same operation on another machine,
-run `musubi debug op-id <id>` here, which prints its id in the hive, then `musubi debug op-id`
-with that id on the other machine.
+run `musubi debug op-id <id>` here, which prints the hive's id for it, then `musubi debug
+op-id` with that id on the other machine.
 
 ## The hub needn't be durable
 
 Every machine has every operation it has seen, so a hub holds nothing that isn't on the
-machines too. A hub that loses its state, through a power cut or a deleted directory, loses
-no work: start a new one, and make its hives again from the machines' copies. See
-[Replace or move a hub](guides/manage.md#replace-or-move-a-hub).
+machines too. A hub that loses its state, through a power cut or a deleted directory, loses no
+work: start a new one, and make its hives again from the machines' copies. See [Replace or
+move a hub](guides/manage.md#replace-or-move-a-hub).

@@ -5,15 +5,14 @@ on crates.io, all at one version.
 
 ## Prepare the version
 
-1. Check what the release changes for users. `CHANGELOG.md`'s Unreleased section should say
-   what breaks and what a user must do on upgrading (see the Compatibility section of
-   [AGENTS.md](../../AGENTS.md#compatibility)).
+1. Check that `CHANGELOG.md`'s Unreleased section says what the release breaks and what a
+   user must do on upgrading ([AGENTS.md, "Compatibility"](../../AGENTS.md#compatibility)).
 2. If the wire format changed since the latest `v*` tag (`jj tag list`), check that
    `PROTOCOL_VERSION` changed too, so that machines and hubs of the two releases refuse each
    other, saying so.
-3. Set the version in `Cargo.toml`, both the workspace's and the one its own crates require of
-   each other (the `=0.1.0`s), and run `cargo update --workspace` to put it in `Cargo.lock`.
-4. Make the Unreleased heading in `CHANGELOG.md` the version's, if there is one.
+3. In `Cargo.toml`, set the workspace's `version` and the exact versions (`=0.1.0`) its
+   crates require of each other, and run `cargo update --workspace` to put it in `Cargo.lock`.
+4. Rename the Unreleased heading in `CHANGELOG.md`, if there is one, to the version.
 5. Run `just check`, and land the change on main.
 
 ## Tag and build
@@ -37,7 +36,7 @@ without releasing anything.
 ## Publish the crates
 
 Once the release has built, publish the crates from the tagged commit, with a crates.io
-token (`cargo login`). Publishing can't be undone, only yanked:
+token (`cargo login`). A published version can't be replaced, only yanked:
 
 ```sh
 jj new v0.1.0

@@ -234,6 +234,22 @@ impl NodeRepo {
         Ok(())
     }
 
+    /// Writes with `settings` from now on, keeping the stores open. For tests, whose
+    /// clock is their own: jj-lib takes the times it gives commits and operations from the
+    /// settings, and a test hands a node new ones as its clock moves on.
+    pub fn set_settings(&mut self, settings: UserSettings) {
+        let loader = &self.loader;
+        self.loader = RepoLoader::new(
+            settings,
+            loader.store().clone(),
+            loader.workspace_store().clone(),
+            loader.op_store().clone(),
+            loader.op_heads_store().clone(),
+            loader.index_store().clone(),
+            loader.submodule_store().clone(),
+        );
+    }
+
     /// How the repository shares its git repository with a working copy, if it does.
     fn colocation(&self) -> Option<&Colocation> {
         self.git.as_ref()?.colocation()

@@ -22,6 +22,7 @@ use musubi_testutil::TestEnv;
 use musubi_testutil::TestRepo;
 
 use crate::fixture::Fixture;
+use crate::fixture::TestClock;
 use crate::ledger::Ledger;
 use crate::ledger::Seen;
 use crate::origin::Origin;
@@ -408,15 +409,16 @@ impl World {
         self.ledger.record(m, &what, &before, &after, false);
     }
 
-    /// Machine `m`'s daemon, two hours on by its clock, forgets every other copy that has
-    /// gone unused for longer than its `musubi.forget-after`. Records what changed.
+    /// Machine `m`'s daemon, two hours on by the environment's clock, forgets every other
+    /// copy that has gone unused for longer than its `musubi.forget-after`. Records what
+    /// changed.
     pub fn expire_idle(&mut self, m: usize) {
         let before = self.seen(m);
         self.record(format!(
             "{}: forget the copies unused two hours on",
             self.machine(m)
         ));
-        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(2 * 3600);
+        let later = self.fx.env.clock().now() + std::time::Duration::from_secs(2 * 3600);
         if let Err(err) = self
             .fx
             .node(m)
@@ -719,7 +721,7 @@ impl World {
             return;
         }
         let before = self.seen(m);
-        if let Err(err) = self.fx.hive.members[m].adapter.repo().merge_heads() {
+        if let Err(err) = self.fx.node(m).merge_heads() {
             self.fail(&format!(
                 "merging {}'s op heads failed: {err}",
                 self.machine(m)
@@ -1025,7 +1027,8 @@ impl World {
             Ok(node) => node.with_repo_config(Some(repo.repo_config_path())),
             Err(err) => self.fail(&format!("reopening {}: {err}", self.machine(m))),
         };
-        let adapter = NodeAdapter::new(node).unwrap();
+        let mut adapter = NodeAdapter::new(node).unwrap();
+        adapter.set_clock(Box::new(TestClock(self.fx.env.clock())));
         self.fx.hive.members[m].adapter = adapter;
         self.fx.hive.restart(m);
         self.touched.insert(m);

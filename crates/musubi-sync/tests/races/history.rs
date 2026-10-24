@@ -3,6 +3,7 @@
 use musubi_testutil::TestEnv;
 
 use crate::fixture::Fixture;
+use crate::fixture::add_node;
 
 /// Both machines' workspaces called `default`, as they are unless renamed.
 fn default_workspaces() -> Fixture {
@@ -298,13 +299,13 @@ fn joining_with_full_history() {
         alpha.jj(&["commit", "-m", &format!("history {i}")]);
     }
     let mut hive = Hive::new(&env.root().join("hub"), Backend::Git).unwrap();
-    hive.add(NodeRepo::open(&alpha.repo_path(), &alpha.settings()).unwrap())
-        .unwrap();
+    let alpha_node = NodeRepo::open(&alpha.repo_path(), &alpha.settings()).unwrap();
+    add_node(&mut hive, &env, alpha_node);
     let mut beta_node = NodeRepo::open(&beta.repo_path(), &beta.settings()).unwrap();
     beta_node
         .create_join_operation("musubi: beta joins")
         .unwrap();
-    hive.add(beta_node).unwrap();
+    add_node(&mut hive, &env, beta_node);
     let mut fixture = Fixture {
         env,
         repos: vec![alpha, beta],

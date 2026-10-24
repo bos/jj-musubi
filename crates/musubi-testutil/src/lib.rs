@@ -8,6 +8,13 @@
 //! [`TestRepo::settings`], gets the next seed from a counter that the environment's
 //! repositories share, so that a test that runs the same commands makes the same changes,
 //! and a generated test case replays exactly.
+//!
+//! The same seed gives each `jj` command its times, as jj's own tests have them: the commits
+//! it makes a second later than the last command's, and its operation a millisecond later.
+//! jj orders operations by their times, to merge them, as musubi does too, breaking ties by
+//! their ids; with the real clock, operations tied or not by how fast a test ran, and a case
+//! merged differently from one run to the next. Code that compares operation times with the
+//! clock, as expiry does, must ask the environment's [`Clock`] for the time instead.
 
 // Test helpers fail the test on any unexpected error; that is what unwrap is for here.
 #![allow(clippy::unwrap_used)]
@@ -24,7 +31,10 @@ use std::sync::OnceLock;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use std::time::SystemTime;
 
+use jj_lib::backend::MillisSinceEpoch;
+use jj_lib::backend::Timestamp;
 use jj_lib::config::ConfigLayer;
 use jj_lib::config::ConfigSource;
 use jj_lib::config::StackedConfig;
@@ -37,6 +47,8 @@ pub const JJ_VERSION: &str = "0.46.0";
 pub struct TestEnv {
     root: TempDir,
     seeds: Arc<AtomicU64>,
+    /// Whether `jj` commands record the real time in their operations, not their seed's.
+    real_op_times: bool,
 }
 
 impl Default for TestEnv {
@@ -53,6 +65,24 @@ impl TestEnv {
         Self {
             root,
             seeds: Arc::new(AtomicU64::new(1)),
+            real_op_times: false,
+        }
+    }
+
+    /// An environment whose `jj` commands record the real time in their operations, for
+    /// tests that run musubi's own processes, whose daemons judge copies idle by the real
+    /// clock. Their commits' times are still their seeds'.
+    pub fn with_real_op_times() -> Self {
+        Self {
+            real_op_times: true,
+            ..Self::new()
+        }
+    }
+
+    /// The clock that agrees with the times this environment's operations record.
+    pub fn clock(&self) -> Clock {
+        Clock {
+            seeds: self.seeds.clone(),
         }
     }
 
@@ -78,6 +108,7 @@ impl TestEnv {
         Self {
             root,
             seeds: Arc::new(AtomicU64::new(seed.parse().unwrap())),
+            real_op_times: false,
         }
     }
 
@@ -133,6 +164,7 @@ impl TestEnv {
             machine: machine.to_owned(),
             hostname: machine.to_owned(),
             seeds: self.seeds.clone(),
+            real_op_times: self.real_op_times,
         }
     }
 
@@ -307,6 +339,7 @@ pub struct TestRepo {
     hostname: String,
     /// The environment's counter of seeds for jj's change ids.
     seeds: Arc<AtomicU64>,
+    real_op_times: bool,
 }
 
 impl TestRepo {
@@ -324,15 +357,21 @@ impl TestRepo {
     }
 
     /// Settings equivalent to the ones the `jj` CLI uses in this repository, with a seed of
-    /// their own for change ids.
+    /// their own for change ids, and for the times of the commits and operations they write
+    /// (see [`Clock::retime`]). Those times are in 2001: a node given these settings must
+    /// judge copies unused by the environment's [`Clock`], not the system's, or it takes
+    /// every copy for unused since then.
     pub fn settings(&self) -> UserSettings {
         let mut config = StackedConfig::with_defaults();
+        let seed = self.next_seed();
         let text = format!(
-            "{}debug.randomness-seed = {}\n",
+            "{}debug.randomness-seed = {seed}\n",
             machine_config(&self.hostname),
-            self.next_seed()
         );
         config.add_layer(ConfigLayer::parse(ConfigSource::User, &text).unwrap());
+        if !self.real_op_times {
+            config.add_layer(times_layer(seed));
+        }
         UserSettings::from_config_and_home_dir(config, Some(self.home.clone())).unwrap()
     }
 
@@ -392,7 +431,7 @@ impl TestRepo {
     }
 
     /// Each command's own seed, from which it takes its randomness and, if it is `jj`, the
-    /// time its commits record (`commit_timestamp`).
+    /// times its commits and its operation record.
     fn next_seed(&self) -> u64 {
         self.seeds.fetch_add(1, Ordering::Relaxed)
     }
@@ -423,6 +462,9 @@ impl TestRepo {
             .is_some_and(|stem| stem == "jj")
         {
             command.env("JJ_TIMESTAMP", commit_timestamp(seed));
+            if !self.real_op_times {
+                command.env("JJ_OP_TIMESTAMP", operation_timestamp(seed));
+            }
         }
         // What Windows itself needs: without `SystemRoot`, for one, sockets don't work.
         for name in [
@@ -455,14 +497,66 @@ fn expect_success(program: &str, args: &[&str], output: &Output) -> String {
 /// later for each seed. Git records whole seconds, so jj, repeating a rewrite it undid within
 /// the same second, would make the very commit it made before, and refuse it as one that
 /// exists already; how fast a test ran would decide whether it did. With these, it never does,
-/// and every run of a test makes the same commits. Dates have 28-day months, all valid.
+/// and every run of a test makes the same commits.
 fn commit_timestamp(seed: u64) -> String {
-    let (secs, mins, hours) = (seed % 60, seed / 60 % 60, seed / 3600 % 24);
-    let day = seed / 86_400;
-    format!(
-        "{:04}-{:02}-{:02}T{hours:02}:{mins:02}:{secs:02}+00:00",
-        2001 + day / (28 * 12),
-        1 + day / 28 % 12,
-        1 + day % 28
-    )
+    rfc3339(seed * 1000)
+}
+
+/// The time a `jj` command made with `seed` gives its operation, as `JJ_OP_TIMESTAMP`, and
+/// what [`Clock::now`] says once it has run: a millisecond later for each seed, the
+/// resolution jj records. An hour passes only after millions of commands, so no copy goes
+/// unused for its `musubi.forget-after` in a test unless the test says that it did, as a real
+/// one wouldn't in the time a test takes.
+fn operation_timestamp(seed: u64) -> String {
+    rfc3339(seed)
+}
+
+/// Milliseconds since the start of 2001, the tests' epoch.
+const EPOCH_MILLIS: u64 = 978_307_200_000;
+
+fn rfc3339(millis: u64) -> String {
+    let timestamp = Timestamp {
+        timestamp: MillisSinceEpoch(i64::try_from(EPOCH_MILLIS + millis).unwrap()),
+        tz_offset: 0,
+    };
+    timestamp.to_datetime().unwrap().to_rfc3339()
+}
+
+/// A config layer giving what jj writes the times that a `jj` command with `seed` gives
+/// its commits and its operation.
+fn times_layer(seed: u64) -> ConfigLayer {
+    let text = format!(
+        "debug.commit-timestamp = \"{}\"\ndebug.operation-timestamp = \"{}\"\n",
+        commit_timestamp(seed),
+        operation_timestamp(seed)
+    );
+    ConfigLayer::parse(ConfigSource::CommandArg, &text).unwrap()
+}
+
+/// An environment's clock, which agrees with the times its operations record: the time of
+/// the latest seed taken. Code that compares operations' times with the clock takes the time
+/// from this one in tests.
+#[derive(Clone)]
+pub struct Clock {
+    seeds: Arc<AtomicU64>,
+}
+
+impl Clock {
+    /// The time the latest command's operation recorded, or would have.
+    pub fn now(&self) -> SystemTime {
+        let seed = self.seeds.load(Ordering::Relaxed).saturating_sub(1);
+        SystemTime::UNIX_EPOCH + Duration::from_millis(EPOCH_MILLIS + seed)
+    }
+
+    /// `settings` with the next seed's times for the commits and operations they write, as
+    /// if a `jj` command ran now, keeping their randomness. jj-lib takes these times from the
+    /// settings a repository was opened with, so a test hands a node new ones as it acts,
+    /// to keep its operations in order with the commands' around them.
+    pub fn retime(&self, settings: &UserSettings) -> UserSettings {
+        let seed = self.seeds.fetch_add(1, Ordering::Relaxed);
+        let mut config = settings.config().clone();
+        config.remove_layers(ConfigSource::CommandArg);
+        config.add_layer(times_layer(seed));
+        settings.with_new_config(config).unwrap()
+    }
 }

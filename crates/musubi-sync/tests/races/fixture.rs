@@ -17,8 +17,31 @@ use jj_lib::revset::RevsetExpression;
 use musubi_jj::node::NodeRepo;
 use musubi_jj::objects::Backend;
 use musubi_sync::hive::Hive;
+use musubi_sync::node::Clock;
 use musubi_testutil::TestEnv;
 use musubi_testutil::TestRepo;
+
+/// The environment's clock, for its nodes: their operations take their times from it, as
+/// the `jj` commands' do, and they judge copies unused by it.
+pub struct TestClock(pub musubi_testutil::Clock);
+
+impl Clock for TestClock {
+    fn now(&self) -> std::time::SystemTime {
+        self.0.now()
+    }
+
+    fn tick(&self, repo: &mut NodeRepo) {
+        repo.set_settings(self.0.retime(repo.loader().settings()));
+    }
+}
+
+/// Adds `node` to `hive`, keeping `env`'s time.
+pub fn add_node(hive: &mut Hive, env: &TestEnv, node: NodeRepo) {
+    let index = hive.add(node).unwrap();
+    hive.members[index]
+        .adapter
+        .set_clock(Box::new(TestClock(env.clock())));
+}
 
 pub struct Fixture {
     pub env: TestEnv,
@@ -79,7 +102,7 @@ impl Fixture {
             let node = NodeRepo::open(&repo.repo_path(), &repo.settings())
                 .unwrap()
                 .with_repo_config(Some(env.root().join(config)));
-            hive.add(node).unwrap();
+            add_node(&mut hive, &env, node);
         }
         Self { env, repos, hive }
     }
@@ -100,7 +123,7 @@ impl Fixture {
                 .with_repo_config(Some(repo.repo_config_path()));
             node.create_join_operation(&format!("musubi: {} joins", repo.machine()))
                 .unwrap();
-            hive.add(node).unwrap();
+            add_node(&mut hive, &env, node);
         }
         Self { env, repos, hive }
     }
@@ -112,7 +135,7 @@ impl Fixture {
             .with_repo_config(Some(repo.repo_config_path()));
         node.create_join_operation(&format!("musubi: {} joins", repo.machine()))
             .unwrap();
-        self.hive.add(node).unwrap();
+        add_node(&mut self.hive, &self.env, node);
         self.repos.push(repo);
     }
 
@@ -201,7 +224,8 @@ impl Fixture {
             .to_owned()
     }
 
-    /// The node of machine `index`, to act on as musubi's commands do.
+    /// The node of machine `index`, to act on as musubi's commands do, with its time moved
+    /// on to now.
     pub fn node(&mut self, index: usize) -> &mut NodeRepo {
         self.hive.members[index].adapter.repo_mut()
     }

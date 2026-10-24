@@ -41,7 +41,7 @@ fn workspace_merge_matches_jj() {
     )
     .unwrap();
     let name = WorkspaceNameBuf::from("w");
-    let set = |from: &Arc<ReadonlyRepo>, value: Option<&CommitId>| {
+    let set = |from: &Arc<ReadonlyRepo>, value: Option<&CommitId>, side: &str| {
         let mut tx = from.start_transaction();
         match value {
             Some(commit) => tx
@@ -53,16 +53,18 @@ fn workspace_merge_matches_jj() {
             }
             None => {}
         }
-        tx.commit("set w").block_on().unwrap()
+        tx.commit(format!("set w, {side}")).block_on().unwrap()
     };
     let choices: Vec<Option<&CommitId>> =
         [None].into_iter().chain(commits.iter().map(Some)).collect();
     for &base in &choices {
         for &ours in &choices {
             for &theirs in &choices {
-                let base_repo = set(&loader.load_at_head().block_on().unwrap(), base);
-                let one = set(&base_repo, ours);
-                set(&base_repo, theirs);
+                let base_repo = set(&loader.load_at_head().block_on().unwrap(), base, "base");
+                // Described apart, so that two sides setting the same are still two
+                // operations: the settings' operation time is the same for both.
+                let one = set(&base_repo, ours, "ours");
+                set(&base_repo, theirs, "theirs");
                 let merged = loader.load_at_head().block_on().unwrap();
                 // jj merges with the merge operation's first parent as its own side.
                 let (first, second) = if merged.operation().parent_ids()[0] == *one.op_id() {

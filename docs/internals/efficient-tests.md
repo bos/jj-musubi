@@ -146,3 +146,16 @@ the case. jj's change ids come from a seed counter in musubi-testutil (jj's
 `debug.randomness-seed`); the random suffix that tells machines of one name apart comes from
 the same seeded generator rather than the clock; and rules pick among commits in change-id
 order, since commit ids and `jj log`'s order depend on when commits were made.
+
+Times come from the seed counter too, as in jj's own tests: each `jj` command's commits are a
+second after the last command's (`JJ_TIMESTAMP`), and its operation a millisecond after
+(`JJ_OP_TIMESTAMP`). jj merges concurrent operations in order of their end times, breaking ties
+by id, and so does musubi, so with the real clock whether two operations tied within a
+millisecond, and so how a case merged, depended on how fast it ran. A node in process takes its
+times from its settings, which jj-lib reads once: its `Clock` (`musubi_sync::node::Clock`)
+hands it the next seed's at each sync, and whenever the test takes the node to act on. Expiry,
+which compares operation times with the clock, reads the environment's `musubi_testutil::Clock`,
+which agrees with them; an hour of it takes millions of commands, so no copy goes unused in a
+case unless a rule says so. The CLI tests run real daemons, which read the real clock, so their
+operations keep the real time (`TestEnv::with_real_op_times`). With all that, a failure that
+doesn't replay is a bug, so the search fails at once, saying where the replay diverged.

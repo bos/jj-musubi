@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::Write as _;
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 use anyhow::Context as _;
 use anyhow::bail;
@@ -26,8 +27,32 @@ use crate::temp_bundle;
 /// the others, which then have nothing to forget, before their own time comes.
 const EXPIRY_STAGGER: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// Where a node takes the time from: the system's clock, but for tests, whose clock agrees
+/// with the times they give the operations they write.
+pub trait Clock: Send {
+    /// The time now, by which copies go unused.
+    fn now(&self) -> SystemTime;
+
+    /// Moves `repo`'s time for the commits and operations it writes on to now, if this clock
+    /// gives it one: jj-lib takes it from the settings a repository was opened with, unless
+    /// they leave it to the system's clock.
+    fn tick(&self, repo: &mut NodeRepo);
+}
+
+/// The system's clock, which a repository's settings leave jj-lib to read itself.
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> SystemTime {
+        SystemTime::now()
+    }
+
+    fn tick(&self, _: &mut NodeRepo) {}
+}
+
 pub struct NodeAdapter {
     repo: NodeRepo,
+    clock: Box<dyn Clock>,
     tmp: PathBuf,
     base_path: PathBuf,
     /// `anc*(base)` for the most recent `base` asked about.
@@ -51,12 +76,18 @@ impl NodeAdapter {
         Ok(Self {
             base_path: musubi_dir.join("accepted_base"),
             repo,
+            clock: Box::new(SystemClock),
             tmp,
             base_ancestry: RefCell::new(None),
             staged: HashMap::new(),
             staged_children: HashMap::new(),
             staged_commits: None,
         })
+    }
+
+    /// Takes the time from `clock`, for tests.
+    pub fn set_clock(&mut self, clock: Box<dyn Clock>) {
+        self.clock = clock;
     }
 
     /// The repository, for tests that look into it.
@@ -91,6 +122,7 @@ impl NodeAdapter {
     /// machine built on it meanwhile. Op heads may have changed since the last step: a
     /// fetch's haves should say so.
     pub fn before_sync(&mut self) -> anyhow::Result<()> {
+        self.clock.tick(&mut self.repo);
         self.repo.check_complete()?;
         self.reconcile_settings(true)?;
         self.show_other_workspaces()?;
@@ -110,18 +142,19 @@ impl NodeAdapter {
     /// (`NodeRepo::replace_abandoned_working_copies`), and the work that shows it again,
     /// such as creating a bookmark, needn't touch them: then nothing would arrive to realize.
     pub fn when_idle(&mut self) -> anyhow::Result<bool> {
+        self.clock.tick(&mut self.repo);
         let settings = self.reconcile_settings(false)?;
         let workspaces = self.show_other_workspaces()?;
         let replaced = !self.repo.replace_abandoned_working_copies()?.is_empty();
         let recorded = self.repo.record_forget_after()?;
-        let forgotten = self
-            .repo
-            .expire_idle(std::time::SystemTime::now(), EXPIRY_STAGGER)?;
+        let forgotten = self.repo.expire_idle(self.clock.now(), EXPIRY_STAGGER)?;
         Ok(settings || workspaces || replaced || recorded || !forgotten.is_empty())
     }
 
-    /// The repository, for tests that act on it, as by crashing it.
+    /// The repository, for tests that act on it, as by crashing it, with its time moved on
+    /// to now (`Clock::tick`).
     pub fn repo_mut(&mut self) -> &mut NodeRepo {
+        self.clock.tick(&mut self.repo);
         &mut self.repo
     }
 

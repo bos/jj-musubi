@@ -2,7 +2,6 @@
 //! copy records its `musubi.forget-after`, and a daemon forgets one whose latest work is older.
 
 use std::time::Duration;
-use std::time::SystemTime;
 
 use crate::fixture::Fixture;
 
@@ -36,7 +35,7 @@ fn unused_copies_are_forgotten_after_their_forget_after() {
     assert_eq!(after(&beta), Some(Some(HOUR)));
     assert_eq!(after(&gamma), Some(None));
 
-    let now = SystemTime::now();
+    let now = hive.env.clock().now();
     assert!(
         hive.node(0)
             .expire_idle(now, Duration::ZERO)
@@ -81,7 +80,7 @@ fn changing_forget_after_is_work() {
     let beta = hive.machine_key(1);
     set_forget_after(&hive, 1, "1h");
     hive.sync();
-    let now = SystemTime::now();
+    let now = hive.env.clock().now();
     assert_eq!(
         hive.node(0)
             .expire_idle(now + 2 * HOUR, Duration::ZERO)

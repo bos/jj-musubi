@@ -310,7 +310,7 @@ fn fetch_history(from: &TestRepo, to: &TestRepo) {
 
 #[test]
 fn hub_join_sync_clone_and_list() {
-    let env = TestEnv::new();
+    let env = TestEnv::with_real_op_times();
     let mut logs = Logs::default();
     let hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
@@ -551,7 +551,7 @@ fn completion_scripts_complete_the_commands() {
 /// a restarted hub serves its hives again, to the daemons connected before as well.
 #[test]
 fn the_daemon_picks_up_new_repositories() {
-    let env = TestEnv::new();
+    let env = TestEnv::with_real_op_times();
     let mut logs = Logs::default();
     let mut hub = Hub::start(&env, &mut logs);
     let mut daemons = Daemons::default();
@@ -638,7 +638,7 @@ fn the_daemon_picks_up_new_repositories() {
 
 #[test]
 fn machines_whose_workspaces_are_all_default_can_join() {
-    let env = TestEnv::new();
+    let env = TestEnv::with_real_op_times();
     let mut logs = Logs::default();
     let hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
@@ -698,7 +698,7 @@ fn two_machines_with(
 /// history it shared, which the hive has.
 #[test]
 fn a_copy_can_join_again_after_leaving() {
-    let env = TestEnv::new();
+    let env = TestEnv::with_real_op_times();
     let mut logs = Logs::default();
     let hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
@@ -738,7 +738,7 @@ fn a_copy_can_join_again_after_leaving() {
 /// it as they sync, with every machine's working copy under its own name.
 #[test]
 fn copies_make_a_lost_hive_again() {
-    let env = TestEnv::new();
+    let env = TestEnv::with_real_op_times();
     let mut logs = Logs::default();
     let mut hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
@@ -786,7 +786,7 @@ fn copies_make_a_lost_hive_again() {
 /// again there, under its id, and the rest join it, carrying on as before.
 #[test]
 fn copies_move_to_another_hub() {
-    let env = TestEnv::new();
+    let env = TestEnv::with_real_op_times();
     let mut logs = Logs::default();
     let mut old = Hub::start(&env, &mut logs);
     let new = Hub::start_in(&env, &mut logs, "newhub");
@@ -817,7 +817,7 @@ fn copies_move_to_another_hub() {
 /// it has, whether its daemon hears or `musubi sync` does.
 #[test]
 fn copies_leave_a_removed_hive() {
-    let env = TestEnv::new();
+    let env = TestEnv::with_real_op_times();
     let mut logs = Logs::default();
     let hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
@@ -849,7 +849,7 @@ fn copies_leave_a_removed_hive() {
 /// a daemon, rather than once the sync's requests time out, and `musubi list` says it too.
 #[test]
 fn a_sync_says_at_once_that_the_hub_is_gone() {
-    let env = TestEnv::new();
+    let env = TestEnv::with_real_op_times();
     let mut logs = Logs::default();
     let mut hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
@@ -882,7 +882,7 @@ fn a_sync_says_at_once_that_the_hub_is_gone() {
 /// and with its working copy; `--force` leaves without telling the hive.
 #[test]
 fn leaving_needs_the_hub_unless_forced() {
-    let env = TestEnv::new();
+    let env = TestEnv::with_real_op_times();
     let mut logs = Logs::default();
     let mut hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
@@ -926,7 +926,7 @@ fn leaving_needs_the_hub_unless_forced() {
 /// an open repository can't follow, such as turning colocation off.
 #[test]
 fn daemon_carries_on_after_colocation_changes() {
-    let env = TestEnv::new();
+    let env = TestEnv::with_real_op_times();
     let mut logs = Logs::default();
     let hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
@@ -952,7 +952,7 @@ fn daemon_carries_on_after_colocation_changes() {
 /// machine for as long as it runs.
 #[test]
 fn the_daemon_ignores_the_git_repository_it_was_started_in() {
-    let env = TestEnv::new();
+    let env = TestEnv::with_real_op_times();
     let mut logs = Logs::default();
     let hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
@@ -1001,7 +1001,7 @@ fn file_url(path: &Path) -> String {
 /// shallow since it joined.
 #[test]
 fn shallow_clones_are_refused() {
-    let env = TestEnv::new();
+    let env = TestEnv::with_real_op_times();
     let mut logs = Logs::default();
     let hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
@@ -1028,7 +1028,7 @@ fn shallow_clones_are_refused() {
 /// `musubi list`, as the daemon would.
 #[test]
 fn syncing_without_the_daemon_shows_in_the_list() {
-    let env = TestEnv::new();
+    let env = TestEnv::with_real_op_times();
     let mut logs = Logs::default();
     let hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
@@ -1048,7 +1048,7 @@ fn syncing_without_the_daemon_shows_in_the_list() {
 /// repo config where jj keeps it.
 #[test]
 fn settings_are_shared_through_the_binary() {
-    let env = TestEnv::new();
+    let env = TestEnv::with_real_op_times();
     let mut logs = Logs::default();
     let hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
@@ -1079,7 +1079,7 @@ fn settings_are_shared_through_the_binary() {
 #[cfg(unix)]
 #[test]
 fn rewrites_are_signed_as_jj_signs_them() {
-    let env = TestEnv::new();
+    let env = TestEnv::with_real_op_times();
     let mut logs = Logs::default();
     let hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
@@ -1155,7 +1155,7 @@ fn rewrites_are_signed_as_jj_signs_them() {
 fn machines_reach_the_hub_over_ssh() {
     use std::os::unix::fs::PermissionsExt as _;
 
-    let env = TestEnv::new();
+    let env = TestEnv::with_real_op_times();
     let mut logs = Logs::default();
     let hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
@@ -1279,7 +1279,7 @@ fn the_daemon_starts_through_the_login_service() {
         eprintln!("skipped: set MUSUBI_TEST_LOGIN_SERVICE=1 to install a login service");
         return;
     }
-    let env = TestEnv::new();
+    let env = TestEnv::with_real_op_times();
     let logs = Logs(vec![env.root().join("state/daemon.log")]);
     let state = env.root().join("state");
     // Make sure no list shows a hub it can't reach.

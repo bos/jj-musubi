@@ -209,7 +209,7 @@ impl HubStore {
                 continue;
             }
             if id != *self.canonical.root_operation_id() {
-                stack.extend(self.canonical.read_operation(&id)?.parents);
+                stack.extend(self.canonical.parents(&id)?);
             }
             found.push(id);
         }
@@ -268,7 +268,7 @@ impl HubStore {
             {
                 continue;
             }
-            stack.extend(self.canonical.read_operation(&id)?.parents);
+            stack.extend(self.canonical.parents(&id)?);
         }
         Ok(false)
     }

@@ -101,6 +101,129 @@ struct Admitted {
     names_its_commits: bool,
 }
 
+/// `work` done on each of `items`, by as many workers as are worth it, each numbered and
+/// given a share in order, with the results in order. A panic in a worker is passed on as it
+/// is: jj-lib panics on some malformed views.
+fn in_parallel<T: Sync, R: Send>(items: &[T], work: impl Fn(usize, &T) -> R + Sync) -> Vec<R> {
+    let workers = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(MAX_WORKERS)
+        .min(items.len().div_ceil(MIN_PER_WORKER))
+        .max(1);
+    if workers == 1 {
+        return items.iter().map(|item| work(0, item)).collect();
+    }
+    let share = items.len().div_ceil(workers);
+    let work = &work;
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = items
+            .chunks(share)
+            .enumerate()
+            .map(|(worker, items)| {
+                scope.spawn(move || {
+                    items
+                        .iter()
+                        .map(|item| work(worker, item))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .flat_map(|worker| {
+                worker
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            })
+            .collect()
+    })
+}
+
+/// How many views an import verifies, in parallel, before appending them.
+const IMPORT_BATCH: usize = 512;
+
+/// How many records, of operations and views, an import takes in before appending them.
+const IMPORT_ITEMS: usize = 4096;
+
+/// How many bytes of views and operations an import takes in before appending them, so
+/// that a bundle of many large views is taken in a part at a time. A single view may still
+/// be as large as a record may be.
+const IMPORT_BYTES: usize = 64 << 20;
+
+/// The most workers an import verifies views with.
+const MAX_WORKERS: usize = 16;
+
+/// The fewest views worth a worker of their own.
+const MIN_PER_WORKER: usize = 16;
+
+/// A view an import is to store, with the delta it came as, if any, and its base.
+struct Pending {
+    id: ViewId,
+    contents: Vec<u8>,
+    delta: Option<Delta>,
+}
+
+/// A delta a view came as, with its base, and the bytes of the base it was applied to.
+struct Delta {
+    base: ViewId,
+    bytes: Vec<u8>,
+    applied_to: Applied,
+}
+
+/// The bytes of its base a delta was applied to.
+enum Applied {
+    /// The store's: in normal form.
+    Stored,
+    /// Those of the view at this index in [`Batch::views`], as received.
+    Batch(usize),
+    /// Those of a view received in an earlier batch, as received.
+    Earlier,
+}
+
+enum Item {
+    /// The view at this index in [`Batch::views`].
+    View(usize),
+    Operation(OperationId, Vec<u8>),
+}
+
+/// What an import has taken in, in the order the bundle had it, and not yet stored.
+#[derive(Default)]
+struct Batch {
+    items: Vec<Item>,
+    views: Vec<Pending>,
+    /// Each view's index in `views`.
+    by_id: HashMap<ViewId, usize>,
+    /// What the views and operations take, roughly.
+    bytes: usize,
+}
+
+impl Batch {
+    fn push_view(&mut self, id: ViewId, contents: Vec<u8>, delta: Option<Delta>) {
+        self.bytes += contents.len() + delta.as_ref().map_or(0, |delta| delta.bytes.len());
+        self.by_id.insert(id.clone(), self.views.len());
+        self.items.push(Item::View(self.views.len()));
+        self.views.push(Pending {
+            id,
+            contents,
+            delta,
+        });
+    }
+
+    /// A view taken in, as received.
+    fn view(&self, id: &ViewId) -> Option<&[u8]> {
+        self.by_id
+            .get(id)
+            .map(|&i| self.views[i].contents.as_slice())
+    }
+
+    /// Whether to store what it holds before taking in more.
+    fn full(&self) -> bool {
+        self.views.len() >= IMPORT_BATCH
+            || self.items.len() >= IMPORT_ITEMS
+            || self.bytes >= IMPORT_BYTES
+    }
+}
+
 /// Whether an operation or view is what it says it is, and may be stored.
 fn admit(checked: Admitted) -> Result<(), CanonicalError> {
     let Admitted {
@@ -210,6 +333,30 @@ impl Shared {
             });
         }
         Ok(op)
+    }
+
+    /// An operation's parents, as jj decodes them, read from its encoding: a walk over the
+    /// history needs only those, and decoding and hashing the whole operation at every step
+    /// would take most of its time. Every stored operation was checked as it arrived.
+    fn parents(&self, id: &OperationId) -> Result<Vec<OperationId>, CanonicalError> {
+        if *id == self.root_operation_id {
+            return Ok(vec![]);
+        }
+        let bytes = self.operation_bytes(id)?;
+        let mut parents = vec![];
+        each_field(&bytes, |number, payload| {
+            if number == 2 {
+                (payload.len() == log::ID_LEN).then_some(())?;
+                parents.push(OperationId::from_bytes(payload));
+            }
+            Some(())
+        })
+        .ok_or_else(|| CanonicalError::MalformedOperation(id.hex()))?;
+        // As jj reads an operation from before it had a root operation.
+        if parents.is_empty() {
+            parents.push(self.root_operation_id.clone());
+        }
+        Ok(parents)
     }
 
     fn read_view(&self, id: &ViewId) -> Result<View, CanonicalError> {
@@ -341,6 +488,11 @@ impl CanonicalStore {
 
     pub fn read_view(&self, id: &ViewId) -> Result<View, CanonicalError> {
         self.shared.read_view(id)
+    }
+
+    /// The parents of a stored operation, without reading the rest of it.
+    pub fn parents(&self, id: &OperationId) -> Result<Vec<OperationId>, CanonicalError> {
+        self.shared.parents(id)
     }
 
     /// The view of the operation `id`.
@@ -486,6 +638,20 @@ impl CanonicalStore {
         if self.has_operation(id) {
             return Ok(None);
         }
+        let parents = self.verify_operation(id, bytes)?;
+        self.shared
+            .log
+            .append_operation(id, bytes)
+            .map_err(self.shared.log_err())?;
+        Ok(Some(parents))
+    }
+
+    /// Checks an operation, decoded, against its id, and returns its parents.
+    fn verify_operation(
+        &self,
+        id: &OperationId,
+        bytes: &[u8],
+    ) -> Result<Vec<OperationId>, CanonicalError> {
         let op = codec::decode_operation(bytes, self.root_operation_id())
             .map_err(|err| Shared::read_error("operation", id.hex(), err))?;
         admit(Admitted {
@@ -495,11 +661,7 @@ impl CanonicalStore {
             actual: OperationId::new(blake2b_hash(&op).to_vec()).hex(),
             names_its_commits: names_decoded_commits(bytes, encoded_op_commits, op_commit_ids(&op)),
         })?;
-        self.shared
-            .log
-            .append_operation(id, bytes)
-            .map_err(self.shared.log_err())?;
-        Ok(Some(op.parents))
+        Ok(op.parents)
     }
 
     /// Verifies and stores a view received from a peer, in normal form (see
@@ -543,7 +705,7 @@ impl CanonicalStore {
             if id == *self.root_operation_id() || !seen.insert(id.clone()) {
                 continue;
             }
-            stack.extend(self.read_operation(&id)?.parents);
+            stack.extend(self.parents(&id)?);
         }
         Ok(false)
     }
@@ -566,7 +728,7 @@ impl CanonicalStore {
                 stack.pop();
                 continue;
             }
-            let parents = self.read_operation(&op)?.parents;
+            let parents = self.parents(&op)?;
             let missing: Vec<OperationId> = parents
                 .iter()
                 .filter(|p| !generations.contains_key(*p))
@@ -630,7 +792,7 @@ impl CanonicalStore {
             if !seen.insert(id.clone()) || self.generation(&id)? <= target {
                 continue;
             }
-            stack.extend(self.read_operation(&id)?.parents);
+            stack.extend(self.parents(&id)?);
         }
         Ok(false)
     }
@@ -661,7 +823,7 @@ impl CanonicalStore {
                 done.insert(id);
                 continue;
             }
-            let parents = self.read_operation(&id)?.parents;
+            let parents = self.parents(&id)?;
             stack.push((id, true));
             stack.extend(
                 parents
@@ -693,17 +855,35 @@ impl CanonicalStore {
         // The last view a delta went to, in normal form: usually the next delta's base.
         let mut last: Option<(ViewId, Vec<u8>)> = None;
         for id in ops {
-            let op = self.read_operation(id)?;
+            let encoded = self.operation_bytes(id)?;
+            let view_id = encoded_view_id(&encoded)
+                .ok_or_else(|| CanonicalError::MalformedOperation(id.hex()))?;
+            let view_id = ViewId::from_bytes(view_id);
             let mut parent_views = vec![];
-            for parent in &op.parents {
-                parent_views.push(match views.get(parent) {
+            for parent in self.parents(id)? {
+                parent_views.push(match views.get(&parent) {
                     Some(view) => view.clone(),
-                    None => self.read_operation(parent)?.view_id,
+                    None => self.read_operation(&parent)?.view_id,
                 });
             }
-            let view = &op.view_id;
+            let view = &view_id;
             if !is_root_view(view) && !parent_views.contains(view) && sent.insert(view.clone()) {
-                match parent_views.first().filter(|base| !is_root_view(base)) {
+                let base = parent_views.first().filter(|base| !is_root_view(base));
+                let stored = match base {
+                    Some(base) => self
+                        .shared
+                        .log
+                        .stored_delta_against(view, base)
+                        .map_err(self.shared.log_err())?,
+                    None => None,
+                };
+                match base {
+                    // Stored against the base the reader has: sent as it is.
+                    Some(base) if stored.is_some() => {
+                        let delta = stored.expect("matched");
+                        writer.view_delta_made(view.as_bytes(), base.as_bytes(), &delta)?;
+                        last = None;
+                    }
                     Some(base) => {
                         let base_bytes = match last.take() {
                             Some((last_id, bytes)) if last_id == *base => bytes,
@@ -721,8 +901,8 @@ impl CanonicalStore {
                     None => writer.view(view.as_bytes(), &self.view_bytes(view)?)?,
                 }
             }
-            writer.operation(id.as_bytes(), &self.operation_bytes(id)?)?;
-            views.insert(id.clone(), op.view_id);
+            writer.operation(id.as_bytes(), &encoded)?;
+            views.insert(id.clone(), view_id);
         }
         Ok(writer.finish()?)
     }
@@ -732,6 +912,7 @@ impl CanonicalStore {
     /// parents if this stored it, or `None` if it was stored already.
     pub fn import_operations(&self, bundle_path: &Path) -> Result<Vec<Imported>, CanonicalError> {
         let mut ops = vec![];
+        let mut batch = Batch::default();
         // The last view a delta made, in normal form (see `normal_view_bytes`): usually the
         // next delta's base, since consecutive operations' views go as deltas against each
         // other.
@@ -739,30 +920,47 @@ impl CanonicalStore {
         bundle::read(bundle_path, |record| {
             match record {
                 Record::View { id, contents } => {
-                    self.import_view(&ViewId::new(id), &contents)?;
+                    let id = ViewId::new(id);
+                    if !self.has_view(&id) && batch.view(&id).is_none() {
+                        batch.push_view(id, contents, None);
+                    }
                 }
                 Record::ViewDelta { id, base, delta } => {
                     let (id, base) = (ViewId::new(id), ViewId::new(base));
-                    if !self.has_view(&id) {
-                        let base = match last.take() {
-                            Some((last_id, bytes)) if last_id == base => bytes,
-                            _ if !self.has_view(&base) => {
-                                return Err(CanonicalError::MissingDeltaBase {
-                                    view: id.hex(),
-                                    base: base.hex(),
-                                });
+                    if !self.has_view(&id) && batch.view(&id).is_none() {
+                        let in_batch = batch.by_id.get(&base).copied();
+                        let (base_contents, applied_to) = match last.take() {
+                            Some((last_id, bytes)) if last_id == base => {
+                                (bytes, in_batch.map_or(Applied::Earlier, Applied::Batch))
                             }
-                            _ => self.normal_view_bytes(&base)?,
+                            _ => match in_batch {
+                                Some(at) => (batch.views[at].contents.clone(), Applied::Batch(at)),
+                                None if self.has_view(&base) => {
+                                    (self.normal_view_bytes(&base)?, Applied::Stored)
+                                }
+                                None => {
+                                    return Err(CanonicalError::MissingDeltaBase {
+                                        view: id.hex(),
+                                        base: base.hex(),
+                                    });
+                                }
+                            },
                         };
-                        let contents = bundle::apply_view_delta(&base, &delta)?;
-                        self.import_view(&id, &contents)?;
-                        last = Some((id, contents));
+                        let contents = bundle::apply_view_delta(&base_contents, &delta)?;
+                        last = Some((id.clone(), contents.clone()));
+                        let delta = Delta {
+                            base,
+                            bytes: delta,
+                            applied_to,
+                        };
+                        batch.push_view(id, contents, Some(delta));
                     }
                 }
                 Record::Operation { id, contents } => {
-                    let id = OperationId::new(id);
-                    let parents = self.import_operation_parents(&id, &contents)?;
-                    ops.push((id, parents));
+                    batch.bytes += contents.len();
+                    batch
+                        .items
+                        .push(Item::Operation(OperationId::new(id), contents));
                 }
                 _ => {
                     return Err(ObjectError::MalformedBundle(
@@ -771,9 +969,124 @@ impl CanonicalStore {
                     .into());
                 }
             }
+            if batch.full() {
+                self.store_batch(std::mem::take(&mut batch), &mut ops)?;
+            }
             Ok(())
         })?;
+        self.store_batch(batch, &mut ops)?;
         Ok(ops)
+    }
+
+    /// Verifies the views and operations of `batch`, the views in parallel, then appends
+    /// them all, in order, under one lock. Adds the operations to `ops`, as
+    /// [`Self::import_operations`] returns them.
+    fn store_batch(&self, batch: Batch, ops: &mut Vec<Imported>) -> Result<(), CanonicalError> {
+        let normal = self.verify_views(&batch.views)?;
+        // Which views came in normal form.
+        let normal_form: Vec<bool> = batch
+            .views
+            .iter()
+            .zip(&normal)
+            .map(|(view, normal)| view.contents == *normal)
+            .collect();
+        // The operations to store, each once: not those stored already.
+        let mut seen = HashSet::new();
+        let new: Vec<(usize, &OperationId, &[u8])> = batch
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(at, item)| match item {
+                Item::Operation(id, bytes) => Some((at, id, bytes.as_slice())),
+                Item::View(_) => None,
+            })
+            .filter(|(_, id, _)| !self.has_operation(id) && seen.insert((*id).clone()))
+            .collect();
+        let verified = in_parallel(&new, |_, (_, id, bytes)| self.verify_operation(id, bytes));
+        let mut stored: Vec<Option<Vec<OperationId>>> = vec![None; batch.items.len()];
+        for ((at, _, _), parents) in new.iter().zip(verified) {
+            stored[*at] = Some(parents?);
+        }
+        self.shared
+            .log
+            .append(|appender| {
+                // Which views this append wrote, with the bytes this batch has for them.
+                let mut written = vec![false; batch.views.len()];
+                for (item, parents) in batch.items.iter().zip(&stored) {
+                    match item {
+                        Item::View(index) => {
+                            let Pending {
+                                id,
+                                contents,
+                                delta,
+                            } = &batch.views[*index];
+                            let normal = &normal[*index];
+                            // The delta made the bytes received from those of its base it was
+                            // applied to. Stored, it makes, from the bytes the log holds for the
+                            // base, the view's: so only if both are what the log holds. For a
+                            // base in this batch, the log holds its bytes only if they were in
+                            // normal form and this append wrote them: another process may have
+                            // appended it first, in bytes of its own.
+                            let in_normal_form = |at: usize| normal_form[at] && written[at];
+                            let delta = delta
+                                .as_ref()
+                                .filter(|delta| {
+                                    normal == contents
+                                        && match delta.applied_to {
+                                            Applied::Stored => true,
+                                            Applied::Batch(at) => in_normal_form(at),
+                                            Applied::Earlier => false,
+                                        }
+                                })
+                                .map(|delta| (&delta.base, delta.bytes.as_slice()));
+                            written[*index] = appender.view(id, normal, delta)?;
+                        }
+                        Item::Operation(id, bytes) => {
+                            if parents.is_some() {
+                                appender.operation(id, bytes)?;
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            })
+            .map_err(self.shared.log_err())?;
+        for (item, parents) in batch.items.into_iter().zip(stored) {
+            if let Item::Operation(id, _) = item {
+                ops.push((id, parents));
+            }
+        }
+        Ok(())
+    }
+
+    /// Checks each view, decoded, against its id, as [`Self::import_view`] does, and returns
+    /// its normal form. Decoding takes most of an import's time, so workers share it, each
+    /// with a scratch store of its own.
+    fn verify_views(&self, views: &[Pending]) -> Result<Vec<Vec<u8>>, CanonicalError> {
+        self.shared
+            .views
+            .with_workers(|| in_parallel(views, |worker, view| self.verify_view(worker, view)))
+            .into_iter()
+            .collect()
+    }
+
+    fn verify_view(&self, worker: usize, view: &Pending) -> Result<Vec<u8>, CanonicalError> {
+        let Pending { id, contents, .. } = view;
+        let normal =
+            normal_view(contents).ok_or_else(|| CanonicalError::MalformedView(id.hex()))?;
+        let decoded = self.shared.views.decode_in(worker, id, &normal)?;
+        admit(Admitted {
+            kind: "view",
+            malformed: CanonicalError::MalformedView,
+            expected: id.hex(),
+            actual: ViewId::new(blake2b_hash(&decoded).to_vec()).hex(),
+            names_its_commits: names_decoded_commits(
+                &normal,
+                encoded_view_commits,
+                view_commit_ids(&decoded),
+            ),
+        })?;
+        Ok(normal)
     }
 
     /// A stored view in normal form (see `normal_view`), which is how the store holds
@@ -1362,6 +1675,99 @@ mod tests {
             Err(CanonicalError::MalformedOperation(_))
         ));
         assert!(!store.has_operation(&op_id));
+    }
+
+    /// Parents read from an operation's encoding are those jj decodes: a merge's in order,
+    /// and the root for an operation that has none, as from before jj had a root operation.
+    #[test]
+    fn parents_are_read_as_jj_decodes_them() {
+        use jj_lib::protos::simple_op_store as proto;
+
+        let dir = musubi_testutil::tempdir();
+        let store = CanonicalStore::open(dir.path(), commit(0)).unwrap();
+        let root = store.root_operation_id().clone();
+        let view_id = store.write_view(&view_with_heads(1)).unwrap();
+        let a = store
+            .write_operation(&operation(&root, view_id.clone()))
+            .unwrap();
+        let b = store
+            .write_operation(&operation(&a, view_id.clone()))
+            .unwrap();
+        let mut merge = operation(&b, view_id.clone());
+        merge.parents.push(a.clone());
+        let merge = store.write_operation(&merge).unwrap();
+        let orphan = proto::Operation {
+            view_id: view_id.to_bytes(),
+            metadata: Some(Default::default()),
+            ..Default::default()
+        }
+        .encode_to_vec();
+        let orphan_id = match store.import_operation(&OperationId::new(vec![1; 64]), &orphan) {
+            Err(CanonicalError::HashMismatch { actual, .. }) => {
+                OperationId::try_from_hex(&actual).unwrap()
+            }
+            other => panic!("{other:?}"),
+        };
+        store.import_operation(&orphan_id, &orphan).unwrap();
+        for id in [&root, &a, &b, &merge, &orphan_id] {
+            assert_eq!(
+                store.parents(id).unwrap(),
+                store.read_operation(id).unwrap().parents
+            );
+        }
+        assert_eq!(store.parents(&merge).unwrap(), [b, a]);
+        assert_eq!(store.parents(&orphan_id).unwrap(), [root]);
+    }
+
+    /// A delta made against bytes of its base other than the store's normal form, which a
+    /// peer can send, is stored anew rather than as it came: stored, it would rebuild from
+    /// the normal form into something else, under an id it was checked against.
+    #[test]
+    fn a_delta_against_another_encoding_of_its_base_is_made_again() {
+        let dir = musubi_testutil::tempdir();
+        let root_commit = CommitId::from_bytes(&[0; 20]);
+        let sender = CanonicalStore::open(&dir.path().join("sender"), root_commit.clone()).unwrap();
+        let root = sender.root_operation_id().clone();
+        let base_view = sender.write_view(&view_with_heads(30)).unwrap();
+        let base = sender
+            .write_operation(&operation(&root, base_view.clone()))
+            .unwrap();
+        let view = view_with_heads(31);
+        let child_view = sender.write_view(&view).unwrap();
+        let child = sender
+            .write_operation(&operation(&base, child_view.clone()))
+            .unwrap();
+
+        // The base, its heads in the opposite order, and a delta against those bytes.
+        let normal = sender.view_bytes(&base_view).unwrap();
+        let mut proto = jj_lib::protos::simple_op_store::View::decode(&*normal).unwrap();
+        proto.head_ids.reverse();
+        let reordered = proto.encode_to_vec();
+        assert_ne!(reordered, normal);
+        let delta =
+            bundle::view_delta(&reordered, &sender.view_bytes(&child_view).unwrap()).unwrap();
+        let bundle_file = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+        let mut writer = BundleWriter::create(bundle_file.path()).unwrap();
+        writer.view(base_view.as_bytes(), &reordered).unwrap();
+        writer
+            .operation(base.as_bytes(), &sender.operation_bytes(&base).unwrap())
+            .unwrap();
+        writer
+            .view_delta_made(child_view.as_bytes(), base_view.as_bytes(), &delta)
+            .unwrap();
+        writer
+            .operation(child.as_bytes(), &sender.operation_bytes(&child).unwrap())
+            .unwrap();
+        writer.finish().unwrap();
+
+        let receiver_dir = dir.path().join("receiver");
+        let receiver = CanonicalStore::open(&receiver_dir, root_commit.clone()).unwrap();
+        receiver.import_operations(bundle_file.path()).unwrap();
+        drop(receiver);
+        // Opened again, with nothing rebuilt yet.
+        let receiver = CanonicalStore::open(&receiver_dir, root_commit).unwrap();
+        assert_eq!(receiver.read_view(&child_view).unwrap(), view);
+        assert_eq!(receiver.torn().unwrap(), Vec::<String>::new());
     }
 
     fn view_with_heads(heads: u8) -> View {

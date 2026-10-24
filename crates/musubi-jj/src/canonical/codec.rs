@@ -182,9 +182,12 @@ pub fn encode_operation(op: &Operation) -> Vec<u8> {
 #[derive(Debug)]
 pub struct ViewCodec {
     dir: tempfile::TempDir,
+    root_commit_id: CommitId,
     store: SimpleOpStore,
     /// One view at a time: jj names its file by the view's id.
     busy: Mutex<()>,
+    /// Held while workers decode, each in a store of its own (see [`Self::decode_in`]).
+    workers: Mutex<()>,
 }
 
 impl ViewCodec {
@@ -195,11 +198,18 @@ impl ViewCodec {
         let dir = tempfile::Builder::new()
             .prefix("scratch-")
             .tempdir_in(parent)?;
-        let store = SimpleOpStore::load(dir.path(), RootOperationData { root_commit_id });
+        let store = SimpleOpStore::load(
+            dir.path(),
+            RootOperationData {
+                root_commit_id: root_commit_id.clone(),
+            },
+        );
         Ok(Self {
             dir,
+            root_commit_id,
             store,
             busy: Mutex::new(()),
+            workers: Mutex::new(()),
         })
     }
 
@@ -216,6 +226,37 @@ impl ViewCodec {
         let path = self.views_dir().map_err(write_error)?.join(id.hex());
         fs::write(&path, bytes).map_err(write_error)?;
         let view = self.store.read_view(id).block_on();
+        fs::remove_file(&path).ok();
+        view
+    }
+
+    /// Runs `work` with workers numbered from 0 to `count` free to call
+    /// [`Self::decode_in`], each in a store of its own.
+    pub fn with_workers<T>(&self, work: impl FnOnce() -> T) -> T {
+        let _workers = self.workers.lock().unwrap_or_else(PoisonError::into_inner);
+        work()
+    }
+
+    /// [`Self::decode`] for worker `worker`, within [`Self::with_workers`], in a scratch
+    /// store of its own, so that workers decode at once.
+    pub fn decode_in(
+        &self,
+        worker: usize,
+        id: &ViewId,
+        bytes: &[u8],
+    ) -> Result<View, OpStoreError> {
+        let root = self.dir.path().join(format!("worker-{worker}"));
+        let views = root.join("views");
+        fs::create_dir_all(&views).map_err(write_error)?;
+        let store = SimpleOpStore::load(
+            &root,
+            RootOperationData {
+                root_commit_id: self.root_commit_id.clone(),
+            },
+        );
+        let path = views.join(id.hex());
+        fs::write(&path, bytes).map_err(write_error)?;
+        let view = store.read_view(id).block_on();
         fs::remove_file(&path).ok();
         view
     }

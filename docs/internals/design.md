@@ -577,17 +577,25 @@ musubi's own stores keep views as deltas too: the hub's, and each machine's copy
 shared history, `.jj/repo/musubi/canonical`. jj's op store on the machine keeps them whole,
 as jj needs. A store is one log, appended to (`crates/musubi-jj/src/canonical/log.rs`):
 operations as encoded, and each view, in a normal form whose bytes depend only on its
-content, as a delta against the view before it in the log. Every 128th view is compressed
-whole, so that rebuilding one never applies more than 127 deltas, and the view rebuilt last
-is kept, since the next one asked for usually follows it. A busy repository's operation and
-view then take about a kilobyte together, where jj's two files take two blocks of the
-disk and the view's full size. Each record carries a checksum, and a scan stops at the
-first that fails, so damage to the log loses only what was written after it. Writers append
-under a lock file, so that the daemon and a command can share a store, and the next writer
-cuts off what a scan stopped at before appending. jj-lib decodes views only from files, so
-a view is decoded, or encoded, by writing it to a scratch op store and reading it back.
-Operations, read at every step of a walk over the history, are decoded by musubi, and each
-read checks that the result hashes to the operation's id.
+content, as a delta against the view before it in the log, which the record therefore needn't
+name. Every 128th view is compressed whole, so that rebuilding one never applies more than
+127 deltas, and the view rebuilt or appended last is kept, since the next one asked for
+usually follows it. A busy repository's operation and view then take under a kilobyte
+together, where jj's two files take two blocks of the disk and the view's full size. Each
+record carries a checksum, and a scan stops at the first that fails, so damage to the log
+loses only what was written after it. Writers append a batch at a time under a lock file,
+so that the daemon and a command can share a store, and the next writer cuts off what a scan
+stopped at before appending.
+
+A stored delta is against the view its operation's first parent has more often than not, so
+a bundle carries it as it is, and a receiver whose last view is the delta's base stores it
+as it came: neither compresses it again. jj-lib decodes views only from files, so a view is
+decoded, or encoded, by writing it to a scratch op store and reading it back. Checking each
+view a bundle brings against its id, by decoding and hashing it, is most of what an import
+costs, so an import checks a batch of views at once on several threads, each with a scratch
+store of its own, then appends the batch. Operations are decoded by musubi, and a read of a
+whole operation checks that the result hashes to its id; a walk over the history, as when
+the hub opens a hive, reads only parents, from the encoding.
 
 ## Joining
 

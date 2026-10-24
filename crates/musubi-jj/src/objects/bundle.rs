@@ -176,6 +176,16 @@ impl BundleWriter {
         contents: &[u8],
     ) -> Result<(), ObjectError> {
         let delta = view_delta(base, contents)?;
+        self.view_delta_made(id, base_id, &delta)
+    }
+
+    /// A view as a delta against `base_id` already made, as [`view_delta`] makes one.
+    pub fn view_delta_made(
+        &mut self,
+        id: &[u8],
+        base_id: &[u8],
+        delta: &[u8],
+    ) -> Result<(), ObjectError> {
         let (id_len, base_len) = (
             u8::try_from(id.len()).expect("ids are short"),
             u8::try_from(base_id.len()).expect("ids are short"),
@@ -189,7 +199,7 @@ impl BundleWriter {
         sink.write_all(id)?;
         sink.write_all(&[base_len])?;
         sink.write_all(base_id)?;
-        sink.write_all(&delta)?;
+        sink.write_all(delta)?;
         Ok(())
     }
 
@@ -511,21 +521,70 @@ pub fn view_delta(base: &[u8], contents: &[u8]) -> io::Result<Vec<u8>> {
 }
 
 /// The view a [`view_delta`] against `base` encodes.
+///
+/// A delta says how large the view is (see [`view_delta`]), so it is decompressed in one
+/// call, straight into a buffer that size: an import makes one for every view it receives.
 pub fn apply_view_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, ObjectError> {
-    let bad = |_| malformed("bad view delta");
-    let mut decoder = zstd::stream::read::Decoder::with_ref_prefix(delta, base).map_err(bad)?;
-    decoder.window_log_max(MAX_WINDOW_LOG).map_err(bad)?;
-    let mut contents = vec![];
-    (&mut decoder)
-        .take(MAX_COMPRESSED_RECORD)
-        .read_to_end(&mut contents)
-        .map_err(bad)?;
+    use zstd::zstd_safe::DCtx;
+    let bad = || malformed("bad view delta");
+    let size = match zstd::zstd_safe::get_frame_content_size(delta) {
+        Ok(Some(size)) if size <= MAX_COMPRESSED_RECORD => size as usize,
+        _ => return Err(bad()),
+    };
+    // One zstd frame, not a skippable one, and nothing after it, which would be stored and
+    // sent on as it came.
+    const MAGIC: [u8; 4] = 0xfd2f_b528_u32.to_le_bytes();
+    if !delta.starts_with(&MAGIC)
+        || zstd::zstd_safe::find_frame_compressed_size(delta) != Ok(delta.len())
+    {
+        return Err(bad());
+    }
+    let mut dctx = DCtx::create();
+    dctx.ref_prefix(base).map_err(|_| bad())?;
+    // The size is the sender's word: one it can't have meant fails here, not by aborting.
+    let mut contents = Vec::new();
+    contents.try_reserve_exact(size).map_err(|_| bad())?;
+    let written = dctx.decompress(&mut contents, delta).map_err(|_| bad())?;
+    if written != size {
+        return Err(bad());
+    }
     Ok(contents)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A view delta is one zstd frame that says how large the view is. Anything after the
+    /// frame is refused, as is a size the frame can't make, however large.
+    #[test]
+    fn view_deltas_are_one_frame_of_the_size_they_say() {
+        let base = b"heads 1 2 3 bookmarks main".repeat(50);
+        let mut contents = base.clone();
+        contents.extend_from_slice(b" and 4");
+        let delta = view_delta(&base, &contents).unwrap();
+        assert_eq!(apply_view_delta(&base, &delta).unwrap(), contents);
+
+        // A skippable frame after it.
+        let mut padded = delta.clone();
+        padded.extend_from_slice(&[0x50, 0x2a, 0x4d, 0x18, 4, 0, 0, 0, 1, 2, 3, 4]);
+        assert!(apply_view_delta(&base, &padded).is_err());
+        // Only a skippable frame, which says nothing of a view.
+        assert!(apply_view_delta(&base, &padded[delta.len()..]).is_err());
+        // Another frame after it.
+        let mut doubled = delta.clone();
+        doubled.extend_from_slice(&delta);
+        assert!(apply_view_delta(&base, &doubled).is_err());
+        // A frame that says it makes a gigabyte, cut short.
+        let mut frame = Vec::new();
+        let mut encoder = zstd::stream::write::Encoder::new(&mut frame, 3).unwrap();
+        encoder.set_pledged_src_size(Some(1 << 30)).unwrap();
+        encoder.include_contentsize(true).unwrap();
+        encoder.write_all(b"x").unwrap();
+        encoder.flush().unwrap();
+        drop(encoder);
+        assert!(apply_view_delta(&base, &frame).is_err());
+    }
 
     #[test]
     fn records_round_trip() {

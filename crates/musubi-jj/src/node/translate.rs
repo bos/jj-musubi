@@ -103,7 +103,7 @@ impl NodeRepo {
                     .expect("parents canonicalized first")
             })
             .collect();
-        if parents != self.canonical.read_operation(&canonical_id)?.parents {
+        if parents != self.canonical.parents(&canonical_id)? {
             return Err(NodeError::RewrittenRealization {
                 op: id.hex(),
                 canonical: canonical_id.hex(),

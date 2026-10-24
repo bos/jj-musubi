@@ -91,7 +91,7 @@ impl HubStorage for HubAdapter {
         for id in &ids {
             entries.push(OpEntry {
                 id: id.clone(),
-                parents: canonical.read_operation(id)?.parents,
+                parents: canonical.parents(id)?,
             });
         }
         let bundle = temp_bundle(&self.tmp)?;

@@ -14,13 +14,14 @@
 //! | --- | --- |
 //! | 1 operation | `id encoded` |
 //! | 2 view | `id zstd(view)` |
-//! | 3 view delta | `id base delta`, `delta` as [`bundle::view_delta`] makes it |
+//! | 4 view delta | `id delta`, against the view before it in the log, as [`bundle::view_delta`] makes it |
 //!
 //! Ids are 64 bytes, as jj's simple op store makes them, and views are in normal form (see
-//! `CanonicalStore::normal_view_bytes`).
+//! `CanonicalStore::normal_view_bytes`). A delta's base is implicit, since it is always
+//! the view before it in the log.
 //!
 //! Records are appended under a lock file, so that the daemon and a command can both
-//! write. A record cut short or garbled, as a process killed mid-write or a power cut
+//! write, a batch at a time. A record cut short or garbled, as a process killed mid-write or a power cut
 //! leaves one, ends what a scan reads, and the next writer cuts it off before appending.
 //! A delta's base always comes before it, so everything before a damaged record still
 //! reads. A reader that doesn't find a record scans again from where it stopped, for
@@ -58,7 +59,8 @@ pub const KEYFRAME: u32 = 128;
 
 const OPERATION: u8 = 1;
 const VIEW: u8 = 2;
-const VIEW_DELTA: u8 = 3;
+/// Not 3, which a delta that named its base had: a log written so ends at its first.
+const VIEW_DELTA: u8 = 4;
 
 const CHECK_LEN: usize = 8;
 const HEADER_LEN: usize = 1 + 4 + CHECK_LEN;
@@ -119,14 +121,14 @@ impl Index {
                 self.views.entry(id.clone()).or_insert(entry);
                 self.last_view = Some(id);
             }
-            VIEW_DELTA if body.len() >= 2 * ID_LEN => {
+            VIEW_DELTA if body.len() >= ID_LEN => {
                 let id = ViewId::from_bytes(&body[..ID_LEN]);
-                let base = ViewId::from_bytes(&body[ID_LEN..2 * ID_LEN]);
-                let Some(depth) = self.views.get(&base).map(|base| base.depth + 1) else {
+                let Some(base) = self.last_view.clone() else {
                     return false;
                 };
+                let depth = self.views[&base].depth + 1;
                 let entry = ViewEntry {
-                    payload: at(2 * ID_LEN),
+                    payload: at(ID_LEN),
                     base: Some(base),
                     depth,
                 };
@@ -200,6 +202,10 @@ impl Log {
     fn scan(&self, index: &mut Index) -> io::Result<()> {
         let mut reader = BufReader::with_capacity(1 << 16, &self.scanned);
         reader.seek(SeekFrom::Start(index.end))?;
+        // A record can't run past what the file holds now: a garbled length is caught here,
+        // before a buffer of up to `MAX_LEN` is made for it.
+        let file_len = self.scanned.metadata()?.len();
+        let mut body = vec![];
         loop {
             let mut header = [0; HEADER_LEN];
             if !read_whole(&mut reader, &mut header)? {
@@ -207,10 +213,10 @@ impl Log {
             }
             let tag = header[0];
             let len = u32::from_le_bytes(header[1..5].try_into().expect("four bytes"));
-            if len > MAX_LEN {
+            if len > MAX_LEN || index.end + (HEADER_LEN as u64) + u64::from(len) > file_len {
                 return Ok(());
             }
-            let mut body = vec![0; len as usize];
+            body.resize(len as usize, 0);
             if !read_whole(&mut reader, &mut body)?
                 || check(&header[..5], &body) != header[5..]
                 || !index.add(tag, index.end, &body)
@@ -231,12 +237,12 @@ impl Log {
         Ok(index)
     }
 
-    /// Appends the record `build` makes, if it makes one, under the lock, once the index has
-    /// every record before it and the log has nothing after them.
-    fn append(
+    /// Appends the records `build` makes, under the lock, once the index has every record
+    /// before them and the log has nothing after them.
+    pub fn append<T>(
         &self,
-        build: impl FnOnce(&Index) -> io::Result<Option<(u8, Vec<u8>)>>,
-    ) -> io::Result<()> {
+        build: impl FnOnce(&mut Appender<'_>) -> io::Result<T>,
+    ) -> io::Result<T> {
         let mut index = self.index();
         self.lock.lock()?;
         let appended = (|| {
@@ -246,24 +252,10 @@ impl Log {
             if self.file.metadata()?.len() > index.end {
                 self.file.set_len(index.end)?;
             }
-            let Some((tag, body)) = build(&index)? else {
-                return Ok(());
-            };
-            let len = u32::try_from(body.len())
-                .ok()
-                .filter(|&len| len <= MAX_LEN)
-                .ok_or_else(|| io::Error::other("record too large for the log"))?;
-            let mut record = Vec::with_capacity(HEADER_LEN + body.len());
-            record.push(tag);
-            record.extend_from_slice(&len.to_le_bytes());
-            let check = check(&record, &body);
-            record.extend_from_slice(&check);
-            record.extend_from_slice(&body);
-            let start = index.end;
-            write_at(&self.file, &record, start)?;
-            assert!(index.add(tag, start, &body), "a record the log holds");
-            index.end += record.len() as u64;
-            Ok(())
+            build(&mut Appender {
+                log: self,
+                index: &mut index,
+            })
         })();
         self.lock.unlock()?;
         appended
@@ -271,42 +263,31 @@ impl Log {
 
     /// Appends an encoded operation, unless the log has it.
     pub fn append_operation(&self, id: &OperationId, encoded: &[u8]) -> io::Result<()> {
-        assert_eq!(id.as_bytes().len(), ID_LEN);
-        self.append(|index| {
-            if index.ops.contains_key(id) {
-                return Ok(None);
-            }
-            Ok(Some((OPERATION, [id.as_bytes(), encoded].concat())))
-        })
+        self.append(|appender| appender.operation(id, encoded))
     }
 
-    /// Appends a view in normal form, unless the log has it: as a delta against the last
-    /// view, or whole once that one's depth calls for a keyframe.
+    /// Appends a view in normal form, unless the log has it.
     pub fn append_view(&self, id: &ViewId, contents: &[u8]) -> io::Result<()> {
-        assert_eq!(id.as_bytes().len(), ID_LEN);
-        self.append(|index| {
-            if index.views.contains_key(id) {
-                return Ok(None);
-            }
-            let base = index
-                .last_view
-                .as_ref()
-                .filter(|base| index.views[*base].depth + 1 < KEYFRAME);
-            let record = match base {
-                Some(base) => {
-                    let delta = bundle::view_delta(&self.rebuild(index, base)?, contents)?;
-                    (
-                        VIEW_DELTA,
-                        [id.as_bytes(), base.as_bytes(), &delta].concat(),
-                    )
-                }
-                None => {
-                    let whole = zstd::encode_all(contents, LEVEL)?;
-                    (VIEW, [id.as_bytes(), &whole].concat())
-                }
-            };
-            Ok(Some(record))
-        })
+        self.append(|appender| appender.view(id, contents, None).map(drop))
+    }
+
+    /// A view stored as a delta against `base`: what a bundle can carry as it is, to a
+    /// receiver that has the base. `None` if it is stored otherwise, or the log lacks it.
+    pub fn stored_delta_against(&self, id: &ViewId, base: &ViewId) -> io::Result<Option<Vec<u8>>> {
+        let index = self.index_having(|index| index.views.contains_key(id))?;
+        match index.views.get(id) {
+            Some(ViewEntry {
+                payload,
+                base: Some(stored),
+                ..
+            }) if stored == base => Ok(Some(self.read(*payload)?)),
+            _ => Ok(None),
+        }
+    }
+
+    fn remember(&self, id: &ViewId, contents: Vec<u8>) {
+        *self.recent.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some((id.clone(), Arc::new(contents)));
     }
 
     fn read(&self, span: Span) -> io::Result<Vec<u8>> {
@@ -377,8 +358,7 @@ impl Log {
             contents = bundle::apply_view_delta(&contents, &self.read(delta)?)
                 .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
         }
-        *self.recent.lock().unwrap_or_else(PoisonError::into_inner) =
-            Some((id.clone(), Arc::new(contents.clone())));
+        self.remember(id, contents.clone());
         Ok(contents)
     }
 
@@ -426,6 +406,85 @@ impl Log {
         let mut index = self.index();
         self.scan(&mut index)?;
         Ok(self.file.metadata()?.len() - index.end)
+    }
+}
+
+/// Appends records to the log, holding its lock (see [`Log::append`]).
+pub struct Appender<'a> {
+    log: &'a Log,
+    index: &'a mut Index,
+}
+
+impl Appender<'_> {
+    /// Where the log ends, with what was appended so far.
+    #[cfg(test)]
+    fn end(&self) -> u64 {
+        self.index.end
+    }
+
+    fn record(&mut self, tag: u8, body: &[u8]) -> io::Result<()> {
+        let len = u32::try_from(body.len())
+            .ok()
+            .filter(|&len| len <= MAX_LEN)
+            .ok_or_else(|| io::Error::other("record too large for the log"))?;
+        let mut record = Vec::with_capacity(HEADER_LEN + body.len());
+        record.push(tag);
+        record.extend_from_slice(&len.to_le_bytes());
+        let check = check(&record, body);
+        record.extend_from_slice(&check);
+        record.extend_from_slice(body);
+        let start = self.index.end;
+        write_at(&self.log.file, &record, start)?;
+        assert!(self.index.add(tag, start, body), "a record the log holds");
+        self.index.end += record.len() as u64;
+        Ok(())
+    }
+
+    /// Appends an encoded operation, unless the log has it.
+    pub fn operation(&mut self, id: &OperationId, encoded: &[u8]) -> io::Result<()> {
+        assert_eq!(id.as_bytes().len(), ID_LEN);
+        if self.index.ops.contains_key(id) {
+            return Ok(());
+        }
+        self.record(OPERATION, &[id.as_bytes(), encoded].concat())
+    }
+
+    /// Appends a view in normal form, unless the log has it: as a delta against the last
+    /// view, or whole once that one's depth calls for a keyframe. `delta` is a delta for it
+    /// already made, as a bundle brings one, with the view it is against: used as it is if
+    /// that is the last view. Returns whether it appended the view: the log may have it
+    /// already, as another process may have appended it, in bytes of its own.
+    pub fn view(
+        &mut self,
+        id: &ViewId,
+        contents: &[u8],
+        delta: Option<(&ViewId, &[u8])>,
+    ) -> io::Result<bool> {
+        assert_eq!(id.as_bytes().len(), ID_LEN);
+        if self.index.views.contains_key(id) {
+            return Ok(false);
+        }
+        let base = self
+            .index
+            .last_view
+            .clone()
+            .filter(|base| self.index.views[base].depth + 1 < KEYFRAME);
+        match base {
+            Some(base) => {
+                let delta = match delta {
+                    Some((delta_base, delta)) if *delta_base == base => delta.to_vec(),
+                    _ => bundle::view_delta(&self.log.rebuild(self.index, &base)?, contents)?,
+                };
+                self.record(VIEW_DELTA, &[id.as_bytes(), &delta].concat())?;
+            }
+            None => {
+                let whole = zstd::encode_all(contents, LEVEL)?;
+                self.record(VIEW, &[id.as_bytes(), &whole].concat())?;
+            }
+        }
+        // The base of the next delta.
+        self.log.remember(id, contents.to_vec());
+        Ok(true)
     }
 }
 
@@ -581,42 +640,83 @@ mod tests {
     /// the damage is sure to; no view takes more than `KEYFRAME - 1` deltas to rebuild; and
     /// the next append cuts the damage off, so that it, and what read before it, reads from
     /// the log and from the log opened afresh.
-    #[hegel::test(test_cases = 200)]
+    /// Few enough on Windows, where every write to the disk is slow, to finish in time.
+    fn cases() -> u64 {
+        if cfg!(windows) { 50 } else { 200 }
+    }
+
+    #[hegel::test(test_cases = cases())]
     fn damage_loses_only_what_follows_it(tc: TestCase) {
         let dir = musubi_testutil::tempdir();
         let log = Log::open(dir.path()).unwrap();
         let count = tc.draw(gs::integers::<usize>().min_value(1).max_value(300));
         let base = bytes(tc.draw(gs::integers::<u64>()), 400);
         let mut written: Vec<Written> = vec![];
-        for i in 0..count {
-            if i > 0 && tc.draw(gs::integers::<u8>().max_value(15)) == 0 {
-                // Written again: nothing is appended.
-                let again = &written[tc.draw(gs::integers::<usize>().max_value(written.len() - 1))];
-                let before = fs::metadata(dir.path().join("log")).unwrap().len();
-                let (view, contents) = (again.view, again.contents.clone());
-                let i = usize::from_le_bytes(again.id[1..9].try_into().unwrap());
-                append(&log, dir.path(), view, i, contents);
-                assert_eq!(fs::metadata(dir.path().join("log")).unwrap().len(), before);
-                continue;
+        let mut i = 0;
+        // In batches, as an import appends them, each under one lock.
+        while i < count {
+            let size = tc
+                .draw(gs::integers::<usize>().min_value(1).max_value(64))
+                .min(count - i);
+            // Whether each is a view, its id and contents, and whether it was written before.
+            let mut batch = vec![];
+            for _ in 0..size {
+                if !written.is_empty() && tc.draw(gs::integers::<u8>().max_value(15)) == 0 {
+                    let again =
+                        &written[tc.draw(gs::integers::<usize>().max_value(written.len() - 1))];
+                    batch.push((again.view, again.id.clone(), again.contents.clone(), true));
+                } else {
+                    let view = tc.draw(gs::booleans());
+                    let contents = if view {
+                        // Mostly like the last view, as consecutive views are.
+                        let mut contents = base.clone();
+                        let at = tc.draw(gs::integers::<usize>().max_value(base.len() - 1));
+                        contents[at] ^= 0xff;
+                        contents.extend(bytes(
+                            i as u64,
+                            tc.draw(gs::integers::<usize>().max_value(40)),
+                        ));
+                        contents
+                    } else {
+                        bytes(
+                            tc.draw(gs::integers::<u64>()),
+                            tc.draw(gs::integers::<usize>().max_value(600)),
+                        )
+                    };
+                    batch.push((view, id(if view { 2 } else { 1 }, i), contents, false));
+                }
+                i += 1;
             }
-            let view = tc.draw(gs::booleans());
-            let contents = if view {
-                // Mostly like the last view, as consecutive views are.
-                let mut contents = base.clone();
-                let at = tc.draw(gs::integers::<usize>().max_value(base.len() - 1));
-                contents[at] ^= 0xff;
-                contents.extend(bytes(
-                    i as u64,
-                    tc.draw(gs::integers::<usize>().max_value(40)),
-                ));
-                contents
-            } else {
-                bytes(
-                    tc.draw(gs::integers::<u64>()),
-                    tc.draw(gs::integers::<usize>().max_value(600)),
-                )
-            };
-            written.push(append(&log, dir.path(), view, i, contents));
+            let before = fs::metadata(dir.path().join("log")).unwrap().len();
+            let ends = log
+                .append(|appender| {
+                    let mut ends = vec![];
+                    for (view, id, contents, _) in &batch {
+                        if *view {
+                            appender.view(&ViewId::from_bytes(id), contents, None)?;
+                        } else {
+                            appender.operation(&OperationId::from_bytes(id), contents)?;
+                        }
+                        ends.push(appender.end());
+                    }
+                    Ok(ends)
+                })
+                .unwrap();
+            let mut last = before;
+            for ((view, id, contents, again), end) in batch.into_iter().zip(ends) {
+                if again {
+                    // Written again: nothing is appended.
+                    assert_eq!(end, last);
+                } else {
+                    written.push(Written {
+                        id,
+                        view,
+                        contents,
+                        end,
+                    });
+                }
+                last = end;
+            }
         }
         for record in &written {
             assert_eq!(read(&log, record).as_ref(), Some(&record.contents));
@@ -680,6 +780,31 @@ mod tests {
             assert_eq!(read(&log, record).as_ref(), Some(&record.contents));
             assert_eq!(read(&reopened, record).as_ref(), Some(&record.contents));
         }
+    }
+
+    /// A view delta in the earlier format, which named its base under tag 3, ends what a
+    /// scan reads, as damage does, so that a store written so reads as missing what follows.
+    #[test]
+    fn an_earlier_delta_record_ends_the_log() {
+        let dir = musubi_testutil::tempdir();
+        let log = Log::open(dir.path()).unwrap();
+        let first = append(&log, dir.path(), true, 0, bytes(7, 300));
+        let body = [id(2, 1), id(2, 0), vec![1, 2, 3]].concat();
+        let mut record = vec![3];
+        record.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        let check = check(&record, &body);
+        record.extend_from_slice(&check);
+        record.extend_from_slice(&body);
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(dir.path().join("log"))
+            .unwrap();
+        file.write_all(&record).unwrap();
+        drop(file);
+        let log = Log::open(dir.path()).unwrap();
+        assert_eq!(read(&log, &first).as_ref(), Some(&first.contents));
+        assert!(!log.has_view(&ViewId::from_bytes(&id(2, 1))).unwrap());
+        assert_eq!(log.unread().unwrap(), record.len() as u64);
     }
 
     /// Two processes share a log: each finds what the other appended, and appends after it,

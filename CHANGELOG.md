@@ -12,7 +12,7 @@ change the protocol, so run the same release on the hub and every machine (see
   two weeks old. It runs once enough has built up, at most once a week, and not on battery.
 - The hub's store of each hive, and each machine's copy of the shared history
   (`.jj/repo/musubi/canonical`), are now one log, with views kept as deltas: an operation
-  and its view take about a kilobyte, where they took two files and the view's full size.
+  and its view take under a kilobyte, where they took two files and the view's full size.
   Stores made before aren't read. On upgrading, a hub makes each hive again, as for a
   corrupt store, and its machines fill it; a machine's copy made before can't sync, so make
   it again with `musubi clone`.

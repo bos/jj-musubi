@@ -166,7 +166,7 @@ impl NodeAdapter {
             if self.repo.local_of(&op).is_some() {
                 frontier.push(op);
             } else if store.has_operation(&op) {
-                stack.extend(store.read_operation(&op)?.parents);
+                stack.extend(store.parents(&op)?);
             }
         }
         Ok(frontier)
@@ -373,7 +373,7 @@ impl LocalRepo for NodeAdapter {
         if !store.has_operation(op) {
             return Ok(None);
         }
-        Ok(Some(store.read_operation(op)?.parents))
+        Ok(Some(store.parents(op)?))
     }
 
     fn objects_missing(&self, ops: &[OpId]) -> anyhow::Result<Vec<OpId>> {

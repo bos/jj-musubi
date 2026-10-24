@@ -86,18 +86,22 @@ pub struct Ledger {
     /// Branches moved or deleted with git, and the changes they were moved to.
     git_moves: BTreeSet<String>,
     git_targets: BTreeSet<String>,
+    /// The commits pushed to the shared remote, which a fetch brings back (`pushed`).
+    pushed: BTreeSet<String>,
     /// Divergence and conflicts already present at the last full convergence.
     divergent_before: BTreeSet<String>,
     conflicted_before: BTreeSet<String>,
 }
 
 impl Ledger {
-    /// Forgets everything, once the hive has fully converged on `view`.
+    /// Forgets everything, once the hive has fully converged on `view`, but for the commits
+    /// pushed to the shared remote, which its branches still name.
     pub fn reset(&mut self, view: &View) {
         *self = Self {
             divergent_before: view.divergent(),
             conflicted_before: conflicted(view),
             known: view.commits.iter().map(|c| c.id.clone()).collect(),
+            pushed: std::mem::take(&mut self.pushed),
             ..Self::default()
         };
     }
@@ -153,6 +157,13 @@ impl Ledger {
         }
     }
 
+    /// Records commit `commit` pushed to the shared remote, which a fetch on another machine
+    /// brings back, though the hive has rewritten it meanwhile, beside its rewrite, as jj
+    /// does on one machine. It explains its change's divergence only while it is visible.
+    pub fn pushed(&mut self, commit: &str) {
+        self.pushed.insert(commit.to_owned());
+    }
+
     /// Records a branch moved with git to a commit of change `target`, or deleted.
     pub fn git_move(&mut self, branch: &str, target: Option<&str>) {
         self.git_moves.insert(branch.to_owned());
@@ -174,6 +185,11 @@ impl Ledger {
                     // jj imports the branch in its own operation, keeping the old commit
                     // visible beside the new one. jj does this on one machine, too.
                     || self.git_targets.contains(*change)
+                    // A pushed commit that a fetch brought back.
+                    || view
+                        .commits
+                        .iter()
+                        .any(|c| c.change == **change && self.pushed.contains(&c.id))
             })
             .cloned()
             .collect();
@@ -206,6 +222,7 @@ impl Ledger {
                 let ancestors = view.ancestors(&commit.id);
                 if self.git_targets.contains(&commit.change)
                     || held.contains(&commit.id)
+                    || self.pushed.contains(&commit.id)
                     || explained.contains(&commit.change)
                 {
                     for ancestor in &ancestors {

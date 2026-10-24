@@ -568,6 +568,21 @@ impl Search {
         let pushed = world.try_jj_in(m, 0, &["git", "push", "--bookmark", &name], PUSH_REFUSALS);
         if pushed.is_ok() {
             fired("push:accepted");
+            // The remote's branch now names this commit, which another machine's fetch
+            // brings back even after the hive rewrote it, as on one machine.
+            let commit = world.raw_jj(
+                m,
+                &[
+                    "log",
+                    "--ignore-working-copy",
+                    "--no-graph",
+                    "-r",
+                    &name,
+                    "-T",
+                    "commit_id",
+                ],
+            );
+            world.ledger.pushed(commit.trim());
         }
         drop(world);
         self.note(&tc);

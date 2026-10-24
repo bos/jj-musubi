@@ -391,17 +391,20 @@ impl TestRepo {
         command
     }
 
+    /// Each command's own seed, from which it takes its randomness and, if it is `jj`, the
+    /// time its commits record (`commit_timestamp`).
     fn next_seed(&self) -> u64 {
         self.seeds.fetch_add(1, Ordering::Relaxed)
     }
 
     fn command(&self, program: &str, dir: &Path) -> Command {
         let mut command = Command::new(program);
+        let seed = self.next_seed();
         command
             .current_dir(dir)
             .env_clear()
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
-            .env("JJ_RANDOMNESS_SEED", self.next_seed().to_string())
+            .env("JJ_RANDOMNESS_SEED", seed.to_string())
             // Windows's equivalents of `HOME`, where jj keeps each repository's config:
             // without them it would use the real user's, which every test would share.
             .env("USERPROFILE", &self.home)
@@ -415,6 +418,12 @@ impl TestRepo {
             .env("GIT_AUTHOR_EMAIL", "test@example.com")
             .env("GIT_COMMITTER_NAME", "Test User")
             .env("GIT_COMMITTER_EMAIL", "test@example.com");
+        if Path::new(program)
+            .file_stem()
+            .is_some_and(|stem| stem == "jj")
+        {
+            command.env("JJ_TIMESTAMP", commit_timestamp(seed));
+        }
         // What Windows itself needs: without `SystemRoot`, for one, sockets don't work.
         for name in [
             "SystemRoot",
@@ -440,4 +449,20 @@ fn expect_success(program: &str, args: &[&str], output: &Output) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout.clone()).unwrap()
+}
+
+/// The time a `jj` command made with `seed` gives its commits, as `JJ_TIMESTAMP`: a second
+/// later for each seed. Git records whole seconds, so jj, repeating a rewrite it undid within
+/// the same second, would make the very commit it made before, and refuse it as one that
+/// exists already; how fast a test ran would decide whether it did. With these, it never does,
+/// and every run of a test makes the same commits. Dates have 28-day months, all valid.
+fn commit_timestamp(seed: u64) -> String {
+    let (secs, mins, hours) = (seed % 60, seed / 60 % 60, seed / 3600 % 24);
+    let day = seed / 86_400;
+    format!(
+        "{:04}-{:02}-{:02}T{hours:02}:{mins:02}:{secs:02}+00:00",
+        2001 + day / (28 * 12),
+        1 + day / 28 % 12,
+        1 + day % 28
+    )
 }

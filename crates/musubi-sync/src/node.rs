@@ -98,20 +98,26 @@ impl NodeAdapter {
         Ok(())
     }
 
-
     /// What a node does once its policy has nothing left to do, having just fetched the
-    /// hive's head: reconcile its settings, show other machines' workspaces again, record
-    /// this copy's `musubi.forget-after` if it changed, and forget the copies that have gone
-    /// unused for longer than theirs. Each runs; any may write an operation to upload, and
-    /// then it returns true, since the policy has more to do.
+    /// hive's head: reconcile its settings, show other machines' workspaces again, give its
+    /// own workspaces new commits where theirs were abandoned elsewhere, record this copy's
+    /// `musubi.forget-after` if it changed, and forget the copies that have gone unused for
+    /// longer than theirs. Each runs; any may write an operation to upload, and then it
+    /// returns true, since the policy has more to do.
+    ///
+    /// Realizing another machine's operation replaces abandoned working copies too, but
+    /// while the hive has forgotten this machine it leaves them be
+    /// (`NodeRepo::replace_abandoned_working_copies`), and the work that shows it again,
+    /// such as creating a bookmark, needn't touch them: then nothing would arrive to realize.
     pub fn when_idle(&mut self) -> anyhow::Result<bool> {
         let settings = self.reconcile_settings(false)?;
         let workspaces = self.show_other_workspaces()?;
+        let replaced = !self.repo.replace_abandoned_working_copies()?.is_empty();
         let recorded = self.repo.record_forget_after()?;
         let forgotten = self
             .repo
             .expire_idle(std::time::SystemTime::now(), EXPIRY_STAGGER)?;
-        Ok(settings || workspaces || recorded || !forgotten.is_empty())
+        Ok(settings || workspaces || replaced || recorded || !forgotten.is_empty())
     }
 
     /// The repository, for tests that act on it, as by crashing it.

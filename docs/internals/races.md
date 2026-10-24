@@ -50,6 +50,7 @@ back (docs/internals/design.md, "Copies that go away").
 | Race | Outcome | Test |
 | --- | --- | --- |
 | A machine forgets another machine's copy | Every machine stops showing its working copies; its empty working-copy commit is abandoned, and its work stays. The forgotten copy keeps its working copy, on the hidden commit, with no new one for the others to see, and stays forgotten however often its daemon syncs, until its next work. | `a_forgotten_copy_comes_back_with_its_next_work` |
+| …and the forgotten copy's next work leaves its working copy alone, as creating a bookmark does | It shows again with a new working-copy commit on the old one's parent, as jj gives a workspace whose commit is abandoned: the forget abandoned its empty one. | `a_forgotten_copy_back_by_other_work_gets_a_new_working_copy` |
 | …and the forgotten copy realizes the forget together with the operation before it | It keeps its working copy, as its realization of that operation had it. | `a_forgotten_copy_keeps_its_working_copy_through_a_run` |
 | …and the forget, which saw the copy add a workspace, merges with work from before it | The copy keeps its workspaces as its latest work left them, whichever parent the merge lists first. | `a_forgotten_copy_keeps_its_latest_workspaces_through_a_merge` |
 | A machine forgets a copy that is working meanwhile | The work the forget didn't see keeps the copy. | `work_a_forget_didnt_see_keeps_the_copy` |

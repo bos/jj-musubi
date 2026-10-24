@@ -48,6 +48,34 @@ fn a_forgotten_copy_comes_back_with_its_next_work() {
     hive.assert_converged();
 }
 
+/// A forgotten copy whose next work leaves its working copy alone, as creating a bookmark
+/// does, shows again with a working copy every machine can see. The forget abandoned its
+/// empty working-copy commit, so it gets a new one, as jj gives a workspace whose commit is
+/// abandoned.
+#[test]
+fn a_forgotten_copy_back_by_other_work_gets_a_new_working_copy() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(1, "b", "from beta");
+    hive.sync();
+    let beta = hive.machine_key(1);
+    let empty = hive.workspaces(1)["beta"].clone();
+    assert!(hive.node(0).forget_copy(&beta, "beta").unwrap());
+    hive.sync();
+    assert!(!hive.shown_machines().contains(&beta));
+    hive.repo(1).jj(&["bookmark", "create", "x", "-r", "@-"]);
+    hive.sync();
+    assert!(hive.shown_machines().contains(&beta));
+    let wc = hive.workspaces(1)["beta"].clone();
+    assert_ne!(wc, empty);
+    for index in 0..2 {
+        assert!(
+            hive.visible(index).iter().any(|c| c.starts_with(&wc)),
+            "beta's working copy is hidden on {index}"
+        );
+    }
+    hive.assert_converged();
+}
+
 /// A forget removes only the work it saw: work the copy did meanwhile keeps it.
 #[test]
 fn work_a_forget_didnt_see_keeps_the_copy() {

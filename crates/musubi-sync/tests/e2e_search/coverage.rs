@@ -128,6 +128,10 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         Some(&["forget_copy", "commit"]),
     ),
     (
+        "a_forgotten_copy_back_by_other_work_gets_a_new_working_copy",
+        Some(&["forget_copy", "bookmark_create"]),
+    ),
+    (
         "a_forgotten_copy_keeps_its_working_copy_through_a_run",
         Some(&["forget_copy"]),
     ),

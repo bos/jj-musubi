@@ -1,4 +1,4 @@
-//! The node daemon: one per user, serving every repository in config.toml, each on a
+//! The node daemon: one per user, serving every repository in state.toml, each on a
 //! thread of its own that syncs whenever its op heads change, a head announcement
 //! arrives, the poll timer fires, or a command asks. Commands reach it over the control
 //! socket (see [`crate::control`]); `add` starts serving a newly joined repository without
@@ -39,7 +39,7 @@ use tokio::sync::watch;
 use crate::agent;
 use crate::config;
 use crate::config::HiveConfig;
-use crate::config::UserConfig;
+use crate::config::UserState;
 use crate::control;
 use crate::control::Control;
 use crate::control::ControlClient;
@@ -317,7 +317,7 @@ async fn listen(socket: &Socket, lock_path: &Path) -> anyhow::Result<()> {
         supervisor: Arc::new(Supervisor::default()),
         stop: Arc::new(tokio::sync::Notify::new()),
     };
-    for workspace in UserConfig::load()?.repos {
+    for workspace in UserState::load()?.repos {
         daemon.supervisor.start(workspace);
     }
     tracing::info!("listening on {socket}");
@@ -660,7 +660,7 @@ pub fn leave_hive(located: &Located, hive: &HiveConfig) -> anyhow::Result<bool> 
     {
         return Ok(false);
     }
-    UserConfig::remove_repo(&located.workspace_root)?;
+    UserState::remove_repo(&located.workspace_root)?;
     fs::remove_file(HiveConfig::path(&located.repo_path))?;
     fs::remove_file(Status::path(&located.repo_path)).ok();
     Ok(true)

@@ -71,7 +71,7 @@ It creates `./musubi-hub` the first time, and prints what to run on the other ma
 
 ```text
 Created a new hub in /home/you/musubi-hub
-Saved this hub as this machine's default (/home/you/.config/musubi/config.toml).
+Saved this hub as this machine's default.
 To share a repository:               musubi create --hub devbox
 To add another machine's copy of it: musubi join --hub devbox
 To make a new copy of a hive:        musubi clone <name> <dir> --hub devbox

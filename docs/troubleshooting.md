@@ -15,7 +15,8 @@ musubi`. On the hub's machine, the hub logs to its terminal. To log more, see
 ### "no hub given; pass --hub <host>, ..."
 
 This machine has no default hub yet: it gets one the first time it creates, joins, or clones
-a hive. Pass `--hub` with the name you ssh to the hub's machine by, as `musubi hub` printed.
+a hive. Pass `--hub` with the name you ssh to the hub's machine by, as `musubi hub` printed,
+or choose a default with `jj config set --user musubi.hub <hub>`.
 
 ### "`musubi` is not on the PATH of non-interactive shells on devbox"
 
@@ -272,7 +273,7 @@ musubi makes it again, or choose another place for the daemon's socket with `MUS
 ### "... would be ... bytes longer than this system allows" or "... is ... bytes longer ..."
 
 Unix socket paths are limited to about 100 bytes. For the daemon, choose a shorter path with
-`MUSUBI_SOCKET` or `socket` under `[daemon]` in `config.toml`. For a hub, serve it from a
+`MUSUBI_SOCKET` or `musubi.daemon.socket` in jj's config. For a hub, serve it from a
 directory with a shorter path.
 
 ### "a hub is already running, serving ...; use --dir to run another"

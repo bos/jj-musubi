@@ -136,14 +136,8 @@ pub fn serve(args: ServeArgs) -> anyhow::Result<()> {
     };
     // And what this one passes, which commands here leave out if it is the default.
     let local = dir.display().to_string();
-    let mut saved = false;
-    let user = config::UserConfig::update(|user| {
-        if user.hub.is_none() {
-            user.hub = Some(local.clone());
-            saved = true;
-        }
-    })?;
-    let default_here = user.hub.as_deref() == Some(local.as_str());
+    let saved = config::UserState::save_default_hub(&local)?;
+    let default_here = config::UserState::load()?.default_hub()?.as_deref() == Some(local.as_str());
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -162,10 +156,7 @@ pub fn serve(args: ServeArgs) -> anyhow::Result<()> {
             let mut stdout = io::stdout().lock();
             let mut text = String::new();
             if saved {
-                let path = config::UserConfig::path()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_default();
-                writeln!(text, "Saved this hub as this machine's default ({path}).").ok();
+                writeln!(text, "Saved this hub as this machine's default.").ok();
             }
             writeln!(
                 text,

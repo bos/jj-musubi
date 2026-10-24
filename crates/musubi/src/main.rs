@@ -37,7 +37,8 @@ use musubi_sync::wire::HubWideReply;
 use musubi_sync::wire::HubWideRequest;
 
 use crate::config::HiveConfig;
-use crate::config::UserConfig;
+use crate::config::Settings;
+use crate::config::UserState;
 use crate::control::Synced;
 use crate::daemon::Status;
 use crate::repo::Located;
@@ -62,8 +63,8 @@ struct Cli {
     )]
     socket: Option<String>,
     /// What to log, as a filter in `RUST_LOG`'s syntax: `debug`, or `info,musubi_sync=debug`.
-    /// It applies to this command, not to a daemon it starts, which uses `[daemon] log` in
-    /// the user config.
+    /// It applies to this command, not to a daemon it starts, which uses `musubi.daemon.log`
+    /// in jj's config.
     #[arg(
         long,
         global = true,
@@ -284,7 +285,7 @@ enum DaemonAction {
     Uninstall,
 }
 
-/// What to log: `--log`, else `RUST_LOG`, else for the daemon `[daemon] log` in the user
+/// What to log: `--log`, else `RUST_LOG`, else for the daemon `musubi.daemon.log` in jj's
 /// config. Otherwise the hub and the daemon log what they do, and other commands only
 /// warn, since they say what they did themselves.
 fn log_filter(cli: &Cli) -> anyhow::Result<tracing_subscriber::EnvFilter> {
@@ -302,9 +303,9 @@ fn log_filter(cli: &Cli) -> anyhow::Result<tracing_subscriber::EnvFilter> {
             Err(err) => eprintln!("Ignoring RUST_LOG={filter:?} ({err})."),
         }
     }
-    if daemon && let Some(filter) = UserConfig::load()?.daemon.log {
+    if daemon && let Some(filter) = Settings::load()?.daemon_log {
         return parse_filter(&filter)
-            .with_context(|| format!("bad log filter {filter:?} under [daemon] in the config"));
+            .with_context(|| format!("bad log filter {filter:?} in musubi.daemon.log"));
     }
     if daemon || hub {
         return parse_filter("info");
@@ -364,7 +365,7 @@ fn main() -> anyhow::Result<()> {
             action: Some(HubAction::Remove { hive, hub }),
             ..
         } => block_on(async {
-            let hub = UserConfig::hub(hub.as_deref())?;
+            let hub = UserState::hub(hub.as_deref())?;
             let reply = hub::ask(&hub, HubWideRequest::Remove { name: hive }).await?;
             if let HubWideReply::Hive(info) = reply {
                 println!("Removed hive {}", info.name);
@@ -380,7 +381,7 @@ fn main() -> anyhow::Result<()> {
                 }),
             ..
         } => block_on(async {
-            let hub = UserConfig::hub(hub.as_deref())?;
+            let hub = UserState::hub(hub.as_deref())?;
             let request = HubWideRequest::Rename {
                 name: hive.clone(),
                 to: new_name,
@@ -510,7 +511,7 @@ fn join(start: &Path, choice: JoinChoice, member: &Member, socket: &Socket) -> a
     // `musubi join` in a repository that is part of a hive joins that hive again, made again
     // if its hub has lost it.
     let (choice, hub) = match (HiveConfig::load(&located.repo_path)?, choice) {
-        (None, choice) => (choice, UserConfig::hub(hub)?),
+        (None, choice) => (choice, UserState::hub(hub)?),
         (Some(hive), JoinChoice::Match) => {
             let remake = JoinChoice::Remake {
                 id: hive.hive.to_string(),
@@ -518,7 +519,7 @@ fn join(start: &Path, choice: JoinChoice, member: &Member, socket: &Socket) -> a
             };
             (
                 remake,
-                hub.map_or_else(|| Ok(hive.hub.clone()), |hub| UserConfig::hub(Some(hub)))?,
+                hub.map_or_else(|| Ok(hive.hub.clone()), |hub| UserState::hub(Some(hub)))?,
             )
         }
         (Some(hive), _) => anyhow::bail!(
@@ -622,7 +623,7 @@ fn set_machine_name(located: &Located, machine: Option<&str>) -> anyhow::Result<
 }
 
 /// Records that the repository is part of `hive`: the join operation (unless replicating
-/// full history), its hive config, and its place in the user's config. The first hub joined
+/// full history), its hive config, and that the daemon serves it. The first hub joined
 /// becomes the user's default.
 fn become_node(
     located: &Located,
@@ -645,18 +646,11 @@ fn become_node(
         node: machine,
     };
     config.save(&located.repo_path)?;
-    UserConfig::add_repo(&located.workspace_root)?;
-    let mut saved = false;
-    UserConfig::update(|config| {
-        if config.hub.is_none() {
-            config.hub = Some(hub.to_owned());
-            saved = true;
-        }
-    })?;
-    if saved {
+    UserState::add_repo(&located.workspace_root)?;
+    if UserState::save_default_hub(hub)? {
         println!(
-            "Saved {hub} as this machine's default hub ({}).",
-            UserConfig::path()?.display()
+            "Saved {hub} as this machine's default hub. To choose another: jj config set \
+             --user musubi.hub <hub>"
         );
     }
     Ok(())
@@ -724,7 +718,7 @@ fn clone(
     machine: Option<&str>,
     socket: &Socket,
 ) -> anyhow::Result<()> {
-    let hub = UserConfig::hub(hub)?;
+    let hub = UserState::hub(hub)?;
     let reply = block_on(ask_preparing(
         &hub,
         HubWideRequest::Resolve {
@@ -762,7 +756,7 @@ fn sync(start: &Path, socket: &Socket) -> anyhow::Result<()> {
     let located = Located::find(start)?;
     let hive =
         HiveConfig::load(&located.repo_path)?.context("this repository is not part of a hive")?;
-    let served = UserConfig::load()?.repos.contains(&located.workspace_root);
+    let served = UserState::load()?.repos.contains(&located.workspace_root);
     let through_daemon = block_on(async {
         if !served {
             return Ok(None);
@@ -828,7 +822,7 @@ struct Copy {
 
 /// Lists what it can: a daemon or hub out of reach is a line of the listing.
 fn list(start: &Path, socket: anyhow::Result<Socket>) -> anyhow::Result<()> {
-    let config = UserConfig::load()?;
+    let state = UserState::load()?;
     let (daemon, statuses) = block_on(async {
         let running = match &socket {
             Ok(socket) => daemon::running(socket).await,
@@ -848,12 +842,12 @@ fn list(start: &Path, socket: anyhow::Result<Socket>) -> anyhow::Result<()> {
         Ok::<_, anyhow::Error>((Ok(true), statuses))
     })?;
     let mut copies = vec![];
-    for workspace in &config.repos {
+    for workspace in &state.repos {
         let Ok(located) = Located::find(workspace) else {
             println!(
                 "{} is gone; remove it from {}",
                 workspace.display(),
-                UserConfig::path()?.display()
+                UserState::path()?.display()
             );
             continue;
         };
@@ -870,7 +864,7 @@ fn list(start: &Path, socket: anyhow::Result<Socket>) -> anyhow::Result<()> {
             status,
         });
     }
-    let hubs = config.known_hubs(copies.iter().map(|copy| &copy.hive));
+    let hubs = UserState::known_hubs(state.default_hub()?, copies.iter().map(|copy| &copy.hive));
     if hubs.is_empty() {
         println!("No hubs yet: run `musubi hub` on one machine, then the join command it prints.");
     }

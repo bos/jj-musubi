@@ -656,14 +656,14 @@ the user's own `ssh` (or `$MUSUBI_SSH`), so `~/.ssh/config` applies: aliases,
 
 ## Local integration
 
-- Each user runs one daemon, which serves every repository listed in its config file
-  (`config.toml` in musubi's config directory, the source of truth), one thread each.
+- Each user runs one daemon, which serves every repository listed in its state file
+  (`state.toml` in musubi's state directory, the source of truth), one thread each.
   Commands reach it over a control socket: tarpc (a Rust RPC library), with JSON messages,
   over a Unix domain socket (`$XDG_RUNTIME_DIR/musubi/daemon.sock` on Linux,
   `$TMPDIR/musubi/daemon.sock` on macOS) or a Windows named pipe (`\\.\pipe\musubi-<user>`).
   It answers `version`, `add` (start serving a repository now, and reply after its first
   sync), `remove`, `sync`, `status`, and `stop`. `musubi create`, `join`, and `clone` write
-  the repository's membership and the config file, then ask the daemon to add it, starting
+  the repository's membership and the state file, then ask the daemon to add it, starting
   the daemon in the background first if none is running. Only the user can reach the daemon:
   a Unix socket's directory must be theirs and writable by no one else, as tmux and
   ssh-agent check, or the daemon won't listen there and commands won't connect; a named pipe
@@ -678,8 +678,10 @@ the user's own `ssh` (or `$MUSUBI_SSH`), so `~/.ssh/config` applies: aliases,
   on Windows, which runs `musubi daemon start`. Where launchd or systemd runs it, commands
   that need the daemon ask the service manager to start it rather than starting one
   themselves, so there is never a second. The service gets the installing shell's `PATH`
-  (the daemon runs `git`) and `MUSUBI_*` settings, and a marker in the state directory
-  records it, so commands with another `MUSUBI_CONFIG_DIR` (tests) leave it alone.
+  (the daemon runs `git`), and what says where jj's config (which holds the daemon's own
+  settings too) and musubi's state are: `JJ_CONFIG`, `XDG_CONFIG_HOME`, `XDG_STATE_HOME`,
+  and `MUSUBI_*` settings. A marker in the state directory records it, so commands with
+  another `MUSUBI_STATE_DIR` (tests) leave it alone.
 - A daemon that a command starts outlives it, so it takes nothing from the command's
   environment that only says where the command ran. git's variables naming a repository
   (`git rev-parse --local-env-vars`), which a git hook has, reach neither the daemon nor
@@ -690,7 +692,7 @@ the user's own `ssh` (or `$MUSUBI_SSH`), so `~/.ssh/config` applies: aliases,
   musubi, and outlives the session it started in, such as an ssh login with a forwarded
   agent. The systemd unit names the link too, since a user's service manager rarely has an
   agent; launchd has one of its own.
-- Commands change `config.toml` holding a lock beside it, and write it whole, so
+- Commands change `state.toml` holding a lock beside it, and write it whole, so
   that concurrent joins keep each other's changes and a crash never leaves half a file.
 - The daemon watches `.jj/repo/op_heads/heads` with filesystem notifications and also polls
   slowly. It reads operations through jj-lib's op store and never parses jj files itself.
@@ -699,9 +701,13 @@ the user's own `ssh` (or `$MUSUBI_SSH`), so `~/.ssh/config` applies: aliases,
 - In colocated repositories, realization holds `.jj/repo/git_import_export.lock`, the lock the
   jj CLI holds around its own import and export, so the two never interleave.
 - Merges that musubi performs rebase commits, which needs the user's jj config (identity, and
-  signing if enabled). musubi loads the same user and repo config that `jj` does. The merge
-  operation looks like one `jj` would write ("reconcile divergent operations"), with this
-  machine's hostname.
+  signing if enabled). musubi loads the same system, user, repo, and workspace config that
+  `jj` does. The merge operation looks like one `jj` would write ("reconcile divergent
+  operations"), with this machine's hostname.
+- musubi's own settings are jj's too, under `musubi.`, so `jj config` shows and changes them,
+  and musubi has no config file. Those that are a machine's rather than a repository's
+  (`musubi.hub`, `musubi.daemon.*`) come from the user config alone: the daemon serves every
+  repository from one socket, and commands must find that socket wherever they run.
 - Operations reach the op store in dependency order: objects, then views, then operations
   ancestors first, then the op head. A jj process can therefore never observe a reference to
   something missing.

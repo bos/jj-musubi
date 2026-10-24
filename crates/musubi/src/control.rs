@@ -2,9 +2,9 @@
 //!
 //! tarpc, with JSON messages, over a local socket: a Unix domain socket, or a named pipe
 //! on Windows. The socket is, in order of preference, `--socket`, `$MUSUBI_SOCKET`,
-//! `daemon.socket` in config.toml, or else:
+//! `musubi.daemon.socket` in jj's config, or else:
 //!
-//! - `$MUSUBI_CONFIG_DIR/daemon.sock` when that is set (a pipe named after the directory on
+//! - `$MUSUBI_STATE_DIR/daemon.sock` when that is set (a pipe named after the directory on
 //!   Windows);
 //! - Linux: `$XDG_RUNTIME_DIR/musubi/daemon.sock`, or `/tmp/musubi-<uid>/daemon.sock`;
 //! - macOS: `$TMPDIR/musubi/daemon.sock`;
@@ -29,7 +29,7 @@ use tarpc::tokio_serde::formats::Json;
 use tarpc::tokio_util::codec::LengthDelimitedCodec;
 
 use crate::config;
-use crate::config::UserConfig;
+use crate::config::Settings;
 use crate::daemon::Status;
 use crate::socket::Socket;
 use crate::socket::fnv;
@@ -76,7 +76,7 @@ impl Socket {
             Some(socket) => Some(socket.to_owned()),
             None => match std::env::var("MUSUBI_SOCKET") {
                 Ok(socket) if !socket.is_empty() => Some(socket),
-                _ => UserConfig::load()?.daemon.socket,
+                _ => Settings::load()?.daemon_socket,
             },
         };
         let socket = match chosen {
@@ -88,7 +88,7 @@ impl Socket {
     }
 
     fn usual() -> anyhow::Result<Self> {
-        if let Some(dir) = std::env::var_os("MUSUBI_CONFIG_DIR") {
+        if let Some(dir) = std::env::var_os("MUSUBI_STATE_DIR") {
             let dir = PathBuf::from(dir);
             return Ok(if cfg!(windows) {
                 Self::Pipe(format!(
@@ -120,7 +120,7 @@ impl Socket {
         if let Some(over) = self.too_long() {
             anyhow::bail!(
                 "the daemon's socket path {self} is {over} bytes longer than this system allows; \
-                 choose a shorter one with MUSUBI_SOCKET or `daemon.socket` in config.toml"
+                 choose a shorter one with MUSUBI_SOCKET or musubi.daemon.socket in jj's config"
             );
         }
         Ok(())

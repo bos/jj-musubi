@@ -158,6 +158,9 @@ musubi join --hub newbox
 
 The first makes the hive again there, and the others join it. Each machine's default hub,
 which commands use without `--hub`, is still the old one, and `musubi list` goes on showing
-it. Change `hub` in `config.toml` (see
-[Configuration](../reference/configuration.md#musubis-config-file)) to make the new hub the
-default.
+it. To make the new hub the default, set `musubi.hub` (see
+[Settings](../reference/configuration.md#this-machines)):
+
+```sh
+jj config set --user musubi.hub newbox
+```

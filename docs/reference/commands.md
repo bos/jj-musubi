@@ -22,7 +22,7 @@ musubi <command> --help
 `create`, `join`, and `clone` take:
 
 - `--hub <hub>`: the hub, as `musubi hub` prints it. Leave it out to use this machine's
-  default hub, the first it used.
+  default hub: the first it used, unless `musubi.hub` in jj's config names another.
 - `--machine <name>`: this machine's name in the hive, which other machines show its
   working copy under. It defaults to jj's `operation.hostname`.
 

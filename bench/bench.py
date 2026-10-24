@@ -64,7 +64,7 @@ BASE_ENV.update(
     RUST_LOG="warn",
     MUSUBI_SSH=f"{B}/ssh.py",
 )
-for k in ("MUSUBI_CONFIG_DIR", "MUSUBI_SOCKET", "GIT_DIR", "GIT_WORK_TREE", "GIT_TRACE2_EVENT"):
+for k in ("MUSUBI_STATE_DIR", "MUSUBI_SOCKET", "GIT_DIR", "GIT_WORK_TREE", "GIT_TRACE2_EVENT"):
     BASE_ENV.pop(k, None)
 
 PROCS = []
@@ -234,10 +234,10 @@ def start_hub(hub, **extra):
     """Starts a hub serving `hub`, and sshd.py, which the hub* routes reach it through, and
     waits for the hub to listen."""
     cfg = f"{RUN}/cfg-hub"
-    p = start([MUSUBI, "hub", "--dir", hub], e=env(MUSUBI_CONFIG_DIR=cfg, **extra), name="hub")
+    p = start([MUSUBI, "hub", "--dir", hub], e=env(MUSUBI_STATE_DIR=cfg, **extra), name="hub")
     start(
         ["/usr/bin/python3", "-I", f"{B}/sshd.py", str(PORT_SSHD), MUSUBI, hub],
-        e=env(MUSUBI_CONFIG_DIR=cfg),
+        e=env(MUSUBI_STATE_DIR=cfg),
         name="sshd",
     )
     deadline = time.time() + 20
@@ -256,14 +256,14 @@ def hub_route(route):
 
 
 def machine(name, **extra):
-    """The environment of musubi machine `name`: a config directory of its own, holding the
+    """The environment of musubi machine `name`: a state directory of its own, holding the
     key it reaches hubs by, as one that has joined a hub before has."""
     cfg = f"{RUN}/cfg{name}"
     if not os.path.exists(f"{cfg}/hub_key"):
         # Private, or musubi won't put the daemon's socket in it.
         os.makedirs(cfg, mode=0o700, exist_ok=True)
         sh(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", f"{cfg}/hub_key"])
-    return env(MUSUBI_CONFIG_DIR=cfg, **extra)
+    return env(MUSUBI_STATE_DIR=cfg, **extra)
 
 
 def member(args, cwd, e):

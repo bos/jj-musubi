@@ -8,10 +8,12 @@
 //! Where launchd or systemd runs the daemon, commands that need it ask the service manager to
 //! start it rather than starting one themselves, so there is only ever one, and it restarts
 //! after a crash but not after `musubi daemon stop`. The service carries the `PATH` (the
-//! daemon runs `git`) and any `MUSUBI_*` settings of the shell that installed it.
+//! daemon runs `git`) of the shell that installed it, and what there says where jj's config,
+//! which holds the daemon's own settings too, and musubi's state are: `JJ_CONFIG`,
+//! `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, and any `MUSUBI_*` settings.
 //!
 //! A marker in the state directory records the installation, so that a command run with
-//! another `MUSUBI_CONFIG_DIR`, as tests do, never mistakes this one for its own.
+//! another `MUSUBI_STATE_DIR`, as tests do, never mistakes this one for its own.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -38,7 +40,10 @@ const RUN_VALUE: &str = "musubi";
 /// The environment the daemon needs from the shell that installed it.
 fn environment() -> Vec<(String, String)> {
     std::env::vars()
-        .filter(|(name, _)| name == "PATH" || name.starts_with("MUSUBI_"))
+        .filter(|(name, _)| {
+            ["PATH", "JJ_CONFIG", "XDG_CONFIG_HOME", "XDG_STATE_HOME"].contains(&name.as_str())
+                || name.starts_with("MUSUBI_")
+        })
         .collect()
 }
 

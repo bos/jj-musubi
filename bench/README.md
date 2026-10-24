@@ -32,7 +32,7 @@ runs `musubi hub connect` for each connection.
   machines in `daemonslots.py`) name the hub by its directory instead, as on the hub's
   machine.
 
-Each machine has a config directory of its own, with its key already made. `musubi create`,
+Each machine has a state directory of its own, with its key already made. `musubi create`,
 `join` and `clone` start a daemon to do their first sync, so their times include that; the
 scripts then stop it, and only `musubi sync` moves anything until they start daemons
 themselves.

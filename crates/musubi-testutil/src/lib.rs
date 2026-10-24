@@ -385,7 +385,7 @@ impl TestRepo {
     pub fn program(&self, program: &Path) -> Command {
         let mut command = self.command(program.to_str().unwrap(), &self.path);
         command.env(
-            "MUSUBI_CONFIG_DIR",
+            "MUSUBI_STATE_DIR",
             self.home.join(format!("musubi-{}", self.machine)),
         );
         command

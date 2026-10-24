@@ -46,7 +46,7 @@ impl Logs {
 
     /// Includes the daemon log of `repo`'s machine in failure messages.
     fn daemon_of(&mut self, env: &TestEnv, repo: &TestRepo) {
-        self.0.push(config_dir(env, repo).join("daemon.log"));
+        self.0.push(state_dir(env, repo).join("daemon.log"));
     }
 
     fn dump(&self) -> String {
@@ -59,8 +59,8 @@ impl Logs {
     }
 }
 
-/// Where `TestRepo::program` points musubi's config for the repository's machine.
-fn config_dir(env: &TestEnv, repo: &TestRepo) -> PathBuf {
+/// Where `TestRepo::program` points musubi's state for the repository's machine.
+fn state_dir(env: &TestEnv, repo: &TestRepo) -> PathBuf {
     env.root().join(format!("home/musubi-{}", repo.machine()))
 }
 
@@ -159,9 +159,10 @@ impl Hub {
                 "--advertise",
                 "127.0.0.1",
             ])
+            .env("MUSUBI_STATE_DIR", env.root().join(format!("{name}-state")))
             .env(
-                "MUSUBI_CONFIG_DIR",
-                env.root().join(format!("{name}-config")),
+                "JJ_CONFIG",
+                env.root().join(format!("{name}-state/absent.toml")),
             )
             .stdout(Stdio::piped());
         logs.attach(env, name, &mut command);
@@ -367,6 +368,11 @@ fn hub_join_sync_clone_and_list() {
     assert_eq!(hives, "project\t2 machines: alpha, beta\n");
     let hubs = completions(&env, &logs, &beta, &["musubi", "join", "--hub", ""]);
     assert_eq!(hubs, format!("{}\tthe default hub\n", hub.url));
+    // `musubi.hub` in jj's config takes the place of the hub the first join saved.
+    beta.jj(&["config", "set", "--user", "musubi.hub", "elsewhere"]);
+    let hubs = completions(&env, &logs, &beta, &["musubi", "join", "--hub", ""]);
+    assert_eq!(hubs, format!("elsewhere\tthe default hub\n{}\n", hub.url));
+    beta.jj(&["config", "unset", "--user", "musubi.hub"]);
 
     // Daemons keep the machines in sync on their own.
     alpha.write_file("b", "more");
@@ -1102,19 +1108,20 @@ fn machines_reach_the_hub_over_ssh() {
 }
 
 /// A `musubi` command with this process's environment, so the real user's service manager
-/// (launchd, systemd, the registry), but its own config directory.
-fn musubi_as_user(config: &Path, args: &[&str]) -> Command {
+/// (launchd, systemd, the registry), but its own state directory, and no jj user config.
+fn musubi_as_user(state: &Path, args: &[&str]) -> Command {
     let mut command = Command::new(musubi());
     command
         .args(args)
-        .env("MUSUBI_CONFIG_DIR", config)
+        .env("MUSUBI_STATE_DIR", state)
+        .env("JJ_CONFIG", state.join("absent.toml"))
         .env_remove("MUSUBI_SOCKET");
     command
 }
 
 /// The running daemon's pid, from the file it writes beside its lock.
-fn daemon_pid(config: &Path) -> Option<String> {
-    fs::read_dir(config)
+fn daemon_pid(state: &Path) -> Option<String> {
+    fs::read_dir(state)
         .ok()?
         .flatten()
         .find(|entry| {
@@ -1127,8 +1134,8 @@ fn daemon_pid(config: &Path) -> Option<String> {
 }
 
 /// `musubi list`, which says whether the daemon runs.
-fn daemon_line(env: &TestEnv, logs: &Logs, config: &Path) -> String {
-    let out = run(env, logs, musubi_as_user(config, &["list"]));
+fn daemon_line(env: &TestEnv, logs: &Logs, state: &Path) -> String {
+    let out = run(env, logs, musubi_as_user(state, &["list"]));
     out.lines()
         .find(|line| line.starts_with("Daemon:"))
         .unwrap_or_default()
@@ -1147,22 +1154,22 @@ fn the_daemon_starts_through_the_login_service() {
         return;
     }
     let env = TestEnv::new();
-    let logs = Logs(vec![env.root().join("config/daemon.log")]);
-    let config = env.root().join("config");
+    let logs = Logs(vec![env.root().join("state/daemon.log")]);
+    let state = env.root().join("state");
     // Make sure no list shows a hub it can't reach.
-    fs::create_dir_all(&config).unwrap();
+    fs::create_dir_all(&state).unwrap();
     // Uninstalls, and so stops the daemon, whatever happens below.
-    let mut uninstall = musubi_as_user(&config, &["daemon", "uninstall"]);
+    let mut uninstall = musubi_as_user(&state, &["daemon", "uninstall"]);
     uninstall.stdout(Stdio::null()).stderr(Stdio::null());
     let _uninstall = Daemons(vec![uninstall]);
-    let out = run(&env, &logs, musubi_as_user(&config, &["daemon", "install"]));
+    let out = run(&env, &logs, musubi_as_user(&state, &["daemon", "install"]));
     assert!(out.contains("starts at login from now on"), "{out}");
-    let line = daemon_line(&env, &logs, &config);
+    let line = daemon_line(&env, &logs, &state);
     assert!(
         line.contains("running") && line.contains("starts at login"),
         "{line}"
     );
-    let first = daemon_pid(&config).unwrap();
+    let first = daemon_pid(&state).unwrap();
 
     if cfg!(windows) {
         // Windows runs the Run entry's command at login: run it as Windows would. A
@@ -1178,25 +1185,25 @@ fn the_daemon_starts_through_the_login_service() {
             .unwrap();
         let entry = String::from_utf8_lossy(&query.stdout).into_owned();
         assert!(entry.contains("daemon start"), "{entry}");
-        run(&env, &logs, musubi_as_user(&config, &["daemon", "stop"]));
-        run(&env, &logs, musubi_as_user(&config, &["daemon", "start"]));
-        let started = daemon_pid(&config).unwrap();
-        run(&env, &logs, musubi_as_user(&config, &["daemon", "start"]));
-        assert_eq!(daemon_pid(&config).unwrap(), started);
+        run(&env, &logs, musubi_as_user(&state, &["daemon", "stop"]));
+        run(&env, &logs, musubi_as_user(&state, &["daemon", "start"]));
+        let started = daemon_pid(&state).unwrap();
+        run(&env, &logs, musubi_as_user(&state, &["daemon", "start"]));
+        assert_eq!(daemon_pid(&state).unwrap(), started);
     } else {
         // A crash: the service manager starts it again.
         Command::new("kill").args(["-9", &first]).status().unwrap();
         wait_for(&logs, "the service manager to restart the daemon", || {
-            daemon_pid(&config).is_some_and(|pid| pid != first)
-                && daemon_line(&env, &logs, &config).contains("running,")
+            daemon_pid(&state).is_some_and(|pid| pid != first)
+                && daemon_line(&env, &logs, &state).contains("running,")
         });
         // A clean stop: it stays stopped.
-        run(&env, &logs, musubi_as_user(&config, &["daemon", "stop"]));
+        run(&env, &logs, musubi_as_user(&state, &["daemon", "stop"]));
         std::thread::sleep(Duration::from_secs(12));
-        let line = daemon_line(&env, &logs, &config);
+        let line = daemon_line(&env, &logs, &state);
         assert!(line.contains("not running"), "{line}");
         // A command that needs it starts it through the service manager.
-        run(&env, &logs, musubi_as_user(&config, &["daemon", "start"]));
+        run(&env, &logs, musubi_as_user(&state, &["daemon", "start"]));
         let managed = if cfg!(target_os = "macos") {
             let uid =
                 String::from_utf8(Command::new("id").arg("-u").output().unwrap().stdout).unwrap();
@@ -1223,9 +1230,9 @@ fn the_daemon_starts_through_the_login_service() {
     let out = run(
         &env,
         &logs,
-        musubi_as_user(&config, &["daemon", "uninstall"]),
+        musubi_as_user(&state, &["daemon", "uninstall"]),
     );
     assert!(out.contains("no longer starts at login"), "{out}");
-    let line = daemon_line(&env, &logs, &config);
+    let line = daemon_line(&env, &logs, &state);
     assert!(line.contains("not running"), "{line}");
 }

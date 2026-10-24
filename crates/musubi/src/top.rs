@@ -36,7 +36,7 @@ use ratatui::widgets::Table;
 use ratatui::widgets::TableState;
 
 use crate::config::HiveConfig;
-use crate::config::UserConfig;
+use crate::config::UserState;
 use crate::control;
 use crate::daemon;
 use crate::hub;
@@ -86,16 +86,16 @@ pub fn run(args: Args, socket: anyhow::Result<Socket>) -> anyhow::Result<()> {
 
 /// The default hub, and the hubs of this machine's copies.
 fn known_hubs() -> anyhow::Result<Vec<String>> {
-    let config = UserConfig::load()?;
+    let state = UserState::load()?;
     let mut hives = vec![];
-    for workspace in &config.repos {
+    for workspace in &state.repos {
         if let Ok(located) = Located::find(workspace)
             && let Ok(Some(hive)) = HiveConfig::load(&located.repo_path)
         {
             hives.push(hive);
         }
     }
-    Ok(config.known_hubs(&hives))
+    Ok(UserState::known_hubs(state.default_hub()?, &hives))
 }
 
 /// What every hub, and this machine's daemon, said at one refresh.

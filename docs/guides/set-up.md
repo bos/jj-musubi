@@ -49,7 +49,7 @@ The first time, it creates `./musubi-hub` and prints what to run elsewhere:
 
 ```text
 Created a new hub in /home/you/musubi-hub
-Saved this hub as this machine's default (/home/you/.config/musubi/config.toml).
+Saved this hub as this machine's default.
 To share a repository:               musubi create --hub devbox
 To add another machine's copy of it: musubi join --hub devbox
 To make a new copy of a hive:        musubi clone <name> <dir> --hub devbox
@@ -115,7 +115,7 @@ remotes. To choose another name, pass it: `musubi create work-app`.
 ```text
 Created an ssh key for musubi: /home/you/.local/state/musubi/hub_key
 Adding it to ~/.ssh/authorized_keys on devbox, allowed only to run `musubi hub connect`. ssh may ask for your password.
-Saved devbox as this machine's default hub (/home/you/.config/musubi/config.toml).
+Saved devbox as this machine's default hub. To choose another: jj config set --user musubi.hub <hub>
 Created hive app
 Syncing...
 Synced with the hub (hive at #1). The daemon keeps it in sync from now on.

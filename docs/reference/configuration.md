@@ -3,37 +3,36 @@
 Most setups need no configuration: `musubi hub`, `create`, `join`, and `clone` write what
 musubi needs. This page lists what you can set, and where musubi keeps its files.
 
-## musubi's config file
+## Settings
 
-musubi keeps its own settings in `config.toml` in its config directory:
-`~/.config/musubi/config.toml` on Linux and macOS (or under `$XDG_CONFIG_HOME`), and
-`%APPDATA%\musubi\config.toml` on Windows, beside jj's own config.
+musubi has no config file of its own: its settings are jj's, under `musubi`, and you see and
+change them with `jj config` as you would any of jj's.
 
-```toml
-hub = "devbox"
-repos = ["/home/you/src/app", "/home/you/src/dotfiles"]
-
-[daemon]
-log = "info,musubi_sync=debug"
+```sh
+jj config list musubi
+jj config set --user musubi.daemon.log 'info,musubi_sync=debug'
 ```
 
-- `hub` is the hub that commands use when not given `--hub`: the first one this machine used,
-  or on the hub's own machine, that hub's directory. Change it to make another hub the
-  default.
-- `repos` lists the repositories the daemon serves. `create`, `join`, `clone`, and `leave`
-  change it; you needn't.
-- `[daemon] log` is what a daemon started in the background logs, as a filter in `RUST_LOG`'s
-  syntax. See [Logging](#logging).
-- `[daemon] socket` is the path of the daemon's control socket, in place of the usual one.
-  See [Files and directories](#files-and-directories).
+musubi loads jj's config as `jj` does, system, user, repo and workspace, so the commits it
+makes when it merges concurrent work carry your identity and are signed if you sign commits.
 
-The daemon reads the file when it starts, so restart it (`musubi daemon restart`) after
-editing `[daemon]`.
+### This machine's
 
-## jj config that musubi reads
+These are the machine's, not a repository's, so musubi reads them as `jj` would outside any
+repository, and a repository's config doesn't change them: set them with `--user`.
 
-musubi loads jj's config as `jj` does, user, repo and workspace, so the commits it makes when
-it merges concurrent work carry your identity and are signed if you sign commits.
+| Key | Effect |
+| --- | --- |
+| `musubi.hub` | The hub that commands use when not given `--hub`, in place of the one this machine saved: the first it used, or on the hub's own machine, that hub's directory. Give it as `--hub` takes it: the name you ssh to the hub's machine by, or on that machine, the hub's directory, which may start with `~/`. |
+| `musubi.daemon.log` | What a daemon started in the background logs, as a filter in `RUST_LOG`'s syntax. See [Logging](#logging). |
+| `musubi.daemon.socket` | The path of the daemon's control socket, in place of the usual one. See [Files and directories](#files-and-directories). |
+
+The daemon reads `musubi.daemon` when it starts, so restart it (`musubi daemon restart`)
+after changing it.
+
+### Each repository's
+
+musubi reads these as `jj` would in the repository, so any of jj's config files can set them.
 
 | Key | Effect |
 | --- | --- |
@@ -54,11 +53,12 @@ These repo config keys are shared across a hive whatever `musubi.shared-config` 
 | `RUST_LOG` | What a command logs, unless `--log` says. A daemon that a command starts itself, rather than through launchd or systemd, inherits it. |
 | `MUSUBI_SSH` | The ssh program to run, in place of `ssh`. |
 | `MUSUBI_SOCKET` | The daemon's control socket, in place of the usual one. Same as `--socket`. |
-| `MUSUBI_CONFIG_DIR` | One directory for musubi's config, state, and daemon socket, in place of the usual ones. Useful for running a second, separate musubi, as tests do. |
+| `MUSUBI_STATE_DIR` | One directory for musubi's state and daemon socket, in place of the usual ones. Useful for running a second, separate musubi, as tests do, with `JJ_CONFIG` for its settings. |
 | `COMPLETE` | Set by your shell to have musubi complete what you type. See [Complete commands in your shell](commands.md#complete-commands-in-your-shell). |
 
-On macOS and Linux, `musubi daemon install` passes the `MUSUBI_*` variables set when you run
-it, and your `PATH`, to the service that starts the daemon. On Windows, the daemon started at
+On macOS and Linux, `musubi daemon install` passes the `MUSUBI_*` variables, `JJ_CONFIG`,
+`XDG_CONFIG_HOME`, and `XDG_STATE_HOME` set when you run it, and your `PATH`, to the service
+that starts the daemon: run it again after changing them. On Windows, the daemon started at
 login gets the login's environment.
 
 ## Logging
@@ -85,9 +85,9 @@ requests are the daemon's to log. To watch them, stop the daemon and run it in t
 foreground: `musubi daemon stop`, then `musubi --log musubi_sync=debug daemon`.
 
 Without `--log`, `RUST_LOG` does the same. A daemon started for you, at login or by another
-command, isn't given `--log`: set `log` under `[daemon]` in `config.toml` and run
-`musubi daemon restart`. A daemon that another command starts itself, rather than through
-launchd or systemd, also inherits that command's `RUST_LOG`, which takes the config's place.
+command, isn't given `--log`: set `musubi.daemon.log` and run `musubi daemon restart`. A
+daemon that another command starts itself, rather than through launchd or systemd, also
+inherits that command's `RUST_LOG`, which takes the setting's place.
 
 [filter]: https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html#directives
 
@@ -97,14 +97,13 @@ launchd or systemd, also inherits that command's `RUST_LOG`, which takes the con
 
 | Path | Holds |
 | --- | --- |
-| Config directory: `~/.config/musubi` (`%APPDATA%\musubi`) | `config.toml`. |
-| State directory: `~/.local/state/musubi` (`%APPDATA%\musubi`, beside `config.toml`) | `daemon.log`; `hub_key`, the machine's ssh key for reaching hubs; `ssh-agent`, a link to the latest ssh agent, for the daemon; locks. |
+| State directory: `~/.local/state/musubi` (`%APPDATA%\musubi`) | `state.toml`, which lists the repositories the daemon serves, and the hub this machine saved as its default; `daemon.log`; `hub_key`, the machine's ssh key for reaching hubs; `ssh-agent`, a link to the latest ssh agent, for the daemon; locks. |
 | `.jj/repo/musubi/` in each repository | The repository's membership (`hive.toml`), this machine's identity in it (`machine`), its last sync (`status.json`), and musubi's own record of the hive's operations. Removing it, or copying it into another repository, confuses musubi: use `musubi leave` and `musubi clone`. |
 
 The daemon's control socket is `$XDG_RUNTIME_DIR/musubi/daemon.sock` on Linux,
 `$TMPDIR/musubi/daemon.sock` on macOS, and the named pipe `\\.\pipe\musubi-<user>` on
 Windows. Its directory must belong to you and be writable by no one else, or musubi won't use
-it. `--socket`, `MUSUBI_SOCKET`, or `socket` under `[daemon]` choose another.
+it. `--socket`, `MUSUBI_SOCKET`, or `musubi.daemon.socket` choose another.
 
 ### On the hub's machine
 

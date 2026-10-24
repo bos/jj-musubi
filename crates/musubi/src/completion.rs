@@ -10,7 +10,7 @@ use clap_complete::CompletionCandidate;
 
 use crate::Cli;
 use crate::config::HiveConfig;
-use crate::config::UserConfig;
+use crate::config::UserState;
 use crate::repo::Located;
 
 /// How long completing a hive's name waits for the hub, while the shell waits on it.
@@ -71,8 +71,8 @@ pub fn complete_if_asked() {
 }
 
 /// The hives of this machine's copies, leaving out copies that are gone.
-fn memberships(config: &UserConfig) -> Vec<HiveConfig> {
-    config
+fn memberships(state: &UserState) -> Vec<HiveConfig> {
+    state
         .repos
         .iter()
         .filter_map(|workspace| Located::find(workspace).ok())
@@ -82,14 +82,14 @@ fn memberships(config: &UserConfig) -> Vec<HiveConfig> {
 
 /// The hubs this machine knows of, for `--hub`.
 pub fn hubs() -> Vec<CompletionCandidate> {
-    let Ok(config) = UserConfig::load() else {
+    let Ok(state) = UserState::load() else {
         return vec![];
     };
-    config
-        .known_hubs(&memberships(&config))
+    let default = state.default_hub().ok().flatten();
+    UserState::known_hubs(default.clone(), &memberships(&state))
         .into_iter()
         .map(|hub| {
-            let default = config.hub.as_ref() == Some(&hub);
+            let default = default.as_ref() == Some(&hub);
             CompletionCandidate::new(hub).help(default.then(|| "the default hub".into()))
         })
         .collect()
@@ -98,10 +98,10 @@ pub fn hubs() -> Vec<CompletionCandidate> {
 /// The default hub's hives, which commands without `--hub` act on; or if it doesn't answer
 /// in time, the hives of this machine's copies on it.
 pub fn hives() -> Vec<CompletionCandidate> {
-    let Ok(config) = UserConfig::load() else {
+    let Ok(state) = UserState::load() else {
         return vec![];
     };
-    let Some(hub) = &config.hub else {
+    let Some(hub) = &state.default_hub().ok().flatten() else {
         return vec![];
     };
     let answer =
@@ -113,7 +113,7 @@ pub fn hives() -> Vec<CompletionCandidate> {
                 CompletionCandidate::new(&info.name).help(Some(crate::machines(info).into()))
             })
             .collect(),
-        Err(_) => memberships(&config)
+        Err(_) => memberships(&state)
             .iter()
             .filter(|copy| &copy.hub == hub)
             .map(|copy| CompletionCandidate::new(copy.display_name()))

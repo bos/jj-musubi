@@ -21,6 +21,30 @@ change the protocol, so run the same release on the hub and every machine (see
   in and out, the operations and commits that came in, and which machines are offline,
   behind, or failing to sync. Daemons now report to the hub after every sync for it. See
   [Watch every machine](docs/guides/manage.md#watch-every-machine).
+- musubi has no config file of its own any more: its settings are jj's, under `musubi`, so
+  `jj config list musubi` shows them. `[daemon] log` and `socket` in musubi's `config.toml`
+  are now `musubi.daemon.log` and `musubi.daemon.socket` in jj's user config, where
+  `musubi.hub` chooses another default hub than the one the first join saved. What musubi
+  records for itself, the repositories the daemon serves and that saved hub, is now
+  `state.toml` in its state directory. `MUSUBI_CONFIG_DIR` is now `MUSUBI_STATE_DIR`, which
+  no longer separates a second musubi's settings: give it a `JJ_CONFIG` of its own too. On
+  upgrading:
+
+  1. Move the file. On Linux and macOS, unless you set `XDG_CONFIG_HOME` or
+     `XDG_STATE_HOME`:
+
+     ```sh
+     mv ~/.config/musubi/config.toml ~/.local/state/musubi/state.toml
+     ```
+
+     On Windows, rename `%APPDATA%\musubi\config.toml` to `state.toml`. Where
+     `MUSUBI_CONFIG_DIR` was set, rename `config.toml` in it to `state.toml`.
+  2. Set again what you had under `[daemon]`, with `jj config set --user musubi.daemon.log`
+     or `musubi.daemon.socket`.
+  3. Restart the daemon: `musubi daemon install` if it starts at login, so that the service
+     finds jj's config as your shell does, or else `musubi daemon restart`.
+
+  See [Configuration](docs/reference/configuration.md#settings).
 - The hub and machines talk differently, so upgrade the hub and every machine together.
 
 ## 0.1.0

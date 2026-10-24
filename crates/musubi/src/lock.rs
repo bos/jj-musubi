@@ -1,5 +1,5 @@
 //! Lock files, which keep a second daemon or hub from starting where one runs, and two
-//! commands from changing the config at once.
+//! commands from changing musubi's state at once.
 
 use std::fs;
 use std::path::Path;

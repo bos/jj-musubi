@@ -97,8 +97,8 @@ for ssh whose shell prints a banner first, `musubi clone` by a prefix of the hiv
 `musubi list`, `leave`, and each machine's daemon, which the first `create` or `join`
 starts in the background, serving a repository added later without a restart, even when
 that `create` ran with git's variables naming another repository, as in a git hook. Each
-test machine has its own config directory, and so its own daemon and control socket; the
-tests stop the daemons when they finish. One test turns on commit signing, with
+test machine has its own state directory and jj config, and so its own daemon and control
+socket; the tests stop the daemons when they finish. One test turns on commit signing, with
 `ssh-keygen` as jj's signer, and checks that the commits musubi rewrites are signed, which
 shows that the binary loads jj's config as jj does; it runs only on Unix.
 

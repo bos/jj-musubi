@@ -538,10 +538,13 @@ fn create_key(key: &Path) -> anyhow::Result<()> {
 }
 
 /// Appends the key to `~/.ssh/authorized_keys` on `dest`, unless it is there already. The
-/// script runs in `sh`, whatever the user's shell is there.
+/// script runs in `sh`, whatever the user's shell is there. A file that doesn't end in a
+/// newline, as some tools that provision machines write it, gets one first: appended to its
+/// last line, the key would spoil that line's key as well as its own.
 const AUTHORIZE: &str = "sh -c 'umask 077; mkdir -p ~/.ssh; read -r line; \
-     grep -qxF \"$line\" ~/.ssh/authorized_keys 2>/dev/null || \
-     printf \"%s\\n\" \"$line\" >> ~/.ssh/authorized_keys'";
+     f=~/.ssh/authorized_keys; grep -qxF \"$line\" \"$f\" 2>/dev/null && exit; \
+     [ -s \"$f\" ] && [ -n \"$(tail -c 1 \"$f\")\" ] && echo >> \"$f\"; \
+     printf \"%s\\n\" \"$line\" >> \"$f\"'";
 
 async fn authorize(ui: &Ui, dest: &str, key: &Path) -> anyhow::Result<()> {
     let public = key.with_extension("pub");
@@ -566,4 +569,44 @@ async fn authorize(ui: &Ui, dest: &str, key: &Path) -> anyhow::Result<()> {
         "could not add musubi's key on {dest} (ssh exited with {status})"
     );
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authorizing_keeps_other_keys_on_lines_of_their_own() {
+        let home = musubi_testutil::tempdir();
+        let keys = home.path().join(".ssh/authorized_keys");
+        // Runs the script as the hub's machine would, through a shell.
+        let authorize = |line: &str| {
+            let mut child = std::process::Command::new("sh")
+                .args(["-c", AUTHORIZE])
+                .env("HOME", home.path())
+                .stdin(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(line.as_bytes())
+                .unwrap();
+            assert!(child.wait().unwrap().success());
+        };
+        let musubi = "restrict,command=\"musubi hub connect\" ssh-ed25519 AAAAmusubi musubi@a\n";
+        authorize(musubi);
+        assert_eq!(fs::read_to_string(&keys).unwrap(), musubi);
+
+        // A file that doesn't end in a newline keeps its last key whole, and a key that is
+        // there already isn't added again.
+        fs::write(&keys, "ssh-ed25519 AAAA1234").unwrap();
+        authorize(musubi);
+        authorize(musubi);
+        assert_eq!(
+            fs::read_to_string(&keys).unwrap(),
+            format!("ssh-ed25519 AAAA1234\n{musubi}")
+        );
+    }
 }

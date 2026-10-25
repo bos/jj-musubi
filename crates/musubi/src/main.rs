@@ -10,6 +10,7 @@ mod hub;
 mod listing;
 mod lock;
 mod login;
+mod open_files;
 mod repo;
 mod settings;
 mod socket;
@@ -516,6 +517,12 @@ fn run(cli: Cli, ui: &Ui) -> anyhow::Result<()> {
     ) && let Err(err) = agent::refresh()
     {
         tracing::debug!("not pointing the daemon at this ssh agent: {err:#}");
+    }
+    if matches!(
+        cli.command,
+        Some(Command::Hub { action: None, .. } | Command::Daemon { action: None })
+    ) {
+        open_files::raise();
     }
     let cwd = std::env::current_dir()?;
     let socket = || Socket::locate(cli.socket.as_deref());

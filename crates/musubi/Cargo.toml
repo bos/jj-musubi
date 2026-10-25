@@ -44,6 +44,9 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 whoami.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 widestring.workspace = true
 

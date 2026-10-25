@@ -2505,6 +2505,7 @@ dependencies = [
  "notify",
  "pollster",
  "ratatui",
+ "rustix",
  "serde",
  "serde_json",
  "tarpc",

@@ -139,6 +139,9 @@ change the protocol, so run the same release on the hub and every machine (see
 - Adding musubi's ssh key on the hub's machine no longer joins it to the last line of an
   `~/.ssh/authorized_keys` that doesn't end in a newline, which spoiled both keys and could
   lock you out of that machine.
+- A daemon started at login on macOS, by `musubi daemon install`, no longer fails every sync
+  with "Too many open files" once it serves some two dozen repositories: the daemon and the
+  hub raise their limit on open files as far as the system allows, from launchd's 256.
 - The daemon and the hub log only warnings from jj's library, whose notes on every lock it
   took and index it built made up most of `daemon.log`. `--log info` brings them back, as
   does `musubi.daemon.log = "info"` for the daemon.

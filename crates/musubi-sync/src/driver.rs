@@ -157,7 +157,8 @@ impl NodeDriver {
     /// jj-lib and gix cache what they read from the repository, so a handle can keep
     /// failing after the repository changed under it (colocation turned on or off), or
     /// after git's object store outgrew what gix sized for it.
-    pub fn reopen(&mut self, repo: NodeRepo) -> anyhow::Result<()> {
+    pub fn reopen(&mut self, mut repo: NodeRepo) -> anyhow::Result<()> {
+        repo.keep_found(self.adapter.repo());
         self.adapter = NodeAdapter::new(repo)?;
         self.restart();
         Ok(())

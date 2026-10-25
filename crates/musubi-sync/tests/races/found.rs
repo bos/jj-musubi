@@ -68,10 +68,15 @@ fn rebases_that_form_a_loop_pause_instead_of_breaking_jj() {
     hive.repo(1).jj(&["rebase", "-s", &z, "-o", &y]);
     hive.repo(1).jj(&["rebase", "-s", &r, "-o", &q]);
     hive.hive.sync(1).unwrap();
-    for expected in [first, second] {
+    for (round, expected) in [first, second].into_iter().enumerate() {
         let err = format!("{:#}", hive.hive.sync(0).unwrap_err());
         let advice = format!("`jj op revert {expected}`");
         assert!(err.contains(&advice), "expected {advice}: {err}");
+        assert_eq!(hive.node(0).unmergeable_searches(), round + 1);
+        // A retry with nothing new reuses the search.
+        let again = format!("{:#}", hive.hive.sync(0).unwrap_err());
+        assert_eq!(again, err);
+        assert_eq!(hive.node(0).unmergeable_searches(), round + 1);
         hive.repo(0).jj(&["op", "revert", &expected]);
     }
     hive.sync();

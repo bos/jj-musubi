@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::PoisonError;
 use std::thread;
 
 use futures::TryStreamExt as _;
@@ -25,6 +26,7 @@ use pollster::FutureExt as _;
 use super::CANONICAL_ATTRIBUTE;
 use super::NodeError;
 use super::NodeRepo;
+use super::UnmergeableSearch;
 use super::catch_jj_panic;
 use super::git::Colocation;
 use super::translate::target_of;
@@ -590,7 +592,7 @@ impl NodeRepo {
         let realized = self.realize(canonical)?;
         // Views made ahead inherit what this changes, in a colocated repository.
         self.prepared = None;
-        let superseded = self.check_mergeable(&realized)?;
+        let superseded = self.check_mergeable(canonical, &realized)?;
         let colocation = self.colocation();
         let _lock = colocation.map(Colocation::lock).transpose()?;
         let head = match colocation {
@@ -627,12 +629,17 @@ impl NodeRepo {
     /// hand. Unpublished, jj keeps working, and the error says which operations to revert.
     /// Returns the op heads the realization descends from, beyond its parents, which are
     /// not concurrent with it: after a catch-up of several operations, the previous head.
-    fn check_mergeable(&self, realized: &OperationId) -> Result<Vec<OperationId>, NodeError> {
+    fn check_mergeable(
+        &self,
+        canonical: &OperationId,
+        realized: &OperationId,
+    ) -> Result<Vec<OperationId>, NodeError> {
         let realized_op = self.loader.load_operation(realized).block_on()?;
-        let others: Vec<OperationId> = self
-            .local_heads()?
-            .into_iter()
-            .filter(|head| head != realized && !realized_op.parent_ids().contains(head))
+        let mut heads = self.local_heads()?;
+        let others: Vec<OperationId> = heads
+            .iter()
+            .filter(|head| *head != realized && !realized_op.parent_ids().contains(head))
+            .cloned()
             .collect();
         let mut theirs = vec![];
         let mut superseded = vec![];
@@ -662,8 +669,32 @@ impl NodeRepo {
         let mut operations = theirs;
         operations.push(realized_op.clone());
         if let Err(reason) = self.try_merge(operations) {
-            // Failing to find it leaves the advice to list them.
-            let culprit = self.first_unmergeable(&ours, &realized_op).ok().flatten();
+            // The same heads and the hive's same operation, as when the sync is retried,
+            // give the same result. Failing to find it leaves the advice to list them.
+            heads.sort();
+            let mut memo = self
+                .unmergeable
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            let culprit = match &memo.last {
+                Some(last) if last.heads == heads && last.theirs == *canonical => {
+                    last.culprit.clone()
+                }
+                _ => {
+                    memo.searches += 1;
+                    // An error, as reading the store, is no answer to keep.
+                    let culprit = self.first_unmergeable(&ours, &realized_op).ok();
+                    if let Some(culprit) = &culprit {
+                        memo.last = Some(UnmergeableSearch {
+                            heads,
+                            theirs: canonical.clone(),
+                            culprit: culprit.clone(),
+                        });
+                    }
+                    culprit.flatten()
+                }
+            };
+            drop(memo);
             return Err(self.unmergeable(&ours, culprit, reason));
         }
         Ok(superseded)

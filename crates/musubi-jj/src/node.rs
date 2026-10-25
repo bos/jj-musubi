@@ -15,6 +15,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::PoisonError;
 use std::thread;
 
 use jj_lib::backend::CommitId;
@@ -100,6 +101,27 @@ pub struct NodeRepo {
     /// This machine's own workspace names as of its latest work, while the hive has forgotten
     /// it (`own_names_in`): the same for every operation until its next work.
     worked_names: Mutex<presence::WorkedNames>,
+    /// The last search for the operation to revert when jj can't merge this machine's
+    /// operations with the hive's (see `first_unmergeable`), so that retries of a sync stuck
+    /// there don't search again.
+    unmergeable: Mutex<UnmergeableMemo>,
+}
+
+/// The last search for the operation to revert, and how many searches have run.
+#[derive(Clone, Default)]
+struct UnmergeableMemo {
+    last: Option<UnmergeableSearch>,
+    searches: usize,
+}
+
+/// A search for the operation to revert: what decides its result, and the result.
+#[derive(Clone)]
+struct UnmergeableSearch {
+    /// This machine's op heads, sorted.
+    heads: Vec<OperationId>,
+    /// The hive's operation, canonical, that jj can't merge with them.
+    theirs: OperationId,
+    culprit: Option<OperationId>,
 }
 
 impl Drop for NodeRepo {
@@ -159,6 +181,7 @@ impl NodeRepo {
             prepared: None,
             presences: Mutex::default(),
             worked_names: Mutex::default(),
+            unmergeable: Mutex::default(),
             unwritten: vec![],
             joins: BTreeMap::new(),
             settings: HashMap::new(),
@@ -289,6 +312,29 @@ impl NodeRepo {
         }
     }
 
+    /// Keeps what `previous`, an earlier handle on the same repository, found out about
+    /// which operation to revert, as when the daemon reopens a repository after a failed
+    /// sync.
+    pub fn keep_found(&mut self, previous: &Self) {
+        let previous = previous
+            .unmergeable
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        *self
+            .unmergeable
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = previous;
+    }
+
+    /// How many times this handle has searched for the operation to revert, for tests.
+    pub fn unmergeable_searches(&self) -> usize {
+        self.unmergeable
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .searches
+    }
+
     pub fn local_heads(&self) -> Result<Vec<OperationId>, NodeError> {
         Ok(self.loader.op_heads_store().get_op_heads().block_on()?)
     }
@@ -390,11 +436,29 @@ fn load_machine(
         .map_err(|source| NodeError::Io { path, source })
 }
 
+thread_local! {
+    /// Whether this thread is in [`catch_jj_panic`], whose panics the hook doesn't print.
+    static CATCHING_JJ_PANIC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// Runs `f`, turning a panic in jj-lib into an error with the panic's message. jj 0.46
 /// panics, rather than failing, when it merges concurrent operations whose rebases form a
-/// loop ("graph has cycle").
+/// loop ("graph has cycle"). The panic isn't printed: the error carries its message, and a
+/// sync stuck there would otherwise print several at every retry.
 fn catch_jj_panic<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+    static QUIET_HOOK: std::sync::Once = std::sync::Once::new();
+    QUIET_HOOK.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if !CATCHING_JJ_PANIC.with(std::cell::Cell::get) {
+                previous(info);
+            }
+        }));
+    });
+    let outer = CATCHING_JJ_PANIC.with(|catching| catching.replace(true));
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    CATCHING_JJ_PANIC.with(|catching| catching.set(outer));
+    match caught {
         Ok(result) => result,
         Err(panic) => Err(panic
             .downcast_ref::<&str>()

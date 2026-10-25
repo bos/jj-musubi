@@ -6,6 +6,8 @@ change the protocol, so run the same release on the hub and every machine (see
 
 ## Unreleased
 
+- Added `skills/musubi` to help coding agents work in a hive.
+  See [Coding agents](docs/guides/working-across-machines.md#coding-agents).
 - musubi tells a copy from a repository made by copying its files, with `cp -a`, `rsync` or a
   backup, and doesn't sync the duplicate, where two repositories synced as one machine and
   overwrote each other's working copy. `musubi join --original` syncs a repository as the

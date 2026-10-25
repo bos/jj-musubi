@@ -157,6 +157,20 @@ values. A machine whose clock is wrong can win when it shouldn't.
 A machine joining a hive takes the hive's value for each setting the hive has, and adds the
 others it has, such as a remote the hive lacks.
 
+## Coding agents
+
+Another machine's rewrites can repeatedly make a coding agent's working copy stale. The
+[`musubi` skill](../../skills/musubi/SKILL.md) helps agents choose a stable base, avoid
+disrupting other machines, and handle stale copies and sync failures.
+
+To install it, link it into your agent's skills directory. Replace `~/src/jj-musubi` with the
+path to your clone:
+
+```sh
+ln -s ~/src/jj-musubi/skills/musubi ~/.claude/skills/musubi   # Claude Code
+ln -s ~/src/jj-musubi/skills/musubi ~/.codex/skills/musubi    # Codex
+```
+
 ## Things to avoid
 
 - **`jj op abandon`** of operations other machines already have. musubi can't replicate it

@@ -279,12 +279,28 @@ impl Search {
         let m = self.machine(&tc);
         let mut world = self.world.borrow_mut();
         let view = world.observe(m);
-        let existing = view.bookmarks();
+        // Not only the view's bookmarks: a conflicted bookmark can have no side that is a
+        // commit, which `jj log` never shows but `jj bookmark create` refuses. jj makes one
+        // where a conflict is resolved and deleted concurrently: from `main` at {A, B, C},
+        // moving it to A on one machine and deleting it on another leaves {-B, -C} and
+        // absent sides, as plain jj does for the same two operations in one repository.
+        // `observe` has just snapshotted and imported, so the list needn't again.
+        let existing = world.raw_jj(
+            m,
+            &[
+                "--ignore-working-copy",
+                "bookmark",
+                "list",
+                "-T",
+                r#"if(!remote && present, name ++ "\n")"#,
+            ],
+        );
+        let existing: Vec<&str> = existing.lines().collect();
         let remote = view.remote_names();
         let free: Vec<String> = BOOKMARKS
             .iter()
             .map(|b| (*b).to_owned())
-            .filter(|b| !existing.contains(b) && !remote.contains(b))
+            .filter(|b| !existing.contains(&b.as_str()) && !remote.contains(b))
             .collect();
         let name = choose(&tc, &free);
         let target = choose(&tc, &view.targets());

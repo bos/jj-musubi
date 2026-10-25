@@ -258,7 +258,9 @@ struct Daemons(Vec<Command>);
 impl Daemons {
     fn of(&mut self, repo: &TestRepo) {
         let mut stop = repo.program(musubi());
+        // Not in the repository, which a test may move or delete.
         stop.args(["daemon", "stop"])
+            .current_dir(repo.path().parent().unwrap())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         self.0.push(stop);
@@ -550,7 +552,10 @@ fn hub_join_sync_clone_and_list() {
     // until it's next used. Its `jj` commands above are work, and imported git's refs as
     // they started: one that reached the hub after the forget would bring gamma back,
     // rightly, so let gamma's daemon send them first.
-    let out = musubi_in(&env, &logs, &gamma, &["sync"]);
+    // Gamma is a copy on alpha's machine, which cloned it.
+    let mut sync = alpha.program(musubi());
+    sync.arg("sync").current_dir(gamma.path());
+    let out = run(&env, &logs, sync);
     assert!(out.contains("Synced (hive at #"), "{out}");
     let out = musubi_in(&env, &logs, &alpha, &["forget", "gamma"]);
     assert!(out.contains("Forgot gamma"), "{out}");
@@ -558,10 +563,11 @@ fn hub_join_sync_clone_and_list() {
     wait_for(&logs, "the hub to count gamma out", || {
         musubi_in(&env, &logs, &alpha, &["list"]).contains("project  2 machines: alpha, beta")
     });
+    // Gamma is a copy on alpha's machine, which cloned it.
     wait_for(&logs, "gamma's daemon to hear it was forgotten", || {
-        status_in(&env, &logs, &gamma)
-            .0
-            .contains("Forgotten by the hive")
+        let mut status = alpha.program(musubi());
+        status.arg("status").current_dir(gamma.path());
+        run(&env, &logs, status).contains("Forgotten by the hive")
     });
 
     // A renamed hive goes by its new name on every machine, once its daemon next syncs.
@@ -1011,19 +1017,33 @@ fn copies_leave_a_removed_hive() {
     assert!(out.contains("Removed hive alpha"), "{out}");
     let err = musubi_fails(&env, &logs, &beta, &["sync"]);
     assert!(err.contains("removed from the hub"), "{err}");
-    assert!(!beta.repo_path().join("musubi/hive.toml").exists());
+    assert_eq!(membership(&beta), "removed");
     let list = musubi_in(&env, &logs, &beta, &["list"]);
     assert!(!list.contains("here:"), "{list}");
     assert!(log(&beta).contains("start"));
+    // It remembers its hive was removed, rather than joining another its history matches.
+    let err = musubi_fails(&env, &logs, &beta, &["join", "--hub", &hub.url]);
+    assert!(err.contains("was removed from its hub"), "{err}");
     // Alpha's daemon hears when it next syncs, as after an operation here.
     alpha.write_file("after", "after");
     alpha.jj(&["status"]);
     wait_for(&logs, "alpha's daemon to leave the hive", || {
-        !alpha.repo_path().join("musubi/hive.toml").exists()
+        membership(&alpha) == "removed"
     });
     let list = musubi_in(&env, &logs, &alpha, &["list"]);
     assert!(!list.contains("here:"), "{list}");
     assert!(log(&alpha).contains("start"));
+}
+
+/// Whether the repository is part of the hive its record names: `joined`, `left`, or
+/// `removed`.
+fn membership(repo: &TestRepo) -> String {
+    let record = fs::read_to_string(repo.repo_path().join("musubi/hive.toml")).unwrap();
+    let line = record
+        .lines()
+        .find_map(|line| line.strip_prefix("state = "))
+        .unwrap_or_else(|| panic!("no state in {record}"));
+    line.trim_matches('"').to_owned()
 }
 
 /// With its hub gone, `musubi sync` through the daemon says why at once, as it does without
@@ -1077,7 +1097,7 @@ fn leaving_needs_the_hub_unless_forced() {
     hub.kill();
     let err = musubi_fails(&env, &logs, &alpha, &["leave"]);
     assert!(err.contains("still part of hive"), "{err}");
-    assert!(alpha.repo_path().join("musubi/hive.toml").exists());
+    assert_eq!(membership(&alpha), "joined");
     // It keeps its working copy, though on the empty commit its forget abandoned.
     let workspaces = alpha.jj(&["workspace", "list", "--ignore-working-copy"]);
     assert!(
@@ -1089,7 +1109,7 @@ fn leaving_needs_the_hub_unless_forced() {
     assert!(log(&alpha).contains("start"));
     let out = musubi_in(&env, &logs, &alpha, &["leave", "--force"]);
     assert!(out.contains("has left hive"), "{out}");
-    assert!(!alpha.repo_path().join("musubi/hive.toml").exists());
+    assert_eq!(membership(&alpha), "left");
     // With a new commit to work on, which no next work of its in the hive will make now.
     let at = alpha.jj(&[
         "log",
@@ -1164,6 +1184,449 @@ fn the_daemon_ignores_the_git_repository_it_was_started_in() {
     wait_for(&logs, "alpha's daemon to sync alpha's later commit", || {
         try_log(&beta).is_some_and(|log| log.contains("later from alpha"))
     });
+}
+
+/// A daemon doesn't stay in the directory of the command that started it, often a repository
+/// it serves: gix needs the current directory to open any repository, so once that one was
+/// deleted, no repository on the machine could sync.
+// Moving and deleting a repository whose files the daemon has open is for Unix only
+// (docs/internals/copies.md, "Out of scope").
+#[cfg(unix)]
+#[test]
+fn the_daemon_outlives_the_directory_it_was_started_in() {
+    let env = TestEnv::new();
+    let mut logs = Logs::default();
+    let hub = Hub::start(&env, &mut logs);
+    // Stopped before the hub.
+    let mut daemons = Daemons::default();
+    let alpha = env.init_repo("alpha");
+    logs.daemon_of(&env, &alpha);
+    daemons.of(&alpha);
+    alpha.write_file("a", "a");
+    alpha.jj(&["commit", "-m", "first project"]);
+    // Started from alpha's directory.
+    musubi_in(&env, &logs, &alpha, &["create", "--hub", &hub.url]);
+    musubi_in(&env, &logs, &alpha, &["leave"]);
+    fs::remove_dir_all(alpha.path()).unwrap();
+
+    let second = env.root().join("second");
+    let mut init = alpha.program(Path::new("jj"));
+    init.args(["git", "init", "--colocate", second.to_str().unwrap()])
+        .current_dir(env.root());
+    run(&env, &logs, init);
+    fs::write(second.join("s"), "s").unwrap();
+    let mut commit = alpha.program(Path::new("jj"));
+    commit
+        .args(["commit", "-m", "second project"])
+        .current_dir(&second);
+    run(&env, &logs, commit);
+    let mut create = alpha.program(musubi());
+    create
+        .args(["create", "--hub", &hub.url])
+        .current_dir(&second);
+    let out = run(&env, &logs, create);
+    assert!(out.contains("Synced with the hub"), "{out}");
+}
+
+/// Runs musubi in `dir` as `machine` runs it, which must succeed, returning its stdout.
+fn musubi_at(env: &TestEnv, logs: &Logs, machine: &TestRepo, dir: &Path, args: &[&str]) -> String {
+    let mut command = machine.program(musubi());
+    command.args(args).current_dir(dir);
+    run(env, logs, command)
+}
+
+/// Runs musubi in `dir` as `machine` runs it, which must fail, returning its stderr.
+fn musubi_fails_at(
+    env: &TestEnv,
+    logs: &Logs,
+    machine: &TestRepo,
+    dir: &Path,
+    args: &[&str],
+) -> String {
+    let mut command = machine.program(musubi());
+    command.args(args).current_dir(dir);
+    let (ok, stdout, stderr) = try_run(logs, env, command);
+    assert!(!ok, "musubi {args:?} succeeded:\n{stdout}");
+    stderr
+}
+
+/// Whether the daemon of `repo`'s machine has logged `text`: what it did, rather than what a
+/// command finds looking at the files.
+fn daemon_logged(env: &TestEnv, repo: &TestRepo, text: &str) -> bool {
+    fs::read_to_string(state_dir(env, repo).join("daemon.log")).is_ok_and(|log| log.contains(text))
+}
+
+/// Waits for `dir`'s daemon to be idle, having synced beta's join, as after [`two_machines`],
+/// so that a test moving, deleting or copying the repository there doesn't do it during a
+/// sync, which docs/internals/copies.md leaves out: a `musubi sync` through the daemon
+/// returns only once a whole sync is done, and nothing else wakes it until beta does more.
+fn settled(env: &TestEnv, logs: &Logs, alpha: &TestRepo, dir: &Path) {
+    wait_for(logs, "alpha to sync beta's join", || {
+        jj_at(env, logs, alpha, dir, &["workspace", "list"]).contains("beta/")
+    });
+    musubi_at(env, logs, alpha, dir, &["sync"]);
+}
+
+/// Runs jj in `dir` as `machine` runs it.
+fn jj_at(env: &TestEnv, logs: &Logs, machine: &TestRepo, dir: &Path, args: &[&str]) -> String {
+    let mut command = machine.program(Path::new("jj"));
+    command.args(args).current_dir(dir);
+    run(env, logs, command)
+}
+
+/// A duplicate of a copy, made with `cp -a` (docs/internals/copies.md), carries its key and
+/// record, but musubi never syncs it: it says so, refuses to join or leave in it, and the
+/// original goes on syncing.
+#[test]
+fn duplicates_are_never_synced() {
+    let env = TestEnv::new();
+    let mut logs = Logs::default();
+    let hub = Hub::start(&env, &mut logs);
+    // Stopped before the hub.
+    let mut daemons = Daemons::default();
+    let (alpha, beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
+    settled(&env, &logs, &alpha, alpha.path());
+    let duplicate = env.root().join("duplicate");
+    musubi_testutil::copy_tree(alpha.path(), &duplicate);
+    let at = format!(
+        "which is at {}",
+        alpha.path().canonicalize().unwrap().display()
+    );
+    let status = musubi_at(&env, &logs, &alpha, &duplicate, &["status"]);
+    assert!(
+        status.contains("This repository was made from the files of a copy"),
+        "{status}"
+    );
+    assert!(status.contains(&at), "{status}");
+    assert!(!status.contains("synced 0s ago"), "{status}");
+    for args in [
+        &["join"][..],
+        &["leave"],
+        &["sync"],
+        &["join", "--original"],
+    ] {
+        let err = musubi_fails_at(&env, &logs, &alpha, &duplicate, args);
+        assert!(
+            err.contains("made from the files of a copy") || err.contains("is at"),
+            "{args:?}: {err}"
+        );
+    }
+    jj_at(
+        &env,
+        &logs,
+        &alpha,
+        &duplicate,
+        &["commit", "-m", "in the duplicate"],
+    );
+    alpha.write_file("b", "b");
+    alpha.jj(&["commit", "-m", "in the original"]);
+    wait_for(&logs, "the original's work to reach beta", || {
+        try_log(&beta).is_some_and(|log| log.contains("in the original"))
+    });
+    assert!(!log(&beta).contains("in the duplicate"));
+    let list = musubi_in(&env, &logs, &alpha, &["list"]);
+    assert!(
+        list.contains("Daemon: running, serving 1 repositories;"),
+        "{list}"
+    );
+}
+
+/// A copy restored onto another machine, from a backup, say, is taken for a duplicate until
+/// `musubi join --original` says it is the copy, whose original is gone; then it syncs as
+/// that copy.
+// Moving and deleting a repository whose files the daemon has open is for Unix only
+// (docs/internals/copies.md, "Out of scope").
+#[cfg(unix)]
+#[test]
+fn a_copy_restored_elsewhere_syncs_as_the_original() {
+    let env = TestEnv::new();
+    let mut logs = Logs::default();
+    let hub = Hub::start(&env, &mut logs);
+    // Stopped before the hub.
+    let mut daemons = Daemons::default();
+    let (alpha, beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
+    let gamma = env.init_repo("gamma");
+    logs.daemon_of(&env, &gamma);
+    daemons.of(&gamma);
+    settled(&env, &logs, &alpha, alpha.path());
+    let restored = env.root().join("restored");
+    musubi_testutil::copy_tree(alpha.path(), &restored);
+    musubi_in(&env, &logs, &alpha, &["daemon", "stop"]);
+    fs::remove_dir_all(alpha.path()).unwrap();
+    let err = musubi_fails_at(&env, &logs, &gamma, &restored, &["join"]);
+    assert!(err.contains("musubi join --original"), "{err}");
+    let out = musubi_at(&env, &logs, &gamma, &restored, &["join", "--original"]);
+    assert!(out.contains("Synced with the hub"), "{out}");
+    jj_at(
+        &env,
+        &logs,
+        &gamma,
+        &restored,
+        &["commit", "-m", "after the restore"],
+    );
+    wait_for(&logs, "the restored copy's work to reach beta", || {
+        try_log(&beta).is_some_and(|log| log.contains("after the restore"))
+    });
+}
+
+/// A copy moved with `mv` syncs again once jj has run in it, which records where it went.
+// Moving and deleting a repository whose files the daemon has open is for Unix only
+// (docs/internals/copies.md, "Out of scope").
+#[cfg(unix)]
+#[test]
+fn moved_copies_sync_again() {
+    let env = TestEnv::new();
+    let mut logs = Logs::default();
+    let hub = Hub::start(&env, &mut logs);
+    // Stopped before the hub.
+    let mut daemons = Daemons::default();
+    let (alpha, beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
+    // Not during a sync, which a move can interrupt halfway through writing a git ref,
+    // leaving the ref's lock behind (docs/internals/copies.md, "Out of scope").
+    wait_for(&logs, "alpha to sync beta's join", || {
+        alpha.jj(&["workspace", "list"]).contains("beta/")
+    });
+    let moved = env.root().join("moved");
+    fs::rename(alpha.path(), &moved).unwrap();
+    jj_at(
+        &env,
+        &logs,
+        &alpha,
+        &moved,
+        &["commit", "-m", "after the move"],
+    );
+    wait_for(&logs, "the moved copy's work to reach beta", || {
+        try_log(&beta).is_some_and(|log| log.contains("after the move"))
+    });
+    let list = musubi_at(&env, &logs, &alpha, &moved, &["list"]);
+    let here = format!("here: {}", moved.canonicalize().unwrap().display());
+    assert!(list.contains(&here), "{list}");
+    assert!(!list.contains("not syncing"), "{list}");
+    // Away for a while, as on a disk unmounted, it syncs again when it's back.
+    settled(&env, &logs, &alpha, &moved);
+    let missing = format!("{} is missing", moved.canonicalize().unwrap().display());
+    let away = env.root().join("away");
+    fs::rename(&moved, &away).unwrap();
+    beta.write_file("b", "b");
+    beta.jj(&["commit", "-m", "while alpha is away"]);
+    wait_for(&logs, "alpha's daemon to miss it", || {
+        daemon_logged(&env, &alpha, &missing)
+    });
+    fs::rename(&away, &moved).unwrap();
+    wait_for(&logs, "the copy to sync again once it's back", || {
+        jj_at(
+            &env,
+            &logs,
+            &alpha,
+            &moved,
+            &["log", "--ignore-working-copy", "-r", "all()"],
+        )
+        .contains("while alpha is away")
+    });
+}
+
+/// A copy deleted while its daemon runs can be deleted: the daemon writes nothing there,
+/// and stops syncing it until it comes back. `musubi list` says so, and a clone made in its
+/// place, or `musubi leave` with its path, puts an end to it.
+// Moving and deleting a repository whose files the daemon has open is for Unix only
+// (docs/internals/copies.md, "Out of scope").
+#[cfg(unix)]
+#[test]
+fn deleted_copies_stop_syncing() {
+    let env = TestEnv::new();
+    let mut logs = Logs::default();
+    let hub = Hub::start(&env, &mut logs);
+    // Stopped before the hub.
+    let mut daemons = Daemons::default();
+    let (alpha, beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
+    settled(&env, &logs, &alpha, alpha.path());
+    let root = env.root();
+    let path = alpha.path().to_str().unwrap();
+    let missing = format!(
+        "{} is missing",
+        alpha.path().canonicalize().unwrap().display()
+    );
+    fs::remove_dir_all(alpha.path()).unwrap();
+    // Work announced while it's gone wakes the daemon, which writes nothing.
+    beta.write_file("b", "b");
+    beta.jj(&["commit", "-m", "while alpha is gone"]);
+    wait_for(&logs, "alpha's daemon to stop syncing it", || {
+        daemon_logged(&env, &alpha, &missing)
+    });
+    assert!(!alpha.path().exists());
+    let list = musubi_at(&env, &logs, &alpha, root, &["list"]);
+    assert!(list.contains("it's missing"), "{list}");
+    // A clone in its place takes over its entry.
+    musubi_at(&env, &logs, &alpha, root, &["clone", "alpha", path]);
+    let list = musubi_at(&env, &logs, &alpha, root, &["list"]);
+    assert!(!list.contains("not syncing"), "{list}");
+    assert!(list.contains("serving 1 repositories"), "{list}");
+    musubi_at(&env, &logs, &alpha, alpha.path(), &["daemon", "stop"]);
+    fs::remove_dir_all(alpha.path()).unwrap();
+    let out = musubi_at(&env, &logs, &alpha, root, &["leave", path]);
+    assert!(out.contains("no longer syncs the copy"), "{out}");
+    let list = musubi_at(&env, &logs, &alpha, root, &["list"]);
+    assert!(!list.contains("not syncing"), "{list}");
+}
+
+/// A directory the daemon syncs that comes to hold another repository is never synced into
+/// the first one's hive, nor written to: not a repository in no hive, nor a copy of another
+/// hive, which is synced into its own.
+// Moving and deleting a repository whose files the daemon has open is for Unix only
+// (docs/internals/copies.md, "Out of scope").
+#[cfg(unix)]
+#[test]
+fn a_replaced_copy_is_never_synced_into_its_hive() {
+    let env = TestEnv::new();
+    let mut logs = Logs::default();
+    let hub = Hub::start(&env, &mut logs);
+    // Stopped before the hub.
+    let mut daemons = Daemons::default();
+    let (alpha, beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
+    settled(&env, &logs, &alpha, alpha.path());
+    let root = env.root();
+    let path = alpha.path().to_str().unwrap();
+    // A second hive on alpha's machine.
+    let other = root.join("other");
+    jj_at(
+        &env,
+        &logs,
+        &alpha,
+        root,
+        &["git", "init", "--colocate", "other"],
+    );
+    fs::write(other.join("o"), "o").unwrap();
+    jj_at(
+        &env,
+        &logs,
+        &alpha,
+        &other,
+        &["commit", "-m", "other's work"],
+    );
+    musubi_at(&env, &logs, &alpha, &other, &["create", "other"]);
+
+    // A repository in no hive.
+    fs::rename(alpha.path(), root.join("away")).unwrap();
+    jj_at(
+        &env,
+        &logs,
+        &alpha,
+        root,
+        &["git", "init", "--colocate", path],
+    );
+    alpha.write_file("s", "s");
+    alpha.jj(&["commit", "-m", "a stranger's work"]);
+    // Work announced wakes alpha's daemon, whose watcher went with the directory moved away.
+    beta.write_file("b", "b");
+    beta.jj(&["commit", "-m", "beta's work"]);
+    wait_for(&logs, "alpha's daemon to stop syncing its path", || {
+        daemon_logged(&env, &alpha, "isn't the copy: it is not part of a hive")
+    });
+    assert!(!alpha.repo_path().join("musubi").exists());
+
+    // A copy of the other hive, which syncs with that hive from its new place.
+    fs::remove_dir_all(alpha.path()).unwrap();
+    fs::rename(&other, alpha.path()).unwrap();
+    alpha.write_file("p", "p");
+    alpha.jj(&["commit", "-m", "other's work, moved"]);
+    let here = format!("here: {}", alpha.path().canonicalize().unwrap().display());
+    wait_for(
+        &logs,
+        "alpha's daemon to sync the other hive from there",
+        || {
+            let list = musubi_at(&env, &logs, &alpha, root, &["list"]);
+            list.contains(&here) && list.contains("other  1 machine")
+        },
+    );
+    let mut sync = alpha.program(musubi());
+    sync.arg("sync").current_dir(alpha.path());
+    run(&env, &logs, sync);
+    let beta_log = log(&beta);
+    assert!(!beta_log.contains("stranger"), "{beta_log}");
+    assert!(!beta_log.contains("other's work"), "{beta_log}");
+}
+
+/// A backup restored in place over a copy is the copy, as jj sees it: the daemon opens it
+/// afresh, and watches it, so its work syncs at once.
+// Moving and deleting a repository whose files the daemon has open is for Unix only
+// (docs/internals/copies.md, "Out of scope").
+#[cfg(unix)]
+#[test]
+fn a_copy_restored_in_place_syncs_as_before() {
+    let env = TestEnv::new();
+    let mut logs = Logs::default();
+    let hub = Hub::start(&env, &mut logs);
+    // Stopped before the hub.
+    let mut daemons = Daemons::default();
+    let (alpha, beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
+    settled(&env, &logs, &alpha, alpha.path());
+    let backup = env.root().join("backup");
+    musubi_testutil::copy_tree(alpha.path(), &backup);
+    alpha.write_file("b", "b");
+    alpha.jj(&["commit", "-m", "after the backup"]);
+    wait_for(&logs, "alpha's work to reach beta", || {
+        try_log(&beta).is_some_and(|log| log.contains("after the backup"))
+    });
+    settled(&env, &logs, &alpha, alpha.path());
+    fs::remove_dir_all(alpha.path()).unwrap();
+    fs::rename(&backup, alpha.path()).unwrap();
+    // The first sync finds the directory replaced; the watcher is the new directory's after.
+    musubi_in(&env, &logs, &alpha, &["sync"]);
+    assert!(log(&alpha).contains("after the backup"));
+    alpha.write_file("r", "r");
+    alpha.jj(&["commit", "-m", "after the restore"]);
+    wait_for(&logs, "the restored copy's work to reach beta", || {
+        try_log(&beta).is_some_and(|log| log.contains("after the restore"))
+    });
+}
+
+/// A copy whose machine key is missing isn't given a new one by anything but a join, which
+/// would show it on every other machine as a second copy: it isn't synced, and says why.
+#[test]
+fn a_copy_without_its_key_is_not_synced() {
+    let env = TestEnv::new();
+    let mut logs = Logs::default();
+    let hub = Hub::start(&env, &mut logs);
+    // Stopped before the hub.
+    let mut daemons = Daemons::default();
+    let (alpha, _beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
+    let machine = alpha.repo_path().join("musubi/machine");
+    fs::remove_file(&machine).unwrap();
+    let (status, _) = status_in(&env, &logs, &alpha);
+    assert!(
+        status.contains("machine key or jj config id is missing"),
+        "{status}"
+    );
+    let err = musubi_fails(&env, &logs, &alpha, &["sync"]);
+    assert!(
+        err.contains("machine key or jj config id is missing"),
+        "{err}"
+    );
+    alpha.write_file("b", "b");
+    alpha.jj(&["commit", "-m", "without a key"]);
+    wait_for(&logs, "alpha's daemon to stop syncing it", || {
+        daemon_logged(&env, &alpha, "isn't the copy: it has no machine key")
+    });
+    assert!(!machine.exists());
+}
+
+/// A copy that leaves one hive and starts another doesn't bring the first one's copies
+/// into it as members.
+#[test]
+fn a_new_hive_doesnt_inherit_members() {
+    let env = TestEnv::new();
+    let mut logs = Logs::default();
+    let hub = Hub::start(&env, &mut logs);
+    // Stopped before the hub.
+    let mut daemons = Daemons::default();
+    let (_alpha, beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
+    musubi_in(&env, &logs, &beta, &["leave"]);
+    let out = musubi_in(&env, &logs, &beta, &["create", "other"]);
+    assert!(out.contains("Forgot 1 copies"), "{out}");
+    let list = musubi_in(&env, &logs, &beta, &["list"]);
+    assert!(list.contains("other  1 machine: beta"), "{list}");
+    let workspaces = beta.jj(&["workspace", "list"]);
+    assert!(!workspaces.contains("alpha/"), "{workspaces}");
 }
 
 /// A `file://` URL for `path`, which git, unlike for a plain path, fetches from as from any

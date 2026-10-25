@@ -29,7 +29,9 @@ musubi replicates only the repository, through jj's own code, and keeps each mac
 working copy and per-machine state its own.
 
 File syncing is still a good fit when you use one machine at a time and let the sync finish
-in between, or when you want ignored files and build output carried along too.
+in between, or when you want ignored files and build output carried along too. Don't use it
+on a repository musubi syncs as well: the file-syncing tool makes each machine's copy a copy
+of the other's files, which musubi stops syncing, rather than let them overwrite each other.
 
 ## Pushing and fetching through a git remote
 

@@ -16,9 +16,9 @@ explains hubs, hives, and copies.
 | Command | Use it to |
 | --- | --- |
 | `create [<name>]` | Start a hive from the repository you're in, for other copies to join. |
-| `join` | Add this machine's copy of a repository to the hive it belongs in. In a copy already part of a hive, make the hive again on a hub that has lost it, or on another hub given with `--hub`. |
+| `join` | Add this machine's copy of a repository to the hive it belongs in. In a copy already part of a hive, make the hive again on a hub that has lost it, or on another hub given with `--hub`. In a repository made by copying a copy's files, which musubi doesn't sync, `--original` syncs it as that copy, which must be gone. |
 | `clone <hive> <dir>` | Make a new copy of a hive on this machine. |
-| `leave` | Take the repository you're in out of its hive, telling the hive, and stop syncing it. It keeps everything it has. `--force` leaves without telling the hive, if its hub can't be reached. |
+| `leave` | Take the repository you're in out of its hive, telling the hive, and stop syncing it. It keeps everything it has. `--force` leaves without telling the hive, if its hub can't be reached. `leave <path>` stops syncing a copy that was at `<path>` and is gone. |
 | `forget <machine>` | Forget another machine's copy that went away without leaving. Name the machine as its working copies are named here: `laptop` for `laptop/default@`, or `laptop-1a2b` for `laptop-1a2b/default@`. The name `musubi list` gives it also works, if no other machine has that name. |
 
 `create`, `join`, and `clone` take:
@@ -52,13 +52,14 @@ go to standard error, as jj's do.
 `musubi status -T 'json(self) ++ "\n"'` prints one JSON object, with times as seconds since
 the Unix epoch, and durations in seconds. A value that can't be told, or doesn't apply, is
 `null`, where `-T`'s keywords give an empty string or false. The keyword `problem` is
-`hive.error` here, `status` comes from `hive.last_sync`, and `daemon_running` is
-`daemon.running`.
+`not_synced` here, else `hive.error`; `status` comes from `hive.last_sync`, and
+`daemon_running` is `daemon.running`.
 
 | Field | Value |
 | --- | --- |
 | `repository` | The workspace the current directory is in, or `null` outside a jj repository. |
 | `hive` | The repository's part in its hive, or `null` outside one: `name`, `id`, `hub`, `machine` (this machine's name in the hive), `head` (the hive's head, as of the last sync), `last_sync`, `error` (why its syncing fails), `sent` (whether the hub has all this machine's work, as far as the last sync tells), `forgotten`, `working_copies` (each with `name`, `commit`, `change` and `description`), and `copies` (each with `machine`, `this`, `last_used`, and `forget_after`, `null` for never). |
+| `not_synced` | Why musubi doesn't sync the repository, though it has a hive's record, as when it was made by copying a copy's files, or why that can't be told (see [Move, copy or restore a repository](../guides/manage.md#move-copy-or-restore-a-repository)); `hive` is `null` then. `null` otherwise. |
 | `default_hub` | The hub commands use without `--hub`, or `null`. |
 | `daemon` | `running`, or `null` with `error` saying why that can't be told; `pid`; `serving` (whether it serves this repository); `served` (how many repositories it serves); `at_login`; `socket`; and `log`. |
 

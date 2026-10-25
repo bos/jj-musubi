@@ -126,6 +126,6 @@ jobs:
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
           tool: cargo-nextest
-      - run: cargo nextest run -p musubi-core -p musubi-jj --locked -E "test(/conformance$/)"
+      - run: cargo nextest run -p musubi-core -p musubi-jj -p jj-musubi --locked -E "test(/conformance$/)"
         env:
           MUSUBI_ORACLE: ${{ github.workspace }}/formal/.lake/build/bin/oracle

@@ -1,9 +1,10 @@
 //! What musubi records, and what the user sets.
 //!
-//! - Each node keeps its hive membership in `.jj/repo/musubi/hive.toml`, beside the
-//!   repository it describes, so moving or copying the repository keeps it consistent.
-//! - `state.toml` in the user's musubi state directory (see [`state_dir`]) lists the
-//!   repositories the daemon serves, and the hub this machine saved as its default. musubi
+//! - Each copy keeps its record, its membership in a hive, in `.jj/repo/musubi/hive.toml`,
+//!   beside the repository it describes, so it moves with the repository. A duplicate of the
+//!   repository carries it too, which [`crate::copy`] tells apart from the copy.
+//! - `state.toml` in the user's musubi state directory (see [`state_dir`]) lists the copies
+//!   the daemon serves, one entry each, and the hub this machine saved as its default. musubi
 //!   writes it; it is the source of truth: the daemon reads it when it starts, and commands
 //!   that change it tell a running daemon.
 //! - What the user sets lives in jj's user config, under `musubi.` (see [`Settings`]).
@@ -19,9 +20,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::repo::Located;
-
-/// A node's membership in a hive.
+/// A copy's record: its membership in a hive.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HiveConfig {
     pub hive: Uuid,
@@ -34,6 +33,23 @@ pub struct HiveConfig {
     pub hub: String,
     /// This node's name, used in status output.
     pub node: String,
+    /// The repository's jj config-id when it joined, which jj changes in a duplicate
+    /// ([`crate::copy`]).
+    pub config_id: String,
+    /// Whether the copy is still part of the hive. A record outlives its membership, so
+    /// that a copy whose hive was removed knows which hive that was.
+    pub state: Membership,
+}
+
+/// Whether a copy is part of the hive its record names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Membership {
+    Joined,
+    /// It left, with `musubi leave`.
+    Left,
+    /// The hub said the hive was removed.
+    Removed,
 }
 
 impl HiveConfig {
@@ -44,9 +60,12 @@ impl HiveConfig {
     pub fn load(repo_path: &Path) -> anyhow::Result<Option<Self>> {
         let path = Self::path(repo_path);
         match fs::read_to_string(&path) {
-            Ok(text) => Ok(Some(
-                toml::from_str(&text).with_context(|| format!("{path:?}"))?,
-            )),
+            Ok(text) => Ok(Some(toml::from_str(&text).with_context(|| {
+                format!(
+                    "{path:?}, perhaps written by an older musubi; delete it and run `musubi \
+                     join` to join again"
+                )
+            })?)),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(err) => Err(err).with_context(|| format!("reading {path:?}")),
         }
@@ -80,6 +99,10 @@ impl HiveConfig {
         self.name.clone().unwrap_or_else(|| self.hive.to_string())
     }
 
+    pub fn joined(&self) -> bool {
+        self.state == Membership::Joined
+    }
+
     /// Records `name` as the hive's, as its hub calls it now, unless the repository at
     /// `repo_path` has it already, or is no longer part of this hive through this hub, as
     /// after a leave or a join meanwhile. The name is only for showing while the hub is out of
@@ -91,7 +114,11 @@ impl HiveConfig {
         let Ok(Some(now)) = Self::load(repo_path) else {
             return;
         };
-        if now.hive != self.hive || now.hub != self.hub || now.name.as_deref() == Some(name) {
+        if !now.joined()
+            || now.hive != self.hive
+            || now.hub != self.hub
+            || now.name.as_deref() == Some(name)
+        {
             return;
         }
         let renamed = Self {
@@ -109,10 +136,22 @@ pub struct UserState {
     /// machine, that hub.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hub: Option<String>,
-    /// The workspace roots of the repositories the daemon serves, one for each repository,
-    /// whichever of its workspaces it was first served from.
+    /// The copies the daemon serves, one entry a key.
     #[serde(default)]
-    pub repos: Vec<PathBuf>,
+    pub copies: Vec<Entry>,
+}
+
+/// A copy the daemon serves: which key, in which hive, and where. What makes a repository the
+/// copy is in [`crate::copy`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Entry {
+    /// The copy's machine key.
+    pub key: String,
+    pub hive: Uuid,
+    /// The repository's jj config-id, as its record has it.
+    pub config_id: String,
+    /// The workspace root it was joined in, or last found at.
+    pub path: PathBuf,
 }
 
 /// What the user sets for musubi in jj's config. These are a machine's, not a repository's,
@@ -149,12 +188,6 @@ fn expand_home(hub: &str) -> String {
         (Some(rest), Ok(home)) => home.join(rest).display().to_string(),
         _ => hub.to_owned(),
     }
-}
-
-/// Whether `workspace` is a workspace of the repository whose `.jj/repo` directory is
-/// `repo_path`.
-fn is_workspace_of(workspace: &Path, repo_path: &Path) -> bool {
-    Located::find(workspace).is_ok_and(|located| located.repo_path == repo_path)
 }
 
 /// Writes `path` so that only its owner can read it, and so that a reader finds either the
@@ -217,43 +250,47 @@ impl UserState {
         Ok(state)
     }
 
-    /// Lists the repository `located` is in, unless it is listed already, through this
-    /// workspace or another.
-    pub fn add_repo(located: &Located) -> anyhow::Result<()> {
-        let root = located.workspace_root.canonicalize()?;
-        Self::update(|state| {
-            if state.served_workspace(&located.repo_path).is_none() {
-                state.repos.push(root);
-            }
-        })?;
-        Ok(())
+    /// The entry for `key`, if the daemon serves it.
+    pub fn entry(&self, key: &str) -> Option<&Entry> {
+        self.copies.iter().find(|entry| entry.key == key)
     }
 
-    /// Stops listing the repository `located` is in, through whichever workspace.
-    pub fn remove_repo(located: &Located) -> anyhow::Result<()> {
+    /// Makes `entry` the one for its key: in place of the key's entry, and of any other at
+    /// its path, whose copy can no longer be found there.
+    pub fn put_entry(entry: Entry) -> anyhow::Result<()> {
         Self::update(|state| {
             state
-                .repos
-                .retain(|workspace| !is_workspace_of(workspace, &located.repo_path));
+                .copies
+                .retain(|other| other.key != entry.key && other.path != entry.path);
+            state.copies.push(entry);
         })?;
         Ok(())
     }
 
-    /// The workspace the daemon serves the repository whose `.jj/repo` directory is
-    /// `repo_path` through, if it serves it: the daemon knows a repository by that one.
-    pub fn served_workspace(&self, repo_path: &Path) -> Option<PathBuf> {
-        self.repos
-            .iter()
-            .find(|workspace| is_workspace_of(workspace, repo_path))
-            .cloned()
+    /// Moves `entry`, as it was read, to `path`, where its copy was found, in place of any
+    /// other entry there: unless something changed it meanwhile, as a command can. Returns
+    /// whether it moved it.
+    pub fn move_entry(entry: &Entry, path: PathBuf) -> anyhow::Result<bool> {
+        let mut moved = false;
+        Self::update(|state| {
+            if state.entry(&entry.key) == Some(entry) {
+                state
+                    .copies
+                    .retain(|other| other.key != entry.key && other.path != path);
+                state.copies.push(Entry {
+                    path,
+                    ..entry.clone()
+                });
+                moved = true;
+            }
+        })?;
+        Ok(moved)
     }
 
-    /// The workspace to name the repository `located` is in by to the daemon: the one it
-    /// serves it through, else `located`'s own.
-    pub fn daemon_workspace(located: &Located) -> anyhow::Result<PathBuf> {
-        Ok(Self::load()?
-            .served_workspace(&located.repo_path)
-            .unwrap_or_else(|| located.workspace_root.clone()))
+    /// Stops serving `key`'s copy.
+    pub fn remove_entry(key: &str) -> anyhow::Result<()> {
+        Self::update(|state| state.copies.retain(|entry| entry.key != key))?;
+        Ok(())
     }
 
     /// Saves `hub` as this machine's default hub, unless it saved one before. Returns whether
@@ -284,6 +321,17 @@ impl UserState {
                  it as the default, and musubi.hub in jj's config chooses one)",
             ),
         }
+    }
+
+    /// The records of the copies the daemon serves, leaving out copies that are gone or
+    /// have left.
+    pub fn memberships(&self) -> Vec<HiveConfig> {
+        self.copies
+            .iter()
+            .filter_map(|entry| crate::repo::Located::find(&entry.path).ok())
+            .filter_map(|located| HiveConfig::load(&located.repo_path).ok().flatten())
+            .filter(HiveConfig::joined)
+            .collect()
     }
 
     /// Every hub this machine knows of, `default` first, given its copies' hives.

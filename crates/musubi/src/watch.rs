@@ -1,6 +1,6 @@
 //! Notices new local operations by watching `.jj/repo/op_heads/heads`.
 //!
-//! Every jj operation, from any process, ends by adding a file there, so a change in that
+//! Every jj operation, from any process, ends by adding a file there, so a file added to that
 //! directory is the earliest moment a new operation is visible. Notifications are only
 //! hints: the daemon also polls, and filesystem events can be dropped or coalesced.
 
@@ -21,10 +21,18 @@ impl OpHeadsWatcher {
         let (sender, events) = mpsc::unbounded_channel();
         let mut watcher =
             notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                // On Linux, inotify reports reads too, and every sync reads the directory:
-                // only changes are news.
+                // Only a file added is news: inotify reports reads too, and every sync reads
+                // the directory; and files removed, as jj removes heads an operation
+                // replaces, are also what `rm -rf` of the repository looks like, which a sync
+                // would race, writing into what it deletes. A backend that can't say what
+                // happened is believed.
                 if let Ok(event) = event
-                    && !matches!(event.kind, notify::EventKind::Access(_))
+                    && matches!(
+                        event.kind,
+                        notify::EventKind::Create(_)
+                            | notify::EventKind::Any
+                            | notify::EventKind::Other
+                    )
                 {
                     // The daemon stopped listening; nothing to notify.
                     sender.send(()).ok();

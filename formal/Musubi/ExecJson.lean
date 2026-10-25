@@ -5,6 +5,7 @@ only; no protocol logic.
 import Lean.Data.Json
 import Musubi.Exec
 import Musubi.PresenceExec
+import Musubi.Copies
 
 namespace Musubi.Exec.Json
 
@@ -174,6 +175,68 @@ def presenceReply (ops : List Presence.EOp) : Json :=
   Json.mkObj [("ok", Json.bool true),
     ("presence", Json.arr ((List.range ops.length).map atOp).toArray)]
 
+/-! ## Copies (`Copies.lean`) -/
+
+/-- Field `k` of `j`, `none` if it is missing or null. -/
+def getOpt {α : Type} (j : Json) (k : String) (f : Json → Except String α) :
+    Except String (Option α) :=
+  match j.getObjVal? k with
+  | .error _ | .ok .null => pure none
+  | .ok v => some <$> f v
+
+def decodeMembership : String → Except String Copies.Membership
+  | "joined" => pure .joined
+  | "left" => pure .left
+  | "removed" => pure .removed
+  | m => throw s!"unknown state {m}"
+
+def decodeRecord (j : Json) : Except String Copies.Record := do
+  pure { hive := ← getNat j "hive", cid := ← getNat j "cid",
+         state := ← decodeMembership (← j.getObjValAs? String "state") }
+
+def decodeRepo (j : Json) : Except String Copies.Repo := do
+  pure { key := ← getOpt j "key" (·.getNat?), record := ← getOpt j "record" decodeRecord,
+         cid := ← getOpt j "cid" (·.getNat?) }
+
+/-- An entry's path decides neither `standing` nor `check`: 0 if not given. -/
+def decodeEntry (j : Json) : Except String Copies.Entry := do
+  pure { key := ← getNat j "key", hive := ← getNat j "hive", cid := ← getNat j "cid",
+         path := (← getOpt j "path" (·.getNat?)).getD 0 }
+
+/-- A case: a repository, this machine's entry for its key, and, for `refine`, whether the
+entry's path holds the copy the entry names and whether it is the repository's directory
+(each false if not given). -/
+structure CopiesCase where
+  repo : Copies.Repo
+  entry : Option Copies.Entry
+  elsewhereHolds : Bool
+  sameDirectory : Bool
+
+def decodeCase (j : Json) : Except String CopiesCase := do
+  pure { repo := ← decodeRepo (← j.getObjVal? "repo"), entry := ← getOpt j "entry" decodeEntry,
+         elsewhereHolds := (← getOpt j "elsewhereHolds" (·.getBool?)).getD false,
+         sameDirectory := (← getOpt j "sameDirectory" (·.getBool?)).getD false }
+
+def standingStr : Copies.Standing → String
+  | .outside => "outside"
+  | .removed => "removed"
+  | .copy => "copy"
+  | .broken => "broken"
+  | .duplicate => "duplicate"
+  | .unknown => "unknown"
+
+/-- For each case, the repository's standing given the entry, that standing `refine`d, and, if
+there is an entry, whether the repository passes its check. -/
+def copiesReply (cases : List CopiesCase) : Json :=
+  let answer (c : CopiesCase) : Json :=
+    let st := Copies.standing c.repo c.entry
+    let standings := [("standing", Json.str (standingStr st)),
+      ("refined", Json.str (standingStr (Copies.refine st c.elsewhereHolds c.sameDirectory)))]
+    match c.entry with
+    | none => Json.mkObj standings
+    | some e => Json.mkObj (standings ++ [("check", Json.bool (Copies.check e c.repo))])
+  Json.mkObj [("ok", Json.bool true), ("copies", Json.arr (cases.map answer).toArray)]
+
 /-! ## Liveness (`Exec.lean`, "The liveness measure") -/
 
 /-- The session state's measures, and whether it has converged. -/
@@ -229,6 +292,10 @@ def handle (sess : Session) (line : String) : Json × Session :=
       | .ok ops =>
         if Presence.EHist.orderedB ops then (presenceReply ops, sess)
         else (errReply "presence: an operation's parents must come before it", sess)
+    | .ok "copies" =>
+      match j.getObjValAs? (Array Json) "cases" >>= fun cs => cs.toList.mapM decodeCase with
+      | .error e => (errReply s!"bad request: {e}", sess)
+      | .ok cases => (copiesReply cases, sess)
     | .ok op => (errReply s!"bad request: unknown op {op}", sess)
 
 end Musubi.Exec.Json

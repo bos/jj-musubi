@@ -77,7 +77,9 @@ half a minute, or the next time `musubi list` runs there.
 machine's copy leaves the hive as it next syncs, as with `musubi leave`, keeping everything it
 has. The hub keeps the hive's data in `removed/` for a day, then only an empty directory, as a
 record that the hive was removed, so that no copy brings it back. To share the repository
-again, start a new hive with `musubi create`, and run `musubi join` in the other copies.
+again, start a new hive with `musubi create`, and run `musubi join --hive <name>` in the other
+copies: a plain `musubi join` in a copy whose hive was removed says so, rather than joining
+another hive.
 
 ## Take a repository or machine out
 
@@ -154,6 +156,33 @@ machine together:
 
 Upgrade `jj` with musubi, not before: each release of musubi works with one release of jj, and
 refuses operations that a newer jj wrote.
+
+## Move, copy or restore a repository
+
+musubi follows a copy you move, with `mv`, on one disk or to another: once jj or musubi runs
+in it at its new place, the daemon syncs it there.
+
+A repository made by copying a copy's files, with `cp -a`, `rsync` or a backup, is a
+duplicate. It carries the copy's identity in the hive, and two repositories syncing as one
+would overwrite each other's working copy. So musubi doesn't sync a duplicate: `musubi status`
+in it says it isn't synced, and `musubi join`, `sync` and `leave` there refuse. Use it as a
+plain jj repository, or make another copy with `musubi clone`.
+
+Some repositories are the copy, as far as you know, though musubi takes them for a
+duplicate: a copy moved by copying it and deleting the original, or restored from a backup
+onto a new machine. Once the original is gone, `musubi join --original` syncs it as the copy.
+A backup restored in place, over the copy, is the copy already: it syncs as before, and
+fetches the work it lacks.
+
+A copy that is deleted, or on a disk that isn't mounted, stops syncing, and musubi writes
+nothing there; it syncs again if it comes back. `musubi list` shows it as "not syncing",
+saying why, and `musubi leave <path>` stops looking for it. The other machines show it until it's
+forgotten. If the directory comes to hold another repository, musubi stops syncing it too,
+and writes nothing there.
+
+Run musubi as the user who owns the repository: it refuses another user's, as under `sudo`.
+And don't let a file-syncing tool, such as Dropbox or Syncthing, sync a copy too: see
+[Comparison](../comparison.md#file-syncing-dropbox-syncthing-icloud-rsync-nfs).
 
 ## Replace or move a hub
 

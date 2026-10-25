@@ -13,6 +13,7 @@ import Musubi.RegressScenario
 import Musubi.Refs
 import Musubi.Presence
 import Musubi.PresenceExec
+import Musubi.Copies
 
 open Musubi
 
@@ -152,3 +153,14 @@ open Musubi
 #print axioms Presence.Hist.umax_merge
 #print axioms Presence.EHist.presentB_iff
 #print axioms Presence.EHist.mem_latestB
+-- Copies, duplicates and moves
+#print axioms Copies.right_hive
+#print axioms Copies.duplicates_refused
+#print axioms Copies.only_join_makes_keys
+#print axioms Copies.moves_followed
+#print axioms Copies.daemon_writes_nothing
+#print axioms Copies.jj_records_path
+#print axioms Copies.refine_ne_copy
+#print axioms Copies.join_refuses_duplicate
+#print axioms Copies.duplicate_taken_for_moved
+#print axioms Copies.move_taken_for_duplicate

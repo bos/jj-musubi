@@ -99,6 +99,48 @@ and the other machines fill it. See
 Someone removed the hive with `musubi hub remove`, and this copy has left it, keeping
 everything it has. To share the repository again, start a new hive with `musubi create`.
 
+### "this repository's hive, app, was removed from its hub; ..."
+
+A plain `musubi join`, in a copy whose hive was removed, doesn't join another hive whose
+history matches. Choose one with `musubi join --hive <name>`, or start a new one with
+`musubi create`.
+
+## Copies, moves and duplicates
+
+See [Move, copy or restore a repository](guides/manage.md#move-copy-or-restore-a-repository).
+
+### "this repository was made from the files of a copy in hive app, ..."
+
+The repository is a duplicate, made by copying a copy's files, as with `cp -a`, `rsync` or a
+backup, so musubi doesn't sync it: two repositories syncing as one would overwrite each
+other's working copy. When the message names the copy's path, that copy is on this machine.
+Use the duplicate as a plain jj repository, or make another copy with `musubi clone`. If it is
+the copy, moved here by copying it and deleting the original, or restored from a backup onto
+this machine, and the original is gone, `musubi join --original` syncs it as the copy.
+
+### "the copy of this repository's key is at ..."
+
+`musubi join --original` refuses while the copy it would replace is still there. Run it only
+once that copy is gone.
+
+### "this repository's record says it is part of hive app, but its machine key or jj config id is missing; ..."
+
+Files musubi or jj keeps in `.jj/repo` were deleted. musubi doesn't make the copy a new
+identity, which the other machines would show as a second copy: make another copy with
+`musubi clone`.
+
+### "this repository belongs to another user (uid ...), not this one (uid ...)"
+
+musubi ran as a user who doesn't own the repository, as under `sudo`. Run it as the owner.
+
+### `musubi list` shows a copy "not syncing: ..."
+
+The copy was deleted, moved, or is on a disk that isn't mounted, or its directory now holds
+another repository. musubi writes nothing there meanwhile. A copy moved with `mv` syncs again
+once jj or musubi runs in it; one that comes back syncs again by itself. If it's gone,
+`musubi leave <path>` stops looking for it, and `musubi forget` on another machine stops the
+others showing it.
+
 ### "incompatible peer: protocol ... but this is protocol ..."
 
 This machine and the hub run different releases of musubi, which can't talk to each other
@@ -311,9 +353,12 @@ see this machine's work once you run `musubi sync`.
 
 ### "Warning: The daemon doesn't serve this repository."
 
-The daemon runs, but doesn't know of this repository, as when musubi's state directory was
-deleted or `MUSUBI_STATE_DIR` changed. `musubi join` in the repository has it serve the
-repository again.
+The daemon runs, but hasn't started serving this repository yet, as just after `musubi join`
+while the daemon restarts. If it stays this way, `musubi join` in the repository has it serve
+the repository again. If musubi's state directory was deleted, or `MUSUBI_STATE_DIR` changed,
+`musubi status` says the repository was made from a copy's files instead: `musubi join
+--original` syncs it again, as the copy (see [Move, copy or restore a
+repository](guides/manage.md#move-copy-or-restore-a-repository)).
 
 ## What `musubi top` reports
 

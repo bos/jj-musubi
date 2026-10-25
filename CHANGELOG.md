@@ -6,6 +6,25 @@ change the protocol, so run the same release on the hub and every machine (see
 
 ## Unreleased
 
+- musubi tells a copy from a repository made by copying its files, with `cp -a`, `rsync` or a
+  backup, and doesn't sync the duplicate, where two repositories synced as one machine and
+  overwrote each other's working copy. `musubi join --original` syncs a repository as the
+  copy it was made from, once that is gone, as after restoring a backup onto a new machine.
+  See [Move, copy or restore a repository](docs/guides/manage.md#move-copy-or-restore-a-repository).
+- The daemon follows a copy moved with `mv`, once jj runs in it. It stops syncing a copy that
+  is deleted or missing, or whose directory comes to hold another repository, writing
+  nothing there, where it retried forever and wrote into whatever it found; a directory
+  swapped for a copy of another hive could put each hive's work in the other. `musubi list`
+  lists such copies, and `musubi leave <path>` stops syncing one. The daemon no longer keeps
+  the directory it was started in, whose deletion stopped every repository on the machine
+  syncing.
+- A copy whose hive was removed remembers it: a plain `musubi join` says so, where it could
+  join another hive whose history matched. `hive.toml` is kept, recording whether the copy
+  joined, left, or its hive was removed.
+- A copy that joins or starts a hive other than the one its history came from forgets the
+  other copies that history brings, which the new hive used to list as members.
+- musubi refuses to run in a repository another user owns, as under `sudo`, which left files
+  the owner couldn't read.
 - `musubi status` is a command of its own, no longer another name for `musubi list`. It shows
   what musubi does with the repository you're in: its hive, hub and machine name, its last
   sync, whether the hub has this machine's latest work, every machine's working copies, each
@@ -118,6 +137,9 @@ change the protocol, so run the same release on the hub and every machine (see
 
   See [Configuration](docs/reference/configuration.md#settings).
 - The hub and machines talk differently, so upgrade the hub and every machine together.
+- On upgrading: `hive.toml` and `state.toml` have changed, and the daemon serves nothing
+  until each copy joins again. On each machine, run `musubi daemon restart`, then in each
+  copy delete `.jj/repo/musubi/hive.toml` and run `musubi join`.
 
 ## 0.1.0
 

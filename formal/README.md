@@ -11,8 +11,10 @@ other terms are those of [design.md, "Vocabulary"](../docs/internals/design.md#v
   view"](../docs/internals/design.md#per-machine-state-in-a-replicated-view)).
 - Which copies a hive shows, one copy being one machine's repository (`Musubi/Presence.lean`;
   [design.md, "Copies that go away"](../docs/internals/design.md#copies-that-go-away)).
+- Which repository on a machine is the copy of a key, and which a duplicate made of its files
+  (`Musubi/Copies.lean`; [copies.md](../docs/internals/copies.md)).
 
-The last three are separate models, independent of the protocol model's state.
+The last four are separate models, independent of the protocol model's state.
 
 No proof is left unfinished (Lean's `sorry`) and the model adds no axioms. Every main theorem
 depends only on Lean's standard `propext`, `Classical.choice` and `Quot.sound`, some on fewer;
@@ -67,9 +69,11 @@ is `formal/.lake/build/bin/oracle`.
 | `Musubi/Refs.lean` | Per-machine refs, for one git ref: imports, exports, merges, conflicted remote bookmarks, and `jj undo` and `jj op restore`. |
 | `Musubi/Presence.lean` | Which copies a hive shows. |
 | `Musubi/PresenceExec.lean` | The presence rule on a finite history, executable, for the oracle. |
+| `Musubi/Copies.lean` | Which repository is the copy of a key: musubi's decisions, jj's config-id rule, and a machine's repositories moved, copied, deleted and replaced. |
 | `Musubi/Axioms.lean` | `#print axioms` for every main theorem. |
-| `Oracle.lean` | The `oracle` executable: a stdin/stdout loop around `ExecJson.handle`, which also answers measure, upload and presence requests. |
+| `Oracle.lean` | The `oracle` executable: a stdin/stdout loop around `ExecJson.handle`, which also answers measure, upload, presence and copies requests. |
 | `test/smoke.jsonl`, `test/smoke.expected`, `test/run_smoke.sh` | The oracle smoke test. |
+
 
 ## Correspondence with protocol.md
 

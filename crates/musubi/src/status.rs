@@ -25,6 +25,7 @@ use musubi_jj::node::NodeRepo;
 use crate::config::HiveConfig;
 use crate::config::UserState;
 use crate::control;
+use crate::copy;
 use crate::daemon;
 use crate::login;
 use crate::repo::Located;
@@ -36,8 +37,12 @@ use crate::ui::Ui;
 pub struct Report {
     /// The jj workspace the directory is in, and its repository, if it is in one.
     pub located: Option<Located>,
-    /// The repository's hive, if it is part of one.
+    /// The repository's hive, if it is part of one, as the copy musubi syncs.
     pub hive: Option<Hive>,
+    /// Why musubi doesn't sync the repository, though its record says it is part of a hive
+    /// (it was made from a copy's files, say: docs/internals/copies.md), or why that can't
+    /// be told; and what to do.
+    pub not_synced: Option<copy::NotTheCopy>,
     /// The hub a command uses when not given `--hub`.
     pub default_hub: Option<String>,
     pub daemon: Daemon,
@@ -104,26 +109,50 @@ impl Report {
         let state = UserState::load().unwrap_or_default();
         let default_hub = state.default_hub().ok().flatten();
         let located = Located::find(start).ok();
-        let config = located
-            .as_ref()
-            .and_then(|located| HiveConfig::load(&located.repo_path).ok().flatten());
         let (mut daemon, served) = Daemon::gather(socket);
-        let hive = located.as_ref().zip(config).map(|(located, config)| {
-            let mine = served.iter().find(|repo| {
-                Located::find(&repo.workspace)
-                    .is_ok_and(|other| other.repo_path == located.repo_path)
-            });
-            if daemon.running == Ok(true) {
-                daemon.serving = Some(mine.is_some());
-            }
-            let sync = mine
-                .map(|repo| repo.status.clone())
-                .or_else(|| daemon::Status::load(&located.repo_path));
-            Hive::gather(located, config, sync)
+        // What the repository is to musubi, before anything opens it, which would give it a
+        // key if it had none; and not as another user, as whom jj could write to it.
+        let found = located.as_ref().map(|located| {
+            copy::check_owner(&located.repo_path)?;
+            let found = copy::Found::resolve(located)?;
+            let entry = found.key.as_deref().and_then(|key| state.entry(key));
+            let standing = copy::standing_of(located, &found, entry);
+            Ok::<_, anyhow::Error>((found.clone(), entry.cloned(), standing))
         });
+        let mut not_synced = None;
+        let mut hive = None;
+        if let Some(Err(err)) = &found {
+            not_synced = Some(copy::NotTheCopy {
+                why: format!("{err:#}"),
+                what_to_do: None,
+            });
+        }
+        if let (Some(located), Some(Ok((found, entry, standing)))) = (&located, found) {
+            match (standing, found.record, &entry) {
+                (copy::Standing::Copy, Some(config), Some(entry)) => {
+                    let mine = served.iter().find(|repo| repo.key == entry.key);
+                    if daemon.running == Ok(true) {
+                        daemon.serving = Some(mine.is_some());
+                    }
+                    let sync = mine
+                        .map(|repo| repo.status.clone())
+                        .or_else(|| daemon::Status::load(&located.repo_path));
+                    hive = Some(Hive::gather(located, config, sync));
+                }
+                (copy::Standing::Outside, _, _) => {}
+                (standing, record, entry) => {
+                    not_synced = Some(copy::not_the_copy(
+                        standing,
+                        record.as_ref(),
+                        entry.as_ref(),
+                    ));
+                }
+            }
+        }
         Self {
             located,
             hive,
+            not_synced,
             default_hub,
             daemon,
         }
@@ -151,6 +180,7 @@ impl Report {
                 .as_ref()
                 .map(|located| located.workspace_root.to_string_lossy()),
             "hive": self.hive.as_ref().map(Hive::to_json),
+            "not_synced": self.not_synced.as_ref().map(|not| &not.why),
             "default_hub": self.default_hub,
             "daemon": self.daemon.to_json(),
         })
@@ -161,6 +191,19 @@ impl Report {
             writeln!(ui.stdout(), "This directory is not in a jj repository.")?;
             return self.print_machine(ui);
         };
+        if let Some(not) = &self.not_synced {
+            // As a sentence of its own.
+            let mut why = not.why.clone();
+            if let Some(first) = why.get_mut(..1) {
+                first.make_ascii_uppercase();
+            }
+            writeln!(ui.stdout().labeled("problem"), "{why}.")?;
+            self.print_machine(ui)?;
+            if let Some(advice) = &not.what_to_do {
+                writeln!(ui.hint(), "{advice}.")?;
+            }
+            return Ok(());
+        }
         let Some(hive) = &self.hive else {
             writeln!(
                 ui.stdout(),
@@ -591,8 +634,10 @@ fn language(settings: &UserSettings, cwd: &Path) -> Language {
     });
     keyword(&mut language, "problem", |report| {
         report
-            .sync()
-            .and_then(|sync| sync.error.clone())
+            .not_synced
+            .as_ref()
+            .map(|not| not.why.clone())
+            .or_else(|| report.sync().and_then(|sync| sync.error.clone()))
             .unwrap_or_default()
     });
     keyword(&mut language, "sent", |report| {

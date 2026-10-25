@@ -132,6 +132,14 @@ Every machine keeps every operation and commit of its hive, so the daemon cleans
 no longer reads, none less than two weeks old. It runs once enough has built up, at most once
 a week, and not on battery. Unlike `jj util gc`, it deletes no git object.
 
+## Moving and copying repositories
+
+A copy is the repository that joined, wherever you move it: the daemon follows it. A
+repository made by copying a copy's files is a duplicate, which musubi doesn't sync, since
+two repositories syncing as one would overwrite each other's working copy. See [Move, copy
+or restore a repository](guides/manage.md#move-copy-or-restore-a-repository), and for the
+cases musubi handles and leaves out, [docs/internals/copies.md](internals/copies.md).
+
 ## Operation ids differ between machines
 
 Each machine records its own git refs and workspaces in its operations, so the same operation

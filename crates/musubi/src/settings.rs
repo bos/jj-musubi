@@ -62,3 +62,27 @@ pub fn repo_config_path(repo_path: &Path) -> anyhow::Result<Option<PathBuf>> {
     env.repo_config_path(&ui)
         .map_err(|err| anyhow::anyhow!("finding the repo config: {err:?}"))
 }
+
+/// [`repo_config_path`], but `None` for a repository without a config id, which only joining
+/// gives it.
+pub fn existing_repo_config_path(repo_path: &Path) -> anyhow::Result<Option<PathBuf>> {
+    if !repo_path.join("config-id").exists() {
+        return Ok(None);
+    }
+    repo_config_path(repo_path)
+}
+
+/// The `.jj/repo` directory jj last saw the repository with `config_id` at: jj records it
+/// for each repository it opens, under the user's jj config directory, and when it finds a
+/// repository moved, records where it went.
+pub fn path_of_config_id(config_id: &str) -> Option<PathBuf> {
+    let dir = ConfigEnv::from_environment()
+        .repo_configs_root_dir()?
+        .join(config_id);
+    let metadata = jj_lib::secure_config::read_metadata(&dir).ok()?;
+    Some(
+        jj_lib::secure_config::metadata_path(&metadata)
+            .ok()??
+            .to_owned(),
+    )
+}

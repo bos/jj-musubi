@@ -215,8 +215,17 @@ impl ViewCodec {
 
     fn views_dir(&self) -> io::Result<std::path::PathBuf> {
         let views = self.dir.path().join("views");
-        // Made again if something cleaned it away.
-        fs::create_dir_all(&views)?;
+        // Made again if something cleaned it away, its scratch directory too, as another
+        // process does after a quiet day; but not the directories above them, which
+        // are gone only if the repository is, as when it was moved during a sync: making
+        // them again would leave a stub of it behind, which jj would take for the
+        // repository, and the moved one for a copy of it.
+        for dir in [self.dir.path(), &views] {
+            match fs::create_dir(dir) {
+                Err(err) if err.kind() != io::ErrorKind::AlreadyExists => return Err(err),
+                _ => {}
+            }
+        }
         Ok(views)
     }
 

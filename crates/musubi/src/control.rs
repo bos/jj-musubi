@@ -37,7 +37,7 @@ use crate::socket::uid;
 
 /// Changes whenever the control service does, so that a command and a daemon from
 /// different builds notice each other.
-pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "/control-1");
+pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "/control-2");
 
 /// What a successful sync reached: the hub's head.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -49,7 +49,8 @@ pub struct Synced {
 /// One repository the daemon serves.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RepoStatus {
-    pub workspace: PathBuf,
+    /// The copy's machine key.
+    pub key: String,
     pub status: Status,
 }
 
@@ -57,13 +58,14 @@ pub struct RepoStatus {
 pub trait Control {
     /// The daemon's [`VERSION`].
     async fn version() -> String;
-    /// Starts serving a repository now, and returns once it has synced (or failed to: it
-    /// keeps trying).
-    async fn add(workspace: PathBuf) -> Result<Synced, String>;
-    /// Stops serving a repository.
-    async fn remove(workspace: PathBuf) -> Result<(), String>;
-    /// Syncs a repository the daemon serves now.
-    async fn sync(workspace: PathBuf) -> Result<Synced, String>;
+    /// Starts serving a repository now, starting over if it serves it already, and returns
+    /// once it has synced (or failed to: it keeps trying).
+    /// The copy is the one state.toml's entry for its machine key names.
+    async fn add(key: String) -> Result<Synced, String>;
+    /// Stops serving a copy, by its machine key.
+    async fn remove(key: String) -> Result<(), String>;
+    /// Syncs a copy the daemon serves now, by its machine key.
+    async fn sync(key: String) -> Result<Synced, String>;
     async fn status() -> Vec<RepoStatus>;
     /// Stops the daemon.
     async fn stop();

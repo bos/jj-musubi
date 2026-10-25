@@ -1,8 +1,12 @@
-//! The node daemon: one per user, serving every repository in state.toml, each on a
-//! thread of its own that syncs whenever its op heads change, a head announcement
-//! arrives, the poll timer fires, or a command asks. Commands reach it over the control
-//! socket (see [`crate::control`]); `add` starts serving a newly joined repository without
-//! a restart.
+//! The node daemon: one per user, serving every copy in state.toml, each on a thread of its
+//! own that syncs whenever its op heads change, a head announcement arrives, the poll timer
+//! fires, or a command asks. Commands reach it over the control socket (see
+//! [`crate::control`]); `add` starts serving a newly joined copy without a restart.
+//!
+//! Before each sync it checks that the entry's path still holds the copy the entry names
+//! ([`crate::copy`]). If not, it suspends the entry: it syncs nothing and writes nothing
+//! there, and looks again, there and where jj last saw the repository, until the copy is
+//! back.
 
 use std::collections::HashMap;
 use std::fs;
@@ -41,13 +45,16 @@ use tokio::sync::watch;
 
 use crate::agent;
 use crate::config;
+use crate::config::Entry;
 use crate::config::HiveConfig;
+use crate::config::Membership;
 use crate::config::UserState;
 use crate::control;
 use crate::control::Control;
 use crate::control::ControlClient;
 use crate::control::RepoStatus;
 use crate::control::Synced;
+use crate::copy;
 use crate::login;
 use crate::repo::Located;
 use crate::socket::Socket;
@@ -139,43 +146,46 @@ struct Served {
     thread: std::thread::JoinHandle<()>,
 }
 
-/// The repositories being served.
+/// The copies being served, by machine key.
 #[derive(Default)]
 struct Supervisor {
-    repos: Mutex<HashMap<PathBuf, Served>>,
+    repos: Mutex<HashMap<String, Served>>,
 }
 
 impl Supervisor {
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, Served>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Served>> {
         self.repos.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Starts serving `workspace`, unless it already is.
-    fn start(&self, workspace: PathBuf) {
+    /// Starts serving `key`'s copy, unless it already is.
+    fn start(&self, key: String) {
         let mut repos = self.lock();
         // A thread that finished, as after its hive was removed, serves nothing.
         if repos
-            .get(&workspace)
+            .get(&key)
             .is_some_and(|served| !served.thread.is_finished())
         {
             return;
         }
         let (commands, receiver) = mpsc::unbounded_channel();
         let (stop, stopped) = watch::channel(false);
-        let initial = Located::find(&workspace)
+        let initial = UserState::load()
             .ok()
+            .and_then(|state| state.entry(&key).cloned())
+            .filter(|entry| copy::holds(entry, &entry.path))
+            .and_then(|entry| Located::find(&entry.path).ok())
             .and_then(|located| Status::load(&located.repo_path))
             .unwrap_or_default();
         let status = Arc::new(Mutex::new(initial));
         let thread = {
-            let (workspace, status) = (workspace.clone(), status.clone());
+            let (key, status) = (key.clone(), status.clone());
             std::thread::Builder::new()
-                .name(format!("serve {}", workspace.display()))
-                .spawn(move || serve(&workspace, receiver, stopped, &status))
+                .name(format!("serve {key}"))
+                .spawn(move || serve(&key, receiver, stopped, &status))
                 .expect("spawning a thread")
         };
         repos.insert(
-            workspace,
+            key,
             Served {
                 commands,
                 stop,
@@ -185,27 +195,24 @@ impl Supervisor {
         );
     }
 
-    async fn sync(&self, workspace: &Path) -> Result<Synced, String> {
+    async fn sync(&self, key: &str) -> Result<Synced, String> {
         let (reply, result) = oneshot::channel();
         let sent = self
             .lock()
-            .get(workspace)
+            .get(key)
             .map(|served| served.commands.send(Command::Sync(reply)).is_ok());
         match sent {
-            None => Err(format!("the daemon does not serve {}", workspace.display())),
-            Some(false) => Err(format!(
-                "the daemon stopped serving {}",
-                workspace.display()
-            )),
+            None => Err("the daemon does not serve this repository".to_owned()),
+            Some(false) => Err("the daemon stopped serving this repository".to_owned()),
             Some(true) => result
                 .await
                 .unwrap_or_else(|_| Err("the repository's thread stopped".to_owned())),
         }
     }
 
-    /// Stops serving `workspace`, waiting for its thread to finish.
-    async fn remove(&self, workspace: &Path) -> bool {
-        let Some(served) = self.lock().remove(workspace) else {
+    /// Stops serving `key`'s copy, waiting for its thread to finish.
+    async fn remove(&self, key: &str) -> bool {
+        let Some(served) = self.lock().remove(key) else {
             return false;
         };
         served.stop.send(true).ok();
@@ -216,9 +223,9 @@ impl Supervisor {
     }
 
     async fn stop_all(&self) {
-        let workspaces: Vec<PathBuf> = self.lock().keys().cloned().collect();
-        for workspace in workspaces {
-            self.remove(&workspace).await;
+        let keys: Vec<String> = self.lock().keys().cloned().collect();
+        for key in keys {
+            self.remove(&key).await;
         }
     }
 
@@ -227,8 +234,8 @@ impl Supervisor {
             .lock()
             .iter()
             .filter(|(_, served)| !served.thread.is_finished())
-            .map(|(workspace, served)| RepoStatus {
-                workspace: workspace.clone(),
+            .map(|(key, served)| RepoStatus {
+                key: key.clone(),
                 status: served
                     .status
                     .lock()
@@ -236,7 +243,7 @@ impl Supervisor {
                     .clone(),
             })
             .collect();
-        statuses.sort_by(|a, b| a.workspace.cmp(&b.workspace));
+        statuses.sort_by(|a, b| a.key.cmp(&b.key));
         statuses
     }
 }
@@ -252,21 +259,43 @@ impl Control for Daemon {
         control::VERSION.to_owned()
     }
 
-    async fn add(self, _: tarpc::context::Context, workspace: PathBuf) -> Result<Synced, String> {
-        tracing::info!("serving {} from now on", workspace.display());
-        self.supervisor.start(workspace.clone());
-        self.supervisor.sync(&workspace).await
+    async fn add(self, _: tarpc::context::Context, key: String) -> Result<Synced, String> {
+        tracing::info!("serving {key} from now on");
+        // Starting over if it serves it already, with its entry as it is now, as after
+        // joining again. On a task of its own, which finishes even if this request is
+        // cancelled, as when the command asking gives up: else the copy could be left
+        // unserved between stopping and starting.
+        let supervisor = self.supervisor.clone();
+        let restart = key.clone();
+        tokio::spawn(async move {
+            supervisor.remove(&restart).await;
+            supervisor.start(restart.clone());
+            // An entry it took the place of, at the same path, is no longer served. Looked
+            // up afresh for each, so that one another command has just added is kept.
+            let served: Vec<String> = supervisor.lock().keys().cloned().collect();
+            for other in served.iter().filter(|other| **other != restart) {
+                let entered = UserState::load()
+                    .map(|state| state.entry(other).is_some())
+                    .unwrap_or(true);
+                if !entered {
+                    supervisor.remove(other).await;
+                }
+            }
+        })
+        .await
+        .ok();
+        self.supervisor.sync(&key).await
     }
 
-    async fn remove(self, _: tarpc::context::Context, workspace: PathBuf) -> Result<(), String> {
-        if self.supervisor.remove(&workspace).await {
-            tracing::info!("stopped serving {}", workspace.display());
+    async fn remove(self, _: tarpc::context::Context, key: String) -> Result<(), String> {
+        if self.supervisor.remove(&key).await {
+            tracing::info!("stopped serving {key}");
         }
         Ok(())
     }
 
-    async fn sync(self, _: tarpc::context::Context, workspace: PathBuf) -> Result<Synced, String> {
-        self.supervisor.sync(&workspace).await
+    async fn sync(self, _: tarpc::context::Context, key: String) -> Result<Synced, String> {
+        self.supervisor.sync(&key).await
     }
 
     async fn status(self, _: tarpc::context::Context) -> Vec<RepoStatus> {
@@ -323,8 +352,8 @@ async fn listen(socket: &Socket, lock_path: &Path) -> anyhow::Result<()> {
         supervisor: Arc::new(Supervisor::default()),
         stop: Arc::new(tokio::sync::Notify::new()),
     };
-    for workspace in UserState::load()?.repos {
-        daemon.supervisor.start(workspace);
+    for entry in UserState::load()?.copies {
+        daemon.supervisor.start(entry.key);
     }
     tracing::info!("listening on {socket}");
     // A daemon whose lock file was deleted, as by cleaning up its directory, has nothing to
@@ -353,17 +382,17 @@ async fn listen(socket: &Socket, lock_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Serves one repository until told to stop: a single-threaded runtime, since jj-lib's
+/// Serves one copy until told to stop: a single-threaded runtime, since jj-lib's
 /// repository handles are used from one thread.
 fn serve(
-    workspace: &Path,
+    key: &str,
     commands: mpsc::UnboundedReceiver<Command>,
     stop: watch::Receiver<bool>,
     status: &Mutex<Status>,
 ) {
-    // Everything this thread logs is about this workspace. At error level, the span stays
-    // on under any filter that shows anything.
-    let _span = tracing::error_span!("sync", repo = %workspace.display()).entered();
+    // Everything this thread logs is about this copy. At error level, the span stays on
+    // under any filter that shows anything.
+    let _span = tracing::error_span!("sync", copy = %key).entered();
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -377,7 +406,7 @@ fn serve(
     runtime.block_on(async {
         let mut stop = stop;
         tokio::select! {
-            () = serve_retrying(workspace, commands, status) => {}
+            () = serve_retrying(key, commands, status) => {}
             () = stopped(&mut stop) => {}
         }
     });
@@ -388,10 +417,11 @@ async fn stopped(stop: &mut watch::Receiver<bool>) {
     stop.wait_for(|stop| *stop).await.ok();
 }
 
-/// Serves a repository, starting over after anything goes wrong, such as the hub being
-/// out of reach or the repository's git store moving: it may be servable soon.
+/// Serves a copy, starting over after anything goes wrong, such as the hub being out of
+/// reach, the repository's git store moving, or the copy not being where its entry says: it
+/// may be servable soon.
 async fn serve_retrying(
-    workspace: &Path,
+    key: &str,
     mut commands: mpsc::UnboundedReceiver<Command>,
     status: &Mutex<Status>,
 ) {
@@ -399,12 +429,25 @@ async fn serve_retrying(
     let mut backoff = Duration::from_secs(1);
     loop {
         let started = now();
-        match serve_async(workspace, &mut commands, status, &mut waiting).await {
+        match serve_async(key, &mut commands, status, &mut waiting).await {
             Ok(()) => return,
             Err(err) => {
                 let message = format!("{err:#}");
-                tracing::error!("{message}; retrying in {backoff:?}");
-                record(workspace, status, |status| status.failed(message.clone()));
+                if err.downcast_ref::<Suspended>().is_some() {
+                    tracing::warn!("{message}; looking again in {backoff:?}");
+                } else {
+                    tracing::error!("{message}; retrying in {backoff:?}");
+                }
+                // Into the copy, if it is where its entry says; never into what is there
+                // instead.
+                let copy = UserState::load()
+                    .ok()
+                    .and_then(|state| state.entry(key).cloned())
+                    .filter(|entry| copy::holds(entry, &entry.path))
+                    .and_then(|entry| Located::find(&entry.path).ok());
+                record(copy.as_ref(), status, |status| {
+                    status.failed(message.clone());
+                });
                 for waiter in waiting.drain(..) {
                     waiter.send(Err(message.clone())).ok();
                 }
@@ -446,23 +489,96 @@ async fn pause(
     }
 }
 
-fn record(workspace: &Path, status: &Mutex<Status>, change: impl FnOnce(&mut Status)) {
+/// Records a change of status, for `musubi list`: in memory, and in `copy`, the copy being
+/// served, if it was found.
+fn record(copy: Option<&Located>, status: &Mutex<Status>, change: impl FnOnce(&mut Status)) {
     let mut status = status.lock().unwrap_or_else(PoisonError::into_inner);
     change(&mut status);
-    if let Ok(located) = Located::find(workspace) {
+    if let Some(located) = copy {
         status.save(&located.repo_path);
     }
 }
 
+/// Why the daemon syncs nothing for an entry: its path doesn't hold the copy it names, and
+/// jj hasn't seen the copy anywhere else.
+#[derive(Debug)]
+pub struct Suspended(String);
+
+impl std::fmt::Display for Suspended {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "suspended: {}", self.0)
+    }
+}
+
+impl std::error::Error for Suspended {}
+
+/// Finds the copy `key`'s entry names: at its path, or where jj last saw it, which moves the
+/// entry there.
+fn find_copy(key: &str) -> anyhow::Result<Option<(Entry, Located)>> {
+    let Some(entry) = UserState::load()?.entry(key).cloned() else {
+        return Ok(None);
+    };
+    if copy::holds(&entry, &entry.path) {
+        let located = Located::find(&entry.path)?;
+        return Ok(Some((entry, located)));
+    }
+    if let Some(path) = copy::moved_to(&entry) {
+        tracing::info!(
+            "the copy moved from {} to {}; serving it there",
+            entry.path.display(),
+            path.display()
+        );
+        if !UserState::move_entry(&entry, path.clone())? {
+            return Err(Suspended("its entry changed while the daemon found it".to_owned()).into());
+        }
+        let moved = Entry { path, ..entry };
+        let located = Located::find(&moved.path)?;
+        return Ok(Some((moved, located)));
+    }
+    let why = match Located::find(&entry.path) {
+        Err(_) => format!("{} is missing", entry.path.display()),
+        Ok(located) => {
+            let found = copy::Found::read(&located.repo_path)?;
+            let why = copy::check(&entry, &found)
+                .err()
+                .unwrap_or_else(|| "it changed".to_owned());
+            format!(
+                "the repository at {} isn't the copy: {why}",
+                entry.path.display()
+            )
+        }
+    };
+    Err(Suspended(why).into())
+}
+
+/// The identity of `path`'s directory, which changes when it is replaced, as by restoring a
+/// backup, though what is in it may not.
+#[cfg(unix)]
+fn identity(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt as _;
+    let metadata = fs::metadata(path).ok()?;
+    Some((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(unix))]
+fn identity(_path: &Path) -> Option<(u64, u64)> {
+    None
+}
+
 async fn serve_async(
-    workspace: &Path,
+    key: &str,
     commands: &mut mpsc::UnboundedReceiver<Command>,
     status: &Mutex<Status>,
     waiting: &mut Vec<oneshot::Sender<Result<Synced, String>>>,
 ) -> anyhow::Result<()> {
-    let located = Located::find(workspace)?;
+    // No entry: the copy left, or its hive was removed.
+    let Some((entry, located)) = find_copy(key)? else {
+        return Ok(());
+    };
     let hive = HiveConfig::load(&located.repo_path)?
-        .with_context(|| format!("{} is not part of a hive", workspace.display()))?;
+        .with_context(|| format!("{} is not part of a hive", entry.path.display()))?;
+    let workspace = &entry.path;
+    let mut opened = identity(&located.repo_path);
     let (connection, mut driver, machine) = open_driver(&located, &hive).await?;
     let transport = connection.transport.clone();
     let mut notices = transport.subscribe(&hive.head_subject()).await?;
@@ -515,6 +631,19 @@ async fn serve_async(
                 },
             }
         };
+        // Still the copy, before anything is read from it or written to it, its status
+        // included.
+        let found = copy::Found::read(&located.repo_path)?;
+        if let Err(why) = copy::check(&entry, &found) {
+            let why = format!(
+                "the repository at {} isn't the copy: {why}",
+                workspace.display()
+            );
+            for waiter in waiting.drain(..) {
+                waiter.send(Err(format!("suspended: {why}"))).ok();
+            }
+            return Err(Suspended(why).into());
+        }
         // While the hub is out of reach, a sync could only wait for its requests to time
         // out. Say why instead, to `musubi status` and to any command waiting, and wait for
         // the connection to come back, or for the backoff to pass. A reconnection from now
@@ -526,7 +655,7 @@ async fn serve_async(
             if unreachable.as_ref() != Some(&why) {
                 tracing::warn!("{why}");
             }
-            record(workspace, status, |status| status.failed(why.clone()));
+            record(Some(&located), status, |status| status.failed(why.clone()));
             for waiter in waiting.drain(..) {
                 waiter.send(Err(why.clone())).ok();
             }
@@ -545,6 +674,15 @@ async fn serve_async(
             continue;
         }
         unreachable = None;
+        // The copy, but in a directory that replaced the one opened, as after restoring a
+        // backup: open it afresh, and watch it.
+        let now_identity = identity(&located.repo_path);
+        if now_identity != opened {
+            tracing::info!("the repository's directory was replaced; opening it afresh");
+            driver.reopen(located.open()?)?;
+            watcher = OpHeadsWatcher::new(&located.repo_path)?;
+            opened = now_identity;
+        }
         tracing::debug!("syncing after {trigger}");
         let started = std::time::Instant::now();
         // Reconnecting during the sync, which may miss announcements, calls for another.
@@ -563,7 +701,7 @@ async fn serve_async(
             );
             // Changed meanwhile, as by `musubi join --hub`: start over with what it is now.
             anyhow::ensure!(
-                leave_hive(&located, &hive)?,
+                leave_hive(&located, &hive, Membership::Removed)?,
                 "this repository's hive or hub changed while it synced"
             );
             tracing::warn!("{message}");
@@ -576,7 +714,7 @@ async fn serve_async(
             Ok(_) => Ok(synced.clone()),
             Err(err) => Err(format!("{err:#}")),
         };
-        record(workspace, status, |status| {
+        record(Some(&located), status, |status| {
             status.synced(reply.as_ref().err().cloned(), &synced);
         });
         report(
@@ -602,11 +740,26 @@ async fn serve_async(
             }
             Err(err) => {
                 tracing::warn!("{err:#}");
+                // What failed may be that the copy is no longer there, as when it was moved
+                // or deleted during the sync: then open nothing there, which would write.
+                if !copy::holds(&entry, workspace) {
+                    return Err(Suspended(format!(
+                        "the copy is no longer at {}",
+                        workspace.display()
+                    ))
+                    .into());
+                }
                 // Lost replies are indistinguishable from lost requests, and the open
                 // repository's cached state may be what failed: start over, reopened.
                 if let Err(err) = located.open().and_then(|repo| driver.reopen(repo)) {
                     tracing::warn!("cannot reopen: {err:#}");
                     driver.restart();
+                }
+                // So too may the watcher, if the directory it watches was replaced, as by
+                // restoring a backup: one watching a deleted directory never wakes.
+                match OpHeadsWatcher::new(&located.repo_path) {
+                    Ok(new) => watcher = new,
+                    Err(err) => tracing::debug!("cannot watch afresh: {err:#}"),
                 }
                 retry = true;
                 // The connection coming back while it waits, as after the machine slept, ends
@@ -711,19 +864,33 @@ fn report(
     });
 }
 
-/// Makes the repository at `located` no longer part of `hive`, as `musubi leave` does,
-/// keeping everything it has: forgets its membership, and that this machine's daemon serves
-/// it. Returns false, doing nothing, if it isn't part of `hive` through the same hub (any
-/// more), as when it left it, joined another, or moved to another hub, meanwhile.
-pub fn leave_hive(located: &Located, hive: &HiveConfig) -> anyhow::Result<bool> {
+/// Makes the repository at `located` no longer part of `hive`, keeping everything it has:
+/// marks its record `membership`, left as `musubi leave` leaves or removed as the hub said,
+/// and stops this machine's daemon serving it. Returns false, doing nothing, if it isn't part
+/// of `hive` through the same hub (any more), as when it left it, joined another, or moved
+/// to another hub, meanwhile.
+pub fn leave_hive(
+    located: &Located,
+    hive: &HiveConfig,
+    membership: Membership,
+) -> anyhow::Result<bool> {
     let _lock = HiveConfig::lock(&located.repo_path)?;
-    if HiveConfig::load(&located.repo_path)?
-        .is_none_or(|now| now.hive != hive.hive || now.hub != hive.hub)
-    {
+    let Some(now) = HiveConfig::load(&located.repo_path)?
+        .filter(|now| now.joined() && now.hive == hive.hive && now.hub == hive.hub)
+    else {
         return Ok(false);
+    };
+    let key = copy::Found::read(&located.repo_path)?.key;
+    // The record first: an entry for a record that says it left is suspended, where a record
+    // that says joined with no entry here would look like a duplicate, if this failed between.
+    HiveConfig {
+        state: membership,
+        ..now
     }
-    UserState::remove_repo(located)?;
-    fs::remove_file(HiveConfig::path(&located.repo_path))?;
+    .save(&located.repo_path)?;
+    if let Some(key) = key {
+        UserState::remove_entry(&key)?;
+    }
     fs::remove_file(Status::path(&located.repo_path)).ok();
     Ok(true)
 }
@@ -846,19 +1013,31 @@ const LAST_POLL: Duration = Duration::from_millis(50);
 /// Starts `musubi daemon` in the background, detached from this terminal, logging to the
 /// state directory.
 fn spawn(socket: &Socket) -> anyhow::Result<(std::process::Child, PathBuf)> {
-    fs::create_dir_all(config::state_dir()?)?;
+    let state = std::path::absolute(config::state_dir()?)?;
+    fs::create_dir_all(&state)?;
     let log = config::daemon_log()?;
     let file = fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&log)
         .with_context(|| format!("opening {log:?}"))?;
+    let socket = match socket {
+        Socket::Path(path) => Socket::Path(std::path::absolute(path)?),
+        Socket::Pipe(_) => socket.clone(),
+    };
     let mut command = std::process::Command::new(std::env::current_exe()?);
     command
         .args(["daemon", "--socket", &socket.to_string()])
+        // Not the directory of the command that starts it, often a repository it serves,
+        // which may be deleted or moved: gix needs the current directory whenever it opens
+        // a repository, any repository. So the paths it is given are absolute.
+        .current_dir(&state)
         .stdin(std::process::Stdio::null())
         .stdout(file.try_clone()?)
         .stderr(file);
+    if std::env::var_os("MUSUBI_STATE_DIR").is_some() {
+        command.env("MUSUBI_STATE_DIR", &state);
+    }
     // Now that the state directory exists.
     if let Err(err) = agent::refresh() {
         tracing::debug!("not pointing the daemon at this ssh agent: {err:#}");

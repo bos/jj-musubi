@@ -44,9 +44,12 @@ impl Located {
         })
     }
 
+    /// Opens the repository. Its machine key, if it has none, is made only by joining:
+    /// callers other than a join check it has one first ([`crate::copy`]). It gives it no jj
+    /// config id either.
     pub fn open(&self) -> anyhow::Result<NodeRepo> {
         let settings = settings::load(&self.workspace_root, &self.repo_path)?;
-        let repo_config = settings::repo_config_path(&self.repo_path)?;
+        let repo_config = settings::existing_repo_config_path(&self.repo_path)?;
         Ok(NodeRepo::open(&self.repo_path, &settings)?.with_repo_config(repo_config))
     }
 }

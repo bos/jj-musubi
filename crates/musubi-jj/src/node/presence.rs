@@ -267,6 +267,51 @@ impl NodeRepo {
         Ok(true)
     }
 
+    /// Forgets, in one operation, every copy present here but this one that `keep` doesn't
+    /// name, as [`Self::forget_copy`] forgets one: as a copy does when it joins a hive whose
+    /// head lacks copies its history brings from another hive (docs/internals/copies.md,
+    /// R8). Returns the keys it forgot, writing nothing if there are none.
+    pub fn forget_copies_except(
+        &mut self,
+        keep: &BTreeSet<String>,
+    ) -> Result<Vec<String>, NodeError> {
+        let repo = self.merged_repo()?;
+        let canonical = self.canonicalize(repo.op_id())?;
+        let own = self.machine.key().to_owned();
+        let forgotten: Vec<String> = self
+            .presence(&canonical)?
+            .copies()
+            .filter(|copy| *copy != own && !keep.contains(*copy))
+            .map(str::to_owned)
+            .collect();
+        if forgotten.is_empty() {
+            return Ok(forgotten);
+        }
+        let names: Vec<WorkspaceNameBuf> = self
+            .other_names(&canonical)?
+            .into_iter()
+            .filter(|(_, key)| {
+                workspaces::split_key(key.as_str())
+                    .is_some_and(|(machine, _)| forgotten.iter().any(|copy| copy == machine))
+            })
+            .map(|(name, _)| name)
+            .collect();
+        let mut tx = repo.start_transaction();
+        for name in &names {
+            if tx.repo().view().get_wc_commit_id(name).is_some() {
+                tx.repo_mut()
+                    .remove_workspace(name)
+                    .block_on()
+                    .map_err(index_err)?;
+            }
+        }
+        tx.repo_mut().rebase_descendants().block_on()?;
+        tx.set_attribute(FORGET_ATTRIBUTE.to_owned(), forgotten.join(" "));
+        tx.commit("musubi: forget copies of another hive")
+            .block_on()?;
+        Ok(forgotten)
+    }
+
     /// Forgets this machine's copy, as `musubi leave` does before it stops syncing: an
     /// operation that removes this machine's workspaces, abandoning each working-copy commit
     /// that is empty, and that the hive takes as a forget of this copy. Returns the

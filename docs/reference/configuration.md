@@ -126,8 +126,8 @@ jj config set --user 'colors.machine' yellow
 
 | Path | Holds |
 | --- | --- |
-| State directory: `~/.local/state/musubi` (`$XDG_STATE_HOME/musubi`; `%APPDATA%\musubi` on Windows) | `state.toml`, which lists the repositories the daemon serves and this machine's default hub; `daemon.log`; `hub_key`, the machine's ssh key for reaching hubs; `ssh-agent`, a link to the latest ssh agent, for the daemon; locks. |
-| `.jj/repo/musubi/` in each repository | The repository's hive (`hive.toml`), this machine's identity in it (`machine`), its last sync (`status.json`), when the daemon last cleaned up after jj in it (`gc`, and `gc.lock` while it does), and musubi's own record of the hive's operations. Removing it, or copying it into another repository, confuses musubi: use `musubi leave` and `musubi clone`. |
+| State directory: `~/.local/state/musubi` (`$XDG_STATE_HOME/musubi`; `%APPDATA%\musubi` on Windows) | `state.toml`, which lists the copies the daemon syncs, each with its machine key and where it is, and this machine's default hub; `daemon.log`; `hub_key`, the machine's ssh key for reaching hubs; `ssh-agent`, a link to the latest ssh agent, for the daemon; locks. |
+| `.jj/repo/musubi/` in each repository | The repository's hive (`hive.toml`, which records its hive, its jj config id, and whether it joined, left, or its hive was removed), this machine's identity in it (`machine`), its last sync (`status.json`), when the daemon last cleaned up after jj in it (`gc`, and `gc.lock` while it does), and musubi's own record of the hive's operations. Removing it, or copying it into another repository, confuses musubi: use `musubi leave` and `musubi clone`. |
 
 The daemon's control socket is `$XDG_RUNTIME_DIR/musubi/daemon.sock` on Linux (without
 `XDG_RUNTIME_DIR`, `musubi-<uid>/daemon.sock` in `$TMPDIR` or `/tmp`),

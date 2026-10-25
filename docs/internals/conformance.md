@@ -550,3 +550,74 @@ cargo nextest run -p musubi-sync -E 'test(/^blobs::/)'
 The test makes 200 cases, about a millisecond each. Dropping the check that the prefix is
 the length the chunk claims, so that a blob is stored when a chunk claims one byte too few,
 fails it at once.
+
+## Copies
+
+`formal/Musubi/Copies.lean` proves, for one machine, that musubi syncs only the copy of a key,
+follows a moved copy, and makes keys only by joining ([copies.md](copies.md)). What it decides
+from are pure functions, as in `crates/musubi/src/copy.rs`: which repository is the copy of a
+key (`standing`), given the repository's record, key and config-id and this machine's entry
+for its key; whether that holds up against what is at the entry's path (`refine`), given
+whether the entry's path holds the copy the entry names and whether it is this repository's
+directory; and whether a repository is the copy an entry names (`check`). The chain has two
+links:
+
+1. **The rules.** The model's machine moves, copies, deletes and replaces repositories, runs
+   jj's config-id rule (`handle_metadata_path`) in them, joins them, and syncs and follows
+   entries. It decides with `standing` then `refine`, as `copy::standing_of` does, and with
+   `check`. With no aliases, another directory is another path. In every reachable state:
+   - every push is of a repository joined to the hive pushed to, under its own key
+     (`right_hive`);
+   - while an entry's path holds its copy, no other repository with the key is the copy,
+     whatever jj decides when it runs there (`duplicates_refused`);
+   - a duplicate of a copy that left, or whose hive was removed, can't join, since its
+     config-id isn't its record's (`join_refuses_duplicate`);
+   - no step but `join` makes a key, though a repository the user puts in place may bring
+     its own (`only_join_makes_keys`);
+   - if an entry's path holds its copy, and jj last saw the copy's config-id there, then
+     once the copy is moved and jj has run in it, the daemon follows it (`moves_followed`);
+   - syncing and following a move change no repository and nothing jj records
+     (`daemon_writes_nothing`).
+
+   Two runs show what jj's rule leaves to musubi. In both, jj ran in the copy at another
+   path, and the copy came back before jj ran in it again. In `duplicate_taken_for_moved`, jj
+   then takes a duplicate for the copy moved: `standing` alone says it is the copy, and
+   `refine` makes it a duplicate. In `move_taken_for_duplicate`, the other path is reused, jj
+   takes the copy moved for a duplicate, and the daemon can't follow it, as copies.md says
+   under "Out of scope".
+2. **The decisions.** The test `copy::conformance::decisions_conformance`, in
+   `crates/musubi/src/copy/conformance.rs`, asks the oracle for `standing`, `refine` and
+   `check` of every combination of: no record, or one with either of two hives, either of
+   two config-ids, and any state; no key, or either of two; no config-id, or either of two;
+   no entry, or one with either of two keys, hives and config-ids; and both answers to each
+   of `refine`'s two questions. That is 4212 cases, in one request. The test makes the ids
+   uuids and strings, and requires `copy::standing`, `copy::refine` and `copy::check` to give
+   the oracle's answer for each.
+
+The test checks the decisions, not where musubi makes them: that `musubi join` and
+`musubi list` have jj resolve the config-id first and look at the entry's path, and that the
+daemon checks before each sync, is for the CLI tests (`crates/musubi/tests/cli.rs`) to check.
+
+### Request and reply
+
+```json
+{"op": "copies", "cases": [{"repo": {"key": 0, "cid": 0, "record": {"hive": 0, "cid": 0, "state": "joined"}}, "entry": {"key": 0, "hive": 0, "cid": 0}, "elsewhereHolds": true, "sameDirectory": false}, {"repo": {"key": null, "cid": null, "record": null}, "entry": null}]}
+{"ok": true, "copies": [{"standing": "copy", "refined": "duplicate", "check": true}, {"standing": "outside", "refined": "outside"}]}
+```
+
+A case is a repository, with its key, config-id (`cid`) and record, each `null` if it has
+none; this machine's entry for its key, or `null`; and `refine`'s two questions, whether the
+entry's path holds the copy the entry names (`elsewhereHolds`) and whether it is the
+repository's directory (`sameDirectory`), each false if not given. A record's `state` is
+`joined`, `left` or `removed`. The reply has, for each case, the repository's standing
+(`outside`, `removed`, `copy`, `broken`, `duplicate` or `unknown`), that standing refined,
+and, if the case has an entry, whether the repository passes its check. A copies request
+leaves the oracle's session as it was.
+
+```sh
+cargo nextest run -p jj-musubi -E 'test(/^copy::conformance::/)'
+```
+
+The test takes under a second. Dropping, from the oracle's check, the comparison of the
+record's config-id with the entry's fails 32 of the 4212 cases, and ignoring `sameDirectory`
+in its `refine` fails 8.

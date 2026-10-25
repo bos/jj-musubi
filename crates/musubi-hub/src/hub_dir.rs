@@ -93,6 +93,10 @@ pub struct Joined {
     pub created: bool,
     /// Why this hive, for telling the user: `matched remote origin`, say.
     pub reason: String,
+    /// The keys of the copies present at the hive's head, and of those joining it: a copy
+    /// whose history came from another hive forgets the others it knows
+    /// (docs/internals/copies.md, R8).
+    pub present: Vec<String>,
 }
 
 /// How long the hub counts what a joining repository brings as the hive's before the
@@ -650,13 +654,17 @@ impl HubDir {
             until: now + self.pending_lifetime,
         });
         let mut info = self.info(id).expect("chosen or created");
-        let mut machines = self.hives[id].index.machines.clone();
+        let hive = &self.hives[id];
+        let mut machines = hive.index.machines.clone();
+        machines.extend(hive.pending.iter().map(|pending| pending.machine.clone()));
+        let present = machines.iter().cloned().collect();
         machines.insert(request.machine.clone());
         info.machines = display_names(&machines);
         Joined {
             hive: info,
             created,
             reason,
+            present,
         }
     }
 }

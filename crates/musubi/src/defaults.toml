@@ -12,7 +12,10 @@
 [musubi.templates]
 list = '''
 if(path,
-  "    here: " ++ path ++ "  " ++ if(problem, label("problem", status), status),
+  if(hub,
+    "    here: " ++ path ++ "  " ++ if(problem, label("problem", status), status),
+    "  " ++ path ++ " (hive " ++ id ++ ")  " ++ label("problem", status),
+  ),
   if(hive,
     "  " ++ label("hive", hive) ++ if(problem,
       "  " ++ label("problem", "(" ++ problem ++ ")"),

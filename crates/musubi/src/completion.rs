@@ -9,9 +9,7 @@ use clap::CommandFactory as _;
 use clap_complete::CompletionCandidate;
 
 use crate::Cli;
-use crate::config::HiveConfig;
 use crate::config::UserState;
-use crate::repo::Located;
 use crate::ui::Ui;
 
 /// How long completing a hive's name waits for the hub, while the shell waits on it.
@@ -71,23 +69,13 @@ pub fn complete_if_asked() {
     clap_complete::CompleteEnv::with_factory(Cli::command).complete();
 }
 
-/// The hives of this machine's copies, leaving out copies that are gone.
-fn memberships(state: &UserState) -> Vec<HiveConfig> {
-    state
-        .repos
-        .iter()
-        .filter_map(|workspace| Located::find(workspace).ok())
-        .filter_map(|located| HiveConfig::load(&located.repo_path).ok().flatten())
-        .collect()
-}
-
 /// The hubs this machine knows of, for `--hub`.
 pub fn hubs() -> Vec<CompletionCandidate> {
     let Ok(state) = UserState::load() else {
         return vec![];
     };
     let default = state.default_hub().ok().flatten();
-    UserState::known_hubs(default.clone(), &memberships(&state))
+    UserState::known_hubs(default.clone(), &state.memberships())
         .into_iter()
         .map(|hub| {
             let default = default.as_ref() == Some(&hub);
@@ -134,7 +122,8 @@ pub fn hives() -> Vec<CompletionCandidate> {
                 CompletionCandidate::new(&info.name).help(Some(crate::machines(info).into()))
             })
             .collect(),
-        Err(_) => memberships(&state)
+        Err(_) => state
+            .memberships()
             .iter()
             .filter(|copy| &copy.hub == hub)
             .map(|copy| CompletionCandidate::new(copy.display_name()))

@@ -4,6 +4,7 @@ mod agent;
 mod completion;
 mod config;
 mod control;
+mod copy;
 mod daemon;
 mod hub;
 mod listing;
@@ -39,13 +40,16 @@ use jj_lib::object_id::ObjectId as _;
 use musubi_hub::hub_dir::HiveInfo;
 use musubi_hub::hub_dir::JoinChoice;
 use musubi_hub::hub_dir::JoinRequest;
+use musubi_hub::hub_dir::Joined;
 use musubi_jj::node::NodeRepo;
 use musubi_jj::objects::Backend;
 use musubi_sync::remote::HiveGone;
 use musubi_sync::wire::HubWideReply;
 use musubi_sync::wire::HubWideRequest;
 
+use crate::config::Entry;
 use crate::config::HiveConfig;
+use crate::config::Membership;
 use crate::config::Settings;
 use crate::config::UserState;
 use crate::control::Synced;
@@ -147,6 +151,11 @@ enum Command {
         /// Join this hive (a name, a prefix of one, or an id), whatever its remotes.
         #[arg(long, add = ArgValueCandidates::new(completion::hives))]
         hive: Option<String>,
+        /// Sync this repository as the copy it was made from, which must be gone: for a copy
+        /// moved by copying it and deleting the original, or restored onto a new machine.
+        /// musubi otherwise takes it for a duplicate, and syncs nothing.
+        #[arg(long, conflicts_with = "hive")]
+        original: bool,
         #[command(flatten)]
         member: Member,
     },
@@ -174,7 +183,8 @@ enum Command {
         /// Print only a line for each hub, each of its hives, and each copy of one here, in
         /// that order, with this template, in jj's template language, in place of
         /// `musubi.templates.list` in jj's config. A copy's line has its hive's `hub`,
-        /// `reached`, `hive`, `id` and `machines`. The keywords:
+        /// `reached`, `hive`, `id` and `machines`; a copy that isn't where it was, of a hive
+        /// no hub here lists, has only its hive's `id`. The keywords:
         ///
         /// * `hub: String`: The hub, as `--hub` takes it.
         /// * `reached: Boolean`: Whether the hub answered.
@@ -200,7 +210,8 @@ enum Command {
     /// forgotten (`musubi.forget-after`), and the daemon: whether it runs and serves the
     /// repository, its process, socket, and log. It warns of what keeps the repository from
     /// syncing, saying what to do. Outside a hive, it says so, and shows the default hub and
-    /// the daemon.
+    /// the daemon; so too in a repository musubi doesn't sync, as one made by copying a
+    /// copy's files, saying why.
     ///
     /// It never starts the daemon or asks the hub, so it answers at once.
     Status {
@@ -216,7 +227,9 @@ enum Command {
         /// * `default_hub: String`: The hub commands use without `--hub`; empty if none.
         /// * `head: Option<Integer>`: The hive's head, as of the last sync; none before it.
         /// * `status: String`: When the repository last synced.
-        /// * `problem: String`: Why its syncing fails, if it does.
+        /// * `problem: String`: Why musubi doesn't sync the repository, though it has a
+        ///   hive's record, as when it was made by copying a copy's files; else why its
+        ///   syncing fails, if it does.
         /// * `sent: Boolean`: Whether the hub has all this machine's work, as far as the
         ///   last sync tells; false if it can't tell.
         /// * `forgotten: Boolean`: Whether the hive has forgotten this copy, until it's used.
@@ -265,6 +278,11 @@ enum Command {
         /// until one of them forgets it.
         #[arg(long)]
         force: bool,
+        /// Instead, stop syncing the copy that was at this path, which is gone: deleted, say.
+        /// `musubi list` lists these. The other machines go on showing it until one of them
+        /// forgets it.
+        #[arg(conflicts_with = "force", value_hint = ValueHint::DirPath)]
+        path: Option<PathBuf>,
     },
     /// Forget another machine's copy of this repository: the other machines stop showing its
     /// working copies, and the hub stops counting it.
@@ -552,12 +570,21 @@ fn run(cli: Cli, ui: &Ui) -> anyhow::Result<()> {
             }
             Ok(())
         }),
-        Command::Create { name, member } => {
-            join(ui, &cwd, JoinChoice::Create(name), &member, &socket()?)
-        }
-        Command::Join { hive, member } => {
+        Command::Create { name, member } => join(
+            ui,
+            &cwd,
+            JoinChoice::Create(name),
+            &member,
+            false,
+            &socket()?,
+        ),
+        Command::Join {
+            hive,
+            original,
+            member,
+        } => {
             let choice = hive.map_or(JoinChoice::Match, JoinChoice::Hive);
-            join(ui, &cwd, choice, &member, &socket()?)
+            join(ui, &cwd, choice, &member, original, &socket()?)
         }
         Command::Clone {
             hive,
@@ -593,7 +620,7 @@ fn run(cli: Cli, ui: &Ui) -> anyhow::Result<()> {
             },
             socket(),
         ),
-        Command::Leave { force } => leave(ui, &cwd, &socket()?, force),
+        Command::Leave { force, path } => leave(ui, &cwd, &socket()?, force, path.as_deref()),
         Command::Forget { machine } => forget(ui, &cwd, &machine, &socket()?),
         Command::Daemon { action: None } => daemon::run(&socket()?),
         Command::Daemon {
@@ -674,11 +701,13 @@ fn block_on<T>(future: impl Future<Output = anyhow::Result<T>>) -> anyhow::Resul
 
 /// Makes the repository at `start` part of a hive: the hub decides which (see
 /// `musubi_hub::matching`); then this records the membership and has the daemon serve it.
+/// `original` makes a repository the copy of its key that isn't (see [`copy`]).
 fn join(
     ui: &Ui,
     start: &Path,
     choice: JoinChoice,
     member: &Member,
+    original: bool,
     socket: &Socket,
 ) -> anyhow::Result<()> {
     let Member {
@@ -688,24 +717,50 @@ fn join(
     } = member;
     let (hub, machine, full_history) = (hub.as_deref(), machine.as_deref(), *full_history);
     let located = Located::find(start)?;
+    copy::check_owner(&located.repo_path)?;
+    let found = copy::Found::resolve(&located)?;
+    let state = UserState::load()?;
+    let entry = found.key.as_deref().and_then(|key| state.entry(key));
+    let standing = copy::standing_of(&located, &found, entry);
     // `musubi join` in a repository that is part of a hive joins that hive again, made again
     // if its hub has lost it.
-    let (choice, hub) = match (HiveConfig::load(&located.repo_path)?, choice) {
-        (None, choice) => (choice, UserState::hub(hub)?),
-        (Some(hive), JoinChoice::Match) => {
-            let remake = JoinChoice::Remake {
-                id: hive.hive.to_string(),
-                name: hive.name.clone(),
-            };
-            (
-                remake,
-                hub.map_or_else(|| Ok(hive.hub.clone()), |hub| UserState::hub(Some(hub)))?,
-            )
-        }
-        (Some(hive), _) => anyhow::bail!(
-            "this repository is already part of hive {}; `musubi leave` first to join another",
-            hive.display_name()
+    let rejoin = |record: &HiveConfig| -> anyhow::Result<(JoinChoice, String)> {
+        let remake = JoinChoice::Remake {
+            id: record.hive.to_string(),
+            name: record.name.clone(),
+        };
+        let hub = hub.map_or_else(|| Ok(record.hub.clone()), |hub| UserState::hub(Some(hub)))?;
+        Ok((remake, hub))
+    };
+    let (choice, hub) = match (standing, &found.record, choice) {
+        (copy::Standing::Outside, _, choice) => (choice, UserState::hub(hub)?),
+        (copy::Standing::Removed, Some(record), JoinChoice::Match) => anyhow::bail!(
+            "this repository's hive, {}, was removed from its hub; `musubi join --hive \
+             <name>` joins another, and `musubi create` starts a new one",
+            record.display_name()
         ),
+        (copy::Standing::Removed, _, choice) => (choice, UserState::hub(hub)?),
+        // From any of its workspaces, or through a bind mount: one entry serves them all.
+        (copy::Standing::Copy, Some(record), JoinChoice::Match) => rejoin(record)?,
+        (copy::Standing::Duplicate | copy::Standing::Unknown, Some(record), JoinChoice::Match)
+            if original =>
+        {
+            if let Some(path) = entry.and_then(copy::whereabouts) {
+                anyhow::bail!(
+                    "the copy of this repository's key is at {}, so this repository isn't it; \
+                     `musubi clone` makes another copy",
+                    path.display()
+                );
+            }
+            rejoin(record)?
+        }
+        (copy::Standing::Copy, Some(record), _) => anyhow::bail!(
+            "this repository is already part of hive {}; `musubi leave` first to join another",
+            record.display_name()
+        ),
+        (standing, record, _) => {
+            anyhow::bail!("{}", copy::not_the_copy(standing, record.as_ref(), entry))
+        }
     };
     let remaking = matches!(choice, JoinChoice::Remake { .. });
     configured_forget_after(settings::load(&located.workspace_root, &located.repo_path)?.config())?;
@@ -737,27 +792,22 @@ fn join(
         HubWideReply::Joined(joined) => joined,
         other => anyhow::bail!("unexpected reply from the hub: {other:?}"),
     };
-    become_node(ui, &located, &joined.hive, &hub, full_history)?;
+    become_node(
+        ui,
+        &located,
+        &joined,
+        &hub,
+        full_history,
+        found.record.as_ref(),
+    )?;
     let count = joined.hive.machines.len();
     let machines = if count == 1 {
         "1 machine".to_owned()
     } else {
         format!("{count} machines")
     };
-    if remaking {
-        // The daemon serves the repository with the hub it knew: start it over, as for a
-        // repository newly joined.
-        let workspace = UserState::daemon_workspace(&located)?;
-        block_on(async {
-            if let Some(client) = daemon::running(socket).await? {
-                client
-                    .remove(control::context(Duration::from_secs(120)), workspace)
-                    .await?
-                    .map_err(anyhow::Error::msg)?;
-            }
-            Ok::<_, anyhow::Error>(())
-        })?;
-    }
+    // The daemon may serve the repository with the hub it knew: `start_serving` has it start
+    // over.
     let mut out = ui.stdout();
     let name = &joined.hive.name;
     if remaking && joined.created {
@@ -781,6 +831,71 @@ fn join(
     }
     drop(out);
     start_serving(ui, &located, socket)
+}
+
+/// The repository at `start`, its record and its entry, if it is the copy of its key here
+/// ([`copy`]); else fails, saying what it is. A copy whose entry is at a path that no longer
+/// holds it moved here: its entry follows it, and the daemon serves it here.
+fn the_copy(
+    ui: &Ui,
+    start: &Path,
+    socket: &Socket,
+) -> anyhow::Result<(Located, HiveConfig, Entry)> {
+    let located = Located::find(start)?;
+    copy::check_owner(&located.repo_path)?;
+    let found = copy::Found::resolve(&located)?;
+    let state = UserState::load()?;
+    let entry = found.key.as_deref().and_then(|key| state.entry(key));
+    let standing = copy::standing_of(&located, &found, entry);
+    let (copy::Standing::Copy, Some(record), Some(entry)) = (standing, &found.record, entry) else {
+        anyhow::bail!(
+            "{}",
+            copy::not_the_copy(standing, found.record.as_ref(), entry)
+        );
+    };
+    let entry = follow_move(ui, &located, entry, socket)?;
+    Ok((located, record.clone(), entry))
+}
+
+/// Moves `entry` to `located`, the copy it names, if its path no longer holds it, and has
+/// the daemon serve it there. Returns the entry as it is now.
+fn follow_move(
+    ui: &Ui,
+    located: &Located,
+    entry: &Entry,
+    socket: &Socket,
+) -> anyhow::Result<Entry> {
+    if entry.path == located.workspace_root || copy::holds(entry, &entry.path) {
+        return Ok(entry.clone());
+    }
+    let moved = Entry {
+        path: located.workspace_root.clone(),
+        ..entry.clone()
+    };
+    // Unless the daemon, or another command, changed it first, which may have made another
+    // repository the copy.
+    anyhow::ensure!(
+        UserState::move_entry(entry, moved.path.clone())?,
+        "this machine's record of this repository changed meanwhile; run the command again"
+    );
+    // Not with what the command prints, as `musubi list -T` prints only its lines.
+    writeln!(
+        ui.stderr(),
+        "This repository moved here from {}; it syncs from here now",
+        entry.path.display()
+    )?;
+    // The daemon starts serving it here at once, and syncs in its own time: the command
+    // needn't wait for that.
+    block_on(async {
+        if let Some(client) = daemon::running(socket).await? {
+            client
+                .add(control::context(Duration::from_secs(2)), moved.key.clone())
+                .await
+                .ok();
+        }
+        Ok::<_, anyhow::Error>(())
+    })?;
+    Ok(moved)
 }
 
 /// Asks `hub`, over ssh first making sure this machine's key works there.
@@ -809,40 +924,83 @@ fn set_machine_name(located: &Located, machine: Option<&str>) -> anyhow::Result<
     Ok(())
 }
 
-/// Records that the repository is part of `hive`: the join operation (unless replicating
-/// full history), its hive config, and that the daemon serves it. The first hub joined
-/// becomes the user's default.
+/// Records that the repository is part of the hive it `joined`: the join operation (unless
+/// replicating full history), its record, and its entry, for the daemon to serve it. A copy
+/// whose record named another hive, `before`, forgets the copies its history brings that the
+/// hive doesn't have. The first hub joined becomes the user's default.
 fn become_node(
     ui: &Ui,
     located: &Located,
-    hive: &HiveInfo,
+    joined: &Joined,
     hub: &str,
     full_history: bool,
+    before: Option<&HiveConfig>,
 ) -> anyhow::Result<()> {
+    let hive_id: uuid::Uuid = joined
+        .hive
+        .id
+        .parse()
+        .context("the hub sent a malformed hive id")?;
     let mut node = located.open()?;
     let machine = node.machine().name().to_owned();
+    let key = node.machine().key().to_owned();
     let description = format!("musubi: {machine} joins the hive");
     if full_history {
         node.mark_joined(&description)?;
     } else {
         node.create_join_operation(&description)?;
     }
+    // A hive doesn't take on the members of another: they aren't its own until they join it.
+    if before.is_none_or(|before| before.hive != hive_id) {
+        let keep: std::collections::BTreeSet<String> = joined.present.iter().cloned().collect();
+        let forgotten = node.forget_copies_except(&keep)?;
+        if !forgotten.is_empty() {
+            writeln!(
+                ui.stdout(),
+                "Forgot {} copies this repository's history knows that the hive doesn't have",
+                forgotten.len()
+            )?;
+        }
+    }
+    drop(node);
+    // Only joining gives the repository a jj config id, which its record and entry name.
+    settings::repo_config_path(&located.repo_path)?;
+    let config_id = copy::Found::read(&located.repo_path)?
+        .config_id
+        .context("jj gave this repository no config id")?;
+    // Through the workspace it joined from already, if this is another of the same
+    // repository's.
+    let path = UserState::load()?
+        .entry(&key)
+        .filter(|entry| {
+            Located::find(&entry.path)
+                .is_ok_and(|other| copy::same_directory(&other.repo_path, &located.repo_path))
+        })
+        .map_or_else(
+            || located.workspace_root.clone(),
+            |entry| entry.path.clone(),
+        );
+    // The entry first: a record that names a config id no entry here does would make this
+    // repository look like a duplicate, if what follows failed.
+    UserState::put_entry(Entry {
+        key,
+        hive: hive_id,
+        config_id: config_id.clone(),
+        path,
+    })?;
     let config = HiveConfig {
-        hive: hive
-            .id
-            .parse()
-            .context("the hub sent a malformed hive id")?,
-        name: Some(hive.name.clone()),
+        hive: hive_id,
+        name: Some(joined.hive.name.clone()),
         hub: hub.to_owned(),
         node: machine,
+        config_id,
+        state: Membership::Joined,
     };
     {
         let _lock = HiveConfig::lock(&located.repo_path)?;
         config.save(&located.repo_path)?;
     }
-    drop(node);
     set_forget_after(ui, located)?;
-    UserState::add_repo(located)?;
     if UserState::save_default_hub(hub)? {
         writeln!(ui.stdout(), "Saved {hub} as this machine's default hub.")?;
         writeln!(
@@ -963,7 +1121,9 @@ fn start_serving(ui: &Ui, located: &Located, socket: &Socket) -> anyhow::Result<
         /// The daemon serves it, but its first sync failed, saying this.
         Failed(String),
     }
-    let workspace = UserState::daemon_workspace(located)?;
+    let key = copy::Found::read(&located.repo_path)?
+        .key
+        .context("this repository has no machine key")?;
     // The client lives on the runtime that made it, so one runtime does it all.
     let served = block_on(async {
         let client = match daemon::ensure(socket).await {
@@ -972,7 +1132,7 @@ fn start_serving(ui: &Ui, located: &Located, socket: &Socket) -> anyhow::Result<
         };
         writeln!(ui.stdout(), "Syncing...")?;
         let first = client
-            .add(control::context(Duration::from_secs(3600)), workspace)
+            .add(control::context(Duration::from_secs(3600)), key)
             .await
             .context("asking the daemon to serve this repository")?;
         Ok::<_, anyhow::Error>(match first {
@@ -1043,7 +1203,13 @@ fn clone(
     anyhow::ensure!(status.success(), "`jj {} {dest}` failed", init.join(" "));
     let located = Located::find(destination)?;
     set_machine_name(&located, machine)?;
-    become_node(ui, &located, &info, &hub, false)?;
+    let joined = Joined {
+        hive: info.clone(),
+        created: false,
+        reason: String::new(),
+        present: vec![],
+    };
+    become_node(ui, &located, &joined, &hub, false, None)?;
     let mut out = ui.stdout();
     write!(out, "Cloning hive ")?;
     write!(out.labeled("hive"), "{}", info.name)?;
@@ -1061,7 +1227,7 @@ fn sync_directly(located: &Located) -> anyhow::Result<Synced> {
 
 /// Syncs through the daemon when it serves the repository, else directly.
 fn sync(ui: &Ui, start: &Path, socket: &Socket) -> anyhow::Result<()> {
-    let (synced, stopped) = sync_quietly(start, socket)?;
+    let (synced, stopped) = sync_quietly(ui, start, socket)?;
     writeln!(ui.stdout(), "Synced (hive at #{}).", synced.seq)?;
     if stopped {
         writeln!(
@@ -1076,22 +1242,16 @@ fn sync(ui: &Ui, start: &Path, socket: &Socket) -> anyhow::Result<()> {
 
 /// [`sync`], saying nothing, and whether it synced here because the daemon that would serve
 /// the repository isn't running.
-fn sync_quietly(start: &Path, socket: &Socket) -> anyhow::Result<(Synced, bool)> {
-    let located = Located::find(start)?;
-    let hive =
-        HiveConfig::load(&located.repo_path)?.context("this repository is not part of a hive")?;
-    let served = UserState::load()?.served_workspace(&located.repo_path);
+fn sync_quietly(ui: &Ui, start: &Path, socket: &Socket) -> anyhow::Result<(Synced, bool)> {
+    let (located, hive, entry) = the_copy(ui, start, socket)?;
     let mut stopped = false;
     let through_daemon = block_on(async {
-        let Some(workspace) = served else {
-            return Ok(None);
-        };
         let Some(client) = daemon::running(socket).await? else {
             stopped = true;
             return Ok(None);
         };
         let synced = client
-            .sync(control::context(Duration::from_secs(3600)), workspace)
+            .sync(control::context(Duration::from_secs(3600)), entry.key)
             .await?;
         Ok::<_, anyhow::Error>(Some(synced))
     })?;
@@ -1102,7 +1262,7 @@ fn sync_quietly(start: &Path, socket: &Socket) -> anyhow::Result<(Synced, bool)>
             Ok(synced) => synced,
             // As the daemon would: the hive is over.
             Err(err) if HiveGone::of(&err) == Some(HiveGone::Removed) => {
-                daemon::leave_hive(&located, &hive)?;
+                daemon::leave_hive(&located, &hive, Membership::Removed)?;
                 anyhow::bail!(
                     "{err:#}, so this repository no longer syncs with it; everything it has stays"
                 );
@@ -1113,25 +1273,67 @@ fn sync_quietly(start: &Path, socket: &Socket) -> anyhow::Result<(Synced, bool)>
     Ok((synced, stopped))
 }
 
-fn leave(ui: &Ui, start: &Path, socket: &Socket, force: bool) -> anyhow::Result<()> {
-    let located = Located::find(start)?;
-    let hive =
-        HiveConfig::load(&located.repo_path)?.context("this repository is not part of a hive")?;
-    // So that the daemon doesn't sync it meanwhile.
-    let workspace = UserState::daemon_workspace(&located)?;
-    let served = block_on(async {
+/// Stops the daemon serving the copy whose entry is at `path`, which may be gone: the hive
+/// isn't told, since only the copy can tell it.
+fn leave_path(ui: &Ui, path: &Path, socket: &Socket) -> anyhow::Result<()> {
+    // As entries are: canonical, though the copy is gone, by the directory that held it.
+    let path = std::path::absolute(path)?;
+    let path = match (path.parent().map(Path::canonicalize), path.file_name()) {
+        (Some(Ok(parent)), Some(name)) => parent.join(name),
+        _ => path,
+    };
+    let state = UserState::load()?;
+    let entry = state
+        .copies
+        .iter()
+        .find(|entry| entry.path == path)
+        .with_context(|| format!("this machine syncs no copy at {}", path.display()))?;
+    anyhow::ensure!(
+        !copy::holds(entry, &entry.path),
+        "the copy is at {}; `musubi leave` there takes it out of its hive",
+        entry.path.display()
+    );
+    stop_serving(&entry.key, socket)?;
+    UserState::remove_entry(&entry.key)?;
+    writeln!(
+        ui.stdout(),
+        "This machine no longer syncs the copy at {}.",
+        entry.path.display()
+    )?;
+    writeln!(
+        ui.hint(),
+        "The other machines show it until it is forgotten: `musubi forget` there does that."
+    )?;
+    Ok(())
+}
+
+/// Stops the daemon, if it runs, serving `key`'s copy. Returns whether one runs.
+fn stop_serving(key: &str, socket: &Socket) -> anyhow::Result<bool> {
+    block_on(async {
         let Some(client) = daemon::running(socket).await? else {
             return Ok(false);
         };
         client
-            .remove(
-                control::context(Duration::from_secs(120)),
-                workspace.clone(),
-            )
+            .remove(control::context(Duration::from_secs(120)), key.to_owned())
             .await?
             .map_err(anyhow::Error::msg)?;
         Ok::<_, anyhow::Error>(true)
-    })?;
+    })
+}
+
+fn leave(
+    ui: &Ui,
+    start: &Path,
+    socket: &Socket,
+    force: bool,
+    path: Option<&Path>,
+) -> anyhow::Result<()> {
+    if let Some(path) = path {
+        return leave_path(ui, path, socket);
+    }
+    let (located, hive, entry) = the_copy(ui, start, socket)?;
+    // So that the daemon doesn't sync it meanwhile.
+    let served = stop_serving(&entry.key, socket)?;
     let name = hive.display_name();
     let told = match snapshot(&located) {
         Err(err) => Err(("record what changed in the working copy".to_owned(), err)),
@@ -1145,7 +1347,7 @@ fn leave(ui: &Ui, start: &Path, socket: &Socket, force: bool) -> anyhow::Result<
                 block_on(async {
                     if let Some(client) = daemon::running(socket).await? {
                         let context = control::context(Duration::from_secs(10));
-                        client.add(context, workspace).await.ok();
+                        client.add(context, entry.key.clone()).await.ok();
                     }
                     Ok::<_, anyhow::Error>(())
                 })
@@ -1169,7 +1371,7 @@ fn leave(ui: &Ui, start: &Path, socket: &Socket, force: bool) -> anyhow::Result<
             "Couldn't give this repository's working copies new commits ({err:#})."
         )?;
     }
-    daemon::leave_hive(&located, &hive)?;
+    daemon::leave_hive(&located, &hive, Membership::Left)?;
     let mut out = ui.stdout();
     write!(out, "This repository has left hive ")?;
     write!(out.labeled("hive"), "{name}")?;
@@ -1275,9 +1477,7 @@ fn leave_once(
 }
 
 fn forget(ui: &Ui, start: &Path, machine: &str, socket: &Socket) -> anyhow::Result<()> {
-    let located = Located::find(start)?;
-    let hive =
-        HiveConfig::load(&located.repo_path)?.context("this repository is not part of a hive")?;
+    let (located, hive, _) = the_copy(ui, start, socket)?;
     let mut node = located.open()?;
     let this =
         |node: &NodeRepo| machine == node.machine().name() || machine == node.machine().key();
@@ -1290,7 +1490,7 @@ fn forget(ui: &Ui, start: &Path, machine: &str, socket: &Socket) -> anyhow::Resu
         ),
         None => {
             drop(node);
-            sync_quietly(start, socket)?;
+            sync_quietly(ui, start, socket)?;
             node = located.open()?;
             node.machine_named(machine)?.with_context(|| {
                 format!(
@@ -1337,30 +1537,47 @@ fn list(
             Ok(None) => return Ok((Ok(false), BTreeMap::new())),
             Err(err) => return Ok((Err(err), BTreeMap::new())),
         };
-        let statuses: BTreeMap<PathBuf, Status> = client
+        let statuses: BTreeMap<String, Status> = client
             .status(control::context(Duration::from_secs(10)))
             .await?
             .into_iter()
-            .map(|repo| (repo.workspace, repo.status))
+            .map(|repo| (repo.key, repo.status))
             .collect();
         Ok::<_, anyhow::Error>((Ok(true), statuses))
     })?;
+    // A copy moved here is served here from now on.
+    if let Ok(located) = Located::find(cwd)
+        // jj, looking at it, could write to another user's repository.
+        && copy::check_owner(&located.repo_path).is_ok()
+        && let Ok(found) = copy::Found::resolve(&located)
+        && let Some(entry) = found.key.as_deref().and_then(|key| state.entry(key))
+        && copy::standing_of(&located, &found, Some(entry)) == copy::Standing::Copy
+        && let Ok(socket) = &socket
+        && let Err(err) = follow_move(ui, &located, entry, socket)
+    {
+        writeln!(
+            ui.warning(),
+            "Couldn't sync this repository from here: {err:#}"
+        )?;
+    }
+    let state = UserState::load()?;
     let mut copies = vec![];
-    for workspace in &state.repos {
-        let Ok(located) = Located::find(workspace) else {
-            writeln!(
-                ui.warning(),
-                "{} is gone; remove it from {}",
-                workspace.display(),
-                UserState::path()?.display()
-            )?;
-            continue;
-        };
-        let Some(hive) = HiveConfig::load(&located.repo_path)? else {
+    let mut missing = vec![];
+    // The missing copies printed under their hives.
+    let mut shown: Vec<&Entry> = vec![];
+    for entry in &state.copies {
+        let located = Located::find(&entry.path)
+            .ok()
+            .filter(|_| copy::holds(entry, &entry.path));
+        let Some((located, Some(hive))) = located.map(|located| {
+            let hive = HiveConfig::load(&located.repo_path).ok().flatten();
+            (located, hive)
+        }) else {
+            missing.push(entry);
             continue;
         };
         let status = statuses
-            .get(workspace)
+            .get(&entry.key)
             .cloned()
             .or_else(|| Status::load(&located.repo_path));
         copies.push(Copy {
@@ -1391,6 +1608,7 @@ fn list(
                     for copy in here.iter().filter(|c| c.hive.hive.to_string() == info.id) {
                         lister.print(&copy_line(&hive, copy))?;
                     }
+                    print_missing(&lister, &hive, &missing, &mut shown)?;
                 }
                 for copy in here
                     .iter()
@@ -1402,6 +1620,7 @@ fn list(
                         ..hive.clone()
                     })?;
                     lister.print(&copy_line(&hive, copy))?;
+                    print_missing(&lister, &hive, &missing, &mut shown)?;
                 }
             }
             Err(err) => {
@@ -1410,13 +1629,31 @@ fn list(
                     let hive = hive_here(hub, false, copy);
                     lister.print(&hive)?;
                     lister.print(&copy_line(&hive, copy))?;
+                    print_missing(&lister, &hive, &missing, &mut shown)?;
                 }
             }
         }
     }
+    // Copies not where their entries say, of hives no hub listed: with their hives' ids
+    // alone, which their entries keep.
+    for entry in missing.iter().filter(|entry| !shown.contains(entry)) {
+        let hive = Line {
+            id: entry.hive.to_string(),
+            ..Line::default()
+        };
+        lister.print(&missing_line(&hive, entry))?;
+    }
     // As jj's list commands print only their lines when given a template.
     if template.is_some() {
         return Ok(());
+    }
+    if let Some(entry) = missing.first() {
+        writeln!(
+            ui.hint(),
+            "A copy not where it was syncs again if it comes back, or once jj runs in it where it \
+             was moved to. If it's gone, `musubi leave {}` stops looking for it.",
+            entry.path.display()
+        )?;
     }
     let mut out = ui.stdout();
     let at_login = if login::installed() {
@@ -1447,6 +1684,48 @@ fn no_hubs(ui: &Ui) -> std::io::Result<()> {
         ui.hint(),
         "Run `musubi hub` on one machine, then the join command it prints."
     )
+}
+
+/// The lines of the copies in `missing` of the hive on line `hive`, unless `shown` has them,
+/// as it does from then on.
+fn print_missing<'a>(
+    lister: &Lister,
+    hive: &Line,
+    missing: &[&'a Entry],
+    shown: &mut Vec<&'a Entry>,
+) -> anyhow::Result<()> {
+    for &entry in missing {
+        if entry.hive.to_string() == hive.id && !shown.contains(&entry) {
+            lister.print(&missing_line(hive, entry))?;
+            shown.push(entry);
+        }
+    }
+    Ok(())
+}
+
+/// The line of a copy that isn't where `entry` says, of the hive on line `hive`.
+fn missing_line(hive: &Line, entry: &Entry) -> Line {
+    let why = why_missing(entry);
+    Line {
+        path: Some(entry.path.clone()),
+        status: format!("not syncing: {why}"),
+        problem: why,
+        ..hive.clone()
+    }
+}
+
+/// Why `entry`'s path doesn't hold the copy it names.
+fn why_missing(entry: &Entry) -> String {
+    let Ok(located) = Located::find(&entry.path) else {
+        return "it's missing".to_owned();
+    };
+    match copy::Found::read(&located.repo_path) {
+        Ok(found) => match copy::check(entry, &found) {
+            Ok(()) => "it is back".to_owned(),
+            Err(why) => format!("the repository there isn't the copy: {why}"),
+        },
+        Err(err) => format!("{err:#}"),
+    }
 }
 
 /// The machines in a hive, as shell completion shows them.

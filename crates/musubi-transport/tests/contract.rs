@@ -10,7 +10,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bytes::Bytes;
 use musubi_transport::MemoryNetwork;
+use musubi_transport::MemoryTransport;
 use musubi_transport::StreamTransport;
+use musubi_transport::Subscription;
 use musubi_transport::Transport;
 use musubi_transport::TransportError;
 use musubi_transport::stream::Connector;
@@ -221,6 +223,86 @@ async fn stream_transport_reconnects() {
         .unwrap()
         .unwrap();
     assert_eq!(head.payload, "head");
+}
+
+/// The hub's transport, counting the subscriptions it takes.
+struct Counting {
+    inner: MemoryTransport,
+    subscriptions: Mutex<Vec<String>>,
+}
+
+impl Counting {
+    fn subscriptions_to(&self, subject: &str) -> usize {
+        let subscriptions = self.subscriptions.lock().unwrap();
+        subscriptions.iter().filter(|s| *s == subject).count()
+    }
+}
+
+#[async_trait]
+impl Transport for Counting {
+    fn max_payload(&self) -> usize {
+        self.inner.max_payload()
+    }
+
+    async fn publish(&self, subject: &str, payload: Bytes) -> Result<(), TransportError> {
+        self.inner.publish(subject, payload).await
+    }
+
+    async fn subscribe(&self, subject: &str) -> Result<Subscription, TransportError> {
+        self.subscriptions.lock().unwrap().push(subject.to_owned());
+        self.inner.subscribe(subject).await
+    }
+
+    async fn request(
+        &self,
+        subject: &str,
+        payload: Bytes,
+        timeout: Duration,
+    ) -> Result<Bytes, TransportError> {
+        self.inner.request(subject, payload, timeout).await
+    }
+}
+
+/// However many subscriptions to a subject a transport makes and drops, as a daemon's copies
+/// sharing a connection do each time they start, the hub takes one a connection, which they
+/// share: each gets each message once.
+#[tokio::test]
+async fn stream_transport_subscribes_once_a_subject() {
+    let network = MemoryNetwork::new(1, LIMIT);
+    let hub = network.connect();
+    let counting = Arc::new(Counting {
+        inner: network.connect(),
+        subscriptions: Mutex::new(vec![]),
+    });
+    let pipe = Pipe::new(counting.clone());
+    let client = StreamTransport::connect(pipe.clone()).await.unwrap();
+    let mut reconnections = client.reconnections();
+    for _ in 0..3 {
+        drop(client.subscribe("musubi.test.head").await.unwrap());
+    }
+    let mut first = client.subscribe("musubi.test.head").await.unwrap();
+    let mut second = client.subscribe("musubi.test.head").await.unwrap();
+    for connection in 1..=2 {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        hub.publish("musubi.test.head", Bytes::from_static(b"head"))
+            .await
+            .unwrap();
+        for subscription in [&mut first, &mut second] {
+            let message = tokio::time::timeout(Duration::from_secs(5), subscription.next())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(message.payload, "head");
+        }
+        let again = tokio::time::timeout(Duration::from_millis(100), first.next()).await;
+        assert!(again.is_err(), "{again:?}");
+        assert_eq!(counting.subscriptions_to("musubi.test.head"), connection);
+        // The next connection subscribes again, once.
+        pipe.cut();
+        tokio::time::timeout(Duration::from_secs(5), reconnections.next())
+            .await
+            .unwrap();
+    }
 }
 
 /// What answers must greet as a hub of this version, after no more than so much noise, or

@@ -408,9 +408,19 @@ struct State {
     stalled: Arc<Notify>,
     max_payload: usize,
     next_id: u64,
-    subscriptions: HashMap<u64, (String, mpsc::UnboundedSender<Message>)>,
+    /// Its subscriptions on the hub, by id: one for each subject, which the subscriptions
+    /// made to it share. Nothing unsubscribes on the hub, so one that nobody reads any more
+    /// stays until the connection ends, for a subscription to the same subject to take up.
+    subscriptions: HashMap<u64, Subscribed>,
     /// Requests awaiting replies on this connection, with their subjects.
     pending: HashMap<u64, (String, oneshot::Sender<Result<Bytes, TransportError>>)>,
+}
+
+/// A subscription on the hub, to `subject`.
+struct Subscribed {
+    subject: String,
+    /// Where its messages go: one for each subscription made to the subject.
+    to: Vec<mpsc::UnboundedSender<Message>>,
 }
 
 impl State {
@@ -436,11 +446,13 @@ impl Shared {
     /// `stalled` is notified, subscribing again to everything still subscribed to.
     fn attach(&self, out: mpsc::Sender<Vec<u8>>, stalled: Arc<Notify>, max_payload: usize) {
         let mut state = self.lock();
-        state
-            .subscriptions
-            .retain(|_, (_, sender)| !sender.is_closed());
-        for (&sid, (subject, _)) in &state.subscriptions {
-            let subject = subject.clone();
+        // Only what is still read: the last connection's took the rest with it.
+        state.subscriptions.retain(|_, subscribed| {
+            subscribed.to.retain(|to| !to.is_closed());
+            !subscribed.to.is_empty()
+        });
+        for (&sid, subscribed) in &state.subscriptions {
+            let subject = subscribed.subject.clone();
             out.try_send(Frame::Sub { sid, subject }.encode()).ok();
         }
         state.out = Some(out);
@@ -477,11 +489,8 @@ impl Shared {
                     payload,
                     reply,
                 };
-                if let Some((_, sender)) = state.subscriptions.get(&sid)
-                    && sender.send(message).is_err()
-                {
-                    // Nobody reads the subscription any more.
-                    state.subscriptions.remove(&sid);
+                if let Some(subscribed) = state.subscriptions.get_mut(&sid) {
+                    subscribed.to.retain(|to| to.send(message.clone()).is_ok());
                 }
             }
             Frame::Reply { id, payload } => {
@@ -728,6 +737,15 @@ impl Transport for StreamTransport {
         check_subject(subject)?;
         let (sender, receiver) = mpsc::unbounded_channel();
         let mut state = self.shared.lock();
+        // On the hub already, perhaps for a subscription that has ended.
+        if let Some(subscribed) = state
+            .subscriptions
+            .values_mut()
+            .find(|subscribed| subscribed.subject == subject)
+        {
+            subscribed.to.push(sender);
+            return Ok(Subscription::new(receiver));
+        }
         let sid = state.next_id;
         state.next_id += 1;
         // Without a connection now, or with one too far behind to take it, the next one
@@ -737,9 +755,13 @@ impl Transport for StreamTransport {
             subject: subject.to_owned(),
         };
         state.send(frame.encode()).ok();
-        state
-            .subscriptions
-            .insert(sid, (subject.to_owned(), sender));
+        state.subscriptions.insert(
+            sid,
+            Subscribed {
+                subject: subject.to_owned(),
+                to: vec![sender],
+            },
+        );
         Ok(Subscription::new(receiver))
     }
 

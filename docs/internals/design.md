@@ -751,9 +751,11 @@ misbehaving peer can't inject data under a false id.
   fields: `SUB`, `PUB` and `REQ` from the client; `MSG` for its subscriptions, and `REPLY` or
   `FAIL` for its requests, from the hub, which relays each connection through its own in-memory
   network, every request as it comes. A frame the connection ends partway through is never
-  delivered. The client opens a new connection whenever one ends, subscribing again to what it
-  had; requests in flight on the old one fail at once, and those made in between wait for the new
-  one, up to their timeout. Either side ends a connection that falls 1024 frames behind, as it
+  delivered. The client subscribes on the hub once a subject, however many subscriptions it makes
+  to it: there is no unsubscribing there, so one that nobody reads any more stays until the
+  connection ends, for the next subscription to the subject to take up. It opens a new connection
+  whenever one ends, subscribing again to what it still reads; requests in flight on the old one
+  fail at once, and those made in between wait for the new one, up to their timeout. Either side ends a connection that falls 1024 frames behind, as it
   would one whose other side vanished. If a hub greets the client wrongly (another version, too
   much noise first, or an implausible payload limit), the first connection fails at once, and
   after that the client tries again only after a minute.

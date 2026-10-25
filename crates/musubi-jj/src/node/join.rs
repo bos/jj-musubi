@@ -95,6 +95,12 @@ impl NodeRepo {
         self.insert_map(local, canonical)
     }
 
+    /// Whether the local operation `op` is a join point, which a canonical join operation
+    /// stands for.
+    pub(super) fn is_join_point(&self, op: &jj_lib::operation::Operation) -> bool {
+        !self.joins.is_empty() && self.joins.contains_key(&fingerprint(op.store_operation()))
+    }
+
     /// Whether `head` descends from history this repository shared with a hive: an operation
     /// canonicalized already, a realization of another machine's, or a join point, as
     /// `canonicalize` knows them.

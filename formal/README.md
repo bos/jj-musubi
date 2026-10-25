@@ -246,13 +246,18 @@ obeying three laws (`RefAlg`), which the test `ref_laws` checks against jj-lib.
   for a remote bookmark, as long as every realization is exported before a `jj` command can
   import. A tag's slot is a local bookmark's, so these hold for tags too.
 - `conflictedNoSpuriousRevert`, `conflicted_import_agrees`: jj skips the export of a conflicted
-  remote bookmark, which two machines' fetches merge to, so musubi writes one of its sides to
-  `.git` itself (`exportConflicted`). Then an import changes nothing unless git moved the ref,
-  or resolves the conflict to that side (not vacuously: `conflicted_resolves`), and every
-  machine imports the same.
+  remote bookmark, which two machines' fetches merge to and `jj op restore` can bring back, so
+  musubi writes its expected value to `.git` itself (`exportConflicted`): one of its sides
+  where a merge made the conflict, and where a restore brought it, the value from before the
+  restore, which the restoring machine's `.git` kept. Then an import changes nothing unless
+  git moved the ref, or resolves the conflict to that value (not vacuously:
+  `conflicted_resolves`), and every machine with the same expected value imports the same,
+  the restoring machine included (`restore_import_agrees`), so a bookmark restored with its remote bookmark to a conflict
+  goes back where it was (`restore_conflict_resolves_back`, `conflicted_restore_resolves`).
 - `restoreLocal_inv`, `restoreRemote_inv`, `restoreRemote_cinv`: `jj undo` and `jj op restore`
-  keep the invariant where jj's export can write the restored bookmark. Where it can't, as for
-  the root commit or a conflict, the next import moves the bookmark with no `git` command
+  keep the invariant where jj's export can write the restored bookmark, or it restores a
+  conflicted remote bookmark. Where it can't, as for the root commit or a conflicted local
+  bookmark, the next import moves the bookmark with no `git` command
   having run (`restore_reverts`): jj's behaviour, in which no musubi step takes part.
 - `verbatim_reverts`: replicating the per-machine record verbatim instead reverts another
   machine's move of a bookmark with no git move at all.
@@ -268,8 +273,8 @@ Commit graphs, rebases and jj's conflict algebra are not modeled. The file's hea
 what else it leaves out: tracking in the linear steps; the tracking state of an absent
 `x@git`, which musubi's realization keeps and jj would drop (`realize_not_WF`); as runs,
 merges of more than two heads, criss-cross merges, and concurrent heads of remote bookmarks;
-and a restore that brings back a conflicted remote bookmark, which jj resolves to this
-machine's `.git` value rather than musubi's side.
+and the history the expected value of a conflicted remote bookmark is computed from, which
+the model takes as given with each operation.
 
 ### Presence (`Presence.lean`)
 

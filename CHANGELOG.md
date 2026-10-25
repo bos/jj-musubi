@@ -6,6 +6,12 @@ change the protocol, so run the same release on the hub and every machine (see
 
 ## Unreleased
 
+- `jj op restore` (or `jj undo`) back to an operation in which a remote bookmark was
+  conflicted, as concurrent fetches on two machines leave one, no longer moves that remote
+  bookmark and the bookmark tracking it backwards on every machine. Each machine resolves the
+  conflict to the commit the remote bookmark had before the restore, where the machine that
+  restored and the others used to resolve it differently, and the hive merged the two to an
+  older commit, which a plain `git push` from a colocated repository could then push.
 - On each machine, the daemon cleans up what `jj util gc` would, short of deleting git
   objects, so that a busy hive's copies stop growing with files jj no longer reads: replaced
   extras segments, keep refs beyond the heads, and operations nothing reachable needs, once

@@ -16,8 +16,9 @@
 //! the next command merges with the head, as jj's `TSlot.merge`; and the other machine moving
 //! a bookmark or fetching before it has this machine's latest operations, so that it merges
 //! them, and this machine realizes that merge, as `realizeMerge`, which is `TSlot.merge`
-//! (`realizeMerge_eq`). Two fetches merge so to a conflicted `y@origin`, one side of which
-//! musubi writes to `.git` (`exportConflicted`), the same on both machines.
+//! (`realizeMerge_eq`). Two fetches merge so to a conflicted `y@origin`, whose expected value,
+//! one of its sides, musubi writes to `.git` (`exportConflicted`), the same on both machines;
+//! a restore of the conflict keeps the expected value from before it (`restoreC`).
 //!
 //! The refs are a local bookmark `x`, which git moves; a local bookmark `y`, which git
 //! doesn't; `y@origin`, which `y` tracks, which git moves and fetches move; and a tag `t`,
@@ -108,12 +109,15 @@ struct Slot {
     tr: bool,
 }
 
-/// The model's `Machine`: the view's slot, `.git`'s ref, and the ghost `moved`.
+/// The model's `Machine`: the view's slot, `.git`'s ref, and the ghost `moved`; for
+/// `y@origin`, `CMachine`, with the expected value of a conflicted remote bookmark.
 #[derive(Clone, Debug)]
 struct Machine {
     v: Slot,
     g: RefTarget,
     moved: bool,
+    /// Ghost, shared: `CMachine.E` where `R` is a conflict (`Machine::expected`).
+    e: RefTarget,
     /// Ghost: a `jj undo` or `jj op restore` since the last import left a record that
     /// doesn't match `.git`, which `restoreLocal_inv` and `restoreRemote_cinv` allow only
     /// where the restored slot isn't `Restorable`.
@@ -138,7 +142,7 @@ impl Alg {
         Self::resolved(t) && t.as_normal() != Some(self.repo.store().root_commit_id())
     }
 
-    /// `Sides.side`: the side of a conflict that musubi writes to `.git`
+    /// `Sides.side`: the side of a conflict a merge makes that musubi writes to `.git`
     /// (`export_conflicted_remote_bookmarks`), the one committed last, then the greatest
     /// commit id; none if no side is present.
     fn side(&self, t: &RefTarget) -> Option<RefTarget> {
@@ -261,6 +265,7 @@ impl Machine {
         self.v = v;
         self.moved = false;
         self.restored = false;
+        self.e = self.g.clone();
         set
     }
 
@@ -302,54 +307,65 @@ impl Machine {
         }
     }
 
+    /// The expected value: the remote bookmark if it is resolved, otherwise `e`.
+    fn expected(&self) -> RefTarget {
+        if Alg::resolved(&self.v.r) {
+            self.v.r.clone()
+        } else {
+            self.e.clone()
+        }
+    }
+
     /// musubi's export of a conflicted remote bookmark (`exportConflicted`,
-    /// `export_conflicted_remote_bookmarks`): its side, written to `.git` if that holds a
-    /// value the hive knows of, a term of the conflict or the record, and to the record.
+    /// `export_conflicted_remote_bookmarks`): its expected value, written to `.git` if that
+    /// holds it, or a value the hive knows of, a term of the conflict or the record, and it
+    /// can be written; and to the record.
     fn export_conflicted(&mut self, alg: &Alg) {
-        let v = &mut self.v;
-        if Alg::resolved(&v.r) {
+        if Alg::resolved(&self.v.r) {
             return;
         }
-        let Some(side) = alg.side(&v.r) else {
-            return;
-        };
-        if self.g != side {
+        let e = self.e.clone();
+        let v = &mut self.v;
+        if self.g != e {
             let actual = self.g.as_normal();
             let known = v.r.iter().any(|term| term.as_ref() == actual)
                 || (Alg::resolved(&v.k) && v.k.as_normal() == actual);
-            if !known {
+            if !known || !alg.writable(&e) {
                 return;
             }
-            self.g = side.clone();
+            self.g = e.clone();
         }
-        v.k = side;
+        v.k = e;
     }
 
     /// The model's invariant for `r`: `LInv`, or for `y@origin` `CInv`, which is `RInv`
-    /// but for a conflicted remote bookmark whose side musubi wrote.
-    fn strict_inv(&self, alg: &Alg, r: Ref) -> bool {
+    /// but for a conflicted remote bookmark, with `.git` at the expected value.
+    fn strict_inv(&self, r: Ref) -> bool {
         if r != Ref::Origin {
             return self.moved || (self.v.r == self.g && self.v.k == self.g);
         }
         Alg::resolved(&self.g)
             && (self.moved
                 || (self.v.k == self.g
-                    && (self.v.r == self.g
-                        || (!Alg::resolved(&self.v.r)
-                            && alg.side(&self.v.r).as_ref() == Some(&self.g)))))
+                    && self.expected() == self.g
+                    && (self.v.r == self.g || !Alg::resolved(&self.v.r))))
     }
 
     /// `strict_inv`, but where a restore left the record behind (`restored`).
-    fn inv(&self, alg: &Alg, r: Ref) -> bool {
-        self.restored || self.strict_inv(alg, r)
+    fn inv(&self, r: Ref) -> bool {
+        self.restored || self.strict_inv(r)
     }
 
     /// `Restorable`: whether restoring `o` here keeps the invariant, as the export puts
     /// `.git` back or there is nothing to put back. For a remote bookmark (`remote`) that is
-    /// about its target, otherwise about the bookmark's.
+    /// about its target, which may be a conflict too (`CStep.restore`), otherwise about the
+    /// bookmark's.
     fn restorable(&self, alg: &Alg, o: &Slot, remote: bool) -> bool {
         let target = if remote { &o.r } else { &o.l };
-        alg.writable(target) || *target == self.v.k || o.r == self.v.r
+        alg.writable(target)
+            || *target == self.v.k
+            || o.r == self.v.r
+            || (remote && !Alg::resolved(target))
     }
 }
 
@@ -433,6 +449,9 @@ impl Model {
             let o = slot(view, r);
             let m = self.at(r);
             restorable[r as usize] = m.restorable(alg, &o, r == Ref::Origin);
+            // `restoreC`: the restore's parent is the head, so its expected value is the
+            // head's, where the restored remote bookmark is a conflict.
+            m.e = m.expected();
             m.v = Slot {
                 k: m.v.k.clone(),
                 ..o
@@ -441,7 +460,7 @@ impl Model {
         self.export(alg, false, false);
         for r in Ref::ALL {
             let m = self.at(r);
-            if !m.inv(alg, r) {
+            if !m.inv(r) {
                 assert!(
                     !restorable[r as usize],
                     "{r:?}: a restorable slot left the record behind: {m:?}"
@@ -506,7 +525,7 @@ impl Model {
 /// the model assumes: without it, jj forgets that `y` tracks `y@origin` once both are gone,
 /// and merges nothing into `y` when `y@origin` comes back (docs/internals/conformance.md,
 /// "Per-machine refs").
-fn hive() -> Fixture {
+pub(crate) fn hive() -> Fixture {
     Fixture::recorded(&["alpha", "beta"], "refs", |hive| {
         let origin = hive.env.root().join("origin.git");
         let repo = hive.repo(HERE);
@@ -594,6 +613,7 @@ impl Refs {
         let model = Model(Ref::ALL.map(|r| {
             let (v, g) = read(&repo, r);
             Machine {
+                e: g.clone(),
                 v,
                 g,
                 moved: false,
@@ -642,12 +662,12 @@ impl Refs {
             assert_eq!(v, model.v, "{r:?}: bookmark, remote bookmark and git_refs");
             assert_eq!(g, model.g, "{r:?}: .git's {}", r.git_ref());
             assert!(
-                model.inv(&self.alg, r),
+                model.inv(r),
                 "{r:?}: the model's invariant fails: {model:?}"
             );
             // Once the record is back, as a realization's export can put it, the invariant
             // holds again in full.
-            if model.strict_inv(&self.alg, r) {
+            if model.strict_inv(r) {
                 self.model.at(r).restored = false;
             }
         }
@@ -728,6 +748,12 @@ impl Refs {
     fn origin(&self) -> PathBuf {
         self.fixture.env.root().join("origin.git")
     }
+}
+
+/// The expected value of `y@origin` in `model`, if it is conflicted.
+fn conflicted_expected(model: &Model) -> Option<RefTarget> {
+    let origin = model.get(Ref::Origin);
+    (!Alg::resolved(&origin.v.r)).then(|| origin.e.clone())
 }
 
 /// `r` as this machine's view at `repo` has it, and its `.git`.
@@ -905,10 +931,10 @@ impl Refs {
         let canonical = shared(|r| slot(view, r));
         let mut expected = base.clone();
         // The other machine's command imports first, and resolves a conflicted `y@origin` to
-        // the side musubi wrote there, as this machine's import would
-        // (`conflicted_import_agrees`).
-        if let Some(side) = self.conflicted_side(&expected) {
-            expected.at(Ref::Origin).g = side;
+        // the expected value its `.git` holds, as this machine's import would
+        // (`conflicted_import_agrees`, `restore_import_agrees`).
+        if let Some(e) = conflicted_expected(&expected) {
+            expected.at(Ref::Origin).g = e;
             expected.import(&self.alg, &[Ref::Origin]);
         }
         match moved {
@@ -949,12 +975,13 @@ impl Refs {
         if expected.shared() != base.shared() {
             // `CStep.advance`'s precondition, which offering no root commit keeps.
             let g = self.model.at(Ref::Origin).g.clone();
-            let advances = |r: &RefTarget| {
-                *r == g || self.alg.writable(r) || (!Alg::resolved(r) && self.alg.side(r).is_some())
-            };
-            assert!(advances(&canonical.2.r));
+            let advances = |e: &RefTarget| *e == g || self.alg.writable(e);
             if ours == synced_op {
+                // The other machine's operations follow on from this machine's head, so a
+                // conflict they keep has the head's expected value.
+                let e = self.model.get(Ref::Origin).expected();
                 self.model.realize(&canonical);
+                self.model.at(Ref::Origin).e = e;
             } else {
                 // Theirs is realized here from the base, its record the base's, and merged
                 // with ours as the other machine merged them.
@@ -970,35 +997,38 @@ impl Refs {
                 } else {
                     Model::merge(&self.alg, &base, &theirs, &self.model)
                 };
+                // The merge's expected value: the first parent's with the same conflict, or
+                // the side, where the merge made it.
+                let r = &merged[Ref::Origin as usize].r;
+                let mut heads = [&self.model, &theirs];
+                if parents[0] != ours {
+                    heads.reverse();
+                }
+                let e = match heads.iter().find(|m| m.get(Ref::Origin).v.r == *r) {
+                    Some(parent) => parent.get(Ref::Origin).expected(),
+                    // Two fetches' conflict has a side, a commit: one of them fetched it.
+                    None => self.alg.side(r).expect("a fetched side"),
+                };
                 for (r, v) in Ref::ALL.into_iter().zip(merged) {
                     self.model.at(r).v = v;
                 }
-                assert!(advances(&self.model.get(Ref::Origin).v.r));
+                self.model.at(Ref::Origin).e = e;
             }
+            assert!(advances(&self.model.get(Ref::Origin).expected()));
             self.model.export(&self.alg, locked, true);
         }
         self.check();
-        // Every machine writes the same side of a conflicted `y@origin` to its `.git`.
-        if let Some(side) = self.conflicted_side(&self.model) {
+        // Every machine has the same expected value of a conflicted `y@origin` in its `.git`.
+        if let Some(e) = conflicted_expected(&self.model) {
             let (there, g) = read(&self.fixture.load(THERE), Ref::Origin);
             assert_eq!(
                 there.r,
                 self.model.get(Ref::Origin).v.r,
                 "the other machine's y@origin"
             );
-            assert_eq!(g, side, "the other machine's refs/remotes/origin/y");
+            assert_eq!(g, e, "the other machine's refs/remotes/origin/y");
         }
         self.synced = (self.head(), self.model.clone());
-    }
-
-    /// The side musubi writes for `y@origin` in `model`, if it is conflicted.
-    fn conflicted_side(&self, model: &Model) -> Option<RefTarget> {
-        let r = &model.get(Ref::Origin).v.r;
-        if Alg::resolved(r) {
-            None
-        } else {
-            self.alg.side(r)
-        }
     }
 
     /// `jj undo`, or if `target`, `jj op restore` to it: as a `jj` command, its import, then
@@ -1149,6 +1179,34 @@ fn undo_of_an_unexportable_bookmark_conflicts_it() {
     let y = refs.imported(Ref::Y);
     refs.jj_sets(Ref::Y, y);
     assert!(!refs.model.get(Ref::X).v.l.is_resolved());
+}
+
+/// `restore_import_agrees`, the case of `restore.rs`, which Hegel reaches only now and then:
+/// this machine fetches `two` while the other fetches `three`, so that the merge conflicts
+/// `y@origin`, and musubi writes its side to both `.git`s; this machine fetches `base`, then
+/// restores the conflicted operation. The restore's expected value is `base`, so the other
+/// machine's command, as it moves `x`, resolves the conflict to `base`, as this machine's
+/// then does.
+#[test]
+fn restore_of_a_conflicted_remote_bookmark_resolves_alike() {
+    let mut refs = Refs::new();
+    let [base, _, two, three] = [1, 2, 3, 4].map(|i| RefTarget::normal(refs.commits[i].clone()));
+    refs.jj_fetches_from(two);
+    refs.musubi_realizes_with(None, three, false, true);
+    assert!(!refs.model.get(Ref::Origin).v.r.is_resolved());
+    let conflicted = refs.head();
+    refs.jj_fetches_from(base.clone());
+    refs.jj_restores_to(Some(conflicted));
+    let origin = refs.model.get(Ref::Origin);
+    assert!(!origin.v.r.is_resolved() && !origin.restored, "{origin:?}");
+    assert_eq!(origin.g, base);
+    let x = refs.model.get(Ref::X).v.l.clone();
+    let moved = RefTarget::normal(refs.commits[if x == base { 2 } else { 1 }].clone());
+    refs.musubi_realizes_with(Some((Ref::X, moved)), base.clone(), false, false);
+    let y = refs.imported(Ref::Y);
+    refs.jj_sets(Ref::Y, y);
+    let origin = refs.model.get(Ref::Origin);
+    assert_eq!((&origin.v.l, &origin.v.r), (&base, &base));
 }
 
 /// How many cases to make: `MUSUBI_CONFORMANCE_CASES`, as for the other conformance tests,

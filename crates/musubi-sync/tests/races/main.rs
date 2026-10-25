@@ -18,4 +18,5 @@ mod history;
 mod refs;
 mod remotes;
 mod repositories;
+mod restore;
 mod workspaces;

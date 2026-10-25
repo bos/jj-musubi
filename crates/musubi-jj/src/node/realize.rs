@@ -594,7 +594,8 @@ impl NodeRepo {
         let _lock = colocation.map(Colocation::lock).transpose()?;
         let head = match colocation {
             Some(colocation) => {
-                let exported = colocation.export_refs(&self.loader, &realized)?;
+                let exported = colocation
+                    .export_refs(&self.loader, &realized, &|op| self.is_join_point(op))?;
                 self.insert_map(exported.clone(), canonical.clone())?;
                 exported
             }

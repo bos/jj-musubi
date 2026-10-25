@@ -2,9 +2,11 @@
 //! export its refs to `.git` when it is colocated.
 
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use gix::refs::transaction::PreviousValue;
 use jj_lib::backend::CommitId;
@@ -17,6 +19,7 @@ use jj_lib::op_store::OperationId;
 use jj_lib::op_store::RefTarget;
 use jj_lib::operation::Operation;
 use jj_lib::ref_name::GitRefNameBuf;
+use jj_lib::ref_name::RemoteRefSymbol;
 use jj_lib::repo::MutableRepo;
 use jj_lib::repo::ReadonlyRepo;
 use jj_lib::repo::Repo as _;
@@ -48,7 +51,14 @@ pub(super) struct NodeGit {
 pub(super) struct Colocation {
     /// jj's lock on importing and exporting refs.
     lock_path: PathBuf,
+    /// The expected values of the conflicted remote bookmarks of the operation exported last,
+    /// under its realization's id and its exported copy's, where the next export's walk back
+    /// through history ([`expected`]) usually stops.
+    expected: Mutex<Expected>,
 }
+
+/// Expected values of conflicted remote bookmarks, by operation and git ref.
+type Expected = HashMap<(OperationId, GitRefNameBuf), Option<RefTarget>>;
 
 impl NodeGit {
     /// The git repository of the jj repository whose `.jj/repo` directory is `repo_path` and
@@ -61,6 +71,7 @@ impl NodeGit {
             repo: GitRepo::new(executable, git_path),
             colocation: colocated.then(|| Colocation {
                 lock_path: repo_path.join("git_import_export.lock"),
+                expected: Mutex::default(),
             }),
             config: ConfigCache::default(),
         })
@@ -284,11 +295,12 @@ impl Colocation {
 
     /// Runs jj's `export_refs` on top of a realization and returns the operation that
     /// records the result: the same operation if nothing changed, otherwise a copy with the
-    /// updated per-machine fields.
+    /// updated per-machine fields. `is_join` says whether a local operation is a join point.
     pub fn export_refs(
         &self,
         loader: &RepoLoader,
         realized: &OperationId,
+        is_join: &dyn Fn(&Operation) -> bool,
     ) -> Result<OperationId, NodeError> {
         let op = loader.load_operation(realized).block_on()?;
         let repo: Arc<ReadonlyRepo> = loader.load_at(&op).block_on()?;
@@ -296,9 +308,26 @@ impl Colocation {
         // Refs that fail to export keep their recorded values, exactly as after a failed
         // export in a local `jj` command; jj's next import reconciles them.
         let _stats = jj_lib::git::export_refs(tx.repo_mut())?;
-        export_conflicted_remote_bookmarks(tx.repo_mut())?;
+        let history = History {
+            known: &self.expected.lock().expect("not poisoned").clone(),
+            root: loader.op_store().root_operation_id(),
+            is_join,
+        };
+        let expected = export_conflicted_remote_bookmarks(tx.repo_mut(), &op, &history)?;
+        let remember = |exported: &OperationId| {
+            let ids = [realized, exported];
+            *self.expected.lock().expect("not poisoned") = ids
+                .into_iter()
+                .flat_map(|id| {
+                    expected
+                        .iter()
+                        .map(|(name, e)| ((id.clone(), name.clone()), e.clone()))
+                })
+                .collect();
+        };
         let view = tx.repo().view().store_view();
         if view == repo.view().store_view() {
+            remember(realized);
             return Ok(realized.clone());
         }
         let mut store_op = op.store_operation().clone();
@@ -317,26 +346,33 @@ impl Colocation {
             // Only a cache: jj indexes it when loading the repository there.
             tracing::warn!("indexing the exported operation: {err}");
         }
+        remember(&exported);
         Ok(exported)
     }
 }
 
-/// Writes one side of each conflicted remote bookmark to this machine's `.git`, which jj's
-/// export leaves alone. Every `jj` command imports `refs/remotes/<remote>/<name>` and resolves
-/// a conflicted remote bookmark to what it finds there. On one machine that is its latest
-/// fetch, one of the sides. Here a machine that made neither fetch still has an older one,
-/// and its import would replicate that, losing both sides (docs/internals/races.md, "Remotes").
-/// Every machine writes the same side, the one committed last (then the greatest commit id), so
-/// their imports agree: one machine importing anything else would merge with the others' imports
-/// back to an older value. So the write compares against what `.git` holds, not jj's record of
-/// it, and replaces any value the hive already knows of: a term of the conflict, absent included,
-/// or the record. That includes a `git fetch` that happens to match a term; the next fetch after
-/// the conflict resolves corrects it. Any other value, absent included, was put there by git
-/// since, and the import takes it, as it would without musubi. A ref that can't be read or
-/// written is left alone, as jj's export leaves a failed ref.
-fn export_conflicted_remote_bookmarks(mut_repo: &mut MutableRepo) -> Result<(), NodeError> {
+/// Writes the expected value of each conflicted remote bookmark ([`expected`]) to this
+/// machine's `.git`, which jj's export leaves alone. Every `jj` command imports
+/// `refs/remotes/<remote>/<name>` and resolves a conflicted remote bookmark to what it finds
+/// there, so every machine must find the same, or their imports merge to a value none of them
+/// had (docs/internals/races.md, "Remotes"). After concurrent fetches, a machine that made
+/// neither fetch still has an older one, and one that made a fetch has its own side. After
+/// `jj op restore` of a conflict, the machine that restored it exported nothing for it, so
+/// has the value from before the restore, which the others must keep too. So the write
+/// compares against what `.git` holds, not jj's record of it, and replaces any value the hive
+/// already knows of: a term of the conflict, absent included, or the record. That includes a
+/// `git fetch` that happens to match a term; the next fetch after the conflict resolves
+/// corrects it. Any other value, absent included, was put there by git since, and the import
+/// takes it, as it would without musubi. A ref that can't be read or written is left alone, as
+/// jj's export leaves a failed ref (Refs.lean, `exportConflicted`).
+/// Returns the expected values, by git ref.
+fn export_conflicted_remote_bookmarks(
+    mut_repo: &mut MutableRepo,
+    op: &Operation,
+    history: &History<'_>,
+) -> Result<Vec<(GitRefNameBuf, Option<RefTarget>)>, NodeError> {
     type Terms = Vec<Option<CommitId>>;
-    let conflicted: Vec<(GitRefNameBuf, Terms)> = mut_repo
+    let conflicted: Vec<(GitRefNameBuf, Option<RefTarget>, Terms)> = mut_repo
         .view()
         .all_remote_bookmarks()
         .filter(|(symbol, remote_ref)| {
@@ -345,78 +381,164 @@ fn export_conflicted_remote_bookmarks(mut_repo: &mut MutableRepo) -> Result<(), 
                 && !remote_ref.target.is_resolved()
         })
         .map(|(symbol, remote_ref)| {
-            let name = format!(
+            let name: GitRefNameBuf = format!(
                 "refs/remotes/{}/{}",
                 symbol.remote.as_str(),
                 symbol.name.as_str()
-            );
-            (name.into(), remote_ref.target.iter().cloned().collect())
+            )
+            .into();
+            let expected = expected(
+                mut_repo.store(),
+                history,
+                op,
+                symbol,
+                &name,
+                &remote_ref.target,
+            )?;
+            Ok((name, expected, remote_ref.target.iter().cloned().collect()))
         })
-        .collect();
+        .collect::<Result<_, NodeError>>()?;
     if conflicted.is_empty() {
-        return Ok(());
+        return Ok(vec![]);
     }
+    let all = conflicted
+        .iter()
+        .map(|(name, expected, _)| (name.clone(), expected.clone()))
+        .collect();
     let git_repo = jj_lib::git::get_git_repo(mut_repo.store()).map_err(GitExportError::from)?;
-    for (name, terms) in conflicted {
-        let mut chosen: Option<(i64, CommitId)> = None;
-        // A conflict's terms alternate add, remove, add, ...; its sides are the adds.
-        for id in terms.iter().step_by(2).flatten() {
-            let time = mut_repo
-                .store()
-                .get_commit(id)?
-                .committer()
-                .timestamp
-                .timestamp
-                .0;
-            if chosen
-                .as_ref()
-                .is_none_or(|(best_time, best)| (time, id) > (*best_time, best))
-            {
-                chosen = Some((time, id.clone()));
-            }
-        }
-        let Some((_, side)) = chosen else {
+    for (name, expected, terms) in conflicted {
+        let Some(expected) = expected else {
             continue;
         };
-        let actual = match git_repo.try_find_reference(name.as_str()) {
-            Ok(Some(reference)) => match reference.into_fully_peeled_id() {
+        let Ok(reference) = git_repo.try_find_reference(name.as_str()) else {
+            continue;
+        };
+        let actual = match &reference {
+            Some(reference) => match reference.clone().into_fully_peeled_id() {
                 Ok(id) => Some(CommitId::from_bytes(id.detach().as_bytes())),
                 Err(_) => continue,
             },
-            Ok(None) => None,
-            Err(_) => continue,
+            None => None,
         };
         let recorded = mut_repo.view().get_git_ref(&name);
         let known = terms.contains(&actual)
             || (recorded.is_resolved() && recorded.as_normal() == actual.as_ref());
-        if actual.as_ref() != Some(&side) {
+        if actual.as_ref() != expected.as_normal() {
             if !known {
                 continue;
             }
-            let Ok(new) = gix::ObjectId::try_from(side.as_bytes()) else {
-                continue;
-            };
-            let constraint = match &actual {
-                Some(old) => {
-                    let Ok(old) = gix::ObjectId::try_from(old.as_bytes()) else {
+            let written = match (expected.as_normal(), reference) {
+                (Some(new), _) => {
+                    let Ok(new) = gix::ObjectId::try_from(new.as_bytes()) else {
                         continue;
                     };
-                    PreviousValue::MustExistAndMatch(old.into())
+                    let constraint = match &actual {
+                        Some(old) => {
+                            let Ok(old) = gix::ObjectId::try_from(old.as_bytes()) else {
+                                continue;
+                            };
+                            PreviousValue::MustExistAndMatch(old.into())
+                        }
+                        None => PreviousValue::MustNotExist,
+                    };
+                    git_repo
+                        .reference(name.as_str(), new, constraint, "export from musubi")
+                        .is_ok()
                 }
-                None => PreviousValue::MustNotExist,
+                // The ref goes, as jj's export deletes a ref whose bookmark went: if it still
+                // has the value just read.
+                (None, Some(reference)) => reference.delete().is_ok(),
+                (None, None) => true,
             };
-            if git_repo
-                .reference(name.as_str(), new, constraint, "export from musubi")
-                .is_err()
-            {
+            if !written {
                 continue;
             }
         }
-        if recorded.as_normal() != Some(&side) {
-            mut_repo.set_git_ref_target(&name, RefTarget::normal(side));
+        if *recorded != expected {
+            mut_repo.set_git_ref_target(&name, expected);
         }
     }
-    Ok(())
+    Ok(all)
+}
+
+/// What [`expected`] knows of history beyond the op store.
+struct History<'a> {
+    /// Expected values remembered from the last export.
+    known: &'a Expected,
+    /// The root operation.
+    root: &'a OperationId,
+    /// Whether a local operation is a join point.
+    is_join: &'a dyn Fn(&Operation) -> bool,
+}
+
+/// The value every machine's `.git` should hold for the conflicted remote bookmark `symbol`,
+/// whose git ref is `name` and whose target at `op` is `target`, so that every machine's import
+/// resolves it alike: `Refs.lean`'s expected value. It depends only on the history of `op`,
+/// which every machine shares. Where a parent has the same target, it is that parent's: the
+/// first such parent's, for a merge. Where the only parent has another, as for `jj op restore`
+/// of the conflict, it is the parent's target, or if that is a conflict too, its expected
+/// value, which the `jj` command that made `op` left in its machine's `.git`, exporting nothing
+/// for the conflict. Where a merge made the conflict, it is one of the conflict's sides, the
+/// one committed last (then the greatest commit id), or none if no side is present; and so it
+/// is at a join, whose history before it only the machine that joined has: a join operation,
+/// whose realization's only parent is the root, or the join point it is on that machine.
+fn expected(
+    store: &Arc<Store>,
+    history: &History<'_>,
+    op: &Operation,
+    symbol: RemoteRefSymbol<'_>,
+    name: &GitRefNameBuf,
+    target: &RefTarget,
+) -> Result<Option<RefTarget>, NodeError> {
+    let mut op = op.clone();
+    let mut target = target.clone();
+    loop {
+        if let Some(known) = history.known.get(&(op.id().clone(), name.clone())) {
+            return Ok(known.clone());
+        }
+        let mut parents = op.parents().block_on()?;
+        let joined = (history.is_join)(&op)
+            || matches!(parents.as_slice(), [parent] if parent.id() == history.root);
+        if joined {
+            return Ok(side(store, &target)?.map(RefTarget::normal));
+        }
+        let mut targets = Vec::with_capacity(parents.len());
+        for parent in &parents {
+            let view = parent.view().block_on()?;
+            targets.push(view.get_remote_bookmark(symbol).target.clone());
+        }
+        if let Some(same) = targets.iter().position(|t| *t == target) {
+            op = parents.swap_remove(same);
+            continue;
+        }
+        match (parents.pop(), targets.pop()) {
+            (Some(parent), Some(parent_target)) if parents.is_empty() => {
+                if parent_target.is_resolved() {
+                    return Ok(Some(parent_target));
+                }
+                op = parent;
+                target = parent_target;
+            }
+            _ => return Ok(side(store, &target)?.map(RefTarget::normal)),
+        }
+    }
+}
+
+/// The side of a conflict musubi chooses where a merge made it: the one committed last, then
+/// the greatest commit id, the same on every machine; none if no side is present.
+fn side(store: &Arc<Store>, target: &RefTarget) -> Result<Option<CommitId>, NodeError> {
+    let mut chosen: Option<(i64, CommitId)> = None;
+    // A conflict's terms alternate add, remove, add, ...; its sides are the adds.
+    for id in target.iter().step_by(2).flatten() {
+        let time = store.get_commit(id)?.committer().timestamp.timestamp.0;
+        if chosen
+            .as_ref()
+            .is_none_or(|(best_time, best)| (time, id) > (*best_time, best))
+        {
+            chosen = Some((time, id.clone()));
+        }
+    }
+    Ok(chosen.map(|(_, id)| id))
 }
 
 #[cfg(test)]

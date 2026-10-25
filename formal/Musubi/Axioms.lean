@@ -128,6 +128,9 @@ open Musubi
 #print axioms Refs.conflictedNoSpuriousRevert
 #print axioms Refs.conflicted_import_agrees
 #print axioms Refs.conflicted_resolves
+#print axioms Refs.restore_import_agrees
+#print axioms Refs.restore_conflict_resolves_back
+#print axioms Refs.conflicted_restore_resolves
 -- Which copies a hive shows
 #print axioms Presence.Hist.present_local
 #print axioms Presence.Hist.present_congr

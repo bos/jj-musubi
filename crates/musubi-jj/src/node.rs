@@ -312,7 +312,8 @@ impl NodeRepo {
         };
         let _lock = colocation.lock()?;
         let merged = self.load_at_head()?;
-        let exported = colocation.export_refs(&self.loader, merged.op_id())?;
+        let exported =
+            colocation.export_refs(&self.loader, merged.op_id(), &|op| self.is_join_point(op))?;
         if exported == *merged.op_id() {
             return Ok(merged);
         }

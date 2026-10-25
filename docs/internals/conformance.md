@@ -358,9 +358,10 @@ made with git. musubi keeps that record per-machine ([design.md, "Per-machine st
 replicated view"](design.md#per-machine-state-in-a-replicated-view)). `formal/Musubi/Refs.lean`
 proves that an import changes a bookmark only if git moved the ref, whatever musubi realizes,
 assuming jj's ref merge obeys three laws (`RefAlg`); that musubi realizes a merge as jj merges it;
-that once musubi writes a side of a conflicted remote bookmark, every machine's import resolves it
-alike; and that `jj undo` and `jj op restore` keep the invariant where jj's export can write what
-they restore ([formal/README.md, "Per-machine refs
+that once musubi writes a conflicted remote bookmark's expected value, every machine's import
+resolves it alike, a restore of the conflict included; and that `jj undo` and `jj op restore` keep
+the invariant where jj's export can write what they restore, or restore a conflicted remote
+bookmark ([formal/README.md, "Per-machine refs
 (`Refs.lean`)"](../../formal/README.md#per-machine-refs-refslean) lists the theorems). Its state
 is a few ref targets, so the tests keep a copy of the model in Rust rather than running an oracle.
 The chain has three links:
@@ -386,9 +387,9 @@ The chain has three links:
    | A `jj` command moves `x`, `y` or `t` (`jj bookmark set`, `jj bookmark delete`, `jj tag set`, `jj tag delete`), or changes nothing (`jj status`) | `jjImport` of every ref; `jjExport` of every ref if that changed the view; then, if the command moves a bookmark, `set` and `jjExport` of every ref |
    | `y` moves in `origin`, and `jj git fetch` fetches it | as a `jj` command, whose change is `RStep.fetch` |
    | A `jj` command at the operation before the latest action (`--at-op`) moves `x` or `y`, and `jj status` follows | on the older operation's slots, `set` and `jjExport` of every ref (it imports nothing); then `TSlot.merge` of the head with them against the older operation's, in the order of the merge operation's parents, then as a `jj` command that changes nothing |
-   | `jj undo`, or `jj op restore` to the operation before the latest action or to the one both machines last synced at | as a `jj` command that imports; then, if it restored an operation, which its description names, every ref's slot but `K` from that operation's view (`restoreLocal`, `restoreRemote`), and `jjExport` of every ref |
-   | The other machine moves `x` or `t` or fetches `y`, and both sync, with `refs/heads/x.lock` held here or not | `LStep.advance` of `x`, `y` and `t` and `CStep.advance` of `y@origin`, then `jjExport` of every ref, except where the lock makes `x`'s update fail, then `exportConflicted` of `y@origin`; nothing if there was nothing to realize |
-   | The other machine moves `x` or `t` or fetches `y` before it has this machine's latest operations, merges them with its own as it syncs, and this machine syncs | the other's operation realized from the slots both last synced at, and `realizeMerge` of it with the head, against those slots, in the order of the merge's parents, which is `TSlot.merge`; then the exports, as above. Two fetches that moved `y@origin` to different values merge to a conflict |
+   | `jj undo`, or `jj op restore` to the operation before the latest action or to the one both machines last synced at | as a `jj` command that imports; then, if it restored an operation, which its description names, every ref's slot but `K` from that operation's view (`restoreLocal`, `restoreRemote`), the expected value the head's (`restoreC`), and `jjExport` of every ref |
+   | The other machine moves `x` or `t` or fetches `y`, and both sync, with `refs/heads/x.lock` held here or not | `LStep.advance` of `x`, `y` and `t` and `CStep.advance` of `y@origin`, with this machine's expected value, then `jjExport` of every ref, except where the lock makes `x`'s update fail, then `exportConflicted` of `y@origin`; nothing if there was nothing to realize |
+   | The other machine moves `x` or `t` or fetches `y` before it has this machine's latest operations, merges them with its own as it syncs, and this machine syncs | the other's operation realized from the slots both last synced at, and `realizeMerge` of it with the head, against those slots, in the order of the merge's parents, which is `TSlot.merge`; then the exports, as above. Two fetches that moved `y@origin` to different values merge to a conflict, whose expected value is its side; a conflict from one parent keeps that parent's |
 
    The mapping follows what jj does. jj imports `x@git`, `y@git` and `y@origin` in that
    order, and the two refs of `y` share the bookmark, so an import of one that sets the
@@ -403,8 +404,12 @@ The chain has three links:
    may (the ghost `restored`). The test also checks that the other machine's command left its
    bookmarks and tag as the model says, its import resolving a conflicted `y@origin` as this
    machine's would (`conflicted_import_agrees`), so that its own refs reverted nothing
-   either, and that it wrote the same side of a conflicted `y@origin` to its `.git`. Beside
-   it, `undo_of_an_unexportable_bookmark_conflicts_it` shows `restore_reverts` with jj alone.
+   either, and that its `.git` has the same expected value of a conflicted `y@origin`. Beside
+   it, `undo_of_an_unexportable_bookmark_conflicts_it` shows `restore_reverts` with jj alone,
+   and `restore_of_a_conflicted_remote_bookmark_resolves_alike` drives the state machine
+   through `restore_import_agrees`: concurrent fetches conflict `y@origin`, a fetch here
+   settles it, this machine restores the conflict, and both machines' commands resolve it to
+   the fetched value.
 
    musubi's *shortcut* for merging per-machine fields (`PerMachine::merged_trivially`) takes
    the side that changed, where at most one did; otherwise, or where a side has a tracked
@@ -458,7 +463,7 @@ What the test relies on of jj, and what it leaves out:
   expects it.
 - **Restores.** `jj undo` and `jj op restore` restore `x@git` with the bookmark but keep
   `git_refs`. Where jj's export can't write the restored bookmark, as for the root commit or
-  a conflict, the record stays behind `.git`, and the next import takes the difference for a
+  a conflicted local bookmark, the record stays behind `.git`, and the next import takes the difference for a
   move made with git, though jj itself made it: a bookmark at the root, moved and undone,
   becomes a conflict (`restore_reverts`, and the test
   `undo_of_an_unexportable_bookmark_conflicts_it`, which runs only jj). That is jj's
@@ -467,10 +472,14 @@ What the test relies on of jj, and what it leaves out:
   realization of another machine's operation, which jj attributes to that machine's
   workspace.
 - **Conflicted remote bookmarks.** Two machines' fetches merge to a conflicted `y@origin`,
-  of which musubi writes a side to `.git`; a machine's next import resolves it to that side,
-  as every other machine's does. A restore that brings such a conflict back isn't
-  `RestorableRemote`: jj writes no side, so this machine's import resolves it to its own
-  `.git` value.
+  whose expected value is a side, which musubi writes to `.git`; a machine's next import
+  resolves it to that side, as every other machine's does. A restore that brings such a
+  conflict back writes nothing, so the restoring machine's `.git` keeps the value from before
+  it, which is the restore's expected value, and every other machine keeps or writes that
+  instead of the side. The model takes the expected value as given with each operation; the
+  test computes it from the parents' as `export_conflicted_remote_bookmarks` does, and checks
+  that both machines' `.git`s have it, but makes no joins, where musubi takes the side too,
+  as the history before a join is only the joining machine's.
 - **Not covered.** The state machine makes no merges of more than two heads and no
   criss-cross merges. It locks no remote ref, since `CStep.advance` admits only exports that
   can succeed (a failed one ends as `remote_reset_without_export` says). The realization

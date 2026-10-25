@@ -12,8 +12,14 @@ use std::time::Duration;
 use std::time::SystemTime;
 
 use jj_cli::formatter::FormatterExt as _;
+use jj_cli::generic_templater::GenericTemplateLanguage;
+use jj_cli::generic_templater::GenericTemplatePropertyKind;
+use jj_cli::templater::BoxedTemplateProperty;
+use jj_cli::templater::TemplatePropertyExt as _;
+use jj_cli::templater::WrapTemplateProperty;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::OperationId;
+use jj_lib::settings::UserSettings;
 use musubi_jj::node::NodeRepo;
 
 use crate::config::HiveConfig;
@@ -26,6 +32,7 @@ use crate::socket::Socket;
 use crate::ui::Ui;
 
 /// What `musubi status` finds out.
+#[derive(Clone)]
 pub struct Report {
     /// The jj workspace the directory is in, and its repository, if it is in one.
     pub located: Option<Located>,
@@ -37,6 +44,7 @@ pub struct Report {
 }
 
 /// A repository's part in its hive.
+#[derive(Clone)]
 pub struct Hive {
     pub config: HiveConfig,
     /// How its syncs go: the daemon's latest word if it serves the repository, else what the
@@ -54,6 +62,7 @@ pub struct Hive {
 }
 
 /// A working copy, as `jj workspace list` shows one.
+#[derive(Clone)]
 pub struct WorkingCopy {
     /// As jj names it here: `laptop/default`.
     pub name: String,
@@ -63,6 +72,7 @@ pub struct WorkingCopy {
 }
 
 /// A copy in the hive.
+#[derive(Clone)]
 pub struct Copy {
     /// Its machine's name, as its working copies are named here.
     pub name: String,
@@ -73,6 +83,7 @@ pub struct Copy {
 }
 
 /// This machine's daemon.
+#[derive(Clone)]
 pub struct Daemon {
     pub socket: Result<Socket, String>,
     /// Whether it runs, or why that can't be told, as when it is another release's.
@@ -116,6 +127,33 @@ impl Report {
             default_hub,
             daemon,
         }
+    }
+
+    /// Prints only the report, through `text`, a template in jj's template language, as
+    /// `musubi status -T` does.
+    pub fn print_template(&self, ui: &Ui, text: &str, cwd: &Path) -> anyhow::Result<()> {
+        let template = ui.parse_template(&language(&ui.settings()?, cwd), text)?;
+        template.format(self, ui.stdout().as_mut())?;
+        Ok(())
+    }
+
+    /// How the repository's syncs go, if it is part of a hive.
+    fn sync(&self) -> Option<&daemon::Status> {
+        self.hive.as_ref()?.sync.as_ref()
+    }
+
+    /// The report, for `json(self)`, in the user guide's words.
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            // Lossily, as a path that isn't UTF-8 has no JSON string.
+            "repository": self
+                .located
+                .as_ref()
+                .map(|located| located.workspace_root.to_string_lossy()),
+            "hive": self.hive.as_ref().map(Hive::to_json),
+            "default_hub": self.default_hub,
+            "daemon": self.daemon.to_json(),
+        })
     }
 
     pub fn print(&self, ui: &Ui) -> io::Result<()> {
@@ -215,13 +253,7 @@ impl Hive {
         write!(out, "Hive: ")?;
         write!(out.labeled("hive"), "{}", config.display_name())?;
         writeln!(out, " on {}{at}", config.hub)?;
-        let synced = match self.sync.as_ref().and_then(|sync| sync.last_success) {
-            Some(t) => format!(
-                "synced {} ago",
-                roughly(Duration::from_secs(daemon::now().saturating_sub(t)))
-            ),
-            None => "not synced yet".to_owned(),
-        };
+        let synced = self.synced();
         let sent = match self.sent {
             Some(true) => "; the hub has all its work",
             // Not while its syncs fail, which the warnings say.
@@ -290,6 +322,61 @@ impl Hive {
             }
         }
         Ok(())
+    }
+
+    /// When the repository last synced.
+    fn synced(&self) -> String {
+        match self.sync.as_ref().and_then(|sync| sync.last_success) {
+            Some(t) => format!(
+                "synced {} ago",
+                roughly(Duration::from_secs(daemon::now().saturating_sub(t)))
+            ),
+            None => "not synced yet".to_owned(),
+        }
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        let sync = self.sync.as_ref();
+        let working_copies: Vec<serde_json::Value> = self
+            .working_copies
+            .iter()
+            .map(|wc| {
+                serde_json::json!({
+                    "name": wc.name,
+                    "commit": wc.commit.hex(),
+                    "change": wc.change.as_ref().map(|(change, _)| change.reverse_hex()),
+                    "description": wc.change.as_ref().map(|(_, description)| description),
+                })
+            })
+            .collect();
+        let copies: Vec<serde_json::Value> = self
+            .copies
+            .iter()
+            .map(|copy| {
+                serde_json::json!({
+                    "machine": copy.name,
+                    "this": copy.this,
+                    "last_used": copy
+                        .last_used
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .map_or(0, |since| since.as_secs()),
+                    "forget_after": copy.forget_after.map(|after| after.as_secs()),
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "name": self.config.display_name(),
+            "id": self.config.hive.to_string(),
+            "hub": self.config.hub,
+            "machine": self.config.node,
+            "head": sync.and_then(|sync| sync.known_seq),
+            "last_sync": sync.and_then(|sync| sync.last_success),
+            "error": sync.and_then(|sync| sync.error.as_ref()),
+            "sent": self.sent,
+            "forgotten": self.forgotten,
+            "working_copies": working_copies,
+            "copies": copies,
+        })
     }
 
     /// Whether its last sync failed.
@@ -423,6 +510,114 @@ impl Daemon {
         }
         writeln!(out, "Daemon log: {}", self.log)
     }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "running": self.running.as_ref().ok(),
+            "error": self.running.as_ref().err(),
+            "pid": self.pid,
+            "serving": self.serving,
+            "served": self.served,
+            "at_login": self.at_login,
+            "socket": self.socket.as_ref().ok().map(ToString::to_string),
+            "log": self.log,
+        })
+    }
+}
+
+/// What `json(self)` gives: the report in the user guide's words.
+impl serde::Serialize for Report {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.to_json().serialize(serializer)
+    }
+}
+
+type Language = GenericTemplateLanguage<'static, Report>;
+
+impl<'a> WrapTemplateProperty<'a, Report> for GenericTemplatePropertyKind<'a, Report> {
+    fn wrap_property(property: BoxedTemplateProperty<'a, Report>) -> Self {
+        Self::Self_(property)
+    }
+}
+
+/// The keywords of a report, as `musubi status --help` gives them.
+fn language(settings: &UserSettings, cwd: &Path) -> Language {
+    let mut language = Language::new(settings, cwd);
+    keyword(&mut language, "repository", |report| {
+        report
+            .located
+            .as_ref()
+            .map(|located| located.workspace_root.clone())
+    });
+    keyword(&mut language, "hive", |report| {
+        report
+            .hive
+            .as_ref()
+            .map(|hive| hive.config.display_name())
+            .unwrap_or_default()
+    });
+    keyword(&mut language, "id", |report| {
+        report
+            .hive
+            .as_ref()
+            .map(|hive| hive.config.hive.to_string())
+            .unwrap_or_default()
+    });
+    keyword(&mut language, "hub", |report| {
+        report
+            .hive
+            .as_ref()
+            .map(|hive| hive.config.hub.clone())
+            .unwrap_or_default()
+    });
+    keyword(&mut language, "machine", |report| {
+        report
+            .hive
+            .as_ref()
+            .map(|hive| hive.config.node.clone())
+            .unwrap_or_default()
+    });
+    keyword(&mut language, "default_hub", |report| {
+        report.default_hub.clone().unwrap_or_default()
+    });
+    keyword(&mut language, "head", |report| {
+        report
+            .sync()
+            .and_then(|sync| sync.known_seq)
+            .map(|seq| i64::try_from(seq).unwrap_or(i64::MAX))
+    });
+    keyword(&mut language, "status", |report| {
+        report.hive.as_ref().map(Hive::synced).unwrap_or_default()
+    });
+    keyword(&mut language, "problem", |report| {
+        report
+            .sync()
+            .and_then(|sync| sync.error.clone())
+            .unwrap_or_default()
+    });
+    keyword(&mut language, "sent", |report| {
+        report.hive.as_ref().and_then(|hive| hive.sent) == Some(true)
+    });
+    keyword(&mut language, "forgotten", |report| {
+        report.hive.as_ref().is_some_and(|hive| hive.forgotten)
+    });
+    keyword(&mut language, "daemon_running", |report| {
+        report.daemon.running == Ok(true)
+    });
+    keyword(&mut language, "serving", |report| {
+        report.daemon.serving == Some(true)
+    });
+    language
+}
+
+/// Adds keyword `name`, whose value is `value` of the report.
+fn keyword<O: 'static>(language: &mut Language, name: &'static str, value: fn(&Report) -> O)
+where
+    GenericTemplatePropertyKind<'static, Report>: WrapTemplateProperty<'static, O>,
+{
+    language.add_keyword(name, move |report| {
+        Ok(report.map(move |report| value(&report)).into_dyn_wrapped())
+    });
 }
 
 /// What the running daemon serves, or `None` if no daemon is running.

@@ -27,6 +27,7 @@ use jj_cli::ui::ColorChoice;
 use jj_lib::config::ConfigLayer;
 use jj_lib::config::ConfigSource;
 use jj_lib::config::StackedConfig;
+use jj_lib::settings::UserSettings;
 
 /// musubi's defaults in jj's config: its labels' colours, and its templates.
 const DEFAULTS: &str = include_str!("defaults.toml");
@@ -75,6 +76,14 @@ impl Ui {
     /// jj's config, as it prints by.
     pub fn config(&self) -> &StackedConfig {
         &self.config
+    }
+
+    /// jj's settings, for a template language.
+    pub fn settings(&self) -> anyhow::Result<UserSettings> {
+        Ok(UserSettings::from_config_and_home_dir(
+            self.config.clone(),
+            etcetera::home_dir().ok(),
+        )?)
     }
 
     /// `text`, a template in jj's template language, for `language`, with the template

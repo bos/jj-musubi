@@ -203,7 +203,32 @@ enum Command {
     /// the daemon.
     ///
     /// It never starts the daemon or asks the hub, so it answers at once.
-    Status,
+    Status {
+        /// Print only the report, with this template, in jj's template language. Outside a
+        /// hive, a hive's strings are empty and its booleans false. The keywords:
+        ///
+        /// * `repository: Option<FsPath>`: The workspace the current directory is in; none
+        ///   outside a jj repository.
+        /// * `hive: String`: The repository's hive.
+        /// * `id: String`: The hive's id.
+        /// * `hub: String`: The hive's hub.
+        /// * `machine: String`: This machine's name in the hive.
+        /// * `default_hub: String`: The hub commands use without `--hub`; empty if none.
+        /// * `head: Option<Integer>`: The hive's head, as of the last sync; none before it.
+        /// * `status: String`: When the repository last synced.
+        /// * `problem: String`: Why its syncing fails, if it does.
+        /// * `sent: Boolean`: Whether the hub has all this machine's work, as far as the
+        ///   last sync tells; false if it can't tell.
+        /// * `forgotten: Boolean`: Whether the hive has forgotten this copy, until it's used.
+        /// * `daemon_running: Boolean`: Whether the daemon runs; false if that can't be told.
+        /// * `serving: Boolean`: Whether the daemon serves the repository.
+        ///
+        /// `json(self)` gives the whole report, for a script or an agent, with `null` for
+        /// what can't be told.
+        #[arg(long, short = 'T', verbatim_doc_comment)]
+        #[arg(add = ArgValueCandidates::new(completion::template_aliases))]
+        template: Option<String>,
+    },
     /// Watch what flows through the hubs, and what is wrong, as it happens.
     ///
     /// For each hive, it shows the bytes a second coming into its hub and going out, the
@@ -548,7 +573,13 @@ fn run(cli: Cli, ui: &Ui) -> anyhow::Result<()> {
             &socket()?,
         ),
         Command::List { template } => list(ui, &cwd, template.as_deref(), socket()),
-        Command::Status => Ok(status::Report::gather(&cwd, socket()).print(ui)?),
+        Command::Status { template } => {
+            let report = status::Report::gather(&cwd, socket());
+            match template {
+                Some(text) => report.print_template(ui, &text, &cwd),
+                None => Ok(report.print(ui)?),
+            }
+        }
         Command::Top {
             hub,
             interval,

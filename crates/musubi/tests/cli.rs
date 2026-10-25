@@ -423,6 +423,24 @@ fn hub_join_sync_clone_and_list() {
     );
     // A sync failing meanwhile, which a retry fixes, would be no fault of status's.
     assert!(!warnings.contains("Warning: The daemon"), "{warnings}");
+    // Through a template -T gives, and as JSON, for a script or an agent.
+    let line = musubi_in(
+        &env,
+        &logs,
+        &beta,
+        &[
+            "status",
+            "-T",
+            "hive ++ \" \" ++ machine ++ \" \" ++ serving",
+        ],
+    );
+    assert_eq!(line, "project beta true");
+    let json = musubi_in(&env, &logs, &beta, &["status", "-T", "json(self)"]);
+    let json: serde_json::Value = serde_json::from_str(&json).expect(&json);
+    assert_eq!(json["hive"]["name"], "project", "{json}");
+    assert_eq!(json["hive"]["machine"], "beta", "{json}");
+    assert_eq!(json["hive"]["copies"][0]["this"], true, "{json}");
+    assert_eq!(json["daemon"]["serving"], true, "{json}");
     // Each line through a template -T gives: here the hive of each copy, then each line as
     // JSON, for a script.
     let hives = musubi_in(

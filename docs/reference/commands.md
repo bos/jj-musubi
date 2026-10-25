@@ -39,13 +39,28 @@ unless jj's config sets it already. See [Set up a hub and machines](../guides/se
 | Command | Use it to |
 | --- | --- |
 | `list` | Show the hubs' hives, this machine's copies of them, and whether each is syncing. `-T` prints only the hubs, hives and copies, with a template of your own, as jj's list commands do (see `musubi list --help`); `-T 'json(self) ++ "\n"'` gives them as JSON, for a script. |
-| `status` | Show what musubi does with the repository you're in: its hive, hub and machine name, its last sync, whether the hub has this machine's latest work, each machine's working copies, each copy in the hive with when it was last used and when it will be forgotten, and the daemon's process, socket and log. Warn of what keeps it from syncing, and say what to do. Outside a hive, show the default hub and the daemon. |
+| `status` | Show what musubi does with the repository you're in: its hive, hub and machine name, its last sync, whether the hub has this machine's latest work, each machine's working copies, each copy in the hive with when it was last used and when it will be forgotten, and the daemon's process, socket and log. Warn of what keeps it from syncing, and say what to do. Outside a hive, show the default hub and the daemon. `-T` prints only the report, with a template of your own (see `musubi status --help`); `-T 'json(self) ++ "\n"'` gives it as JSON, for a script or an agent (see [below](#musubi-status-as-json)). |
 | `sync` | Sync the repository you're in now, and see at once whether it worked. |
 | `top` | Watch what flows through the hubs, and which machines are offline, behind, or failing, as it happens. |
 
 `status` never starts the daemon or asks the hub, so it answers at once, and it exits 0
 whatever it reports: run it from a script, an agent, or a shell prompt. Its warnings and hints
 go to standard error, as jj's do.
+
+### `musubi status` as JSON
+
+`musubi status -T 'json(self) ++ "\n"'` prints one JSON object, with times as seconds since
+the Unix epoch, and durations in seconds. A value that can't be told, or doesn't apply, is
+`null`, where `-T`'s keywords give an empty string or false. The keyword `problem` is
+`hive.error` here, `status` comes from `hive.last_sync`, and `daemon_running` is
+`daemon.running`.
+
+| Field | Value |
+| --- | --- |
+| `repository` | The workspace the current directory is in, or `null` outside a jj repository. |
+| `hive` | The repository's part in its hive, or `null` outside one: `name`, `id`, `hub`, `machine` (this machine's name in the hive), `head` (the hive's head, as of the last sync), `last_sync`, `error` (why its syncing fails), `sent` (whether the hub has all this machine's work, as far as the last sync tells), `forgotten`, `working_copies` (each with `name`, `commit`, `change` and `description`), and `copies` (each with `machine`, `this`, `last_used`, and `forget_after`, `null` for never). |
+| `default_hub` | The hub commands use without `--hub`, or `null`. |
+| `daemon` | `running`, or `null` with `error` saying why that can't be told; `pid`; `serving` (whether it serves this repository); `served` (how many repositories it serves); `at_login`; `socket`; and `log`. |
 
 ## Run the daemon
 

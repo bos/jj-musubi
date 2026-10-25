@@ -82,9 +82,7 @@ impl<'ui> Lister<'ui> {
             Some(text) => text.to_owned(),
             None => ui.config().get::<String>("musubi.templates.list")?,
         };
-        let settings =
-            UserSettings::from_config_and_home_dir(ui.config().clone(), etcetera::home_dir().ok())?;
-        let template = ui.parse_template(&language(&settings, cwd), &text)?;
+        let template = ui.parse_template(&language(&ui.settings()?, cwd), &text)?;
         Ok(Self { ui, template })
     }
 

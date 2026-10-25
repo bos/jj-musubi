@@ -9,6 +9,7 @@ use musubi_jj::node::NodeRepo;
 use crate::settings;
 
 /// A jj workspace and the repository it belongs to.
+#[derive(Clone)]
 pub struct Located {
     /// The workspace root (the directory containing `.jj`).
     pub workspace_root: PathBuf,

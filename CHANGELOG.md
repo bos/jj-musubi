@@ -28,6 +28,9 @@ change the protocol, so run the same release on the hub and every machine (see
 - `musubi list` prints its hubs, hives and copies through a template in jj's template
   language, `musubi.templates.list` in jj's config, or one `-T` gives, as jj's list commands
   do; `-T 'json(self) ++ "\n"'` gives them as JSON. A hub with no hives no longer says so.
+- `musubi status -T` prints its report through a template in jj's template language, and
+  `musubi status -T 'json(self) ++ "\n"'` as JSON, for scripts and agents (see [`musubi status` as
+  JSON](docs/reference/commands.md#musubi-status-as-json)).
 - A command whose output stops being read, as in `musubi list | head`, no longer panics: it
   does all it would, printing nothing more there, and exits with status 3, as jj does then.
 - `musubi sync` warns when it syncs in its own process because the daemon isn't running.

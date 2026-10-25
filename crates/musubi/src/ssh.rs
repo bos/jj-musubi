@@ -13,6 +13,7 @@
 use std::ffi::OsString;
 use std::fs;
 use std::io;
+use std::io::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -48,6 +49,7 @@ use tokio::sync::oneshot;
 use tokio::sync::watch;
 
 use crate::config;
+use crate::ui::Ui;
 
 /// What the machine's key may run on the hub's machine.
 const REMOTE_COMMAND: &str = "musubi hub connect";
@@ -485,7 +487,7 @@ async fn probe(dest: &str, key: &Path) -> Result<(), Failure> {
 /// Makes sure this machine can reach the hub at `dest` with its own key: creating the key
 /// if need be, and adding it to `~/.ssh/authorized_keys` there, through the user's own
 /// ssh, which may ask for a password, if it doesn't work yet.
-pub async fn prepare(dest: &str) -> anyhow::Result<()> {
+pub async fn prepare(ui: &Ui, dest: &str) -> anyhow::Result<()> {
     let key = key_path()?;
     if key.exists() {
         match probe(dest, &key).await {
@@ -495,9 +497,13 @@ pub async fn prepare(dest: &str) -> anyhow::Result<()> {
         }
     } else {
         create_key(&key)?;
-        println!("Created an ssh key for musubi: {}", key.display());
+        writeln!(
+            ui.stdout(),
+            "Created an ssh key for musubi: {}",
+            key.display()
+        )?;
     }
-    authorize(dest, &key).await?;
+    authorize(ui, dest, &key).await?;
     probe(dest, &key)
         .await
         .map_err(|failure| anyhow::anyhow!(failure.describe(dest)))
@@ -537,14 +543,15 @@ const AUTHORIZE: &str = "sh -c 'umask 077; mkdir -p ~/.ssh; read -r line; \
      grep -qxF \"$line\" ~/.ssh/authorized_keys 2>/dev/null || \
      printf \"%s\\n\" \"$line\" >> ~/.ssh/authorized_keys'";
 
-async fn authorize(dest: &str, key: &Path) -> anyhow::Result<()> {
+async fn authorize(ui: &Ui, dest: &str, key: &Path) -> anyhow::Result<()> {
     let public = key.with_extension("pub");
     let public = fs::read_to_string(&public).with_context(|| format!("reading {public:?}"))?;
     let line = format!("restrict,command=\"{REMOTE_COMMAND}\" {}\n", public.trim());
-    println!(
+    writeln!(
+        ui.stdout(),
         "Adding it to ~/.ssh/authorized_keys on {dest}, allowed only to run `{REMOTE_COMMAND}`. \
          ssh may ask for your password."
-    );
+    )?;
     let mut child = Command::new(program())
         .args(["--", dest, AUTHORIZE])
         .stdin(Stdio::piped())

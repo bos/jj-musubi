@@ -59,7 +59,7 @@ go to standard error, as jj's do.
 | `daemon` | Run the daemon in the foreground, logging to the terminal. |
 
 `create`, `join`, and `clone` start the daemon if it isn't running. `sync` uses the daemon if
-it is running, and otherwise syncs by itself.
+it is running, and otherwise syncs by itself, saying that the daemon isn't running.
 
 ## Run a hub
 
@@ -113,5 +113,10 @@ source <(musubi completion zsh)
 
 | Option | Effect |
 | --- | --- |
+| `--color <when>` | Choose when to colour what the command prints: `always`, `never`, `debug` (showing labels), or `auto` (only on a terminal). Without it, jj's `ui.color` says. See [Colours](configuration.md#colours). |
 | `--log <filter>` | Choose what this command logs, as a filter in `RUST_LOG`'s syntax, such as `debug` or `musubi_sync=debug`. See [Logging](configuration.md#logging). |
 | `--socket <path>` | Talk to the daemon on another control socket. See [Files and directories](configuration.md#files-and-directories). |
+
+When whatever reads a command's output stops before the end, as `head` does in `musubi list |
+head`, the command still does all it would, printing nothing more there, and exits with
+status 3, as jj does then.

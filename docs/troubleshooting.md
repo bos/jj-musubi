@@ -178,14 +178,14 @@ repository leaves with all of its work, and jj couldn't; the parentheses say why
 the working copy is stale, as after another machine rewrote its commit: run
 `jj workspace update-stale`, then `musubi leave` again.
 
-### "Couldn't put back this repository's working copies (...)"
+### "Warning: Couldn't put back this repository's working copies (...)."
 
 `musubi leave` takes this copy's working copies out of the view while it tells the hive, then
 puts them back, and couldn't. jj then says a workspace has no working-copy commit. `jj op log`
 lists the operation `musubi: leave`; `jj op restore` to the operation before it brings them
 back.
 
-### "Couldn't give this repository's working copies new commits (...)"
+### "Warning: Couldn't give this repository's working copies new commits (...)."
 
 The repository has left its hive, but a working copy whose commit the hive abandoned didn't
 get a new one. Run `jj new @-` in that workspace.
@@ -285,26 +285,31 @@ aside under `removed/`, and makes the hive again, empty, for the machines to fil
 `create`, `join`, or `clone` set up the repository, but its first sync failed for the reason
 given. The daemon keeps trying: fix the cause, and `musubi status` shows when it succeeds.
 
-### "Could not start the daemon (...); syncing once instead."
+### "Warning: Could not start the daemon (...); syncing once instead."
 
 The command synced the repository itself, but no daemon keeps it in sync. Fix the reason
 given, then run `musubi daemon start`.
 
+### "Warning: The daemon isn't running, so this synced in its own process, ..."
+
+`musubi sync` synced the repository itself, since the daemon that serves it isn't running, as
+after `musubi daemon stop`; nothing syncs it otherwise. Run `musubi daemon start`.
+
 ## What `musubi status` reports
 
-### "Syncing fails: ..."
+### "Warning: Syncing fails: ..."
 
 The repository's last sync failed, for the reason quoted: find that message on this page. If
 the daemon serves the repository, it keeps trying, and its log, which the hint names, says
 more. Otherwise `musubi sync` tries again.
 
-### "The daemon isn't running, so this repository syncs only when you run `musubi sync`."
+### "Warning: The daemon isn't running, so this repository syncs only when you run `musubi sync`."
 
 Start it with `musubi daemon start`, and to have it start at login from now on, run `musubi
 daemon install`. Until then, "the hub lacks its latest work" means just that: other machines
 see this machine's work once you run `musubi sync`.
 
-### "The daemon doesn't serve this repository."
+### "Warning: The daemon doesn't serve this repository."
 
 The daemon runs, but doesn't know of this repository, as when musubi's state directory was
 deleted or `MUSUBI_STATE_DIR` changed. `musubi join` in the repository has it serve the

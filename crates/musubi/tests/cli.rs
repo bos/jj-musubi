@@ -423,6 +423,17 @@ fn hub_join_sync_clone_and_list() {
     );
     // A sync failing meanwhile, which a retry fixes, would be no fault of status's.
     assert!(!warnings.contains("Warning: The daemon"), "{warnings}");
+    // It prints through jj's formatting, labelled; the daemon's log has no colour codes.
+    let labelled = musubi_in(&env, &logs, &beta, &["--color=debug"]);
+    assert!(
+        labelled.contains("<<hive::project>>") && labelled.contains("<<machine::alpha>>"),
+        "{labelled}"
+    );
+    let daemon_log = fs::read_to_string(state_dir(&env, &beta).join("daemon.log")).unwrap();
+    assert!(
+        !daemon_log.is_empty() && !daemon_log.contains('\x1b'),
+        "{daemon_log}"
+    );
 
     // Completing as you type, the shell gets the hub's hives, and the hubs this machine knows.
     let hives = completions(&env, &logs, &beta, &["musubi", "clone", "pr"]);
@@ -579,6 +590,60 @@ fn completion_scripts_complete_the_commands() {
         );
         assert!(script.contains("clone"), "{shell}: {script}");
     }
+}
+
+/// A command whose output stops being read, as `head` stops it in `musubi list | head`,
+/// still does all it would, printing nothing more there, and exits with jj's status for
+/// that.
+#[test]
+fn commands_carry_on_once_their_output_goes_unread() {
+    let env = TestEnv::new();
+    let repo = env.init_repo("alpha");
+    // Nothing reads what it prints, from the start.
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let mut command = repo.program(musubi());
+    command.arg("list").stdout(writer).stderr(Stdio::piped());
+    let out = command.spawn().unwrap().wait_with_output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(3), "{err}");
+    // Past the line it couldn't print, to the hint after it.
+    assert!(err.contains("Hint: Run `musubi hub`"), "{err}");
+}
+
+/// A log file never has colour, even where `--color` asks for it.
+#[test]
+fn logs_have_no_colour() {
+    let env = TestEnv::new();
+    let mut logs = Logs::default();
+    let repo = env.init_repo("alpha");
+    let mut daemons = Daemons::default();
+    daemons.of(&repo);
+    let log = env.root().join("foreground-daemon.log");
+    logs.0.push(log.clone());
+    let mut daemon = repo.program(musubi());
+    daemon
+        .args(["--color=always", "daemon"])
+        .stdout(Stdio::null())
+        .stderr(fs::File::create(&log).unwrap());
+    let mut child = daemon.spawn().unwrap();
+    wait_for(&logs, "the daemon to listen", || {
+        fs::read_to_string(&log).is_ok_and(|text| text.contains("listening on"))
+    });
+    musubi_in(&env, &logs, &repo, &["daemon", "stop"]);
+    child.wait().unwrap();
+    let text = fs::read_to_string(&log).unwrap();
+    assert!(!text.contains('\x1b'), "{text}");
+    // Nor what the daemon says there itself, as when it can't start.
+    let failed = env.root().join("failed-daemon.log");
+    let mut daemon = repo.program(musubi());
+    daemon
+        .args(["--color=always", "--log=musubi=bogus", "daemon"])
+        .stdout(Stdio::null())
+        .stderr(fs::File::create(&failed).unwrap());
+    assert!(!daemon.status().unwrap().success());
+    let text = fs::read_to_string(&failed).unwrap();
+    assert!(text.contains("Error: ") && !text.contains('\x1b'), "{text}");
 }
 
 /// A machine's daemon serves a repository joined after it started, without a restart, and
@@ -1135,7 +1200,14 @@ fn syncing_without_the_daemon_shows_in_the_list() {
         "{warnings}"
     );
     assert!(warnings.contains("`musubi daemon start`"), "{warnings}");
-    musubi_in(&env, &logs, &alpha, &["sync"]);
+    let mut sync = alpha.program(musubi());
+    sync.arg("sync");
+    let (ok, out, err) = try_run(&logs, &env, sync);
+    assert!(ok, "{out}{err}");
+    assert!(
+        err.contains("daemon isn't running") && err.contains("musubi daemon start"),
+        "{err}"
+    );
     let list = musubi_in(&env, &logs, &alpha, &["list"]);
     assert!(list.contains("Daemon: not running"), "{list}");
     assert!(list.contains("  synced "), "{list}");

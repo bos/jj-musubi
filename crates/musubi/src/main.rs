@@ -14,19 +14,28 @@ mod socket;
 mod ssh;
 mod status;
 mod top;
+mod ui;
 mod watch;
 
 use std::collections::BTreeMap;
+use std::io::IsTerminal as _;
+use std::io::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command as Process;
+use std::process::ExitCode;
 use std::time::Duration;
 
 use anyhow::Context as _;
+use clap::CommandFactory as _;
 use clap::Parser;
 use clap::Subcommand;
 use clap::ValueHint;
 use clap_complete::ArgValueCandidates;
+use jj_cli::formatter::Formatter;
+use jj_cli::formatter::FormatterExt as _;
+use jj_cli::formatter::PlainTextFormatter;
+use jj_cli::ui::ColorChoice;
 use jj_lib::object_id::ObjectId as _;
 use musubi_hub::hub_dir::HiveInfo;
 use musubi_hub::hub_dir::JoinChoice;
@@ -44,6 +53,7 @@ use crate::control::Synced;
 use crate::daemon::Status;
 use crate::repo::Located;
 use crate::socket::Socket;
+use crate::ui::Ui;
 
 #[derive(Parser)]
 #[command(
@@ -73,6 +83,15 @@ struct Cli {
         help_heading = "Global options"
     )]
     log: Option<String>,
+    /// When to colour what it prints, as jj's `--color` does [default: as jj's `ui.color`
+    /// says].
+    #[arg(
+        long,
+        global = true,
+        value_name = "WHEN",
+        help_heading = "Global options"
+    )]
+    color: Option<ColorChoice>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -216,7 +235,8 @@ enum Command {
     ///
     /// The daemon syncs by itself whenever the repository or its hive changes, so this is
     /// rarely needed, except to see at once how a sync goes. It asks the daemon to sync, if
-    /// the daemon serves the repository, and otherwise syncs in this process.
+    /// the daemon serves the repository, and otherwise syncs in this process, saying if
+    /// that's because the daemon isn't running.
     Sync,
     /// Run the daemon that keeps this machine's repositories in sync, or control it.
     ///
@@ -321,7 +341,7 @@ enum DaemonAction {
 /// What to log: `--log`, else `RUST_LOG`, else for the daemon `musubi.daemon.log` in jj's
 /// config. Otherwise the hub and the daemon log what they do, and other commands only
 /// warn, since they say what they did themselves.
-fn log_filter(cli: &Cli) -> anyhow::Result<tracing_subscriber::EnvFilter> {
+fn log_filter(cli: &Cli, ui: &Ui) -> anyhow::Result<tracing_subscriber::EnvFilter> {
     let daemon = matches!(cli.command, Some(Command::Daemon { action: None }));
     let hub = matches!(cli.command, Some(Command::Hub { action: None, .. }));
     if let Some(filter) = &cli.log {
@@ -333,7 +353,7 @@ fn log_filter(cli: &Cli) -> anyhow::Result<tracing_subscriber::EnvFilter> {
     {
         match parse_filter(&filter) {
             Ok(filter) => return Ok(filter),
-            Err(err) => eprintln!("Ignoring RUST_LOG={filter:?} ({err})."),
+            Err(err) => writeln!(ui.warning(), "Ignoring RUST_LOG={filter:?} ({err}).")?,
         }
     }
     if daemon && let Some(filter) = Settings::load()?.daemon_log {
@@ -359,12 +379,61 @@ fn parse_filter(filter: &str) -> anyhow::Result<tracing_subscriber::EnvFilter> {
     Ok(tracing_subscriber::EnvFilter::try_new(filter)?)
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() -> ExitCode {
     completion::complete_if_asked();
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(err) => {
+            let ui = Ui::new(early_color()).unwrap_or_else(|_| Ui::plain());
+            return ui.clap_error(&err);
+        }
+    };
+    let ui = match command_ui(&cli) {
+        Ok(ui) => ui,
+        Err(err) => return Ui::plain().finish(Err(err)),
+    };
+    let result = run(cli, &ui);
+    ui.finish(result)
+}
+
+/// `--color`, read from a command line clap refused, as jj reads it, so that its help and
+/// its errors print as it says.
+fn early_color() -> Option<ColorChoice> {
+    Cli::command()
+        .disable_help_flag(true)
+        .disable_version_flag(true)
+        .ignore_errors(true)
+        .try_get_matches()
+        .ok()?
+        .get_one::<ColorChoice>("color")
+        .copied()
+}
+
+/// How `cli`'s command prints. What the daemon and the hub write to stderr is their log,
+/// which never has colour, unless it's a terminal. What `hub connect` writes there goes back
+/// over ssh, for musubi to read, so it reads no config, which mustn't keep other machines
+/// from the hub.
+fn command_ui(cli: &Cli) -> anyhow::Result<Ui> {
+    match &cli.command {
+        Some(Command::Hub {
+            action: Some(HubAction::Connect { .. }),
+            ..
+        }) => Ok(Ui::plain()),
+        Some(Command::Daemon { action: None } | Command::Hub { action: None, .. })
+            if !std::io::stderr().is_terminal() =>
+        {
+            Ui::new(Some(ColorChoice::Never))
+        }
+        _ => Ui::new(cli.color),
+    }
+}
+
+fn run(cli: Cli, ui: &Ui) -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(log_filter(&cli)?)
+        .with_env_filter(log_filter(&cli, ui)?)
         .with_writer(std::io::stderr)
+        // A log file never has colour.
+        .with_ansi(ui.color() && std::io::stderr().is_terminal())
         .init();
     // Serving a hub, and `hub connect`, are for other machines, whose agents aren't this
     // machine's; the daemon itself has the link, or the service manager's agent. Every shell
@@ -389,7 +458,7 @@ fn main() -> anyhow::Result<()> {
             action: None,
             dir,
             advertise,
-        } => hub::serve(hub::ServeArgs { dir, advertise }),
+        } => hub::serve(ui, hub::ServeArgs { dir, advertise }),
         Command::Hub {
             action: Some(HubAction::Connect { dir }),
             ..
@@ -401,7 +470,9 @@ fn main() -> anyhow::Result<()> {
             let hub = UserState::hub(hub.as_deref())?;
             let reply = hub::ask(&hub, HubWideRequest::Remove { name: hive }).await?;
             if let HubWideReply::Hive(info) = reply {
-                println!("Removed hive {}", info.name);
+                let mut out = ui.stdout();
+                write!(out, "Removed hive ")?;
+                writeln!(out.labeled("hive"), "{}", info.name)?;
             }
             Ok(())
         }),
@@ -420,20 +491,26 @@ fn main() -> anyhow::Result<()> {
                 to: new_name,
             };
             if let HubWideReply::Hive(info) = hub::ask(&hub, request).await? {
+                let mut out = ui.stdout();
                 if hive == info.name {
-                    println!("Hive {hive} already has that name");
+                    write!(out, "Hive ")?;
+                    write!(out.labeled("hive"), "{hive}")?;
+                    writeln!(out, " already has that name")?;
                 } else {
-                    println!("Renamed hive {hive} to {}", info.name);
+                    write!(out, "Renamed hive ")?;
+                    write!(out.labeled("hive"), "{hive}")?;
+                    write!(out, " to ")?;
+                    writeln!(out.labeled("hive"), "{}", info.name)?;
                 }
             }
             Ok(())
         }),
         Command::Create { name, member } => {
-            join(&cwd, JoinChoice::Create(name), &member, &socket()?)
+            join(ui, &cwd, JoinChoice::Create(name), &member, &socket()?)
         }
         Command::Join { hive, member } => {
             let choice = hive.map_or(JoinChoice::Match, JoinChoice::Hive);
-            join(&cwd, choice, &member, &socket()?)
+            join(ui, &cwd, choice, &member, &socket()?)
         }
         Command::Clone {
             hive,
@@ -441,22 +518,21 @@ fn main() -> anyhow::Result<()> {
             hub,
             machine,
         } => clone(
+            ui,
             &destination,
             &hive,
             hub.as_deref(),
             machine.as_deref(),
             &socket()?,
         ),
-        Command::List => list(socket()),
-        Command::Status => {
-            status::Report::gather(&cwd, socket()).print();
-            Ok(())
-        }
+        Command::List => list(ui, socket()),
+        Command::Status => Ok(status::Report::gather(&cwd, socket()).print(ui)?),
         Command::Top {
             hub,
             interval,
             once,
         } => top::run(
+            ui,
             top::Args {
                 hub,
                 interval: Duration::from_secs(interval),
@@ -464,8 +540,8 @@ fn main() -> anyhow::Result<()> {
             },
             socket(),
         ),
-        Command::Leave { force } => leave(&cwd, &socket()?, force),
-        Command::Forget { machine } => forget(&cwd, &machine, &socket()?),
+        Command::Leave { force } => leave(ui, &cwd, &socket()?, force),
+        Command::Forget { machine } => forget(ui, &cwd, &machine, &socket()?),
         Command::Daemon { action: None } => daemon::run(&socket()?),
         Command::Daemon {
             action: Some(DaemonAction::Start),
@@ -482,12 +558,16 @@ fn main() -> anyhow::Result<()> {
             daemon::stop(&socket).await?;
             let described = login::install()?;
             daemon::ensure(&socket).await?;
-            println!("The daemon starts at login from now on, through {described}.");
+            writeln!(
+                ui.stdout(),
+                "The daemon starts at login from now on, through {described}."
+            )?;
             if cfg!(target_os = "linux") {
-                println!(
-                    "To keep it running while you're logged out, as on a server: \
-                     loginctl enable-linger"
-                );
+                writeln!(
+                    ui.hint(),
+                    "To keep it running while you're logged out, as on a server: `loginctl \
+                     enable-linger`"
+                )?;
             }
             Ok(())
         }),
@@ -498,9 +578,12 @@ fn main() -> anyhow::Result<()> {
             let was = login::uninstall()?;
             daemon::stop(&socket).await?;
             if was {
-                println!("The daemon no longer starts at login, and is stopped.");
+                writeln!(
+                    ui.stdout(),
+                    "The daemon no longer starts at login, and is stopped."
+                )?;
             } else {
-                println!("The daemon wasn't set to start at login.");
+                writeln!(ui.stdout(), "The daemon wasn't set to start at login.")?;
             }
             Ok(())
         }),
@@ -508,9 +591,9 @@ fn main() -> anyhow::Result<()> {
             action: Some(DaemonAction::Stop),
         } => block_on(async {
             if daemon::stop(&socket()?).await? {
-                println!("Stopped the daemon.");
+                writeln!(ui.stdout(), "Stopped the daemon.")?;
             } else {
-                println!("No daemon is running.");
+                writeln!(ui.stdout(), "No daemon is running.")?;
             }
             Ok(())
         }),
@@ -520,12 +603,12 @@ fn main() -> anyhow::Result<()> {
             let socket = socket()?;
             daemon::stop(&socket).await?;
             daemon::ensure(&socket).await?;
-            println!("Started the daemon.");
+            writeln!(ui.stdout(), "Started the daemon.")?;
             Ok(())
         }),
-        Command::Sync => sync(&cwd, &socket()?),
-        Command::Completion { shell } => completion::print_script(shell),
-        Command::Debug(Debug::OpId { id }) => op_id(&cwd, &id),
+        Command::Sync => sync(ui, &cwd, &socket()?),
+        Command::Completion { shell } => completion::print_script(ui, shell),
+        Command::Debug(Debug::OpId { id }) => op_id(ui, &cwd, &id),
     }
 }
 
@@ -538,7 +621,13 @@ fn block_on<T>(future: impl Future<Output = anyhow::Result<T>>) -> anyhow::Resul
 
 /// Makes the repository at `start` part of a hive: the hub decides which (see
 /// `musubi_hub::matching`); then this records the membership and has the daemon serve it.
-fn join(start: &Path, choice: JoinChoice, member: &Member, socket: &Socket) -> anyhow::Result<()> {
+fn join(
+    ui: &Ui,
+    start: &Path,
+    choice: JoinChoice,
+    member: &Member,
+    socket: &Socket,
+) -> anyhow::Result<()> {
     let Member {
         machine,
         full_history,
@@ -591,11 +680,11 @@ fn join(start: &Path, choice: JoinChoice, member: &Member, socket: &Socket) -> a
         machine: node.machine().key().to_owned(),
     };
     drop(node);
-    let joined = match block_on(ask_preparing(&hub, HubWideRequest::Join(request)))? {
+    let joined = match block_on(ask_preparing(ui, &hub, HubWideRequest::Join(request)))? {
         HubWideReply::Joined(joined) => joined,
         other => anyhow::bail!("unexpected reply from the hub: {other:?}"),
     };
-    become_node(&located, &joined.hive, &hub, full_history)?;
+    become_node(ui, &located, &joined.hive, &hub, full_history)?;
     let count = joined.hive.machines.len();
     let machines = if count == 1 {
         "1 machine".to_owned()
@@ -616,31 +705,39 @@ fn join(start: &Path, choice: JoinChoice, member: &Member, socket: &Socket) -> a
             Ok::<_, anyhow::Error>(())
         })?;
     }
+    let mut out = ui.stdout();
+    let name = &joined.hive.name;
     if remaking && joined.created {
-        println!(
-            "Made hive {} again from this repository; its other machines fill it as they sync",
-            joined.hive.name
-        );
+        write!(out, "Made hive ")?;
+        write!(out.labeled("hive"), "{name}")?;
+        writeln!(
+            out,
+            " again from this repository; its other machines fill it as they sync"
+        )?;
     } else if remaking {
-        println!(
-            "Hive {} is on the hub, and this repository is part of it",
-            joined.hive.name
-        );
+        write!(out, "Hive ")?;
+        write!(out.labeled("hive"), "{name}")?;
+        writeln!(out, " is on the hub, and this repository is part of it")?;
     } else if joined.created {
-        println!("Created hive {}", joined.hive.name);
+        write!(out, "Created hive ")?;
+        writeln!(out.labeled("hive"), "{name}")?;
     } else {
-        println!(
-            "Joined hive {} ({}), {machines}",
-            joined.hive.name, joined.reason
-        );
+        write!(out, "Joined hive ")?;
+        write!(out.labeled("hive"), "{name}")?;
+        writeln!(out, " ({}), {machines}", joined.reason)?;
     }
-    start_serving(&located, socket)
+    drop(out);
+    start_serving(ui, &located, socket)
 }
 
 /// Asks `hub`, over ssh first making sure this machine's key works there.
-async fn ask_preparing(hub: &str, request: HubWideRequest) -> anyhow::Result<HubWideReply> {
+async fn ask_preparing(
+    ui: &Ui,
+    hub: &str,
+    request: HubWideRequest,
+) -> anyhow::Result<HubWideReply> {
     if !hub::is_local(hub) {
-        ssh::prepare(hub).await?;
+        ssh::prepare(ui, hub).await?;
     }
     hub::ask(hub, request).await
 }
@@ -663,6 +760,7 @@ fn set_machine_name(located: &Located, machine: Option<&str>) -> anyhow::Result<
 /// full history), its hive config, and that the daemon serves it. The first hub joined
 /// becomes the user's default.
 fn become_node(
+    ui: &Ui,
     located: &Located,
     hive: &HiveInfo,
     hub: &str,
@@ -690,13 +788,14 @@ fn become_node(
         config.save(&located.repo_path)?;
     }
     drop(node);
-    set_forget_after(located)?;
+    set_forget_after(ui, located)?;
     UserState::add_repo(located)?;
     if UserState::save_default_hub(hub)? {
-        println!(
-            "Saved {hub} as this machine's default hub. To choose another: jj config set \
-             --user musubi.hub <hub>"
-        );
+        writeln!(ui.stdout(), "Saved {hub} as this machine's default hub.")?;
+        writeln!(
+            ui.hint(),
+            "To choose another: `jj config set --user musubi.hub <hub>`"
+        )?;
     }
     Ok(())
 }
@@ -716,7 +815,7 @@ const AGENT_FORGET_AFTER: &str = "6h";
 /// already: `6h` if an agent is joining, as on a short-lived machine, `never` otherwise. A
 /// value in the user's config, as an agent's image might set, wins, and so does the one
 /// set when the repository last joined. Says which.
-fn set_forget_after(located: &Located) -> anyhow::Result<()> {
+fn set_forget_after(ui: &Ui, located: &Located) -> anyhow::Result<()> {
     let key = musubi_jj::node::FORGET_AFTER_KEY;
     let settings = settings::load(&located.workspace_root, &located.repo_path)?;
     let name: jj_lib::config::ConfigNamePathBuf = key.parse()?;
@@ -747,14 +846,23 @@ fn set_forget_after(located: &Located) -> anyhow::Result<()> {
         }
     };
     match value.as_str() {
-        "never" => println!(
-            "The hive keeps this copy however long it goes unused, {how}. To have it forgotten \
-             once unused for 6 hours: jj config set --repo {key} 6h"
-        ),
-        after => println!(
-            "The hive forgets this copy once it goes unused for {after}, {how}. To keep it: jj \
-             config set --repo {key} never"
-        ),
+        "never" => {
+            writeln!(
+                ui.stdout(),
+                "The hive keeps this copy however long it goes unused, {how}."
+            )?;
+            writeln!(
+                ui.hint(),
+                "To have it forgotten once unused for 6 hours: `jj config set --repo {key} 6h`"
+            )?;
+        }
+        after => {
+            writeln!(
+                ui.stdout(),
+                "The hive forgets this copy once it goes unused for {after}, {how}."
+            )?;
+            writeln!(ui.hint(), "To keep it: `jj config set --repo {key} never`")?;
+        }
     }
     Ok(())
 }
@@ -793,7 +901,7 @@ fn configured_forget_after(
 
 /// Has the daemon, started if need be, serve the repository, and reports its first sync.
 /// Without a daemon, syncs once.
-fn start_serving(located: &Located, socket: &Socket) -> anyhow::Result<()> {
+fn start_serving(ui: &Ui, located: &Located, socket: &Socket) -> anyhow::Result<()> {
     /// How asking the daemon to serve the repository went.
     enum Served {
         /// There was no daemon to ask, nor could one be started.
@@ -809,7 +917,7 @@ fn start_serving(located: &Located, socket: &Socket) -> anyhow::Result<()> {
             Ok(client) => client,
             Err(err) => return Ok(Served::NoDaemon(err)),
         };
-        println!("Syncing...");
+        writeln!(ui.stdout(), "Syncing...")?;
         let first = client
             .add(control::context(Duration::from_secs(3600)), workspace)
             .await
@@ -821,21 +929,26 @@ fn start_serving(located: &Located, socket: &Socket) -> anyhow::Result<()> {
     })?;
     match served {
         Served::NoDaemon(err) => {
-            eprintln!("Could not start the daemon ({err:#}); syncing once instead.");
+            writeln!(
+                ui.warning(),
+                "Could not start the daemon ({err:#}); syncing once instead."
+            )?;
             let synced = sync_directly(located)?;
-            println!(
-                "Synced (hive at #{}). Run `musubi daemon` to keep it in sync.",
-                synced.seq
-            );
+            writeln!(ui.stdout(), "Synced (hive at #{}).", synced.seq)?;
+            writeln!(ui.hint(), "Run `musubi daemon` to keep it in sync.")?;
             Ok(())
         }
         Served::Synced(synced) => {
-            println!(
+            writeln!(
+                ui.stdout(),
                 "Synced with the hub (hive at #{}). The daemon keeps it in sync from now on.",
                 synced.seq
-            );
+            )?;
             if !login::installed() {
-                println!("To start the daemon at login too: musubi daemon install");
+                writeln!(
+                    ui.hint(),
+                    "To start the daemon at login too: `musubi daemon install`"
+                )?;
             }
             Ok(())
         }
@@ -847,6 +960,7 @@ fn start_serving(located: &Located, socket: &Socket) -> anyhow::Result<()> {
 }
 
 fn clone(
+    ui: &Ui,
     destination: &Path,
     hive: &str,
     hub: Option<&str>,
@@ -856,6 +970,7 @@ fn clone(
     let hub = UserState::hub(hub)?;
     configured_forget_after(&settings::user_config()?)?;
     let reply = block_on(ask_preparing(
+        ui,
         &hub,
         HubWideRequest::Resolve {
             name: hive.to_owned(),
@@ -875,9 +990,13 @@ fn clone(
     anyhow::ensure!(status.success(), "`jj {} {dest}` failed", init.join(" "));
     let located = Located::find(destination)?;
     set_machine_name(&located, machine)?;
-    become_node(&located, &info, &hub, false)?;
-    println!("Cloning hive {} into {}", info.name, destination.display());
-    start_serving(&located, socket)
+    become_node(ui, &located, &info, &hub, false)?;
+    let mut out = ui.stdout();
+    write!(out, "Cloning hive ")?;
+    write!(out.labeled("hive"), "{}", info.name)?;
+    writeln!(out, " into {}", destination.display())?;
+    drop(out);
+    start_serving(ui, &located, socket)
 }
 
 /// Syncs once, in this process.
@@ -888,23 +1007,34 @@ fn sync_directly(located: &Located) -> anyhow::Result<Synced> {
 }
 
 /// Syncs through the daemon when it serves the repository, else directly.
-fn sync(start: &Path, socket: &Socket) -> anyhow::Result<()> {
-    let synced = sync_quietly(start, socket)?;
-    println!("Synced (hive at #{}).", synced.seq);
+fn sync(ui: &Ui, start: &Path, socket: &Socket) -> anyhow::Result<()> {
+    let (synced, stopped) = sync_quietly(start, socket)?;
+    writeln!(ui.stdout(), "Synced (hive at #{}).", synced.seq)?;
+    if stopped {
+        writeln!(
+            ui.warning(),
+            "The daemon isn't running, so this synced in its own process, and nothing keeps \
+             this repository in sync."
+        )?;
+        writeln!(ui.hint(), "`musubi daemon start` starts it.")?;
+    }
     Ok(())
 }
 
-/// [`sync`], saying nothing.
-fn sync_quietly(start: &Path, socket: &Socket) -> anyhow::Result<Synced> {
+/// [`sync`], saying nothing, and whether it synced here because the daemon that would serve
+/// the repository isn't running.
+fn sync_quietly(start: &Path, socket: &Socket) -> anyhow::Result<(Synced, bool)> {
     let located = Located::find(start)?;
     let hive =
         HiveConfig::load(&located.repo_path)?.context("this repository is not part of a hive")?;
     let served = UserState::load()?.served_workspace(&located.repo_path);
+    let mut stopped = false;
     let through_daemon = block_on(async {
         let Some(workspace) = served else {
             return Ok(None);
         };
         let Some(client) = daemon::running(socket).await? else {
+            stopped = true;
             return Ok(None);
         };
         let synced = client
@@ -927,10 +1057,10 @@ fn sync_quietly(start: &Path, socket: &Socket) -> anyhow::Result<Synced> {
             Err(err) => return Err(err),
         },
     };
-    Ok(synced)
+    Ok((synced, stopped))
 }
 
-fn leave(start: &Path, socket: &Socket, force: bool) -> anyhow::Result<()> {
+fn leave(ui: &Ui, start: &Path, socket: &Socket, force: bool) -> anyhow::Result<()> {
     let located = Located::find(start)?;
     let hive =
         HiveConfig::load(&located.repo_path)?.context("this repository is not part of a hive")?;
@@ -952,7 +1082,7 @@ fn leave(start: &Path, socket: &Socket, force: bool) -> anyhow::Result<()> {
     let name = hive.display_name();
     let told = match snapshot(&located) {
         Err(err) => Err(("record what changed in the working copy".to_owned(), err)),
-        Ok(()) => tell_the_hive(&located, &hive)
+        Ok(()) => tell_the_hive(ui, &located, &hive)
             .map_err(|err| (format!("tell hive {name} that this repository leaves"), err)),
     };
     if let Err((doing, err)) = told {
@@ -973,7 +1103,7 @@ fn leave(start: &Path, socket: &Socket, force: bool) -> anyhow::Result<()> {
                  `musubi leave --force` leaves without telling it"
             );
         }
-        eprintln!("Couldn't {doing} ({err:#}); leaving anyway.");
+        writeln!(ui.warning(), "Couldn't {doing} ({err:#}); leaving anyway.")?;
     }
     // No next work of a copy out of its hive shows it there again: a working copy the hive
     // abandoned gets a new commit now.
@@ -981,13 +1111,19 @@ fn leave(start: &Path, socket: &Socket, force: bool) -> anyhow::Result<()> {
         .open()
         .and_then(|mut node| Ok(node.give_back_working_copies()?))
     {
-        eprintln!("Couldn't give this repository's working copies new commits ({err:#}).");
+        writeln!(
+            ui.warning(),
+            "Couldn't give this repository's working copies new commits ({err:#})."
+        )?;
     }
     daemon::leave_hive(&located, &hive)?;
-    println!(
-        "This repository has left hive {name}, and no longer syncs with it. Everything it \
-         has stays."
-    );
+    let mut out = ui.stdout();
+    write!(out, "This repository has left hive ")?;
+    write!(out.labeled("hive"), "{name}")?;
+    writeln!(
+        out,
+        ", and no longer syncs with it. Everything it has stays."
+    )?;
     Ok(())
 }
 
@@ -1015,7 +1151,7 @@ const LEAVE_ATTEMPTS: usize = 3;
 
 /// Forgets this machine's copy and syncs, so that the hive has this copy's last work and
 /// knows it left, and puts this copy's working copies back here, whether or not it could.
-fn tell_the_hive(located: &Located, hive: &HiveConfig) -> anyhow::Result<()> {
+fn tell_the_hive(ui: &Ui, located: &Located, hive: &HiveConfig) -> anyhow::Result<()> {
     let mut removed: BTreeMap<jj_lib::ref_name::WorkspaceNameBuf, jj_lib::backend::CommitId> =
         BTreeMap::new();
     let mut told = Err(anyhow::anyhow!("never tried"));
@@ -1044,11 +1180,15 @@ fn tell_the_hive(located: &Located, hive: &HiveConfig) -> anyhow::Result<()> {
             .open()
             .and_then(|mut node| Ok(node.restore_workspaces(&removed)?))
         {
-            eprintln!(
-                "Couldn't put back this repository's working copies ({err:#}). `jj op log` \
-                 lists `musubi: leave`; `jj op restore` to the operation before it brings them \
-                 back."
-            );
+            writeln!(
+                ui.warning(),
+                "Couldn't put back this repository's working copies ({err:#})."
+            )?;
+            writeln!(
+                ui.hint(),
+                "`jj op log` lists `musubi: leave`; `jj op restore` to the operation before it \
+                 brings them back."
+            )?;
         }
     }
     told
@@ -1081,7 +1221,7 @@ fn leave_once(
     Ok(!node.present_copies()?.1.is_present(node.machine().key()))
 }
 
-fn forget(start: &Path, machine: &str, socket: &Socket) -> anyhow::Result<()> {
+fn forget(ui: &Ui, start: &Path, machine: &str, socket: &Socket) -> anyhow::Result<()> {
     let located = Located::find(start)?;
     let hive =
         HiveConfig::load(&located.repo_path)?.context("this repository is not part of a hive")?;
@@ -1109,10 +1249,13 @@ fn forget(start: &Path, machine: &str, socket: &Socket) -> anyhow::Result<()> {
         }
     };
     if node.forget_copy(&key, machine)? {
-        println!("Forgot {machine}: the other machines stop showing it as they sync.");
+        let mut out = ui.stdout();
+        write!(out, "Forgot ")?;
+        write!(out.labeled("machine"), "{machine}")?;
+        writeln!(out, ": the other machines stop showing it as they sync.")?;
     }
     drop(node);
-    sync(start, socket)
+    sync(ui, start, socket)
 }
 
 /// A repository on this machine that is part of a hive.
@@ -1123,7 +1266,7 @@ struct Copy {
 }
 
 /// Lists what it can: a daemon or hub out of reach is a line of the listing.
-fn list(socket: anyhow::Result<Socket>) -> anyhow::Result<()> {
+fn list(ui: &Ui, socket: anyhow::Result<Socket>) -> anyhow::Result<()> {
     let state = UserState::load()?;
     let (daemon, statuses) = block_on(async {
         let running = match &socket {
@@ -1146,11 +1289,12 @@ fn list(socket: anyhow::Result<Socket>) -> anyhow::Result<()> {
     let mut copies = vec![];
     for workspace in &state.repos {
         let Ok(located) = Located::find(workspace) else {
-            println!(
+            writeln!(
+                ui.warning(),
                 "{} is gone; remove it from {}",
                 workspace.display(),
                 UserState::path()?.display()
-            );
+            )?;
             continue;
         };
         let Some(hive) = HiveConfig::load(&located.repo_path)? else {
@@ -1167,8 +1311,9 @@ fn list(socket: anyhow::Result<Socket>) -> anyhow::Result<()> {
         });
     }
     let hubs = UserState::known_hubs(state.default_hub()?, copies.iter().map(|copy| &copy.hive));
+    let mut out = ui.stdout();
     if hubs.is_empty() {
-        println!("No hubs yet: run `musubi hub` on one machine, then the join command it prints.");
+        no_hubs(ui)?;
     }
     for hub in &hubs {
         let here: Vec<&Copy> = copies.iter().filter(|copy| &copy.hive.hub == hub).collect();
@@ -1181,29 +1326,39 @@ fn list(socket: anyhow::Result<Socket>) -> anyhow::Result<()> {
                         copy.hive.note_name(&copy.located.repo_path, &info.name);
                     }
                 }
-                println!("Hub {hub}:");
+                writeln!(out.labeled("heading"), "Hub {hub}:")?;
                 if hives.is_empty() {
-                    println!("  no hives yet");
+                    writeln!(out, "  no hives yet")?;
                 }
                 for info in &hives {
-                    println!("  {}  {}", info.name, machines(info));
+                    write!(out, "  ")?;
+                    write!(out.labeled("hive"), "{}", info.name)?;
+                    write!(out, "  ")?;
+                    write_machines(out.as_mut(), info)?;
+                    writeln!(out)?;
                     for copy in here.iter().filter(|c| c.hive.hive.to_string() == info.id) {
-                        print_copy(copy);
+                        print_copy(out.as_mut(), copy)?;
                     }
                 }
                 for copy in here
                     .iter()
                     .filter(|copy| !hives.iter().any(|h| h.id == copy.hive.hive.to_string()))
                 {
-                    println!("  {}  (no longer on the hub)", copy.hive.display_name());
-                    print_copy(copy);
+                    write!(out, "  ")?;
+                    write!(out.labeled("hive"), "{}", copy.hive.display_name())?;
+                    writeln!(out.labeled("problem"), "  (no longer on the hub)")?;
+                    print_copy(out.as_mut(), copy)?;
                 }
             }
             Err(err) => {
-                println!("Hub {hub}: {err:#}. This machine's copies:");
+                write!(out.labeled("heading"), "Hub {hub}:")?;
+                write!(out, " ")?;
+                write!(out.labeled("problem"), "{err:#}")?;
+                writeln!(out, ". This machine's copies:")?;
                 for copy in &here {
-                    println!("  {}", copy.hive.display_name());
-                    print_copy(copy);
+                    write!(out, "  ")?;
+                    writeln!(out.labeled("hive"), "{}", copy.hive.display_name())?;
+                    print_copy(out.as_mut(), copy)?;
                 }
             }
         }
@@ -1213,23 +1368,56 @@ fn list(socket: anyhow::Result<Socket>) -> anyhow::Result<()> {
     } else {
         "doesn't start at login; `musubi daemon install` makes it"
     };
+    write!(out, "Daemon: ")?;
     match daemon {
-        Ok(true) => println!(
-            "Daemon: running, serving {} repositories; {at_login}",
+        Ok(true) => writeln!(
+            out,
+            "running, serving {} repositories; {at_login}",
             statuses.len()
-        ),
-        Ok(false) => println!("Daemon: not running ({at_login}); `musubi daemon start` starts it"),
-        Err(err) => println!("Daemon: {err:#}"),
+        )?,
+        Ok(false) => {
+            write!(out.labeled("problem"), "not running")?;
+            writeln!(out, " ({at_login}); `musubi daemon start` starts it")?;
+        }
+        Err(err) => writeln!(out.labeled("problem"), "{err:#}")?,
     }
     Ok(())
 }
 
-/// The machines in a hive, as `musubi list` shows them.
+/// Says that this machine knows no hub, and what to do.
+fn no_hubs(ui: &Ui) -> std::io::Result<()> {
+    writeln!(ui.stdout(), "No hubs yet.")?;
+    writeln!(
+        ui.hint(),
+        "Run `musubi hub` on one machine, then the join command it prints."
+    )
+}
+
+/// [`write_machines`], as plain text.
 fn machines(info: &HiveInfo) -> String {
+    let mut text = vec![];
+    write_machines(&mut PlainTextFormatter::new(&mut text), info).ok();
+    String::from_utf8_lossy(&text).into_owned()
+}
+
+/// The machines in a hive, as `musubi list` shows them.
+fn write_machines(out: &mut dyn Formatter, info: &HiveInfo) -> std::io::Result<()> {
     match info.machines.as_slice() {
-        [] => "no machines yet".to_owned(),
-        [one] => format!("1 machine: {one}"),
-        all => format!("{} machines: {}", all.len(), all.join(", ")),
+        [] => write!(out, "no machines yet"),
+        [one] => {
+            write!(out, "1 machine: ")?;
+            write!(out.labeled("machine"), "{one}")
+        }
+        all => {
+            write!(out, "{} machines: ", all.len())?;
+            for (index, machine) in all.iter().enumerate() {
+                if index > 0 {
+                    write!(out, ", ")?;
+                }
+                write!(out.labeled("machine"), "{machine}")?;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -1243,28 +1431,27 @@ async fn list_hub(hub: &str) -> anyhow::Result<Vec<HiveInfo>> {
     }
 }
 
-fn print_copy(copy: &Copy) {
-    println!(
-        "    here: {}  {}",
-        copy.located.workspace_root.display(),
-        describe(copy.status.as_ref())
-    );
+fn print_copy(out: &mut dyn Formatter, copy: &Copy) -> std::io::Result<()> {
+    write!(out, "    here: {}  ", copy.located.workspace_root.display())?;
+    describe(out, copy.status.as_ref())?;
+    writeln!(out)
 }
 
-fn describe(status: Option<&Status>) -> String {
+/// How syncing goes, as `status` says.
+fn describe(out: &mut dyn Formatter, status: Option<&Status>) -> std::io::Result<()> {
     let Some(status) = status else {
-        return "not synced yet".to_owned();
+        return write!(out, "not synced yet");
     };
     if let Some(error) = &status.error {
-        return format!("sync failing: {error}");
+        return write!(out.labeled("problem"), "sync failing: {error}");
     }
     match status.last_success {
-        Some(t) => format!("synced {}s ago", daemon::now().saturating_sub(t)),
-        None => "not synced yet".to_owned(),
+        Some(t) => write!(out, "synced {}s ago", daemon::now().saturating_sub(t)),
+        None => write!(out, "not synced yet"),
     }
 }
 
-fn op_id(start: &Path, id: &str) -> anyhow::Result<()> {
+fn op_id(ui: &Ui, start: &Path, id: &str) -> anyhow::Result<()> {
     let located = Located::find(start)?;
     let mut node = located.open()?;
     let prefix =
@@ -1276,16 +1463,27 @@ fn op_id(start: &Path, id: &str) -> anyhow::Result<()> {
     )?;
     if let jj_lib::object_id::PrefixResolution::SingleMatch(local) = local {
         let canonical = node.canonicalize(&local)?;
-        println!("local {} = hive {}", local.hex(), canonical.hex());
+        writeln!(
+            ui.stdout(),
+            "local {} = hive {}",
+            local.hex(),
+            canonical.hex()
+        )?;
         return Ok(());
     }
     if let Some(canonical) = node.canonical_store().resolve_prefix(id)? {
         match node.local_of(&canonical) {
-            Some(local) => println!("hive {} = local {}", canonical.hex(), local.hex()),
-            None => println!(
+            Some(local) => writeln!(
+                ui.stdout(),
+                "hive {} = local {}",
+                canonical.hex(),
+                local.hex()
+            )?,
+            None => writeln!(
+                ui.stdout(),
                 "hive {} is not realized on this machine yet",
                 canonical.hex()
-            ),
+            )?,
         }
         return Ok(());
     }

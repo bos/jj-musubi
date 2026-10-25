@@ -53,6 +53,7 @@ A hive always shares these repo config keys, whatever `musubi.shared-config` say
 | Variable | Effect |
 | --- | --- |
 | `RUST_LOG` | What a command logs, unless `--log` says. See [Logging](#logging). |
+| `NO_COLOR` | No colour, unless `--color` or your config's `ui.color` asks for it, as for jj. See [Colours](#colours). |
 | `MUSUBI_SSH` | The ssh program to run, in place of `ssh`. |
 | `MUSUBI_SOCKET` | The daemon's control socket, in place of the usual one. Same as `--socket`. |
 | `MUSUBI_STATE_DIR` | One directory for musubi's state and the daemon's socket, in place of the usual ones. With `JJ_CONFIG` for its settings, this runs a second, separate musubi. |
@@ -75,6 +76,10 @@ they report what they did themselves.
   musubi's state directory, starting the log afresh when it starts if it has passed 10 MiB.
   Under systemd, it logs to the journal instead: `journalctl --user -u musubi`.
 
+Logs are in colour only on a terminal, and then as for the rest of what musubi prints (see
+[Colours](#colours)). A log file never is, nor is anything else the hub or the daemon writes
+to one.
+
 To choose what a command logs, pass `--log` with a filter in [`RUST_LOG`'s syntax][filter],
 or set `RUST_LOG`; `--log` wins:
 
@@ -92,6 +97,27 @@ restart`. One started by another command itself, rather than through launchd or 
 inherits that command's `RUST_LOG`, which then takes the setting's place.
 
 [filter]: https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html#directives
+
+## Colours
+
+musubi prints as jj does, through jj's own formatting, reading jj's config for it as `jj`
+does outside any repository: the system's and yours, not a repository's.
+`--color` (`always`, `never`, `debug`, or `auto`) or else jj's `ui.color` says when to colour
+what it prints: by default, `auto`, only on a terminal, and `never` if `NO_COLOR` is set and your
+config doesn't set `ui.color`. jj's `colors` table says how, by label; `--color=debug` shows
+each label. Besides jj's own labels, such as `commit_id`, `working_copies`, `warning`, and
+`hint`, musubi gives these:
+
+| Label | Text | Default |
+| --- | --- | --- |
+| `heading` | a heading, such as `musubi list`'s `This repository:` | bold |
+| `hive` | a hive's name | bold |
+| `machine` | a machine's name | green |
+| `problem` | what's wrong, such as a sync that fails | red |
+
+```sh
+jj config set --user 'colors.machine' yellow
+```
 
 ## Files and directories
 

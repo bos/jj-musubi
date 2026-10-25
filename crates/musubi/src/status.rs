@@ -5,10 +5,13 @@
 //! without changing what it finds out. It never starts the daemon, nor asks the hub: the last
 //! sync says whether the hub was in reach.
 
+use std::io;
+use std::io::Write as _;
 use std::path::Path;
 use std::time::Duration;
 use std::time::SystemTime;
 
+use jj_cli::formatter::FormatterExt as _;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::OperationId;
 use musubi_jj::node::NodeRepo;
@@ -20,6 +23,7 @@ use crate::daemon;
 use crate::login;
 use crate::repo::Located;
 use crate::socket::Socket;
+use crate::ui::Ui;
 
 /// What `musubi status` finds out.
 pub struct Report {
@@ -114,36 +118,36 @@ impl Report {
         }
     }
 
-    pub fn print(&self) {
+    pub fn print(&self, ui: &Ui) -> io::Result<()> {
         let Some(located) = &self.located else {
-            println!("This directory is not in a jj repository.");
-            self.print_machine();
-            return;
+            writeln!(ui.stdout(), "This directory is not in a jj repository.")?;
+            return self.print_machine(ui);
         };
         let Some(hive) = &self.hive else {
-            println!(
+            writeln!(
+                ui.stdout(),
                 "This repository is not part of a hive: {}",
                 located.workspace_root.display()
-            );
-            self.print_machine();
-            hint(
+            )?;
+            self.print_machine(ui)?;
+            return writeln!(
+                ui.hint(),
                 "`musubi join` makes it part of the hive it belongs in; `musubi create` starts \
-                 one.",
+                 one."
             );
-            return;
         };
-        hive.print(&self.daemon);
-        self.daemon.print();
-        hive.warn(&self.daemon);
+        hive.print(ui, &self.daemon)?;
+        self.daemon.print(ui)?;
+        hive.warn(ui, &self.daemon)
     }
 
     /// What this machine has, outside any hive.
-    fn print_machine(&self) {
+    fn print_machine(&self, ui: &Ui) -> io::Result<()> {
         match &self.default_hub {
-            Some(hub) => println!("Default hub: {hub}"),
-            None => println!("Default hub: none yet"),
+            Some(hub) => writeln!(ui.stdout(), "Default hub: {hub}")?,
+            None => writeln!(ui.stdout(), "Default hub: none yet")?,
         }
-        self.daemon.print();
+        self.daemon.print(ui)
     }
 }
 
@@ -201,13 +205,16 @@ impl Hive {
         Ok(())
     }
 
-    fn print(&self, daemon: &Daemon) {
+    fn print(&self, ui: &Ui, daemon: &Daemon) -> io::Result<()> {
+        let mut out = ui.stdout();
         let config = &self.config;
         let at = match self.sync.as_ref().and_then(|sync| sync.known_seq) {
             Some(seq) => format!(", at #{seq}"),
             None => String::new(),
         };
-        println!("Hive: {} on {}{at}", config.display_name(), config.hub);
+        write!(out, "Hive: ")?;
+        write!(out.labeled("hive"), "{}", config.display_name())?;
+        writeln!(out, " on {}{at}", config.hub)?;
         let synced = match self.sync.as_ref().and_then(|sync| sync.last_success) {
             Some(t) => format!(
                 "synced {} ago",
@@ -224,29 +231,43 @@ impl Hive {
             Some(false) => "; the hub lacks its latest work",
             None => "",
         };
-        println!("This machine: {}, {synced}{sent}", config.node);
+        write!(out, "This machine: ")?;
+        write!(out.labeled("machine"), "{}", config.node)?;
+        writeln!(out, ", {synced}{sent}")?;
         if self.forgotten {
-            println!("Forgotten by the hive, which shows this copy again once it's used");
+            writeln!(
+                out.labeled("problem"),
+                "Forgotten by the hive, which shows this copy again once it's used"
+            )?;
         }
         if !self.working_copies.is_empty() {
-            println!("Working copies:");
+            writeln!(out, "Working copies:")?;
             for wc in &self.working_copies {
+                write!(out.labeled("working_copies"), "{}@", wc.name)?;
+                write!(out, ": ")?;
                 let commit = &wc.commit.hex()[..8];
                 match &wc.change {
                     Some((change, description)) => {
-                        let change = &change.reverse_hex()[..8];
-                        let description = match description.lines().next() {
-                            Some(line) if !line.is_empty() => line,
-                            _ => "(no description set)",
-                        };
-                        println!("{}@: {change} {commit} {description}", wc.name);
+                        write!(out.labeled("change_id"), "{}", &change.reverse_hex()[..8])?;
+                        write!(out, " ")?;
+                        write!(out.labeled("commit_id"), "{commit}")?;
+                        match description.lines().next() {
+                            Some(line) if !line.is_empty() => writeln!(out, " {line}")?,
+                            _ => {
+                                write!(out, " ")?;
+                                writeln!(
+                                    out.labeled("description").labeled("placeholder"),
+                                    "(no description set)"
+                                )?;
+                            }
+                        }
                     }
-                    None => println!("{}@: {commit}", wc.name),
+                    None => writeln!(out.labeled("commit_id"), "{commit}")?,
                 }
             }
         }
         if !self.copies.is_empty() {
-            println!("Copies:");
+            writeln!(out, "Copies:")?;
             let now = SystemTime::now();
             for copy in &self.copies {
                 let this = if copy.this { " (this machine)" } else { "" };
@@ -264,13 +285,11 @@ impl Hive {
                         }
                     }
                 };
-                println!(
-                    "{}{this}: used {} ago, {forgotten}",
-                    copy.name,
-                    roughly(since)
-                );
+                write!(out.labeled("machine"), "{}", copy.name)?;
+                writeln!(out, "{this}: used {} ago, {forgotten}", roughly(since))?;
             }
         }
+        Ok(())
     }
 
     /// Whether its last sync failed.
@@ -279,29 +298,37 @@ impl Hive {
     }
 
     /// Says what keeps the repository from syncing, and what to do about it.
-    fn warn(&self, daemon: &Daemon) {
+    fn warn(&self, ui: &Ui, daemon: &Daemon) -> io::Result<()> {
         let failing = self.failing();
         if let Some(error) = self.sync.as_ref().and_then(|sync| sync.error.as_ref()) {
-            warning(&format!("Syncing fails: {error}"));
+            writeln!(ui.warning(), "Syncing fails: {error}")?;
             if daemon.serving == Some(true) {
-                hint(&format!("The daemon keeps trying. Its log: {}", daemon.log));
+                writeln!(
+                    ui.hint(),
+                    "The daemon keeps trying. Its log: {}",
+                    daemon.log
+                )?;
             } else {
-                hint("`musubi sync` tries again.");
+                writeln!(ui.hint(), "`musubi sync` tries again.")?;
             }
         }
         match (&daemon.running, daemon.serving) {
             // The daemon's line says why.
             (Err(_), _) => {}
             (Ok(false), _) => {
-                warning(
+                writeln!(
+                    ui.warning(),
                     "The daemon isn't running, so this repository syncs only when you run \
-                     `musubi sync`.",
-                );
-                hint("`musubi daemon start` starts it.");
+                     `musubi sync`."
+                )?;
+                writeln!(ui.hint(), "`musubi daemon start` starts it.")?;
             }
             (Ok(true), Some(false)) => {
-                warning("The daemon doesn't serve this repository.");
-                hint("`musubi join`, with the hub in reach, has it serve the repository again.");
+                writeln!(ui.warning(), "The daemon doesn't serve this repository.")?;
+                writeln!(
+                    ui.hint(),
+                    "`musubi join`, with the hub in reach, has it serve the repository again."
+                )?;
             }
             (Ok(true), _) => {}
         }
@@ -311,8 +338,12 @@ impl Hive {
             && !failing
             && daemon.running != Ok(false)
         {
-            hint("`musubi sync` sends this machine's latest work to the hub.");
+            writeln!(
+                ui.hint(),
+                "`musubi sync` sends this machine's latest work to the hub."
+            )?;
         }
+        Ok(())
     }
 }
 
@@ -355,13 +386,15 @@ impl Daemon {
         (daemon, served)
     }
 
-    fn print(&self) {
+    fn print(&self, ui: &Ui) -> io::Result<()> {
         let at_login = if self.at_login {
             "starts at login"
         } else {
             "doesn't start at login"
         };
-        let line = match &self.running {
+        let mut out = ui.stdout();
+        write!(out, "Daemon: ")?;
+        match &self.running {
             Ok(true) => {
                 let pid = self
                     .pid
@@ -374,16 +407,21 @@ impl Daemon {
                     None if self.served == 1 => "serving 1 repository".to_owned(),
                     None => format!("serving {} repositories", self.served),
                 };
-                format!("running{pid}, {serving}; {at_login}")
+                writeln!(out, "running{pid}, {serving}; {at_login}")?;
             }
-            Ok(false) => format!("not running; {at_login}"),
-            Err(err) => format!("{err}; {at_login}"),
-        };
-        println!("Daemon: {line}");
-        if let Ok(socket) = &self.socket {
-            println!("Daemon socket: {socket}");
+            Ok(false) => {
+                write!(out.labeled("problem"), "not running")?;
+                writeln!(out, "; {at_login}")?;
+            }
+            Err(err) => {
+                write!(out.labeled("problem"), "{err}")?;
+                writeln!(out, "; {at_login}")?;
+            }
         }
-        println!("Daemon log: {}", self.log);
+        if let Ok(socket) = &self.socket {
+            writeln!(out, "Daemon socket: {socket}")?;
+        }
+        writeln!(out, "Daemon log: {}", self.log)
     }
 }
 
@@ -419,14 +457,6 @@ fn sent(node: &NodeRepo, sync: Option<&daemon::Status>) -> Option<bool> {
         }
     }
     Some(true)
-}
-
-fn warning(message: &str) {
-    eprintln!("Warning: {message}");
-}
-
-fn hint(message: &str) {
-    eprintln!("Hint: {message}");
 }
 
 /// A duration in its largest whole unit, as musubi shows how long ago or how soon: `40s`,

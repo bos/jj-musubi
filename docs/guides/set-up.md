@@ -115,11 +115,14 @@ its directory if it has no remotes. To choose another name, pass it: `musubi cre
 ```text
 Created an ssh key for musubi: /home/you/.local/state/musubi/hub_key
 Adding it to ~/.ssh/authorized_keys on devbox, allowed only to run `musubi hub connect`. ssh may ask for your password.
-Saved devbox as this machine's default hub. To choose another: jj config set --user musubi.hub <hub>
+The hive keeps this copy however long it goes unused, since a person, not an agent, is joining it.
+Hint: To have it forgotten once unused for 6 hours: `jj config set --repo musubi.forget-after 6h`
+Saved devbox as this machine's default hub.
+Hint: To choose another: `jj config set --user musubi.hub <hub>`
 Created hive app
 Syncing...
 Synced with the hub (hive at #1). The daemon keeps it in sync from now on.
-To start the daemon at login too: musubi daemon install
+Hint: To start the daemon at login too: `musubi daemon install`
 ```
 
 The first hub a machine uses becomes its default, so later commands need no `--hub`. The
@@ -137,9 +140,12 @@ You don't need to name the hive: the hub picks the one that has some of the copy
 and one of its remotes' URLs.
 
 ```text
+The hive keeps this copy however long it goes unused, since a person, not an agent, is joining it.
+Hint: To have it forgotten once unused for 6 hours: `jj config set --repo musubi.forget-after 6h`
 Joined hive app (matched remote origin), 2 machines
 Syncing...
 Synced with the hub (hive at #3). The daemon keeps it in sync from now on.
+Hint: To start the daemon at login too: `musubi daemon install`
 ```
 
 The copies' histories are merged as jj merges concurrent operations: commits both copies have

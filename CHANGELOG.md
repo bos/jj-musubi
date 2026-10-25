@@ -20,6 +20,14 @@ change the protocol, so run the same release on the hub and every machine (see
   than the one it joined from, act on the repository the daemon serves: `sync` goes through
   the daemon rather than syncing alongside it, `leave` stops the daemon serving it, and `join`
   no longer has the daemon serve it twice.
+- musubi prints through jj's own formatting: it colours what it prints as jj's `ui.color` and
+  `colors` config say, and takes jj's `--color` flag (see
+  [Colours](docs/reference/configuration.md#colours)); errors, warnings and hints read as
+  jj's do, with hints and warnings on stderr. Logs are coloured only on a terminal, so
+  `daemon.log`, and a hub's log written to a file, no longer hold colour codes.
+- A command whose output stops being read, as in `musubi list | head`, no longer panics: it
+  does all it would, printing nothing more there, and exits with status 3, as jj does then.
+- `musubi sync` warns when it syncs in its own process because the daemon isn't running.
 - When jj can't merge this machine's operations with the hive's (as when rebases on two
   machines form a loop), the sync error names the operation to revert, rather than listing
   every operation the hive doesn't have yet.

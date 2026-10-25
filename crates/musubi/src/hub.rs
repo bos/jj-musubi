@@ -39,6 +39,7 @@ use crate::lock::try_lock;
 use crate::socket;
 use crate::socket::Socket;
 use crate::ssh;
+use crate::ui::Ui;
 
 /// What marks a directory as a hub's, and holds its settings.
 const HUB_FILE: &str = "hub.toml";
@@ -75,7 +76,7 @@ pub struct ServeArgs {
     pub advertise: Option<String>,
 }
 
-pub fn serve(args: ServeArgs) -> anyhow::Result<()> {
+pub fn serve(ui: &Ui, args: ServeArgs) -> anyhow::Result<()> {
     let cwd = std::env::current_dir()?;
     let default = args.dir.is_none();
     let dir = match args.dir {
@@ -124,11 +125,13 @@ pub fn serve(args: ServeArgs) -> anyhow::Result<()> {
     }
     settings.save(&dir)?;
     let server = HubServer::open(&dir)?;
-    match (created, server.hive_count()) {
-        (true, _) => println!("Created a new hub in {}", dir.display()),
-        (false, 1) => println!("Serving 1 hive from {}", dir.display()),
-        (false, n) => println!("Serving {n} hives from {}", dir.display()),
-    }
+    let greeting = match (created, server.hive_count()) {
+        (true, _) => format!("Created a new hub in {}", dir.display()),
+        (false, 1) => format!("Serving 1 hive from {}", dir.display()),
+        (false, n) => format!("Serving {n} hives from {}", dir.display()),
+    };
+    // Whoever reads stdout may have stopped already; the hub serves all the same.
+    writeln!(ui.stdout(), "{greeting}").ok();
     // What other machines pass as --hub: the name they ssh to this machine by.
     let public = match &settings.advertise {
         Some(host) => host.clone(),
@@ -152,8 +155,7 @@ pub fn serve(args: ServeArgs) -> anyhow::Result<()> {
         let ready = || {
             answering.send(()).ok();
             // Whoever reads stdout may stop before the end, as `musubi hub | head -1` does;
-            // println! would panic then, and the hub would stop serving.
-            let mut stdout = io::stdout().lock();
+            // the hub serves all the same.
             let mut text = String::new();
             if saved {
                 writeln!(text, "Saved this hub as this machine's default.").ok();
@@ -172,9 +174,9 @@ pub fn serve(args: ServeArgs) -> anyhow::Result<()> {
             } else {
                 writeln!(text, "On this machine, use --hub {local}.").ok();
             }
-            stdout
-                .write_all(text.as_bytes())
-                .and_then(|()| stdout.flush())
+            let mut out = ui.stdout();
+            out.write_all(text.as_bytes())
+                .and_then(|()| out.flush())
                 .ok();
             tracing::info!("serving {}", dir.display());
         };

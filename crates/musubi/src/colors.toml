@@ -1,0 +1,7 @@
+# The colours of the labels musubi gives what it prints, beyond jj's own, such as `commit_id`
+# and `working_copies`. A `colors` table in jj's config overrides them.
+[colors]
+"heading" = { bold = true }
+"hive" = { bold = true }
+"machine" = "green"
+"problem" = "red"

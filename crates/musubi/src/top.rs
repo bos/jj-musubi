@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io::IsTerminal as _;
+use std::io::Write as _;
 use std::sync::mpsc;
 use std::time::Duration;
 use std::time::Instant;
@@ -42,6 +43,7 @@ use crate::daemon;
 use crate::hub;
 use crate::repo::Located;
 use crate::socket::Socket;
+use crate::ui::Ui;
 
 /// A daemon reports after every sync, and syncs at least this often (see
 /// `daemon::POLL_INTERVAL`), so one silent for four times as long is offline, or stopped.
@@ -65,20 +67,21 @@ pub struct Args {
     pub once: bool,
 }
 
-pub fn run(args: Args, socket: anyhow::Result<Socket>) -> anyhow::Result<()> {
+pub fn run(ui: &Ui, args: Args, socket: anyhow::Result<Socket>) -> anyhow::Result<()> {
     let hubs = match args.hub {
         Some(hub) => vec![hub::absolute(&hub)],
         None => known_hubs()?,
     };
     if hubs.is_empty() {
-        println!("No hubs yet: run `musubi hub` on one machine, then the join command it prints.");
+        crate::no_hubs(ui)?;
         return Ok(());
     }
     let socket = socket.map_err(|err| format!("{err:#}"));
     let mut sampler = Sampler::new(hubs, socket)?;
     if args.once || !std::io::stdout().is_terminal() {
         let sample = sampler.sample();
-        print!("{}", View::new(&sample, None, None).plain());
+        let plain = View::new(&sample, None, None).plain();
+        ui.stdout().write_all(plain.as_bytes())?;
         return Ok(());
     }
     interactive(sampler, args.interval)

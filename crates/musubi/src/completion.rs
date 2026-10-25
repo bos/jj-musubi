@@ -12,6 +12,7 @@ use crate::Cli;
 use crate::config::HiveConfig;
 use crate::config::UserState;
 use crate::repo::Located;
+use crate::ui::Ui;
 
 /// How long completing a hive's name waits for the hub, while the shell waits on it.
 const HUB_LIMIT: Duration = Duration::from_secs(2);
@@ -39,7 +40,7 @@ pub enum Shell {
 }
 
 /// Prints the completion script for `shell`.
-pub fn print_script(shell: Shell) -> anyhow::Result<()> {
+pub fn print_script(ui: &Ui, shell: Shell) -> anyhow::Result<()> {
     use clap_complete::Shell as Clap;
     let mut command = Cli::command();
     let name = command.get_name().to_owned();
@@ -61,7 +62,7 @@ pub fn print_script(shell: Shell) -> anyhow::Result<()> {
         }
         Shell::Zsh => clap_complete::generate(Clap::Zsh, &mut command, name, &mut script),
     }
-    std::io::stdout().write_all(&script)?;
+    ui.stdout().raw()?.write_all(&script)?;
     Ok(())
 }
 

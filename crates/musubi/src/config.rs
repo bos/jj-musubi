@@ -167,6 +167,10 @@ pub struct Settings {
     /// `musubi.daemon.socket`: where the daemon's control socket is, in place of the usual
     /// place.
     pub daemon_socket: Option<String>,
+    /// `musubi.daemon.connections`: `one` for the daemon to reach each hub over one
+    /// connection, large transfers included; `as-needed`, the default, for it to open another
+    /// for each large transfer.
+    pub daemon_connections: Option<String>,
 }
 
 impl Settings {
@@ -177,6 +181,7 @@ impl Settings {
             hub: get("musubi.hub")?.map(|hub| expand_home(&hub)),
             daemon_log: get("musubi.daemon.log")?,
             daemon_socket: get("musubi.daemon.socket")?,
+            daemon_connections: get("musubi.daemon.connections")?,
         })
     }
 }

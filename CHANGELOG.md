@@ -141,7 +141,10 @@ change the protocol, so run the same release on the hub and every machine (see
   lock you out of that machine.
 - The daemon keeps one connection to each hub, shared by every repository it serves there,
   where it kept one, and an ssh, for each: a machine with two dozen repositories on a hub ran
-  two dozen ssh processes, and the hub's machine as many `musubi hub connect`.
+  two dozen ssh processes, and the hub's machine as many `musubi hub connect`. It opens
+  another for each transfer of 16 MiB or more, while it lasts; `musubi.daemon.connections =
+  "one"` keeps it to one connection to each hub, as where each new ssh is costly (see
+  [Configuration](docs/reference/configuration.md#this-machines)).
 - When `jj op abandon` pauses syncing, the error says how to carry on, and `musubi status` says
   that retrying won't help, where it said that the daemon keeps trying.
 - `musubi clone` checks out the hive's trunk, as `jj git clone` checks out a remote's

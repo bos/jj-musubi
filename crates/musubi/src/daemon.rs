@@ -33,6 +33,7 @@ use musubi_hub::activity::Report;
 use musubi_sync::driver::NodeDriver;
 use musubi_sync::node::history_abandoned;
 use musubi_sync::remote::HiveGone;
+use musubi_sync::remote::OpenConnection;
 use musubi_sync::remote::RemoteHub;
 use musubi_sync::wire::Envelope;
 use musubi_sync::wire::HUB_TOKEN;
@@ -53,6 +54,7 @@ use crate::config;
 use crate::config::Entry;
 use crate::config::HiveConfig;
 use crate::config::Membership;
+use crate::config::Settings;
 use crate::config::UserState;
 use crate::control;
 use crate::control::Control;
@@ -68,6 +70,9 @@ use crate::watch::OpHeadsWatcher;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a copy waits to open a connection of its own for a large transfer, before it
+/// moves the transfer on the connection it shares.
+const OWN_CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 const REPORT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How often a repository that syncs is checked for whether gc is due, which counts its
@@ -166,6 +171,9 @@ struct Served {
 struct Hubs {
     runtime: tokio::runtime::Handle,
     hubs: Arc<Mutex<HashMap<String, HubConnection>>>,
+    /// Whether a copy opens another connection for a large transfer
+    /// (`musubi.daemon.connections`).
+    own_connections: bool,
 }
 
 /// A hub's connection while a copy holds it, and the attempt to connect while one is under
@@ -202,11 +210,31 @@ impl Drop for Attempted {
 }
 
 impl Hubs {
-    fn new(runtime: tokio::runtime::Handle) -> Self {
+    fn new(runtime: tokio::runtime::Handle, own_connections: bool) -> Self {
         Self {
             runtime,
             hubs: Arc::default(),
+            own_connections,
         }
+    }
+
+    /// Opens a connection of a copy's own to `hub`, for a large transfer, unless the daemon
+    /// is to reach each hub over one. It runs on the copy's runtime, which the transfer
+    /// keeps busy, and ends with the transfer.
+    fn own_connections(&self, hub: &str) -> Option<OpenConnection> {
+        let hub = hub.to_owned();
+        self.own_connections.then(|| -> OpenConnection {
+            Arc::new(move || {
+                let hub = hub.clone();
+                async move {
+                    let next = WhileDisconnected::NextAttempt;
+                    Ok(crate::hub::connect_with(&hub, OWN_CONNECTION_TIMEOUT, next)
+                        .await?
+                        .transport)
+                }
+                .boxed()
+            })
+        })
     }
 
     /// The connection to `hub`, connecting if no copy holds one. An attempt that fails
@@ -465,12 +493,38 @@ pub fn run(socket: &Socket) -> anyhow::Result<()> {
     result
 }
 
+/// Whether copies open another connection for a large transfer: unless
+/// `musubi.daemon.connections` says `one`.
+fn own_connections() -> bool {
+    let setting = match Settings::load() {
+        Ok(settings) => settings.daemon_connections,
+        Err(err) => {
+            tracing::warn!(
+                "couldn't read musubi.daemon.connections ({err:#}); taking it for as-needed"
+            );
+            None
+        }
+    };
+    match setting.as_deref() {
+        None | Some("as-needed") => true,
+        Some("one") => false,
+        Some(other) => {
+            tracing::warn!(
+                "musubi.daemon.connections is {other:?}, neither `one` nor `as-needed`; taking \
+                 it for as-needed"
+            );
+            true
+        }
+    }
+}
+
 async fn listen(socket: &Socket, lock_path: &Path) -> anyhow::Result<()> {
     let listener = socket.listen()?;
     let daemon = Daemon {
-        supervisor: Arc::new(Supervisor::new(
-            Hubs::new(tokio::runtime::Handle::current()),
-        )),
+        supervisor: Arc::new(Supervisor::new(Hubs::new(
+            tokio::runtime::Handle::current(),
+            own_connections(),
+        ))),
         stop: Arc::new(tokio::sync::Notify::new()),
     };
     for entry in UserState::load()?.copies {
@@ -702,7 +756,8 @@ async fn serve_async(
     let workspace = &entry.path;
     let mut opened = identity(&located.repo_path);
     let connection = hubs.connect(&hive.hub).await?;
-    let (mut driver, machine) = open_driver(&located, &hive, &connection)?;
+    let own = hubs.own_connections(&hive.hub);
+    let (mut driver, machine) = open_driver(&located, &hive, &connection, own)?;
     let transport = connection.transport.clone();
     let mut notices = transport.subscribe(&hive.head_subject()).await?;
     let mut reconnections = transport.reconnections();
@@ -1028,14 +1083,18 @@ fn open_driver(
     located: &Located,
     hive: &HiveConfig,
     connection: &Connection,
+    own_connections: Option<OpenConnection>,
 ) -> anyhow::Result<(NodeDriver, String)> {
     let blobs = located.repo_path.join("musubi/blobs");
-    let remote = RemoteHub::new(
+    let mut remote = RemoteHub::new(
         connection.transport.clone(),
         hive.rpc_subject(),
         &blobs,
         REQUEST_TIMEOUT,
     )?;
+    if let Some(open) = own_connections {
+        remote = remote.with_own_connections(open);
+    }
     let repo = located.open()?;
     let machine = repo.machine().key().to_owned();
     let driver = NodeDriver::new(repo, remote)?;
@@ -1057,7 +1116,7 @@ pub async fn sync_once(located: &Located, hive: &HiveConfig) -> anyhow::Result<S
     let mut status = Status::load(&located.repo_path).unwrap_or_default();
     let opened = async {
         let connection = crate::hub::connect(&hive.hub, REQUEST_TIMEOUT).await?;
-        let (driver, _) = open_driver(located, hive, &connection)?;
+        let (driver, _) = open_driver(located, hive, &connection, None)?;
         anyhow::Ok((connection, driver))
     };
     let (connection, mut driver) = match opened.await {

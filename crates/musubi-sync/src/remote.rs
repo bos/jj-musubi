@@ -11,6 +11,7 @@ use std::time::SystemTime;
 
 use bytes::Bytes;
 use futures::StreamExt as _;
+use futures::future::BoxFuture;
 use futures::stream::FuturesOrdered;
 use jj_lib::object_id::ObjectId as _;
 use musubi_core::message::Reply;
@@ -34,6 +35,17 @@ use crate::wire::map_request;
 /// Chunks of one blob in flight at once: enough to keep a link with a long round trip
 /// busy, without queueing much at the hub, which answers one request at a time.
 pub const WINDOW: usize = 8;
+
+/// Windows of chunks a call moves at which it opens a connection of its own for them, if it
+/// may: below that, the transfer is over about as soon as a new connection, an ssh, would
+/// have started.
+const OWN_CONNECTION_WINDOWS: u64 = 2;
+
+/// Opens a connection to the hub of the call's own, for a call that moves enough chunks to be
+/// worth it, so that a large transfer neither holds up the small requests of others sharing
+/// the node's connection nor waits behind theirs, and transfers at once each have one.
+pub type OpenConnection =
+    Arc<dyn Fn() -> BoxFuture<'static, anyhow::Result<Arc<dyn Transport>>> + Send + Sync>;
 
 /// That the hub doesn't have the hive asked about: the error a sync fails with then, which
 /// the daemon looks for.
@@ -90,6 +102,9 @@ const UNUSED_BLOB_LIFETIME: Duration = Duration::from_secs(24 * 3600);
 
 pub struct RemoteHub {
     transport: Arc<dyn Transport>,
+    /// Opens a call's own connection, for a large transfer; without it, every transfer
+    /// shares `transport`.
+    open: Option<OpenConnection>,
     rpc_subject: String,
     blobs: BlobStore,
     timeout: Duration,
@@ -104,10 +119,18 @@ impl RemoteHub {
     ) -> anyhow::Result<Self> {
         Ok(Self {
             transport,
+            open: None,
             rpc_subject,
             blobs: BlobStore::open(blob_dir)?,
             timeout,
         })
+    }
+
+    /// Moves a large transfer on a connection of its own, which `open` opens.
+    #[must_use]
+    pub fn with_own_connections(mut self, open: OpenConnection) -> Self {
+        self.open = Some(open);
+        self
     }
 
     /// Sends one protocol request and returns the reply, with any bundle in it downloaded,
@@ -124,21 +147,28 @@ impl RemoteHub {
             blobs: &self.blobs,
             ids: vec![],
         };
+        let mut upload_len = 0;
         let request = map_request(
             request,
             |id| id.to_bytes(),
             |attachment| {
                 WireAttachment::of(&attachment, &mut inline_left, |path| {
                     let (blob, len) = self.blobs.insert_file(path)?;
+                    // Once, though the request names it twice: the hub takes it once.
+                    if !uploads.ids.contains(&blob) {
+                        upload_len += len;
+                    }
                     uploads.ids.push(blob);
                     Ok((blob, len))
                 })
             },
         )?;
+        let mut lanes = Lanes::new(self);
+        let lane = lanes.lane(upload_len).await;
         for blob in &uploads.ids {
-            self.upload(blob).await?;
+            self.upload(blob, &*lane).await?;
         }
-        let reply = self.send(HubRequest::Protocol(request)).await;
+        let reply = self.send(HubRequest::Protocol(request), &mut lanes).await;
         drop(uploads);
         let reply = match reply? {
             HubReply::Protocol(reply) => reply,
@@ -146,14 +176,15 @@ impl RemoteHub {
         };
         // Deleted here if a later download fails or the call is dropped, and otherwise once
         // the caller is done with the reply.
+        let mut blobs = reply_blobs(&reply);
+        // Once, though the reply names it twice: each path deletes its file.
+        blobs.sort();
+        blobs.dedup();
+        let lane = lanes.lane(blobs.iter().map(|(_, len)| len).sum()).await;
         let mut downloads = vec![];
-        for (blob, len) in reply_blobs(&reply) {
-            // Once, though the reply names it twice: each path deletes its file.
-            if downloads.iter().any(|(id, _)| *id == blob) {
-                continue;
-            }
-            let path = tempfile::TempPath::try_from_path(self.download(&blob, len).await?)?;
-            downloads.push((blob, Arc::new(path)));
+        for (blob, len) in blobs {
+            let path = self.download(&blob, len, &*lane).await?;
+            downloads.push((blob, Arc::new(tempfile::TempPath::try_from_path(path)?)));
         }
         map_reply(reply, OpId::new, |attachment| {
             attachment.into_attachment(&self.blobs, |blob| {
@@ -167,29 +198,33 @@ impl RemoteHub {
         })
     }
 
-    async fn send(&self, request: HubRequest) -> anyhow::Result<HubReply> {
+    async fn send(&self, request: HubRequest, lanes: &mut Lanes<'_>) -> anyhow::Result<HubReply> {
         let mut bytes = Envelope::encode(request)?;
         if bytes.len() > self.transport.max_payload() {
-            let (blob, _) = self.blobs.insert_bytes(&bytes)?;
+            let (blob, len) = self.blobs.insert_bytes(&bytes)?;
             let upload = Uploads {
                 blobs: &self.blobs,
                 ids: vec![blob],
             };
-            self.upload(&blob).await?;
+            self.upload(&blob, &*lanes.lane(len).await).await?;
             drop(upload);
             bytes = Envelope::encode(HubRequest::Indirect { blob })?;
         }
-        let reply = self.exchange(bytes).await?;
+        let reply = self.exchange(&*self.transport, bytes).await?;
         if let HubReply::Indirect { blob, len } = reply {
-            let path = tempfile::TempPath::try_from_path(self.download(&blob, len).await?)?;
+            let path = self.download(&blob, len, &*lanes.lane(len).await).await?;
+            let path = tempfile::TempPath::try_from_path(path)?;
             return Envelope::<HubReply>::decode(&std::fs::read(&path)?);
         }
         Ok(reply)
     }
 
-    async fn exchange(&self, bytes: Vec<u8>) -> anyhow::Result<HubReply> {
-        let reply = self
-            .transport
+    async fn exchange(
+        &self,
+        transport: &dyn Transport,
+        bytes: Vec<u8>,
+    ) -> anyhow::Result<HubReply> {
+        let reply = transport
             .request(&self.rpc_subject, Bytes::from(bytes), self.timeout)
             .await?;
         Envelope::<HubReply>::decode(&reply)
@@ -198,8 +233,8 @@ impl RemoteHub {
     /// Uploads a blob in chunks, [`WINDOW`] at a time, resuming from whatever the hub
     /// reports it has. That is less than before only if the hub started over, after a hash
     /// mismatch or after discarding the upload as abandoned, and then so does the upload.
-    async fn upload(&self, blob: &BlobId) -> anyhow::Result<()> {
-        let chunk = chunk_size(self.transport.max_payload());
+    async fn upload(&self, blob: &BlobId, transport: &dyn Transport) -> anyhow::Result<()> {
+        let chunk = chunk_size(transport.max_payload());
         let (total, _) = self.blobs.read(blob, 0, 0)?;
         let mut offset = 0;
         let mut restarts = 0;
@@ -214,7 +249,7 @@ impl RemoteHub {
                     offset: next,
                     data,
                 };
-                acks.push_back(self.exchange(Envelope::encode(request)?));
+                acks.push_back(self.exchange(transport, Envelope::encode(request)?));
                 next += chunk as u64;
                 if next >= total || acks.len() == WINDOW {
                     break;
@@ -245,8 +280,13 @@ impl RemoteHub {
 
     /// Downloads a blob of `total` bytes in chunks, [`WINDOW`] at a time, into the local
     /// blob store, returning its file.
-    async fn download(&self, blob: &BlobId, total: u64) -> anyhow::Result<PathBuf> {
-        let chunk = chunk_size(self.transport.max_payload()) as u64;
+    async fn download(
+        &self,
+        blob: &BlobId,
+        total: u64,
+        transport: &dyn Transport,
+    ) -> anyhow::Result<PathBuf> {
+        let chunk = chunk_size(transport.max_payload()) as u64;
         let mut offset = 0;
         let mut restarts = 0;
         loop {
@@ -263,7 +303,7 @@ impl RemoteHub {
                     len: chunk,
                 })?;
                 let at = next;
-                chunks.push_back(async move { (at, self.exchange(request).await) });
+                chunks.push_back(async move { (at, self.exchange(transport, request).await) });
                 next += chunk;
                 if next >= total || chunks.len() == WINDOW {
                     break;
@@ -305,6 +345,44 @@ impl Drop for Uploads<'_> {
         for id in &self.ids {
             self.blobs.remove(id);
         }
+    }
+}
+
+/// The connections a call moves chunks on: the one it shares, and one of its own, opened the
+/// first time it moves enough chunks to be worth it, and closed with the call.
+struct Lanes<'a> {
+    hub: &'a RemoteHub,
+    own: Option<Arc<dyn Transport>>,
+    /// Whether the call tried to open its own: once, though it failed.
+    tried: bool,
+}
+
+impl<'a> Lanes<'a> {
+    fn new(hub: &'a RemoteHub) -> Self {
+        Self {
+            hub,
+            own: None,
+            tried: false,
+        }
+    }
+
+    /// The connection to move `len` bytes of chunks on.
+    async fn lane(&mut self, len: u64) -> Arc<dyn Transport> {
+        let hub = self.hub;
+        let chunk = chunk_size(hub.transport.max_payload()) as u64;
+        let worth = OWN_CONNECTION_WINDOWS * WINDOW as u64 * chunk;
+        if !self.tried
+            && len >= worth
+            && let Some(open) = &hub.open
+        {
+            self.tried = true;
+            match open().await {
+                Ok(own) => self.own = Some(own),
+                // The shared connection still works, if more slowly for this.
+                Err(err) => tracing::debug!("moving {len} bytes on the shared connection: {err:#}"),
+            }
+        }
+        self.own.clone().unwrap_or_else(|| hub.transport.clone())
     }
 }
 
@@ -399,10 +477,14 @@ mod tests {
             Duration::from_secs(5),
         )
         .unwrap();
+        let mut lanes = Lanes::new(&remote);
         let err = remote
-            .send(HubRequest::Indirect {
-                blob: BlobId::of_bytes(b"other"),
-            })
+            .send(
+                HubRequest::Indirect {
+                    blob: BlobId::of_bytes(b"other"),
+                },
+                &mut lanes,
+            )
             .await
             .unwrap_err();
         assert!(err.to_string().contains("failed its hash check"), "{err:#}");

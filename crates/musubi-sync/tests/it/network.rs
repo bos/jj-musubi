@@ -16,7 +16,9 @@ use musubi_jj::node::NodeRepo;
 use musubi_jj::objects::Backend;
 use musubi_sync::driver::NodeDriver;
 use musubi_sync::hub::HubAdapter;
+use musubi_sync::remote::OpenConnection;
 use musubi_sync::remote::RemoteHub;
+use musubi_sync::remote::WINDOW;
 use musubi_sync::service::HubService;
 use musubi_sync::wire::Envelope;
 use musubi_sync::wire::HeadNotice;
@@ -326,6 +328,127 @@ async fn syncs_take_few_round_trips() {
             drivers[1].sync().await.unwrap();
             assert!(beta_net.take().1 > 1, "a download one chunk at a time");
             assert!(visible(&beta).contains("big"));
+        })
+        .await;
+}
+
+/// [`driver`], with `open` to open a connection of a call's own.
+fn driver_opening(
+    repo: &TestRepo,
+    transport: Arc<dyn Transport>,
+    open: OpenConnection,
+) -> NodeDriver {
+    let mut node = NodeRepo::open(&repo.repo_path(), &repo.settings()).unwrap();
+    node.create_join_operation(&format!("musubi: {} joins", repo.machine()))
+        .unwrap();
+    let blobs = repo.repo_path().join("musubi/blobs");
+    let remote = RemoteHub::new(transport, RPC.into(), &blobs, Duration::from_secs(10))
+        .unwrap()
+        .with_own_connections(open);
+    NodeDriver::new(node, remote).unwrap()
+}
+
+/// Opens connections to `network`, counting their requests, and keeps them in `opened`.
+fn opener(
+    network: &MemoryNetwork,
+    opened: &Arc<std::sync::Mutex<Vec<Arc<Counting>>>>,
+) -> OpenConnection {
+    let (network, opened) = (network.clone(), opened.clone());
+    Arc::new(move || {
+        let connection = Counting::new(Arc::new(network.connect()));
+        opened.lock().unwrap().push(connection.clone());
+        Box::pin(async move { Ok(connection as Arc<dyn Transport>) })
+    })
+}
+
+/// Incompressible content, `len` bytes of it.
+fn noise(seed: &[u8], len: usize) -> Vec<u8> {
+    let mut bytes = vec![0; len];
+    blake3::Hasher::new()
+        .update(seed)
+        .finalize_xof()
+        .fill(&mut bytes);
+    bytes
+}
+
+/// A call that moves two windows of chunks or more does so on a connection of its own, which
+/// it closes after, uploading or downloading, while its other requests, and smaller transfers,
+/// share the node's; if no connection of its own opens, the shared one carries the chunks.
+#[tokio::test(flavor = "current_thread")]
+async fn large_transfers_take_a_connection_of_their_own() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let network = MemoryNetwork::new(17, 64 * 1024);
+            let env = TestEnv::new();
+            let alpha = env.init_repo("alpha");
+            let beta = env.init_repo("beta");
+            let gamma = env.init_repo("gamma");
+            spawn_hub(&env, Arc::new(network.connect()));
+            let shared = Counting::new(Arc::new(network.connect()));
+            let (alpha_own, beta_own) = (Arc::default(), Arc::default());
+            let tries = Arc::new(AtomicUsize::new(0));
+            let failing: OpenConnection = {
+                let tries = tries.clone();
+                Arc::new(move || {
+                    tries.fetch_add(1, Ordering::SeqCst);
+                    Box::pin(async { anyhow::bail!("no ssh today") })
+                })
+            };
+            let gamma_net = Counting::new(Arc::new(network.connect()));
+            let mut drivers = [
+                driver_opening(&alpha, shared.clone(), opener(&network, &alpha_own)),
+                driver_opening(
+                    &beta,
+                    Arc::new(network.connect()),
+                    opener(&network, &beta_own),
+                ),
+                driver_opening(&gamma, gamma_net.clone(), failing),
+            ];
+            converge(&mut drivers).await;
+            // More than jj snapshots unless told.
+            let big_enough = "--config=snapshot.max-new-file-size=8MiB";
+
+            // More than a window of chunks, but less than two.
+            std::fs::write(alpha.path().join("small"), noise(b"small", 512 << 10)).unwrap();
+            alpha.jj(&["commit", big_enough, "-m", "small"]);
+            drivers[0].sync().await.unwrap();
+            assert!(alpha_own.lock().unwrap().is_empty());
+
+            std::fs::write(alpha.path().join("big"), noise(b"big", 2 << 20)).unwrap();
+            alpha.jj(&["commit", big_enough, "-m", "big"]);
+            shared.take();
+            drivers[0].sync().await.unwrap();
+            let opened = alpha_own.lock().unwrap().clone();
+            assert_eq!(opened.len(), 1);
+            assert!(
+                opened[0].take().0 >= 2 * WINDOW,
+                "the chunks went on their own connection"
+            );
+            assert!(shared.take().0 <= 2, "only the push went on the shared one");
+            // Closed with the call: only the test holds it.
+            assert_eq!(Arc::strong_count(&opened[0]), 2);
+            drivers[1].sync().await.unwrap();
+            assert_eq!(
+                beta_own.lock().unwrap().len(),
+                1,
+                "a download opens one too"
+            );
+            assert!(visible(&beta).contains("big"));
+
+            // With none to open, the chunks share the connection: gamma's upload, once it has
+            // what alpha pushed.
+            drivers[2].sync().await.unwrap();
+            let tried = tries.load(Ordering::SeqCst);
+            std::fs::write(gamma.path().join("big"), noise(b"gamma", 2 << 20)).unwrap();
+            gamma.jj(&["commit", big_enough, "-m", "big from gamma"]);
+            gamma_net.take();
+            drivers[2].sync().await.unwrap();
+            assert_eq!(tries.load(Ordering::SeqCst), tried + 1);
+            assert!(
+                gamma_net.take().0 >= 2 * WINDOW,
+                "the chunks went on the shared one"
+            );
         })
         .await;
 }

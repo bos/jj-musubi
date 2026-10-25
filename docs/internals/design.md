@@ -821,7 +821,12 @@ be exposed. A `--hub` that isn't an absolute path is an ssh destination, passed 
   there shares, so that a machine with many repositories on a hub runs one ssh, and the hub's
   machine one `musubi hub connect`, not one for each. The connection runs on the daemon's own
   runtime, rather than any copy's, and ends once no copy holds it. Copies that ask for it while
-  it connects wait for that attempt, and hear how it went, rather than each running ssh.
+  it connects wait for that attempt, and hear how it went, rather than each running ssh. A call
+  that moves two windows of chunks or more, 16 MiB, opens a connection of its own for them, which
+  ends with the call, unless `musubi.daemon.connections` is `one`: so that a large transfer
+  neither holds up the small requests of the copies sharing the connection nor waits behind
+  theirs, and transfers at once each have a connection, as they had before it was shared. A
+  call that can't open one moves its chunks on the shared connection.
 - Each connection is an ssh of its own, and the stream transport speaks through its stdin and
   stdout. Nothing outlives a connection: an `ssh -L` forward that lasts goes dead when the
   machine sleeps, while here, connecting again is a new ssh. ssh's `ServerAliveInterval` gives

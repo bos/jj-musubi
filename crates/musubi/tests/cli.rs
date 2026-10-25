@@ -527,6 +527,15 @@ fn hub_join_sync_clone_and_list() {
     assert!(!delta.exists());
     beta.jj(&["config", "unset", "--user", "musubi.forget-after"]);
 
+    // The hive's trunk is alpha's main, which a clone checks out.
+    alpha.jj(&[
+        "config",
+        "set",
+        "--repo",
+        r#"revset-aliases."trunk()""#,
+        "main",
+    ]);
+    musubi_in(&env, &logs, &alpha, &["sync"]);
     // A new machine clones the hive by a prefix of its name.
     let gamma = env.repo_handle("gamma");
     let mut clone = alpha.program(musubi());
@@ -537,6 +546,21 @@ fn hub_join_sync_clone_and_list() {
     clone.env("CLAUDE_CODE_SESSION_ID", "a session");
     let out = run(&env, &logs, clone);
     assert!(out.contains("Cloning hive project into"), "{out}");
+    // As `jj git clone` checks out the remote's default branch.
+    let parent = [
+        "log",
+        "--ignore-working-copy",
+        "--no-graph",
+        "-r",
+        "@-",
+        "-T",
+        "bookmarks",
+    ];
+    assert_eq!(gamma.jj(&parent), "main");
+    assert_eq!(
+        fs::read_to_string(gamma.path().join("a")).unwrap(),
+        "from alpha"
+    );
     assert!(log(&gamma).contains("picked up by the daemon"));
     assert!(
         out.contains("The hive forgets this copy once it goes unused for 6h, since an agent"),
@@ -550,13 +574,15 @@ fn hub_join_sync_clone_and_list() {
 
     // A machine forgotten elsewhere drops out of the hive, though its daemon still syncs,
     // until it's next used. Its `jj` commands above are work, and imported git's refs as
-    // they started: one that reached the hub after the forget would bring gamma back,
-    // rightly, so let gamma's daemon send them first.
+    // they started: one that reached the hub after the forget, or that alpha hadn't taken
+    // when it forgot gamma, would bring gamma back, rightly, so let gamma's daemon send them
+    // first, and alpha take them.
     // Gamma is a copy on alpha's machine, which cloned it.
     let mut sync = alpha.program(musubi());
     sync.arg("sync").current_dir(gamma.path());
     let out = run(&env, &logs, sync);
     assert!(out.contains("Synced (hive at #"), "{out}");
+    musubi_in(&env, &logs, &alpha, &["sync"]);
     let out = musubi_in(&env, &logs, &alpha, &["forget", "gamma"]);
     assert!(out.contains("Forgot gamma"), "{out}");
     // The hub counts gamma out once it has the forget, which `musubi forget`'s sync sends.

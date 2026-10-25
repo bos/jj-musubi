@@ -17,7 +17,7 @@ explains hubs, hives, and copies.
 | --- | --- |
 | `create [<name>]` | Start a hive from the repository you're in, for other copies to join. |
 | `join` | Add this machine's copy of a repository to the hive it belongs in. In a copy already part of a hive, make the hive again on a hub that has lost it, or on another hub given with `--hub`. In a repository made by copying a copy's files, which musubi doesn't sync, `--original` syncs it as that copy, which must be gone. |
-| `clone <hive> <dir>` | Make a new copy of a hive on this machine. |
+| `clone <hive> <dir>` | Make a new copy of a hive on this machine, and check out the hive's trunk. |
 | `leave` | Take the repository you're in out of its hive, telling the hive, and stop syncing it. It keeps everything it has. `--force` leaves without telling the hive, if its hub can't be reached. `leave <path>` stops syncing a copy that was at `<path>` and is gone. |
 | `forget <machine>` | Forget another machine's copy that went away without leaving. Name the machine as its working copies are named here: `laptop` for `laptop/default@`, or `laptop-1a2b` for `laptop-1a2b/default@`. The name `musubi list` gives it also works, if no other machine has that name. |
 

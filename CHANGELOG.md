@@ -139,6 +139,8 @@ change the protocol, so run the same release on the hub and every machine (see
 - Adding musubi's ssh key on the hub's machine no longer joins it to the last line of an
   `~/.ssh/authorized_keys` that doesn't end in a newline, which spoiled both keys and could
   lock you out of that machine.
+- `musubi clone` checks out the hive's trunk, as `jj git clone` checks out a remote's
+  default branch, where it left the new copy's working copy on the root commit, with no files.
 - A daemon started at login on macOS, by `musubi daemon install`, no longer fails every sync
   with "Too many open files" once it serves some two dozen repositories: the daemon and the
   hub raise their limit on open files as far as the system allows, from launchd's 256.

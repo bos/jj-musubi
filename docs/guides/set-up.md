@@ -156,7 +156,8 @@ If the copy matches no hive, or more than one, `join` refuses and says why. See 
 refused](../troubleshooting.md#joining-is-refused).
 
 For a machine with no copy yet, clone the hive instead. This makes a new colocated
-repository, joins it to the hive, and syncs it:
+repository, joins it to the hive, syncs it, and checks out the hive's trunk, as `jj git clone`
+checks out a remote's default branch:
 
 ```sh
 musubi clone app ~/src/app --hub devbox

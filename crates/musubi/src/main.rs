@@ -163,7 +163,8 @@ enum Command {
     /// Create a new colocated repository from a hive.
     ///
     /// It makes the repository, joins it to the hive, and returns once it has synced, with
-    /// the daemon keeping it in sync from then on.
+    /// the daemon keeping it in sync from then on. It checks out the hive's trunk, as
+    /// `jj git clone` checks out a remote's default branch.
     Clone {
         /// The hive: a name, a prefix of one, or an id.
         #[arg(add = ArgValueCandidates::new(completion::hives))]
@@ -1223,7 +1224,51 @@ fn clone(
     write!(out.labeled("hive"), "{}", info.name)?;
     writeln!(out, " into {}", destination.display())?;
     drop(out);
-    start_serving(ui, &located, socket)
+    start_serving(ui, &located, socket)?;
+    if let Err(err) = check_out_trunk(&located) {
+        writeln!(
+            ui.warning(),
+            "Couldn't check out the hive's trunk ({err:#})."
+        )?;
+        writeln!(ui.hint(), "`jj new 'trunk()'` checks it out.")?;
+    }
+    Ok(())
+}
+
+/// Checks out the hive's trunk in a new copy, as `jj git clone` checks out the remote's
+/// default branch: a new working-copy commit on it, unless the hive's `trunk()` is the root.
+fn check_out_trunk(located: &Located) -> anyhow::Result<()> {
+    let jj = |args: &[&str]| {
+        let mut jj = Process::new("jj");
+        musubi_jj::git_command::without_repository_env(&mut jj);
+        jj.args(args).current_dir(&located.workspace_root);
+        jj
+    };
+    let output = jj(&[
+        "log",
+        "--ignore-working-copy",
+        "--no-graph",
+        "-n1",
+        "-r",
+        "trunk() ~ root()",
+        "-T",
+        "commit_id",
+    ])
+    .output()
+    .context("running `jj log`")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let trunk = String::from_utf8_lossy(&output.stdout);
+    if trunk.is_empty() {
+        return Ok(());
+    }
+    // jj says where the working copy is now, as `jj git clone` does.
+    let status = jj(&["new", &trunk]).status().context("running `jj new`")?;
+    anyhow::ensure!(status.success(), "`jj new {trunk}` failed");
+    Ok(())
 }
 
 /// Syncs once, in this process.

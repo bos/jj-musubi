@@ -151,6 +151,15 @@ Not races: kinds of repository and history a hive carries.
 These are jj 0.46 behaviors, reproducible on one machine with concurrent `jj` processes or
 `--at-op`. musubi doesn't cause them, but more concurrency makes them likelier.
 
+When a test or the search finds a jj bug, report it in three steps:
+
+1. File a tracking issue in jj-musubi, labeled `jj` and titled for what jj should do
+   ("jj: …"). Say what goes wrong, what musubi does about it, and what to change here once
+   jj is fixed.
+2. File a succinct issue against [jj](https://github.com/jj-vcs/jj/issues), with a minimal
+   reproduction in plain jj, checked against jj's main branch.
+3. Comment on the tracking issue with a link to the jj issue, saying it has been filed.
+
 | Behavior | Effect | Recovery | Test |
 | --- | --- | --- | --- |
 | One operation abandons, or moves away, a commit directly on the root, while a concurrent one makes it a parent of a merge commit | Reconciling them would rebase the merge commit onto the root, which jj's git backend refuses: every `jj` command would then fail with "Failed to load the repo". Rare in established repositories, where commits on the root are ancestors of `trunk()` and so immutable. musubi doesn't apply another machine's operation that jj can't merge with this machine's own (it tries the merge first, in both orders): the sync fails, listing this machine's operations the hive doesn't have yet, and jj keeps working. Two operations on one machine still break it. | Revert the conflicting operation the sync error lists with `jj op revert <id>`; musubi then catches up. Between two operations on one machine: `jj --at-op <one head> op revert @`. | `root_parent_merge_bug_is_explained` |

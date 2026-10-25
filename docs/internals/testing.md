@@ -320,7 +320,11 @@ the hub's history, operation by operation, with the same parents:
    at the hive's head over the reference's. The failure lists where the merges parted.
 
 Merges staged through the hub are judged as staged: a node that merges part of another
-machine's work and later the rest makes what jj makes of the same two merges.
+machine's work and later the rest makes what jj makes of the same two merges. A merge made on a
+machine, rather than realized there, is judged against the parents as that machine had them
+too, where they lack only the working-copy commit of another machine's workspace it forgot,
+which the hive keeps: jj there merges as if the forget abandoned it ([races.md, "Known jj
+limitations"](races.md#known-jj-limitations)).
 
 The test also checks that the hive's history can stand for one repository's: every machine's
 realization of each operation has the hive's view of it, and no operation but a merge makes

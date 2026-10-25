@@ -165,6 +165,36 @@ fn other_machines_workspaces_are_theirs_through_a_merge() {
     }
 }
 
+/// A command at an operation from before the forget points a bookmark at the forgotten
+/// working copy. The forgetting machine's next command merges the two, before musubi sees
+/// either, and jj, which there had the forget abandon the commit, moves the bookmark to its
+/// parent, as on one machine. The hive takes that merge, though it keeps the commit, and the
+/// other machine its working copy.
+#[test]
+fn a_bookmark_set_at_a_forgotten_working_copy_moves_to_its_parent() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(1, "b", "from beta");
+    hive.sync();
+    let beta_wc = working_copy(&hive, 1);
+    let old = hive
+        .repo(0)
+        .jj(&["op", "log", "--no-graph", "-n", "1", "-T", "id"]);
+    hive.repo(0).jj(&["workspace", "forget", "beta/beta"]);
+    hive.repo(0)
+        .jj(&["--at-op", &old, "bookmark", "set", "x", "-r", &beta_wc]);
+    hive.commit(0, "a", "from alpha");
+    hive.sync();
+    hive.assert_converged();
+    let parent = hive.commit_id(1, "from beta");
+    for m in 0..2 {
+        let x = hive
+            .repo(m)
+            .jj(&["log", "--no-graph", "-r", "x", "-T", "commit_id"]);
+        assert_eq!(x, parent, "on {}", hive.repo(m).machine());
+    }
+    assert_eq!(working_copy(&hive, 1), beta_wc);
+}
+
 /// A machine that forgot another machine's workspace no longer sees its empty working-copy
 /// commit, so jj leaves that commit behind when this machine rewrites its parent. The hive
 /// mustn't keep it, which would bring the old parent back as a divergent copy: the other

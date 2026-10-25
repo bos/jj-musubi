@@ -7,7 +7,10 @@
 //! parents, into one jj repository. An operation with one parent is taken as it is, its view
 //! the canonical one, while the reference agrees with the hive at its parent. A merge is jj's
 //! own merge of the same parents, in the same order, by `RepoLoader::merge_operations`, as
-//! concurrent processes on one machine would have it merged.
+//! concurrent processes on one machine would have it merged. A merge made on a machine, rather
+//! than realized there, agrees too where it is jj's merge of the parents as that machine had
+//! them, lacking the working-copy commit of another machine's workspace it forgot
+//! (`merged_as_made`).
 //!
 //! Where jj's merge gives what the hive's did, the reference takes the hive's operation
 //! itself, so that it goes on agreeing exactly. Where it doesn't, the reference goes its own
@@ -272,9 +275,18 @@ impl Reference {
                     reference.changes_of(op.parents.iter().flat_map(|p| [&copies[p], &replays[p]]));
                 let ours = reference.summary(&view, &known);
                 let theirs = reference.summary(&replayed.view, &known);
-                if op.parents.len() > 1 && agreed && ours != theirs {
-                    // The same parents on both sides: what the hive's merge did beyond jj's
-                    // is musubi's, whatever later operations make of it.
+                // The same parents on both sides, but a different merge: it may be jj's own,
+                // on the machine that made it, of the parents as that machine had them.
+                let as_made = if op.parents.len() > 1 && agreed && ours != theirs {
+                    reference
+                        .merged_as_made(world, &id, &op.parents, &replayed.view, &copies, &views)
+                        .filter(|(merged, _)| reference.summary(merged, &known) == ours)
+                } else {
+                    None
+                };
+                if op.parents.len() > 1 && agreed && ours != theirs && as_made.is_none() {
+                    // What the hive's merge did beyond jj's is musubi's, whatever later
+                    // operations make of it.
                     let beyond = reference.beyond(&view, &replayed.view, &known);
                     if !beyond.is_empty() {
                         reference.unexplained.push(format!(
@@ -284,7 +296,21 @@ impl Reference {
                         ));
                     }
                 }
-                if ours == theirs && dominates(&ops, &children, &deviated, &id) {
+                if let Some((merged, machine)) = as_made {
+                    reference.deviations.push(format!(
+                        "{} merged by jj as {} had its parents",
+                        describe(&id, op),
+                        machine
+                    ));
+                    if dominates(&ops, &children, &deviated, &id) {
+                        copy.clone()
+                    } else {
+                        // Its own, as where jj's merge agrees but other lines have parted.
+                        deviated.insert(id.clone());
+                        let parents = op.parents.iter().map(|p| replays[p].id().clone());
+                        reference.write_like(&copy, &merged, parents.collect())
+                    }
+                } else if ours == theirs && dominates(&ops, &children, &deviated, &id) {
                     if !agreed {
                         reference
                             .deviations
@@ -494,6 +520,124 @@ impl Reference {
                 .leave_unpublished();
             Replayed::of(&repo)
         })
+    }
+
+    /// jj's merge of a merge's two parents as the machine that made it had them, where they
+    /// differ from the hive's: that machine's own views lack the working-copy commit of
+    /// another machine's workspace it forgot, which `jj workspace forget` abandoned there but
+    /// the hive keeps (docs/internals/races.md, "Known jj limitations"). jj's merge there,
+    /// by a `jj` command or the machine's daemon, takes the commit for abandoned, as on one
+    /// machine, moving bookmarks off it and rebasing work on it. So the parents, and their
+    /// base, as the machine's merge found them, go in as the hive has them but with the heads
+    /// the machine's views had, and without the workspaces whose commits those lacked, and
+    /// only where they lacked nothing else. The merge then gets back the commits jj's merge of
+    /// the hive's parents (`canonical`) keeps. `None` where that differs from nothing, or the
+    /// merge has several bases.
+    fn merged_as_made(
+        &mut self,
+        world: &World,
+        id: &OperationId,
+        parents: &[OperationId],
+        canonical: &View,
+        copies: &HashMap<OperationId, Operation>,
+        views: &HashMap<OperationId, View>,
+    ) -> Option<(View, &'static str)> {
+        // The machine that made the merge, rather than realized it, and the merge there.
+        let (m, node, local_op) =
+            world
+                .fx
+                .hive
+                .members
+                .iter()
+                .enumerate()
+                .find_map(|(m, member)| {
+                    let node = member.adapter.repo();
+                    let local = node.local_of(id)?;
+                    let local_op = block_on(node.loader().load_operation(&local)).unwrap();
+                    let made = !local_op
+                        .metadata()
+                        .attributes
+                        .contains_key("musubi.canonical");
+                    made.then_some((m, node, local_op))
+                })?;
+        let local_parents = block_on(local_op.parents()).unwrap();
+        let [first, second] = local_parents.as_slice() else {
+            return None;
+        };
+        // The same parents, in the same order.
+        let canonical_parents: Vec<Option<OperationId>> = local_parents
+            .iter()
+            .map(|parent| node.canonical_of(parent.id()))
+            .collect();
+        if canonical_parents
+            .iter()
+            .cloned()
+            .collect::<Option<Vec<_>>>()?
+            != parents
+        {
+            return None;
+        }
+        let bases = block_on(jj_lib::op_walk::closest_common_ancestors(
+            vec![first.clone()],
+            [second.clone()],
+        ))
+        .unwrap();
+        let [base] = bases.as_slice() else {
+            return None;
+        };
+        let mut kept: HashSet<CommitId> = HashSet::new();
+        let mut as_had = vec![];
+        for local in [base, first, second] {
+            let canonical_id = node.canonical_of(local.id())?;
+            let local_view = block_on(local.view()).unwrap().store_view().clone();
+            let mut view = views.get(&canonical_id)?.clone();
+            let visible = self.visible(&view);
+            if !local_view
+                .head_ids
+                .iter()
+                .all(|head| visible.contains(head))
+            {
+                return None;
+            }
+            let lacked: HashSet<CommitId> = visible
+                .difference(&self.visible(&local_view))
+                .cloned()
+                .collect();
+            let working_copies: HashSet<&CommitId> = view.wc_commit_ids.values().collect();
+            if !lacked.iter().all(|commit| working_copies.contains(commit)) {
+                return None;
+            }
+            view.head_ids = local_view.head_ids.clone();
+            view.wc_commit_ids
+                .retain(|_, commit| !lacked.contains(commit));
+            kept.extend(lacked);
+            let copy = copies.get(&canonical_id)?;
+            as_had.push(self.write_like(copy, &view, copy.parent_ids().to_vec()));
+        }
+        if kept.is_empty() {
+            return None;
+        }
+        let [base, first, second] = as_had.as_slice() else {
+            unreachable!()
+        };
+        let mut merged = self.apply(base, second, first).view;
+        let canonical = self.visible(canonical);
+        merged
+            .head_ids
+            .extend(kept.into_iter().filter(|commit| canonical.contains(commit)));
+        Some((merged, world.machine(m)))
+    }
+
+    /// `op` with `view` instead, on `parents`.
+    fn write_like(&self, op: &Operation, view: &View, parents: Vec<OperationId>) -> Operation {
+        let op_store = self.loader.op_store().clone();
+        let written = op_store::Operation {
+            view_id: block_on(op_store.write_view(view)).unwrap(),
+            parents,
+            ..op.store_operation().clone()
+        };
+        let id = block_on(op_store.write_operation(&written)).unwrap();
+        block_on(self.loader.load_operation(&id)).unwrap()
     }
 
     fn facts(&mut self, id: &CommitId) -> &Facts {

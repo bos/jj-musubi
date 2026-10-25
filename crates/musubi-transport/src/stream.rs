@@ -379,9 +379,9 @@ pub trait Connector: Send + Sync {
 
 /// A connection to a hub over the streams a [`Connector`] opens, opening another whenever
 /// one ends. Requests in flight when a connection ends fail with
-/// [`TransportError::Disconnected`], those made while there is none wait for the next, up
-/// to their timeout, and subscriptions carry on over each new connection, missing what was
-/// published in between.
+/// [`TransportError::Disconnected`], those made while there is none do as
+/// [`WhileDisconnected`] says, and subscriptions carry on over each new connection, missing
+/// what was published in between.
 pub struct StreamTransport {
     shared: Arc<Shared>,
     task: tokio::task::JoinHandle<()>,
@@ -393,7 +393,22 @@ impl Drop for StreamTransport {
     }
 }
 
+/// What a request made while a [`StreamTransport`] has no connection does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WhileDisconnected {
+    /// Waits for the next connection, up to its timeout: for a command, which a link that
+    /// drops and comes back within moments shouldn't fail.
+    Wait,
+    /// Waits for the next attempt to connect, failing with [`TransportError::Disconnected`]
+    /// if it fails: for a caller that says why the hub is out of reach and waits for it
+    /// itself, as the daemon does, rather than wait for the timeout of each request.
+    NextAttempt,
+}
+
 struct Shared {
+    while_disconnected: WhileDisconnected,
+    /// How many attempts to connect have failed.
+    failed_attempts: watch::Sender<u64>,
     state: Mutex<State>,
     /// Whether there is a connection now.
     connected: watch::Sender<bool>,
@@ -524,7 +539,18 @@ impl StreamTransport {
     /// whenever a connection ends. Fails at once if what answers isn't a musubi hub, or
     /// speaks another version of the protocol.
     pub async fn connect(connector: Arc<dyn Connector>) -> Result<Self, TransportError> {
+        Self::connect_with(connector, WhileDisconnected::Wait).await
+    }
+
+    /// [`StreamTransport::connect`], with requests made while there is no connection doing
+    /// as `while_disconnected` says.
+    pub async fn connect_with(
+        connector: Arc<dyn Connector>,
+        while_disconnected: WhileDisconnected,
+    ) -> Result<Self, TransportError> {
         let shared = Arc::new(Shared {
+            while_disconnected,
+            failed_attempts: watch::channel(0).0,
             state: Mutex::new(State {
                 out: None,
                 stalled: Arc::new(Notify::new()),
@@ -589,6 +615,7 @@ async fn run(
             }
             // The other side not speaking the protocol: trying again won't help, not soon.
             Err(err) if err.kind() == io::ErrorKind::InvalidData => {
+                shared.failed_attempts.send_modify(|n| *n += 1);
                 if let Some(first) = first.take() {
                     first.send(Err(TransportError::Other(err.to_string()))).ok();
                     return;
@@ -599,6 +626,7 @@ async fn run(
             }
             Err(err) => {
                 failures += 1;
+                shared.failed_attempts.send_modify(|n| *n += 1);
                 tracing::debug!("could not connect to the hub: {err}");
             }
         }
@@ -775,6 +803,8 @@ impl Transport for StreamTransport {
         check_size(&payload, self.max_payload())?;
         let deadline = Instant::now() + timeout;
         let mut connected = self.shared.connected.subscribe();
+        // Before looking for a connection: an attempt that fails meanwhile counts.
+        let mut failed_attempts = self.shared.failed_attempts.subscribe();
         let (id, replied) = loop {
             {
                 let mut state = self.shared.lock();
@@ -796,10 +826,26 @@ impl Transport for StreamTransport {
                     break (id, replied);
                 }
             }
-            // No connection now: wait for the next, as long as the timeout allows.
-            match tokio::time::timeout_at(deadline, connected.changed()).await {
-                Ok(Ok(())) => {}
-                Ok(Err(_)) => return Err(TransportError::Disconnected),
+            // No connection now: wait for the next, as long as the timeout allows, or as
+            // long as the next attempt to make one.
+            let attempt_failed = async {
+                match self.shared.while_disconnected {
+                    WhileDisconnected::Wait => std::future::pending().await,
+                    WhileDisconnected::NextAttempt => failed_attempts.changed().await,
+                }
+            };
+            let waited = tokio::time::timeout_at(deadline, async {
+                // A connection made since counts for more than an attempt that failed before
+                // it.
+                tokio::select! {
+                    biased;
+                    changed = connected.changed() => changed.is_ok(),
+                    _ = attempt_failed => false,
+                }
+            });
+            match waited.await {
+                Ok(true) => {}
+                Ok(false) => return Err(TransportError::Disconnected),
                 Err(_) => return Err(TransportError::Timeout),
             }
         };

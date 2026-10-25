@@ -755,7 +755,9 @@ misbehaving peer can't inject data under a false id.
   to it: there is no unsubscribing there, so one that nobody reads any more stays until the
   connection ends, for the next subscription to the subject to take up. It opens a new connection
   whenever one ends, subscribing again to what it still reads; requests in flight on the old one
-  fail at once, and those made in between wait for the new one, up to their timeout. Either side ends a connection that falls 1024 frames behind, as it
+  fail at once, and those made in between wait for the new one, up to their timeout. The
+  daemon's wait only for the next attempt to connect, failing if it fails, so that the daemon
+  says at once why the hub is out of reach, and syncs as soon as the connection is back. Either side ends a connection that falls 1024 frames behind, as it
   would one whose other side vanished. If a hub greets the client wrongly (another version, too
   much noise first, or an implausible payload limit), the first connection fails at once, and
   after that the client tries again only after a minute.
@@ -815,12 +817,17 @@ be exposed. A `--hub` that isn't an absolute path is an ssh destination, passed 
   prompts (`BatchMode=yes`), which a process started at login couldn't answer.
 - `musubi hub connect` relays its stdin and stdout to the socket of the user's hub (the one
   `musubi hub` last served without `--dir`).
-- On the other machine, each connection is an ssh of its own, and the stream transport speaks
-  through its stdin and stdout. Nothing outlives a connection: an `ssh -L` forward that lasts goes
-  dead when the machine sleeps, while here, connecting again is a new ssh. ssh's
-  `ServerAliveInterval` gives up on a dead link within half a minute, and musubi ends every
-  connection at once when it sees that the machine has slept (its monotonic clock stops during
-  sleep and the wall clock doesn't), so the transport connects again within seconds of waking.
+- On the other machine, the daemon keeps one connection to each hub, which every copy it serves
+  there shares, so that a machine with many repositories on a hub runs one ssh, and the hub's
+  machine one `musubi hub connect`, not one for each. The connection runs on the daemon's own
+  runtime, rather than any copy's, and ends once no copy holds it. Copies that ask for it while
+  it connects wait for that attempt, and hear how it went, rather than each running ssh.
+- Each connection is an ssh of its own, and the stream transport speaks through its stdin and
+  stdout. Nothing outlives a connection: an `ssh -L` forward that lasts goes dead when the
+  machine sleeps, while here, connecting again is a new ssh. ssh's `ServerAliveInterval` gives
+  up on a dead link within half a minute, and musubi ends every connection at once when it sees
+  that the machine has slept (its monotonic clock stops during sleep and the wall clock
+  doesn't), so the transport connects again within seconds of waking.
 - Once the transport reconnects, over ssh or not, the daemon syncs at once, since it missed the
   hub's announcements while it was away, even if it was waiting to retry a sync that failed (only
   once per run of failures, in case the sync is what loses the connection). A request in flight

@@ -5,6 +5,8 @@
 use std::io;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -17,6 +19,7 @@ use musubi_transport::Transport;
 use musubi_transport::TransportError;
 use musubi_transport::stream::Connector;
 use musubi_transport::stream::Reader;
+use musubi_transport::stream::WhileDisconnected;
 use musubi_transport::stream::Writer;
 
 const LIMIT: usize = 64 * 1024;
@@ -107,6 +110,8 @@ struct Pipe {
     /// What the hub's side says before the hub, as some shells' startup files do over ssh.
     noise: &'static [u8],
     serving: Mutex<Vec<tokio::task::AbortHandle>>,
+    /// Whether it refuses new connections, as a link that is down does.
+    refusing: AtomicBool,
 }
 
 /// What some machines print for every shell, interactive or not.
@@ -124,6 +129,7 @@ impl Pipe {
             hub,
             noise,
             serving: Mutex::new(vec![]),
+            refusing: AtomicBool::new(false),
         })
     }
 
@@ -138,6 +144,9 @@ impl Pipe {
 #[async_trait]
 impl Connector for Pipe {
     async fn connect(&self) -> io::Result<(Reader, Writer)> {
+        if self.refusing.load(Ordering::SeqCst) {
+            return Err(io::Error::other("refused"));
+        }
         let (ours, theirs) = tokio::io::duplex(64 * 1024);
         let (reader, mut writer) = tokio::io::split(theirs);
         let (hub, noise) = (self.hub.clone(), self.noise);
@@ -303,6 +312,35 @@ async fn stream_transport_subscribes_once_a_subject() {
             .await
             .unwrap();
     }
+}
+
+/// A transport told to fail a request made while it has no connection fails it once the next
+/// attempt to connect fails, rather than waiting out its timeout, as the daemon's do: the
+/// daemon then says why, and waits for the hub itself.
+#[tokio::test]
+async fn stream_transport_can_fail_requests_while_disconnected() {
+    let network = MemoryNetwork::new(1, LIMIT);
+    let pipe = Pipe::new(Arc::new(network.connect()));
+    let client = StreamTransport::connect_with(pipe.clone(), WhileDisconnected::NextAttempt)
+        .await
+        .unwrap();
+    pipe.refusing.store(true, Ordering::SeqCst);
+    pipe.cut();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while client.connected() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let request = client.request("musubi.test.rpc", Bytes::new(), Duration::from_secs(30));
+    let result = tokio::time::timeout(Duration::from_secs(5), request)
+        .await
+        .unwrap();
+    assert!(
+        matches!(result, Err(TransportError::Disconnected)),
+        "{result:?}"
+    );
 }
 
 /// What answers must greet as a hub of this version, after no more than so much noise, or

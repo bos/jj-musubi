@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::PoisonError;
+use std::sync::Weak;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -23,7 +24,10 @@ use std::time::SystemTime;
 
 use anyhow::Context as _;
 use bytes::Bytes;
+use futures::FutureExt as _;
 use futures::StreamExt as _;
+use futures::future::BoxFuture;
+use futures::future::Shared;
 use jj_lib::object_id::ObjectId as _;
 use musubi_hub::activity::Report;
 use musubi_sync::driver::NodeDriver;
@@ -36,7 +40,7 @@ use musubi_sync::wire::HeadNotice;
 use musubi_sync::wire::HubWideReply;
 use musubi_sync::wire::HubWideRequest;
 use musubi_sync::wire::rpc_subject;
-use musubi_transport::Transport;
+use musubi_transport::stream::WhileDisconnected;
 use serde::Deserialize;
 use serde::Serialize;
 use tarpc::server::Channel as _;
@@ -56,6 +60,7 @@ use crate::control::ControlClient;
 use crate::control::RepoStatus;
 use crate::control::Synced;
 use crate::copy;
+use crate::hub::Connection;
 use crate::login;
 use crate::repo::Located;
 use crate::socket::Socket;
@@ -155,13 +160,118 @@ struct Served {
     thread: std::thread::JoinHandle<()>,
 }
 
-/// The copies being served, by machine key.
+/// The daemon's connections to hubs: one to each, which every copy it serves there shares,
+/// rather than one, and an ssh, a copy. Each runs on the runtime that made the registry, the
+/// daemon's own, which outlives the copies', and ends once no copy holds it.
+struct Hubs {
+    runtime: tokio::runtime::Handle,
+    hubs: Arc<Mutex<HashMap<String, HubConnection>>>,
+}
+
+/// A hub's connection while a copy holds it, and the attempt to connect while one is under
+/// way, which copies that ask meanwhile wait for rather than connecting too.
 #[derive(Default)]
+struct HubConnection {
+    connection: Weak<Connection>,
+    connecting: Option<Connecting>,
+}
+
+type Connecting = Shared<BoxFuture<'static, Result<Arc<Connection>, String>>>;
+
+/// Records how an attempt to connect ended, however it ends, panicking included: what it
+/// made, and that it is over, so that the next copy to ask connects afresh.
+struct Attempted {
+    hubs: Arc<Mutex<HashMap<String, HubConnection>>>,
+    hub: String,
+    connection: Weak<Connection>,
+}
+
+impl Attempted {
+    fn made(&mut self, connection: &Arc<Connection>) {
+        self.connection = Arc::downgrade(connection);
+    }
+}
+
+impl Drop for Attempted {
+    fn drop(&mut self) {
+        let mut hubs = self.hubs.lock().unwrap_or_else(PoisonError::into_inner);
+        let entry = hubs.entry(std::mem::take(&mut self.hub)).or_default();
+        entry.connecting = None;
+        entry.connection = std::mem::take(&mut self.connection);
+    }
+}
+
+impl Hubs {
+    fn new(runtime: tokio::runtime::Handle) -> Self {
+        Self {
+            runtime,
+            hubs: Arc::default(),
+        }
+    }
+
+    /// The connection to `hub`, connecting if no copy holds one. An attempt that fails
+    /// fails every copy that waited for it.
+    async fn connect(&self, hub: &str) -> anyhow::Result<Arc<Connection>> {
+        let attempt = {
+            let mut hubs = self.hubs.lock().unwrap_or_else(PoisonError::into_inner);
+            let entry = hubs.entry(hub.to_owned()).or_default();
+            if let Some(connection) = entry.connection.upgrade() {
+                return Ok(connection);
+            }
+            entry
+                .connecting
+                .get_or_insert_with(|| self.attempt(hub))
+                .clone()
+        };
+        attempt.await.map_err(anyhow::Error::msg)
+    }
+
+    /// Connects to `hub` on the daemon's runtime, and records the connection as it ends,
+    /// for copies that ask afterwards: so that only the copies that waited hold what it
+    /// made, which ends once none does.
+    fn attempt(&self, hub: &str) -> Connecting {
+        let mut ended = Attempted {
+            hubs: self.hubs.clone(),
+            hub: hub.to_owned(),
+            connection: Weak::new(),
+        };
+        let task = self.runtime.spawn(async move {
+            // A copy's sync fails once the connection is lost and connecting again fails,
+            // rather than waiting out its timeouts, so that the copy says why at once and
+            // waits for the hub itself.
+            let next = WhileDisconnected::NextAttempt;
+            let connected = crate::hub::connect_with(&ended.hub, REQUEST_TIMEOUT, next)
+                .await
+                .map(Arc::new)
+                .map_err(|err| format!("{err:#}"));
+            if let Ok(connection) = &connected {
+                ended.made(connection);
+            }
+            connected
+        });
+        async move {
+            task.await
+                .unwrap_or_else(|err| Err(format!("connecting to the hub: {err}")))
+        }
+        .boxed()
+        .shared()
+    }
+}
+
+/// The copies being served, by machine key, and the connections to hubs they share.
 struct Supervisor {
     repos: Mutex<HashMap<String, Served>>,
+    hubs: Arc<Hubs>,
 }
 
 impl Supervisor {
+    fn new(hubs: Hubs) -> Self {
+        Self {
+            repos: Mutex::default(),
+            hubs: Arc::new(hubs),
+        }
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Served>> {
         self.repos.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -187,10 +297,10 @@ impl Supervisor {
             .unwrap_or_default();
         let status = Arc::new(Mutex::new(initial));
         let thread = {
-            let (key, status) = (key.clone(), status.clone());
+            let (key, status, hubs) = (key.clone(), status.clone(), self.hubs.clone());
             std::thread::Builder::new()
                 .name(format!("serve {key}"))
-                .spawn(move || serve(&key, receiver, stopped, &status))
+                .spawn(move || serve(&key, receiver, stopped, &status, &hubs))
                 .expect("spawning a thread")
         };
         repos.insert(
@@ -358,7 +468,9 @@ pub fn run(socket: &Socket) -> anyhow::Result<()> {
 async fn listen(socket: &Socket, lock_path: &Path) -> anyhow::Result<()> {
     let listener = socket.listen()?;
     let daemon = Daemon {
-        supervisor: Arc::new(Supervisor::default()),
+        supervisor: Arc::new(Supervisor::new(
+            Hubs::new(tokio::runtime::Handle::current()),
+        )),
         stop: Arc::new(tokio::sync::Notify::new()),
     };
     for entry in UserState::load()?.copies {
@@ -398,6 +510,7 @@ fn serve(
     commands: mpsc::UnboundedReceiver<Command>,
     stop: watch::Receiver<bool>,
     status: &Mutex<Status>,
+    hubs: &Hubs,
 ) {
     // Everything this thread logs is about this copy. At error level, the span stays on
     // under any filter that shows anything.
@@ -415,7 +528,7 @@ fn serve(
     runtime.block_on(async {
         let mut stop = stop;
         tokio::select! {
-            () = serve_retrying(key, commands, status) => {}
+            () = serve_retrying(key, commands, status, hubs) => {}
             () = stopped(&mut stop) => {}
         }
     });
@@ -433,12 +546,13 @@ async fn serve_retrying(
     key: &str,
     mut commands: mpsc::UnboundedReceiver<Command>,
     status: &Mutex<Status>,
+    hubs: &Hubs,
 ) {
     let mut waiting = vec![];
     let mut backoff = Duration::from_secs(1);
     loop {
         let started = now();
-        match serve_async(key, &mut commands, status, &mut waiting).await {
+        match serve_async(key, &mut commands, status, &mut waiting, hubs).await {
             Ok(()) => return,
             Err(err) => {
                 let message = format!("{err:#}");
@@ -577,6 +691,7 @@ async fn serve_async(
     commands: &mut mpsc::UnboundedReceiver<Command>,
     status: &Mutex<Status>,
     waiting: &mut Vec<oneshot::Sender<Result<Synced, String>>>,
+    hubs: &Hubs,
 ) -> anyhow::Result<()> {
     // No entry: the copy left, or its hive was removed.
     let Some((entry, located)) = find_copy(key)? else {
@@ -586,7 +701,8 @@ async fn serve_async(
         .with_context(|| format!("{} is not part of a hive", entry.path.display()))?;
     let workspace = &entry.path;
     let mut opened = identity(&located.repo_path);
-    let (connection, mut driver, machine) = open_driver(&located, &hive).await?;
+    let connection = hubs.connect(&hive.hub).await?;
+    let (mut driver, machine) = open_driver(&located, &hive, &connection)?;
     let transport = connection.transport.clone();
     let mut notices = transport.subscribe(&hive.head_subject()).await?;
     let mut reconnections = transport.reconnections();
@@ -727,7 +843,7 @@ async fn serve_async(
             status.synced(result.as_ref().err(), &synced);
         });
         report(
-            &transport,
+            &connection,
             &located.repo_path,
             &hive,
             &machine,
@@ -834,7 +950,7 @@ fn collect_garbage(located: &Located) {
 /// that failed may have failed to reach it. The answer, when it comes, has the hive's name,
 /// recorded for `musubi status` should the hive have been renamed.
 fn report(
-    transport: &Arc<dyn Transport>,
+    connection: &Arc<Connection>,
     repo_path: &Path,
     hive: &HiveConfig,
     machine: &str,
@@ -853,11 +969,14 @@ fn report(
     let Ok(payload) = Envelope::encode(request) else {
         return;
     };
-    let transport = transport.clone();
+    // The connection, not just its transport, so that while the report waits, the daemon
+    // shares it rather than connecting again.
+    let connection = connection.clone();
     let (repo_path, hive) = (repo_path.to_owned(), hive.clone());
     tokio::spawn(async move {
         let subject = rpc_subject(HUB_TOKEN);
-        match transport
+        match connection
+            .transport
             .request(&subject, Bytes::from(payload), REPORT_TIMEOUT)
             .await
         {
@@ -905,11 +1024,11 @@ pub fn leave_hive(
 }
 
 /// Connects to the hive's hub, and opens the repository to sync with it there.
-async fn open_driver(
+fn open_driver(
     located: &Located,
     hive: &HiveConfig,
-) -> anyhow::Result<(crate::hub::Connection, NodeDriver, String)> {
-    let connection = crate::hub::connect(&hive.hub, REQUEST_TIMEOUT).await?;
+    connection: &Connection,
+) -> anyhow::Result<(NodeDriver, String)> {
     let blobs = located.repo_path.join("musubi/blobs");
     let remote = RemoteHub::new(
         connection.transport.clone(),
@@ -920,7 +1039,7 @@ async fn open_driver(
     let repo = located.open()?;
     let machine = repo.machine().key().to_owned();
     let driver = NodeDriver::new(repo, remote)?;
-    Ok((connection, driver, machine))
+    Ok((driver, machine))
 }
 
 /// The hive's head as `driver` knows it.
@@ -936,7 +1055,12 @@ fn known(driver: &NodeDriver) -> Synced {
 /// `musubi status`.
 pub async fn sync_once(located: &Located, hive: &HiveConfig) -> anyhow::Result<Synced> {
     let mut status = Status::load(&located.repo_path).unwrap_or_default();
-    let (connection, mut driver, _) = match open_driver(located, hive).await {
+    let opened = async {
+        let connection = crate::hub::connect(&hive.hub, REQUEST_TIMEOUT).await?;
+        let (driver, _) = open_driver(located, hive, &connection)?;
+        anyhow::Ok((connection, driver))
+    };
+    let (connection, mut driver) = match opened.await {
         Ok(opened) => opened,
         Err(err) => {
             status.failed(&err);

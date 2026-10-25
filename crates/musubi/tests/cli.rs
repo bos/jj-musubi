@@ -1953,6 +1953,30 @@ fn machines_reach_the_hub_over_ssh() {
         "beta's daemon to fetch alpha's commit over ssh",
         || try_log(&beta).is_some_and(|log| log.contains("over ssh")),
     );
+
+    // The daemon shares one connection to a hub, and so one ssh, among every copy it serves
+    // there: started again with a second copy on alpha's machine, it connects once.
+    let gamma = env.repo_handle("gamma");
+    over_ssh(&alpha, &["clone", "alpha", gamma.path().to_str().unwrap()]);
+    let key = state_dir(&env, &alpha).join("hub_key");
+    let key = key.to_str().unwrap();
+    let connects = || {
+        let args = fs::read_to_string(env.root().join("ssh-args")).unwrap();
+        args.lines()
+            .filter(|line| line.contains(key) && line.ends_with("hub connect"))
+            .count()
+    };
+    let before = connects();
+    over_ssh(&alpha, &["daemon", "restart"]);
+    alpha.write_file("c", "c");
+    alpha.jj(&["commit", "-m", "from alpha again"]);
+    gamma.write_file("d", "d");
+    gamma.jj(&["commit", "-m", "from gamma"]);
+    wait_for(&logs, "beta to fetch both copies' commits", || {
+        try_log(&beta)
+            .is_some_and(|log| log.contains("from alpha again") && log.contains("from gamma"))
+    });
+    assert_eq!(connects() - before, 1);
 }
 
 /// A `musubi` command with this process's environment, so the real user's service manager

@@ -29,6 +29,7 @@ use musubi_transport::Transport;
 use musubi_transport::TransportError;
 use musubi_transport::stream::Connector;
 use musubi_transport::stream::Reader;
+use musubi_transport::stream::WhileDisconnected;
 use musubi_transport::stream::Writer;
 use serde::Deserialize;
 use serde::Serialize;
@@ -292,6 +293,16 @@ pub fn absolute(hub: &str) -> String {
 /// Connects to `hub`, an ssh destination or the directory of a hub on this machine, giving
 /// up after `limit`.
 pub async fn connect(hub: &str, limit: Duration) -> anyhow::Result<Connection> {
+    connect_with(hub, limit, WhileDisconnected::Wait).await
+}
+
+/// [`connect`], with requests made while the connection is lost doing as `while_disconnected`
+/// says.
+pub async fn connect_with(
+    hub: &str,
+    limit: Duration,
+    while_disconnected: WhileDisconnected,
+) -> anyhow::Result<Connection> {
     let unreachable = |problem: Option<String>| match problem {
         Some(problem) => anyhow::anyhow!(out_of_reach(hub, &problem)),
         None => anyhow::anyhow!("the hub at {hub} is out of reach"),
@@ -304,7 +315,8 @@ pub async fn connect(hub: &str, limit: Duration) -> anyhow::Result<Connection> {
             dir: dir.clone(),
             first,
         };
-        let transport = tokio::time::timeout(limit, StreamTransport::connect(Arc::new(local)))
+        let connecting = StreamTransport::connect_with(Arc::new(local), while_disconnected);
+        let transport = tokio::time::timeout(limit, connecting)
             .await
             .map_err(|_| unreachable(None))??;
         return Ok(Connection {
@@ -314,7 +326,8 @@ pub async fn connect(hub: &str, limit: Duration) -> anyhow::Result<Connection> {
     }
     let link = ssh::Link::new(hub)?;
     let health = link.health();
-    let transport = tokio::time::timeout(limit, StreamTransport::connect(Arc::new(link)))
+    let connecting = StreamTransport::connect_with(Arc::new(link), while_disconnected);
+    let transport = tokio::time::timeout(limit, connecting)
         .await
         .map_err(|_| unreachable(health.problem()))??;
     Ok(Connection {

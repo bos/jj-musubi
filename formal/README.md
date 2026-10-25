@@ -34,10 +34,10 @@ cd formal
 lake build
 ```
 
-The toolchain is pinned to `leanprover/lean4:v4.35.0` in `lean-toolchain`. The model uses
-only core Lean: no Mathlib, no dependencies. A clean build of the proofs and the oracle takes
-about 5 seconds. It prints the axioms report of `Musubi/Axioms.lean` and runs the `#guard`
-smoke tests in `Musubi/ExecTest.lean`.
+The toolchain is pinned to `leanprover/lean4:v4.35.0` in `lean-toolchain`. The model uses only
+core Lean: no Mathlib, no dependencies. A clean build of the proofs and the oracle takes about a
+minute on 4 cores. It prints the axioms report of `Musubi/Axioms.lean` and runs the `#guard` smoke
+tests in `Musubi/ExecTest.lean`.
 
 `./test/run_smoke.sh` builds the conformance oracle alone (`lake build oracle`), replays
 `test/smoke.jsonl` through it and diffs the output against `test/smoke.expected`. The binary

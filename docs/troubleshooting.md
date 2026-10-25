@@ -57,12 +57,28 @@ echo "restrict,command=\"musubi hub connect\" $(cat ~/.local/state/musubi/hub_ke
   ssh devbox 'cat >> ~/.ssh/authorized_keys'
 ```
 
+### "ssh to devbox did not connect" or "ssh to devbox did not connect: ..."
+
+musubi gave up waiting for the hub to answer: after half a minute, or a minute while joining.
+ssh may be hanging, on a `ProxyCommand` say, or on a shell startup file on the hub's machine that
+waits for input; the hub may be stuck; or, if the message goes on "cannot run ssh: ...", ssh
+can't run at all. Check that `ssh devbox true` finishes at once from this machine, and see what
+the hub logs: in its terminal, or under systemd in `journalctl --user -u musubi-hub`.
+
+### "the hub on devbox ended the connection before greeting"
+
+ssh reached the hub's machine, but the hub never answered: it closed the connection, as it does
+when it stops, or didn't answer within half a minute, as when it's stuck. The daemon tries again
+by itself. If this keeps happening, see what the hub logs, as above, and restart it if it's
+stuck.
+
 ### "the hub at devbox is out of reach", "no hub is serving ...", or "request timed out"
 
 No hub answered. Check that `musubi hub` is running on the hub's machine, and start it if not;
-`musubi sync` and `musubi list` say why the hub is out of reach. Daemons reconnect by
-themselves: within a few seconds to a hub on the same machine, and within about a minute over
-ssh, which waits longer between tries after each failure.
+`musubi sync` and `musubi list` say why the hub is out of reach. Where the message gives a reason
+after the colon, such as "ssh to devbox failed: ...", that reason's own entry above says more.
+Daemons reconnect by themselves: within a few seconds to a hub on the same machine, and within
+about a minute over ssh, which waits longer between tries after each failure.
 
 If the hub runs with `--dir`, other machines can't find it: the `musubi hub connect` they run
 over ssh finds the hub that `musubi hub` last served without `--dir`. Add `--dir <dir>` to the

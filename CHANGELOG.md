@@ -139,6 +139,9 @@ change the protocol, so run the same release on the hub and every machine (see
 - Adding musubi's ssh key on the hub's machine no longer joins it to the last line of an
   `~/.ssh/authorized_keys` that doesn't end in a newline, which spoiled both keys and could
   lock you out of that machine.
+- The daemon and the hub log only warnings from jj's library, whose notes on every lock it
+  took and index it built made up most of `daemon.log`. `--log info` brings them back, as
+  does `musubi.daemon.log = "info"` for the daemon.
 - The hub and machines talk differently, so upgrade the hub and every machine together.
 - On upgrading: `hive.toml` and `state.toml` have changed, and the daemon serves nothing
   until each copy joins again. On each machine, run `musubi daemon restart`, then in each

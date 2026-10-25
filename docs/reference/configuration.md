@@ -67,8 +67,9 @@ started at login gets the login's environment.
 
 ## Logging
 
-The hub and the daemon log what they do, at `info`. Other commands log only warnings, since
-they report what they did themselves.
+The hub and the daemon log what they do, at `info`, and only warnings from the jj library
+they use (`jj_lib`). Other commands log only warnings, since they report what they did
+themselves.
 
 - `musubi hub` logs to its terminal, or under systemd to the journal:
   `journalctl --user -u musubi-hub`.

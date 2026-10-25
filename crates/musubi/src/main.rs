@@ -425,8 +425,9 @@ fn log_filter(cli: &Cli, ui: &Ui) -> anyhow::Result<tracing_subscriber::EnvFilte
         return parse_filter(&filter)
             .with_context(|| format!("bad log filter {filter:?} in musubi.daemon.log"));
     }
+    // jj's library logs every lock it takes and every index it builds, at length.
     if daemon || hub {
-        return parse_filter("info");
+        return parse_filter("info,jj_lib=warn");
     }
     // Anything logged would land in the middle of the screen; top shows what goes wrong.
     if matches!(cli.command, Some(Command::Top { once: false, .. }))

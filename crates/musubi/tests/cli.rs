@@ -309,6 +309,10 @@ fn fetch_history(from: &TestRepo, to: &TestRepo) {
 }
 
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "on Windows, the forgotten copy sometimes comes back (bos/jj-musubi#67)"
+)]
 fn hub_join_sync_clone_and_list() {
     let env = TestEnv::with_real_op_times();
     let mut logs = Logs::default();

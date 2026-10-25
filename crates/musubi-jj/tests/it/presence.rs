@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::convert::Infallible;
 
+use hegel::HealthCheck;
 use hegel::TestCase;
 use hegel::generators as gs;
 use musubi_jj::presence::Kind;
@@ -128,7 +129,9 @@ fn modelled(oracle: &mut Oracle, ops: &[Op]) -> Vec<BTreeMap<u64, BTreeSet<usize
         .collect()
 }
 
-#[hegel::test(test_cases = cases())]
+// Each case asks the Lean oracle, a process of its own, which on a small machine running other
+// tests at once can slow generating cases past Hegel's health check.
+#[hegel::test(test_cases = cases(), suppress_health_check = [HealthCheck::TooSlow])]
 fn conformance(tc: TestCase) {
     // One oracle for every case: presence requests leave it as they found it.
     thread_local!(static ORACLE: Cell<Option<Oracle>> = const { Cell::new(None) });

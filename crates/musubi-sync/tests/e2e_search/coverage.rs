@@ -75,6 +75,9 @@ pub const EVENTS: &[&str] = &[
     "import:restored_conflict",
     "import:undo",
     "import:concurrent_records",
+    // Imports of git's HEAD, by what explains each.
+    "import:head_git_move",
+    "import:concurrent_heads",
 ];
 
 /// Each catalogue row, by test name, with the rules and events that together exercise it

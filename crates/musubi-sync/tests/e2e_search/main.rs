@@ -6,9 +6,9 @@
 //! the documented refusals; `coverage` maps rows to rules.
 //!
 //! After every rule, every op head of every repository a sync or fault touched loads,
-//! every `jj` command and sync step must succeed, and no import of git refs changes a ref
-//! that git didn't move, except where jj itself would (`imports`). At every full convergence
-//! (`checks`):
+//! every `jj` command and sync step must succeed, and no import of git refs or of git's HEAD
+//! changes a ref that git didn't move, except where jj itself would (`imports`). At every full
+//! convergence (`checks`):
 //! the fixture's `assert_converged`; every node's canonical head is the hub's; every
 //! operation is on every machine; tags agree; each machine has its own workspaces, at
 //! visible commits; no divergence and no bookmark or tag conflict that jj wouldn't make of

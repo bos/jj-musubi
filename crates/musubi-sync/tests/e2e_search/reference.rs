@@ -820,10 +820,13 @@ impl std::fmt::Display for Made {
 /// undo, redo, restore or revert brings back an older view; and an import of git refs takes
 /// what `.git` has where jj's record of it differs, which happens without anyone moving a
 /// branch, as when an undo restores an older record and a conflicted bookmark can't be
-/// exported over it. (Whether musubi keeps that record as jj would is for the per-machine
-/// refs' conformance test: docs/internals/conformance.md.) Anything else that makes a change
-/// diverge or a name conflict on its own is musubi's: an operation of its own, or a
-/// realization or canonical form that differs from what the machine did.
+/// exported over it. An import of git's HEAD likewise moves the working copy onto what
+/// `.git`'s HEAD has, bringing back a rewritten commit there, as after a command at an older
+/// operation wrote HEAD and jj's merge with the operations since conflicted its record of it.
+/// (Whether musubi keeps those records as jj would is for the per-machine refs' conformance
+/// test, docs/internals/conformance.md, and the check of every import, `imports`.) Anything
+/// else that makes a change diverge or a name conflict on its own is musubi's: an operation of
+/// its own, or a realization or canonical form that differs from what the machine did.
 fn explained(op: &op_store::Operation) -> bool {
     let description = op.metadata.description.as_str();
     [
@@ -833,6 +836,7 @@ fn explained(op: &op_store::Operation) -> bool {
         "revert operation",
         "fetch from git remote",
         "import git refs",
+        "import git head",
     ]
     .iter()
     .any(|prefix| description.starts_with(prefix))

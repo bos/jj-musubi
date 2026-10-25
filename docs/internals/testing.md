@@ -264,23 +264,30 @@ a sync.
   three lines of its `heads` before it restarts, as a power cut would; or lose a reply the hub
   sent. Faults are capped per sequence, so that a short sequence still reaches recovery.
 
-After each rule, every repository must still load, and no import of git refs may revert
-anything (`e2e_search/imports.rs`, `noSpuriousRevert` in `formal/Musubi/Refs.lean`). Every `jj`
-command imports any difference between its record of `.git` and `.git` itself as a change made
-with git, so a record musubi gets wrong moves a bookmark back with no git command run. The
-search makes every move git makes of a machine's refs outside `jj` itself, so it records, per
-machine, which refs git moved since jj last imported there, and what `.git` had before. Each
-operation that imports (jj's "import git refs") may change a bookmark, remote bookmark or tag
-only through a ref git moved in that time, from the value jj's record had, or where jj does the
-same in one repository: it resolves a conflicted remote bookmark, which its export never
-writes, to the side in `.git` (`remote_reset_without_export`), or, where `jj op restore` put
-the conflict back, to the value from before the restore, which musubi writes everywhere as the
-restoring machine's `.git` kept it (the expected value in `Refs.lean`); an undo, redo,
-`jj op restore` or `jj op revert` on that machine restored a record its export couldn't then
-write over, such as a conflicted bookmark's; or jj's merge of two op heads that both changed
-the record, each as jj does (`concurrent_records_revert`). Otherwise the check walks back from
-the import to the operation that left the record differing from `.git`, and the failure names
-it.
+After each rule, every repository must still load, and no import of git refs or of git's HEAD
+may revert anything (`e2e_search/imports.rs`; for refs, `noSpuriousRevert` in
+`formal/Musubi/Refs.lean`). Every `jj` command imports any difference between its record of
+`.git` and `.git` itself as a change made with git, so a record musubi gets wrong moves a
+bookmark back with no git command run. The search makes every move git makes of a machine's refs
+outside `jj` itself, so it records, per machine, which refs git moved since jj last imported
+there, and what `.git` had before. Each operation that imports (jj's "import git refs") may
+change a bookmark, remote bookmark or tag only through a ref git moved in that time, from the
+value jj's record had, or where jj does the same in one repository: it resolves a conflicted
+remote bookmark, which its export never writes, to the side in `.git`
+(`remote_reset_without_export`), or, where `jj op restore` put the conflict back, to the value
+from before the restore, which musubi writes everywhere as the restoring machine's `.git` kept
+it (the expected value in `Refs.lean`); an undo, redo, `jj op restore` or `jj op revert` on that
+machine restored a record its export couldn't then write over, such as a conflicted bookmark's;
+or jj's merge of two op heads that both changed the record, each as jj does
+(`concurrent_records_revert`). Otherwise the check walks back from the import to the operation
+that left the record differing from `.git`, and the failure names it. Imports of git's HEAD
+("import git head"), which move a workspace's working copy onto what HEAD has, are checked the
+same way against jj's record of each workspace's HEAD (`git_heads`). git moves HEAD only where
+it is still a symbolic ref to the branch git moves, as in a new repository until jj first writes
+HEAD, and jj writes HEAD only as it records it, so such an import may change the record only
+after such a move, or where jj's merge of two op heads that both changed the record left it
+differing from `.git`, as after a command at an older operation (`--at-op`), which still writes
+HEAD ([races.md, "Known jj limitations"](races.md#known-jj-limitations)).
 
 At the end of a sequence, and at most once in the middle, the hive syncs to a fixed point,
 and the test checks that:
@@ -318,7 +325,7 @@ machine's work and later the rest makes what jj makes of the same two merges.
 The test also checks that the hive's history can stand for one repository's: every machine's
 realization of each operation has the hive's view of it, and no operation but a merge makes
 anything diverge or conflict unless what it did explains it: a fetch, an undo or restore, or an
-import of git refs.
+import of git refs or of git's HEAD.
 
 To keep the search effective:
 

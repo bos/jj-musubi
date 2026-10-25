@@ -731,7 +731,8 @@ impl Search {
         self.world.borrow_mut().check_loads();
     }
 
-    /// Every import of git refs follows a git move (`imports`).
+    /// Every import of git refs or of git's HEAD follows a git move, or does as jj does in one
+    /// repository (`imports`).
     #[invariant(always_run)]
     fn no_spurious_revert(&mut self, _: TestCase) {
         let mut world = self.world.borrow_mut();

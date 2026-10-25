@@ -43,6 +43,20 @@
 //!
 //! Anything else is a finding: the operation that left the record differing from `.git`, if
 //! any, is named in the failure.
+//!
+//! Imports of git's HEAD are checked the same way. Every `jj` command first compares its op
+//! head's record of the workspace's HEAD (`git_heads`) with `.git`'s, and where they differ
+//! writes "import git head", which takes `.git`'s and moves the working copy onto it, making a
+//! new working-copy commit (`import_git_head` in jj-cli's `cli_util.rs`). git moves HEAD here
+//! only where it is still a symbolic ref to the branch git moves, as it is in a new repository
+//! until jj first writes it; the import then takes that move, as for a ref. Otherwise jj writes
+//! HEAD only as it records it, in the same operation (`reset_head` in jj-lib's `git.rs`), so
+//! the record matches `.git` but where jj's merge of two op heads that both changed it made it
+//! something else, `.git` having one head's: as after a command at an older operation
+//! (`--at-op`), which still writes HEAD, without checking it where the older operation has no
+//! record of it, as for a workspace renamed since; jj merges it with the operations made since.
+//! A record musubi got wrong would move a working copy with nobody having moved HEAD, and bring
+//! back any rewritten commit it moved onto, which then diverges.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -63,6 +77,7 @@ use jj_lib::op_store::View;
 use jj_lib::ref_name::GitRefName;
 use jj_lib::ref_name::RefName;
 use jj_lib::ref_name::RemoteName;
+use jj_lib::ref_name::WorkspaceName;
 use jj_lib::refs::merge_ref_targets;
 use jj_lib::repo::ReadonlyRepo;
 use jj_lib::repo::Repo as _;
@@ -90,6 +105,9 @@ pub struct Imports {
     /// Each machine's git refs that git moved since jj last imported there, with what `.git`
     /// had before each of those moves.
     moved: Vec<BTreeMap<String, Vec<RefTarget>>>,
+    /// Each machine's HEAD, where git moved it through the branch it is a symbolic ref to,
+    /// since jj last imported it, by its workspace's name: what HEAD had before each move.
+    head_moved: Vec<BTreeMap<String, Vec<RefTarget>>>,
 }
 
 /// A ref an import compares with `.git`.
@@ -220,6 +238,25 @@ fn own(op: &op_store::Operation) -> bool {
 /// One of this machine's own imports: a realization of another machine's is that machine's.
 fn own_import(op: &op_store::Operation) -> bool {
     own(op) && op.metadata.description.starts_with("import git refs")
+}
+
+/// One of this machine's own imports of git's HEAD.
+fn own_head_import(op: &op_store::Operation) -> bool {
+    own(op) && op.metadata.description.starts_with("import git head")
+}
+
+/// An operation a `jj` command of this machine's made, which names its workspace, unlike
+/// musubi's own.
+fn jj_command(op: &op_store::Operation) -> bool {
+    own(op) && op.metadata.workspace_name.is_some()
+}
+
+/// jj's record of workspace `ws`'s HEAD in `view`.
+fn head(view: &View, ws: &str) -> RefTarget {
+    view.git_heads
+        .get(WorkspaceName::new(ws))
+        .cloned()
+        .unwrap_or_else(RefTarget::absent)
 }
 
 fn describe(id: &OperationId, op: &op_store::Operation) -> String {
@@ -369,6 +406,64 @@ impl Log {
         ))
     }
 
+    fn head(&mut self, id: &OperationId, ws: &str) -> RefTarget {
+        head(self.view(id), ws)
+    }
+
+    /// [`Self::touched`], for the record of workspace `ws`'s HEAD: whether any operation after
+    /// `before` up to `op` records it other than as `base`. Only a `jj` command changes it, as it
+    /// writes or imports HEAD, or adds, renames or forgets the workspace: a realization, or an
+    /// operation of musubi's own, keeps its parent's, and a merge takes one parent's or jj's
+    /// merge of two.
+    fn head_touched(
+        &mut self,
+        op: &OperationId,
+        before: &HashSet<OperationId>,
+        setup: &HashSet<OperationId>,
+        ws: &str,
+        base: &RefTarget,
+    ) -> Result<bool, String> {
+        let mut pending = vec![op.clone()];
+        let mut visited = HashSet::new();
+        let mut touched = false;
+        while let Some(id) = pending.pop() {
+            if before.contains(&id) || !visited.insert(id.clone()) {
+                continue;
+            }
+            let now = self.head(&id, ws);
+            touched |= now != *base;
+            if setup.contains(&id) {
+                continue;
+            }
+            let op = self.op(&id).clone();
+            let parents: Vec<RefTarget> = op.parents.iter().map(|p| self.head(p, ws)).collect();
+            let plausible = match parents.as_slice() {
+                [parent] => jj_command(&op) || *parent == now,
+                [left, right] if !parents.contains(&now) => {
+                    let bases = self.bases(&op.parents);
+                    let base_heads: Vec<RefTarget> =
+                        bases.iter().map(|b| self.head(b, ws)).collect();
+                    match base_heads.first() {
+                        Some(base) if base_heads.iter().all(|b| b == base) => {
+                            self.merge_targets(&id, left, base, right) == now
+                        }
+                        _ => false,
+                    }
+                }
+                _ => parents.contains(&now),
+            };
+            if !plausible {
+                return Err(format!(
+                    "{} made jj's record of {ws}'s HEAD {}, as jj doesn't",
+                    describe(&id, &op),
+                    show(&now)
+                ));
+            }
+            pending.extend(op.parents.iter().cloned());
+        }
+        Ok(touched)
+    }
+
     /// jj's three-way merge of the records of `r` at `left` and `right` against `base`, as
     /// `merge_view` merges them (`merge_ref_targets`), with the commit index at `at`.
     fn merge(
@@ -442,6 +537,7 @@ impl World {
         for m in 0..self.nodes() {
             self.imports.seen.push(HashSet::new());
             self.imports.moved.push(BTreeMap::new());
+            self.imports.head_moved.push(BTreeMap::new());
             self.check_imports(m);
             self.imports.setup.push(self.imports.seen[m].clone());
         }
@@ -459,6 +555,19 @@ impl World {
             "" => RefTarget::absent(),
             hex => RefTarget::normal(CommitId::try_from_hex(hex).unwrap()),
         };
+        // A new repository's HEAD is a symbolic ref to `main` until jj first writes it.
+        let head = std::fs::read_to_string(self.fx.repo(m).path().join(".git/HEAD")).unwrap();
+        if head.trim().strip_prefix("ref: ") == Some(git_ref)
+            && let Some(primary) = self.workspaces[m]
+                .iter()
+                .find(|ws| ws.path.is_none())
+                .map(|ws| ws.name.clone())
+        {
+            self.imports.head_moved[m]
+                .entry(primary)
+                .or_default()
+                .push(value.clone());
+        }
         self.imports.moved[m]
             .entry(git_ref.to_owned())
             .or_default()
@@ -516,12 +625,17 @@ impl World {
         }
         let mut failures = vec![];
         for id in order {
-            if !own_import(&log.ops[&id]) {
+            let refs = own_import(&log.ops[&id]);
+            if !refs && !own_head_import(&log.ops[&id]) {
                 continue;
             }
             // Reading the log fails only if musubi lost an operation file it refers to.
             let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.check_import(m, &mut log, &id)
+                if refs {
+                    self.check_import(m, &mut log, &id)
+                } else {
+                    self.check_head_import(m, &mut log, &id)
+                }
             }));
             match checked {
                 Ok(Ok(())) => {}
@@ -536,7 +650,11 @@ impl World {
                         .unwrap_or("a panic")
                 )),
             }
-            self.imports.moved[m].clear();
+            if refs {
+                self.imports.moved[m].clear();
+            } else if let Some(ws) = &log.ops[&id].metadata.workspace_name {
+                self.imports.head_moved[m].remove(ws.as_str());
+            }
         }
         if !failures.is_empty() {
             self.fail(&format!(
@@ -775,6 +893,158 @@ impl World {
                     "the merge {} made jj's record of {r} {now}, which neither the one parent \
                      that changed it nor their common ancestor have",
                     describe(&at, &op),
+                ));
+            }
+            at = next;
+        }
+    }
+
+    /// An import of git's HEAD changes jj's record of it, and so moves the working copy, only
+    /// where git moved HEAD through the branch it is a symbolic ref to, or where jj's merge of
+    /// two op heads that both changed the record left it differing from `.git`.
+    fn check_head_import(&self, m: usize, log: &mut Log, id: &OperationId) -> Result<(), String> {
+        let op = log.op(id).clone();
+        let [parent] = op.parents.as_slice() else {
+            return Err(format!("{} has several parents", describe(id, &op)));
+        };
+        let Some(ws) = op.metadata.workspace_name.clone() else {
+            return Err(format!("{} names no workspace", describe(id, &op)));
+        };
+        let (was, taken) = (log.head(parent, ws.as_str()), log.head(id, ws.as_str()));
+        if was == taken {
+            return Ok(());
+        }
+        if self.imports.head_moved[m]
+            .get(ws.as_str())
+            .is_some_and(|values| values.contains(&was))
+        {
+            fired("import:head_git_move");
+            return Ok(());
+        }
+        self.justify_head(m, log, parent, ws.as_str(), &taken)
+            .map_err(|why| {
+                format!(
+                    "{} moved {}'s working copy, taking HEAD {} for jj's record of it, {}: \
+                     git didn't move HEAD from that, and {why}",
+                    describe(id, &op),
+                    ws.as_str(),
+                    show(&taken),
+                    show(&was),
+                )
+            })
+    }
+
+    /// Why jj's record of workspace `ws`'s HEAD at `parent` could differ from `.git`'s, which
+    /// has `taken`, if it could: back from `parent` to the operation that made the record what
+    /// it is.
+    fn justify_head(
+        &self,
+        m: usize,
+        log: &mut Log,
+        parent: &OperationId,
+        ws: &str,
+        taken: &RefTarget,
+    ) -> Result<(), String> {
+        let mut ws = ws.to_owned();
+        let mut at = parent.clone();
+        loop {
+            if self.imports.setup[m].contains(&at) {
+                return Err("the record is the same as at setup".to_owned());
+            }
+            let op = log.op(&at).clone();
+            let now = log.head(&at, &ws);
+            if let [before] = op.parents.as_slice() {
+                let was = log.head(before, &ws);
+                if was == now {
+                    at = before.clone();
+                    continue;
+                }
+                // A rename takes the record with it.
+                if jj_command(&op)
+                    && let Some(old) = op
+                        .metadata
+                        .description
+                        .strip_prefix("Renamed workspace '")
+                        .and_then(|rest| rest.strip_suffix(&format!("' to '{ws}'")))
+                    && log.head(before, old) == now
+                {
+                    ws = old.to_owned();
+                    at = before.clone();
+                    continue;
+                }
+                // jj records HEAD as it writes or imports it, so `.git` had this record then.
+                return Err(format!(
+                    "{} changed the record from {} to {}{}",
+                    describe(&at, &op),
+                    show(&was),
+                    show(&now),
+                    if jj_command(&op) {
+                        ", as HEAD was then"
+                    } else {
+                        ", as only jj does"
+                    },
+                ));
+            }
+            let bases = log.bases(&op.parents);
+            let base_heads: Vec<RefTarget> = bases.iter().map(|b| log.head(b, &ws)).collect();
+            let Some(base) = base_heads.first().cloned() else {
+                return Err(format!("{} has no common ancestor", describe(&at, &op)));
+            };
+            if base_heads.iter().any(|b| *b != base) {
+                return Err(format!(
+                    "the merge {}, whose closest common ancestors record it differently, made it \
+                     {}; criss-cross merges aren't modeled",
+                    describe(&at, &op),
+                    show(&now)
+                ));
+            }
+            let before = log.ancestors(bases.clone());
+            let mut touched: Vec<OperationId> = vec![];
+            for parent in &op.parents {
+                if log.head_touched(parent, &before, &self.imports.setup[m], &ws, &base)? {
+                    touched.push(parent.clone());
+                }
+            }
+            if touched.len() > 1 {
+                let [left, right] = op.parents.as_slice() else {
+                    return Err(format!(
+                        "the merge {} of {} heads, several of which changed the record, made it \
+                         {}; such merges aren't modeled",
+                        describe(&at, &op),
+                        op.parents.len(),
+                        show(&now)
+                    ));
+                };
+                let (left, right) = (log.head(left, &ws), log.head(right, &ws));
+                let merged = log.merge_targets(&at, &left, &base, &right);
+                // `.git` has what the head that wrote HEAD last left.
+                if merged == now && (*taken == left || *taken == right) {
+                    fired("import:concurrent_heads");
+                    return Ok(());
+                }
+                if merged == now {
+                    return Err(format!(
+                        "the merge {} of records {} and {} can't have left HEAD {}",
+                        describe(&at, &op),
+                        show(&left),
+                        show(&right),
+                        show(taken)
+                    ));
+                }
+                return Err(format!(
+                    "the merge {} made the record {}, where jj's merge of its parents' makes {}",
+                    describe(&at, &op),
+                    show(&now),
+                    show(&merged)
+                ));
+            }
+            let next = touched.first().unwrap_or(&bases[0]).clone();
+            if log.head(&next, &ws) != now {
+                return Err(format!(
+                    "the merge {} made the record {}, which neither the one parent that changed \
+                     it nor their common ancestor have",
+                    describe(&at, &op),
+                    show(&now)
                 ));
             }
             at = next;

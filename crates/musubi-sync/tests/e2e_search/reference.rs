@@ -41,6 +41,7 @@ use std::sync::Arc;
 use futures::executor::block_on;
 use jj_lib::backend::ChangeId;
 use jj_lib::backend::CommitId;
+use jj_lib::backend::MillisSinceEpoch;
 use jj_lib::config::ConfigLayer;
 use jj_lib::config::ConfigSource;
 use jj_lib::config::StackedConfig;
@@ -168,9 +169,19 @@ impl Reference {
             pending.extend(op.parents.iter().cloned());
             ops.insert(id, op);
         }
-        let mut order: Vec<(u64, OperationId)> = ops
-            .keys()
-            .map(|id| (canonical.generation(id).unwrap(), id.clone()))
+        // Concurrent operations of a generation in the order they ended, which is the same
+        // on every run of a case, unlike their ids: jj records each command's arguments,
+        // temporary paths and all.
+        let mut order: Vec<(u64, MillisSinceEpoch, String, OperationId)> = ops
+            .iter()
+            .map(|(id, op)| {
+                (
+                    canonical.generation(id).unwrap(),
+                    op.metadata.time.end.timestamp,
+                    op.view_id.hex(),
+                    id.clone(),
+                )
+            })
             .collect();
         order.sort();
 
@@ -185,7 +196,7 @@ impl Reference {
             deviations: vec![],
             rewrites: vec![],
             unexplained: vec![],
-            history: order.iter().map(|(_, id)| id.clone()).collect(),
+            history: order.iter().map(|(.., id)| id.clone()).collect(),
         };
         let root_view = canonical
             .read_operation_view(canonical.root_operation_id())
@@ -208,7 +219,7 @@ impl Reference {
         let mut replays: HashMap<OperationId, Operation> = HashMap::new();
         copies.insert(canonical.root_operation_id().clone(), root_op.clone());
         replays.insert(canonical.root_operation_id().clone(), root_op);
-        for (_, id) in order {
+        for (.., id) in order {
             let op = &ops[&id];
             let view = canonical.read_view(&op.view_id).unwrap();
             if op.parents.len() > 1 {

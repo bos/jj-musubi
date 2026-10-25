@@ -157,5 +157,10 @@ hands it the next seed's at each sync, and whenever the test takes the node to a
 which compares operation times with the clock, reads the environment's `musubi_testutil::Clock`,
 which agrees with them; an hour of it takes millions of commands, so no copy goes unused in a
 case unless a rule says so. The CLI tests run real daemons, which read the real clock, so their
-operations keep the real time (`TestEnv::with_real_op_times`). With all that, a failure that
-doesn't replay is a bug, so the search fails at once, saying where the replay diverged.
+operations keep the real time (`TestEnv::with_real_op_times`).
+
+Operation ids still differ between runs: jj records each command's arguments in its operation,
+and a test's paths are temporary. So nothing a case does may depend on the order of operation
+ids, such as taking the first of several op heads; the search takes the one that ended last.
+With all that, a failure that doesn't replay is a bug, so the search fails at once, saying
+where the replay diverged.

@@ -211,8 +211,8 @@ impl View {
     /// The commits that `keep` keeps, in an order that is the same on every run, so that a
     /// test case's draws pick the same commits when it replays: by change id, which
     /// musubi-testutil seeds, and then by description and by the parents' change ids.
-    /// Commit ids, which depend on when jj made a commit, would not do, nor would `jj log`'s
-    /// order, which follows commit ids where nothing else orders commits.
+    /// Commit ids would do only while every commit's time is pinned, and `jj log`'s order
+    /// follows them where nothing else orders commits.
     fn select(&self, keep: impl Fn(&Commit) -> bool) -> Vec<String> {
         let change_of: BTreeMap<&str, &str> = self
             .commits

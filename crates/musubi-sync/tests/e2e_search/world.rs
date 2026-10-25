@@ -237,8 +237,8 @@ impl World {
     }
 
     /// The trace without what differs from run to run even when a case replays exactly:
-    /// commit ids, which depend on when jj made the commits, become change ids; operation
-    /// ids are masked, and so is the test's directory.
+    /// commit ids become change ids; operation ids, which hold the test's directory in the
+    /// arguments jj records, are masked, and so is the directory.
     pub fn fingerprint(&self) -> String {
         let root = self.fx.env.root().to_string_lossy().into_owned();
         let mut out = String::new();
@@ -304,10 +304,31 @@ impl World {
         ))
     }
 
-    /// The view at machine `m`'s first op head, without perturbing anything.
+    /// The view at machine `m`'s latest op head, without perturbing anything.
     pub fn view_at_head(&self, m: usize) -> View {
-        let head = self.op_heads(m).remove(0);
+        let head = self.latest_op_head(m);
         self.view_at(m, &head)
+    }
+
+    /// Machine `m`'s op head that ended last, by its view where two ended together. Not
+    /// the first by id: jj records each command's arguments in its operation, temporary
+    /// paths and all, so ids differ from one run of a case to the next.
+    pub fn latest_op_head(&self, m: usize) -> String {
+        let store = self.fx.hive.members[m].adapter.repo().loader().op_store();
+        let key = |head: &String| {
+            let id = jj_lib::op_store::OperationId::try_from_hex(head).unwrap();
+            match futures::executor::block_on(store.read_operation(&id)) {
+                Ok(op) => (op.metadata.time.end.timestamp, op.view_id.hex()),
+                Err(err) => self.fail(&format!(
+                    "reading {}'s op head {head}: {err}",
+                    self.machine(m)
+                )),
+            }
+        };
+        self.op_heads(m)
+            .into_iter()
+            .max_by_key(key)
+            .expect("a repository has an op head")
     }
 
     /// What machine `m` sees at all its op heads, remembered while they do not change.
@@ -613,13 +634,13 @@ impl World {
     /// The workspace that made the head operation, as `jj op log` shows it: `default@`,
     /// `beta/default@` for another machine's, or nothing for an operation musubi made.
     pub fn head_op_workspace(&self, m: usize) -> String {
-        let heads = self.op_heads(m);
+        let head = self.latest_op_head(m);
         let template = "workspace_name";
         self.raw_jj(
             m,
             &[
                 "--at-op",
-                &heads[0],
+                &head,
                 "op",
                 "log",
                 "--no-graph",

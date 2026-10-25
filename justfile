@@ -61,7 +61,7 @@ deny:
     cargo deny --log-level error check
 
 machete:
-    cargo machete
+    cargo machete --skip-target-dir
 
 typos:
     typos

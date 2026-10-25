@@ -72,6 +72,7 @@ pub const EVENTS: &[&str] = &[
     // Imports of git refs, by what explains each ref they changed (`imports`).
     "import:git_move",
     "import:conflicted_remote",
+    "import:restored_conflict",
     "import:undo",
     "import:concurrent_records",
 ];

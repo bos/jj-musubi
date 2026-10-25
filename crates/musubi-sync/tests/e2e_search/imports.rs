@@ -22,10 +22,12 @@
 //! moved the ref (`LInv`). An import may change a ref otherwise only where jj itself would, in
 //! one repository:
 //!
-//! - a conflicted remote bookmark, which it resolves to one of its sides: jj's export never
+//! - a conflicted remote bookmark, which it resolves to `.git`'s value: jj's export never
 //!   writes a conflicted target (`collect_changed_refs_to_export`), so `.git` always differs
-//!   from it and every import resets it to `.git`'s value, as on one machine after concurrent
-//!   fetches (`remote_reset_without_export`), where `.git` has the latest;
+//!   from it and every import resets it, as on one machine after concurrent fetches
+//!   (`remote_reset_without_export`), where `.git` has the latest. That is one of the
+//!   conflict's sides, or where `jj op restore` put the conflict back, the value from before
+//!   the restore, which the restoring machine's `.git` kept (`Refs.lean`'s expected value);
 //! - a record that an undo, redo, `jj op restore` or `jj op revert` on this machine put back:
 //!   they restore the remote refs, `x@git` among them, but keep `git_refs`
 //!   (`view_with_desired_portions_restored` in jj-cli's `commands/operation/mod.rs`), so where
@@ -256,6 +258,37 @@ impl Log {
 
     fn record(&mut self, id: &OperationId, r: &Ref) -> Record {
         r.record(self.view(id))
+    }
+
+    /// Where `.git`'s value for the conflicted remote bookmark `r` at `id` comes from, as
+    /// `Refs.lean`'s expected value has it: back through a parent with the same target, then
+    /// through an operation with one parent, as `jj op restore` of the conflict is, to that
+    /// parent's target, while it is a conflict too. The result is the value from before the
+    /// restore, or else the conflict a merge or a join made, whose sides `.git` may have.
+    /// Unlike musubi, this doesn't stop at a join point on the machine that joined, where
+    /// history before it has no remote bookmarks in the search.
+    fn restored(&mut self, id: &OperationId, r: &Ref) -> RefTarget {
+        let mut at = id.clone();
+        let mut target = self.record(&at, r).0;
+        loop {
+            let parents = self.op(&at).parents.clone();
+            if let Some(same) = parents.iter().find(|p| self.record(p, r).0 == target) {
+                at = same.clone();
+                continue;
+            }
+            let [parent] = parents.as_slice() else {
+                return target;
+            };
+            if self.op(parent).parents.is_empty() {
+                return target;
+            }
+            let was = self.record(parent, r).0;
+            if was.is_resolved() {
+                return was;
+            }
+            at = parent.clone();
+            target = was;
+        }
     }
 
     /// Whether any operation after `before` (the bases and their ancestors) up to `op`
@@ -643,15 +676,20 @@ impl World {
             return Ok(());
         }
         // `.git` has one side of a conflicted remote bookmark: the latest fetch, or the side
-        // musubi writes (`export_conflicted_remote_bookmarks`).
-        if r.kind == Kind::Remote
-            && !target.0.is_resolved()
-            && taken
-                .as_normal()
-                .is_some_and(|id| target.0.adds().any(|side| side.as_ref() == Some(id)))
-        {
-            fired("import:conflicted_remote");
-            return Ok(());
+        // musubi writes (`export_conflicted_remote_bookmarks`). Where `jj op restore` put the
+        // conflict back, the restoring machine's `.git` kept the value from before the restore,
+        // and musubi writes that on every other machine.
+        if r.kind == Kind::Remote && !target.0.is_resolved() {
+            let from = log.restored(parent, r);
+            let side = |id: &CommitId| from.adds().any(|side| side.as_ref() == Some(id));
+            if from == *taken || taken.as_normal().is_some_and(side) {
+                fired(if from == target.0 {
+                    "import:conflicted_remote"
+                } else {
+                    "import:restored_conflict"
+                });
+                return Ok(());
+            }
         }
         // Back from `parent` to the operation that made the record what it is.
         let mut at = parent.clone();

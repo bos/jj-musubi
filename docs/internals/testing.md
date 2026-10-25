@@ -273,11 +273,14 @@ machine, which refs git moved since jj last imported there, and what `.git` had 
 operation that imports (jj's "import git refs") may change a bookmark, remote bookmark or tag
 only through a ref git moved in that time, from the value jj's record had, or where jj does the
 same in one repository: it resolves a conflicted remote bookmark, which its export never
-writes, to the side in `.git` (`remote_reset_without_export`); an undo, redo, `jj op restore`
-or `jj op revert` on that machine restored a record its export couldn't then write over, such
-as a conflicted bookmark's; or jj's merge of two op heads that both changed the record, each as
-jj does (`concurrent_records_revert`). Otherwise the check walks back from the import to the
-operation that left the record differing from `.git`, and the failure names it.
+writes, to the side in `.git` (`remote_reset_without_export`), or, where `jj op restore` put
+the conflict back, to the value from before the restore, which musubi writes everywhere as the
+restoring machine's `.git` kept it (the expected value in `Refs.lean`); an undo, redo,
+`jj op restore` or `jj op revert` on that machine restored a record its export couldn't then
+write over, such as a conflicted bookmark's; or jj's merge of two op heads that both changed
+the record, each as jj does (`concurrent_records_revert`). Otherwise the check walks back from
+the import to the operation that left the record differing from `.git`, and the failure names
+it.
 
 At the end of a sequence, and at most once in the middle, the hive syncs to a fixed point,
 and the test checks that:

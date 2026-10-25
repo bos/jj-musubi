@@ -292,7 +292,9 @@ command fails. For each operation id in `.jj/repo/op_heads/heads`, run
 ```text
 the operation history the hub accepted is no longer reachable from this repository's op
 heads (was `jj op abandon` run?); musubi does not replicate op abandon yet, so replication
-is paused for this repository
+is paused for this repository. It can't sync again: to carry on, run `musubi leave --force`,
+make a new copy with `musubi clone`, and bring across any work this copy has that the hive
+lacks
 ```
 
 musubi may print instead: "operation ... realizes canonical operation ... but no longer has
@@ -300,14 +302,16 @@ its parents (was `jj op abandon` run?) ...".
 
 `jj op abandon` removed operations that the hub, and so other machines, already have. musubi
 can't pass that on yet, and won't bring them back, so it stops syncing this copy, and can't
-sync it again. (Abandoning only operations from before this machine first joined is fine.)
+sync it again: `musubi status` says that retrying won't help. (Abandoning only operations
+from before this machine first joined is fine.)
 The other machines keep the operations you abandoned. To carry on here, run
 `musubi leave --force`, make a new copy with `musubi clone`, and bring across any work this
 copy made since its last sync.
 
-If `musubi join` or `musubi create` says this, the operations were abandoned while the copy
-was out of its hive: skip `musubi leave --force`. A `musubi create` that failed this way
-leaves an empty hive on the hub; remove it with `musubi hub remove`.
+If `musubi join` says this, the operations were abandoned while the copy was out of its hive;
+it joined all the same, so do as above. If `musubi create` says this, the hive it made is
+empty, and this copy can't fill it: run `musubi leave --force`, and remove the hive with
+`musubi hub remove`.
 
 ### "unknown field ... (written by a newer jj?)"
 

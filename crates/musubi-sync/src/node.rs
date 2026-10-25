@@ -14,6 +14,7 @@ use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
 use musubi_core::message::OpEntry;
 use musubi_core::node::LocalRepo;
+use musubi_jj::node::NodeError;
 use musubi_jj::node::NodeRepo;
 use musubi_jj::node::REALIZE_AT_ONCE;
 
@@ -277,6 +278,16 @@ impl NodeAdapter {
     }
 }
 
+/// Whether `err` is that `jj op abandon` paused syncing, which no retry gets past.
+pub fn history_abandoned(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<NodeError>(),
+            Some(NodeError::UnreachableHistory | NodeError::RewrittenRealization { .. })
+        )
+    })
+}
+
 impl LocalRepo for NodeAdapter {
     type Op = OpId;
     type Attachment = Attachment;
@@ -294,11 +305,7 @@ impl LocalRepo for NodeAdapter {
             reachable |= self.canonical_is_ancestor(&base, head)?;
         }
         if !reachable {
-            bail!(
-                "the operation history the hub accepted is no longer reachable from this \
-                 repository's op heads (was `jj op abandon` run?); musubi does not replicate \
-                 op abandon yet, so replication is paused for this repository"
-            );
+            return Err(NodeError::UnreachableHistory.into());
         }
         Ok(heads)
     }

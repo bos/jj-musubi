@@ -27,6 +27,7 @@ use futures::StreamExt as _;
 use jj_lib::object_id::ObjectId as _;
 use musubi_hub::activity::Report;
 use musubi_sync::driver::NodeDriver;
+use musubi_sync::node::history_abandoned;
 use musubi_sync::remote::HiveGone;
 use musubi_sync::remote::RemoteHub;
 use musubi_sync::wire::Envelope;
@@ -77,6 +78,9 @@ pub struct Status {
     pub known_seq: Option<u64>,
     pub known_head: Option<String>,
     pub error: Option<String>,
+    /// Whether the error is one that syncing again can't get past, as after `jj op abandon`.
+    #[serde(default)]
+    pub paused: bool,
 }
 
 impl Status {
@@ -90,20 +94,25 @@ impl Status {
 
     /// Records a sync: its error, if it failed, and the hive's head as it left the node
     /// knowing it.
-    fn synced(&mut self, error: Option<String>, known: &Synced) {
+    fn synced(&mut self, error: Option<&anyhow::Error>, known: &Synced) {
         self.last_attempt = Some(now());
         if error.is_none() {
             self.last_success = self.last_attempt;
         }
-        self.error = error;
+        self.set_error(error);
         self.known_seq = Some(known.seq);
         self.known_head = Some(known.head.clone());
     }
 
     /// Records an attempt that failed before it could sync, as to reach the hub.
-    fn failed(&mut self, error: String) {
+    fn failed(&mut self, error: &anyhow::Error) {
         self.last_attempt = Some(now());
-        self.error = Some(error);
+        self.set_error(Some(error));
+    }
+
+    fn set_error(&mut self, error: Option<&anyhow::Error>) {
+        self.error = error.map(|err| format!("{err:#}"));
+        self.paused = error.is_some_and(history_abandoned);
     }
 
     /// Overwrites the status in place: it changes at every sync attempt, and ext4 writes out
@@ -445,9 +454,7 @@ async fn serve_retrying(
                     .and_then(|state| state.entry(key).cloned())
                     .filter(|entry| copy::holds(entry, &entry.path))
                     .and_then(|entry| Located::find(&entry.path).ok());
-                record(copy.as_ref(), status, |status| {
-                    status.failed(message.clone());
-                });
+                record(copy.as_ref(), status, |status| status.failed(&err));
                 for waiter in waiting.drain(..) {
                     waiter.send(Err(message.clone())).ok();
                 }
@@ -655,7 +662,9 @@ async fn serve_async(
             if unreachable.as_ref() != Some(&why) {
                 tracing::warn!("{why}");
             }
-            record(Some(&located), status, |status| status.failed(why.clone()));
+            record(Some(&located), status, |status| {
+                status.failed(&anyhow::anyhow!("{why}"));
+            });
             for waiter in waiting.drain(..) {
                 waiter.send(Err(why.clone())).ok();
             }
@@ -715,7 +724,7 @@ async fn serve_async(
             Err(err) => Err(format!("{err:#}")),
         };
         record(Some(&located), status, |status| {
-            status.synced(reply.as_ref().err().cloned(), &synced);
+            status.synced(result.as_ref().err(), &synced);
         });
         report(
             &transport,
@@ -930,14 +939,14 @@ pub async fn sync_once(located: &Located, hive: &HiveConfig) -> anyhow::Result<S
     let (connection, mut driver, _) = match open_driver(located, hive).await {
         Ok(opened) => opened,
         Err(err) => {
-            status.failed(format!("{err:#}"));
+            status.failed(&err);
             status.save(&located.repo_path);
             return Err(err);
         }
     };
     let result = driver.sync().await.map_err(|err| connection.explain(err));
     let synced = known(&driver);
-    status.synced(result.as_ref().err().map(|err| format!("{err:#}")), &synced);
+    status.synced(result.as_ref().err(), &synced);
     status.save(&located.repo_path);
     result.map(|_| synced)
 }

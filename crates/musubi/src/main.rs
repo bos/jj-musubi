@@ -1174,6 +1174,12 @@ fn start_serving(ui: &Ui, located: &Located, socket: &Socket) -> anyhow::Result<
             }
             Ok(())
         }
+        // Unless it's a failure no retry gets past, as the daemon recorded before it answered.
+        Served::Failed(message)
+            if Status::load(&located.repo_path).is_some_and(|status| status.paused) =>
+        {
+            anyhow::bail!("the first sync failed: {message}")
+        }
         Served::Failed(message) => anyhow::bail!(
             "the first sync failed: {message}\nThe daemon keeps trying; `musubi status` shows how \
              it goes."

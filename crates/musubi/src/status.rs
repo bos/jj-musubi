@@ -432,7 +432,12 @@ impl Hive {
         let failing = self.failing();
         if let Some(error) = self.sync.as_ref().and_then(|sync| sync.error.as_ref()) {
             writeln!(ui.warning(), "Syncing fails: {error}")?;
-            if daemon.serving == Some(true) {
+            if self.sync.as_ref().is_some_and(|sync| sync.paused) {
+                writeln!(
+                    ui.hint(),
+                    "Retrying won't get past this; the warning says what will."
+                )?;
+            } else if daemon.serving == Some(true) {
                 writeln!(
                     ui.hint(),
                     "The daemon keeps trying. Its log: {}",

@@ -1,5 +1,6 @@
 //! Operation-log level races: undo, op abandon, offline machines, restarts.
 
+use musubi_sync::node::history_abandoned;
 use musubi_testutil::TestEnv;
 
 use crate::fixture::Fixture;
@@ -182,6 +183,9 @@ fn op_abandon_pauses_replication() {
     hive.repo(0).jj(&["op", "abandon", "..@-"]);
     let err = hive.try_sync().unwrap_err();
     assert!(format!("{err:#}").contains("op abandon"), "{err:#}");
+    // No retry gets past it, and it says what does.
+    assert!(history_abandoned(&err), "{err:#}");
+    assert!(format!("{err:#}").contains("`musubi clone`"), "{err:#}");
 }
 
 /// The same when this machine's latest operation is a realization of another machine's:
@@ -197,6 +201,9 @@ fn op_abandon_under_a_realized_head_pauses_replication() {
     hive.repo(0).jj(&["op", "abandon", "..@-"]);
     let err = hive.try_sync().unwrap_err();
     assert!(format!("{err:#}").contains("op abandon"), "{err:#}");
+    // No retry gets past it, and it says what does.
+    assert!(history_abandoned(&err), "{err:#}");
+    assert!(format!("{err:#}").contains("`musubi clone`"), "{err:#}");
 }
 
 /// Abandoning only history from before a machine joined rewrites the operations since

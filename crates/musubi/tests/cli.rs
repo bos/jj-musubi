@@ -1766,6 +1766,34 @@ fn settings_are_shared_through_the_binary() {
     );
 }
 
+/// Once `jj op abandon` pauses syncing, the error says how to carry on, and `musubi status`,
+/// reading what the daemon recorded, says that retrying won't help.
+#[test]
+fn status_says_when_retrying_cannot_help() {
+    let env = TestEnv::with_real_op_times();
+    let mut logs = Logs::default();
+    let hub = Hub::start(&env, &mut logs);
+    // Stopped before the hub.
+    let mut daemons = Daemons::default();
+    let (alpha, _beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
+    alpha.write_file("b", "b");
+    alpha.jj(&["commit", "-m", "second"]);
+    let accepted = alpha.jj(&["op", "log", "--no-graph", "-n1", "-T", "id"]);
+    musubi_in(&env, &logs, &alpha, &["sync"]);
+    alpha.jj(&["describe", "-m", "third"]);
+    alpha.jj(&["op", "abandon", &format!("..{accepted}")]);
+    let err = musubi_fails(&env, &logs, &alpha, &["sync"]);
+    assert!(err.contains("`musubi leave --force`"), "{err}");
+    let (_, hints) = status_in(&env, &logs, &alpha);
+    assert!(hints.contains("Retrying won't get past this"), "{hints}");
+
+    // Nor does joining again, which says so, though the copy joins.
+    musubi_in(&env, &logs, &alpha, &["leave", "--force"]);
+    let err = musubi_fails(&env, &logs, &alpha, &["join"]);
+    assert!(err.contains("`musubi leave --force`"), "{err}");
+    assert!(!err.contains("keeps trying"), "{err}");
+}
+
 /// With commit signing on, the commits musubi rewrites when it merges another machine's
 /// operations are signed, as jj's own rewrites are: musubi loads jj's signing config as jj
 /// does. jj signs and verifies with `ssh-keygen` here; Unix only until a Windows runner

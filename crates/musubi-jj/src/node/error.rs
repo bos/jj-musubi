@@ -20,6 +20,10 @@ use crate::git_command::GitError;
 use crate::objects::Incompleteness;
 use crate::objects::ObjectError;
 
+/// How to carry on after `jj op abandon` pauses syncing, which no retry gets past.
+const CARRY_ON: &str = ". It can't sync again: to carry on, run `musubi leave --force`, make a \
+     new copy with `musubi clone`, and bring across any work this copy has that the hive lacks";
+
 #[derive(Debug, Error)]
 pub enum NodeError {
     #[error("failed to load repository")]
@@ -80,10 +84,18 @@ pub enum NodeError {
     },
     #[error("repo config {path}: {message}")]
     Config { path: PathBuf, message: String },
+    /// `jj op abandon` made operations that the hub accepted unreachable. Replicating the
+    /// history that is left would put them back on every other machine.
+    #[error(
+        "the operation history the hub accepted is no longer reachable from this repository's \
+         op heads (was `jj op abandon` run?); musubi does not replicate op abandon yet, so \
+         replication is paused for this repository{CARRY_ON}"
+    )]
+    UnreachableHistory,
     #[error(
         "operation {op} realizes canonical operation {canonical} but no longer has its parents \
          (was `jj op abandon` run?); musubi does not replicate op abandon yet, so replication is \
-         paused for this repository"
+         paused for this repository{CARRY_ON}"
     )]
     RewrittenRealization { op: String, canonical: String },
     /// The hub accepts an operation only with everything it requires, which a shallow or

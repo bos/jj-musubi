@@ -1,0 +1,29 @@
+# musubi's defaults in jj's config, beneath the user's as jj's own defaults are.
+
+# The colours of the labels musubi gives what it prints, beyond jj's own, such as `commit_id`
+# and `working_copies`.
+[colors]
+"heading" = { bold = true }
+"hive" = { bold = true }
+"machine" = "green"
+"problem" = "red"
+
+# How `musubi list` prints each hub, each of its hives, and each copy of a hive here.
+[musubi.templates]
+list = '''
+if(path,
+  "    here: " ++ path ++ "  " ++ if(problem, label("problem", status), status),
+  if(hive,
+    "  " ++ label("hive", hive) ++ if(problem,
+      "  " ++ label("problem", "(" ++ problem ++ ")"),
+      if(reached, "  " ++ if(machines,
+        machines.len() ++ if(machines.len() == 1, " machine: ", " machines: ")
+          ++ machines.map(|machine| label("machine", machine)).join(", "),
+        "no machines yet",
+      )),
+    ),
+    label("heading", "Hub " ++ hub ++ ":")
+      ++ if(problem, " " ++ label("problem", problem) ++ ". This machine's copies:"),
+  ),
+) ++ "\n"
+'''

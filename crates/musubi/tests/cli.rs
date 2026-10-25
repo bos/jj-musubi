@@ -423,10 +423,25 @@ fn hub_join_sync_clone_and_list() {
     );
     // A sync failing meanwhile, which a retry fixes, would be no fault of status's.
     assert!(!warnings.contains("Warning: The daemon"), "{warnings}");
+    // Each line through a template -T gives: here the hive of each copy, then each line as
+    // JSON, for a script.
+    let hives = musubi_in(
+        &env,
+        &logs,
+        &beta,
+        &["list", "-T", "if(path, hive ++ \"\\n\")"],
+    );
+    assert_eq!(hives, "project\n");
+    let json = musubi_in(&env, &logs, &beta, &["list", "-T", "json(self) ++ \"\\n\""]);
+    assert!(
+        json.lines().all(|line| line.starts_with("{\"hub\":"))
+            && json.contains("\"hive\":\"project\",\"id\":"),
+        "{json}"
+    );
     // It prints through jj's formatting, labelled; the daemon's log has no colour codes.
     let labelled = musubi_in(&env, &logs, &beta, &["--color=debug"]);
     assert!(
-        labelled.contains("<<hive::project>>") && labelled.contains("<<machine::alpha>>"),
+        labelled.contains("hive::project>>") && labelled.contains("machine::alpha>>"),
         "{labelled}"
     );
     let daemon_log = fs::read_to_string(state_dir(&env, &beta).join("daemon.log")).unwrap();

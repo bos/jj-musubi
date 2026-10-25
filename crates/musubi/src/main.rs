@@ -6,6 +6,7 @@ mod config;
 mod control;
 mod daemon;
 mod hub;
+mod listing;
 mod lock;
 mod login;
 mod repo;
@@ -32,9 +33,7 @@ use clap::Parser;
 use clap::Subcommand;
 use clap::ValueHint;
 use clap_complete::ArgValueCandidates;
-use jj_cli::formatter::Formatter;
 use jj_cli::formatter::FormatterExt as _;
-use jj_cli::formatter::PlainTextFormatter;
 use jj_cli::ui::ColorChoice;
 use jj_lib::object_id::ObjectId as _;
 use musubi_hub::hub_dir::HiveInfo;
@@ -51,6 +50,8 @@ use crate::config::Settings;
 use crate::config::UserState;
 use crate::control::Synced;
 use crate::daemon::Status;
+use crate::listing::Line;
+use crate::listing::Lister;
 use crate::repo::Located;
 use crate::socket::Socket;
 use crate::ui::Ui;
@@ -169,7 +170,28 @@ enum Command {
     },
     /// List the hub's hives, this machine's copies of them, and how their syncing goes
     /// (the default command).
-    List,
+    List {
+        /// Print only a line for each hub, each of its hives, and each copy of one here, in
+        /// that order, with this template, in jj's template language, in place of
+        /// `musubi.templates.list` in jj's config. A copy's line has its hive's `hub`,
+        /// `reached`, `hive`, `id` and `machines`. The keywords:
+        ///
+        /// * `hub: String`: The hub, as `--hub` takes it.
+        /// * `reached: Boolean`: Whether the hub answered.
+        /// * `hive: String`: The hive's name; empty on a hub's line.
+        /// * `id: String`: The hive's id; empty on a hub's line.
+        /// * `machines: List<String>`: The machines in the hive, as its hub knows them.
+        /// * `path: Option<FsPath>`: Where the copy is; none on a hub's line or a hive's.
+        /// * `status: String`: How the copy's syncing goes; empty on a hub's line or a
+        ///   hive's.
+        /// * `problem: String`: What's wrong, if anything: why the hub is out of reach, that
+        ///   the hive is no longer on it, or why the copy's syncing fails.
+        ///
+        /// `json(self)` gives the whole line, for a script.
+        #[arg(long, short = 'T', verbatim_doc_comment)]
+        #[arg(add = ArgValueCandidates::new(completion::template_aliases))]
+        template: Option<String>,
+    },
     /// Show what musubi does with the repository in the current directory: its hive, whether
     /// it syncs, and whether the hub has its latest work.
     ///
@@ -453,7 +475,7 @@ fn run(cli: Cli, ui: &Ui) -> anyhow::Result<()> {
     }
     let cwd = std::env::current_dir()?;
     let socket = || Socket::locate(cli.socket.as_deref());
-    match cli.command.unwrap_or(Command::List) {
+    match cli.command.unwrap_or(Command::List { template: None }) {
         Command::Hub {
             action: None,
             dir,
@@ -525,7 +547,7 @@ fn run(cli: Cli, ui: &Ui) -> anyhow::Result<()> {
             machine.as_deref(),
             &socket()?,
         ),
-        Command::List => list(ui, socket()),
+        Command::List { template } => list(ui, &cwd, template.as_deref(), socket()),
         Command::Status => Ok(status::Report::gather(&cwd, socket()).print(ui)?),
         Command::Top {
             hub,
@@ -1266,7 +1288,13 @@ struct Copy {
 }
 
 /// Lists what it can: a daemon or hub out of reach is a line of the listing.
-fn list(ui: &Ui, socket: anyhow::Result<Socket>) -> anyhow::Result<()> {
+fn list(
+    ui: &Ui,
+    cwd: &Path,
+    template: Option<&str>,
+    socket: anyhow::Result<Socket>,
+) -> anyhow::Result<()> {
+    let lister = Lister::new(ui, template, cwd)?;
     let state = UserState::load()?;
     let (daemon, statuses) = block_on(async {
         let running = match &socket {
@@ -1311,8 +1339,7 @@ fn list(ui: &Ui, socket: anyhow::Result<Socket>) -> anyhow::Result<()> {
         });
     }
     let hubs = UserState::known_hubs(state.default_hub()?, copies.iter().map(|copy| &copy.hive));
-    let mut out = ui.stdout();
-    if hubs.is_empty() {
+    if hubs.is_empty() && template.is_none() {
         no_hubs(ui)?;
     }
     for hub in &hubs {
@@ -1326,43 +1353,41 @@ fn list(ui: &Ui, socket: anyhow::Result<Socket>) -> anyhow::Result<()> {
                         copy.hive.note_name(&copy.located.repo_path, &info.name);
                     }
                 }
-                writeln!(out.labeled("heading"), "Hub {hub}:")?;
-                if hives.is_empty() {
-                    writeln!(out, "  no hives yet")?;
-                }
+                lister.print(&Line::hub(hub, None))?;
                 for info in &hives {
-                    write!(out, "  ")?;
-                    write!(out.labeled("hive"), "{}", info.name)?;
-                    write!(out, "  ")?;
-                    write_machines(out.as_mut(), info)?;
-                    writeln!(out)?;
+                    let hive = Line::hive(hub, info);
+                    lister.print(&hive)?;
                     for copy in here.iter().filter(|c| c.hive.hive.to_string() == info.id) {
-                        print_copy(out.as_mut(), copy)?;
+                        lister.print(&copy_line(&hive, copy))?;
                     }
                 }
                 for copy in here
                     .iter()
                     .filter(|copy| !hives.iter().any(|h| h.id == copy.hive.hive.to_string()))
                 {
-                    write!(out, "  ")?;
-                    write!(out.labeled("hive"), "{}", copy.hive.display_name())?;
-                    writeln!(out.labeled("problem"), "  (no longer on the hub)")?;
-                    print_copy(out.as_mut(), copy)?;
+                    let hive = hive_here(hub, true, copy);
+                    lister.print(&Line {
+                        problem: "no longer on the hub".to_owned(),
+                        ..hive.clone()
+                    })?;
+                    lister.print(&copy_line(&hive, copy))?;
                 }
             }
             Err(err) => {
-                write!(out.labeled("heading"), "Hub {hub}:")?;
-                write!(out, " ")?;
-                write!(out.labeled("problem"), "{err:#}")?;
-                writeln!(out, ". This machine's copies:")?;
+                lister.print(&Line::hub(hub, Some(format!("{err:#}"))))?;
                 for copy in &here {
-                    write!(out, "  ")?;
-                    writeln!(out.labeled("hive"), "{}", copy.hive.display_name())?;
-                    print_copy(out.as_mut(), copy)?;
+                    let hive = hive_here(hub, false, copy);
+                    lister.print(&hive)?;
+                    lister.print(&copy_line(&hive, copy))?;
                 }
             }
         }
     }
+    // As jj's list commands print only their lines when given a template.
+    if template.is_some() {
+        return Ok(());
+    }
+    let mut out = ui.stdout();
     let at_login = if login::installed() {
         "starts at login"
     } else {
@@ -1393,31 +1418,36 @@ fn no_hubs(ui: &Ui) -> std::io::Result<()> {
     )
 }
 
-/// [`write_machines`], as plain text.
+/// The machines in a hive, as shell completion shows them.
 fn machines(info: &HiveInfo) -> String {
-    let mut text = vec![];
-    write_machines(&mut PlainTextFormatter::new(&mut text), info).ok();
-    String::from_utf8_lossy(&text).into_owned()
+    match info.machines.as_slice() {
+        [] => "no machines yet".to_owned(),
+        [one] => format!("1 machine: {one}"),
+        all => format!("{} machines: {}", all.len(), all.join(", ")),
+    }
 }
 
-/// The machines in a hive, as `musubi list` shows them.
-fn write_machines(out: &mut dyn Formatter, info: &HiveInfo) -> std::io::Result<()> {
-    match info.machines.as_slice() {
-        [] => write!(out, "no machines yet"),
-        [one] => {
-            write!(out, "1 machine: ")?;
-            write!(out.labeled("machine"), "{one}")
-        }
-        all => {
-            write!(out, "{} machines: ", all.len())?;
-            for (index, machine) in all.iter().enumerate() {
-                if index > 0 {
-                    write!(out, ", ")?;
-                }
-                write!(out.labeled("machine"), "{machine}")?;
-            }
-            Ok(())
-        }
+/// The line of `copy`'s hive, on `hub`, as this machine knows it: by name and id.
+fn hive_here(hub: &str, reached: bool, copy: &Copy) -> Line {
+    Line {
+        hub: hub.to_owned(),
+        reached,
+        hive: copy.hive.display_name(),
+        id: copy.hive.hive.to_string(),
+        ..Line::default()
+    }
+}
+
+/// The line of `copy`, of the hive on line `hive`.
+fn copy_line(hive: &Line, copy: &Copy) -> Line {
+    let status = copy.status.as_ref();
+    Line {
+        path: Some(copy.located.workspace_root.clone()),
+        status: describe(status),
+        problem: status
+            .and_then(|status| status.error.clone())
+            .unwrap_or_default(),
+        ..hive.clone()
     }
 }
 
@@ -1431,23 +1461,17 @@ async fn list_hub(hub: &str) -> anyhow::Result<Vec<HiveInfo>> {
     }
 }
 
-fn print_copy(out: &mut dyn Formatter, copy: &Copy) -> std::io::Result<()> {
-    write!(out, "    here: {}  ", copy.located.workspace_root.display())?;
-    describe(out, copy.status.as_ref())?;
-    writeln!(out)
-}
-
 /// How syncing goes, as `status` says.
-fn describe(out: &mut dyn Formatter, status: Option<&Status>) -> std::io::Result<()> {
+fn describe(status: Option<&Status>) -> String {
     let Some(status) = status else {
-        return write!(out, "not synced yet");
+        return "not synced yet".to_owned();
     };
     if let Some(error) = &status.error {
-        return write!(out.labeled("problem"), "sync failing: {error}");
+        return format!("sync failing: {error}");
     }
     match status.last_success {
-        Some(t) => write!(out, "synced {}s ago", daemon::now().saturating_sub(t)),
-        None => write!(out, "not synced yet"),
+        Some(t) => format!("synced {}s ago", daemon::now().saturating_sub(t)),
+        None => "not synced yet".to_owned(),
     }
 }
 

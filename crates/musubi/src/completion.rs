@@ -96,6 +96,26 @@ pub fn hubs() -> Vec<CompletionCandidate> {
         .collect()
 }
 
+/// The template aliases jj's config defines, for `musubi list -T`, as jj completes `-T`.
+pub fn template_aliases() -> Vec<CompletionCandidate> {
+    let Ok(config) = crate::settings::user_config() else {
+        return vec![];
+    };
+    let Ok(aliases) = jj_cli::cli_util::load_template_aliases(&jj_cli::ui::Ui::null(), &config)
+    else {
+        return vec![];
+    };
+    let mut candidates: Vec<CompletionCandidate> = aliases
+        .symbol_names()
+        .map(|name| {
+            let doc = aliases.get_symbol(name).and_then(|(_, _, doc)| doc);
+            CompletionCandidate::new(name).help(doc.map(|doc| doc.to_owned().into()))
+        })
+        .collect();
+    candidates.sort_by(|a, b| a.get_value().cmp(b.get_value()));
+    candidates
+}
+
 /// The default hub's hives, which commands without `--hub` act on; or if it doesn't answer
 /// in time, the hives of this machine's copies on it.
 pub fn hives() -> Vec<CompletionCandidate> {

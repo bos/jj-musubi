@@ -27,6 +27,7 @@ change them. Set them with `--user`.
 | `musubi.hub` | The hub commands use without `--hub`, in place of the default this machine saved (the first hub it used, or on the hub's own machine, that hub's directory). Give it as `--hub` takes it: the name you ssh to the hub's machine by, or on that machine, the hub's directory, which may start with `~/`. |
 | `musubi.daemon.log` | What the daemon logs, unless `--log` or `RUST_LOG` says. See [Logging](#logging). |
 | `musubi.daemon.socket` | The path of the daemon's control socket, in place of the usual one. See [Files and directories](#files-and-directories). |
+| `musubi.templates.list` | The template, in jj's template language, `musubi list` prints each hub, hive and copy with, unless `-T` gives one. `musubi list --help` lists its keywords. |
 
 The daemon reads `musubi.daemon.*` when it starts, so run `musubi daemon restart` after
 changing them.

@@ -38,7 +38,7 @@ unless jj's config sets it already. See [Set up a hub and machines](../guides/se
 
 | Command | Use it to |
 | --- | --- |
-| `list` | Show the hubs' hives, this machine's copies of them, and whether each is syncing. |
+| `list` | Show the hubs' hives, this machine's copies of them, and whether each is syncing. `-T` prints only the hubs, hives and copies, with a template of your own, as jj's list commands do (see `musubi list --help`); `-T 'json(self) ++ "\n"'` gives them as JSON, for a script. |
 | `status` | Show what musubi does with the repository you're in: its hive, hub and machine name, its last sync, whether the hub has this machine's latest work, each machine's working copies, each copy in the hive with when it was last used and when it will be forgotten, and the daemon's process, socket and log. Warn of what keeps it from syncing, and say what to do. Outside a hive, show the default hub and the daemon. |
 | `sync` | Sync the repository you're in now, and see at once whether it worked. |
 | `top` | Watch what flows through the hubs, and which machines are offline, behind, or failing, as it happens. |

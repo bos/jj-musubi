@@ -25,6 +25,9 @@ change the protocol, so run the same release on the hub and every machine (see
   [Colours](docs/reference/configuration.md#colours)); errors, warnings and hints read as
   jj's do, with hints and warnings on stderr. Logs are coloured only on a terminal, so
   `daemon.log`, and a hub's log written to a file, no longer hold colour codes.
+- `musubi list` prints its hubs, hives and copies through a template in jj's template
+  language, `musubi.templates.list` in jj's config, or one `-T` gives, as jj's list commands
+  do; `-T 'json(self) ++ "\n"'` gives them as JSON. A hub with no hives no longer says so.
 - A command whose output stops being read, as in `musubi list | head`, no longer panics: it
   does all it would, printing nothing more there, and exits with status 3, as jj does then.
 - `musubi sync` warns when it syncs in its own process because the daemon isn't running.

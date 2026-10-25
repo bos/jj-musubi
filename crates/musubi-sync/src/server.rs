@@ -187,11 +187,13 @@ impl HubServer {
                 }
             }
             HubWideRequest::Report { hive, report } => {
-                if self.lock().hive_dir(&hive).is_some() {
-                    self.activity().report(&hive, report, Instant::now());
-                    Ok(HubWideReply::Noted)
-                } else {
-                    Err(format!("no hive {hive}"))
+                let info = self.lock().info(&hive);
+                match info {
+                    Some(info) => {
+                        self.activity().report(&hive, report, Instant::now());
+                        Ok(HubWideReply::Hive(info))
+                    }
+                    None => Err(format!("no hive {hive}")),
                 }
             }
             HubWideRequest::Activity => {

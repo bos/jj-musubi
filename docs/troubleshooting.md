@@ -1,9 +1,10 @@
 # Troubleshooting
 
-Start with `musubi list` in the repository. It shows whether the daemon is running, whether
-the hub is reachable, and for each copy on this machine, when it last synced or the error its
-last sync failed with. `musubi sync` syncs at once and prints any error itself. `musubi top`
-shows every machine's syncing, as the hub hears of it.
+Start with `musubi status` in the repository. It shows whether the daemon is running and
+serving the repository, when it last synced or the error its last sync failed with, and
+whether the hub has this machine's latest work. `musubi list` shows whether each hub is
+reachable, and every copy on this machine. `musubi sync` syncs at once and prints any error
+itself. `musubi top` shows every machine's syncing, as the hub hears of it.
 
 For more, read the daemon's log: `daemon.log` in musubi's state directory
 (`~/.local/state/musubi` on Linux and macOS), or under systemd, `journalctl --user -u
@@ -75,8 +76,9 @@ stuck.
 ### "the hub at devbox is out of reach", "no hub is serving ...", or "request timed out"
 
 No hub answered. Check that `musubi hub` is running on the hub's machine, and start it if not;
-`musubi sync` and `musubi list` say why the hub is out of reach. Where the message gives a reason
-after the colon, such as "ssh to devbox failed: ...", that reason's own entry above says more.
+`musubi sync` and `musubi list` say why the hub is out of reach, and `musubi status` shows why
+the last sync couldn't reach it. Where the message gives a reason after the colon, such as "ssh
+to devbox failed: ...", that reason's own entry above says more.
 Daemons reconnect by themselves: within a few seconds to a hub on the same machine, and within
 about a minute over ssh, which waits longer between tries after each failure.
 
@@ -281,12 +283,32 @@ aside under `removed/`, and makes the hive again, empty, for the machines to fil
 ### "the first sync failed: ..."
 
 `create`, `join`, or `clone` set up the repository, but its first sync failed for the reason
-given. The daemon keeps trying: fix the cause, and `musubi list` shows when it succeeds.
+given. The daemon keeps trying: fix the cause, and `musubi status` shows when it succeeds.
 
 ### "Could not start the daemon (...); syncing once instead."
 
 The command synced the repository itself, but no daemon keeps it in sync. Fix the reason
 given, then run `musubi daemon start`.
+
+## What `musubi status` reports
+
+### "Syncing fails: ..."
+
+The repository's last sync failed, for the reason quoted: find that message on this page. If
+the daemon serves the repository, it keeps trying, and its log, which the hint names, says
+more. Otherwise `musubi sync` tries again.
+
+### "The daemon isn't running, so this repository syncs only when you run `musubi sync`."
+
+Start it with `musubi daemon start`, and to have it start at login from now on, run `musubi
+daemon install`. Until then, "the hub lacks its latest work" means just that: other machines
+see this machine's work once you run `musubi sync`.
+
+### "The daemon doesn't serve this repository."
+
+The daemon runs, but doesn't know of this repository, as when musubi's state directory was
+deleted or `MUSUBI_STATE_DIR` changed. `musubi join` in the repository has it serve the
+repository again.
 
 ## What `musubi top` reports
 
@@ -294,7 +316,7 @@ given, then run `musubi daemon start`.
 
 A machine's daemon reports to the hub after every sync, at least every half minute, and the
 hub has heard nothing for over two minutes. The machine is asleep or off the network, its
-daemon has stopped, or it can't reach the hub: `musubi list` there says which. It catches up
+daemon has stopped, or it can't reach the hub: `musubi status` there says which. It catches up
 when it reconnects. A machine in the middle of a long first sync shows like this too, since it
 reports only once a sync ends, and so, for a day, does one that left the hive or whose copy
 was deleted.

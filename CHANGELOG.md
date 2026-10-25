@@ -6,6 +6,20 @@ change the protocol, so run the same release on the hub and every machine (see
 
 ## Unreleased
 
+- `musubi status` is a command of its own, no longer another name for `musubi list`. It shows
+  what musubi does with the repository you're in: its hive, hub and machine name, its last
+  sync, whether the hub has this machine's latest work, every machine's working copies, each
+  copy in the hive, and the daemon's process, socket and log. It warns of what keeps the
+  repository from syncing, saying what to do, and never starts the daemon or asks the hub, so
+  scripts, agents and shell prompts can run it. `musubi list` no longer shows the current
+  repository's details: run `musubi status` for them.
+- Each machine picks up a renamed hive's new name as its daemon next syncs, rather than only
+  once `musubi list` runs there. The hub answers a daemon's report of a sync with the hive's
+  details, so a hub and machines must be upgraded together.
+- `musubi sync`, `musubi leave` and `musubi join`, run in another workspace of a repository
+  than the one it joined from, act on the repository the daemon serves: `sync` goes through
+  the daemon rather than syncing alongside it, `leave` stops the daemon serving it, and `join`
+  no longer has the daemon serve it twice.
 - When jj can't merge this machine's operations with the hive's (as when rebases on two
   machines form a loop), the sync error names the operation to revert, rather than listing
   every operation the hive doesn't have yet.

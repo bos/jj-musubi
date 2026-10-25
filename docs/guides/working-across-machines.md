@@ -20,18 +20,21 @@ snapshotted yet stay on the laptop.
 `jj op log` shows every machine's operations, each with the workspace that made it, such as
 `laptop/default`.
 
-`musubi list`, run in the repository, shows each machine's working copy at a glance, and when
-this copy last synced:
+`musubi status`, run in the repository, shows each machine's working copy at a glance, when
+this copy last synced, and whether the hub has its latest work:
 
 ```text
-This repository:
-  Hive:      app (8e1f6b0c-4d2a-4f57-9a43-0d5c6e7f8a9b)
-  Hub:       devbox
-  Machine:   desktop
-             default@ is at 3f2a1c9e07b4
-             laptop/default@ is at 8d0b4e11c2a7
-  Last sync: synced 3s ago
-  Hub head:  #412 5c0e9d7a3b21
+Hive: app on devbox, at #412
+This machine: desktop, synced 3s ago; the hub has all its work
+Working copies:
+default@: kxqpwzlm 3f2a1c9e fix the parser
+laptop/default@: vruxwmqv 8d0b4e11 (no description set)
+Copies:
+desktop (this machine): used 1m ago, never forgotten
+laptop: used 2h ago, never forgotten
+Daemon: running (pid 4182), serving this repository; starts at login
+Daemon socket: /run/user/1000/musubi/daemon.sock
+Daemon log: /home/you/.local/state/musubi/daemon.log
 ```
 
 ## When another machine rewrites your working copy

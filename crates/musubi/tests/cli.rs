@@ -115,6 +115,19 @@ fn musubi_in(env: &TestEnv, logs: &Logs, repo: &TestRepo, args: &[&str]) -> Stri
     run(env, logs, command)
 }
 
+/// `musubi status` in `repo`, which must succeed: its stdout, and its warnings and hints.
+fn status_in(env: &TestEnv, logs: &Logs, repo: &TestRepo) -> (String, String) {
+    let mut command = repo.program(musubi());
+    command.arg("status");
+    let (ok, stdout, stderr) = try_run(logs, env, command);
+    assert!(
+        ok,
+        "musubi status failed:\n{stdout}{stderr}\n{}",
+        logs.dump()
+    );
+    (stdout, stderr)
+}
+
 /// Runs musubi in `repo`, which must fail, returning its stderr.
 fn musubi_fails(env: &TestEnv, logs: &Logs, repo: &TestRepo, args: &[&str]) -> String {
     let mut command = repo.program(musubi());
@@ -392,15 +405,24 @@ fn hub_join_sync_clone_and_list() {
         list.contains("Daemon: running, serving 1 repositories;"),
         "{list}"
     );
-    // Every machine's workspaces are listed, as jj names them here, this machine's first.
-    let own = list.find("  beta@ is at").expect(&list);
-    let other = list.find("  alpha/alpha@ is at").expect(&list);
-    assert!(own < other, "{list}");
-    assert!(list.contains("Machine:   beta"), "{list}");
+    // `musubi status` shows the repository's part in the hive: every machine's working
+    // copies, as jj names them here, this machine's first, and each copy.
+    let (status, warnings) = status_in(&env, &logs, &beta);
+    assert!(status.contains("Hive: project on "), "{status}");
+    assert!(status.contains("This machine: beta, synced "), "{status}");
+    let own = status.find("\nbeta@: ").expect(&status);
+    let other = status.find("\nalpha/alpha@: ").expect(&status);
+    assert!(own < other, "{status}");
     assert!(
-        list.contains("beta (this one): last used ") && list.contains("never forgotten"),
-        "{list}"
+        status.contains("beta (this machine): used ") && status.contains("never forgotten"),
+        "{status}"
     );
+    assert!(
+        status.contains("Daemon: running (pid ") && status.contains("serving this repository"),
+        "{status}"
+    );
+    // A sync failing meanwhile, which a retry fixes, would be no fault of status's.
+    assert!(!warnings.contains("Warning: The daemon"), "{warnings}");
 
     // Completing as you type, the shell gets the hub's hives, and the hubs this machine knows.
     let hives = completions(&env, &logs, &beta, &["musubi", "clone", "pr"]);
@@ -475,7 +497,9 @@ fn hub_join_sync_clone_and_list() {
         "{out}"
     );
     wait_for(&logs, "beta to hear gamma's musubi.forget-after", || {
-        musubi_in(&env, &logs, &beta, &[]).contains("forgotten once unused for 6h, in 5h")
+        status_in(&env, &logs, &beta)
+            .0
+            .contains("forgotten once unused for 6h, in 5h")
     });
 
     // A machine forgotten elsewhere drops out of the hive, though its daemon still syncs,
@@ -491,10 +515,12 @@ fn hub_join_sync_clone_and_list() {
         musubi_in(&env, &logs, &alpha, &["list"]).contains("project  2 machines: alpha, beta")
     });
     wait_for(&logs, "gamma's daemon to hear it was forgotten", || {
-        musubi_in(&env, &logs, &gamma, &[]).contains("forgotten by the hive")
+        status_in(&env, &logs, &gamma)
+            .0
+            .contains("Forgotten by the hive")
     });
 
-    // A renamed hive goes by its new name on every machine, once it has listed it.
+    // A renamed hive goes by its new name on every machine, once its daemon next syncs.
     let out = musubi_in(
         &env,
         &logs,
@@ -509,8 +535,12 @@ fn hub_join_sync_clone_and_list() {
         &["hub", "rename", "renamed", "renamed"],
     );
     assert!(out.contains("Hive renamed already has that name"), "{out}");
-    let list = musubi_in(&env, &logs, &beta, &[]);
-    assert!(list.contains("Hive:      renamed ("), "{list}");
+    musubi_in(&env, &logs, &beta, &["sync"]);
+    wait_for(&logs, "beta's daemon to hear the hive's new name", || {
+        status_in(&env, &logs, &beta)
+            .0
+            .contains("Hive: renamed on ")
+    });
 
     // Leaving takes the copy out of the hive, and stops the syncing.
     let out = musubi_in(&env, &logs, &beta, &["leave"]);
@@ -695,6 +725,55 @@ fn two_machines_with(
     fetch_history(&alpha, &beta);
     musubi_in(env, logs, &beta, &["join", "--hub", &hub.url]);
     (alpha, beta)
+}
+
+/// The daemon knows a repository by one of its workspaces, but commands run in any other
+/// workspace of it act on the same repository: a join there doesn't have the daemon serve
+/// it twice, `musubi status` there finds it served, and a leave there stops the serving.
+#[test]
+fn commands_in_another_workspace_act_on_the_repository() {
+    let env = TestEnv::with_real_op_times();
+    let mut logs = Logs::default();
+    let hub = Hub::start(&env, &mut logs);
+    // Stopped before the hub.
+    let mut daemons = Daemons::default();
+    let alpha = env.init_repo("alpha");
+    logs.daemon_of(&env, &alpha);
+    daemons.of(&alpha);
+    alpha.write_file("a", "a");
+    alpha.jj(&["commit", "-m", "start"]);
+    musubi_in(&env, &logs, &alpha, &["create", "--hub", &hub.url]);
+    let second = env.root().join("alpha-second");
+    alpha.jj(&["workspace", "add", second.to_str().unwrap()]);
+    let in_second = |args: &[&str]| {
+        let mut command = alpha.program(musubi());
+        command.args(args).current_dir(&second);
+        command
+    };
+
+    // Joining again from the other workspace, as to make a lost hive again.
+    run(&env, &logs, in_second(&["join"]));
+    let list = musubi_in(&env, &logs, &alpha, &["list"]);
+    assert!(
+        list.contains("Daemon: running, serving 1 repositories;"),
+        "{list}"
+    );
+    // Listed once, through the workspace it joined from, so a daemon starting serves it once.
+    let state_path = state_dir(&env, &alpha).join("state.toml");
+    let state = fs::read_to_string(&state_path).unwrap();
+    assert!(!state.contains("alpha-second"), "{state}");
+    let status = run(&env, &logs, in_second(&["status"]));
+    assert!(status.contains("serving this repository"), "{status}");
+
+    let out = run(&env, &logs, in_second(&["leave"]));
+    assert!(out.contains("has left hive"), "{out}");
+    let list = musubi_in(&env, &logs, &alpha, &["list"]);
+    assert!(
+        list.contains("Daemon: running, serving 0 repositories;"),
+        "{list}"
+    );
+    let state = fs::read_to_string(&state_path).unwrap();
+    assert!(!state.contains("alpha"), "{state}");
 }
 
 /// A copy that left its hive can join it again, even after jj has run in it since, and
@@ -1029,7 +1108,8 @@ fn shallow_clones_are_refused() {
 }
 
 /// Without a daemon, `musubi sync` syncs in its own process, and records how it went for
-/// `musubi list`, as the daemon would.
+/// `musubi list` and `musubi status`, as the daemon would. Until then, `musubi status` says
+/// the hub lacks this machine's work, and what to do.
 #[test]
 fn syncing_without_the_daemon_shows_in_the_list() {
     let env = TestEnv::with_real_op_times();
@@ -1039,13 +1119,29 @@ fn syncing_without_the_daemon_shows_in_the_list() {
     let mut daemons = Daemons::default();
     let (alpha, _beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
     musubi_in(&env, &logs, &alpha, &["daemon", "stop"]);
-    // As the daemon left it when its last sync failed.
-    let status = alpha.repo_path().join("musubi/status.json");
-    fs::write(&status, r#"{"error": "the hub was out of reach"}"#).unwrap();
+    // As the daemon left it when its last sync failed, after it had synced.
+    let path = alpha.repo_path().join("musubi/status.json");
+    let synced = fs::read_to_string(&path).unwrap();
+    let failed = synced.replace("\"error\": null", "\"error\": \"the hub was out of reach\"");
+    assert_ne!(failed, synced);
+    fs::write(&path, failed).unwrap();
+    // Work no daemon sends.
+    alpha.write_file("unsent", "unsent");
+    alpha.jj(&["commit", "-m", "unsent"]);
+    let (status, warnings) = status_in(&env, &logs, &alpha);
+    assert!(status.contains("the hub lacks its latest work"), "{status}");
+    assert!(
+        warnings.contains("the hub was out of reach") && warnings.contains("`musubi sync`"),
+        "{warnings}"
+    );
+    assert!(warnings.contains("`musubi daemon start`"), "{warnings}");
     musubi_in(&env, &logs, &alpha, &["sync"]);
     let list = musubi_in(&env, &logs, &alpha, &["list"]);
     assert!(list.contains("Daemon: not running"), "{list}");
     assert!(list.contains("  synced "), "{list}");
+    let (status, warnings) = status_in(&env, &logs, &alpha);
+    assert!(status.contains("the hub has all its work"), "{status}");
+    assert!(!warnings.contains("Syncing fails"), "{warnings}");
 }
 
 /// The hive shares remotes and chosen repo config through the binary, which finds jj's

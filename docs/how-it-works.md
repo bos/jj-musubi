@@ -122,7 +122,7 @@ with its outcome.
 
 A machine that loses its connection to the hub keeps working: jj never needs the hub. When it
 reconnects, its daemon fetches what it missed, merges its own work with it, and sends the
-result, as for any concurrent change. Meanwhile, `musubi list` shows its syncs failing, which
+result, as for any concurrent change. Meanwhile, `musubi status` shows its syncs failing, which
 is expected.
 
 ## Disk space

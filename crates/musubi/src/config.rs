@@ -19,6 +19,8 @@ use serde::Deserialize;
 use serde::Serialize;
 use uuid::Uuid;
 
+use crate::repo::Located;
+
 /// A node's membership in a hive.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HiveConfig {
@@ -50,6 +52,13 @@ impl HiveConfig {
         }
     }
 
+    /// Holds off anything else that changes the repository's membership, given that it is
+    /// as read, until dropped: so that a name recorded late doesn't bring back a membership a
+    /// leave has removed meanwhile.
+    pub fn lock(repo_path: &Path) -> anyhow::Result<crate::lock::Lock> {
+        crate::lock::lock(&repo_path.join("musubi/hive.lock"))
+    }
+
     pub fn save(&self, repo_path: &Path) -> anyhow::Result<()> {
         let dir = repo_path.join("musubi");
         fs::create_dir_all(&dir)?;
@@ -70,6 +79,27 @@ impl HiveConfig {
     pub fn display_name(&self) -> String {
         self.name.clone().unwrap_or_else(|| self.hive.to_string())
     }
+
+    /// Records `name` as the hive's, as its hub calls it now, unless the repository at
+    /// `repo_path` has it already, or is no longer part of this hive through this hub, as
+    /// after a leave or a join meanwhile. The name is only for showing while the hub is out of
+    /// reach, so failing to record it is no matter.
+    pub fn note_name(&self, repo_path: &Path, name: &str) {
+        let Ok(_lock) = Self::lock(repo_path) else {
+            return;
+        };
+        let Ok(Some(now)) = Self::load(repo_path) else {
+            return;
+        };
+        if now.hive != self.hive || now.hub != self.hub || now.name.as_deref() == Some(name) {
+            return;
+        }
+        let renamed = Self {
+            name: Some(name.to_owned()),
+            ..now
+        };
+        renamed.save(repo_path).ok();
+    }
 }
 
 /// What musubi keeps for itself, in `state.toml`.
@@ -79,7 +109,8 @@ pub struct UserState {
     /// machine, that hub.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hub: Option<String>,
-    /// The workspace roots of the repositories the daemon serves.
+    /// The workspace roots of the repositories the daemon serves, one for each repository,
+    /// whichever of its workspaces it was first served from.
     #[serde(default)]
     pub repos: Vec<PathBuf>,
 }
@@ -118,6 +149,12 @@ fn expand_home(hub: &str) -> String {
         (Some(rest), Ok(home)) => home.join(rest).display().to_string(),
         _ => hub.to_owned(),
     }
+}
+
+/// Whether `workspace` is a workspace of the repository whose `.jj/repo` directory is
+/// `repo_path`.
+fn is_workspace_of(workspace: &Path, repo_path: &Path) -> bool {
+    Located::find(workspace).is_ok_and(|located| located.repo_path == repo_path)
 }
 
 /// Writes `path` so that only its owner can read it, and so that a reader finds either the
@@ -180,20 +217,43 @@ impl UserState {
         Ok(state)
     }
 
-    /// Adds a repository workspace root, if not already listed.
-    pub fn add_repo(workspace_root: &Path) -> anyhow::Result<()> {
-        let root = workspace_root.canonicalize()?;
+    /// Lists the repository `located` is in, unless it is listed already, through this
+    /// workspace or another.
+    pub fn add_repo(located: &Located) -> anyhow::Result<()> {
+        let root = located.workspace_root.canonicalize()?;
         Self::update(|state| {
-            if !state.repos.contains(&root) {
+            if state.served_workspace(&located.repo_path).is_none() {
                 state.repos.push(root);
             }
         })?;
         Ok(())
     }
 
-    pub fn remove_repo(workspace_root: &Path) -> anyhow::Result<()> {
-        Self::update(|state| state.repos.retain(|repo| repo != workspace_root))?;
+    /// Stops listing the repository `located` is in, through whichever workspace.
+    pub fn remove_repo(located: &Located) -> anyhow::Result<()> {
+        Self::update(|state| {
+            state
+                .repos
+                .retain(|workspace| !is_workspace_of(workspace, &located.repo_path));
+        })?;
         Ok(())
+    }
+
+    /// The workspace the daemon serves the repository whose `.jj/repo` directory is
+    /// `repo_path` through, if it serves it: the daemon knows a repository by that one.
+    pub fn served_workspace(&self, repo_path: &Path) -> Option<PathBuf> {
+        self.repos
+            .iter()
+            .find(|workspace| is_workspace_of(workspace, repo_path))
+            .cloned()
+    }
+
+    /// The workspace to name the repository `located` is in by to the daemon: the one it
+    /// serves it through, else `located`'s own.
+    pub fn daemon_workspace(located: &Located) -> anyhow::Result<PathBuf> {
+        Ok(Self::load()?
+            .served_workspace(&located.repo_path)
+            .unwrap_or_else(|| located.workspace_root.clone()))
     }
 
     /// Saves `hub` as this machine's default hub, unless it saved one before. Returns whether

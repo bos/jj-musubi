@@ -28,6 +28,7 @@ use musubi_sync::remote::RemoteHub;
 use musubi_sync::wire::Envelope;
 use musubi_sync::wire::HUB_TOKEN;
 use musubi_sync::wire::HeadNotice;
+use musubi_sync::wire::HubWideReply;
 use musubi_sync::wire::HubWideRequest;
 use musubi_sync::wire::rpc_subject;
 use musubi_transport::Transport;
@@ -515,7 +516,7 @@ async fn serve_async(
             }
         };
         // While the hub is out of reach, a sync could only wait for its requests to time
-        // out. Say why instead, to `musubi list` and to any command waiting, and wait for
+        // out. Say why instead, to `musubi status` and to any command waiting, and wait for
         // the connection to come back, or for the backoff to pass. A reconnection from now
         // on ends the wait.
         reconnections.seen();
@@ -580,6 +581,7 @@ async fn serve_async(
         });
         report(
             &transport,
+            &located.repo_path,
             &hive,
             &machine,
             synced.seq,
@@ -667,9 +669,11 @@ fn collect_garbage(located: &Located) {
 }
 
 /// Tells the hub how a sync went, for `musubi top`, without waiting for its answer: a sync
-/// that failed may have failed to reach it.
+/// that failed may have failed to reach it. The answer, when it comes, has the hive's name,
+/// recorded for `musubi status` should the hive have been renamed.
 fn report(
     transport: &Arc<dyn Transport>,
+    repo_path: &Path,
     hive: &HiveConfig,
     machine: &str,
     seq: u64,
@@ -688,13 +692,21 @@ fn report(
         return;
     };
     let transport = transport.clone();
+    let (repo_path, hive) = (repo_path.to_owned(), hive.clone());
     tokio::spawn(async move {
         let subject = rpc_subject(HUB_TOKEN);
-        if let Err(err) = transport
+        match transport
             .request(&subject, Bytes::from(payload), REPORT_TIMEOUT)
             .await
         {
-            tracing::debug!("could not report to the hub: {err}");
+            Ok(reply) => {
+                if let Ok(HubWideReply::Hive(info)) = Envelope::decode(&reply)
+                    && info.id == hive.hive.to_string()
+                {
+                    hive.note_name(&repo_path, &info.name);
+                }
+            }
+            Err(err) => tracing::debug!("could not report to the hub: {err}"),
         }
     });
 }
@@ -704,12 +716,13 @@ fn report(
 /// it. Returns false, doing nothing, if it isn't part of `hive` through the same hub (any
 /// more), as when it left it, joined another, or moved to another hub, meanwhile.
 pub fn leave_hive(located: &Located, hive: &HiveConfig) -> anyhow::Result<bool> {
+    let _lock = HiveConfig::lock(&located.repo_path)?;
     if HiveConfig::load(&located.repo_path)?
         .is_none_or(|now| now.hive != hive.hive || now.hub != hive.hub)
     {
         return Ok(false);
     }
-    UserState::remove_repo(&located.workspace_root)?;
+    UserState::remove_repo(located)?;
     fs::remove_file(HiveConfig::path(&located.repo_path))?;
     fs::remove_file(Status::path(&located.repo_path)).ok();
     Ok(true)
@@ -744,7 +757,7 @@ fn known(driver: &NodeDriver) -> Synced {
 }
 
 /// Syncs once, in this process, as the daemon would, and records how it went for
-/// `musubi list`.
+/// `musubi status`.
 pub async fn sync_once(located: &Located, hive: &HiveConfig) -> anyhow::Result<Synced> {
     let mut status = Status::load(&located.repo_path).unwrap_or_default();
     let (connection, mut driver, _) = match open_driver(located, hive).await {

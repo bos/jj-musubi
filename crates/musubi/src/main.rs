@@ -12,6 +12,7 @@ mod repo;
 mod settings;
 mod socket;
 mod ssh;
+mod status;
 mod top;
 mod watch;
 
@@ -149,12 +150,19 @@ enum Command {
     },
     /// List the hub's hives, this machine's copies of them, and how their syncing goes
     /// (the default command).
-    ///
-    /// In a hive's repository, it also shows the repository's hive, hub and machine name,
-    /// where every machine's working copy is, each copy in the hive, when it was last used,
-    /// and when it will be forgotten (`musubi.forget-after`), and its last sync.
-    #[command(alias = "status")]
     List,
+    /// Show what musubi does with the repository in the current directory: its hive, whether
+    /// it syncs, and whether the hub has its latest work.
+    ///
+    /// It shows the repository's hive, hub and machine name, its last sync, every machine's
+    /// working copies, each copy in the hive with when it was last used and when it will be
+    /// forgotten (`musubi.forget-after`), and the daemon: whether it runs and serves the
+    /// repository, its process, socket, and log. It warns of what keeps the repository from
+    /// syncing, saying what to do. Outside a hive, it says so, and shows the default hub and
+    /// the daemon.
+    ///
+    /// It never starts the daemon or asks the hub, so it answers at once.
+    Status,
     /// Watch what flows through the hubs, and what is wrong, as it happens.
     ///
     /// For each hive, it shows the bytes a second coming into its hub and going out, the
@@ -439,7 +447,11 @@ fn main() -> anyhow::Result<()> {
             machine.as_deref(),
             &socket()?,
         ),
-        Command::List => list(&cwd, socket()),
+        Command::List => list(socket()),
+        Command::Status => {
+            status::Report::gather(&cwd, socket()).print();
+            Ok(())
+        }
         Command::Top {
             hub,
             interval,
@@ -593,13 +605,11 @@ fn join(start: &Path, choice: JoinChoice, member: &Member, socket: &Socket) -> a
     if remaking {
         // The daemon serves the repository with the hub it knew: start it over, as for a
         // repository newly joined.
+        let workspace = UserState::daemon_workspace(&located)?;
         block_on(async {
             if let Some(client) = daemon::running(socket).await? {
                 client
-                    .remove(
-                        control::context(Duration::from_secs(120)),
-                        located.workspace_root.clone(),
-                    )
+                    .remove(control::context(Duration::from_secs(120)), workspace)
                     .await?
                     .map_err(anyhow::Error::msg)?;
             }
@@ -675,10 +685,13 @@ fn become_node(
         hub: hub.to_owned(),
         node: machine,
     };
-    config.save(&located.repo_path)?;
+    {
+        let _lock = HiveConfig::lock(&located.repo_path)?;
+        config.save(&located.repo_path)?;
+    }
     drop(node);
     set_forget_after(located)?;
-    UserState::add_repo(&located.workspace_root)?;
+    UserState::add_repo(located)?;
     if UserState::save_default_hub(hub)? {
         println!(
             "Saved {hub} as this machine's default hub. To choose another: jj config set \
@@ -789,7 +802,7 @@ fn start_serving(located: &Located, socket: &Socket) -> anyhow::Result<()> {
         /// The daemon serves it, but its first sync failed, saying this.
         Failed(String),
     }
-    let workspace = located.workspace_root.clone();
+    let workspace = UserState::daemon_workspace(located)?;
     // The client lives on the runtime that made it, so one runtime does it all.
     let served = block_on(async {
         let client = match daemon::ensure(socket).await {
@@ -827,7 +840,7 @@ fn start_serving(located: &Located, socket: &Socket) -> anyhow::Result<()> {
             Ok(())
         }
         Served::Failed(message) => anyhow::bail!(
-            "the first sync failed: {message}\nThe daemon keeps trying; `musubi list` shows how \
+            "the first sync failed: {message}\nThe daemon keeps trying; `musubi status` shows how \
              it goes."
         ),
     }
@@ -886,15 +899,14 @@ fn sync_quietly(start: &Path, socket: &Socket) -> anyhow::Result<Synced> {
     let located = Located::find(start)?;
     let hive =
         HiveConfig::load(&located.repo_path)?.context("this repository is not part of a hive")?;
-    let served = UserState::load()?.repos.contains(&located.workspace_root);
+    let served = UserState::load()?.served_workspace(&located.repo_path);
     let through_daemon = block_on(async {
-        if !served {
+        let Some(workspace) = served else {
             return Ok(None);
-        }
+        };
         let Some(client) = daemon::running(socket).await? else {
             return Ok(None);
         };
-        let workspace = located.workspace_root.clone();
         let synced = client
             .sync(control::context(Duration::from_secs(3600)), workspace)
             .await?;
@@ -923,6 +935,7 @@ fn leave(start: &Path, socket: &Socket, force: bool) -> anyhow::Result<()> {
     let hive =
         HiveConfig::load(&located.repo_path)?.context("this repository is not part of a hive")?;
     // So that the daemon doesn't sync it meanwhile.
+    let workspace = UserState::daemon_workspace(&located)?;
     let served = block_on(async {
         let Some(client) = daemon::running(socket).await? else {
             return Ok(false);
@@ -930,7 +943,7 @@ fn leave(start: &Path, socket: &Socket, force: bool) -> anyhow::Result<()> {
         client
             .remove(
                 control::context(Duration::from_secs(120)),
-                located.workspace_root.clone(),
+                workspace.clone(),
             )
             .await?
             .map_err(anyhow::Error::msg)?;
@@ -949,10 +962,7 @@ fn leave(start: &Path, socket: &Socket, force: bool) -> anyhow::Result<()> {
                 block_on(async {
                     if let Some(client) = daemon::running(socket).await? {
                         let context = control::context(Duration::from_secs(10));
-                        client
-                            .add(context, located.workspace_root.clone())
-                            .await
-                            .ok();
+                        client.add(context, workspace).await.ok();
                     }
                     Ok::<_, anyhow::Error>(())
                 })
@@ -1113,7 +1123,7 @@ struct Copy {
 }
 
 /// Lists what it can: a daemon or hub out of reach is a line of the listing.
-fn list(start: &Path, socket: anyhow::Result<Socket>) -> anyhow::Result<()> {
+fn list(socket: anyhow::Result<Socket>) -> anyhow::Result<()> {
     let state = UserState::load()?;
     let (daemon, statuses) = block_on(async {
         let running = match &socket {
@@ -1167,18 +1177,8 @@ fn list(start: &Path, socket: anyhow::Result<Socket>) -> anyhow::Result<()> {
                 // A copy shows its hive's name while the hub is out of reach, so keep up with
                 // renames.
                 for copy in &here {
-                    if let Some(info) = hives.iter().find(|h| h.id == copy.hive.hive.to_string())
-                        && copy.hive.name.as_deref() != Some(info.name.as_str())
-                        // Unless a leave or a join has changed it since it was read.
-                        && HiveConfig::load(&copy.located.repo_path).ok().flatten().as_ref()
-                            == Some(&copy.hive)
-                    {
-                        let renamed = HiveConfig {
-                            name: Some(info.name.clone()),
-                            ..copy.hive.clone()
-                        };
-                        // Only for showing: failing to save it mustn't stop the listing.
-                        renamed.save(&copy.located.repo_path).ok();
+                    if let Some(info) = hives.iter().find(|h| h.id == copy.hive.hive.to_string()) {
+                        copy.hive.note_name(&copy.located.repo_path, &info.name);
                     }
                 }
                 println!("Hub {hub}:");
@@ -1221,11 +1221,6 @@ fn list(start: &Path, socket: anyhow::Result<Socket>) -> anyhow::Result<()> {
         Ok(false) => println!("Daemon: not running ({at_login}); `musubi daemon start` starts it"),
         Err(err) => println!("Daemon: {err:#}"),
     }
-    if let Ok(located) = Located::find(start)
-        && let Some(hive) = HiveConfig::load(&located.repo_path)?
-    {
-        print_details(&located, &hive)?;
-    }
     Ok(())
 }
 
@@ -1267,74 +1262,6 @@ fn describe(status: Option<&Status>) -> String {
         Some(t) => format!("synced {}s ago", daemon::now().saturating_sub(t)),
         None => "not synced yet".to_owned(),
     }
-}
-
-/// A duration in its largest whole unit, as `musubi list` shows how long ago or how soon:
-/// `40s`, `12m`, `3h`, `2d`.
-fn roughly(duration: Duration) -> String {
-    let secs = duration.as_secs();
-    match secs {
-        0..60 => format!("{secs}s"),
-        60..3_600 => format!("{}m", secs / 60),
-        3_600..86_400 => format!("{}h", secs / 3_600),
-        _ => format!("{}d", secs / 86_400),
-    }
-}
-
-/// The current repository's replication state, in detail.
-fn print_details(located: &Located, hive: &HiveConfig) -> anyhow::Result<()> {
-    println!();
-    println!("This repository:");
-    println!("  Hive:      {} ({})", hive.display_name(), hive.hive);
-    println!("  Hub:       {}", hive.hub);
-    println!("  Machine:   {}", hive.node);
-    let mut node = located.open()?;
-    if !node.present_copies()?.1.is_present(node.machine().key()) {
-        println!("             forgotten by the hive, which shows it again once it's used");
-    }
-    for (workspace, commit) in node.machine_workspaces()? {
-        let short = &commit.hex()[..12];
-        println!("             {workspace}@ is at {short}");
-    }
-    let now = std::time::SystemTime::now();
-    for (index, copy) in node.activity()?.iter().enumerate() {
-        let label = if index == 0 {
-            "  Copies:    "
-        } else {
-            "             "
-        };
-        let this = if copy.key == node.machine().key() {
-            " (this one)"
-        } else {
-            ""
-        };
-        let since = now.duration_since(copy.last_work).unwrap_or_default();
-        let forgotten = match copy.forget_after {
-            None => "never forgotten".to_owned(),
-            Some(after) => {
-                let after_text = musubi_jj::presence::format_forget_after(Some(after));
-                match after.checked_sub(since) {
-                    Some(left) if !left.is_zero() => format!(
-                        "forgotten once unused for {after_text}, in {}",
-                        roughly(left)
-                    ),
-                    _ => format!("forgotten once unused for {after_text}, any moment now"),
-                }
-            }
-        };
-        println!(
-            "{label}{}{this}: last used {} ago, {forgotten}",
-            copy.name,
-            roughly(since)
-        );
-    }
-    if let Some(status) = Status::load(&located.repo_path) {
-        println!("  Last sync: {}", describe(Some(&status)));
-        if let (Some(seq), Some(head)) = (status.known_seq, &status.known_head) {
-            println!("  Hub head:  #{seq} {}", &head[..12.min(head.len())]);
-        }
-    }
-    Ok(())
 }
 
 fn op_id(start: &Path, id: &str) -> anyhow::Result<()> {

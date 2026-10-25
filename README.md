@@ -111,7 +111,10 @@ Keep using jj. `jj log` shows each other machine's working copy as a workspace n
 it, such as `laptop/default@`, and `jj op log` shows what every machine did.
 
 - `musubi` (or `musubi list`) shows the hub's hives, this machine's copies of them, and
-  whether each is syncing; in a hive's repository, it adds that repository's details.
+  whether each is syncing.
+- `musubi status` shows the current repository's hive, whether it syncs and whether the hub
+  has its latest work, every machine's working copies, and the daemon, and warns of what's
+  wrong. It answers at once, for scripts and agents to ask.
 - `musubi sync` syncs the current repository now; `musubi leave` takes it out of its hive.
 - `musubi forget <machine>` forgets a machine that went away without leaving. A copy that a
   coding agent (Claude Code or Codex) joined is forgotten by itself after 6 hours unused

@@ -17,8 +17,9 @@ Hub devbox:
 Daemon: running, serving 2 repositories; starts at login
 ```
 
-Run in a hive's repository, it also shows that repository's hive, hub and machine name, where
-each machine's working copy is, and the latest hub head this machine knows of.
+`musubi status`, run in a hive's repository, shows that repository's hive, hub and machine
+name, where each machine's working copy is, and whether the hub has this machine's latest
+work.
 
 ### Watch every machine
 
@@ -68,8 +69,9 @@ musubi hub rename app work-app
 musubi hub remove work-app
 ```
 
-Renaming changes the name that commands take and `musubi list` shows. Copies keep syncing,
-and each machine picks up the new name the next time `musubi list` runs there.
+Renaming changes the name that commands take and `musubi list` and `musubi status` show.
+Copies keep syncing, and each machine picks up the new name as its daemon next syncs, within
+half a minute, or the next time `musubi list` runs there.
 
 `hub remove` takes the hive's whole name or its id, not a prefix as other commands do. Each
 machine's copy leaves the hive as it next syncs, as with `musubi leave`, keeping everything it
@@ -121,7 +123,7 @@ jj config set --repo musubi.forget-after '2 days'   # or 30m, '1h 30m', 1week, n
 Any operation recorded in the copy counts as using it, as does changing this setting. Once a
 copy goes unused for longer than its setting, the first daemon to notice forgets it, as
 `musubi forget` would, within a few minutes; the copy comes back as soon as it's used again.
-In a repository, `musubi list` shows each copy, when it was last used, and when it will be
+In a repository, `musubi status` shows each copy, when it was last used, and when it will be
 forgotten.
 
 ### Rejoin, or stop using musubi

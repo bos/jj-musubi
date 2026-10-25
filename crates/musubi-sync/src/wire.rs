@@ -200,9 +200,9 @@ pub enum HubWideRequest {
 pub enum HubWideReply {
     Joined(Joined),
     Hives(Vec<HiveInfo>),
+    /// The hive, as it is now, after a request about it: after a [`HubWideRequest::Report`],
+    /// so that a daemon learns its new name.
     Hive(HiveInfo),
-    /// After [`HubWideRequest::Report`].
-    Noted,
     Activity(HubActivity),
     Error(String),
 }

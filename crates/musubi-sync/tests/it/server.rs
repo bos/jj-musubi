@@ -429,7 +429,11 @@ async fn the_hub_keeps_account_of_its_hives() {
         hive: hive.clone(),
         report: report.clone(),
     };
-    assert_eq!(hub_wide(&*client, reported).await, HubWideReply::Noted);
+    // With the hive's name, which the daemon records, should the hive have been renamed.
+    assert!(matches!(
+        hub_wide(&*client, reported).await,
+        HubWideReply::Hive(info) if info.id == hive
+    ));
     let elsewhere = HubWideRequest::Report {
         hive: uuid_like().to_owned(),
         report: report.clone(),

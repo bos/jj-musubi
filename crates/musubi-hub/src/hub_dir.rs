@@ -600,13 +600,13 @@ impl HubDir {
                 let name = &self.hives[&id].meta.name;
                 return Err(format!(
                     "the hub lacks this repository's hive, but it belongs in hive {name} \
-                     ({reason}): `musubi leave`, then `musubi join`, joins that"
+                     ({reason}): `musubi leave --force`, then `musubi join`, joins that"
                 ));
             }
             (JoinChoice::Remake { .. }, Decision::Ambiguous(_)) => {
                 return Err(
                     "the hub lacks this repository's hive, but it belongs in several \
-                            the hub has: `musubi leave`, then `musubi join --hive <name>`, \
+                            the hub has: `musubi leave --force`, then `musubi join --hive <name>`, \
                             joins one (`musubi list` shows them)"
                         .to_owned(),
                 );
@@ -1083,6 +1083,8 @@ mod tests {
             .join(&remake(&Uuid::new_v4().to_string(), "x"))
             .unwrap_err();
         assert!(err.contains("belongs in hive mine"), "{err}");
+        // `musubi leave` alone would fail to tell the hive the hub lacks.
+        assert!(err.contains("`musubi leave --force`"), "{err}");
         hubs.remove(&lost).unwrap();
         let err = hubs.join(&remake(&lost, "mine")).unwrap_err();
         assert!(err.contains("removed"), "{err}");

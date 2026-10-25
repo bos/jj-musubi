@@ -82,9 +82,13 @@ fn regex_escape(text: &str) -> String {
     escaped
 }
 
-/// The logs of the background processes, for failure messages.
+/// The logs of the background processes, and the repositories whose operation logs go with
+/// them, for failure messages.
 #[derive(Default)]
-struct Logs(Vec<PathBuf>);
+struct Logs {
+    files: Vec<PathBuf>,
+    repos: Vec<TestRepo>,
+}
 
 impl Logs {
     /// A log file for a background process: its stderr, at debug level for musubi.
@@ -93,22 +97,105 @@ impl Logs {
         command
             .env("RUST_LOG", "info,musubi=debug,musubi_sync=debug")
             .stderr(fs::File::create(&path).unwrap());
-        self.0.push(path);
+        self.files.push(path);
     }
 
-    /// Includes the daemon log of `repo`'s machine in failure messages.
+    /// Includes the daemon log of `repo`'s machine, and `repo`'s operation log, in failure
+    /// messages.
     fn daemon_of(&mut self, env: &TestEnv, repo: &TestRepo) {
-        self.0.push(state_dir(env, repo).join("daemon.log"));
+        self.files.push(state_dir(env, repo).join("daemon.log"));
+        self.op_log_of(repo);
+    }
+
+    /// Includes `repo`'s operation log in failure messages: which machine's work, or which
+    /// musubi command, wrote each operation.
+    fn op_log_of(&mut self, repo: &TestRepo) {
+        self.repos.push(repo.another_copy(repo.path()));
     }
 
     fn dump(&self) -> String {
         let mut dump = String::new();
-        for path in &self.0 {
+        for path in &self.files {
             let log = fs::read_to_string(path).unwrap_or_default();
             writeln!(dump, "--- {}:\n{log}", path.display()).unwrap();
         }
+        // Newest first, each with the workspace it was made in and musubi's attributes, such
+        // as `musubi.work`, which say whose work it is. From each op head in turn, and without
+        // snapshotting: either could write an operation of its own, a merge of divergent heads
+        // or a snapshot, which would count as the machine's work.
+        let template = r#"id.short() ++ " " ++ time.end().format("%H:%M:%S%.3f") ++ " "
+            ++ user ++ " " ++ workspace_name ++ " " ++ description.first_line()
+            ++ if(attributes, " {" ++ attributes.lines().join("; ") ++ "}") ++ "\n""#;
+        for repo in &self.repos {
+            // A repository a failed clone never made has none.
+            let heads = fs::read_dir(repo.repo_path().join("op_heads/heads"))
+                .map(|dir| {
+                    dir.filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+                        .filter(|name| name.bytes().all(|b| b.is_ascii_hexdigit()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            for head in heads {
+                let output = repo.jj_output(&[
+                    "op",
+                    "log",
+                    "--no-graph",
+                    "--ignore-working-copy",
+                    "--at-op",
+                    &head,
+                    "-n",
+                    "40",
+                    "-T",
+                    template,
+                ]);
+                writeln!(
+                    dump,
+                    "--- operations of {} from {}:\n{}{}",
+                    repo.machine(),
+                    head.get(..12).unwrap_or(&head),
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                )
+                .unwrap();
+            }
+        }
         dump
     }
+}
+
+/// Failure diagnostics find moved repositories and read each operation head without writing
+/// a snapshot or merging concurrent operations into the history being diagnosed.
+#[test]
+fn failure_logs_read_operation_heads_without_changing_them() {
+    let env = TestEnv::new();
+    let repo = env.init_repo_with_hostname("alpha", "laptop");
+    let path = env.root().join("moved");
+    fs::rename(repo.path(), &path).unwrap();
+    let repo = repo.another_copy(&path);
+    repo.jj(&["new", "-m", "first head"]);
+    repo.jj(&["--at-op", "@-", "new", "-m", "second head"]);
+    let heads = || {
+        let mut heads: Vec<_> = fs::read_dir(repo.repo_path().join("op_heads/heads"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        heads.sort();
+        heads
+    };
+    let before = heads();
+    assert_eq!(before.len(), 2);
+    let mut logs = Logs::default();
+    logs.op_log_of(&repo);
+    let dump = logs.dump();
+    assert_eq!(
+        dump.matches("--- operations of alpha from ").count(),
+        2,
+        "{dump}"
+    );
+    assert!(dump.contains("first head"), "{dump}");
+    assert!(dump.contains("second head"), "{dump}");
+    assert!(!dump.contains("Error:"), "{dump}");
+    assert_eq!(heads(), before);
 }
 
 /// Where `TestRepo::program` points musubi's state for the repository's machine.
@@ -932,6 +1019,7 @@ fn hub_join_sync_clone_and_list() {
     }
     // A new machine clones the hive by a prefix of its name.
     let gamma = env.repo_handle_at("gamma", &env.root().join("src/gamma"));
+    logs.op_log_of(&gamma);
     let mut clone = alpha.program(musubi());
     // A relative destination, through a parent, lands where it says, in a directory it
     // makes.
@@ -1367,7 +1455,7 @@ fn logs_have_no_colour() {
     let mut daemons = Daemons::default();
     daemons.of(&repo);
     let log = env.root().join("foreground-daemon.log");
-    logs.0.push(log.clone());
+    logs.files.push(log.clone());
     let mut daemon = repo.program(musubi());
     daemon
         .args(["--color=always", "daemon"])
@@ -3804,7 +3892,10 @@ fn the_daemon_starts_through_the_login_service() {
         return;
     }
     let env = TestEnv::with_real_op_times();
-    let logs = Logs(vec![env.root().join("state/daemon.log")]);
+    let logs = Logs {
+        files: vec![env.root().join("state/daemon.log")],
+        repos: Vec::new(),
+    };
     let state = env.root().join("state");
     // Make sure no list shows a hub it can't reach.
     fs::create_dir_all(&state).unwrap();
@@ -3948,7 +4039,10 @@ fn the_hub_runs_through_the_login_service() {
         return;
     }
     // Where launchd sends the hub's output; systemd sends it to the journal.
-    let mut logs = Logs(vec![state.join("hub.log")]);
+    let mut logs = Logs {
+        files: vec![state.join("hub.log")],
+        ..Logs::default()
+    };
     fs::create_dir_all(&state).unwrap();
     // Uninstalls, and so stops the hub, whatever happens below, once the daemons stop.
     let mut uninstall = musubi_as_user(&state, &["hub", "uninstall"]);

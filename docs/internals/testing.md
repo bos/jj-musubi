@@ -316,6 +316,10 @@ and publication checks and their limits.
 
 ### The hub and the CLI
 
+`failure_logs_read_operation_heads_without_changing_them` checks that CLI failure diagnostics
+find a moved repository and read both concurrent operation heads without snapshotting or merging
+them. No hub or daemon runs for this check.
+
 `musubi-sync/tests/it/server.rs` runs one hub serving several hives over the in-memory
 transport: a first copy creating a hive; a copy with the same remote spelled differently
 joining it; a fork getting its own; an unrelated repository refused; requests for a hive the

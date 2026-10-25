@@ -93,3 +93,37 @@ fn rebases_that_form_a_loop_pause_instead_of_breaking_jj() {
     ]);
     assert!(divergent.lines().any(|line| line == "X2"), "{divergent}");
 }
+
+/// The loop goes through work of the stuck machine's that the hive doesn't have yet: beta
+/// commits on Q, rebases P onto its new working copy, and alpha moves Q onto P. Only beta's
+/// rebase and its commit together loop with alpha's, so the advice must still name the
+/// rebase, and reverting it must let beta catch up. Beta described P first: reverting that
+/// would untie the loop too, but leave P divergent.
+#[test]
+fn a_loop_through_unshared_work_names_the_rebase() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    let alpha = hive.repo(0);
+    alpha.jj(&["new", "root()", "-m", "P"]);
+    alpha.jj(&["new", "root()", "-m", "Q"]);
+    alpha.jj(&["new", "root()"]);
+    hive.sync();
+    let [p, q] = ["P", "Q"].map(|m| hive.commit_id(1, m));
+    let beta = hive.repo(1);
+    beta.jj(&["describe", &p, "-m", "P2"]);
+    beta.jj(&["new", &q, "-m", "c3"]);
+    beta.jj(&["new"]);
+    beta.jj(&["rebase", "-r", &hive.commit_id(1, "P2"), "-o", "@"]);
+    let rebase = beta.jj(&["op", "log", "--no-graph", "-n1", "-T", "id.short(12)"]);
+    hive.repo(0).jj(&["rebase", "-s", &q, "-o", &p]);
+    hive.hive.sync(0).unwrap();
+    let err = format!("{:#}", hive.hive.sync(1).unwrap_err());
+    let advice = format!("`jj op revert {rebase}`");
+    assert!(err.contains(&advice), "expected {advice}: {err}");
+    hive.repo(1).jj(&["op", "revert", &rebase]);
+    hive.sync();
+    hive.assert_converged();
+    let divergent = hive
+        .repo(1)
+        .jj(&["log", "-r", "divergent()", "--no-graph", "-T", "commit_id"]);
+    assert_eq!(divergent, "");
+}

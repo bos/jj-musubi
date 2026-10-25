@@ -782,30 +782,43 @@ impl World {
 
     /// Recovers from a sync of node `m` that failed because of a known jj limitation
     /// (docs/internals/races.md): jj can't merge this machine's operations with the hive's, so
-    /// musubi pauses. Recovers as the error says, by reverting the operation it names. Fails
-    /// the case on any other error, or if the error names none, or one already reverted:
-    /// reverting it again would put back what it reverted.
+    /// musubi pauses. Recovers as the error says, by reverting the operation it names, or
+    /// where it names none, as a user given its list would: by reverting the newest, other
+    /// than the recovery's own. Fails the case on any other error, or if the operation to
+    /// revert is one already reverted, or a revert the recovery made: reverting it would put
+    /// back what it reverted.
     fn recover_unmergeable(&mut self, m: usize, what: &str, err: &anyhow::Error) {
-        let culprit = err
+        let found = err
             .chain()
             .find_map(|e| match e.downcast_ref::<NodeError>() {
-                Some(NodeError::Unmergeable { culprit, .. }) => Some(culprit.clone()),
+                Some(NodeError::Unmergeable { ours, culprit, .. }) => {
+                    Some((ours.clone(), culprit.clone()))
+                }
                 _ => None,
             });
-        let Some(culprit) = culprit else {
+        let Some((ours, culprit)) = found else {
             self.fail(&format!("{what} of {} failed: {err:#}", self.machine(m)));
         };
-        let op = culprit.map(|op| op.hex()).filter(|op| {
-            !self.recovery_ops.contains(op) && self.unmergeable_reverts < MAX_UNMERGEABLE_REVERTS
-        });
-        let Some(op) = op else {
+        let ops = self.op_summaries(m);
+        let op = match culprit {
+            Some(op) => Some(op.hex()).filter(|op| !self.recovery_ops.contains(op)),
+            // As `can_undo` does, skip merges, which jj refuses to revert, and workspace
+            // operations, which rewrite no commits, so they can't be what jj fails to
+            // merge, and which strand a working copy when reverted.
+            None => ours.iter().map(|op| op.hex()).find(|op| {
+                !self.recovery_ops.contains(op)
+                    && ops.get(op).is_some_and(|(parents, description)| {
+                        *parents == 1 && !description.to_lowercase().contains("workspace")
+                    })
+            }),
+        };
+        let Some(op) = op.filter(|_| self.unmergeable_reverts < MAX_UNMERGEABLE_REVERTS) else {
             self.fail(&format!(
                 "{what} of {} keeps failing: {err:#}",
                 self.machine(m)
             ));
         };
         self.unmergeable_reverts += 1;
-        let ops = self.op_summaries(m);
         self.jj(m, &["op", "revert", &op]);
         let written: Vec<String> = self
             .op_summaries(m)

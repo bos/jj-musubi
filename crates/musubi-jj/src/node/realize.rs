@@ -666,7 +666,7 @@ impl NodeRepo {
             .map_ok(|op| op.id().clone())
             .try_collect()
             .block_on()?;
-        let mut operations = theirs;
+        let mut operations = theirs.clone();
         operations.push(realized_op.clone());
         if let Err(reason) = self.try_merge(operations) {
             // The same heads and the hive's same operation, as when the sync is retried,
@@ -683,7 +683,14 @@ impl NodeRepo {
                 _ => {
                     memo.searches += 1;
                     // An error, as reading the store, is no answer to keep.
-                    let culprit = self.first_unmergeable(&ours, &realized_op).ok();
+                    // Failing a single revert that will do, one that will help.
+                    let culprit = self
+                        .op_to_revert(&theirs, &ours, &realized_op)
+                        .and_then(|found| match found {
+                            Some(op) => Ok(Some(op)),
+                            None => self.first_unmergeable(&ours, &realized_op),
+                        })
+                        .ok();
                     if let Some(culprit) = &culprit {
                         memo.last = Some(UnmergeableSearch {
                             heads,
@@ -718,15 +725,89 @@ impl NodeRepo {
         Ok(())
     }
 
+    /// Of this machine's operations the hive doesn't have, `ours` (newest first), the newest
+    /// whose revert lets jj merge the hive's operation `realized`: the one to revert. Each
+    /// is reverted as `jj op revert` would, on top of this machine's op heads, `heads`,
+    /// merged, into an operation written but not published (though it rebases immutable
+    /// commits too, where `jj op revert` leaves them), and that merged with `realized`.
+    /// Newest first, since reverting an operation whose result was rewritten since leaves
+    /// it divergent, which can untie the loop where reverting the rewrite would be cleaner.
+    /// Skips merges, which `jj op revert` refuses, operations already reverted, and those
+    /// that leave the commit graph as it was, which can't make a loop. `None` if no single
+    /// revert will do, as when several of this machine's operations each loop with the
+    /// hive's.
+    fn op_to_revert(
+        &self,
+        heads: &[Operation],
+        ours: &[OperationId],
+        realized: &Operation,
+    ) -> Result<Option<OperationId>, NodeError> {
+        // Where `jj op revert` starts: jj's merge of the op heads, in jj's order, as any
+        // command loads them.
+        let mut heads = heads.to_vec();
+        heads.sort_by_key(|op| op.metadata().time.end.timestamp);
+        let Ok(Ok(head)) = catch_jj_panic(|| {
+            Ok(self
+                .loader
+                .merge_operations(heads, None, Some("reconcile divergent operations"), [])
+                .block_on())
+        }) else {
+            return Ok(None);
+        };
+        let head = head.0;
+        let mut ops = vec![];
+        for id in ours {
+            ops.push(self.loader.load_operation(id).block_on()?);
+        }
+        let reverted = reverted_by(&ops);
+        for op in &ops {
+            if op.parent_ids().len() != 1 || reverted.contains(&op.id().hex()) {
+                continue;
+            }
+            let parent = op.parents().block_on()?.remove(0);
+            if op.view().block_on()?.heads() == parent.view().block_on()?.heads() {
+                continue;
+            }
+            let (at_op, at_parent) = (
+                self.loader.load_at(op).block_on()?,
+                self.loader.load_at(&parent).block_on()?,
+            );
+            let revert_op = catch_jj_panic(|| {
+                let mut tx = head.start_transaction();
+                Ok(async {
+                    tx.repo_mut().merge(&at_op, &at_parent).await?;
+                    // `jj op revert` keeps git's refs as they are.
+                    let mut view = tx.repo().view().store_view().clone();
+                    view.git_refs = head.view().store_view().git_refs.clone();
+                    view.git_heads = head.view().store_view().git_heads.clone();
+                    tx.repo_mut().set_view(view);
+                    tx.repo_mut().rebase_descendants().await?;
+                    let reverted = tx
+                        .write(format!("revert operation {}", op.id().hex()))
+                        .await?;
+                    Ok::<_, NodeError>(reverted.leave_unpublished().operation().clone())
+                }
+                .block_on())
+            });
+            let Ok(Ok(revert_op)) = revert_op else {
+                continue;
+            };
+            if self.try_merge(vec![revert_op, realized.clone()]).is_ok() {
+                return Ok(Some(op.id().clone()));
+            }
+        }
+        Ok(None)
+    }
+
     /// Of this machine's operations the hive doesn't have, `ours` (newest first), the oldest
-    /// whose own change jj panics merging with the hive's operation `realized`: the one to
-    /// revert. Each operation's change, from its parent, is merged with `realized` alone,
-    /// both ways round, since the result can depend on which side the merge starts from,
-    /// in a transaction never committed (though the rebased commits are written). Merged
-    /// whole instead, every operation after the one to revert would fail too, carrying its
-    /// change, though reverting them wouldn't help. Skips merges, which `jj op revert`
-    /// refuses, and operations already reverted. `None` if no change panics alone, as when
-    /// the loop needs several of them.
+    /// whose own change jj panics merging with the hive's operation `realized`: one to revert
+    /// first where no single revert will do. Each operation's change, from its parent, is
+    /// merged with `realized` alone, both ways round, since the result can depend on which
+    /// side the merge starts from, in a transaction never committed (though the rebased
+    /// commits are written). Merged whole instead, every operation after the one to revert
+    /// would fail too, carrying its change, though reverting them wouldn't help. Skips
+    /// merges, which `jj op revert` refuses, and operations already reverted. `None` if no
+    /// change panics alone, as when the loop needs several of them.
     fn first_unmergeable(
         &self,
         ours: &[OperationId],
@@ -736,12 +817,7 @@ impl NodeRepo {
         for id in ours.iter().rev() {
             ops.push(self.loader.load_operation(id).block_on()?);
         }
-        // `jj op revert` describes what it writes so.
-        let reverted: HashSet<String> = ops
-            .iter()
-            .filter_map(|op| op.metadata().description.strip_prefix("revert operation "))
-            .map(str::to_owned)
-            .collect();
+        let reverted = reverted_by(&ops);
         let at_realized = self.loader.load_at(realized).block_on()?;
         for op in &ops {
             if op.parent_ids().len() != 1 || reverted.contains(&op.id().hex()) {
@@ -800,9 +876,8 @@ impl NodeRepo {
         };
         let advice = match &culprit {
             Some(op) => format!(
-                "To go on, revert {}, the first of this machine's operations the hive \
-                 doesn't have yet that jj can't merge with the hive's, with \
-                 `jj op revert {}`; musubi then catches up",
+                "To go on, revert this machine's operation {} with `jj op revert {}`: \
+                 musubi then catches up, or names another to revert",
                 describe(op),
                 &op.hex()[..12]
             ),
@@ -820,11 +895,21 @@ impl NodeRepo {
             }
         };
         NodeError::Unmergeable {
+            ours: ours.to_vec(),
             culprit,
             advice,
             reason,
         }
     }
+}
+
+/// The operations that those of `ops` that `jj op revert` wrote reverted, by hex id: it
+/// describes what it writes so.
+fn reverted_by(ops: &[Operation]) -> HashSet<String> {
+    ops.iter()
+        .filter_map(|op| op.metadata().description.strip_prefix("revert operation "))
+        .map(str::to_owned)
+        .collect()
 }
 
 /// The per-machine fields of a local operation's view.

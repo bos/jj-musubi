@@ -67,10 +67,12 @@ pub enum NodeError {
          applied the hive's latest operations here, so jj keeps working. {advice}"
     )]
     Unmergeable {
-        /// The operation to revert: the oldest of this machine's that the hive doesn't have
-        /// whose own change jj can't merge with the hive's operation. `None` where none is
-        /// found: the failing merge is of this machine's own operations, the loop needs
-        /// several of them, or jj fails without panicking, as for a merge commit on the
+        /// This machine's operations the hive doesn't have, newest first.
+        ours: Vec<OperationId>,
+        /// The operation to revert: the newest of this machine's that the hive doesn't have
+        /// whose revert lets jj merge the hive's operation, or failing one, the oldest whose
+        /// own change jj panics merging with it. `None` where none is found, as when the
+        /// failing merge is of this machine's own operations, or for a merge commit on the
         /// root. `advice` then lists them.
         culprit: Option<OperationId>,
         advice: String,

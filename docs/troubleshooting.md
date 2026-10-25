@@ -219,9 +219,8 @@ command again.
 
 jj 0.46 can't merge some combinations of concurrent operations, such as rebases on two
 machines that form a loop. So that every `jj` command here doesn't fail, musubi holds back the
-hive's latest operations on this machine. The message names the operation to revert: the
-first of this machine's operations that the hive doesn't have yet and jj can't merge with the
-hive's. Revert it, and musubi catches up:
+hive's latest operations on this machine. The message names the operation to revert, one of
+this machine's that the hive doesn't have yet. Revert it, and musubi catches up:
 
 ```sh
 jj op revert <id>

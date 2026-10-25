@@ -219,13 +219,20 @@ command again.
 
 jj 0.46 can't merge some combinations of concurrent operations, such as rebases on two
 machines that form a loop. So that every `jj` command here doesn't fail, musubi holds back the
-hive's latest operations on this machine. The message lists this machine's operations that the
-hive doesn't have yet, newest first. Revert the one that conflicts with the hive's, usually
-the newest, and musubi catches up:
+hive's latest operations on this machine. The message names the operation to revert: the
+first of this machine's operations that the hive doesn't have yet and jj can't merge with the
+hive's. Revert it, and musubi catches up:
 
 ```sh
 jj op revert <id>
 ```
+
+Work done since stays, rebased off what the reverted operation rewrote. A change rewritten
+again since, say described, is left divergent, as `jj op revert` leaves it without musubi:
+`jj abandon` the copy you don't want. If another of this machine's operations conflicts
+too, the next sync names it. Where musubi can't find one to name, the message lists this
+machine's operations that the hive doesn't have yet, newest first; revert the one that
+conflicts with the hive's.
 
 [Known jj limitations](internals/races.md#known-jj-limitations) describes the cases jj can't
 merge.

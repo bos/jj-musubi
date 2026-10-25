@@ -64,14 +64,16 @@ pub enum NodeError {
     /// machines' rebases form a loop: jj 0.46 then panics ("graph has cycle").
     #[error(
         "jj cannot merge this machine's operations with the hive's ({reason}). musubi has not \
-         applied the hive's latest operations here, so jj keeps working. To go on, revert this \
-         machine's operation that conflicts with them, one of those the hive doesn't have yet \
-         (newest first: {listed}), with `jj op revert <id>`; musubi then catches up"
+         applied the hive's latest operations here, so jj keeps working. {advice}"
     )]
     Unmergeable {
-        /// This machine's operations the hive doesn't have, newest first.
-        ours: Vec<OperationId>,
-        listed: String,
+        /// The operation to revert: the oldest of this machine's that the hive doesn't have
+        /// whose own change jj can't merge with the hive's operation. `None` where none is
+        /// found: the failing merge is of this machine's own operations, the loop needs
+        /// several of them, or jj fails without panicking, as for a merge commit on the
+        /// root. `advice` then lists them.
+        culprit: Option<OperationId>,
+        advice: String,
         reason: String,
     },
     #[error("repo config {path}: {message}")]

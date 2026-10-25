@@ -32,35 +32,59 @@ fn bookmark_moved_by_a_node_merge_is_exported() {
 /// Two machines rebase concurrently so that their rebases form a loop: alpha moves X, and
 /// Y on it, onto Z, while beta moves Z onto Y. jj 0.46 panics merging such operations
 /// ("graph has cycle"), and again on every load, which would leave every `jj` command on
-/// alpha panicking. So musubi doesn't apply beta's operation on alpha: alpha's sync fails
-/// with a hint, jj keeps working there, and once alpha reverts its rebase, it catches up.
+/// alpha panicking. So musubi doesn't apply beta's operation on alpha: alpha's sync fails,
+/// naming alpha's rebase as the operation to revert, and jj keeps working there. Here alpha
+/// makes a second such loop with P, Q and R, and goes on working on top of both rebases, so
+/// the advice must pick each rebase out of later operations, and the second only once the
+/// first is reverted. Following it, alpha catches up.
 #[test]
 fn rebases_that_form_a_loop_pause_instead_of_breaking_jj() {
     let mut hive = Fixture::new(&["alpha", "beta"]);
     let alpha = hive.repo(0);
-    alpha.jj(&["new", "root()", "-m", "X"]);
-    alpha.jj(&["new", "-m", "Y"]);
-    alpha.jj(&["new", "root()", "-m", "Z"]);
+    for [a, b, c] in [["X", "Y", "Z"], ["P", "Q", "R"]] {
+        alpha.jj(&["new", "root()", "-m", a]);
+        alpha.jj(&["new", "-m", b]);
+        alpha.jj(&["new", "root()", "-m", c]);
+    }
     alpha.jj(&["new", "root()"]);
     hive.sync();
-    let (x, y, z) = (
-        hive.commit_id(0, "X"),
-        hive.commit_id(0, "Y"),
-        hive.commit_id(0, "Z"),
-    );
+    let [x, y, z, p, q, r] = ["X", "Y", "Z", "P", "Q", "R"].map(|m| hive.commit_id(0, m));
+    let last_op = |hive: &Fixture| {
+        hive.repo(0)
+            .jj(&["op", "log", "--no-graph", "-n1", "-T", "id.short(12)"])
+    };
     hive.repo(0).jj(&["rebase", "-s", &x, "-o", &z]);
-    let rebase = hive
-        .repo(0)
-        .jj(&["op", "log", "--no-graph", "-n1", "-T", "id"]);
+    let first = last_op(&hive);
+    // Between the rebases, an operation that carries the first, but can't be what loops.
+    hive.repo(0).jj(&["new", "root()", "-m", "U"]);
+    hive.repo(0).jj(&["rebase", "-s", &p, "-o", &r]);
+    let second = last_op(&hive);
+    // Later work, some of it on what the rebases rewrote.
+    let moved_y = hive.commit_id(0, "Y");
+    hive.repo(0).jj(&["new", &moved_y, "-m", "W"]);
+    hive.repo(0)
+        .jj(&["describe", &hive.commit_id(0, "X"), "-m", "X2"]);
+    hive.repo(0).jj(&["new", "root()", "-m", "V"]);
     hive.repo(1).jj(&["rebase", "-s", &z, "-o", &y]);
+    hive.repo(1).jj(&["rebase", "-s", &r, "-o", &q]);
     hive.hive.sync(1).unwrap();
-    let err = hive.hive.sync(0).unwrap_err();
-    assert!(
-        format!("{err:#}").contains("jj cannot merge this machine's operations"),
-        "{err:#}"
-    );
-    hive.repo(0).jj(&["status"]);
-    hive.repo(0).jj(&["op", "revert", &rebase]);
+    for expected in [first, second] {
+        let err = format!("{:#}", hive.hive.sync(0).unwrap_err());
+        let advice = format!("`jj op revert {expected}`");
+        assert!(err.contains(&advice), "expected {advice}: {err}");
+        hive.repo(0).jj(&["op", "revert", &expected]);
+    }
     hive.sync();
     hive.assert_converged();
+    hive.commit_id(1, "W");
+    // As troubleshooting.md says: X, described since the rebase, is left divergent.
+    let divergent = hive.repo(1).jj(&[
+        "log",
+        "-r",
+        "divergent()",
+        "--no-graph",
+        "-T",
+        r#"description.first_line() ++ "\n""#,
+    ]);
+    assert!(divergent.lines().any(|line| line == "X2"), "{divergent}");
 }

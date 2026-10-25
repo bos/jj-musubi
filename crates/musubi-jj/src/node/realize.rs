@@ -17,6 +17,7 @@ use jj_lib::op_walk;
 use jj_lib::operation::Operation;
 use jj_lib::ref_name::WorkspaceName;
 use jj_lib::ref_name::WorkspaceNameBuf;
+use jj_lib::repo::ReadonlyRepo;
 use jj_lib::repo::Repo as _;
 use jj_lib::repo::RepoLoader;
 use pollster::FutureExt as _;
@@ -659,47 +660,137 @@ impl NodeRepo {
             .try_collect()
             .block_on()?;
         let mut operations = theirs;
-        operations.push(realized_op);
-        // jj merges op heads in order of their end times, and the result can depend on the
-        // order, so try that order. Try the reverse too: equal times sort either way.
+        operations.push(realized_op.clone());
+        if let Err(reason) = self.try_merge(operations) {
+            // Failing to find it leaves the advice to list them.
+            let culprit = self.first_unmergeable(&ours, &realized_op).ok().flatten();
+            return Err(self.unmergeable(&ours, culprit, reason));
+        }
+        Ok(superseded)
+    }
+
+    /// Whether jj can merge `operations` without failing or panicking. jj merges op heads in
+    /// order of their end times, and the result can depend on the order, so this tries that
+    /// order, and the reverse too: equal times sort either way.
+    fn try_merge(&self, mut operations: Vec<Operation>) -> Result<(), String> {
         operations.sort_by_key(|op| op.metadata().time.end.timestamp);
         let reversed: Vec<_> = operations.iter().rev().cloned().collect();
         for order in [operations, reversed] {
-            let merged = catch_jj_panic(|| {
+            catch_jj_panic(|| {
                 self.loader
                     .merge_operations(order, None, Some("reconcile divergent operations"), [])
                     .block_on()
                     .map(|_| ())
                     .map_err(|err| format!("{err:#}"))
-            });
-            merged.map_err(|reason| self.unmergeable(&ours, reason))?;
+            })?;
         }
-        Ok(superseded)
+        Ok(())
+    }
+
+    /// Of this machine's operations the hive doesn't have, `ours` (newest first), the oldest
+    /// whose own change jj panics merging with the hive's operation `realized`: the one to
+    /// revert. Each operation's change, from its parent, is merged with `realized` alone,
+    /// both ways round, since the result can depend on which side the merge starts from,
+    /// in a transaction never committed (though the rebased commits are written). Merged
+    /// whole instead, every operation after the one to revert would fail too, carrying its
+    /// change, though reverting them wouldn't help. Skips merges, which `jj op revert`
+    /// refuses, and operations already reverted. `None` if no change panics alone, as when
+    /// the loop needs several of them.
+    fn first_unmergeable(
+        &self,
+        ours: &[OperationId],
+        realized: &Operation,
+    ) -> Result<Option<OperationId>, NodeError> {
+        let mut ops = vec![];
+        for id in ours.iter().rev() {
+            ops.push(self.loader.load_operation(id).block_on()?);
+        }
+        // `jj op revert` describes what it writes so.
+        let reverted: HashSet<String> = ops
+            .iter()
+            .filter_map(|op| op.metadata().description.strip_prefix("revert operation "))
+            .map(str::to_owned)
+            .collect();
+        let at_realized = self.loader.load_at(realized).block_on()?;
+        for op in &ops {
+            if op.parent_ids().len() != 1 || reverted.contains(&op.id().hex()) {
+                continue;
+            }
+            let parent = op.parents().block_on()?.remove(0);
+            let at_op = self.loader.load_at(op).block_on()?;
+            // A panic is jj failing on a loop. An error doesn't say which operation to
+            // revert: from the parent, this machine's earlier work looks abandoned on the
+            // hive's side, which can itself fail, as for a merge commit on the root. `None`
+            // for an error, which passes over the operation: only a loop panics.
+            let panics = |repo: &Arc<ReadonlyRepo>, other: &Operation| {
+                let merged = catch_jj_panic(|| {
+                    let mut tx = repo.start_transaction();
+                    Ok(async {
+                        tx.merge_operation(&parent, other).await?;
+                        tx.repo_mut().rebase_descendants().await?;
+                        Ok::<_, NodeError>(())
+                    }
+                    .block_on())
+                });
+                match merged {
+                    Ok(Ok(())) => Some(false),
+                    Ok(Err(_)) => None,
+                    Err(_) => Some(true),
+                }
+            };
+            let panicked = match panics(&at_op, realized) {
+                Some(false) => panics(&at_realized, op),
+                other => other,
+            };
+            if panicked == Some(true) {
+                return Ok(Some(op.id().clone()));
+            }
+        }
+        Ok(None)
     }
 
     /// The error for operations of this machine's, `ours` (newest first), that jj can't
-    /// merge with the hive's.
-    pub(super) fn unmergeable(&self, ours: &[OperationId], reason: String) -> NodeError {
+    /// merge with the hive's, `culprit` being the one to revert if known.
+    pub(super) fn unmergeable(
+        &self,
+        ours: &[OperationId],
+        culprit: Option<OperationId>,
+        reason: String,
+    ) -> NodeError {
         const SHOWN: usize = 5;
-        let mut listed: Vec<String> = ours
-            .iter()
-            .take(SHOWN)
-            .map(|id| {
-                let description = self
-                    .loader
-                    .load_operation(id)
-                    .block_on()
-                    .map(|op| op.metadata().description.clone())
-                    .unwrap_or_default();
-                format!("{} ({description})", &id.hex()[..12])
-            })
-            .collect();
-        if ours.len() > SHOWN {
-            listed.push(format!("and {} older", ours.len() - SHOWN));
-        }
+        let describe = |id: &OperationId| {
+            let description = self
+                .loader
+                .load_operation(id)
+                .block_on()
+                .map(|op| op.metadata().description.clone())
+                .unwrap_or_default();
+            format!("{} ({description})", &id.hex()[..12])
+        };
+        let advice = match &culprit {
+            Some(op) => format!(
+                "To go on, revert {}, the first of this machine's operations the hive \
+                 doesn't have yet that jj can't merge with the hive's, with \
+                 `jj op revert {}`; musubi then catches up",
+                describe(op),
+                &op.hex()[..12]
+            ),
+            None => {
+                let mut listed: Vec<String> = ours.iter().take(SHOWN).map(describe).collect();
+                if ours.len() > SHOWN {
+                    listed.push(format!("and {} older", ours.len() - SHOWN));
+                }
+                format!(
+                    "To go on, revert this machine's operation that conflicts with them, one \
+                     of those the hive doesn't have yet (newest first: {}), with \
+                     `jj op revert <id>`; musubi then catches up",
+                    listed.join(", ")
+                )
+            }
+        };
         NodeError::Unmergeable {
-            ours: ours.to_vec(),
-            listed: listed.join(", "),
+            culprit,
+            advice,
             reason,
         }
     }

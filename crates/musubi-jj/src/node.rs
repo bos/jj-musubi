@@ -339,7 +339,7 @@ impl NodeRepo {
                 Err(NodeError::RootParentMerge(err))
             }
             Ok(Err(err)) => Err(err.into()),
-            Err(reason) => Err(self.unmergeable(&self.local_heads()?, reason)),
+            Err(reason) => Err(self.unmergeable(&self.local_heads()?, None, reason)),
         }
     }
 

@@ -6,6 +6,10 @@ change the protocol, so run the same release on the hub and every machine (see
 
 ## Unreleased
 
+- When jj can't merge this machine's operations with the hive's (as when rebases on two
+  machines form a loop), the sync error names the one operation to revert, the first of this
+  machine's that jj can't merge with the hive's, rather than listing every operation the hive
+  doesn't have yet.
 - `jj op restore` (or `jj undo`) back to an operation in which a remote bookmark was
   conflicted, as concurrent fetches on two machines leave one, no longer moves that remote
   bookmark and the bookmark tracking it backwards on every machine. Each machine resolves the

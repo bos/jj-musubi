@@ -6,6 +6,11 @@ change the protocol, so run the same release on the hub and every machine (see
 
 ## Unreleased
 
+- On the hub's machine, `--hub localhost`, or the machine's name as `musubi hub` prints it,
+  now reaches the hub `musubi hub` serves there without `--dir` through its directory rather
+  than over ssh, and so does such a name in `musubi.hub` or saved as the default hub. A copy
+  there that joined by such a name goes on using ssh; run `musubi join --hub localhost` in it
+  to stop.
 - Without `--dir`, `musubi hub` serves `~/musubi-hub`, where it served `musubi-hub` in the
   current directory, unless that is a hub's. To go on serving a hub kept elsewhere, run
   `musubi hub` in its directory, or pass `--dir`, or move it to `~/musubi-hub`.

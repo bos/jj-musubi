@@ -176,8 +176,27 @@ impl Hub {
             .env(
                 "JJ_CONFIG",
                 env.root().join(format!("{name}-state/absent.toml")),
-            )
-            .stdout(Stdio::piped());
+            );
+        Self::spawn(env, logs, name, command, dir)
+    }
+
+    /// The hub `musubi hub` serves by default on `repo`'s machine, `~/musubi-hub`.
+    fn start_on(env: &TestEnv, logs: &mut Logs, repo: &TestRepo) -> Self {
+        let home = env.root().join("home");
+        let mut command = repo.program(musubi());
+        command.arg("hub").current_dir(&home);
+        Self::spawn(env, logs, "hub", command, home.join("musubi-hub"))
+    }
+
+    /// Runs `command`, a hub serving `dir`, and waits until it is serving.
+    fn spawn(
+        env: &TestEnv,
+        logs: &mut Logs,
+        name: &str,
+        mut command: Command,
+        dir: PathBuf,
+    ) -> Self {
+        command.stdout(Stdio::piped());
         logs.attach(env, name, &mut command);
         let mut child = command.spawn().unwrap();
         let stdout = child.stdout.take().unwrap();
@@ -1968,6 +1987,35 @@ fn machines_reach_the_hub_over_ssh() {
             .is_some_and(|log| log.contains("from alpha again") && log.contains("from gamma"))
     });
     assert_eq!(connects() - before, 1);
+}
+
+/// On the hub's machine, `localhost` reaches the hub `musubi hub` serves there by default
+/// without ssh, and names the same hub as its directory does, which `musubi hub` saved as
+/// the default.
+#[cfg(unix)]
+#[test]
+fn localhost_reaches_the_hub_here_without_ssh() {
+    let env = TestEnv::new();
+    let mut logs = Logs::default();
+    let alpha = env.init_repo("alpha");
+    let hub = Hub::start_on(&env, &mut logs, &alpha);
+    let mut daemons = Daemons::default();
+    logs.daemon_of(&env, &alpha);
+    daemons.of(&alpha);
+    alpha.write_file("a", "a");
+    alpha.jj(&["commit", "-m", "start"]);
+    let mut create = alpha.program(musubi());
+    create
+        .args(["create", "--hub", "localhost"])
+        .env("MUSUBI_SSH", "/bin/false");
+    let out = run(&env, &logs, create);
+    assert!(out.contains("Created hive alpha"), "{out}");
+    let list = musubi_in(&env, &logs, &alpha, &["list"]);
+    assert_eq!(list.matches("Hub ").count(), 1, "{list}");
+    assert!(
+        list.contains(&format!("Hub {}:", hub.dir.display())),
+        "{list}"
+    );
 }
 
 /// A `musubi` command with this process's environment, so the real user's service manager

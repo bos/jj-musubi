@@ -333,7 +333,9 @@ struct Member {
     #[arg(long)]
     full_history: bool,
     /// The hub, as `musubi hub` prints it: the name this machine ssh-es to the hub's machine
-    /// by, or on that machine, the hub's directory [default: this machine's default hub].
+    /// by, or on that machine, the hub's directory, or the machine's name or `localhost`, for
+    /// the hub `musubi hub` serves there without `--dir`, reached without ssh [default: this
+    /// machine's default hub].
     #[arg(long, add = ArgValueCandidates::new(completion::hubs))]
     hub: Option<String>,
 }

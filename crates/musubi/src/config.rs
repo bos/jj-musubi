@@ -314,15 +314,22 @@ impl UserState {
     }
 
     /// The hub to use when a command isn't given `--hub`: `musubi.hub` in jj's config, or
-    /// else the one saved.
+    /// else the one saved, as the directory of the hub here if it names this machine.
     pub fn default_hub(&self) -> anyhow::Result<Option<String>> {
-        Ok(Settings::load()?.hub.or_else(|| self.hub.clone()))
+        let hub = Settings::load()?.hub.or_else(|| self.hub.clone());
+        Ok(hub.map(|hub| {
+            if crate::hub::is_local(&hub) {
+                hub
+            } else {
+                crate::hub::on_this_machine(&hub)
+            }
+        }))
     }
 
     /// The hub to use: `given`, or the default.
     pub fn hub(given: Option<&str>) -> anyhow::Result<String> {
         match given {
-            Some(hub) => Ok(crate::hub::absolute(hub)),
+            Some(hub) => Ok(crate::hub::resolve(hub)),
             None => Self::load()?.default_hub()?.context(
                 "no hub given; pass --hub <host>, as `musubi hub` prints (the first join saves \
                  it as the default, and musubi.hub in jj's config chooses one)",

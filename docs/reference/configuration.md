@@ -24,7 +24,7 @@ change them. Set them with `--user`.
 
 | Key | Effect |
 | --- | --- |
-| `musubi.hub` | The hub commands use without `--hub`, in place of the default this machine saved (the first hub it used, or on the hub's own machine, that hub's directory). Give it as `--hub` takes it: the name you ssh to the hub's machine by, or on that machine, the hub's directory, which may start with `~/`. |
+| `musubi.hub` | The hub commands use without `--hub`, in place of the default this machine saved (the first hub it used, or on the hub's own machine, that hub's directory). Give it as `--hub` takes it: the name you ssh to the hub's machine by, or on that machine, the hub's directory, which may start with `~/`. On the hub's machine, its own name or `localhost` means the hub `musubi hub` serves there without `--dir`, reached without ssh. |
 | `musubi.daemon.log` | What the daemon logs, unless `--log` or `RUST_LOG` says. See [Logging](#logging). |
 | `musubi.daemon.socket` | The path of the daemon's control socket, in place of the usual one. See [Files and directories](#files-and-directories). |
 | `musubi.daemon.connections` | `as-needed`, the default, for the daemon to keep one connection to each hub, which every repository there shares, and to open another for each transfer of 16 MiB or more while it lasts. `one` to keep to one connection to each hub, large transfers included, as where each new ssh is costly: through a tunnel that asks you to log in, say. |

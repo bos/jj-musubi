@@ -58,7 +58,9 @@ On this machine, leave out --hub.
 
 The `--hub` it suggests is this machine's host name. If other machines reach it by another
 name, such as an alias in their `~/.ssh/config`, use that instead; `musubi hub --advertise
-<name>` makes the hub print that name from then on.
+<name>` makes the hub print that name from then on. On the hub's own machine, the name it
+prints, or `localhost`, reaches the hub `musubi hub` serves without `--dir` through its
+directory, without ssh.
 
 To serve the same hives later, run `musubi hub` again, with the same `--dir` if you gave one.
 Machines reconnect by themselves.

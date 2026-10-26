@@ -23,9 +23,10 @@ explains hubs, hives, and copies.
 
 `create`, `join`, and `clone` take:
 
-- `--hub <hub>`: the hub, as `musubi hub` prints it. Without it, they use this machine's
-  default hub: the first it used, unless [`musubi.hub`](configuration.md#this-machines)
-  names another.
+- `--hub <hub>`: the hub, as `musubi hub` prints it. On the hub's machine, its name or
+  `localhost` means the hub `musubi hub` serves there without `--dir`, reached without ssh.
+  Without it, they use this machine's default hub: the first it used, unless
+  [`musubi.hub`](configuration.md#this-machines) names another.
 - `--machine <name>`: this machine's name in the hive, which other machines show its working
   copies under. It defaults to jj's `operation.hostname`.
 

@@ -385,16 +385,55 @@ pub fn is_local(hub: &str) -> bool {
     Path::new(hub).is_absolute()
 }
 
-/// `hub` as given to --hub, with a hub directory here made absolute, which given relative
-/// would be taken for an ssh destination.
-pub fn absolute(hub: &str) -> String {
-    if !is_local(hub)
-        && Path::new(hub).join(HUB_FILE).is_file()
+/// `hub` as given to --hub, in the form commands keep: a hub directory here made absolute,
+/// which given relative would be taken for an ssh destination, and a name for this machine
+/// made the directory of its hub, as [`on_this_machine`] does.
+pub fn resolve(hub: &str) -> String {
+    if is_local(hub) {
+        return hub.to_owned();
+    }
+    if Path::new(hub).join(HUB_FILE).is_file()
         && let Ok(dir) = std::path::absolute(hub)
     {
         return dir.display().to_string();
     }
+    on_this_machine(hub)
+}
+
+/// The ssh destination `hub`, or if it names this machine, the directory of the hub
+/// `musubi hub` last served there without `--dir`, which `musubi hub connect` relays to: its
+/// socket reaches it with no ssh to this machine.
+pub fn on_this_machine(hub: &str) -> String {
+    if let Ok(dir) = default_dir()
+        && let Ok(settings) = HubSettings::load(&dir)
+        && names_this_machine(
+            hub,
+            whoami::hostname().ok().as_deref(),
+            settings.advertise.as_deref(),
+        )
+    {
+        return dir.display().to_string();
+    }
     hub.to_owned()
+}
+
+/// Whether the ssh destination `dest` is this machine, as `host` names itself, or the hub
+/// advertises it, by those names or as localhost. With a user, it may be another's account.
+fn names_this_machine(dest: &str, host: Option<&str>, advertise: Option<&str>) -> bool {
+    !dest.contains('@')
+        && ["localhost", "127.0.0.1", "::1"]
+            .into_iter()
+            .chain(host)
+            .chain(advertise)
+            .any(|name| name.eq_ignore_ascii_case(dest))
+}
+
+/// The directory of the hub `musubi hub` last served without `--dir`.
+fn default_dir() -> anyhow::Result<PathBuf> {
+    let path = config::state_dir()?.join("hub.path");
+    let text = fs::read_to_string(&path)
+        .context("no hub has run on this machine; start one with `musubi hub`")?;
+    Ok(PathBuf::from(text.trim()))
 }
 
 /// Connects to `hub`, an ssh destination or the directory of a hub on this machine, giving
@@ -535,12 +574,7 @@ pub async fn ask_within(
 pub fn relay(dir: Option<PathBuf>) -> anyhow::Result<()> {
     let dir = match dir {
         Some(dir) => dir,
-        None => {
-            let path = config::state_dir()?.join("hub.path");
-            let text = fs::read_to_string(&path)
-                .context("no hub has run on this machine; start one with `musubi hub`")?;
-            PathBuf::from(text.trim())
-        }
+        None => default_dir()?,
     };
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -569,4 +603,29 @@ pub fn relay(dir: Option<PathBuf>) -> anyhow::Result<()> {
     // open after the hub closed the connection.
     runtime.shutdown_background();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_for_this_machine_skip_ssh() {
+        let here = |dest| names_this_machine(dest, Some("devbox"), Some("devbox.example.com"));
+        for dest in [
+            "localhost",
+            "127.0.0.1",
+            "::1",
+            "devbox",
+            "DevBox",
+            "devbox.example.com",
+        ] {
+            assert!(here(dest), "{dest}");
+        }
+        // Other machines, and another account here, which may be another user's hub.
+        for dest in ["laptop", "devbox.other.com", "you@localhost"] {
+            assert!(!here(dest), "{dest}");
+        }
+        assert!(!names_this_machine("devbox", None, None));
+    }
 }

@@ -67,7 +67,7 @@ pub struct Args {
 
 pub fn run(ui: &Ui, args: Args, socket: anyhow::Result<Socket>) -> anyhow::Result<()> {
     let hubs = match args.hub {
-        Some(hub) => vec![hub::absolute(&hub)],
+        Some(hub) => vec![hub::resolve(&hub)],
         None => known_hubs()?,
     };
     if hubs.is_empty() {

@@ -121,8 +121,8 @@ impl Socket {
     fn check(&self) -> anyhow::Result<()> {
         if let Some(over) = self.too_long() {
             anyhow::bail!(
-                "the daemon's socket path {self} is {over} bytes longer than this system allows; \
-                 choose a shorter one with MUSUBI_SOCKET or musubi.daemon.socket in jj's config"
+                "the daemon's socket path {self} is {over} bytes too long; set a shorter one with \
+                 MUSUBI_SOCKET or musubi.daemon.socket"
             );
         }
         Ok(())

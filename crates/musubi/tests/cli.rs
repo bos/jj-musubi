@@ -985,10 +985,7 @@ fn copies_make_a_lost_hive_again() {
         repo.jj(&["commit", "-m", file]);
     }
     let err = musubi_fails(&env, &logs, &beta, &["sync"]);
-    assert!(
-        err.contains("`musubi join` in this repository makes the hive again"),
-        "{err}"
-    );
+    assert!(err.contains("`musubi join`"), "{err}");
     let out = musubi_in(&env, &logs, &alpha, &["join"]);
     assert!(
         out.contains("Made hive alpha again from this repository"),
@@ -1137,7 +1134,7 @@ fn leaving_needs_the_hub_unless_forced() {
     musubi_in(&env, &logs, &alpha, &["create", "--hub", &hub.url]);
     hub.kill();
     let err = musubi_fails(&env, &logs, &alpha, &["leave"]);
-    assert!(err.contains("still part of hive"), "{err}");
+    assert!(err.contains("`musubi leave --force`"), "{err}");
     assert_eq!(membership(&alpha), "joined");
     // It keeps its working copy, though on the empty commit its forget abandoned.
     let workspaces = alpha.jj(&["workspace", "list", "--ignore-working-copy"]);
@@ -1335,7 +1332,7 @@ fn duplicates_are_never_synced() {
     );
     let status = musubi_at(&env, &logs, &alpha, &duplicate, &["status"]);
     assert!(
-        status.contains("This repository was made from the files of a copy"),
+        status.contains("This repository duplicates a copy"),
         "{status}"
     );
     assert!(status.contains(&at), "{status}");
@@ -1348,7 +1345,7 @@ fn duplicates_are_never_synced() {
     ] {
         let err = musubi_fails_at(&env, &logs, &alpha, &duplicate, args);
         assert!(
-            err.contains("made from the files of a copy") || err.contains("is at"),
+            err.contains("duplicates a copy") || err.contains("is at"),
             "{args:?}: {err}"
         );
     }

@@ -252,21 +252,19 @@ pub fn not_the_copy(
         Standing::Duplicate | Standing::Unknown => match entry.and_then(whereabouts) {
             Some(path) => (
                 format!(
-                    "this repository was made from the files of a copy in hive {name}, which is \
-                     at {}, so musubi doesn't sync it",
+                    "this repository duplicates a copy in hive {name}, which is at {}, so \
+                     musubi doesn't sync it",
                     path.display()
                 ),
                 Some("`musubi clone` makes another copy".to_owned()),
             ),
             None => (
                 format!(
-                    "this repository was made from the files of a copy in hive {name}, so \
-                     musubi doesn't sync it"
+                    "this repository duplicates a copy in hive {name}, so musubi doesn't sync it"
                 ),
                 Some(
-                    "`musubi clone` makes another copy. If it is the copy, moved or restored \
-                     here, and the one it came from is gone, `musubi join --original` syncs it \
-                     as the copy"
+                    "`musubi clone` makes another copy; if this is that copy, moved here, and \
+                     the original is gone, `musubi join --original` syncs it"
                         .to_owned(),
                 ),
             ),

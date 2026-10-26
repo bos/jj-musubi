@@ -109,11 +109,7 @@ fn connect_command(dest: &str, key: &Path) -> Command {
 fn describe_failure(dest: &str, status: Option<ExitStatus>, stderr: &str) -> String {
     let said = stderr.trim().lines().last().unwrap_or_default().trim();
     match status.and_then(|status| status.code()) {
-        Some(127) => format!(
-            "`musubi` is not on the PATH of non-interactive shells on {dest}; put it there (in \
-             ~/.zshenv, or near the top of ~/.bashrc), or give its absolute path in the \
-             `{REMOTE_COMMAND}` line of ~/.ssh/authorized_keys on {dest}"
-        ),
+        Some(127) => format!("`musubi` is not on the PATH of non-interactive shells on {dest}"),
         Some(255) => format!("ssh to {dest} failed: {said}"),
         // Finished, though the hub never greeted: it closed first, or didn't answer in time.
         Some(0) => format!("the hub on {dest} ended the connection before greeting"),

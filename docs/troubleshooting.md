@@ -112,7 +112,7 @@ history matches. Choose one with `musubi join --hive <name>`, or start a new one
 
 See [Move, copy or restore a repository](guides/manage.md#move-copy-or-restore-a-repository).
 
-### "this repository was made from the files of a copy in hive app, ..."
+### "this repository duplicates a copy in hive app, ..."
 
 The repository is a duplicate, made by copying a copy's files, as with `cp -a`, `rsync` or a
 backup, so musubi doesn't sync it: two repositories syncing as one would overwrite each
@@ -203,7 +203,7 @@ with `musubi clone <hive> <dir>`, if a hive has it, or with `jj git clone` witho
 
 ## Leaving a hive or forgetting a machine
 
-### "couldn't tell hive app that this repository leaves (...), so this repository is still part of hive app; ..."
+### "couldn't tell hive app that this repository leaves: ...; `musubi leave --force` ..."
 
 `musubi leave` couldn't reach the hub to send this copy's last work and its leaving, so the
 repository is still part of the hive, and the daemon syncs it again. That sync takes the
@@ -212,14 +212,14 @@ it's next used. Run `musubi leave` again
 once the hub can be reached, or `musubi leave --force` to leave without telling the hive: the
 other machines then go on showing this copy until one of them runs `musubi forget`.
 
-If the parentheses say "work done in this repository while it left kept it in the hive", a
+If the message says "work done in this repository while it left kept it in the hive", a
 `jj` command ran in the repository during each of `musubi leave`'s three tries. Stop whatever
 is running `jj` there, and run `musubi leave` again.
 
-### "couldn't record what changed in the working copy (...), so this repository is still part of hive app; ..."
+### "couldn't record what changed in the working copy: ...; `musubi leave --force` ..."
 
 `musubi leave` first snapshots the working copy, as any `jj` command would, so that the
-repository leaves with all of its work, and jj couldn't; the parentheses say why. Most often
+repository leaves with all of its work, and jj couldn't; the message says why. Most often
 the working copy is stale, as after another machine rewrote its commit: run
 `jj workspace update-stale`, then `musubi leave` again.
 
@@ -441,7 +441,7 @@ musubi uses a socket only in a directory that belongs to you and that no one els
 to, so that no one else can put a socket of their own in its place. Remove the directory, and
 musubi makes it again, or choose another place for the daemon's socket with `MUSUBI_SOCKET`.
 
-### "... would be ... bytes longer than this system allows" or "... is ... bytes longer ..."
+### "... would be ... bytes longer than this system allows" or "... is ... bytes too long ..."
 
 Unix socket paths are limited to about 100 bytes. For the daemon, choose a shorter path with
 `MUSUBI_SOCKET` or `musubi.daemon.socket` in jj's config. For a hub, serve it from a directory

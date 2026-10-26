@@ -1402,8 +1402,7 @@ fn leave(
                 .ok();
             }
             anyhow::bail!(
-                "couldn't {doing} ({err:#}), so this repository is still part of hive {name}; \
-                 `musubi leave --force` leaves without telling it"
+                "couldn't {doing}: {err:#}; `musubi leave --force` leaves without telling the hive"
             );
         }
         writeln!(ui.warning(), "Couldn't {doing} ({err:#}); leaving anyway.")?;

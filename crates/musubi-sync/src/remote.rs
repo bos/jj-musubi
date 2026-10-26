@@ -61,8 +61,8 @@ impl std::fmt::Display for HiveGone {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Missing => {
-                "the hub has no record of this repository's hive: if it is the right hub, \
-                 `musubi join` in this repository makes the hive again from it"
+                "the hub has no record of this repository's hive; if it's the right hub, \
+                 `musubi join` in this repository makes the hive again"
             }
             Self::Removed => "this repository's hive was removed from the hub",
         })

@@ -151,7 +151,8 @@ machine together:
 2. Install the new `musubi` everywhere, in place of the old one. If its path changes on a
    machine, run `musubi daemon install` again there, since the daemon started at login runs
    the path `daemon install` found.
-3. On the hub's machine, stop `musubi hub` and start it again.
+3. On the hub's machine, stop `musubi hub` and start it again, or if it runs at login, run
+   `musubi hub install` again.
 4. On every machine, run `musubi daemon restart`.
 
 Upgrade `jj` with musubi, not before: each release of musubi works with one release of jj, and

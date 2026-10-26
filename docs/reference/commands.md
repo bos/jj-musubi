@@ -82,6 +82,8 @@ it is running, and otherwise syncs by itself, saying that the daemon isn't runni
 | Command | Use it to |
 | --- | --- |
 | `hub` | Run a hub, in the foreground. `--dir` chooses its directory, and `--advertise` the host name it tells other machines to use. |
+| `hub install` | Run the hub at login from now on, and now, as `hub` would with the same flags. macOS and Linux only. |
+| `hub uninstall` | Stop running the hub at login, and stop it. |
 | `hub rename <hive> <new-name>` | Rename a hive. |
 | `hub remove <hive>` | Remove a hive from the hub. Each machine's copy leaves it as it hears. `rm` is an alias. |
 | `hub connect` | Relay standard input and output to this machine's hub. Other machines run it over ssh; you don't need to. |

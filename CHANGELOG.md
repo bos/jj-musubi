@@ -6,6 +6,11 @@ change the protocol, so run the same release on the hub and every machine (see
 
 ## Unreleased
 
+- `musubi hub install` runs the hub at login, with launchd on macOS and systemd on Linux, as
+  `musubi daemon install` does the daemon; `musubi hub uninstall` stops it. A hub you set up
+  as a systemd unit of your own, as the guide used to say, can go: stop and disable it, then
+  run `musubi hub install` in the hub's directory, or with `--dir`. See
+  [Keep the hub running](docs/guides/set-up.md#keep-the-hub-running).
 - Added `skills/musubi` to help coding agents work in a hive.
   See [Coding agents](docs/guides/working-across-machines.md#coding-agents).
 - musubi tells a copy from a repository made by copying its files, with `cp -a`, `rsync` or a

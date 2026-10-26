@@ -114,14 +114,8 @@ enum Command {
     Hub {
         #[command(subcommand)]
         action: Option<HubAction>,
-        /// The hub's directory [default: ./musubi-hub, or the current directory if it is a
-        /// hub's].
-        #[arg(short, long, value_hint = ValueHint::DirPath)]
-        dir: Option<PathBuf>,
-        /// The host name other machines ssh to this one by, for the commands it prints
-        /// [default: this machine's host name]. Once given, the hub keeps it (in hub.toml).
-        #[arg(long)]
-        advertise: Option<String>,
+        #[command(flatten)]
+        args: HubArgs,
     },
     /// Start a hive on the hub from the repository in the current directory, for other
     /// copies of it to join.
@@ -344,6 +338,19 @@ struct Member {
     hub: Option<String>,
 }
 
+/// Where a hub is, and what it tells other machines, for `hub` and `hub install`.
+#[derive(clap::Args)]
+struct HubArgs {
+    /// The hub's directory [default: ./musubi-hub, or the current directory if it is a
+    /// hub's].
+    #[arg(short, long, value_hint = ValueHint::DirPath)]
+    dir: Option<PathBuf>,
+    /// The host name other machines ssh to this one by, for the commands it prints
+    /// [default: this machine's host name]. Once given, the hub keeps it (in hub.toml).
+    #[arg(long)]
+    advertise: Option<String>,
+}
+
 #[derive(Subcommand)]
 enum Debug {
     /// Translate an operation id between this machine's id and the hive's.
@@ -381,6 +388,18 @@ enum HubAction {
         #[arg(long, add = ArgValueCandidates::new(completion::hubs))]
         hub: Option<String>,
     },
+    /// Run the hub at login from now on (a launchd agent on macOS, a systemd user unit on
+    /// Linux), and now, as this machine's hub.
+    ///
+    /// It serves the directory `musubi hub` would, creating it the first time. On Linux,
+    /// the hub stops when you log out, unless `loginctl enable-linger` keeps your services
+    /// running. Run it again to serve another directory, or after moving `musubi` or `git`.
+    Install {
+        #[command(flatten)]
+        args: HubArgs,
+    },
+    /// Stop running the hub at login, and stop it.
+    Uninstall,
     /// Relay stdin and stdout to this machine's hub: what other machines run over ssh to
     /// reach it.
     Connect {
@@ -530,9 +549,29 @@ fn run(cli: Cli, ui: &Ui) -> anyhow::Result<()> {
     match cli.command.unwrap_or(Command::List { template: None }) {
         Command::Hub {
             action: None,
-            dir,
-            advertise,
+            args: HubArgs { dir, advertise },
         } => hub::serve(ui, hub::ServeArgs { dir, advertise }),
+        Command::Hub {
+            action:
+                Some(HubAction::Install {
+                    args: HubArgs { dir, advertise },
+                }),
+            ..
+        } => hub::install(ui, hub::ServeArgs { dir, advertise }),
+        Command::Hub {
+            action: Some(HubAction::Uninstall),
+            ..
+        } => {
+            if login::uninstall(login::Service::Hub)? {
+                writeln!(
+                    ui.stdout(),
+                    "The hub no longer runs at login, and is stopped."
+                )?;
+            } else {
+                writeln!(ui.stdout(), "The hub wasn't set to run at login.")?;
+            }
+            Ok(())
+        }
         Command::Hub {
             action: Some(HubAction::Connect { dir }),
             ..
@@ -645,7 +684,7 @@ fn run(cli: Cli, ui: &Ui) -> anyhow::Result<()> {
             // The service manager starts the daemon from now on, so stop one started
             // otherwise.
             daemon::stop(&socket).await?;
-            let described = login::install()?;
+            let described = login::install(login::Service::Daemon, None)?;
             daemon::ensure(&socket).await?;
             writeln!(
                 ui.stdout(),
@@ -664,7 +703,7 @@ fn run(cli: Cli, ui: &Ui) -> anyhow::Result<()> {
             action: Some(DaemonAction::Uninstall),
         } => block_on(async {
             let socket = socket()?;
-            let was = login::uninstall()?;
+            let was = login::uninstall(login::Service::Daemon)?;
             daemon::stop(&socket).await?;
             if was {
                 writeln!(
@@ -1166,7 +1205,7 @@ fn start_serving(ui: &Ui, located: &Located, socket: &Socket) -> anyhow::Result<
                 "Synced with the hub (hive at #{}). The daemon keeps it in sync from now on.",
                 synced.seq
             )?;
-            if !login::installed() {
+            if !login::installed(login::Service::Daemon) {
                 writeln!(
                     ui.hint(),
                     "To start the daemon at login too: `musubi daemon install`"
@@ -1715,7 +1754,7 @@ fn list(
         )?;
     }
     let mut out = ui.stdout();
-    let at_login = if login::installed() {
+    let at_login = if login::installed(login::Service::Daemon) {
         "starts at login"
     } else {
         "doesn't start at login; `musubi daemon install` makes it"

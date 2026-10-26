@@ -485,9 +485,9 @@ impl Hive {
 impl Daemon {
     /// The daemon, and the repositories it serves.
     fn gather(socket: anyhow::Result<Socket>) -> (Self, Vec<control::RepoStatus>) {
-        let at_login = login::installed();
+        let at_login = login::installed(login::Service::Daemon);
         let log = if login::managed() {
-            login::log_hint()
+            login::log_hint(login::Service::Daemon)
         } else {
             crate::config::daemon_log()
                 .map_or_else(|err| format!("{err:#}"), |path| path.display().to_string())

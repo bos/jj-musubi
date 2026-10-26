@@ -458,10 +458,11 @@ impl Control for Daemon {
 /// How large the daemon's log grows before a daemon starting starts it over.
 const LOG_LIMIT: u64 = 10 << 20;
 
-/// Starts the daemon's log at `path` over if it has grown large: whether a command started
-/// this daemon or launchd did at login, which never would. In place, since whatever started
-/// it holds it open to append to: one deleted would take the rest of the log with it.
-fn trim_log(path: &Path) {
+/// Starts the daemon's (or the hub's) log at `path` over if it has grown large: whether a
+/// command started this daemon or launchd did at login, which never would. In place, since
+/// whatever started it holds it open to append to: one deleted would take the rest of the log
+/// with it.
+pub fn trim_log(path: &Path) {
     if fs::metadata(path).is_ok_and(|m| m.len() > LOG_LIMIT)
         && let Ok(file) = fs::OpenOptions::new().write(true).open(path)
     {
@@ -1160,7 +1161,7 @@ pub async fn ensure(socket: &Socket) -> anyhow::Result<ControlClient> {
     // Where a service manager runs the daemon, it starts it, so that there is only one.
     let (mut child, log) = if login::managed() {
         login::start()?;
-        (None, login::log_hint())
+        (None, login::log_hint(login::Service::Daemon))
     } else {
         let (child, log) = spawn(socket)?;
         (Some(child), log.display().to_string())

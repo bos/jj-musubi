@@ -70,33 +70,26 @@ it.
 
 ### Keep the hub running
 
-`musubi hub` runs in the foreground until you stop it. To keep it running after you log out,
-run it under `tmux` or `screen`, or as a service. On Linux, a systemd user unit does it, in
-`~/.config/systemd/user/musubi-hub.service`:
-
-```ini
-[Unit]
-Description=musubi hub
-
-[Service]
-WorkingDirectory=%h
-ExecStart=/usr/local/bin/musubi hub
-Restart=on-failure
-
-[Install]
-WantedBy=default.target
-```
-
-Give `ExecStart` the path to your `musubi`. If `git` isn't in `/usr/bin` or `/usr/local/bin`,
-add an `Environment=PATH=...` line that includes it. Then:
+`musubi hub` runs in the foreground until you stop it. To run the hub at login from now on,
+and now, stop it and run instead:
 
 ```sh
-systemctl --user enable --now musubi-hub
-loginctl enable-linger
+musubi hub install
 ```
 
-`loginctl enable-linger` keeps your services running while you're logged out. The hub logs to
-the journal: `journalctl --user -u musubi-hub`.
+This installs a launchd agent on macOS, or a systemd user unit on Linux, which runs `musubi
+hub` in the hub's directory, and again if it fails. It serves the directory `musubi hub`
+would, taking `--dir` and `--advertise` as `musubi hub` does, and prints what to run
+elsewhere. On Linux, the hub stops when you log out unless you also run `loginctl
+enable-linger`; a server you reach only over ssh needs it. Windows has no `hub install`.
+
+The service runs the `musubi` that `hub install` found, with the `PATH` you ran it with. If
+you move `musubi`, or the `git` it runs, or want the hub to serve another directory, run
+`musubi hub install` again. `musubi hub uninstall` stops the hub, and stops it running at
+login.
+
+The hub logs to `hub.log` in musubi's state directory on macOS, and to the journal on Linux:
+`journalctl --user -u musubi-hub`.
 
 ## Share a repository
 

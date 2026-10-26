@@ -870,7 +870,9 @@ be exposed. A `--hub` that isn't an absolute path is an ssh destination, passed 
   where jj's config (which holds the daemon's own settings too) and musubi's state are:
   `JJ_CONFIG`, `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, and `MUSUBI_*` settings. A marker in the state
   directory records the installation, so commands with another `MUSUBI_STATE_DIR` (tests) leave it
-  alone.
+  alone. `musubi hub install` does the same for a hub, on macOS and Linux only: the service runs
+  `musubi hub` in the hub's directory, which install makes a hub's first, so that it is served as
+  the user's one hub, taking the lock and recording its path for `musubi hub connect`.
 - A daemon that a command starts outlives it, so it takes nothing from the command's environment
   that only says where the command ran. git's variables naming a repository (`git rev-parse
   --local-env-vars`), which a git hook has, reach neither the daemon nor any git musubi runs, and

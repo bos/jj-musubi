@@ -8,7 +8,8 @@ itself. `musubi top` shows every machine's syncing, as the hub hears of it.
 
 For more, read the daemon's log: `daemon.log` in musubi's state directory
 (`~/.local/state/musubi` on Linux and macOS), or under systemd, `journalctl --user -u
-musubi`. The hub logs to its terminal. To log more, see
+musubi`. The hub logs to its terminal, or run at login, to `hub.log` in the state directory
+on macOS, and to `journalctl --user -u musubi-hub` on Linux. To log more, see
 [Logging](reference/configuration.md#logging).
 
 Messages below use `devbox` for the hub's machine, `app` for a hive, and `laptop` for a
@@ -64,7 +65,8 @@ musubi gave up waiting for the hub to answer: after half a minute, or a minute w
 ssh may be hanging, on a `ProxyCommand` say, or on a shell startup file on the hub's machine that
 waits for input; the hub may be stuck; or, if the message goes on "cannot run ssh: ...", ssh
 can't run at all. Check that `ssh devbox true` finishes at once from this machine, and see what
-the hub logs: in its terminal, or under systemd in `journalctl --user -u musubi-hub`.
+the hub logs: in its terminal, in `hub.log` in musubi's state directory if launchd runs it, or
+under systemd in `journalctl --user -u musubi-hub`.
 
 ### "the hub on devbox ended the connection before greeting"
 
@@ -407,6 +409,18 @@ heard from once it next syncs, within half a minute.
 
 Nothing keeps this machine's copies in sync. Start the daemon, and to have it start at login
 from now on, run `musubi daemon install`.
+
+### "a hub is already running, serving ...; stop it, then run this again"
+
+`musubi hub install` found a hub running that it didn't start, as `musubi hub` in a terminal
+does. Stop that hub, then run `musubi hub install` again. "a hub is already serving ..." is
+the same, for a hub run with `--dir`.
+
+### "the hub didn't start; see ..."
+
+`musubi hub install` handed the hub to launchd or systemd, but it didn't answer within ten
+seconds. Its log, which the message names, says why. The service manager tries again after a
+failure; `musubi hub uninstall` stops it trying.
 
 ## The daemon
 

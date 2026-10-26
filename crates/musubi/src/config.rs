@@ -220,6 +220,11 @@ pub fn daemon_log() -> anyhow::Result<PathBuf> {
     Ok(state_dir()?.join("daemon.log"))
 }
 
+/// Where the hub launchd runs at login logs.
+pub fn hub_log() -> anyhow::Result<PathBuf> {
+    Ok(state_dir()?.join("hub.log"))
+}
+
 impl UserState {
     pub fn path() -> anyhow::Result<PathBuf> {
         Ok(state_dir()?.join("state.toml"))

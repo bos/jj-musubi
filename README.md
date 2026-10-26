@@ -121,7 +121,8 @@ it, such as `laptop/default@`, and `jj op log` shows what every machine did.
   (`musubi.forget-after`).
 - `musubi daemon install` starts the daemon at login; `musubi daemon start`, `stop` and
   `restart` control it.
-- `musubi hub rename` and `musubi hub remove` manage the hub's hives.
+- `musubi hub install` runs the hub at login; `musubi hub rename` and `musubi hub remove`
+  manage the hub's hives.
 
 The daemon logs to `daemon.log` in musubi's state directory (`~/.local/state/musubi` on Linux
 and macOS), or under systemd, to `journalctl --user -u musubi`. See

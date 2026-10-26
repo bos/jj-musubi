@@ -37,6 +37,8 @@ use tokio::sync::oneshot;
 
 use crate::config;
 use crate::lock::try_lock;
+use crate::login;
+use crate::login::Service;
 use crate::socket;
 use crate::socket::Socket;
 use crate::ssh;
@@ -77,14 +79,58 @@ pub struct ServeArgs {
     pub advertise: Option<String>,
 }
 
-pub fn serve(ui: &Ui, args: ServeArgs) -> anyhow::Result<()> {
+/// The directory `musubi hub` serves: `dir`, or the current directory if it is a hub's, or
+/// `musubi-hub` in it.
+fn choose_dir(dir: Option<PathBuf>) -> io::Result<PathBuf> {
     let cwd = std::env::current_dir()?;
-    let default = args.dir.is_none();
-    let dir = match args.dir {
+    Ok(match dir {
         Some(dir) => dir,
         None if cwd.join(HUB_FILE).exists() => cwd,
         None => cwd.join(DEFAULT_DIR),
+    })
+}
+
+/// The socket of the hub serving `dir`, unless its path is too long to use.
+fn socket_for(dir: &Path) -> anyhow::Result<Socket> {
+    let socket = Socket::hub(dir);
+    if let Some(over) = socket.too_long() {
+        anyhow::bail!(
+            "the hub's socket, {socket}, would be {over} bytes longer than this system allows; \
+             serve the hub from a shorter path"
+        );
+    }
+    Ok(socket)
+}
+
+/// What to run to share a repository through the hub serving `dir`, on other machines and
+/// on this one.
+fn instructions(settings: &HubSettings, dir: &Path) -> anyhow::Result<String> {
+    // What other machines pass as --hub: the name they ssh to this machine by.
+    let public = match &settings.advertise {
+        Some(host) => host.clone(),
+        None => whoami::hostname().unwrap_or_else(|_| "localhost".to_owned()),
     };
+    // And what this one passes, which commands here leave out if it is the default.
+    let local = dir.display().to_string();
+    let default_here = config::UserState::load()?.default_hub()?.as_deref() == Some(local.as_str());
+    let mut text = format!(
+        "To share a repository:               musubi create --hub {public}\n\
+         To add another machine's copy of it: musubi join --hub {public}\n\
+         To make a new copy of a hive:        musubi clone <name> <dir> --hub {public}\n\
+         Other machines reach this hub over ssh: use the name they ssh to this machine by, if \
+         it isn't {public}.\n"
+    );
+    if default_here {
+        text.push_str("On this machine, leave out --hub.\n");
+    } else {
+        writeln!(text, "On this machine, use --hub {local}.").ok();
+    }
+    Ok(text)
+}
+
+pub fn serve(ui: &Ui, args: ServeArgs) -> anyhow::Result<()> {
+    let default = args.dir.is_none();
+    let dir = choose_dir(args.dir)?;
     // One hub per user by default; `--dir` runs more on purpose.
     let state = config::state_dir()?;
     let _user_lock = if default {
@@ -108,6 +154,9 @@ pub fn serve(ui: &Ui, args: ServeArgs) -> anyhow::Result<()> {
     };
     if default {
         fs::write(state.join("hub.path"), dir.display().to_string())?;
+        if let Ok(log) = config::hub_log() {
+            crate::daemon::trim_log(&log);
+        }
     }
     let mut settings = if created {
         HubSettings::default()
@@ -117,13 +166,7 @@ pub fn serve(ui: &Ui, args: ServeArgs) -> anyhow::Result<()> {
     if args.advertise.is_some() {
         settings.advertise = args.advertise;
     }
-    let socket = Socket::hub(&dir);
-    if let Some(over) = socket.too_long() {
-        anyhow::bail!(
-            "the hub's socket, {socket}, would be {over} bytes longer than this system allows; \
-             serve the hub from a shorter path"
-        );
-    }
+    let socket = socket_for(&dir)?;
     settings.save(&dir)?;
     let server = HubServer::open(&dir)?;
     let greeting = match (created, server.hive_count()) {
@@ -133,15 +176,8 @@ pub fn serve(ui: &Ui, args: ServeArgs) -> anyhow::Result<()> {
     };
     // Whoever reads stdout may have stopped already; the hub serves all the same.
     writeln!(ui.stdout(), "{greeting}").ok();
-    // What other machines pass as --hub: the name they ssh to this machine by.
-    let public = match &settings.advertise {
-        Some(host) => host.clone(),
-        None => whoami::hostname().unwrap_or_else(|_| "localhost".to_owned()),
-    };
-    // And what this one passes, which commands here leave out if it is the default.
-    let local = dir.display().to_string();
-    let saved = config::UserState::save_default_hub(&local)?;
-    let default_here = config::UserState::load()?.default_hub()?.as_deref() == Some(local.as_str());
+    let saved = config::UserState::save_default_hub(&dir.display().to_string())?;
+    let instructions = instructions(&settings, &dir)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -161,20 +197,7 @@ pub fn serve(ui: &Ui, args: ServeArgs) -> anyhow::Result<()> {
             if saved {
                 writeln!(text, "Saved this hub as this machine's default.").ok();
             }
-            writeln!(
-                text,
-                "To share a repository:               musubi create --hub {public}\n\
-                 To add another machine's copy of it: musubi join --hub {public}\n\
-                 To make a new copy of a hive:        musubi clone <name> <dir> --hub {public}\n\
-                 Other machines reach this hub over ssh: use the name they ssh to this machine \
-                 by, if it isn't {public}."
-            )
-            .ok();
-            if default_here {
-                writeln!(text, "On this machine, leave out --hub.").ok();
-            } else {
-                writeln!(text, "On this machine, use --hub {local}.").ok();
-            }
+            text.push_str(&instructions);
             let mut out = ui.stdout();
             out.write_all(text.as_bytes())
                 .and_then(|()| out.flush())
@@ -191,6 +214,92 @@ pub fn serve(ui: &Ui, args: ServeArgs) -> anyhow::Result<()> {
         fs::remove_file(path).ok();
     }
     result
+}
+
+/// `musubi hub install`: has the service manager run `musubi hub` in the directory it would
+/// serve, as this user's hub, from login on, and waits for the hub to answer.
+pub fn install(ui: &Ui, args: ServeArgs) -> anyhow::Result<()> {
+    anyhow::ensure!(!cfg!(windows), "musubi can't run a hub at login on Windows");
+    let dir = choose_dir(args.dir)?;
+    fs::create_dir_all(&dir).with_context(|| format!("creating {dir:?}"))?;
+    // The path the hub, run there, finds its directory by, symbolic links resolved, which it
+    // saves as this machine's default hub.
+    let dir = fs::canonicalize(&dir)?;
+    socket_for(&dir)?;
+    let mut settings = if dir.join(HUB_FILE).exists() {
+        HubSettings::load(&dir)?
+    } else {
+        HubSettings::default()
+    };
+    if args.advertise.is_some() {
+        settings.advertise = args.advertise;
+    }
+    // Stop the hub an earlier install runs, which may serve another directory.
+    let stopping = login::uninstall(Service::Hub)?;
+    let state = config::state_dir()?;
+    fs::create_dir_all(&state)?;
+    // The service manager may return before the hub it stops has let go of its lock.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let user_lock = loop {
+        match try_lock(&state.join("hub.lock"))? {
+            Some(lock) => break lock,
+            None if stopping && std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            None => {
+                let serving = fs::read_to_string(state.join("hub.path")).unwrap_or_default();
+                anyhow::bail!(
+                    "a hub is already running, serving {}; stop it, then run this again",
+                    serving.trim()
+                );
+            }
+        }
+    };
+    let Some(dir_lock) = try_lock(&dir.join("hub.lock"))? else {
+        anyhow::bail!(
+            "a hub is already serving {}; stop it, then run this again",
+            dir.display()
+        );
+    };
+    drop((user_lock, dir_lock));
+    // Made a hub's now, the directory is what `musubi hub` serves when run in it.
+    settings.save(&dir)?;
+    let described = login::install(Service::Hub, Some(&dir))?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime
+        .block_on(async {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                match open_local(&dir).await {
+                    Ok(_) => return Ok(()),
+                    Err(err) if tokio::time::Instant::now() >= deadline => return Err(err),
+                    Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+                }
+            }
+        })
+        .with_context(|| {
+            format!(
+                "the hub didn't start; see {}",
+                login::log_hint(Service::Hub)
+            )
+        })?;
+    let mut out = ui.stdout();
+    writeln!(
+        out,
+        "The hub serves {}, and runs at login from now on, through {described}.",
+        dir.display()
+    )?;
+    out.write_all(instructions(&settings, &dir)?.as_bytes())?;
+    if cfg!(target_os = "linux") {
+        writeln!(
+            ui.hint(),
+            "To keep it running while you're logged out, as on a server: `loginctl \
+             enable-linger`"
+        )?;
+    }
+    Ok(())
 }
 
 /// Serves each connection to the hub's socket, once the hub answers requests, relaying what

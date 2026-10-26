@@ -61,10 +61,10 @@ A hive always shares these repo config keys, whatever `musubi.shared-config` say
 | `MUSUBI_STATE_DIR` | One directory for musubi's state and the daemon's socket, in place of the usual ones. With `JJ_CONFIG` for its settings, this runs a second, separate musubi. |
 | `COMPLETE` | Set by your shell to have musubi complete what you type. See [Complete commands in your shell](commands.md#complete-commands-in-your-shell). |
 
-On macOS and Linux, `musubi daemon install` passes your `PATH`, and any `MUSUBI_*`,
-`JJ_CONFIG`, `XDG_CONFIG_HOME`, and `XDG_STATE_HOME` variables set when you run it, to the
-service that starts the daemon: run it again after changing them. On Windows, the daemon
-started at login gets the login's environment.
+On macOS and Linux, `musubi daemon install` (and `musubi hub install`) passes your `PATH`,
+and any `MUSUBI_*`, `JJ_CONFIG`, `XDG_CONFIG_HOME`, and `XDG_STATE_HOME` variables set when
+you run it, to the service that starts the daemon (or the hub): run it again after changing
+them. On Windows, the daemon started at login gets the login's environment.
 
 ## Logging
 
@@ -72,8 +72,9 @@ The hub and the daemon log what they do, at `info`, and only warnings from the j
 they use (`jj_lib`). Other commands log only warnings, since they report what they did
 themselves.
 
-- `musubi hub` logs to its terminal, or under systemd to the journal:
-  `journalctl --user -u musubi-hub`.
+- `musubi hub` logs to its terminal. Run at login by `musubi hub install`, it logs on macOS to
+  `hub.log` in musubi's state directory, starting the log afresh when it starts if it has
+  passed 10 MiB, and on Linux to the journal: `journalctl --user -u musubi-hub`.
 - `musubi daemon`, run in the foreground, logs to its terminal.
 - A daemon started in the background, by a command or at login, logs to `daemon.log` in
   musubi's state directory, starting the log afresh when it starts if it has passed 10 MiB.
@@ -128,7 +129,7 @@ jj config set --user 'colors.machine' yellow
 
 | Path | Holds |
 | --- | --- |
-| State directory: `~/.local/state/musubi` (`$XDG_STATE_HOME/musubi`; `%APPDATA%\musubi` on Windows) | `state.toml`, which lists the copies the daemon syncs, each with its machine key and where it is, and this machine's default hub; `daemon.log`; `hub_key`, the machine's ssh key for reaching hubs; `ssh-agent`, a link to the latest ssh agent, for the daemon; locks. |
+| State directory: `~/.local/state/musubi` (`$XDG_STATE_HOME/musubi`; `%APPDATA%\musubi` on Windows) | `state.toml`, which lists the copies the daemon syncs, each with its machine key and where it is, and this machine's default hub; `daemon.log`; `hub.log`, the log of a hub launchd runs; `hub_key`, the machine's ssh key for reaching hubs; `ssh-agent`, a link to the latest ssh agent, for the daemon; locks. |
 | `.jj/repo/musubi/` in each repository | The repository's hive (`hive.toml`, which records its hive, its jj config id, and whether it joined, left, or its hive was removed), this machine's identity in it (`machine`), its last sync (`status.json`), when the daemon last cleaned up after jj in it (`gc`, and `gc.lock` while it does), and musubi's own record of the hive's operations. Removing it, or copying it into another repository, confuses musubi: use `musubi leave` and `musubi clone`. |
 
 The daemon's control socket is `$XDG_RUNTIME_DIR/musubi/daemon.sock` on Linux (without

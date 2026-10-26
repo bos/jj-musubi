@@ -303,17 +303,14 @@ impl UserState {
         Ok(())
     }
 
-    /// Saves `hub` as this machine's default hub, unless it saved one before. Returns whether
-    /// that made it the default, as it does unless `musubi.hub` names another.
-    pub fn save_default_hub(hub: &str) -> anyhow::Result<bool> {
-        let mut saved = false;
+    /// Saves `hub` as this machine's default hub, unless it saved one before.
+    pub fn save_default_hub(hub: &str) -> anyhow::Result<()> {
         Self::update(|state| {
             if state.hub.is_none() {
                 state.hub = Some(hub.to_owned());
-                saved = true;
             }
         })?;
-        Ok(saved && Settings::load()?.hub.is_none())
+        Ok(())
     }
 
     /// The hub to use when a command isn't given `--hub`: `musubi.hub` in jj's config, or

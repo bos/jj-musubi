@@ -383,11 +383,7 @@ fn hub_join_sync_clone_and_list() {
         "{out}"
     );
     assert!(log(&beta).contains("from alpha"));
-    // A person joined it, so the hive keeps it however long it goes unused, and says so.
-    assert!(
-        out.contains("The hive keeps this copy however long it goes unused, since a person"),
-        "{out}"
-    );
+    // A person joined it, so the hive keeps it however long it goes unused.
     assert_eq!(
         beta.jj(&["config", "get", "musubi.forget-after"]).trim(),
         "never"
@@ -563,7 +559,7 @@ fn hub_join_sync_clone_and_list() {
     );
     assert!(log(&gamma).contains("picked up by the daemon"));
     assert!(
-        out.contains("The hive forgets this copy once it goes unused for 6h, since an agent"),
+        out.contains("The hive forgets this copy once it goes unused for 6h."),
         "{out}"
     );
     wait_for(&logs, "beta to hear gamma's musubi.forget-after", || {
@@ -1647,8 +1643,7 @@ fn a_new_hive_doesnt_inherit_members() {
     let mut daemons = Daemons::default();
     let (_alpha, beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
     musubi_in(&env, &logs, &beta, &["leave"]);
-    let out = musubi_in(&env, &logs, &beta, &["create", "other"]);
-    assert!(out.contains("Forgot 1 copies"), "{out}");
+    musubi_in(&env, &logs, &beta, &["create", "other"]);
     let list = musubi_in(&env, &logs, &beta, &["list"]);
     assert!(list.contains("other  1 machine: beta"), "{list}");
     let workspaces = beta.jj(&["workspace", "list"]);
@@ -1919,10 +1914,6 @@ fn machines_reach_the_hub_over_ssh() {
     assert!(out.contains("Created an ssh key for musubi"), "{out}");
     assert!(
         out.contains("Adding it to ~/.ssh/authorized_keys on hubhost"),
-        "{out}"
-    );
-    assert!(
-        out.contains("Saved hubhost as this machine's default hub"),
         "{out}"
     );
     assert!(out.contains("Created hive alpha"), "{out}");

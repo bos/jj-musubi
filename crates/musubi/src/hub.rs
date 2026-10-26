@@ -179,7 +179,7 @@ pub fn serve(ui: &Ui, args: ServeArgs) -> anyhow::Result<()> {
     };
     // Whoever reads stdout may have stopped already; the hub serves all the same.
     writeln!(ui.stdout(), "{greeting}").ok();
-    let saved = config::UserState::save_default_hub(&dir.display().to_string())?;
+    config::UserState::save_default_hub(&dir.display().to_string())?;
     let instructions = instructions(&settings, &dir)?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -196,13 +196,8 @@ pub fn serve(ui: &Ui, args: ServeArgs) -> anyhow::Result<()> {
             answering.send(()).ok();
             // Whoever reads stdout may stop before the end, as `musubi hub | head -1` does;
             // the hub serves all the same.
-            let mut text = String::new();
-            if saved {
-                writeln!(text, "Saved this hub as this machine's default.").ok();
-            }
-            text.push_str(&instructions);
             let mut out = ui.stdout();
-            out.write_all(text.as_bytes())
+            out.write_all(instructions.as_bytes())
                 .and_then(|()| out.flush())
                 .ok();
             tracing::info!("serving {}", dir.display());

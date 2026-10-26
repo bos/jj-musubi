@@ -861,10 +861,7 @@ fn join(
     if remaking && joined.created {
         write!(out, "Made hive ")?;
         write!(out.labeled("hive"), "{name}")?;
-        writeln!(
-            out,
-            " again from this repository; its other machines fill it as they sync"
-        )?;
+        writeln!(out, " again from this repository")?;
     } else if remaking {
         write!(out, "Hive ")?;
         write!(out.labeled("hive"), "{name}")?;
@@ -1001,14 +998,7 @@ fn become_node(
     // A hive doesn't take on the members of another: they aren't its own until they join it.
     if before.is_none_or(|before| before.hive != hive_id) {
         let keep: std::collections::BTreeSet<String> = joined.present.iter().cloned().collect();
-        let forgotten = node.forget_copies_except(&keep)?;
-        if !forgotten.is_empty() {
-            writeln!(
-                ui.stdout(),
-                "Forgot {} copies this repository's history knows that the hive doesn't have",
-                forgotten.len()
-            )?;
-        }
+        node.forget_copies_except(&keep)?;
     }
     drop(node);
     // Only joining gives the repository a jj config id, which its record and entry name.
@@ -1049,13 +1039,7 @@ fn become_node(
         config.save(&located.repo_path)?;
     }
     set_forget_after(ui, located)?;
-    if UserState::save_default_hub(hub)? {
-        writeln!(ui.stdout(), "Saved {hub} as this machine's default hub.")?;
-        writeln!(
-            ui.hint(),
-            "To choose another: `jj config set --user musubi.hub <hub>`"
-        )?;
-    }
+    UserState::save_default_hub(hub)?;
     Ok(())
 }
 
@@ -1073,55 +1057,29 @@ const AGENT_FORGET_AFTER: &str = "6h";
 /// Sets `musubi.forget-after` in the repository's config, unless jj's config sets it
 /// already: `6h` if an agent is joining, as on a short-lived machine, `never` otherwise. A
 /// value in the user's config, as an agent's image might set, wins, and so does the one
-/// set when the repository last joined. Says which.
+/// set when the repository last joined. Says so if it sets `6h`, which a person watching
+/// an agent may not expect.
 fn set_forget_after(ui: &Ui, located: &Located) -> anyhow::Result<()> {
-    let key = musubi_jj::node::FORGET_AFTER_KEY;
     let settings = settings::load(&located.workspace_root, &located.repo_path)?;
-    let name: jj_lib::config::ConfigNamePathBuf = key.parse()?;
-    let (value, how) = match configured_forget_after(settings.config())? {
-        Some((source, after)) => (
-            musubi_jj::presence::format_forget_after(after),
-            format!("as your {source} config says"),
-        ),
-        None => {
-            let agent = AGENT_VARIABLES
-                .iter()
-                .any(|var| std::env::var_os(var).is_some());
-            let value = if agent { AGENT_FORGET_AFTER } else { "never" };
-            let path = settings::repo_config_path(&located.repo_path)?
-                .context("this repository has no config of its own")?;
-            let mut file = jj_lib::config::ConfigFile::load_or_empty(
-                jj_lib::config::ConfigSource::Repo,
-                &path,
-            )?;
-            file.set_value(&name, value)?;
-            file.save()?;
-            let why = if agent {
-                "since an agent is joining it"
-            } else {
-                "since a person, not an agent, is joining it"
-            };
-            (value.to_owned(), why.to_owned())
-        }
-    };
-    match value.as_str() {
-        "never" => {
-            writeln!(
-                ui.stdout(),
-                "The hive keeps this copy however long it goes unused, {how}."
-            )?;
-            writeln!(
-                ui.hint(),
-                "To have it forgotten once unused for 6 hours: `jj config set --repo {key} 6h`"
-            )?;
-        }
-        after => {
-            writeln!(
-                ui.stdout(),
-                "The hive forgets this copy once it goes unused for {after}, {how}."
-            )?;
-            writeln!(ui.hint(), "To keep it: `jj config set --repo {key} never`")?;
-        }
+    if configured_forget_after(settings.config())?.is_some() {
+        return Ok(());
+    }
+    let name: jj_lib::config::ConfigNamePathBuf = musubi_jj::node::FORGET_AFTER_KEY.parse()?;
+    let agent = AGENT_VARIABLES
+        .iter()
+        .any(|var| std::env::var_os(var).is_some());
+    let value = if agent { AGENT_FORGET_AFTER } else { "never" };
+    let path = settings::repo_config_path(&located.repo_path)?
+        .context("this repository has no config of its own")?;
+    let mut file =
+        jj_lib::config::ConfigFile::load_or_empty(jj_lib::config::ConfigSource::Repo, &path)?;
+    file.set_value(&name, value)?;
+    file.save()?;
+    if agent {
+        writeln!(
+            ui.stdout(),
+            "The hive forgets this copy once it goes unused for {AGENT_FORGET_AFTER}."
+        )?;
     }
     Ok(())
 }
@@ -1202,15 +1160,9 @@ fn start_serving(ui: &Ui, located: &Located, socket: &Socket) -> anyhow::Result<
         Served::Synced(synced) => {
             writeln!(
                 ui.stdout(),
-                "Synced with the hub (hive at #{}). The daemon keeps it in sync from now on.",
+                "Synced with the hub (hive at #{}).",
                 synced.seq
             )?;
-            if !login::installed(login::Service::Daemon) {
-                writeln!(
-                    ui.hint(),
-                    "To start the daemon at login too: `musubi daemon install`"
-                )?;
-            }
             Ok(())
         }
         // Unless it's a failure no retry gets past, as the daemon recorded before it answered.
@@ -1398,10 +1350,6 @@ fn leave_path(ui: &Ui, path: &Path, socket: &Socket) -> anyhow::Result<()> {
         "This machine no longer syncs the copy at {}.",
         entry.path.display()
     )?;
-    writeln!(
-        ui.hint(),
-        "The other machines show it until it is forgotten: `musubi forget` there does that."
-    )?;
     Ok(())
 }
 
@@ -1473,10 +1421,7 @@ fn leave(
     let mut out = ui.stdout();
     write!(out, "This repository has left hive ")?;
     write!(out.labeled("hive"), "{name}")?;
-    writeln!(
-        out,
-        ", and no longer syncs with it. Everything it has stays."
-    )?;
+    writeln!(out, ".")?;
     Ok(())
 }
 
@@ -1603,7 +1548,7 @@ fn forget(ui: &Ui, start: &Path, machine: &str, socket: &Socket) -> anyhow::Resu
         let mut out = ui.stdout();
         write!(out, "Forgot ")?;
         write!(out.labeled("machine"), "{machine}")?;
-        writeln!(out, ": the other machines stop showing it as they sync.")?;
+        writeln!(out)?;
     }
     drop(node);
     sync(ui, start, socket)

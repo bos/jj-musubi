@@ -330,10 +330,9 @@ impl UserState {
     pub fn hub(given: Option<&str>) -> anyhow::Result<String> {
         match given {
             Some(hub) => Ok(crate::hub::resolve(hub)),
-            None => Self::load()?.default_hub()?.context(
-                "no hub given; pass --hub <host>, as `musubi hub` prints (the first join saves \
-                 it as the default, and musubi.hub in jj's config chooses one)",
-            ),
+            None => Self::load()?
+                .default_hub()?
+                .context("no hub given; pass --hub <host>, or run `musubi hub` to serve one here"),
         }
     }
 

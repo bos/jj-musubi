@@ -20,8 +20,9 @@ machine.
 ### "no hub given; pass --hub <host>, ..."
 
 This machine has no default hub yet; it saves one the first time it creates, joins, or clones
-a hive. Pass `--hub` with the name you ssh to the hub's machine by, as `musubi hub` printed,
-or set a default with `jj config set --user musubi.hub <hub>`.
+a hive, or runs `musubi hub`. Pass `--hub` with the name you ssh to the hub's machine by, as
+`musubi hub` printed; or, to make this machine the hub, run `musubi hub` here, after which
+commands here need no `--hub`. `jj config set --user musubi.hub <hub>` also sets a default.
 
 ### "`musubi` is not on the PATH of non-interactive shells on devbox"
 

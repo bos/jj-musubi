@@ -779,10 +779,10 @@ the hub](#replacing-the-hub)). A removed hive's store is emptied a day later, an
 "removed", and they leave it, keeping what they have. A lost hive, which has no tombstone, can be
 made again. Corrupt stores' directories end in `.corrupt`, and their hives are still there.
 
-Without `--dir` the hub serves `./musubi-hub`, or the current directory if it is a hub's, and
-takes a lock in the user's state directory, so that a second hub started the same way says where
-the first one is instead of starting. `--dir` runs more hubs on purpose, and a lock in each hub's
-directory stops two hubs serving the same one.
+Without `--dir` the hub serves the current directory if it is a hub's, or else `~/musubi-hub`,
+and takes a lock in the user's state directory, so that a second hub started the same way says
+where the first one is instead of starting. `--dir` runs more hubs on purpose, and a lock in each
+hub's directory stops two hubs serving the same one.
 
 The hub listens on a local socket that only its owner can reach, `run/hub.sock` in its directory,
 in a subdirectory only its owner can open (on Windows, a named pipe named after the directory),

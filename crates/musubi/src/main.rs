@@ -341,8 +341,8 @@ struct Member {
 /// Where a hub is, and what it tells other machines, for `hub` and `hub install`.
 #[derive(clap::Args)]
 struct HubArgs {
-    /// The hub's directory [default: ./musubi-hub, or the current directory if it is a
-    /// hub's].
+    /// The hub's directory [default: the current directory if it is a hub's, or else
+    /// ~/musubi-hub].
     #[arg(short, long, value_hint = ValueHint::DirPath)]
     dir: Option<PathBuf>,
     /// The host name other machines ssh to this one by, for the commands it prints

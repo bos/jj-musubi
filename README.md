@@ -66,7 +66,7 @@ On the hub's machine:
 musubi hub
 ```
 
-It creates `./musubi-hub` the first time, and prints what to run on the other machines:
+It creates `~/musubi-hub` the first time, and prints what to run on the other machines:
 
 ```text
 Created a new hub in /home/you/musubi-hub

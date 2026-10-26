@@ -47,7 +47,7 @@ use crate::ui::Ui;
 /// What marks a directory as a hub's, and holds its settings.
 const HUB_FILE: &str = "hub.toml";
 
-/// The directory `musubi hub` uses without `--dir`.
+/// The directory in the home directory that `musubi hub` uses without `--dir`.
 const DEFAULT_DIR: &str = "musubi-hub";
 
 /// The largest message the hub takes. Larger attachments move in chunks of about this size
@@ -79,15 +79,18 @@ pub struct ServeArgs {
     pub advertise: Option<String>,
 }
 
-/// The directory `musubi hub` serves: `dir`, or the current directory if it is a hub's, or
-/// `musubi-hub` in it.
-fn choose_dir(dir: Option<PathBuf>) -> io::Result<PathBuf> {
+/// The directory `musubi hub` serves: `dir`, or the current directory if it is a hub's, as
+/// where `musubi hub install` runs it, or `~/musubi-hub`.
+fn choose_dir(dir: Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    if let Some(dir) = dir {
+        return Ok(dir);
+    }
     let cwd = std::env::current_dir()?;
-    Ok(match dir {
-        Some(dir) => dir,
-        None if cwd.join(HUB_FILE).exists() => cwd,
-        None => cwd.join(DEFAULT_DIR),
-    })
+    if cwd.join(HUB_FILE).exists() {
+        return Ok(cwd);
+    }
+    let home = etcetera::home_dir().context("no home directory; give the hub's with --dir")?;
+    Ok(home.join(DEFAULT_DIR))
 }
 
 /// The socket of the hub serving `dir`, unless its path is too long to use.

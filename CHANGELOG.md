@@ -6,6 +6,9 @@ change the protocol, so run the same release on the hub and every machine (see
 
 ## Unreleased
 
+- Without `--dir`, `musubi hub` serves `~/musubi-hub`, where it served `musubi-hub` in the
+  current directory, unless that is a hub's. To go on serving a hub kept elsewhere, run
+  `musubi hub` in its directory, or pass `--dir`, or move it to `~/musubi-hub`.
 - `musubi hub install` runs the hub at login, with launchd on macOS and systemd on Linux, as
   `musubi daemon install` does the daemon; `musubi hub uninstall` stops it. A hub you set up
   as a systemd unit of your own, as the guide used to say, can go: stop and disable it, then

@@ -45,7 +45,7 @@ Then, on the hub's machine:
 musubi hub
 ```
 
-The first time, it creates `./musubi-hub` and prints what to run elsewhere:
+The first time, it creates `~/musubi-hub` and prints what to run elsewhere:
 
 ```text
 Created a new hub in /home/you/musubi-hub
@@ -61,8 +61,8 @@ The `--hub` it suggests is this machine's host name. If other machines reach it 
 name, such as an alias in their `~/.ssh/config`, use that instead; `musubi hub --advertise
 <name>` makes the hub print that name from then on.
 
-To serve the same hives later, run `musubi hub` again from the same directory, or from inside
-`musubi-hub`. Machines reconnect by themselves.
+To serve the same hives later, run `musubi hub` again, with the same `--dir` if you gave one.
+Machines reconnect by themselves.
 
 `--dir` keeps the hub's directory somewhere else. Leave it out unless you run more than one
 hub on the machine: other machines' ssh connections reach only the hub last started without

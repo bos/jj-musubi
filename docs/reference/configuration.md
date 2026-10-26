@@ -140,7 +140,7 @@ directory must belong to you and be writable by no one else, or musubi won't use
 
 ### On the hub's machine
 
-The hub's directory, `musubi-hub` by default, holds:
+The hub's directory, `~/musubi-hub` by default, holds:
 
 | Path | Holds |
 | --- | --- |

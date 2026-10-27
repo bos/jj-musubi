@@ -1,12 +1,14 @@
 # User guide
 
-musubi keeps a jj repository in sync across your machines. These guides explain how to set it
-up, what to expect day to day, and what to do when something goes wrong.
+musubi keeps your jj repositories on every machine you use, always up to date. These guides
+explain how to set it up, what to expect day to day, and what to do when something goes wrong.
 
 ## Start here
 
+- [What you get](../README.md#what-you-get)
 - [Quick start](../README.md#quick-start)
 - [How musubi works](how-it-works.md)
+- [How musubi keeps your work safe](safety.md)
 
 ## Guides
 

@@ -1,8 +1,62 @@
 # Work across machines
 
 Once a repository is in a hive, keep using `jj` as you always do. This guide covers what
-changes when other machines share it: seeing their work, stale working copies, undo,
-concurrent changes, and the settings machines share.
+changes when other machines share it: picking up on another machine, coding agents, seeing
+other machines' work, stale working copies, undo, concurrent changes, and the settings machines
+share.
+
+## Pick up on another machine
+
+Close the laptop, and sit down at the desktop. In the same repository there, the laptop's
+working copy is already in `jj log`, as `laptop/default@`. Carry on from it:
+
+```sh
+jj new laptop/default@   # a new change on top of the laptop's
+```
+
+When you open the laptop again, its daemon reconnects and brings in what you did on the
+desktop; there's nothing to run.
+
+What reaches the desktop is the laptop's work as of its last `jj` command, since that's when
+jj records edits. To have jj record them each time you save a file, without running a command,
+turn on its [watchman](https://facebook.github.io/watchman/) trigger, with watchman installed:
+
+```sh
+jj config set --user fsmonitor.backend watchman
+jj config set --user fsmonitor.watchman.register-snapshot-trigger true
+```
+
+Everything jj records reaches every machine, so keep secrets in ignored files.
+
+## Coding agents
+
+Agents working on several machines in one repository see each other's work as you do. Give
+each agent on a machine its own jj workspace, with `jj workspace add`, so that agents don't
+share files; every machine then shows each agent's working copy, as `devbox/default@` or
+`laptop/agent-2@`. From any machine:
+
+```sh
+jj log -r 'working_copies()'   # what every agent on every machine is working on
+jj diff -r devbox/default@     # review one agent's change
+jj new devbox/default@         # build on it here, or hand it to another agent
+```
+
+`musubi status` answers at once, so an agent can check that its repository syncs, and see the
+other machines' working copies, before it starts. A copy that an agent joins or clones is
+forgotten by itself after 6 hours unused (`musubi.forget-after`), so a short-lived devbox
+doesn't linger in every machine's `jj log`.
+
+Another machine's rewrites can repeatedly make a coding agent's working copy stale. The
+[`musubi` skill](../../skills/musubi/SKILL.md) helps agents choose a stable base, avoid
+disrupting other machines, and handle stale copies and sync failures.
+
+To install it, link it into your agent's skills directory. Replace `~/src/jj-musubi` with the
+path to your clone:
+
+```sh
+ln -s ~/src/jj-musubi/skills/musubi ~/.claude/skills/musubi   # Claude Code
+ln -s ~/src/jj-musubi/skills/musubi ~/.codex/skills/musubi    # Codex
+```
 
 ## See what other machines are doing
 
@@ -156,20 +210,6 @@ values. A machine whose clock is wrong can win when it shouldn't.
 
 A machine joining a hive takes the hive's value for each setting the hive has, and adds the
 others it has, such as a remote the hive lacks.
-
-## Coding agents
-
-Another machine's rewrites can repeatedly make a coding agent's working copy stale. The
-[`musubi` skill](../../skills/musubi/SKILL.md) helps agents choose a stable base, avoid
-disrupting other machines, and handle stale copies and sync failures.
-
-To install it, link it into your agent's skills directory. Replace `~/src/jj-musubi` with the
-path to your clone:
-
-```sh
-ln -s ~/src/jj-musubi/skills/musubi ~/.claude/skills/musubi   # Claude Code
-ln -s ~/src/jj-musubi/skills/musubi ~/.codex/skills/musubi    # Codex
-```
 
 ## Things to avoid
 

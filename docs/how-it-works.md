@@ -3,7 +3,32 @@
 musubi makes several machines' copies of one jj repository behave like workspaces of a single
 repository. This page explains what moves between machines, what stays on each, and what you
 see when machines change the same thing at once. For the design behind it, see
-[docs/internals/design.md](internals/design.md).
+[docs/internals/design.md](internals/design.md), and for how it's checked, [How musubi keeps
+your work safe](safety.md).
+
+## The short version
+
+- **Every machine has the whole repository.** Each machine's copy is an ordinary jj
+  repository, with every commit, bookmark and change from every machine. You can unplug any of
+  them and keep working. Other machines' working copies show up in it as workspaces, such as
+  `laptop/default@`: names for the commit each is on, not bookmarks, so nothing of theirs is
+  ever pushed unless you push it.
+- **Your work moves when jj records it.** jj records your edits each time you run a `jj`
+  command, and musubi sends each record to the other machines within a second or so. Edits
+  you've made since your last `jj` command stay on that machine until the next one, or until
+  [jj records them by itself](guides/working-across-machines.md#pick-up-on-another-machine).
+- **Your files are never touched.** musubi never writes to your working copy. When another
+  machine rewrites the commit you're on, jj says so, and you update your files when you choose.
+- **You still push and fetch.** musubi never talks to GitHub or any other remote for you. When
+  you push or fetch on one machine, though, every machine sees the result.
+- **The hub is a meeting point, not a master.** It keeps a copy of each repository it serves,
+  in its directory on its machine, and decides the order in which machines' work lands. Other
+  machines reach it over ssh, with a key that can reach the hub and nothing else on its
+  machine. It holds nothing the machines don't have too. Anyone who can reach the hub can read
+  and write every repository it serves, so treat it as you would any machine with your
+  repositories on it.
+- **Leaving costs nothing.** `musubi leave` takes a repository out of its hive, and it keeps
+  everything it has, its working copy included.
 
 ## Hubs, hives, and machines
 
@@ -37,10 +62,12 @@ daemon reconnects by itself after a network change or a sleep.
 
 ## What moves between machines
 
-musubi replicates jj's [operation log](https://docs.jj-vcs.dev/latest/operation-log/), not
-just branches. Every `jj` command that changes the repository records an operation; the daemon
-sends each new one, with the commits it needs, to the hub, which passes it on to the other
-machines. It shows up in `jj op log` there within a second or so.
+Every `jj` command that changes the repository records what it did as an operation, in jj's
+[operation log](https://docs.jj-vcs.dev/latest/operation-log/): the record that `jj undo` takes
+back and `jj op log` shows. musubi syncs that record, not just branches. The daemon sends each
+new operation, with the commits it needs, to the hub, which passes it on to the other
+machines, within a second or so. So every machine has not only the same commits, but the same
+history of how they got there.
 
 | Shared across the hive | Each machine's own |
 | --- | --- |
@@ -57,7 +84,7 @@ repo config the hive shares, and how machines agree on them.
 Every snapshot of a working copy replicates too, so a file that jj snapshots reaches every
 machine in the hive, even if you abandon it at once. Keep secrets in ignored files.
 
-Because the operation log replicates, the rest of jj's behaviour carries across machines:
+Because that history is shared, the rest of jj's behaviour carries across machines:
 
 - `jj op log` shows what every machine did, and when.
 - `jj evolog` follows a change through rewrites made anywhere.

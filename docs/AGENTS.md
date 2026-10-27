@@ -6,8 +6,16 @@ messages musubi prints.
 
 ## Audience and vocabulary
 
-Readers know jj, git, and ssh. Use jj's terms, such as operation, working copy, workspace,
-bookmark, and change id, without explaining them again.
+Readers know git and ssh, and some jj. In the guides and the reference, use jj's terms, such as
+working copy, workspace, bookmark, and change id, without explaining them again.
+
+The README, [how-it-works.md](how-it-works.md), [safety.md](safety.md) and the website's
+landing page are also for readers who know git and have barely used jj, and who will leave
+unless they quickly see what musubi does for them. Lead with what they get, in their own
+work: picking up on another machine, agents on several machines, fetching and pushing once.
+Say what a jj term means in a few words the first time it matters, and don't lead with the
+operation log, which few jj users look at: it's how musubi works, not why anyone wants it.
+Don't hedge about how new musubi is.
 
 Use musubi's own nouns consistently:
 
@@ -36,6 +44,9 @@ a command, rather than repeating its flags.
 
 - [README.md](../README.md): what musubi is, installing, and the quick start.
 - [how-it-works.md](how-it-works.md): what replicates, and how machines' changes combine.
+- [safety.md](safety.md): what musubi promises, and how the proofs and tests check it, for
+  readers deciding whether to trust it. Keep it in step with `docs/internals/` and
+  `formal/README.md`, which it summarizes.
 - `guides/`: workflows, step by step, upgrading included.
 - `reference/`: every command, setting, file, and environment variable.
 - [troubleshooting.md](troubleshooting.md): messages users see, and what to do about each.

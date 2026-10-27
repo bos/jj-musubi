@@ -1,20 +1,66 @@
 # jj-musubi
 
-Keeps a [jj](https://jj-vcs.dev) repository in sync across your machines. Commit, rebase, or
-abandon on one machine, and the operation appears in `jj op log` on the others within a second
-or so. A machine that was offline catches up when it reconnects.
+Your [jj](https://jj-vcs.dev) repositories on every machine you use, always up to date. Work
+on your laptop, close the lid, and sit down at your desktop: the change you were working on is
+already there. No pushing work in progress to GitHub, no fetching it back, no wondering which
+machine is behind.
 
-musubi replicates jj's operation log, not just branches, so `jj op log`, `jj undo`, and
-divergence work across machines as they do across workspaces on one machine. It never touches
-your files: when another machine rewrites the commit your working copy is on, jj reports the
-working copy stale, and `jj workspace update-stale` updates it, or [jj can do that
-itself][stale].
+musubi is for jj, the git-compatible version control system, and all it needs is ssh to one
+machine that's usually on.
 
-[stale]: docs/guides/working-across-machines.md#when-another-machine-rewrites-your-working-copy
+Engineers at Meta get this from Sapling's Commit Cloud, which uploads every commit as soon as
+it's made, and engineers at Google have something like it in an internal jj server that keeps
+their repositories' history in the cloud. musubi brings that to your own repositories, on your
+own machines, over plain ssh, with no service to sign up for.
 
-Status: early. The protocol is proved correct in the Lean theorem prover (`formal/`), and the
-implementation is tested against that model and against real repositories, but musubi hasn't
-yet been used in earnest.
+## What you get
+
+- **Agents on every machine, and their work everywhere.** Run Claude Code or Codex on your
+  laptop, your desktop, and a couple of devboxes, all in one repository. Every agent's work
+  shows up in `jj log` on every machine as it goes, as `devbox/default@` or `laptop/agent-2@`:
+  that machine's working copy, which you can look at and build on like any commit. One
+  `jj log` shows what every agent everywhere is doing. Review an agent's change from wherever
+  you are, hand it to an agent on another machine with `jj new devbox/default@`, and never ask
+  "which machine was that on?" again. A [skill for
+  agents](skills/musubi/SKILL.md) keeps them from tripping over each other.
+- **Every machine current, all the time.** Laptop, desktop, home server: each has every
+  commit, bookmark and change you've made on any of them, within a second or so of the `jj`
+  command that made it, and a machine that was asleep catches up within seconds of waking. You
+  never have to remember which one is behind.
+- **Close the lid, pick up anywhere.** Shut your laptop at work and go home. Your desktop
+  already has everything up to your last `jj` command, as `laptop/default@`;
+  `jj new laptop/default@` and carry on. Open the laptop again and it catches up with the
+  evening's work within seconds of waking.
+- **GitHub, everywhere at once.** `jj git fetch` on one machine and every machine has the new
+  `main@origin`. `jj git push` from the desktop and the laptop shows it pushed. Fetch once,
+  not once per machine.
+- **Undo that follows you.** jj records every command you run, so that `jj undo` can take any
+  of them back. musubi shares that record, so a mistake made on one machine can be put right
+  from any other.
+- **Your files stay yours.** musubi never writes to your working copy. When another machine
+  rewrites the commit you're on, jj says so, and `jj workspace update-stale` brings your files
+  up to date when you're ready.
+- **Offline is fine.** jj never needs the hub. Work on a plane, and the laptop catches up when
+  it lands.
+- **Built to be trusted.** The sync protocol is modelled and proved correct in the Lean theorem
+  prover, the Rust code is checked against that model step by step, and a search runs real jj
+  commands on real repositories through crashes, lost connections and power cuts. [How musubi
+  keeps your work safe](docs/safety.md) tells the story.
+
+Here a change described on the laptop shows up on the desktop a second later:
+
+```text
+laptop:~/src/app$ jj describe -m "Add retry logic to the fetcher"
+Working copy  (@) now at: kkmpptxz 8d0b4e11 Add retry logic to the fetcher
+Parent commit (@-)      : zzzzzzzz 00000000 (empty) (no description set)
+
+desktop:~/code/app$ jj log
+@  vruxwmqv me@example.com 2026-10-23 10:14:02 default@ 3f2a1c9e
+│  (empty) (no description set)
+│ ○  kkmpptxz me@example.com 2026-10-23 10:14:01 laptop/default@ 8d0b4e11
+├─╯  Add retry logic to the fetcher
+◆  zzzzzzzz root() 00000000
+```
 
 ## Install
 
@@ -106,14 +152,17 @@ To keep the daemon running across reboots, run `musubi daemon install` on each m
 
 ## Day to day
 
-Keep using jj. `jj log` shows each other machine's working copy as a workspace named after
-it, such as `laptop/default@`, and `jj op log` shows what every machine did.
+Keep using jj as you always have; there's nothing to push, fetch or remember. `jj log` shows
+each other machine's working copy as a workspace named after it, such as `laptop/default@`,
+which you can diff, build on, or rebase like any other revision. musubi's own commands are for
+checking on it:
 
 - `musubi` (or `musubi list`) shows the hub's hives, this machine's copies of them, and
   whether each is syncing.
 - `musubi status` shows the current repository's hive, whether it syncs and whether the hub
   has its latest work, every machine's working copies, and the daemon, and warns of what's
   wrong. It answers at once, for scripts and agents to ask.
+- `musubi top` shows the hub's traffic and every machine's syncing, live.
 - `musubi sync` syncs the current repository now; `musubi leave` takes it out of its hive.
 - `musubi forget <machine>` forgets a machine that went away without leaving. A copy that a
   coding agent (Claude Code or Codex) joined is forgotten by itself after 6 hours unused
@@ -130,10 +179,12 @@ and macOS), or under systemd, to `journalctl --user -u musubi`. See
 ## Learn more
 
 - [How musubi works](docs/how-it-works.md): what replicates, and what stays on each machine.
+- [How musubi keeps your work safe](docs/safety.md): the proofs, the tests, and the design
+  choices that keep every machine's work intact.
 - [Set up a hub and machines](docs/guides/setup.md): ssh, keeping the hub running, forks,
   machine names, and more than one repository.
-- [Work across machines](docs/guides/working-across-machines.md): stale working copies, undo,
-  concurrent changes, and shared remotes and config.
+- [Work across machines](docs/guides/working-across-machines.md): picking up on another
+  machine, coding agents, stale working copies, undo, and shared remotes and config.
 - [Manage hives, machines, and hubs](docs/guides/manage.md): leaving, renaming, upgrading, and
   replacing a hub.
 - [Troubleshooting](docs/troubleshooting.md)

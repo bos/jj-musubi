@@ -167,7 +167,7 @@ enum Command {
         /// The hive: a name, a prefix of one, or an id.
         #[arg(add = ArgValueCandidates::new(completion::hives))]
         hive: String,
-        /// The new repository's directory.
+        /// The new repository's directory. Missing parent directories are made.
         #[arg(value_hint = ValueHint::DirPath)]
         destination: PathBuf,
         /// The hub, as `musubi hub` prints it [default: this machine's default hub].
@@ -1221,6 +1221,10 @@ fn clone(
         Backend::Git => &["git", "init", "--colocate"],
         Backend::Simple => &["debug", "init-simple"],
     };
+    // As `jj git clone` does, make the directories it goes in, where `jj git init` wouldn't.
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("making {}", parent.display()))?;
+    }
     let mut jj = Process::new("jj");
     musubi_jj::git_command::without_repository_env(&mut jj);
     // Its "Initialized repo in" names the directory relative to wherever this runs, ahead of

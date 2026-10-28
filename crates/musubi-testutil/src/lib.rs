@@ -157,10 +157,15 @@ impl TestEnv {
 
     /// A handle for a repository directory that may not exist yet.
     pub fn repo_handle(&self, machine: &str) -> TestRepo {
+        self.repo_handle_at(machine, &self.root().join(machine))
+    }
+
+    /// [`Self::repo_handle`], for a repository at `path`.
+    pub fn repo_handle_at(&self, machine: &str, path: &Path) -> TestRepo {
         TestRepo {
             home: self.root().join("home"),
             config_path: self.root().join(format!("config-{machine}.toml")),
-            path: self.root().join(machine),
+            path: path.to_owned(),
             machine: machine.to_owned(),
             hostname: machine.to_owned(),
             seeds: self.seeds.clone(),

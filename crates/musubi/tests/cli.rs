@@ -618,10 +618,11 @@ fn hub_join_sync_clone_and_list() {
     ]);
     musubi_in(&env, &logs, &alpha, &["sync"]);
     // A new machine clones the hive by a prefix of its name.
-    let gamma = env.repo_handle("gamma");
+    let gamma = env.repo_handle_at("gamma", &env.root().join("src/gamma"));
     let mut clone = alpha.program(musubi());
-    // A relative destination, through a parent, lands where it says.
-    clone.args(["clone", "proj", "../gamma", "--machine", "gamma"]);
+    // A relative destination, through a parent, lands where it says, in a directory it
+    // makes.
+    clone.args(["clone", "proj", "../src/gamma", "--machine", "gamma"]);
     clone.current_dir(env.root().join("home"));
     // An agent clones it, so the hive forgets gamma's copy once it goes unused for 6h.
     clone.env("CLAUDE_CODE_SESSION_ID", "a session");
@@ -648,7 +649,7 @@ fn hub_join_sync_clone_and_list() {
     assert!(log(&gamma).contains("picked up by the daemon"));
     insta::assert_snapshot!(out, @"
     The hive forgets this copy once it goes unused for 6h.
-    Cloned hive project into ../gamma
+    Cloned hive project into ../src/gamma
     ");
     wait_for(&logs, "beta to hear gamma's musubi.forget-after", || {
         status_in(&env, &logs, &beta)

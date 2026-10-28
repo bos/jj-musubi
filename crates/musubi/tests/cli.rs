@@ -181,6 +181,7 @@ impl Hub {
     }
 
     /// The hub `musubi hub` serves by default on `repo`'s machine, `~/musubi-hub`.
+    #[cfg(unix)]
     fn start_on(env: &TestEnv, logs: &mut Logs, repo: &TestRepo) -> Self {
         let home = env.root().join("home");
         let mut command = repo.program(musubi());
@@ -1419,11 +1420,7 @@ fn moved_copies_sync_again() {
     // Stopped before the hub.
     let mut daemons = Daemons::default();
     let (alpha, beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
-    // Not during a sync, which a move can interrupt halfway through writing a git ref,
-    // leaving the ref's lock behind (docs/internals/copies.md, "Out of scope").
-    wait_for(&logs, "alpha to sync beta's join", || {
-        alpha.jj(&["workspace", "list"]).contains("beta/")
-    });
+    settled(&env, &logs, &alpha, alpha.path());
     let moved = env.root().join("moved");
     fs::rename(alpha.path(), &moved).unwrap();
     jj_at(

@@ -414,7 +414,8 @@ heard from once it next syncs, within half a minute.
 ### "This machine's daemon isn't running; `musubi daemon start` starts it."
 
 Nothing keeps this machine's copies in sync. Start the daemon, and to have it start at login
-from now on, run `musubi daemon install`.
+from now on, run `musubi daemon install`. A machine with no copies, such as a hub's, needs no
+daemon, and `musubi top` says nothing of it there.
 
 ### "a hub is already running, serving ...; stop it, then run this again"
 

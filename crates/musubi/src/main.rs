@@ -248,8 +248,8 @@ enum Command {
     /// operations and commits machines have sent since the hub started, and what came in
     /// lately. For each machine, it shows when the hub last heard from its daemon, how far
     /// behind it is, and how its syncing goes. Above them it lists the issues: hubs out of
-    /// reach, requests the hub failed, and machines that are offline, behind, or failing
-    /// to sync, and whether this machine's daemon is running.
+    /// reach, requests the hub failed, machines that are offline, behind, or failing to
+    /// sync, and this machine's daemon not running, where it has copies to sync.
     ///
     /// It asks this machine's default hub and the hubs of its copies, or the hub `--hub`
     /// names. Without a terminal, or with `--once`, it prints what it sees once, without

@@ -99,6 +99,8 @@ struct Sample {
     hubs: Vec<HubSample>,
     /// The number of repositories the daemon serves, if it is running.
     daemon: Result<Option<usize>, String>,
+    /// Whether this machine has copies, which need the daemon. A hub's machine may have none.
+    copies: bool,
 }
 
 /// What a hub said, and when it said it.
@@ -166,7 +168,13 @@ impl Sampler {
             Ok(socket) => self.runtime.block_on(serving(socket)),
             Err(err) => Err(err.clone()),
         };
-        Sample { hubs, daemon }
+        // Read again each time, since a copy may join or leave while it watches.
+        let copies = UserState::load().map_or(true, |state| !state.copies.is_empty());
+        Sample {
+            hubs,
+            daemon,
+            copies,
+        }
     }
 }
 
@@ -385,9 +393,10 @@ impl View {
                     "repositories"
                 }
             )),
-            Ok(None) => issues.push(
+            Ok(None) if sample.copies => issues.push(
                 "This machine's daemon isn't running; `musubi daemon start` starts it.".to_owned(),
             ),
+            Ok(None) => {}
             Err(err) => issues.push(format!("This machine's daemon: {}", one_line(err))),
         }
         let mut hives = vec![];
@@ -921,15 +930,30 @@ mod tests {
                 },
             ],
             daemon: Ok(None),
+            copies: true,
         }
     }
 
     /// Every kind of trouble is an issue: a daemon not running here, a hub out of reach,
     /// the hub failing, and machines silent, stuck, or failing; but not a machine catching
-    /// up, nor one the hub hasn't heard from since it started, which may have left.
+    /// up, nor one the hub hasn't heard from since it started, which may have left, nor a
+    /// daemon not running on a machine with no copies for it to sync, as a hub's may be.
     #[test]
     fn issues_are_what_needs_attention() {
         let now = Instant::now();
+        let no_copies = Sample {
+            copies: false,
+            ..sample(now, 1024)
+        };
+        let view = View::new(&no_copies, None, None);
+        assert!(
+            !view
+                .issues
+                .iter()
+                .any(|issue| issue.contains("This machine")),
+            "{:?}",
+            view.issues
+        );
         let view = View::new(&sample(now, 1024), None, None);
         assert_eq!(
             view.issues,

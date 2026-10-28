@@ -625,7 +625,11 @@ fn hub_join_sync_clone_and_list() {
     clone.current_dir(env.root().join("home"));
     // An agent clones it, so the hive forgets gamma's copy once it goes unused for 6h.
     clone.env("CLAUDE_CODE_SESSION_ID", "a session");
+    // jj colouring what musubi reads of it doesn't keep the trunk from being checked out.
+    alpha.jj(&["config", "set", "--user", "ui.color", "always"]);
+    clone.arg("--color=never");
     let out = run(&env, &logs, clone);
+    alpha.jj(&["config", "set", "--user", "ui.color", "never"]);
     // As `jj git clone` checks out the remote's default branch.
     let parent = [
         "log",

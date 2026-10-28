@@ -1269,6 +1269,8 @@ fn check_out_trunk(located: &Located) -> anyhow::Result<()> {
     };
     let output = jj(&[
         "log",
+        // An id, not the colour codes `ui.color = "always"` would wrap it in.
+        "--color=never",
         "--ignore-working-copy",
         "--no-graph",
         "-n1",

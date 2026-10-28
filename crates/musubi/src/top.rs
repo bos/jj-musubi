@@ -353,8 +353,8 @@ struct HiveView {
     /// machines up to date, issues.
     row: Vec<String>,
     issues: usize,
-    /// Its totals since the hub started.
-    totals: String,
+    /// Its totals since the hub started, a line each, short enough for a narrow terminal.
+    totals: Vec<String>,
     /// Each machine's name, when last heard, head, release, and state, and whether that is
     /// an issue.
     machines: Vec<(Vec<String>, bool)>,
@@ -480,9 +480,13 @@ impl View {
         writeln!(out).ok();
         out.push_str(&columns(&self.hive_header(), &rows, ""));
         for hive in &self.hives {
-            writeln!(out, "\n{} {}", hive.row[0], hive.totals).ok();
+            writeln!(out, "\n{}", hive.totals_title()).ok();
+            for line in &hive.totals {
+                writeln!(out, "  {line}").ok();
+            }
             let machines: Vec<Vec<String>> = hive.machines.iter().map(|(m, _)| m.clone()).collect();
             if !machines.is_empty() {
+                writeln!(out).ok();
                 out.push_str(&columns(&MACHINE_HEADER, &machines, "  "));
             }
             if !hive.recent.is_empty() {
@@ -641,25 +645,41 @@ impl HiveView {
                 issues.len().to_string()
             },
         ];
-        let mut totals = format!(
-            "since the hub started: received {} and sent {}; {} operations, writing {} \
-             commits, came in, and {} went out; {} pushes moved the head, and {} found it \
-             moved first",
-            bytes(traffic.received),
-            bytes(traffic.sent),
-            traffic.ops_in,
-            traffic.commits_in,
-            traffic.ops_out,
-            traffic.accepted,
-            traffic.rejected,
-        );
+        let mut totals = vec![
+            format!(
+                "received {} and sent {}",
+                bytes(traffic.received),
+                bytes(traffic.sent)
+            ),
+            format!(
+                "{} came in, with {}, and {} went out",
+                count(traffic.ops_in, "operation", "operations"),
+                count(traffic.commits_in, "commit", "commits"),
+                traffic.ops_out,
+            ),
+            format!(
+                "{} moved the head, and {} found it moved already",
+                count(traffic.accepted, "push", "pushes"),
+                traffic.rejected,
+            ),
+        ];
         if traffic.incomplete > 0 {
-            write!(totals, "; {} lacked what they needed", traffic.incomplete).ok();
+            totals.push(format!(
+                "{} lacked what {} needed",
+                count(traffic.incomplete, "push", "pushes"),
+                if traffic.incomplete == 1 {
+                    "it"
+                } else {
+                    "they"
+                }
+            ));
         }
         if traffic.failures > 0 {
-            write!(totals, "; {} requests failed", traffic.failures).ok();
+            totals.push(format!(
+                "{} failed",
+                count(traffic.failures, "request", "requests")
+            ));
         }
-        totals.push('.');
         let recent = hive
             .recent
             .iter()
@@ -685,21 +705,31 @@ impl HiveView {
         (view, issues)
     }
 
+    /// What heads the totals.
+    fn totals_title(&self) -> String {
+        format!("{} since the hub started:", self.row[0])
+    }
+
     fn draw(&self, frame: &mut Frame<'_>, area: ratatui::layout::Rect) {
+        let mut lines = vec![Line::from(self.totals_title())];
+        lines.extend(
+            self.totals
+                .iter()
+                .map(|line| Line::from(format!("  {line}"))),
+        );
+        // Each line wraps onto as many more as a terminal narrower than it takes.
+        let paragraph = Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false });
+        let totals_lines = paragraph.line_count(area.width);
         let machine_lines = self.machines.len() + 1;
         let [totals, machines, gap, recent] = Layout::vertical([
-            Constraint::Length(2),
+            Constraint::Length(totals_lines as u16),
             Constraint::Length(machine_lines.min(10) as u16),
             Constraint::Length(1),
             Constraint::Fill(1),
         ])
         .areas(area);
         let _ = gap;
-        frame.render_widget(
-            Paragraph::new(format!("{} {}", self.row[0], self.totals))
-                .wrap(ratatui::widgets::Wrap { trim: true }),
-            totals,
-        );
+        frame.render_widget(paragraph, totals);
         let rows = self.machines.iter().map(|(cells, issue)| {
             let row = Row::new(cells.clone());
             if *issue { row.red() } else { row }
@@ -803,6 +833,11 @@ fn columns<S: AsRef<str>>(header: &[&str], rows: &[Vec<S>], indent: &str) -> Str
         line(row.iter().map(AsRef::as_ref).collect());
     }
     out
+}
+
+/// `n` things, called `one` if there is one and `many` otherwise.
+fn count(n: u64, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
 }
 
 /// `text` on one line.
@@ -993,6 +1028,7 @@ mod tests {
         assert!(plain.contains("  laptop   4s ago"), "{plain}");
     }
 
+    /// The terminal shows the chosen hive, with all of its totals, however narrow.
     #[test]
     fn the_terminal_shows_the_chosen_hive() {
         let now = Instant::now();
@@ -1002,25 +1038,35 @@ mod tests {
             previous: None,
             selected: TableState::default().with_selected(3),
         };
-        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
-        terminal.draw(|frame| app.draw(frame)).unwrap();
-        let screen: String = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect();
-        assert_eq!(app.selected.selected(), Some(0));
+        let mut screen = |width| {
+            let mut terminal = Terminal::new(TestBackend::new(width, 40)).unwrap();
+            terminal.draw(|frame| app.draw(frame)).unwrap();
+            let screen: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            screen
+        };
+        let wide = screen(72);
         for shown in [
             "Issues:",
             "MACHINES",
             "desktop",
             "rebase commit 1234",
+            "and 0 found it moved already",
             "q quit",
         ] {
-            assert!(screen.contains(shown), "{shown} isn't shown:\n{screen}");
+            assert!(wide.contains(shown), "{shown} isn't shown:\n{wide}");
         }
+        // Where a line wraps, at a space, depends on the width.
+        for width in 20..72 {
+            let narrow = screen(width);
+            assert!(narrow.contains("already"), "{width} columns:\n{narrow}");
+        }
+        assert_eq!(app.selected.selected(), Some(0));
     }
 
     #[test]

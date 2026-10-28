@@ -45,8 +45,9 @@ gix = { version = "0.88", default-features = false }
 hegeltest = "=0.50.2"
 # jj-lib's: musubi decodes jj-lib's protobuf types with it.
 prost = "0.14.4"
-# The same as jj-cli's, so that musubi builds no second copy.
-ratatui = { version = "0.30.2", features = ["crossterm"] }
+# The same as jj-cli's, so that musubi builds no second copy. `musubi top` counts the rows a
+# wrapped paragraph takes with `Paragraph::line_count`, which is unstable.
+ratatui = { version = "0.30.2", features = ["crossterm", "unstable-rendered-line-info"] }
 reflink-copy = "0.1.30"
 # tempfile's and crossterm's, so that musubi builds no second copy.
 rustix = { version = "1.1.5", default-features = false, features = ["process", "std"] }

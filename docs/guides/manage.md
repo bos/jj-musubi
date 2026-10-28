@@ -37,8 +37,10 @@ HIVE      HEAD  IN/s     OUT/s    OPS  COMMITS  MACHINES  ISSUES
 app       #412  12 KiB/s 40 KiB/s 96   51       2/3       1
 dotfiles  #88   0 B/s    0 B/s    3    1        1/1
 
-app since the hub started: received 4.1 MiB and sent 12 MiB; 96 operations, writing 51
-commits, came in, and 180 went out; 40 pushes moved the head, and 2 found it moved first.
+app since the hub started:
+  received 4.1 MiB and sent 12 MiB
+  96 operations came in, with 51 commits, and 180 went out
+  40 pushes moved the head, and 2 found it moved already
   MACHINE  HEARD   AT    MUSUBI  STATE
   desktop  6m ago  #401  0.1.0   not heard from in 6m: offline, or its daemon isn't running
   devbox   3s ago  #412  0.1.0   up to date

@@ -571,8 +571,13 @@ fn hub_join_sync_clone_and_list() {
     let (top, _heads) = top.split_once("\n\n  AGO").expect(&top);
     let mut settings = insta::Settings::clone_current();
     settings.add_filter(r"\d+(\.\d+)?", "N");
+    // Whichever, one or more.
+    settings.add_filter(r"N operation\b", "N operations");
+    settings.add_filter(r"N commit\b", "N commits");
+    settings.add_filter(r"N push\b", "N pushes");
     settings.add_filter(r" {2,}", "  ");
-    settings.bind(|| insta::assert_snapshot!(top, @"
+    settings.bind(|| {
+        insta::assert_snapshot!(top, @"
     musubi top: N hub
     This machine's daemon is running, serving N repository.
     Hub $ROOT/hub: up Ns, musubi N.N, N hive.
@@ -581,11 +586,16 @@ fn hub_join_sync_clone_and_list() {
     HIVE  HEAD  IN/s  OUT/s  OPS  COMMITS  MACHINES  ISSUES
     project  #N  —  —  N  N  N/N
 
-    project since the hub started: received N KiB and sent N KiB; N operations, writing N commits, came in, and N went out; N pushes moved the head, and N found it moved first.
+    project since the hub started:
+      received N KiB and sent N KiB
+      N operations came in, with N commits, and N went out
+      N pushes moved the head, and N found it moved already
+
       MACHINE  HEARD  AT  MUSUBI  STATE
       alpha  N ago  #N  N.N  up to date
       beta  N ago  #N  N.N  up to date
-    "));
+    ");
+    });
 
     // Operation ids translate between this machine's and the hive's.
     let local = beta.jj(&["op", "log", "--no-graph", "-n1", "-T", "id"]);

@@ -1209,6 +1209,161 @@ fn a_sync_says_at_once_that_the_hub_is_gone() {
     insta::assert_snapshot!(out, @"");
 }
 
+/// A daemon whose hub runs a newer release runs `musubi.upgrade-command`, telling it the
+/// release, and once its binary is that release, starts again from it, in place. Here the
+/// command first installs a stand-in that says it is musubi 99.0.0, and runs the real binary;
+/// the daemon run from that runs the command again, which installs nothing this time, so the
+/// daemon carries on as it is, and `musubi status` says why.
+#[cfg(unix)]
+#[test]
+fn the_daemon_upgrades_towards_a_newer_hub() {
+    let env = TestEnv::with_real_op_times();
+    let mut settings = insta::Settings::clone_current();
+    settings.add_filter(&regex_escape(musubi().to_str().unwrap()), "[musubi]");
+    settings.add_filter(
+        &regex_escape(&format!("musubi {}", env!("CARGO_PKG_VERSION"))),
+        "musubi [this release]",
+    );
+    settings.add_filter(r"protocol \d+", "protocol N");
+    let _release = settings.bind_to_scope();
+    let _filters = snapshot_filters(&env);
+    let mut logs = Logs::default();
+    let mut hub = Hub::start(&env, &mut logs);
+    let mut daemons = Daemons::default();
+    let alpha = env.init_repo("alpha");
+    logs.daemon_of(&env, &alpha);
+    daemons.of(&alpha);
+    alpha.write_file("a", "a");
+    alpha.jj(&["commit", "-m", "start"]);
+    // The daemon runs from a copy of musubi, which the command can replace.
+    let bin = env.root().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let exe = bin.join("musubi");
+    fs::copy(musubi(), &exe).unwrap();
+    let (ran, installed) = (env.root().join("ran"), env.root().join("installed"));
+    let script = env.root().join("upgrade.sh");
+    fs::write(
+        &script,
+        format!(
+            r#"echo "$MUSUBI_UPGRADE_TO" >>"{ran}"
+[ -e "{installed}" ] && exit 0
+: >"{installed}"
+printf '#!/bin/sh\n[ "$1" = --version ] && exec echo musubi 99.0.0\nexec "%s" "$@"\n' \
+  "{real}" >"{exe}.new"
+chmod +x "{exe}.new" && mv "{exe}.new" "{exe}"
+"#,
+            ran = ran.display(),
+            installed = installed.display(),
+            real = musubi().display(),
+            exe = exe.display(),
+        ),
+    )
+    .unwrap();
+    // As a TOML string, since `jj config set` reads TOML.
+    let command = format!("'sh \"{}\"'", script.display());
+    alpha.jj(&[
+        "config",
+        "set",
+        "--user",
+        "musubi.upgrade-command",
+        &command,
+    ]);
+    let mut create = alpha.program(&exe);
+    create.args(["create", "--hub", &hub.url]);
+    run(&env, &logs, create);
+    let state = state_dir(&env, &alpha);
+    let pid = daemon_pid(&state).unwrap();
+    hub.kill();
+    let _newer = serve_newer_hub(&hub.dir);
+    musubi_fails(&env, &logs, &alpha, &["sync"]);
+    let failed = state.join("upgrade-failed");
+    wait_for(&logs, "the upgrade to fail", || failed.exists());
+    assert_eq!(fs::read_to_string(&ran).unwrap(), "99.0.0\n99.0.0\n");
+    assert_eq!(
+        daemon_pid(&state).unwrap(),
+        pid,
+        "the daemon is another process"
+    );
+    assert!(daemon_logged(
+        &env,
+        &alpha,
+        "upgraded to musubi 99.0.0; starting again"
+    ));
+    let (stdout, stderr) = status_in(&env, &logs, &alpha);
+    insta::assert_snapshot!(stdout, @"
+    Hive: alpha on $ROOT/hub
+    This machine: alpha, synced N ago; the hub lacks its latest work
+    Working copies:
+    alpha@: zsuskuln 95c553be (no description set)
+    Copies:
+    alpha (this machine): used N ago, never forgotten
+    Daemon: running (pid N), serving this repository; doesn't start at login
+    Daemon socket: [daemon socket]
+    Daemon log: $ROOT/home/musubi-alpha/daemon.log
+    Upgrade: upgrading to musubi 99.0.0 failed: musubi.upgrade-command succeeded, but [musubi] is musubi [this release], not musubi 99.0.0
+    ");
+    insta::assert_snapshot!(stderr, @"
+    Hint: Once that's fixed, `musubi daemon restart` tries again.
+    Warning: Syncing fails: incompatible peer: protocol N with jj-lib 0.46.0 (musubi 99.0.0), but this is protocol N with jj-lib 0.46.0 (musubi [this release]); run the same release of musubi on the hub and every machine
+    Hint: The daemon keeps trying. Its log: $ROOT/home/musubi-alpha/daemon.log
+    ");
+}
+
+/// Serves the hub's socket in `dir` as a hub of musubi 99.0.0, on another protocol, would:
+/// answering every request with a message this release refuses. Serves until the runtime it
+/// returns is dropped.
+#[cfg(unix)]
+fn serve_newer_hub(dir: &Path) -> tokio::runtime::Runtime {
+    use std::sync::Arc;
+
+    use musubi_sync::wire::Envelope;
+    use musubi_sync::wire::HubWideReply;
+    use musubi_sync::wire::JJ_LIB_VERSION;
+    use musubi_sync::wire::PROTOCOL_VERSION;
+    use musubi_transport::Transport;
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let transport: Arc<dyn Transport> =
+        Arc::new(musubi_transport::MemoryNetwork::new(1, 1 << 20).connect());
+    let refusal = bytes::Bytes::from(
+        postcard::to_stdvec(&Envelope {
+            protocol: PROTOCOL_VERSION + 1,
+            jj_lib: JJ_LIB_VERSION.to_owned(),
+            release: "99.0.0".to_owned(),
+            body: HubWideReply::Error("from the future".to_owned()),
+        })
+        .unwrap(),
+    );
+    let socket = dir.join("run/hub.sock");
+    fs::remove_file(&socket).ok();
+    let (listener, mut requests) = runtime.block_on(async {
+        (
+            tokio::net::UnixListener::bind(&socket).unwrap(),
+            transport.subscribe("musubi.*.rpc").await.unwrap(),
+        )
+    });
+    let replies = transport.clone();
+    runtime.spawn(async move {
+        while let Some(request) = requests.next().await {
+            if let Some(reply) = request.reply {
+                replies.publish(&reply, refusal.clone()).await.ok();
+            }
+        }
+    });
+    runtime.spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let transport = transport.clone();
+            tokio::spawn(async move {
+                let (reader, writer) = tokio::io::split(stream);
+                musubi_transport::stream::serve(transport, reader, writer)
+                    .await
+                    .ok();
+            });
+        }
+    });
+    runtime
+}
+
 /// `musubi leave` with its hub gone fails, leaving the repository part of its hive, served
 /// and with its working copy; `--force` leaves without telling the hive.
 #[test]

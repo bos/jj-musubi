@@ -7,7 +7,15 @@ use std::path::Path;
 use anyhow::Context as _;
 
 /// Holds a lock file for as long as it lives.
-pub struct Lock(#[expect(dead_code, reason = "held for its lock")] fs::File);
+pub struct Lock(fs::File);
+
+impl Lock {
+    /// The lock's file, which holds the lock for as long as it, or a copy that a child
+    /// process inherits, is open.
+    pub fn into_file(self) -> fs::File {
+        self.0
+    }
+}
 
 /// Takes the lock at `path`, or returns `None` if something else holds it.
 pub fn try_lock(path: &Path) -> anyhow::Result<Option<Lock>> {

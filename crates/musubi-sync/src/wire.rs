@@ -1,10 +1,12 @@
 //! The bytes on the wire between nodes and a hub.
 //!
 //! Messages are postcard-encoded [`Envelope`]s. Every envelope starts with the protocol
-//! version and the jj-lib version, and each side refuses to talk across a mismatch: canonical
-//! operation ids are hashes of jj-lib's structs, so peers must agree on jj-lib exactly
-//! (docs/internals/design.md, "Compatibility"). Those two versions are read before the rest,
-//! which another release may encode differently, so no release may change how they're encoded.
+//! version, the jj-lib version, and the sender's release of musubi, and each side refuses to
+//! talk across a mismatch of the first two: canonical operation ids are hashes of jj-lib's
+//! structs, so peers must agree on jj-lib exactly (docs/internals/design.md,
+//! "Compatibility"). The three are read before the rest, which another release may encode
+//! differently, so no release may change how they're encoded. The release lets a daemon
+//! behind its hub's upgrade itself, whatever the hub's protocol.
 //!
 //! A small bundle travels inline, in the message that refers to it; a larger one as a blob,
 //! in chunks, several of them in flight at once. A message that would itself exceed the
@@ -34,6 +36,8 @@ use crate::blobs::BlobStore;
 
 pub const PROTOCOL_VERSION: u32 = 5;
 pub const JJ_LIB_VERSION: &str = "0.46.0";
+/// This release of musubi, as every message says.
+pub const RELEASE: &str = env!("CARGO_PKG_VERSION");
 
 /// An operation or commit id on the wire.
 pub type WireId = Vec<u8>;
@@ -218,6 +222,7 @@ pub struct HeadNotice {
 pub struct Envelope<T> {
     pub protocol: u32,
     pub jj_lib: String,
+    pub release: String,
     pub body: T,
 }
 
@@ -226,6 +231,7 @@ impl<T: Serialize> Envelope<T> {
         let envelope = Self {
             protocol: PROTOCOL_VERSION,
             jj_lib: JJ_LIB_VERSION.to_owned(),
+            release: RELEASE.to_owned(),
             body,
         };
         Ok(postcard::to_stdvec(&envelope)?)
@@ -237,6 +243,14 @@ impl<T: Serialize> Envelope<T> {
 struct Versions<'a> {
     protocol: u32,
     jj_lib: &'a str,
+    release: &'a str,
+}
+
+/// The release of musubi that sent `bytes`, which this release can read even where it can't
+/// read the rest.
+pub fn release_of(bytes: &[u8]) -> Option<&str> {
+    let (versions, _) = postcard::take_from_bytes::<Versions<'_>>(bytes).ok()?;
+    Some(versions.release)
 }
 
 impl<T: for<'de> Deserialize<'de>> Envelope<T> {
@@ -245,10 +259,12 @@ impl<T: for<'de> Deserialize<'de>> Envelope<T> {
         let (versions, body) = postcard::take_from_bytes::<Versions<'_>>(bytes)?;
         anyhow::ensure!(
             versions.protocol == PROTOCOL_VERSION && versions.jj_lib == JJ_LIB_VERSION,
-            "incompatible peer: protocol {} with jj-lib {}, but this is protocol {} with \
-             jj-lib {}; run the same release of musubi on the hub and every machine",
+            "incompatible peer: protocol {} with jj-lib {} (musubi {}), but this is protocol {} \
+             with jj-lib {} (musubi {RELEASE}); run the same release of musubi on the hub and \
+             every machine",
             versions.protocol,
             versions.jj_lib,
+            versions.release,
             PROTOCOL_VERSION,
             JJ_LIB_VERSION
         );
@@ -371,6 +387,7 @@ mod tests {
         let envelope = Envelope {
             protocol,
             jj_lib: jj_lib.to_owned(),
+            release: "9.9.9".to_owned(),
             body,
         };
         postcard::to_stdvec(&envelope).unwrap()
@@ -424,5 +441,16 @@ mod tests {
         let bytes = envelope(PROTOCOL_VERSION, JJ_LIB_VERSION, unknown_variant);
         let err = Envelope::<HubReply>::decode(&bytes).unwrap_err();
         assert!(!err.to_string().contains("incompatible"), "{err}");
+    }
+
+    /// Any release reads the release that sent a message, whatever its protocol, so that a
+    /// daemon learns its hub is newer from the hub's refusal.
+    #[test]
+    fn the_sender_release_reads_across_protocols() {
+        let bytes = envelope(PROTOCOL_VERSION + 1, "9.9.9", u32::MAX);
+        assert_eq!(release_of(&bytes), Some("9.9.9"));
+        let bytes = Envelope::encode(HubReply::NoHive).unwrap();
+        assert_eq!(release_of(&bytes), Some(RELEASE));
+        assert_eq!(release_of(&[]), None);
     }
 }

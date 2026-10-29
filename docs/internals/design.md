@@ -934,9 +934,12 @@ never verifies them on read. Two consequences:
   canonical operation and view by decoding and re-hashing it. A mismatch means a peer is running
   an incompatible version, or is lying.
 
-Every message between a node and the hub starts with its protocol and jj-lib versions, encoded the
-same way in every release. Each side reads them first and refuses a message whose versions aren't
-its own, so that a message from another release is refused as such rather than misread.
+Every message between a node and the hub starts with its protocol and jj-lib versions and the
+sender's release of musubi, encoded the same way in every release. Each side reads them first and
+refuses a message whose protocol or jj-lib versions aren't its own, so that a message from another
+release is refused as such rather than misread. A daemon that hears from a hub of a newer release,
+in the hub's answer to its report after each sync, which comes even when the hub refuses it, runs
+`musubi.upgrade-command` for that release (`crates/musubi/src/upgrade.rs`).
 
 ## Testing
 

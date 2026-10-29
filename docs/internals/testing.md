@@ -137,7 +137,11 @@ ran with git's variables naming another repository, as in a git hook. Each test 
 its own state directory and jj config, and so its own daemon and control socket; the tests stop
 the daemons when they finish. One test, Unix only, turns on commit signing with `ssh-keygen`
 as jj's signer and checks that the commits musubi rewrites are signed, which shows that the
-binary loads jj's config as jj does.
+binary loads jj's config as jj does. Another, Unix only too, puts a stand-in for a hub of a newer
+release on a hub's socket, and checks that the daemon runs `musubi.upgrade-command`, starts
+again in place once its binary is that release, and that `musubi status` shows an upgrade that
+installed nothing; it can't run a real newer release, so the command installs a script that
+only says it is one.
 
 `the_quick_start_works_as_written` follows the README's quick start as a new user would:
 `musubi hub` run in a repository rather than in the home directory, then the commands it

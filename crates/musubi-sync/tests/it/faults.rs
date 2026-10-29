@@ -929,6 +929,7 @@ fn malformed(tc: &TestCase, seen: &Seen, heads: &[Vec<u8>]) -> Vec<Vec<u8>> {
             jj_lib: tc
                 .draw(gs::text().max_size(8))
                 .repeat(tc.draw(gs::integers::<usize>().min_value(1).max_value(MAX_PAYLOAD))),
+            release: tc.draw(gs::text().max_size(8)),
             body: HubRequest::Protocol(protocol(tc, seen, heads)),
         })
         .unwrap(),

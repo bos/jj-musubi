@@ -157,16 +157,48 @@ To stop using musubi on a machine altogether:
 ## Upgrade musubi
 
 Until 1.0, a release may change how machines and hubs talk, and a machine and a hub running
-different releases refuse to sync, saying so. So upgrade the hub's machine and every other
-machine together:
+different releases refuse to sync, saying so. So run the same release on the hub's machine and
+every other machine.
+
+Each machine can follow its hub by itself. Give it a command that installs the release of
+musubi it is told, as a script in your dotfiles:
+
+```sh
+jj config set --user musubi.upgrade-command ~/bin/upgrade-musubi
+```
+
+Whenever the daemon finds a hub running a newer release than its own, it runs the command
+once for that release, with `MUSUBI_UPGRADE_TO` set to it, such as `0.3.0`. Once the `musubi`
+the daemon started from says it is that release (`musubi --version`), the daemon starts again
+from it. A machine that was asleep or away does this when it next reaches the hub.
+
+To upgrade, then:
 
 1. Read the release's section of [CHANGELOG.md](../../CHANGELOG.md) for anything else to do.
-2. Install the new `musubi` everywhere, in place of the old one. If its path changes on a
-   machine, run `musubi daemon install` again there, since the daemon started at login runs
-   the path `daemon install` found.
-3. On the hub's machine, stop `musubi hub` and start it again, or if it runs at login, run
-   `musubi hub install` again.
-4. On every machine, run `musubi daemon restart`.
+2. On the hub's machine, install the new `musubi` in place of the old one. Stop `musubi hub`
+   and start it again, or if it runs at login, run `musubi hub install` again.
+3. Every machine with `musubi.upgrade-command` upgrades itself. On any other machine, install
+   the new `musubi` and run `musubi daemon restart`.
+
+The command runs through `sh -c` (`cmd /C` on Windows), in the state directory, with no
+terminal and the daemon's environment: where launchd or systemd starts the daemon, the `PATH`
+that `musubi daemon install` saw. It may run for up to an hour, as `cargo install` can, and
+its output goes to `upgrade.log` in the state directory. It must install exactly
+`$MUSUBI_UPGRADE_TO`, where the daemon started `musubi` from: if the path changes, run
+`musubi daemon install` again. A script that builds musubi with cargo:
+
+```sh
+#!/bin/sh
+set -e
+cargo install --locked --version "$MUSUBI_UPGRADE_TO" jj-musubi
+```
+
+If the command fails, or installs another release, the daemon carries on as it was, and
+`musubi status` says why. Once the command works, `musubi daemon restart` tries again.
+
+Only a newer release starts the command. Builds from source between releases all share the
+release they follow, so none of them starts it, and neither does putting a hub back on an
+older release: upgrade or go back by hand then.
 
 Upgrade `jj` with musubi, not before: each release of musubi works with one release of jj, and
 refuses operations that a newer jj wrote.

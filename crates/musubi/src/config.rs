@@ -171,6 +171,9 @@ pub struct Settings {
     /// connection, large transfers included; `as-needed`, the default, for it to open another
     /// for each large transfer.
     pub daemon_connections: Option<String>,
+    /// `musubi.upgrade-command`: the command the daemon runs to upgrade musubi when a hub
+    /// runs a newer release.
+    pub upgrade_command: Option<String>,
 }
 
 impl Settings {
@@ -182,6 +185,7 @@ impl Settings {
             daemon_log: get("musubi.daemon.log")?,
             daemon_socket: get("musubi.daemon.socket")?,
             daemon_connections: get("musubi.daemon.connections")?,
+            upgrade_command: get("musubi.upgrade-command")?,
         })
     }
 }

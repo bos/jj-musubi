@@ -18,6 +18,7 @@ mod ssh;
 mod status;
 mod top;
 mod ui;
+mod upgrade;
 mod watch;
 
 use std::collections::BTreeMap;
@@ -308,6 +309,10 @@ enum Command {
     /// Without a subcommand, it runs the daemon in the foreground, logging to standard
     /// error. Other commands start it in the background when they need it, logging to
     /// `daemon.log` in musubi's state directory, or under systemd, to the journal.
+    ///
+    /// When a hub runs a newer release of musubi, the daemon runs the command
+    /// `musubi.upgrade-command` names, if set, with `MUSUBI_UPGRADE_TO` set to that release,
+    /// and once the `musubi` it started from is that release, starts again from it.
     Daemon {
         #[command(subcommand)]
         action: Option<DaemonAction>,

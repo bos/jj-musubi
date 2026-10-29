@@ -42,6 +42,7 @@ use musubi_sync::wire::HUB_TOKEN;
 use musubi_sync::wire::HeadNotice;
 use musubi_sync::wire::HubWideReply;
 use musubi_sync::wire::HubWideRequest;
+use musubi_sync::wire::release_of;
 use musubi_sync::wire::rpc_subject;
 use musubi_transport::stream::WhileDisconnected;
 use serde::Deserialize;
@@ -495,6 +496,7 @@ pub fn run(socket: &Socket) -> anyhow::Result<()> {
     if let Ok(log) = config::daemon_log() {
         trim_log(&log);
     }
+    crate::upgrade::started();
     // Beside the lock, for finding the daemon's process.
     let pid_path = lock_path.with_extension("pid");
     fs::write(&pid_path, std::process::id().to_string())?;
@@ -507,7 +509,11 @@ pub fn run(socket: &Socket) -> anyhow::Result<()> {
     }
     fs::remove_file(&pid_path).ok();
     drop(lock);
-    result
+    drop(runtime);
+    match result? {
+        Some(exe) => crate::upgrade::restart(exe),
+        None => Ok(()),
+    }
 }
 
 /// Whether copies open another connection for a large transfer: unless
@@ -535,7 +541,8 @@ fn own_connections() -> bool {
     }
 }
 
-async fn listen(socket: &Socket, lock_path: &Path) -> anyhow::Result<()> {
+/// Serves until stopped. Returns the binary to start again from, if an upgrade installed it.
+async fn listen(socket: &Socket, lock_path: &Path) -> anyhow::Result<Option<&'static Path>> {
     let listener = socket.listen()?;
     let daemon = Daemon {
         supervisor: Arc::new(Supervisor::new(Hubs::new(
@@ -551,6 +558,7 @@ async fn listen(socket: &Socket, lock_path: &Path) -> anyhow::Result<()> {
     // A daemon whose lock file was deleted, as by cleaning up its directory, has nothing to
     // stop a second one starting, and no business running on.
     let mut check = tokio::time::interval(Duration::from_secs(5));
+    let mut upgraded = None;
     loop {
         tokio::select! {
             stream = crate::socket::accept(&listener) => {
@@ -562,6 +570,10 @@ async fn listen(socket: &Socket, lock_path: &Path) -> anyhow::Result<()> {
                 tokio::spawn(serve);
             }
             () = daemon.stop.notified() => break,
+            exe = crate::upgrade::installed() => {
+                upgraded = Some(exe);
+                break;
+            }
             () = crate::hub::interrupted() => break,
             _ = check.tick() => if !lock_path.exists() {
                 tracing::warn!("{} is gone; stopping", lock_path.display());
@@ -571,7 +583,7 @@ async fn listen(socket: &Socket, lock_path: &Path) -> anyhow::Result<()> {
     }
     daemon.supervisor.stop_all().await;
     tracing::info!("stopped");
-    Ok(())
+    Ok(upgraded)
 }
 
 /// Serves one copy until told to stop: a single-threaded runtime, since jj-lib's
@@ -1023,7 +1035,8 @@ fn collect_garbage(located: &Located) {
 
 /// Tells the hub how a sync went, for `musubi top`, without waiting for its answer: a sync
 /// that failed may have failed to reach it. The answer, when it comes, has the hive's name,
-/// recorded for `musubi status` should the hive have been renamed.
+/// recorded for `musubi status` should the hive have been renamed, and the hub's release,
+/// which any release can read, for this machine to upgrade to if it is newer.
 fn report(
     connection: &Arc<Connection>,
     repo_path: &Path,
@@ -1056,6 +1069,9 @@ fn report(
             .await
         {
             Ok(reply) => {
+                if let Some(release) = release_of(&reply) {
+                    crate::upgrade::consider(release);
+                }
                 if let Ok(HubWideReply::Hive(info)) = Envelope::decode(&reply)
                     && info.id == hive.hive.to_string()
                 {
@@ -1286,7 +1302,7 @@ fn detach(command: &mut std::process::Command) {
 }
 
 #[cfg(windows)]
-fn detach(command: &mut std::process::Command) {
+pub fn detach(command: &mut std::process::Command) {
     use std::os::windows::process::CommandExt as _;
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;

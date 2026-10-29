@@ -6,6 +6,12 @@ change the protocol, so run the same release on the hub and every machine (see
 
 ## Unreleased
 
+- A machine can upgrade musubi by itself to follow its hub: set `musubi.upgrade-command` to a
+  command that installs the release in `$MUSUBI_UPGRADE_TO`, and the daemon runs it when a
+  hub runs a newer release, then starts again from it. See [Upgrade
+  musubi](docs/guides/manage.md#upgrade-musubi). Every message now carries the sender's
+  release, so this release talks to no hub or machine of an earlier one: upgrade them all
+  together, by hand this once.
 - On a terminal, `musubi create`, `join`, `clone` and `sync` show what the sync they wait on
   is doing: bytes sent or received, with a bar, commits being imported, operations applied,
   or waiting on the hub. They no longer print `Syncing...`. After upgrading, run `musubi

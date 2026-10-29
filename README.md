@@ -197,7 +197,8 @@ The [user guide](docs/README.md) lists every page, and `musubi <command> --help`
 ## Upgrading
 
 Upgrade the hub's machine and every other machine together: until 1.0, a release may change
-the protocol, and a machine and a hub whose protocols differ refuse to sync, saying so.
+the protocol, and a machine and a hub whose protocols differ refuse to sync, saying so. Give
+each machine a command to install a release, and it follows its hub by itself.
 [Upgrade musubi](docs/guides/manage.md#upgrade-musubi) gives the steps, and
 [CHANGELOG.md](CHANGELOG.md) what each release changes.
 

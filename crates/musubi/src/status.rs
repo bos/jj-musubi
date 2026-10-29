@@ -101,6 +101,9 @@ pub struct Daemon {
     pub at_login: bool,
     /// Where it logs: a file, or a description of where the service manager keeps it.
     pub log: String,
+    /// The release its latest upgrade was for, and why it failed, unless this is that
+    /// release already.
+    pub upgrade_failed: Option<(String, String)>,
 }
 
 impl Report {
@@ -513,6 +516,7 @@ impl Daemon {
             served: served.len(),
             at_login,
             log,
+            upgrade_failed: crate::upgrade::failure(),
         };
         (daemon, served)
     }
@@ -552,7 +556,20 @@ impl Daemon {
         if let Ok(socket) = &self.socket {
             writeln!(out, "Daemon socket: {socket}")?;
         }
-        writeln!(out, "Daemon log: {}", self.log)
+        writeln!(out, "Daemon log: {}", self.log)?;
+        if let Some((release, why)) = &self.upgrade_failed {
+            write!(out, "Upgrade: ")?;
+            writeln!(
+                out.labeled("problem"),
+                "upgrading to musubi {release} failed: {why}"
+            )?;
+            drop(out);
+            writeln!(
+                ui.hint(),
+                "Once that's fixed, `musubi daemon restart` tries again."
+            )?;
+        }
+        Ok(())
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -565,6 +582,9 @@ impl Daemon {
             "at_login": self.at_login,
             "socket": self.socket.as_ref().ok().map(ToString::to_string),
             "log": self.log,
+            "upgrade_failed": self.upgrade_failed.as_ref().map(|(release, error)| {
+                serde_json::json!({ "release": release, "error": error })
+            }),
         })
     }
 }

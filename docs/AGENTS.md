@@ -33,6 +33,22 @@ operation", "the operations this machine sent". Link to `docs/internals/` for th
 In messages and hints, name commands in full, as `musubi join`. In docs, quote messages as
 musubi prints them.
 
+## What commands print
+
+musubi is a Unix tool used alongside jj, and prints as jj does: little, and only what the user
+needs.
+
+- A command that did what it was asked prints at most a line saying what changed, or nothing
+  if that's obvious. A command whose output is what was asked for, such as `musubi list`,
+  prints only that.
+- Print no progress or narration ("Syncing...", "Saved ... as the default"), no settings or
+  defaults the user didn't ask about, and no hint they needn't act on. Ids, counts and
+  sequence numbers from inside musubi, such as a hive's operation number, aren't for users.
+- An error is one line: what went wrong, in the user's terms, with no explanation of why
+  musubi works that way. A hint, if any, is one more line naming the command to run. Why, and
+  every other way out, belong in [troubleshooting.md](troubleshooting.md).
+- Output a script reads goes to stdout, everything else to stderr, as in jj.
+
 ## Help and guides
 
 Built-in `--help` is the reference for flags; its text is in the doc comments of

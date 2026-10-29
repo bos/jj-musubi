@@ -9,7 +9,7 @@ describes Hegel, and "the search", the generated end-to-end tests.
 
 ## What a test must protect
 
-A user-visible behavior; a property of the protocol ([protocol.md,
+A user-visible behavior, what musubi prints included; a property of the protocol ([protocol.md,
 "Properties"](protocol.md#properties)); a rule of the design, above all that replicated
 concurrency resolves as jj resolves local concurrency ([races.md](races.md)); a behavior of jj,
 git or the operating system that musubi relies on; or a failure in scope, below. Before adding a
@@ -76,9 +76,15 @@ test what a model assumes of jj as laws, as `ref_laws` does.
   it names, and a rule in the search if the search can't yet produce the situation.
 - **A change to how a node translates, realizes or moves objects** gets an example test with
   real repositories in its crate's `tests/it`.
-- **A change to a command** gets a test in `crates/musubi/tests/cli.rs` only where running the
-  binary is what's at risk. Assert the command or reason a message gives, and the exit code,
-  not the wording around them.
+- **A change to a command** shows what the command prints in an inline insta snapshot in
+  `crates/musubi/tests/cli.rs`, so that a review reads the output as a user would and a
+  changed message shows as a diff. Snapshot it in a test that runs the command already; a new
+  test is for a command none runs, since each starts real daemons. A change to what a new user
+  meets, from `musubi hub` to the first sync, updates `the_quick_start_works_as_written` with
+  the quick start.
+- **A first-use bug,** a message or a step that misleads a new user, gets the test that would
+  have shown it, and an entry in [troubleshooting.md](../troubleshooting.md) if a user can meet
+  it still.
 - **A new decoder of what a peer sends** gets a fuzz target. Fuzz targets are for decoders that
   run in process at hundreds of inputs a second or more; stateful behavior belongs in the
   fault tests.
@@ -155,8 +161,9 @@ new test, and [efficient-tests.md](efficient-tests.md) says how to stay within i
 
   A state the search rarely reaches gets a rule of its own that goes there.
 
-Try, too, what no test sets up: other kinds of repository, the user guide's steps against the
-real binary, real machines over real ssh. What works becomes a test that keeps it working.
+Try, too, what no test sets up: other kinds of repository, real machines over real ssh, the
+guide's steps beyond the quick start. What works becomes a test that keeps it working, and
+what doesn't gets fixed, with a test that would have shown it.
 
 ## Keeping docs in step
 

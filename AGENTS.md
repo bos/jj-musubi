@@ -3,6 +3,14 @@
 The working agreement for this repository, for people and coding agents alike.
 [CONTRIBUTING.md](CONTRIBUTING.md) covers setup and the slow runs outside `just check`.
 
+## Priorities
+
+musubi rewrites people's jj repositories where they work, across machines, so correctness and
+robustness come first: the Lean models, conformance tests, fuzzing and the end-to-end search
+are never paused or cut to make room for other work. What users see gets the same care
+alongside them, not after: a confusing message, or a step that doesn't work as the guide says,
+is a bug like any other.
+
 ## Source control
 
 This is a jj repository: use jj, never git.
@@ -33,9 +41,11 @@ faster; otherwise run the checks as above.
 
 ## Reviews
 
-Have a subagent review every change before it is pushed. Evaluate each finding: decide whether
-it is correct, since a finding can be wrong, and if so, what to do about it, and do that before
-pushing.
+Have subagents review every change before it is pushed, as
+[docs/internals/code-reviews.md](docs/internals/code-reviews.md) says: a change to a command,
+message, help text or the user guide gets a reviewer reading it as a new user would. Evaluate
+each finding: decide whether it is correct, since a finding can be wrong, and if so, what to do
+about it, and do that before pushing.
 
 ## Resilience
 

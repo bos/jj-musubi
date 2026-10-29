@@ -19,6 +19,8 @@ Each document answers a different question:
   where does a new test belong?
 - [Efficient tests](efficient-tests.md): How should a new test be written so that the suite
   stays fast?
+- [Code reviews](code-reviews.md): What does a review look for, in what musubi does and in
+  what users see?
 - [Conformance](conformance.md): How are the Rust protocol core, and which copies a hive
   shows, checked against the Lean model?
 - [The Lean model](../../formal/README.md): What does the model prove, and how does it

@@ -29,7 +29,7 @@
 {"ok":true,"state":{"hub":{"head":0,"objs":[],"ops":[0],"seq":0},"net":[{"expected":0,"msg":"cas","new":1,"node":0},{"msg":"getHead","node":1},{"msg":"getObjs","node":1,"objs":[10]},{"msg":"getOps","node":1,"ops":[1]},{"head":1,"headKind":"accepted","msg":"head","node":0,"seq":1},{"head":1,"headKind":"notify","msg":"head","node":0,"seq":1},{"head":0,"headKind":"head","msg":"head","node":1,"seq":0},{"head":1,"headKind":"notify","msg":"head","node":1,"seq":1},{"msg":"objs","node":1,"objs":[10]},{"msg":"ops","node":1,"ops":[1]},{"msg":"putObjs","node":0,"objs":[10]},{"msg":"putOps","node":0,"ops":[1]},{"msg":"stored","node":0}],"next":2,"nodes":[{"heads":[1],"known":[1,1],"lobj":[10],"lops":[0,1],"sobj":[],"sops":[]},{"heads":[1],"known":[0,0],"lobj":[10],"lops":[0,1],"sobj":[10],"sops":[1]}],"ops":[{"id":1,"objs":[10],"parents":[0]}]}}
 {"ok":true,"presence":[[{"copy":7,"latest":[0]}],[],[{"copy":7,"latest":[2]}],[{"copy":7,"latest":[2]}],[],[{"copy":7,"latest":[2]}]]}
 {"ok":true,"steps":[{"pre":[1,2],"received":2,"stored":false},{"pre":[],"received":0,"stored":false},{"pre":[],"stored":false},{"pre":[],"received":null,"stored":true},{"pre":[],"received":null,"stored":true}]}
-{"ok":true,"prefixes":["mac-aaaa","mac-aaaa2222","beta-1a2b3c4d"]}
+{"names":["mac-aaaa/default","beta-1a2b/default"],"ok":true,"prefixes":["mac-aaaa","mac-aaaa2222","beta-1a2b3c4d"]}
 {"ok":true,"slot":{"K":1,"L":4,"R":1,"tr":true}}
 {"g":2,"ok":true,"slot":{"K":2,"L":2,"R":2,"tr":true}}
 {"holds":true,"ok":true}

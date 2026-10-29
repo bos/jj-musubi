@@ -680,12 +680,14 @@ links:
    always free (`choose_free`), and so the names are injective, whatever the machines and the
    names of this machine's own (`localName_injective`).
 2. **The code.** `workspaces::display_names` makes the same choices. The Hegel test
-   `workspaces::tests::names_conform`, in `crates/musubi-jj/src/workspaces.rs`, draws up to
-   four machines and three names of this machine's own from names, suffixes and names of its
-   own chosen to clash, and requires each machine's prefix to be the one the oracle's
-   `assign` gives it. Letting a machine take a prefix an earlier one took, or one that starts
-   a name of this machine's own, fails it. `longer_names_where_shorter_clash` pins the cases
-   the rule before this one named alike, which `Names.lean` checks with `#guard`.
+   `workspaces::tests::names_conform`, in `crates/musubi-jj/src/workspaces.rs`, draws up to five
+   machines and three names of this machine's own from names, suffixes and names of its own chosen
+   to clash, this machine among the machines, and requires each machine's prefix to be the one the
+   oracle's `assign` gives it, and the name `workspaces::local_name` gives each machine's
+   workspaces here, this machine's own names among them, to be the oracle's `localName`, and all
+   of them distinct. Letting a machine take a prefix an earlier one took, or one that starts a
+   name of this machine's own, fails it. `longer_names_where_shorter_clash` pins the cases the
+   rule before this one named alike, which `Names.lean` checks with `#guard`.
 
 The test checks the rule, not where musubi applies it: that `local_names` and `canonical_view`
 pass it every machine the history has known, this one included, and this machine's own names is
@@ -694,10 +696,12 @@ for the race catalogue (`crates/musubi-sync/tests/races/forget.rs`) to check.
 The oracle's names request and reply:
 
 ```json
-{"op": "names", "machines": [{"name": "mac", "suffix": "aaaa1111"}, {"name": "mac", "suffix": "aaaa2222"}], "own": ["mac-aaaa2222/x"]}
-{"ok": true, "prefixes": ["mac-aaaa", "mac-aaaa2222-"]}
+{"op": "names", "machines": [{"name": "mac", "suffix": "aaaa1111"}, {"name": "mac", "suffix": "aaaa2222"}], "own": ["mac-aaaa2222/x"], "me": {"name": "mac", "suffix": "aaaa2222"}, "workspaces": [{"machine": 0, "workspace": "default"}, {"machine": 1, "workspace": "mac-aaaa2222/x"}]}
+{"ok": true, "prefixes": ["mac-aaaa", "mac-aaaa2222-"], "names": ["mac-aaaa/default", "mac-aaaa2222/x"]}
 ```
 
 The machines go in the order `display_names` takes them, their keys' order, each a key's name
-and suffix, and `own` holds the names of this machine's own. The reply has each machine's
-prefix, in the same order. A names request leaves the oracle's session as it was.
+and suffix, this machine, `me`, among them, and `own` holds the names of this machine's own.
+`workspaces` are the workspaces to name, each a machine's index and the workspace's name on
+it. The reply has each machine's prefix, in the same order, and each workspace's name here
+(`localName`). A names request leaves the oracle's session as it was.

@@ -175,6 +175,19 @@ pub fn display_names(
         .collect()
 }
 
+/// The name on machine `own` (its key) of the workspace a machine-qualified `key` names, given
+/// every other machine's prefix (`display_names`): its own name for one of `own`'s, and
+/// `<prefix>/<workspace>` for another machine's. None for a machine with no prefix. This is
+/// `localName` in formal/Musubi/Names.lean.
+pub fn local_name(own: &str, key: &str, prefixes: &BTreeMap<String, String>) -> Option<String> {
+    let (machine, workspace) = split_key(key)?;
+    if machine == own {
+        Some(workspace.to_owned())
+    } else {
+        Some(format!("{}/{workspace}", prefixes.get(machine)?))
+    }
+}
+
 /// Merges one workspace's working-copy commit three-way, as jj does when it merges
 /// concurrent operations: a trivial merge where there is one, then a removal on either side,
 /// then `ours`. This is jj-lib's private `MutableRepo::merge_wc_commit`, built the same way
@@ -282,10 +295,11 @@ mod tests {
         assert_eq!(names["beta#1a2b3c4d"], "beta-1a2b3c4d");
     }
 
-    /// `display_names` against `assign` in formal/Musubi/Names.lean, through the oracle
-    /// (docs/internals/conformance.md, "Workspace names"): each machine's prefix, among
-    /// machines and names of this machine's own drawn from few, so that they clash. The model
-    /// proves the names it gives a view's workspaces distinct (`localName_injective`).
+    /// `display_names` and `local_name` against `assign` and `localName` in
+    /// formal/Musubi/Names.lean, through the oracle (docs/internals/conformance.md, "Workspace
+    /// names"): each machine's prefix, and the name here of each machine's workspaces, this
+    /// machine's own among them, from machines and names of this machine's own drawn from few,
+    /// so that they clash. The model proves those names distinct (`localName_injective`).
     // Each case asks the Lean oracle, a process of its own, which on a small machine running
     // other tests at once can slow generating cases past Hegel's health check.
     #[hegel::test(test_cases = 300, suppress_health_check = [HealthCheck::TooSlow])]
@@ -302,15 +316,17 @@ mod tests {
             "mac-aaaa-aaaa/x",
         ];
         let pick = |n: usize| tc.draw(gs::integers::<usize>().max_value(n - 1));
-        let machines: BTreeSet<String> = (0..pick(5))
-            .map(|_| {
-                format!(
-                    "{}#{}",
-                    NAMES[pick(NAMES.len())],
-                    SUFFIXES[pick(SUFFIXES.len())]
-                )
-            })
-            .collect();
+        let key = || {
+            format!(
+                "{}#{}",
+                NAMES[pick(NAMES.len())],
+                SUFFIXES[pick(SUFFIXES.len())]
+            )
+        };
+        // This machine is among the machines named, as `NodeRepo::local_names` names them.
+        let me = key();
+        let mut machines: BTreeSet<String> = (0..pick(5)).map(|_| key()).collect();
+        machines.insert(me.clone());
         let own: BTreeSet<&str> = (0..pick(4)).map(|_| OWN[pick(OWN.len())]).collect();
         let names = display_names(&machines, |prefix| {
             own.iter().any(|w| w.starts_with(&format!("{prefix}/")))
@@ -323,7 +339,30 @@ mod tests {
             .iter()
             .map(|key| serde_json::json!({"name": machine_name(key), "suffix": suffix(key)}))
             .collect();
-        let reply = oracle.call(&serde_json::json!({"op": "names", "machines": keys, "own": own}));
+        // This machine's workspaces are its own names; every other machine has two.
+        let workspaces: Vec<(usize, &str)> = machines
+            .iter()
+            .enumerate()
+            .flat_map(|(index, machine)| {
+                let names: Vec<&str> = if *machine == me {
+                    own.iter().copied().collect()
+                } else {
+                    vec!["default", "x"]
+                };
+                names.into_iter().map(move |name| (index, name))
+            })
+            .collect();
+        let request = serde_json::json!({
+            "op": "names",
+            "machines": keys,
+            "own": own,
+            "me": {"name": machine_name(&me), "suffix": suffix(&me)},
+            "workspaces": workspaces
+                .iter()
+                .map(|(machine, workspace)| serde_json::json!({"machine": machine, "workspace": workspace}))
+                .collect::<Vec<_>>(),
+        });
+        let reply = oracle.call(&request);
         ORACLE.set(Some(oracle));
         assert_eq!(
             reply["ok"], true,
@@ -337,6 +376,23 @@ mod tests {
             serde_json::json!(shown),
             reply["prefixes"],
             "{machines:?}, own {own:?}"
+        );
+        let list: Vec<&String> = machines.iter().collect();
+        let local: Vec<String> = workspaces
+            .iter()
+            .map(|(machine, workspace)| {
+                local_name(&me, &format!("{}/{workspace}", list[*machine]), &names).unwrap()
+            })
+            .collect();
+        assert_eq!(
+            serde_json::json!(local),
+            reply["names"],
+            "{machines:?}, me {me}, own {own:?}"
+        );
+        assert_eq!(
+            local.iter().collect::<BTreeSet<_>>().len(),
+            local.len(),
+            "{local:?}"
         );
     }
 

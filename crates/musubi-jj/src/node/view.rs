@@ -397,13 +397,8 @@ impl NodeRepo {
         key: &WorkspaceName,
         prefixes: &BTreeMap<String, String>,
     ) -> Option<WorkspaceNameBuf> {
-        let (machine, workspace) = workspaces::split_key(key.as_str())?;
-        let name = if machine == self.machine.key() {
-            workspace.to_owned()
-        } else {
-            format!("{}/{workspace}", prefixes.get(machine)?)
-        };
-        Some(WorkspaceNameBuf::from(name))
+        workspaces::local_name(self.machine.key(), key.as_str(), prefixes)
+            .map(WorkspaceNameBuf::from)
     }
 
     /// The machines a canonical view's history has known: `known`, and those with

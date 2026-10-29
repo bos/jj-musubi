@@ -282,11 +282,21 @@ def decodeKey (j : Json) : Except String Names.Key := do
   pure ⟨(← j.getObjValAs? String "name").toList, (← j.getObjValAs? String "suffix").toList⟩
 
 /-- Each machine's prefix (`Names.assign`), in the order given, among the machines given and
-the names of this machine's own. -/
-def namesReply (machines : List Names.Key) (own : List String) : Json :=
+the names of this machine's own, `me`; and the name here of each workspace given, the
+`workspace` of the machine at index `machine` (`Names.localName`). -/
+def namesReply (machines : List Names.Key) (own : List String) (me : Names.Key)
+    (workspaces : List (Nat × String)) : Json :=
   let assigned := Names.assign machines (own.map String.toList)
+  let name (w : Nat × String) : Json :=
+    match machines[w.1]? with
+    | some k => Json.str (String.ofList (Names.localName me assigned k w.2.toList))
+    | none => Json.null
   Json.mkObj [("ok", Json.bool true),
-    ("prefixes", Json.arr (assigned.map fun (_, p) => Json.str (String.ofList p)).toArray)]
+    ("prefixes", Json.arr (assigned.map fun (_, p) => Json.str (String.ofList p)).toArray),
+    ("names", Json.arr (workspaces.map name).toArray)]
+
+def decodeWorkspace (j : Json) : Except String (Nat × String) := do
+  pure (← getNat j "machine", ← j.getObjValAs? String "workspace")
 
 /-! ## Per-machine refs (`RefsExec.lean`) -/
 
@@ -391,10 +401,15 @@ def handle (sess : Session) (line : String) : Json × Session :=
       | .error e, _ | _, .error e => (errReply s!"bad request: {e}", sess)
       | .ok b, .ok steps => (chunksReply b steps, sess)
     | .ok "names" =>
+      let me := j.getObjVal? "me" >>= decodeKey
+      let workspaces := j.getObjValAs? (Array Json) "workspaces" >>= fun ws =>
+        ws.toList.mapM decodeWorkspace
       match j.getObjValAs? (Array Json) "machines" >>= fun ms => ms.toList.mapM decodeKey,
-          j.getObjValAs? (Array String) "own" with
-      | .error e, _ | _, .error e => (errReply s!"bad request: {e}", sess)
-      | .ok machines, .ok own => (namesReply machines own.toList, sess)
+          j.getObjValAs? (Array String) "own", me, workspaces with
+      | .error e, _, _, _ | _, .error e, _, _ | _, _, .error e, _ | _, _, _, .error e =>
+        (errReply s!"bad request: {e}", sess)
+      | .ok machines, .ok own, .ok me, .ok workspaces =>
+        (namesReply machines own.toList me workspaces, sess)
     | .ok "copies" =>
       match j.getObjValAs? (Array Json) "cases" >>= fun cs => cs.toList.mapM decodeCase with
       | .error e => (errReply s!"bad request: {e}", sess)

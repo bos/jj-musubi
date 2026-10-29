@@ -172,6 +172,10 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
     ("own_workspaces_with_a_slash_are_own", None),
     ("own_workspaces_named_like_another_machine_are_own", None),
     (
+        "an_operation_that_forgot_its_workspace_keeps_its_name",
+        None,
+    ),
+    (
         "undoing_a_forget_brings_back_nothing",
         Some(&["forget_copy", "undo"]),
     ),

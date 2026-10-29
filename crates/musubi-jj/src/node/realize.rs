@@ -396,7 +396,10 @@ impl NodeRepo {
         }
         workspaces::follow_rewrites(&mut own, op.commit_predecessors.as_ref());
         let LocalView {
-            mut view, names, ..
+            mut view,
+            names,
+            prefixes,
+            ..
         } = local;
         let shown: HashSet<&WorkspaceNameBuf> = names.values().collect();
         for (name, commit) in own {
@@ -406,7 +409,12 @@ impl NodeRepo {
         }
         // The id the op store gives it, worked out as it does.
         let id = jj_lib::op_store::ViewId::new(blake2b_hash(&view).to_vec());
-        Ok(LocalView { view, id, names })
+        Ok(LocalView {
+            view,
+            id,
+            names,
+            prefixes,
+        })
     }
 
     /// Which of a canonical operation's parents has this machine's latest work in its history:
@@ -479,7 +487,9 @@ impl NodeRepo {
         local: LocalView,
         per_machine: Arc<PerMachine>,
     ) -> Result<Realization, NodeError> {
-        let LocalView { view, id, names } = local;
+        let LocalView {
+            view, id, prefixes, ..
+        } = local;
         let mut metadata = op.metadata.clone();
         if let Some((prefix, target)) = target_of(&metadata.description)
             && self.canonical.is_ancestor(&target, &op.parents)?
@@ -489,7 +499,7 @@ impl NodeRepo {
         }
         metadata.workspace_name = metadata
             .workspace_name
-            .map(|key| self.realized_workspace_name(&key, &names));
+            .map(|key| self.realized_workspace_name(&key, &prefixes));
         metadata
             .attributes
             .insert(CANONICAL_ATTRIBUTE.to_owned(), canonical_id.hex());
@@ -508,27 +518,20 @@ impl NodeRepo {
         })
     }
 
-    /// The local name of the workspace that made a canonical operation, as the operation's
-    /// view names it: `default` for this machine's own, `beta/default` for another's. jj's
-    /// `undo` and `redo` refuse to undo another workspace's operation, and they tell
-    /// workspaces apart only by name, so with the plain name `jj undo` here would undo
-    /// beta's latest operation as if it were this machine's own.
+    /// The local name of the workspace that made a canonical operation, as names go in the
+    /// operation's view: `default` for this machine's own, `beta/default` for another's,
+    /// even one the operation forgot, which the view doesn't name. jj's `undo` and `redo`
+    /// refuse to undo another workspace's operation, and they tell workspaces apart only by
+    /// name, so with the plain name `jj undo` here would undo beta's latest operation as if it
+    /// were this machine's own; and so it would with `beta/default` if that were a workspace
+    /// of this machine's own, as it can be where beta is shown as `beta-1a2b`.
     fn realized_workspace_name(
         &self,
         key: &WorkspaceName,
-        names: &BTreeMap<WorkspaceNameBuf, WorkspaceNameBuf>,
+        prefixes: &BTreeMap<String, String>,
     ) -> WorkspaceNameBuf {
-        if let Some(name) = names.get(key) {
-            return name.clone();
-        }
-        match workspaces::split_key(key.as_str()) {
-            Some((machine, workspace)) if machine == self.machine.key() => workspace.into(),
-            // A workspace the operation forgot, so its view doesn't name it.
-            Some((machine, workspace)) => {
-                format!("{}/{workspace}", workspaces::machine_name(machine)).into()
-            }
-            None => key.to_owned(),
-        }
+        self.local_name(key, prefixes)
+            .unwrap_or_else(|| key.to_owned())
     }
 
     /// The per-machine fields a realization starts from: its parent's, or for a merge, the

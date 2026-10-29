@@ -568,6 +568,34 @@ fn machines_sharing_a_hostname_are_told_apart() {
     }
 }
 
+/// An operation that forgot the workspace it was made in is realized under the name that
+/// workspace shows by, as every other operation is, though the view no longer names it.
+/// Here alpha has a workspace `beta/x` of its own, so it shows beta as `beta-1a2b`. Under
+/// the plain name, `beta/beta`, which alpha can have too, `jj undo` in that workspace of
+/// alpha's would take beta's operation for its own.
+#[test]
+fn an_operation_that_forgot_its_workspace_keeps_its_name() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    let path = hive.env.root().join("alpha-beta-x");
+    let path = path.to_str().unwrap().to_owned();
+    hive.repo(0)
+        .jj(&["workspace", "add", "--name", "beta/x", &path]);
+    hive.sync();
+    hive.repo(1).jj(&["workspace", "forget", "beta"]);
+    hive.sync();
+    hive.sync();
+    let qualified = musubi_jj::workspaces::qualified_name(&hive.machine_key(1));
+    let template = r#"description.first_line() ++ "\t" ++ workspace_name ++ "\n""#;
+    let ops = hive
+        .repo(0)
+        .jj(&["op", "log", "--no-graph", "-T", template]);
+    let forget = ops
+        .lines()
+        .find(|line| line.starts_with("forget workspace beta"))
+        .unwrap_or_else(|| panic!("no forget in {ops:?}"));
+    assert_eq!(forget, format!("forget workspace beta\t{qualified}/beta@"));
+}
+
 /// Other machines' working copies are never git refs, so nothing git does can drop them
 /// and have jj abandon the work under them: not a workspace name git can't store as a
 /// ref, not an import in a repository that isn't colocated, and not a git remote named

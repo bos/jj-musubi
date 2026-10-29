@@ -108,12 +108,13 @@ impl PerMachine {
     }
 }
 
-/// A canonical operation's view made local, with its id and the local names of the
-/// canonical view's workspaces.
+/// A canonical operation's view made local, with its id, the local names of the canonical
+/// view's workspaces, and the prefix of every other machine its history has known.
 pub(super) struct LocalView {
     pub(super) view: View,
     pub(super) id: ViewId,
     pub(super) names: BTreeMap<WorkspaceNameBuf, WorkspaceNameBuf>,
+    pub(super) prefixes: BTreeMap<String, String>,
 }
 
 impl NodeRepo {
@@ -353,26 +354,54 @@ impl NodeRepo {
         canonical_view: &View,
         presence: &Presence<OperationId>,
     ) -> Result<BTreeMap<WorkspaceNameBuf, WorkspaceNameBuf>, NodeError> {
-        let keys = &canonical_view.wc_commit_ids;
+        let prefixes = self.prefixes(canonical_view, presence)?;
+        Ok(self.names_of(canonical_view, &prefixes))
+    }
+
+    /// The prefix under which this machine shows each other machine a canonical view's
+    /// history has known, as [`Self::local_names`] names them.
+    fn prefixes(
+        &self,
+        canonical_view: &View,
+        presence: &Presence<OperationId>,
+    ) -> Result<BTreeMap<String, String>, NodeError> {
         let mut machines = self.machines_of(canonical_view, presence.known());
         machines.remove(self.machine.key());
         let own = self.own_names_in(canonical_view, presence)?;
-        let prefixes = workspaces::display_names(&machines, |name| {
+        Ok(workspaces::display_names(&machines, |name| {
             own.iter()
                 .any(|workspace| workspace.as_str().starts_with(&format!("{name}/")))
-        });
-        Ok(keys
+        }))
+    }
+
+    /// The local names of a canonical view's workspaces, given the other machines' prefixes.
+    fn names_of(
+        &self,
+        canonical_view: &View,
+        prefixes: &BTreeMap<String, String>,
+    ) -> BTreeMap<WorkspaceNameBuf, WorkspaceNameBuf> {
+        canonical_view
+            .wc_commit_ids
             .keys()
-            .filter_map(|key| {
-                let (machine, workspace) = workspaces::split_key(key.as_str())?;
-                let name = if machine == self.machine.key() {
-                    workspace.to_owned()
-                } else {
-                    format!("{}/{workspace}", prefixes.get(machine)?)
-                };
-                Some((key.clone(), WorkspaceNameBuf::from(name)))
-            })
-            .collect())
+            .filter_map(|key| Some((key.clone(), self.local_name(key, prefixes)?)))
+            .collect()
+    }
+
+    /// The local name of the workspace a machine-qualified key names, given the other
+    /// machines' prefixes: its own name for this machine's, `<prefix>/<workspace>` for
+    /// another's. None for a machine with no prefix.
+    pub(super) fn local_name(
+        &self,
+        key: &WorkspaceName,
+        prefixes: &BTreeMap<String, String>,
+    ) -> Option<WorkspaceNameBuf> {
+        let (machine, workspace) = workspaces::split_key(key.as_str())?;
+        let name = if machine == self.machine.key() {
+            workspace.to_owned()
+        } else {
+            format!("{}/{workspace}", prefixes.get(machine)?)
+        };
+        Some(WorkspaceNameBuf::from(name))
     }
 
     /// The machines a canonical view's history has known: `known`, and those with
@@ -591,7 +620,8 @@ impl NodeRepo {
         // own names, the others' as `beta/default`. This machine's own may have moved: when
         // another machine rewrites, abandons or restores a working-copy commit, its jj moves
         // the workspace, and the canonical view records where to.
-        let names = self.local_names(&view, &*self.presence(id)?)?;
+        let prefixes = self.prefixes(&view, &*self.presence(id)?)?;
+        let names = self.names_of(&view, &prefixes);
         view.wc_commit_ids = std::mem::take(&mut view.wc_commit_ids)
             .into_iter()
             .filter_map(|(key, commit)| Some((names.get(&key)?.clone(), commit)))
@@ -600,7 +630,12 @@ impl NodeRepo {
         debug_assert_eq!(PerMachine::of(&view), *per_machine);
         // The id the op store gives it, worked out as it does.
         let id = ViewId::new(blake2b_hash(&view).to_vec());
-        Ok(LocalView { view, id, names })
+        Ok(LocalView {
+            view,
+            id,
+            names,
+            prefixes,
+        })
     }
 }
 

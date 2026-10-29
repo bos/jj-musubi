@@ -288,8 +288,9 @@ enum Command {
     /// commit. If the copy is still there, the hive shows it again as soon as it's used.
     Forget {
         /// The machine, as its working copies are named here: `laptop` for `laptop/default@`,
-        /// or `laptop-1a2b` for `laptop-1a2b/default@`. The name `musubi list` gives it will
-        /// do too, if no other machine has that name.
+        /// `laptop-1a2b` for `laptop-1a2b/default@`, or, where even the start of its id is
+        /// another machine's, its whole id, as in `laptop-1a2b3c4d/default@`. The name
+        /// `musubi list` gives it will do too, if no other machine could have that name.
         machine: String,
     },
     /// Sync the repository in the current directory now.

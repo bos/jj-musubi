@@ -237,10 +237,11 @@ get a new one. Run `jj new @-` in that workspace.
 
 ### "no machine laptop shows here in hive app; `jj workspace list` names those that do"
 
-No machine with working copies here has that name: it was forgotten already, it left, or it
-shows by another name, such as `laptop-1a2b` when another machine, even one long gone, shares
-its name. `musubi forget` takes the name in its working copies' names (`laptop` for
-`laptop/default@`), or the name `musubi list` gives it if no other machine has that name.
+No machine with working copies here has that name: it was forgotten already, it left, or it shows
+by another name, such as `laptop-1a2b` when another machine, even one long gone, shares its name,
+or `laptop-1a2b3c4d` when even the start of its id is another's. `musubi forget` takes the name in
+its working copies' names (`laptop` for `laptop/default@`), or the name `musubi list` gives it if
+no other machine could have that name.
 
 ### "laptop is this machine; `musubi leave` takes this repository out of hive app"
 

@@ -671,12 +671,12 @@ own"](design.md#which-workspaces-are-this-machines-own)). Canonicalizing reads t
 machine-qualified keys, so two workspaces shown alike would be taken for one. The chain has two
 links:
 
-1. **The rule.** `assign` gives each machine, in order, the first of its candidate prefixes
-   that is free: its name, if no other machine has it, then `name-1a2b`, `name-1a2b3c4d`, and
-   that with ever more dashes. A prefix is free if no machine before took it and no name of
-   this machine's own starts with it and `/`. One is always free (`choose_free`), and so the
-   names are injective, whatever the machines and the names of this machine's own
-   (`localName_injective`).
+1. **The rule.** `assign` gives each machine, in order, this one among them, as the hub names
+   every machine, the first of its candidate prefixes that is free: its name, if no other machine
+   has it, then `name-1a2b`, `name-1a2b3c4d`, and that with ever more dashes. A prefix is free if
+   no machine before took it and no name of this machine's own starts with it and `/`. One is
+   always free (`choose_free`), and so the names are injective, whatever the machines and the
+   names of this machine's own (`localName_injective`).
 2. **The code.** `workspaces::display_names` makes the same choices. The Hegel test
    `workspaces::tests::names_conform`, in `crates/musubi-jj/src/workspaces.rs`, draws up to
    four machines and three names of this machine's own from names, suffixes and names of its
@@ -686,8 +686,8 @@ links:
    the rule before this one named alike, which `Names.lean` checks with `#guard`.
 
 The test checks the rule, not where musubi applies it: that `local_names` and `canonical_view`
-pass it every machine the history has known and this machine's own names is for the race
-catalogue (`crates/musubi-sync/tests/races/forget.rs`) to check.
+pass it every machine the history has known, this one included, and this machine's own names is
+for the race catalogue (`crates/musubi-sync/tests/races/forget.rs`) to check.
 
 The oracle's names request and reply:
 

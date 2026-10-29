@@ -6,12 +6,13 @@ a view with its own workspaces under their names and every other machine's as
 `<prefix>/<workspace>`. Canonicalizing reads the local names back as keys, so naming must be
 injective on a view's keys.
 
-Each other machine takes the first of its candidate prefixes that is free (`assign`;
-`workspaces::display_names`): its name, if no other machine has it; its name and the start of
-its key's suffix, `laptop-1a2b`; its name and the whole suffix; then that with ever more `-`. A
-prefix is free if no machine before it took it, and no name of this machine's own starts with
-it and `/`. The last candidates make one free: one longer than every prefix taken and every name
-of this machine's own (`choose_free`).
+Each machine, this one among them, takes the first of its candidate prefixes that is free
+(`assign`; `workspaces::display_names`), as the hub, which names every machine, does too; this
+machine shows only the others'. The candidates are its name, if no other machine has it; its name
+and the start of its key's suffix, `laptop-1a2b`; its name and the whole suffix; then that with
+ever more `-`. A prefix is free if no machine before it took it, and no name of this machine's own
+starts with it and `/`. The last candidates make one free: one longer than every prefix taken and
+every name of this machine's own (`choose_free`).
 
 - Naming is injective on a view's keys (`localName_injective`), whatever the machines and the
   names of this machine's own.
@@ -236,12 +237,13 @@ theorem split_slash {p₁ p₂ w₁ w₂ : Str} (h₁ : '/' ∉ p₁) (h₂ : '/
       exact ⟨congrArg _ this.1, this.2⟩
 
 /-- Naming is injective on a view's keys: this machine's workspaces, whose names are among
-`own`, and the other machines', whose keys are among `machines`. -/
+`own`, and the other machines', whose keys are among `machines`, which may have this
+machine's too. -/
 theorem localName_injective {me : Key} {machines : List Key} {own : List Str}
-    (hme : me ∉ machines)
     (hslash : ∀ k ∈ machines, '/' ∉ k.name ∧ '/' ∉ k.suffix)
     {k₁ k₂ : Key} {w₁ w₂ : Str}
-    (hk₁ : k₁ = me ∧ w₁ ∈ own ∨ k₁ ∈ machines) (hk₂ : k₂ = me ∧ w₂ ∈ own ∨ k₂ ∈ machines)
+    (hk₁ : k₁ = me ∧ w₁ ∈ own ∨ k₁ ≠ me ∧ k₁ ∈ machines)
+    (hk₂ : k₂ = me ∧ w₂ ∈ own ∨ k₂ ≠ me ∧ k₂ ∈ machines)
     (h : localName me (assign machines own) k₁ w₁ = localName me (assign machines own) k₂ w₂) :
     k₁ = k₂ ∧ w₁ = w₂ := by
   let a := assign machines own
@@ -261,10 +263,10 @@ theorem localName_injective {me : Key} {machines : List Key} {own : List Str}
     have := this w hw
     rw [e, hpre] at this
     exact Bool.noConfusion this
-  have mine : ∀ {k w}, k = me ∧ w ∈ own ∨ k ∈ machines → k = me → w ∈ own :=
-    fun hk e => (hk.resolve_right fun m => hme (e ▸ m)).2
-  have other : ∀ {k w}, k = me ∧ w ∈ own ∨ k ∈ machines → k ≠ me → k ∈ machines :=
-    fun hk e => hk.resolve_left fun h => e h.1
+  have mine : ∀ {k w}, k = me ∧ w ∈ own ∨ k ≠ me ∧ k ∈ machines → k = me → w ∈ own :=
+    fun hk e => (hk.resolve_right fun h => h.1 e).2
+  have other : ∀ {k w}, k = me ∧ w ∈ own ∨ k ≠ me ∧ k ∈ machines → k ≠ me → k ∈ machines :=
+    fun hk e => (hk.resolve_left fun h => e h.1).2
   unfold localName at h
   by_cases e₁ : k₁ = me <;> by_cases e₂ : k₂ = me <;> simp only [e₁, e₂, ite_true, ite_false] at h
   · exact ⟨e₁.trans e₂.symm, h⟩

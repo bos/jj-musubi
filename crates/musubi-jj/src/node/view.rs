@@ -359,14 +359,16 @@ impl NodeRepo {
     }
 
     /// The prefix under which this machine shows each other machine a canonical view's
-    /// history has known, as [`Self::local_names`] names them.
+    /// history has known, as [`Self::local_names`] names them. This machine takes one too,
+    /// which it never shows, so that it shows the others as the hub names them, which names
+    /// every machine: a machine named alike is `laptop-1a2b` to both.
     fn prefixes(
         &self,
         canonical_view: &View,
         presence: &Presence<OperationId>,
     ) -> Result<BTreeMap<String, String>, NodeError> {
         let mut machines = self.machines_of(canonical_view, presence.known());
-        machines.remove(self.machine.key());
+        machines.insert(self.machine.key().to_owned());
         let own = self.own_names_in(canonical_view, presence)?;
         Ok(workspaces::display_names(&machines, |name| {
             own.iter()

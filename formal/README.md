@@ -319,11 +319,12 @@ defines work and forgets). For any operation graph:
 
 ### Workspace names (`Names.lean`)
 
-Each other machine is shown under the first of its candidate prefixes that no machine before it
-took and that starts no name of this machine's own and `/`: its name, if no other machine has
-it, then its name and the start of its key's suffix, its name and the whole suffix, and that
-with ever more dashes ([conformance.md, "Workspace
-names"](../docs/internals/conformance.md#workspace-names)).
+Each machine, this one among them, takes the first of its candidate prefixes that no machine
+before it took and that starts no name of this machine's own and `/`: its name, if no other
+machine has it, then its name and the start of its key's suffix, its name and the whole suffix,
+and that with ever more dashes ([conformance.md, "Workspace
+names"](../docs/internals/conformance.md#workspace-names)). This machine shows the others under
+theirs, as the hub, which names every machine, lists them.
 
 - `choose_free`: one candidate is always free, one longer than every prefix taken and every
   name of this machine's own.

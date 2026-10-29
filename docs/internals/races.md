@@ -44,7 +44,7 @@ after the machine, as `beta/default` ([design.md, "Workspaces"](design.md#worksp
 | A machine abandons another machine's working-copy commit | jj gives that workspace a new commit on the parent, as for any workspace, and its machine adopts it. | `abandoning_another_machines_working_copy_commit` |
 | A machine renames its workspace | The other machines show the new name. | `renamed_workspace_shows_renamed` |
 | A machine renames or forgets its workspace while another machine rewrites its working copy | The rename or forget wins, as when jj merges concurrent operations on one machine: musubi merges workspaces three-way as jj does, removals first. | `e2e_smoke`, `workspace_merge_matches_jj` |
-| Several machines share a hostname | Told apart by a random suffix in each machine's stored identity, and shown as `mac-1a2b/default`. | `machines_sharing_a_hostname_are_told_apart` |
+| Several machines share a hostname | Told apart by a random suffix in each machine's stored identity, and shown as `mac-1a2b/default`. | `machines_sharing_a_hostname_are_told_apart`, `two_machines_sharing_a_hostname_show_each_other_qualified` |
 | A workspace name git can't store as a ref, an import in a repository that isn't colocated, or a git remote named after a machine | Nothing happens: other machines' working copies are never git refs, so git can't drop them, and jj's import never abandons work because of them. | `git_never_sees_other_machines_working_copies` |
 
 ## Copies that go away

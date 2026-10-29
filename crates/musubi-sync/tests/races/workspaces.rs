@@ -568,6 +568,25 @@ fn machines_sharing_a_hostname_are_told_apart() {
     }
 }
 
+/// Two machines that share a hostname show each other as the hub lists them, by name and part
+/// of the id, not by the plain name, which the other has too.
+#[test]
+fn two_machines_sharing_a_hostname_show_each_other_qualified() {
+    let env = TestEnv::new();
+    let repos = ["one", "two"].map(|dir| env.init_repo_with_hostname(dir, "mac"));
+    let mut hive = Fixture::join(env, repos.into());
+    hive.sync();
+    hive.assert_converged();
+    for (index, other) in [(0, 1), (1, 0)] {
+        let qualified = musubi_jj::workspaces::qualified_name(&hive.machine_key(other));
+        let others: Vec<String> = names(&hive, index)
+            .into_iter()
+            .filter(|name| name.contains('/'))
+            .collect();
+        assert_eq!(others, vec![format!("{qualified}/default")]);
+    }
+}
+
 /// An operation that forgot the workspace it was made in is realized under the name that
 /// workspace shows by, as every other operation is, though the view no longer names it.
 /// Here alpha has a workspace `beta/x` of its own, so it shows beta as `beta-1a2b`. Under

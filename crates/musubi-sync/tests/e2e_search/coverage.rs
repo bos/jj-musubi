@@ -201,6 +201,10 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         Some(&["setup:shared_hostname"]),
     ),
     (
+        "two_machines_sharing_a_hostname_show_each_other_qualified",
+        Some(&["setup:shared_hostname"]),
+    ),
+    (
         "same_bookmark_moved_to_different_commits",
         Some(&["bookmark_move"]),
     ),

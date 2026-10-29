@@ -6,6 +6,8 @@ change the protocol, so run the same release on the hub and every machine (see
 
 ## Unreleased
 
+- A machine shows another machine that shares its name as `laptop-1a2b`, as the hub's list
+  does, where it used to show it as `laptop`.
 - A `jj` command that was already running when a repository joined its hive, or one run with
   `--at-op` at an operation from before it joined, no longer sends the repository's history
   from before the join to the hive. Its work syncs once jj merges it with the history since.

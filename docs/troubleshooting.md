@@ -203,7 +203,7 @@ with `musubi clone <hive> <dir>`, if a hive has it, or with `jj git clone` witho
 
 ## Leaving a hive or forgetting a machine
 
-### "couldn't tell hive app that this repository leaves: ...; `musubi leave --force` ..."
+### "couldn't tell hive app that this repository leaves: ..."
 
 `musubi leave` couldn't reach the hub to send this copy's last work and its leaving, so the
 repository is still part of the hive, and the daemon syncs it again. That sync takes the
@@ -216,7 +216,7 @@ If the message says "work done in this repository while it left kept it in the h
 `jj` command ran in the repository during each of `musubi leave`'s three tries. Stop whatever
 is running `jj` there, and run `musubi leave` again.
 
-### "couldn't record what changed in the working copy: ...; `musubi leave --force` ..."
+### "couldn't record what changed in the working copy: ..."
 
 `musubi leave` first snapshots the working copy, as any `jj` command would, so that the
 repository leaves with all of its work, and jj couldn't; the message says why. Most often

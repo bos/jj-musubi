@@ -458,7 +458,7 @@ fn hub_join_sync_clone_and_list() {
     Hub $ROOT/hub:
       project  2 machines: alpha, beta
         here: $ROOT/beta  synced N ago
-    Daemon: running, serving 1 repositories; doesn't start at login; `musubi daemon install` makes it
+    Daemon: running, serving 1 repository; doesn't start at login; `musubi daemon install` makes it
     ");
     // `musubi status` shows the repository's part in the hive: every machine's working
     // copies, as jj names them here, this machine's first, and each copy.
@@ -518,7 +518,7 @@ fn hub_join_sync_clone_and_list() {
     [1m<<heading::Hub >><<heading hub::$ROOT/hub>><<heading:::>>[0m
       [1m<<hive hive::project>>[0m  <<machines len::2>> machines: [38;5;2m<<machines map join machine::alpha>>[39m<<machines map join::, >>[38;5;2m<<machines map join machine::beta>>[39m
         here: <<path::$ROOT/beta>>  <<status::synced N ago>>
-    Daemon: running, serving 1 repositories; doesn't start at login; `musubi daemon install` makes it
+    Daemon: running, serving 1 repository; doesn't start at login; `musubi daemon install` makes it
     ");
     let daemon_log = fs::read_to_string(state_dir(&env, &beta).join("daemon.log")).unwrap();
     assert!(
@@ -974,7 +974,7 @@ fn commands_in_another_workspace_act_on_the_repository() {
     Hub $ROOT/hub:
       alpha  1 machine: alpha
         here: $ROOT/alpha  synced N ago
-    Daemon: running, serving 1 repositories; doesn't start at login; `musubi daemon install` makes it
+    Daemon: running, serving 1 repository; doesn't start at login; `musubi daemon install` makes it
     ");
     // Listed once, through the workspace it joined from, so a daemon starting serves it once.
     let state_path = state_dir(&env, &alpha).join("state.toml");
@@ -1188,14 +1188,14 @@ fn a_sync_says_at_once_that_the_hub_is_gone() {
     hub.kill();
     let started = Instant::now();
     let err = musubi_fails(&env, &logs, &alpha, &["sync"]);
-    insta::assert_snapshot!(err, @"Error: no hub is serving $ROOT/hub here; start one with `musubi hub`");
+    insta::assert_snapshot!(err, @"Error: no hub is serving $ROOT/hub");
     assert!(started.elapsed() < Duration::from_secs(10), "{err}");
     let list = musubi_in(&env, &logs, &alpha, &["list"]);
     insta::assert_snapshot!(list, @"
-    Hub $ROOT/hub: no hub is serving $ROOT/hub here; start one with `musubi hub`. This machine's copies:
+    Hub $ROOT/hub: no hub is serving $ROOT/hub. This machine's copies:
       alpha
-        here: $ROOT/alpha  sync failing: no hub is serving $ROOT/hub here; start one with `musubi hub`
-    Daemon: running, serving 1 repositories; doesn't start at login; `musubi daemon install` makes it
+        here: $ROOT/alpha  sync failing: no hub is serving $ROOT/hub
+    Daemon: running, serving 1 repository; doesn't start at login; `musubi daemon install` makes it
     ");
     // As soon as the hub is back, a sync goes through: what the daemon knew is not stale.
     hub = Hub::start(&env, &mut logs);
@@ -1222,7 +1222,10 @@ fn leaving_needs_the_hub_unless_forced() {
     musubi_in(&env, &logs, &alpha, &["create", "--hub", &hub.url]);
     hub.kill();
     let err = musubi_fails(&env, &logs, &alpha, &["leave"]);
-    insta::assert_snapshot!(err, @"Error: couldn't tell hive alpha that this repository leaves: no hub is serving $ROOT/hub here; start one with `musubi hub`; `musubi leave --force` leaves without telling the hive");
+    insta::assert_snapshot!(err, @"
+    Error: couldn't tell hive alpha that this repository leaves: no hub is serving $ROOT/hub
+    Hint: `musubi leave --force` leaves without telling the hive
+    ");
     assert_eq!(membership(&alpha), "joined");
     // It keeps its working copy, though on the empty commit its forget abandoned.
     let workspaces = alpha.jj(&["workspace", "list", "--ignore-working-copy"]);
@@ -1232,10 +1235,10 @@ fn leaving_needs_the_hub_unless_forced() {
     );
     let list = musubi_in(&env, &logs, &alpha, &["list"]);
     insta::assert_snapshot!(list, @"
-    Hub $ROOT/hub: no hub is serving $ROOT/hub here; start one with `musubi hub`. This machine's copies:
+    Hub $ROOT/hub: no hub is serving $ROOT/hub. This machine's copies:
       alpha
-        here: $ROOT/alpha  sync failing: no hub is serving $ROOT/hub here; start one with `musubi hub`
-    Daemon: running, serving 1 repositories; doesn't start at login; `musubi daemon install` makes it
+        here: $ROOT/alpha  sync failing: no hub is serving $ROOT/hub
+    Daemon: running, serving 1 repository; doesn't start at login; `musubi daemon install` makes it
     ");
     assert!(log(&alpha).contains("start"));
     let out = musubi_in(&env, &logs, &alpha, &["leave", "--force"]);
@@ -1470,7 +1473,7 @@ fn duplicates_are_never_synced() {
     Hub $ROOT/hub:
       alpha  2 machines: alpha, beta
         here: $ROOT/alpha  synced N ago
-    Daemon: running, serving 1 repositories; doesn't start at login; `musubi daemon install` makes it
+    Daemon: running, serving 1 repository; doesn't start at login; `musubi daemon install` makes it
     ");
 }
 
@@ -1544,7 +1547,7 @@ fn moved_copies_sync_again() {
     Hub $ROOT/hub:
       alpha  2 machines: alpha, beta
         here: $ROOT/moved  synced N ago
-    Daemon: running, serving 1 repositories; doesn't start at login; `musubi daemon install` makes it
+    Daemon: running, serving 1 repository; doesn't start at login; `musubi daemon install` makes it
     ");
     // Away for a while, as on a disk unmounted, it syncs again when it's back.
     settled(&env, &logs, &alpha, &moved);
@@ -1608,7 +1611,7 @@ fn deleted_copies_stop_syncing() {
     Hub $ROOT/hub:
       alpha  2 machines: alpha, beta
         here: $ROOT/alpha  not syncing: it's missing
-    Daemon: running, serving 1 repositories; doesn't start at login; `musubi daemon install` makes it
+    Daemon: running, serving 1 repository; doesn't start at login; `musubi daemon install` makes it
     ");
     // A clone in its place takes over its entry.
     musubi_at(&env, &logs, &alpha, root, &["clone", "alpha", path]);
@@ -1617,7 +1620,7 @@ fn deleted_copies_stop_syncing() {
     Hub $ROOT/hub:
       alpha  3 machines: alpha-XXXX, alpha-XXXX, beta
         here: $ROOT/alpha  synced N ago
-    Daemon: running, serving 1 repositories; doesn't start at login; `musubi daemon install` makes it
+    Daemon: running, serving 1 repository; doesn't start at login; `musubi daemon install` makes it
     ");
     musubi_at(&env, &logs, &alpha, alpha.path(), &["daemon", "stop"]);
     fs::remove_dir_all(alpha.path()).unwrap();
@@ -1792,7 +1795,7 @@ fn a_new_hive_doesnt_inherit_members() {
       alpha  1 machine: alpha
       other  1 machine: beta
         here: $ROOT/beta  synced N ago
-    Daemon: running, serving 1 repositories; doesn't start at login; `musubi daemon install` makes it
+    Daemon: running, serving 1 repository; doesn't start at login; `musubi daemon install` makes it
     ");
     let workspaces = beta.jj(&["workspace", "list"]);
     assert!(!workspaces.contains("alpha/"), "{workspaces}");
@@ -2155,7 +2158,7 @@ fn machines_reach_the_hub_over_ssh() {
     Hub hubhost:
       alpha  2 machines: alpha, beta
         here: $ROOT/beta  synced N ago
-    Daemon: running, serving 1 repositories; doesn't start at login; `musubi daemon install` makes it
+    Daemon: running, serving 1 repository; doesn't start at login; `musubi daemon install` makes it
     ");
 
     alpha.write_file("b", "more");
@@ -2218,7 +2221,7 @@ fn localhost_reaches_the_hub_here_without_ssh() {
     Hub $ROOT/home/musubi-hub:
       alpha  1 machine: alpha
         here: $ROOT/alpha  synced N ago
-    Daemon: running, serving 1 repositories; doesn't start at login; `musubi daemon install` makes it
+    Daemon: running, serving 1 repository; doesn't start at login; `musubi daemon install` makes it
     ");
 }
 
@@ -2331,7 +2334,7 @@ fn the_quick_start_works_as_written() {
     Hub $HOST:
       alpha  2 machines: alpha, beta
         here: $ROOT/beta  synced N ago
-    Daemon: running, serving 1 repositories; doesn't start at login; `musubi daemon install` makes it
+    Daemon: running, serving 1 repository; doesn't start at login; `musubi daemon install` makes it
     beta$ musubi clone alpha $ROOT/gamma --hub $HOST
     Cloning hive alpha into $ROOT/gamma
     Initialized repo in "../gamma"

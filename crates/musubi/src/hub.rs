@@ -272,7 +272,10 @@ pub fn install(ui: &Ui, args: ServeArgs) -> anyhow::Result<()> {
             loop {
                 match open_local(&dir).await {
                     Ok(_) => return Ok(()),
-                    Err(err) if tokio::time::Instant::now() >= deadline => return Err(err),
+                    // As text: its hint, to start a hub, is no help when one failed to.
+                    Err(err) if tokio::time::Instant::now() >= deadline => {
+                        return Err(anyhow::anyhow!("{err:#}"));
+                    }
                     Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
                 }
             }
@@ -431,8 +434,10 @@ fn names_this_machine(dest: &str, host: Option<&str>, advertise: Option<&str>) -
 /// The directory of the hub `musubi hub` last served without `--dir`.
 fn default_dir() -> anyhow::Result<PathBuf> {
     let path = config::state_dir()?.join("hub.path");
-    let text = fs::read_to_string(&path)
-        .context("no hub has run on this machine; start one with `musubi hub`")?;
+    let text = fs::read_to_string(&path).map_err(|_| {
+        let err = anyhow::anyhow!("no hub has run on this machine");
+        crate::ui::with_hint(err, "`musubi hub` starts one")
+    })?;
     Ok(PathBuf::from(text.trim()))
 }
 
@@ -517,16 +522,16 @@ impl Connector for Local {
 /// Connects to the socket of the hub serving `dir`, on this machine.
 async fn open_local(dir: &Path) -> anyhow::Result<Stream> {
     let not_serving = || {
-        format!(
-            "no hub is serving {} here; start one with `musubi hub`",
-            dir.display()
-        )
+        let err = anyhow::anyhow!("no hub is serving {}", dir.display());
+        crate::ui::with_hint(err, "`musubi hub` starts one")
     };
-    anyhow::ensure!(dir.join(HUB_FILE).exists(), not_serving());
+    if !dir.join(HUB_FILE).exists() {
+        return Err(not_serving());
+    }
     Socket::hub(&std::path::absolute(dir)?)
         .connect_stream()
         .await?
-        .with_context(not_serving)
+        .ok_or_else(not_serving)
 }
 
 /// Asks `hub` about its hives; a refusal is an error.
@@ -557,7 +562,8 @@ pub async fn ask_within(
     let reply = match connection.transport.request(&subject, payload, limit).await {
         Ok(reply) => reply,
         Err(TransportError::NoResponders(_)) => {
-            anyhow::bail!("no hub is serving at {hub}; is `musubi hub` running?")
+            let err = anyhow::anyhow!("no hub is serving at {hub}");
+            return Err(crate::ui::with_hint(err, "`musubi hub` there starts one"));
         }
         Err(err) => {
             return Err(connection.explain(anyhow::Error::new(err).context("asking the hub")));

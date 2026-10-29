@@ -13,6 +13,9 @@ change the protocol, so run the same release on the hub and every machine (see
 - `create`, `join` and `clone` no longer print `Synced with the hub (hive at #N)`, nor `sync`
   `Synced (hive at #N)`, nor `musubi status` the hive's operation number: it meant nothing to
   anyone but musubi. A sync that worked prints nothing.
+- When no hub serves a hub's directory, the error says so in a line, with `musubi hub` on a
+  hint line of its own; `musubi list` and `musubi leave` no longer repeat it inside their own
+  messages, and `leave`'s hint, `musubi leave --force`, is on a line of its own too.
 - A machine shows another machine that shares its name as `laptop-1a2b`, as the hub's list
   does, where it used to show it as `laptop`.
 - A `jj` command that was already running when a repository joined its hive, or one run with

@@ -278,6 +278,17 @@ impl Error for Hinted {
     }
 }
 
+/// `err`, followed by `hint` on a line of its own when it ends the command, as jj prints its
+/// hints, even under context added to it. A caller that puts `err` in a message of its own
+/// leaves the hint out. Only `err`'s message survives, not its type, so give it a message
+/// rather than an error that callers downcast.
+pub fn with_hint(err: anyhow::Error, hint: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(Hinted {
+        error: Arc::from(Box::<dyn Error + Send + Sync>::from(err)),
+        hints: vec![ErrorHint::PlainText(hint.into())],
+    })
+}
+
 fn hinted(err: CommandError) -> anyhow::Error {
     anyhow::Error::new(Hinted {
         error: err.error,

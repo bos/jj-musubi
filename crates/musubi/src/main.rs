@@ -1400,11 +1400,20 @@ fn leave(
     let served = stop_serving(&entry.key, socket)?;
     let name = hive.display_name();
     let told = match snapshot(&located) {
-        Err(err) => Err(("record what changed in the working copy".to_owned(), err)),
-        Ok(()) => tell_the_hive(ui, &located, &hive)
-            .map_err(|err| (format!("tell hive {name} that this repository leaves"), err)),
+        Err(err) => Err((
+            "record what changed in the working copy".to_owned(),
+            "if the working copy is stale, `jj workspace update-stale` updates it",
+            err,
+        )),
+        Ok(()) => tell_the_hive(ui, &located, &hive).map_err(|err| {
+            (
+                format!("tell hive {name} that this repository leaves"),
+                "`musubi leave --force` leaves without telling the hive",
+                err,
+            )
+        }),
     };
-    if let Err((doing, err)) = told {
+    if let Err((doing, hint, err)) = told {
         if !force {
             if served {
                 // As before: the daemon serves it again.
@@ -1417,9 +1426,10 @@ fn leave(
                 })
                 .ok();
             }
-            anyhow::bail!(
-                "couldn't {doing}: {err:#}; `musubi leave --force` leaves without telling the hive"
-            );
+            return Err(ui::with_hint(
+                anyhow::anyhow!("couldn't {doing}: {err:#}"),
+                hint,
+            ));
         }
         writeln!(ui.warning(), "Couldn't {doing} ({err:#}); leaving anyway.")?;
     }
@@ -1725,8 +1735,8 @@ fn list(
     match daemon {
         Ok(true) => writeln!(
             out,
-            "running, serving {} repositories; {at_login}",
-            statuses.len()
+            "running, serving {}; {at_login}",
+            repositories(statuses.len())
         )?,
         Ok(false) => {
             write!(out.labeled("problem"), "not running")?;
@@ -1882,4 +1892,13 @@ fn op_id(ui: &Ui, start: &Path, id: &str) -> anyhow::Result<()> {
         return Ok(());
     }
     anyhow::bail!("no operation {id} here or in the hive")
+}
+
+/// `n` repositories, in words.
+fn repositories(n: usize) -> String {
+    if n == 1 {
+        "1 repository".to_owned()
+    } else {
+        format!("{n} repositories")
+    }
 }

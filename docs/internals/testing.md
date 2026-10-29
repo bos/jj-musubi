@@ -52,10 +52,10 @@ them on the disk.
 ## CI
 
 CI runs clippy and the default suite on Linux, macOS and Windows, since each compiles code the
-others don't. On Linux it also runs the rest of `just check`'s lints (formatting, rustdoc,
-cargo-deny, cargo-machete, typos), checks the Lean model, runs the conformance tests against its
-oracle (the executable model, [conformance.md](conformance.md)), and runs each benchmark script
-once (`just bench-smoke`).
+others don't; each first builds the Lean oracle (the executable model,
+[conformance.md](conformance.md)) for the tests that check the code against it. On Linux it also
+runs the rest of `just check`'s lints (formatting, rustdoc, cargo-deny, cargo-machete, typos),
+checks the Lean model's proofs, and runs each benchmark script once (`just bench-smoke`).
 
 The Search workflow runs the search nightly on Linux, each shard on a runner of its own, with a
 seed that changes from run to run. A failing shard uploads its example database; its output

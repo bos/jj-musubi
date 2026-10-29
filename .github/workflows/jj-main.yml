@@ -64,10 +64,26 @@ jobs:
           cp target/debug/jj "$RUNNER_TEMP/bin/"
           echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - run: jj --version && git --version
-      # The conformance tests check musubi's logic, which no jj changes, against the Lean
-      # oracle, which this job doesn't build; nextest still compiles them. The test of a jj
-      # 0.46 bug fails as it should once jj fixes it (jj-vcs/jj#8076, fixed after 0.46), so
-      # it's left out until musubi moves past 0.46 and drops it.
+      # The Lean oracle, which tests check musubi against, and some, jj-lib's merges.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.elan
+          key: elan-${{ runner.os }}-${{ hashFiles('formal/lean-toolchain') }}
+      - uses: leanprover/lean-action@24581d74d674803a25a81b10b059c5c0cdd344c6 # v1.6.2
+        with:
+          lake-package-directory: formal
+          auto-config: false
+          build: false
+          test: false
+          lint: false
+          use-mathlib-cache: false
+      - name: Build the Lean oracle
+        working-directory: formal
+        run: |
+          lake build oracle
+          echo "MUSUBI_ORACLE=$PWD/.lake/build/bin/oracle" >> "$GITHUB_ENV"
+      # The test of a jj 0.46 bug fails as it should once jj fixes it (jj-vcs/jj#8076, fixed
+      # after 0.46), so it's left out until musubi moves past 0.46 and drops it.
       - run: >-
           cargo nextest run --workspace
-          -E "not test(/conformance$/) and not test(=history::root_parent_merge_bug_is_explained)"
+          -E "not test(=history::root_parent_merge_bug_is_explained)"

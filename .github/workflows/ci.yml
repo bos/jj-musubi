@@ -79,6 +79,29 @@ jobs:
         run: |
           .github/scripts/install-release.sh jj-vcs/jj v0.46.0 "${{ matrix.jj }}" "${{ matrix.jj-sha256 }}" jj
       - run: jj --version && git --version
+      # The Lean toolchain, for the oracle that tests check the code against.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.elan
+          key: elan-${{ runner.os }}-${{ hashFiles('formal/lean-toolchain') }}
+      - uses: leanprover/lean-action@24581d74d674803a25a81b10b059c5c0cdd344c6 # v1.6.2
+        with:
+          lake-package-directory: formal
+          auto-config: false
+          build: false
+          test: false
+          lint: false
+          use-mathlib-cache: false
+      # Built once here: tests that each built it would race in formal/.lake.
+      - name: Build the Lean oracle
+        shell: bash
+        working-directory: formal
+        run: |
+          lake build oracle
+          dir=$(pwd)
+          exe=""
+          if [ "$RUNNER_OS" = Windows ]; then dir=$(pwd -W); exe=.exe; fi
+          echo "MUSUBI_ORACLE=$dir/.lake/build/bin/oracle$exe" >> "$GITHUB_ENV"
       # The login service test installs the daemon with systemd's user manager, which a
       # runner doesn't start without a login session.
       - name: Start a systemd user manager
@@ -88,8 +111,7 @@ jobs:
           sudo systemctl start "user@$(id -u).service"
           echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
           echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
-      # The conformance tests need the Lean oracle; the conformance job runs them.
-      - run: cargo nextest run --workspace --locked -E "not test(/conformance$/)"
+      - run: cargo nextest run --workspace --locked
         env:
           # Runners are thrown away, so the test may install a login service for real.
           MUSUBI_TEST_LOGIN_SERVICE: "1"
@@ -99,8 +121,8 @@ jobs:
         timeout-minutes: 15
         run: just bench-smoke
 
-  conformance:
-    name: Lean model and conformance
+  lean:
+    name: Lean model
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -121,11 +143,3 @@ jobs:
           lint: false
           use-mathlib-cache: false
       - run: formal/test/run_smoke.sh
-      - run: rustup toolchain install stable --profile minimal && rustup default stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
-        with:
-          tool: cargo-nextest
-      - run: cargo nextest run -p musubi-core -p musubi-jj -p jj-musubi --locked -E "test(/conformance$/)"
-        env:
-          MUSUBI_ORACLE: ${{ github.workspace }}/formal/.lake/build/bin/oracle

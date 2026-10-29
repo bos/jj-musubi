@@ -159,8 +159,7 @@ trace, so that nodes A and B both merge heads `{1, 2}` (`duplicateMerge`), and t
 quiesces. The trace restarts A and B before they fetch, so the test crashes them, rather
 than have them restart on the hub's reply. `remade_hive_conformance` makes a hive again
 under nodes that know heads it has lost, and requires each to take the hub's reply as
-saying it went back (`NodeCore::handle_reply`) and fill it again. Their names end in
-`conformance` because CI selects the tests that need the oracle by that name.
+saying it went back (`NodeCore::handle_reply`) and fill it again.
 
 ## Running it
 
@@ -174,8 +173,8 @@ it does nothing when the oracle is up to date. The oracle binary is
 as CI does with the one it has just built. `formal/test/run_smoke.sh` replays a fixed
 two-node run through it.
 
-The test makes 150 cases on CI, where it runs as a job of its own, and 50 elsewhere, where
-it would otherwise take most of `just test`'s time. `MUSUBI_CONFORMANCE_CASES` sets the
+The test makes 150 cases on CI and 50 elsewhere, where it would otherwise take most of
+`just test`'s time. `MUSUBI_CONFORMANCE_CASES` sets the
 number; `just mutants` sets 150.
 
 ## Evidence that the check has teeth

@@ -24,6 +24,7 @@ pub mod driver;
 pub mod hive;
 pub mod hub;
 pub mod node;
+pub mod progress;
 pub mod remote;
 pub mod server;
 pub mod service;

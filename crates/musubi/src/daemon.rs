@@ -32,6 +32,8 @@ use jj_lib::object_id::ObjectId as _;
 use musubi_hub::activity::Report;
 use musubi_sync::driver::NodeDriver;
 use musubi_sync::node::history_abandoned;
+use musubi_sync::progress::Activity;
+use musubi_sync::progress::Progress;
 use musubi_sync::remote::HiveGone;
 use musubi_sync::remote::OpenConnection;
 use musubi_sync::remote::RemoteHub;
@@ -162,6 +164,8 @@ struct Served {
     /// a crash the protocol recovers from.
     stop: watch::Sender<bool>,
     status: Arc<Mutex<Status>>,
+    /// What its sync is doing, for a command waiting on it.
+    progress: Progress,
     thread: std::thread::JoinHandle<()>,
 }
 
@@ -324,11 +328,13 @@ impl Supervisor {
             .and_then(|located| Status::load(&located.repo_path))
             .unwrap_or_default();
         let status = Arc::new(Mutex::new(initial));
+        let progress = Progress::default();
         let thread = {
             let (key, status, hubs) = (key.clone(), status.clone(), self.hubs.clone());
+            let progress = progress.clone();
             std::thread::Builder::new()
                 .name(format!("serve {key}"))
-                .spawn(move || serve(&key, receiver, stopped, &status, &hubs))
+                .spawn(move || serve(&key, receiver, stopped, &status, &progress, &hubs))
                 .expect("spawning a thread")
         };
         repos.insert(
@@ -337,6 +343,7 @@ impl Supervisor {
                 commands,
                 stop,
                 status,
+                progress,
                 thread,
             },
         );
@@ -374,6 +381,11 @@ impl Supervisor {
         for key in keys {
             self.remove(&key).await;
         }
+    }
+
+    /// What `key`'s sync is doing, if the daemon serves it.
+    fn progress(&self, key: &str) -> Option<Activity> {
+        self.lock().get(key).map(|served| served.progress.get())
     }
 
     fn statuses(&self) -> Vec<RepoStatus> {
@@ -443,6 +455,10 @@ impl Control for Daemon {
 
     async fn sync(self, _: tarpc::context::Context, key: String) -> Result<Synced, String> {
         self.supervisor.sync(&key).await
+    }
+
+    async fn progress(self, _: tarpc::context::Context, key: String) -> Option<Activity> {
+        self.supervisor.progress(&key)
     }
 
     async fn status(self, _: tarpc::context::Context) -> Vec<RepoStatus> {
@@ -565,6 +581,7 @@ fn serve(
     commands: mpsc::UnboundedReceiver<Command>,
     stop: watch::Receiver<bool>,
     status: &Mutex<Status>,
+    progress: &Progress,
     hubs: &Hubs,
 ) {
     // Everything this thread logs is about this copy. At error level, the span stays on
@@ -583,7 +600,7 @@ fn serve(
     runtime.block_on(async {
         let mut stop = stop;
         tokio::select! {
-            () = serve_retrying(key, commands, status, hubs) => {}
+            () = serve_retrying(key, commands, status, progress, hubs) => {}
             () = stopped(&mut stop) => {}
         }
     });
@@ -601,13 +618,14 @@ async fn serve_retrying(
     key: &str,
     mut commands: mpsc::UnboundedReceiver<Command>,
     status: &Mutex<Status>,
+    progress: &Progress,
     hubs: &Hubs,
 ) {
     let mut waiting = vec![];
     let mut backoff = Duration::from_secs(1);
     loop {
         let started = now();
-        match serve_async(key, &mut commands, status, &mut waiting, hubs).await {
+        match serve_async(key, &mut commands, status, progress, &mut waiting, hubs).await {
             Ok(()) => return,
             Err(err) => {
                 let message = format!("{err:#}");
@@ -745,6 +763,7 @@ async fn serve_async(
     key: &str,
     commands: &mut mpsc::UnboundedReceiver<Command>,
     status: &Mutex<Status>,
+    progress: &Progress,
     waiting: &mut Vec<oneshot::Sender<Result<Synced, String>>>,
     hubs: &Hubs,
 ) -> anyhow::Result<()> {
@@ -758,7 +777,7 @@ async fn serve_async(
     let mut opened = identity(&located.repo_path);
     let connection = hubs.connect(&hive.hub).await?;
     let own = hubs.own_connections(&hive.hub);
-    let (mut driver, machine) = open_driver(&located, &hive, &connection, own)?;
+    let (mut driver, machine) = open_driver(&located, &hive, &connection, own, progress)?;
     let transport = connection.transport.clone();
     let mut notices = transport.subscribe(&hive.head_subject()).await?;
     let mut reconnections = transport.reconnections();
@@ -1085,6 +1104,7 @@ fn open_driver(
     hive: &HiveConfig,
     connection: &Connection,
     own_connections: Option<OpenConnection>,
+    progress: &Progress,
 ) -> anyhow::Result<(NodeDriver, String)> {
     let blobs = located.repo_path.join("musubi/blobs");
     let mut remote = RemoteHub::new(
@@ -1092,7 +1112,8 @@ fn open_driver(
         hive.rpc_subject(),
         &blobs,
         REQUEST_TIMEOUT,
-    )?;
+    )?
+    .with_progress(progress.clone());
     if let Some(open) = own_connections {
         remote = remote.with_own_connections(open);
     }
@@ -1113,11 +1134,16 @@ fn known(driver: &NodeDriver) -> Synced {
 
 /// Syncs once, in this process, as the daemon would, and records how it went for
 /// `musubi status`.
-pub async fn sync_once(located: &Located, hive: &HiveConfig) -> anyhow::Result<Synced> {
+/// `progress` records what it is doing.
+pub async fn sync_once(
+    located: &Located,
+    hive: &HiveConfig,
+    progress: &Progress,
+) -> anyhow::Result<Synced> {
     let mut status = Status::load(&located.repo_path).unwrap_or_default();
     let opened = async {
         let connection = crate::hub::connect(&hive.hub, REQUEST_TIMEOUT).await?;
-        let (driver, _) = open_driver(located, hive, &connection, None)?;
+        let (driver, _) = open_driver(located, hive, &connection, None, progress)?;
         anyhow::Ok((connection, driver))
     };
     let (connection, mut driver) = match opened.await {

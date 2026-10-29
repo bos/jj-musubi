@@ -44,6 +44,8 @@ use musubi_hub::hub_dir::JoinRequest;
 use musubi_hub::hub_dir::Joined;
 use musubi_jj::node::NodeRepo;
 use musubi_jj::objects::Backend;
+use musubi_sync::progress::Activity;
+use musubi_sync::progress::Progress;
 use musubi_sync::remote::HiveGone;
 use musubi_sync::wire::HubWideReply;
 use musubi_sync::wire::HubWideRequest;
@@ -53,6 +55,7 @@ use crate::config::HiveConfig;
 use crate::config::Membership;
 use crate::config::Settings;
 use crate::config::UserState;
+use crate::control::ControlClient;
 use crate::control::Synced;
 use crate::daemon::Status;
 use crate::listing::Line;
@@ -1119,6 +1122,21 @@ fn configured_forget_after(
     Ok(Some((source, after)))
 }
 
+/// Asks the daemon what its sync of `key`'s copy is doing, each time it is called.
+fn daemon_progress(
+    client: &ControlClient,
+    key: &str,
+) -> impl FnMut() -> std::pin::Pin<Box<dyn Future<Output = Option<Activity>>>> {
+    let (client, key) = (client.clone(), key.to_owned());
+    move || {
+        let (client, key) = (client.clone(), key.clone());
+        Box::pin(async move {
+            let context = control::context(Duration::from_secs(1));
+            client.progress(context, key).await.ok().flatten()
+        })
+    }
+}
+
 /// Has the daemon, started if need be, serve the repository, and reports its first sync.
 /// Without a daemon, syncs once.
 fn start_serving(ui: &Ui, located: &Located, socket: &Socket) -> anyhow::Result<()> {
@@ -1139,9 +1157,9 @@ fn start_serving(ui: &Ui, located: &Located, socket: &Socket) -> anyhow::Result<
             Ok(client) => client,
             Err(err) => return Ok(Served::NoDaemon(err)),
         };
-        writeln!(ui.stdout(), "Syncing...")?;
-        let first = client
-            .add(control::context(Duration::from_secs(3600)), key)
+        let add = client.add(control::context(Duration::from_secs(3600)), key.clone());
+        let first = ui
+            .while_waiting(add, daemon_progress(&client, &key))
             .await
             .context("asking the daemon to serve this repository")?;
         Ok::<_, anyhow::Error>(match first {
@@ -1155,7 +1173,7 @@ fn start_serving(ui: &Ui, located: &Located, socket: &Socket) -> anyhow::Result<
                 ui.warning(),
                 "Could not start the daemon ({err:#}); syncing once instead."
             )?;
-            let synced = sync_directly(located)?;
+            let synced = sync_directly(ui, located)?;
             writeln!(ui.stdout(), "Synced (hive at #{}).", synced.seq)?;
             writeln!(ui.hint(), "Run `musubi daemon` to keep it in sync.")?;
             Ok(())
@@ -1272,10 +1290,12 @@ fn check_out_trunk(located: &Located) -> anyhow::Result<()> {
 }
 
 /// Syncs once, in this process.
-fn sync_directly(located: &Located) -> anyhow::Result<Synced> {
+fn sync_directly(ui: &Ui, located: &Located) -> anyhow::Result<Synced> {
     let hive =
         HiveConfig::load(&located.repo_path)?.context("this repository is not part of a hive")?;
-    block_on(daemon::sync_once(located, &hive))
+    let progress = Progress::default();
+    let sync = daemon::sync_once(located, &hive, &progress);
+    block_on(ui.while_waiting(sync, || async { Some(progress.get()) }))
 }
 
 /// Syncs through the daemon when it serves the repository, else directly.
@@ -1303,15 +1323,19 @@ fn sync_quietly(ui: &Ui, start: &Path, socket: &Socket) -> anyhow::Result<(Synce
             stopped = true;
             return Ok(None);
         };
-        let synced = client
-            .sync(control::context(Duration::from_secs(3600)), entry.key)
+        let sync = client.sync(
+            control::context(Duration::from_secs(3600)),
+            entry.key.clone(),
+        );
+        let synced = ui
+            .while_waiting(sync, daemon_progress(&client, &entry.key))
             .await?;
         Ok::<_, anyhow::Error>(Some(synced))
     })?;
     let synced = match through_daemon {
         Some(Ok(synced)) => synced,
         Some(Err(message)) => anyhow::bail!("{message}"),
-        None => match sync_directly(&located) {
+        None => match sync_directly(ui, &located) {
             Ok(synced) => synced,
             // As the daemon would: the hive is over.
             Err(err) if HiveGone::of(&err) == Some(HiveGone::Removed) => {
@@ -1511,7 +1535,7 @@ fn leave_once(
         removed.entry(name).or_insert(commit);
     }
     drop(node);
-    match block_on(daemon::sync_once(located, hive)) {
+    match block_on(daemon::sync_once(located, hive, &Progress::default())) {
         Ok(_) => {}
         // Nothing to tell a hive that is over.
         Err(err) if HiveGone::of(&err) == Some(HiveGone::Removed) => return Ok(true),

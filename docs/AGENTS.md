@@ -41,9 +41,12 @@ needs.
 - A command that did what it was asked prints at most a line saying what changed, or nothing
   if that's obvious. A command whose output is what was asked for, such as `musubi list`,
   prints only that.
-- Print no progress or narration ("Syncing...", "Saved ... as the default"), no settings or
-  defaults the user didn't ask about, and no hint they needn't act on. Ids, counts and
-  sequence numbers from inside musubi, such as a hive's operation number, aren't for users.
+- Print no narration ("Saved ... as the default"), no settings or defaults the user didn't ask
+  about, and no hint they needn't act on. Ids, counts and sequence numbers from inside musubi,
+  such as a hive's operation number, aren't for users.
+- A command that waits on a sync, as `create`, `join`, `clone` and `sync` do, shows on a
+  terminal what the sync is doing, as jj shows a fetch, and clears it when done: silence there
+  reads as a hang. Nothing shows when output isn't a terminal.
 - An error is one line: what went wrong, in the user's terms, with no explanation of why
   musubi works that way. A hint, if any, is one more line naming the command to run. Why, and
   every other way out, belong in [troubleshooting.md](troubleshooting.md).

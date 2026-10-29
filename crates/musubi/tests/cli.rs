@@ -433,7 +433,6 @@ fn hub_join_sync_clone_and_list() {
     let out = musubi_in(&env, &logs, &alpha, &["create", "--hub", &hub.url]);
     insta::assert_snapshot!(out, @"
     Created hive project
-    Syncing...
     Synced with the hub (hive at #N).
     ");
 
@@ -450,7 +449,6 @@ fn hub_join_sync_clone_and_list() {
     let out = musubi_in(&env, &logs, &beta, &["join", "--hub", &hub.url]);
     insta::assert_snapshot!(out, @"
     Joined hive project (matched remote origin), 2 machines
-    Syncing...
     Synced with the hub (hive at #N).
     ");
     assert!(log(&beta).contains("from alpha"));
@@ -644,7 +642,6 @@ fn hub_join_sync_clone_and_list() {
     insta::assert_snapshot!(out, @"
     The hive forgets this copy once it goes unused for 6h.
     Cloning hive project into ../gamma
-    Syncing...
     Synced with the hub (hive at #N).
     ");
     wait_for(&logs, "beta to hear gamma's musubi.forget-after", || {
@@ -833,7 +830,6 @@ fn the_daemon_picks_up_new_repositories() {
     let out = run(&env, &logs, join);
     insta::assert_snapshot!(out, @"
     Created hive second
-    Syncing...
     Synced with the hub (hive at #N).
     ");
     let list = musubi_in(&env, &logs, &alpha, &["list"]);
@@ -922,7 +918,6 @@ fn machines_whose_workspaces_are_all_default_can_join() {
     let out = musubi_in(&env, &logs, &beta, &["join", "--hub", &hub.url]);
     insta::assert_snapshot!(out, @"
     Joined hive alpha (matched commits), 2 machines
-    Syncing...
     Synced with the hub (hive at #N).
     ");
     assert!(log(&beta).contains("from alpha"));
@@ -1059,7 +1054,6 @@ fn a_copy_can_join_again_after_leaving() {
         insta::allow_duplicates! {
             insta::assert_snapshot!(out, @"
             Joined hive alpha (matched commits), 3 machines
-            Syncing...
             Synced with the hub (hive at #N).
             ");
         }
@@ -1100,7 +1094,6 @@ fn copies_make_a_lost_hive_again() {
     let out = musubi_in(&env, &logs, &alpha, &["join"]);
     insta::assert_snapshot!(out, @"
     Made hive alpha again from this repository
-    Syncing...
     Synced with the hub (hive at #N).
     ");
     let out = musubi_in(&env, &logs, &beta, &["sync"]);
@@ -1135,13 +1128,11 @@ fn copies_move_to_another_hub() {
     let out = musubi_in(&env, &logs, &alpha, &["join", "--hub", &new.url]);
     insta::assert_snapshot!(out, @"
     Made hive alpha again from this repository
-    Syncing...
     Synced with the hub (hive at #N).
     ");
     let out = musubi_in(&env, &logs, &beta, &["join", "--hub", &new.url]);
     insta::assert_snapshot!(out, @"
     Hive alpha is on the hub, and this repository is part of it
-    Syncing...
     Synced with the hub (hive at #N).
     ");
     alpha.write_file("moved", "moved");
@@ -1396,7 +1387,6 @@ fn the_daemon_outlives_the_directory_it_was_started_in() {
     let out = run(&env, &logs, create);
     insta::assert_snapshot!(out, @"
     Created hive second
-    Syncing...
     Synced with the hub (hive at #N).
     ");
 }
@@ -1543,7 +1533,6 @@ fn a_copy_restored_elsewhere_syncs_as_the_original() {
     let out = musubi_at(&env, &logs, &gamma, &restored, &["join", "--original"]);
     insta::assert_snapshot!(out, @"
     Hive alpha is on the hub, and this repository is part of it
-    Syncing...
     Synced with the hub (hive at #N).
     ");
     jj_at(
@@ -2174,7 +2163,6 @@ fn machines_reach_the_hub_over_ssh() {
     Created an ssh key for musubi: $ROOT/home/musubi-alpha/hub_key
     Adding it to ~/.ssh/authorized_keys on hubhost, allowed only to run `musubi hub connect`. ssh may ask for your password.
     Created hive alpha
-    Syncing...
     Synced with the hub (hive at #N).
     ");
     let keys = fs::read_to_string(&authorized).unwrap();
@@ -2195,7 +2183,6 @@ fn machines_reach_the_hub_over_ssh() {
     Created an ssh key for musubi: $ROOT/home/musubi-beta/hub_key
     Adding it to ~/.ssh/authorized_keys on hubhost, allowed only to run `musubi hub connect`. ssh may ask for your password.
     Joined hive alpha (matched commits), 2 machines
-    Syncing...
     Synced with the hub (hive at #N).
     ");
     // Listing reaches the hub over ssh too.
@@ -2263,7 +2250,6 @@ fn localhost_reaches_the_hub_here_without_ssh() {
     let out = run(&env, &logs, create);
     insta::assert_snapshot!(out, @"
     Created hive alpha
-    Syncing...
     Synced with the hub (hive at #N).
     ");
     let list = musubi_in(&env, &logs, &alpha, &["list"]);
@@ -2376,13 +2362,11 @@ fn the_quick_start_works_as_written() {
     Error: this repository has no commits to share yet; commit something first
     alpha$ musubi create --hub $HOST
     Created hive alpha
-    Syncing...
     Synced with the hub (hive at #N).
     beta$ musubi join --hub $HOST
     Created an ssh key for musubi: $ROOT/home/musubi-beta/hub_key
     Adding it to ~/.ssh/authorized_keys on $HOST, allowed only to run `musubi hub connect`. ssh may ask for your password.
     Joined hive alpha (matched commits), 2 machines
-    Syncing...
     Synced with the hub (hive at #N).
     beta$ musubi list
     Hub $HOST:
@@ -2391,7 +2375,6 @@ fn the_quick_start_works_as_written() {
     Daemon: running, serving 1 repositories; doesn't start at login; `musubi daemon install` makes it
     beta$ musubi clone alpha $ROOT/gamma --hub $HOST
     Cloning hive alpha into $ROOT/gamma
-    Syncing...
     Synced with the hub (hive at #N).
     Initialized repo in "../gamma"
     "#);

@@ -864,9 +864,12 @@ be exposed. A `--hub` that isn't an absolute path is an ssh destination, passed 
   control socket: tarpc (a Rust RPC library), with JSON messages, over a Unix domain socket
   (`$XDG_RUNTIME_DIR/musubi/daemon.sock` on Linux, `$TMPDIR/musubi/daemon.sock` on macOS) or a
   Windows named pipe (`\\.\pipe\musubi-<user>`). It answers `version`, `add` (start serving a
-  repository now, and reply after its first sync), `remove`, `sync`, `status`, and `stop`. `musubi
-  create`, `join`, and `clone` write the repository's membership and the state file, then ask the
-  daemon to add it, starting the daemon in the background first if none is running.
+  repository now, and reply after its first sync), `remove`, `sync`, `progress` (what a
+  repository's sync is doing: asking the hub, bytes sent or received of how many, importing, or
+  operations applied), `status`, and `stop`. `musubi create`, `join`, and `clone` write the
+  repository's membership and the state file, then ask the daemon to add it, starting the daemon
+  in the background first if none is running; on a terminal, they and `musubi sync` show the
+  sync's `progress` while they wait.
 - Only the user can reach the daemon. A Unix socket's directory must be theirs and writable by no
   one else, as tmux and ssh-agent check, or the daemon won't listen there and commands won't
   connect. A named pipe admits only its owner, and the daemon creates it as the first instance, so

@@ -10,6 +10,7 @@ use musubi_jj::node::NodeRepo;
 
 use crate::OpId;
 use crate::node::NodeAdapter;
+use crate::progress::Activity;
 use crate::remote::RemoteHub;
 use crate::short;
 use crate::wire::HeadNotice;
@@ -77,6 +78,9 @@ impl NodeDriver {
                 Step::Merged => tracing::debug!("merged the op heads"),
                 Step::Realized(op) => {
                     self.tally.realized += 1;
+                    self.remote.progress().set(Activity::Applying {
+                        done: self.tally.realized as u64,
+                    });
                     tracing::debug!("realized {}", short(&op));
                 }
                 Step::Advanced(op) => tracing::debug!("advanced to {}", short(&op)),
@@ -107,6 +111,7 @@ impl NodeDriver {
                 ops.len()
             }
         };
+        self.remote.progress().set(Activity::Asking);
         let reply = self.remote.call(request).await?;
         if self.core.hub_went_back(&reply) {
             let (seq, head) = self.core.known();

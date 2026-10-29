@@ -23,6 +23,8 @@ use crate::OpId;
 use crate::blobs::BlobId;
 use crate::blobs::BlobStore;
 use crate::blobs::Received;
+use crate::progress::Activity;
+use crate::progress::Progress;
 use crate::wire::Envelope;
 use crate::wire::HubReply;
 use crate::wire::HubRequest;
@@ -108,6 +110,7 @@ pub struct RemoteHub {
     rpc_subject: String,
     blobs: BlobStore,
     timeout: Duration,
+    progress: Progress,
 }
 
 impl RemoteHub {
@@ -123,7 +126,19 @@ impl RemoteHub {
             rpc_subject,
             blobs: BlobStore::open(blob_dir)?,
             timeout,
+            progress: Progress::default(),
         })
+    }
+
+    /// Records what its calls are doing in `progress`.
+    #[must_use]
+    pub fn with_progress(mut self, progress: Progress) -> Self {
+        self.progress = progress;
+        self
+    }
+
+    pub fn progress(&self) -> &Progress {
+        &self.progress
     }
 
     /// Moves a large transfer on a connection of its own, which `open` opens.
@@ -165,9 +180,17 @@ impl RemoteHub {
         )?;
         let mut lanes = Lanes::new(self);
         let lane = lanes.lane(upload_len).await;
-        for blob in &uploads.ids {
-            self.upload(blob, &*lane).await?;
+        if upload_len > 0 {
+            self.progress.set(Activity::Sending {
+                done: 0,
+                total: upload_len,
+            });
         }
+        let mut sent = 0;
+        for blob in &uploads.ids {
+            sent += self.upload(blob, &*lane, sent).await?;
+        }
+        self.progress.set(Activity::Asking);
         let reply = self.send(HubRequest::Protocol(request), &mut lanes).await;
         drop(uploads);
         let reply = match reply? {
@@ -180,11 +203,21 @@ impl RemoteHub {
         // Once, though the reply names it twice: each path deletes its file.
         blobs.sort();
         blobs.dedup();
-        let lane = lanes.lane(blobs.iter().map(|(_, len)| len).sum()).await;
+        let total = blobs.iter().map(|(_, len)| len).sum();
+        let lane = lanes.lane(total).await;
+        if total > 0 {
+            self.progress.set(Activity::Receiving { done: 0, total });
+        }
         let mut downloads = vec![];
+        let mut received = 0;
         for (blob, len) in blobs {
-            let path = self.download(&blob, len, &*lane).await?;
+            let path = self.download(&blob, len, &*lane, received).await?;
+            received += len;
             downloads.push((blob, Arc::new(tempfile::TempPath::try_from_path(path)?)));
+        }
+        // Handling the reply imports its bundles.
+        if total > 0 {
+            self.progress.set(Activity::Importing);
         }
         map_reply(reply, OpId::new, |attachment| {
             attachment.into_attachment(&self.blobs, |blob| {
@@ -206,13 +239,24 @@ impl RemoteHub {
                 blobs: &self.blobs,
                 ids: vec![blob],
             };
-            self.upload(&blob, &*lanes.lane(len).await).await?;
+            self.progress.set(Activity::Sending {
+                done: 0,
+                total: len,
+            });
+            self.upload(&blob, &*lanes.lane(len).await, 0).await?;
+            self.progress.set(Activity::Asking);
             drop(upload);
             bytes = Envelope::encode(HubRequest::Indirect { blob })?;
         }
         let reply = self.exchange(&*self.transport, bytes).await?;
         if let HubReply::Indirect { blob, len } = reply {
-            let path = self.download(&blob, len, &*lanes.lane(len).await).await?;
+            self.progress.set(Activity::Receiving {
+                done: 0,
+                total: len,
+            });
+            let path = self
+                .download(&blob, len, &*lanes.lane(len).await, 0)
+                .await?;
             let path = tempfile::TempPath::try_from_path(path)?;
             return Envelope::<HubReply>::decode(&std::fs::read(&path)?);
         }
@@ -233,7 +277,13 @@ impl RemoteHub {
     /// Uploads a blob in chunks, [`WINDOW`] at a time, resuming from whatever the hub
     /// reports it has. That is less than before only if the hub started over, after a hash
     /// mismatch or after discarding the upload as abandoned, and then so does the upload.
-    async fn upload(&self, blob: &BlobId, transport: &dyn Transport) -> anyhow::Result<()> {
+    /// Returns its length; `sent` bytes of the transfer went before it.
+    async fn upload(
+        &self,
+        blob: &BlobId,
+        transport: &dyn Transport,
+        sent: u64,
+    ) -> anyhow::Result<u64> {
         let chunk = chunk_size(transport.max_payload());
         let (total, _) = self.blobs.read(blob, 0, 0)?;
         let mut offset = 0;
@@ -261,8 +311,14 @@ impl RemoteHub {
             let mut furthest = 0;
             while let Some(ack) = acks.next().await {
                 match ack? {
-                    HubReply::ChunkAck { complete: true, .. } => return Ok(()),
-                    HubReply::ChunkAck { received, .. } => furthest = furthest.max(received),
+                    HubReply::ChunkAck { complete: true, .. } => {
+                        self.progress.moved(sent + total);
+                        return Ok(total);
+                    }
+                    HubReply::ChunkAck { received, .. } => {
+                        furthest = furthest.max(received);
+                        self.progress.moved(sent + furthest);
+                    }
                     other => return Err(unexpected(other)),
                 }
             }
@@ -279,18 +335,20 @@ impl RemoteHub {
     }
 
     /// Downloads a blob of `total` bytes in chunks, [`WINDOW`] at a time, into the local
-    /// blob store, returning its file.
+    /// blob store, returning its file. `received` bytes of the transfer came before it.
     async fn download(
         &self,
         blob: &BlobId,
         total: u64,
         transport: &dyn Transport,
+        received: u64,
     ) -> anyhow::Result<PathBuf> {
         let chunk = chunk_size(transport.max_payload()) as u64;
         let mut offset = 0;
         let mut restarts = 0;
         loop {
             if let Some(path) = self.blobs.get(blob) {
+                self.progress.moved(received + total);
                 return Ok(path);
             }
             let start = offset;
@@ -315,9 +373,13 @@ impl RemoteHub {
                     other => return Err(unexpected(other)),
                 };
                 offset = match self.blobs.receive(blob, total, at, &data)? {
-                    Received::Complete => break,
+                    Received::Complete => {
+                        self.progress.moved(received + total);
+                        break;
+                    }
                     Received::Prefix(have) => have,
                 };
+                self.progress.moved(received + offset);
             }
             // A window takes the download further, unless what came failed the hash check
             // and it started over.

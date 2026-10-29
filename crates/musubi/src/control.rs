@@ -22,6 +22,7 @@ use std::time::Instant;
 
 use anyhow::Context as _;
 use interprocess::local_socket::tokio::Stream;
+use musubi_sync::progress::Activity;
 use serde::Deserialize;
 use serde::Serialize;
 use tarpc::serde_transport;
@@ -37,7 +38,7 @@ use crate::socket::uid;
 
 /// Changes whenever the control service does, so that a command and a daemon from
 /// different builds notice each other.
-pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "/control-2");
+pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "/control-3");
 
 /// What a successful sync reached: the hub's head.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -66,6 +67,8 @@ pub trait Control {
     async fn remove(key: String) -> Result<(), String>;
     /// Syncs a copy the daemon serves now, by its machine key.
     async fn sync(key: String) -> Result<Synced, String>;
+    /// What a copy's sync is doing, by its machine key, if the daemon serves it.
+    async fn progress(key: String) -> Option<Activity>;
     async fn status() -> Vec<RepoStatus>;
     /// Stops the daemon.
     async fn stop();

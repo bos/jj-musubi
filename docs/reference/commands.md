@@ -75,8 +75,10 @@ the Unix epoch, and durations in seconds. A value that can't be told, or doesn't
 | `daemon restart` | Stop the daemon and start it again, as after upgrading musubi. |
 | `daemon` | Run the daemon in the foreground, logging to the terminal. |
 
-`create`, `join`, and `clone` start the daemon if it isn't running. `sync` uses the daemon if
-it is running, and otherwise syncs by itself, saying that the daemon isn't running.
+`create`, `join`, and `clone` start the daemon if it isn't running, and wait for the
+repository's first sync. `sync` uses the daemon if it is running, and otherwise syncs by
+itself, saying that the daemon isn't running. Each shows on a terminal how far the sync has
+got.
 
 ## Run a hub
 

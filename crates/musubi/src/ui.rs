@@ -9,6 +9,8 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
+use std::time::Instant;
 
 use jj_cli::cli_util::load_template_aliases;
 use jj_cli::command_error::CommandError;
@@ -28,6 +30,9 @@ use jj_lib::config::ConfigLayer;
 use jj_lib::config::ConfigSource;
 use jj_lib::config::StackedConfig;
 use jj_lib::settings::UserSettings;
+use musubi_sync::progress::Activity;
+use ratatui::crossterm::terminal::Clear;
+use ratatui::crossterm::terminal::ClearType;
 
 /// musubi's defaults in jj's config: its labels' colours, and its templates.
 const DEFAULTS: &str = include_str!("defaults.toml");
@@ -76,6 +81,53 @@ impl Ui {
     /// jj's config, as it prints by.
     pub fn config(&self) -> &StackedConfig {
         &self.config
+    }
+
+    /// Awaits `work`, showing on a terminal, once it has taken a moment, what `current`
+    /// says it is doing, as jj shows a slow fetch; cleared once it's done.
+    pub async fn while_waiting<T, F>(
+        &self,
+        work: impl Future<Output = T>,
+        mut current: impl FnMut() -> F,
+    ) -> T
+    where
+        F: Future<Output = Option<Activity>>,
+    {
+        let Some(mut output) = self.ui.progress_output() else {
+            return work.await;
+        };
+        let mut work = std::pin::pin!(work);
+        let mut tick = tokio::time::interval(Duration::from_secs(1) / 10);
+        let shown_from = Instant::now() + Duration::from_millis(250);
+        let mut frames = SPINNER.iter().cycle();
+        // A question in flight, raced against the work, so that a slow answer never delays
+        // noticing that the work is done.
+        let mut asking = std::pin::pin!(None);
+        // Clears the line once the work is done, however it ends.
+        let mut guard = None;
+        loop {
+            tokio::select! {
+                done = &mut work => return done,
+                _ = tick.tick(), if asking.is_none() => asking.set(Some(current())),
+                activity = async { asking.as_mut().as_pin_mut().expect("asking").await },
+                    if asking.is_some() =>
+                {
+                    asking.set(None);
+                    let Some(activity) = activity else { continue };
+                    if Instant::now() < shown_from {
+                        continue;
+                    }
+                    let frame = frames.next().copied().unwrap_or(' ');
+                    let clear = format!("\r{}", Clear(ClearType::CurrentLine));
+                    guard.get_or_insert_with(|| output.output_guard(clear.clone()));
+                    // A terminal that doesn't say how wide it is may say 0.
+                    let width = output.term_width().filter(|&w| w > 0).map_or(80, usize::from);
+                    let line = progress_line(activity, frame, width);
+                    write!(output, "{clear}{line}").ok();
+                    output.flush().ok();
+                }
+            }
+        }
     }
 
     /// jj's settings, for a template language.
@@ -261,5 +313,130 @@ impl<W: Write> Write for Watched<'_, W> {
     fn flush(&mut self) -> io::Result<()> {
         let flushed = self.output.flush();
         self.unless_unread(flushed, ())
+    }
+}
+
+/// What a spinner shows, a frame each tenth of a second.
+const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/// A line saying what a sync is doing, at most `width` columns, so that it never wraps: a
+/// bar, as jj draws one, for a transfer, and otherwise a spinner.
+fn progress_line(activity: Activity, frame: char, width: usize) -> String {
+    let (what, done, total) = match activity {
+        Activity::Asking => return clip(format!("Syncing with the hub {frame}"), width),
+        Activity::Importing => return clip(format!("Importing commits {frame}"), width),
+        Activity::Applying { done } => {
+            return clip(format!("Applying operations: {done} {frame}"), width);
+        }
+        Activity::Sending { done, total } => ("Sending", done, total),
+        Activity::Receiving { done, total } => ("Receiving", done, total),
+    };
+    #[expect(clippy::cast_precision_loss, reason = "a bar needs no more precision")]
+    let fraction = if total == 0 {
+        1.0
+    } else {
+        done as f64 / total as f64
+    };
+    let label = format!(
+        "{what:<9} {:>3.0}% {} ",
+        100.0 * fraction,
+        bytes(done, total)
+    );
+    let bar = width.saturating_sub(label.chars().count() + 3);
+    if bar == 0 {
+        return clip(label, width);
+    }
+    format!("{label}[{}]", draw_bar(fraction, bar))
+}
+
+/// `line`, cut to leave the last of `width` columns free, where the cursor waits.
+fn clip(line: String, width: usize) -> String {
+    line.chars().take(width.saturating_sub(1)).collect()
+}
+
+/// `done` of `total` bytes, in the unit that suits `total`, as jj shows sizes.
+fn bytes(done: u64, total: u64) -> String {
+    let (unit, scale) = match total {
+        ..0x10_0000 => ("KiB", 1u64 << 10),
+        0x10_0000..0x4000_0000 => ("MiB", 1 << 20),
+        _ => ("GiB", 1 << 30),
+    };
+    #[expect(clippy::cast_precision_loss, reason = "shown to a tenth")]
+    let scaled = |bytes: u64| bytes as f64 / scale as f64;
+    format!("{:.1}/{:.1} {unit}", scaled(done), scaled(total))
+}
+
+/// A bar `width` characters wide, `fraction` of it full, in eighths of a character.
+fn draw_bar(fraction: f64, width: usize) -> String {
+    const EIGHTHS: [char; 9] = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        reason = "clamped, and a bar is a few hundred characters at most"
+    )]
+    let ticks = (width as f64 * fraction.clamp(0.0, 1.0) * 8.0).round() as usize;
+    let mut bar: String = std::iter::repeat_n('█', ticks / 8).collect();
+    if bar.chars().count() < width {
+        bar.push(EIGHTHS[ticks % 8]);
+    }
+    while bar.chars().count() < width {
+        bar.push(' ');
+    }
+    bar
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What a user waiting on a sync sees at each step, on a terminal 60 columns wide.
+    #[test]
+    fn progress_lines() {
+        let lines: Vec<String> = [
+            Activity::Asking,
+            Activity::Sending {
+                done: 0,
+                total: 3 << 20,
+            },
+            Activity::Receiving {
+                done: 5 << 19,
+                total: 40 << 20,
+            },
+            Activity::Receiving {
+                done: 40 << 20,
+                total: 40 << 20,
+            },
+            Activity::Importing,
+            Activity::Applying { done: 12 },
+            Activity::Sending {
+                done: 300 << 10,
+                total: 700 << 10,
+            },
+            Activity::Receiving {
+                done: 3 << 30,
+                total: 5 << 30,
+            },
+        ]
+        .into_iter()
+        .map(|activity| progress_line(activity, '⠹', 60))
+        // Too narrow for a bar, or for the whole of a line.
+        .chain([
+            progress_line(Activity::Receiving { done: 1, total: 2 }, '⠹', 30),
+            progress_line(Activity::Applying { done: 12 }, '⠹', 12),
+        ])
+        .collect();
+        insta::assert_snapshot!(lines.join("\n"), @"
+        Syncing with the hub ⠹
+        Sending     0% 0.0/3.0 MiB [                              ]
+        Receiving   6% 2.5/40.0 MiB [█▉                           ]
+        Receiving 100% 40.0/40.0 MiB [████████████████████████████]
+        Importing commits ⠹
+        Applying operations: 12 ⠹
+        Sending    43% 300.0/700.0 KiB [███████████▏              ]
+        Receiving  60% 3.0/5.0 GiB [██████████████████            ]
+        Receiving  50% 0.0/0.0 KiB 
+        Applying op
+        ");
     }
 }

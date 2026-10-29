@@ -54,6 +54,11 @@ fn snapshot_filters(env: &TestEnv) -> impl Sized {
     ] {
         settings.add_filter(&pattern.replace("{host}", &host), replacement);
     }
+    // The daemon's socket is a file beside its state on Unix, a named pipe on Windows.
+    settings.add_filter(
+        r"\$ROOT/home/musubi-[^/\s]+/daemon\.sock|//\./pipe/musubi-[0-9a-f]+",
+        "[daemon socket]",
+    );
     settings.add_filter(r"\b\d+[smhd] ago\b", "N ago");
     settings.add_filter(r"#\d+", "#N");
     settings.add_filter(r"\(pid \d+\)", "(pid N)");
@@ -473,7 +478,7 @@ fn hub_join_sync_clone_and_list() {
     beta (this machine): used N ago, never forgotten
     alpha: used N ago, never forgotten
     Daemon: running (pid N), serving this repository; doesn't start at login
-    Daemon socket: $ROOT/home/musubi-beta/daemon.sock
+    Daemon socket: [daemon socket]
     Daemon log: $ROOT/home/musubi-beta/daemon.log
     ");
     // A sync failing meanwhile, which a retry fixes, would be no fault of status's.
@@ -990,7 +995,7 @@ fn commands_in_another_workspace_act_on_the_repository() {
     Copies:
     alpha (this machine): used N ago, never forgotten
     Daemon: running (pid N), serving this repository; doesn't start at login
-    Daemon socket: $ROOT/home/musubi-alpha/daemon.sock
+    Daemon socket: [daemon socket]
     Daemon log: $ROOT/home/musubi-alpha/daemon.log
     ");
 
@@ -1429,7 +1434,7 @@ fn duplicates_are_never_synced() {
     This repository duplicates a copy in hive alpha, which is at $ROOT/alpha, so musubi doesn't sync it.
     Default hub: $ROOT/hub
     Daemon: running (pid N), serving 1 repository; doesn't start at login
-    Daemon socket: $ROOT/home/musubi-alpha/daemon.sock
+    Daemon socket: [daemon socket]
     Daemon log: $ROOT/home/musubi-alpha/daemon.log
     ");
     let mut errors = String::new();
@@ -1763,7 +1768,7 @@ fn a_copy_without_its_key_is_not_synced() {
     This repository's record says it is part of hive alpha, but its machine key or jj config id is missing.
     Default hub: $ROOT/hub
     Daemon: running (pid N), serving 1 repository; doesn't start at login
-    Daemon socket: $ROOT/home/musubi-alpha/daemon.sock
+    Daemon socket: [daemon socket]
     Daemon log: $ROOT/home/musubi-alpha/daemon.log
     ");
     let err = musubi_fails(&env, &logs, &alpha, &["sync"]);
@@ -1875,7 +1880,7 @@ fn syncing_without_the_daemon_shows_in_the_list() {
     alpha (this machine): used N ago, never forgotten
     beta: used N ago, never forgotten
     Daemon: not running; doesn't start at login
-    Daemon socket: $ROOT/home/musubi-alpha/daemon.sock
+    Daemon socket: [daemon socket]
     Daemon log: $ROOT/home/musubi-alpha/daemon.log
     ");
     insta::assert_snapshot!(warnings, @"
@@ -1911,7 +1916,7 @@ fn syncing_without_the_daemon_shows_in_the_list() {
     alpha (this machine): used N ago, never forgotten
     beta: used N ago, never forgotten
     Daemon: not running; doesn't start at login
-    Daemon socket: $ROOT/home/musubi-alpha/daemon.sock
+    Daemon socket: [daemon socket]
     Daemon log: $ROOT/home/musubi-alpha/daemon.log
     ");
     insta::assert_snapshot!(warnings, @"

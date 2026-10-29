@@ -635,7 +635,7 @@ fn hub_join_sync_clone_and_list() {
     assert!(log(&gamma).contains("picked up by the daemon"));
     insta::assert_snapshot!(out, @"
     The hive forgets this copy once it goes unused for 6h.
-    Cloning hive project into ../gamma
+    Cloned hive project into ../gamma
     ");
     wait_for(&logs, "beta to hear gamma's musubi.forget-after", || {
         status_in(&env, &logs, &beta)
@@ -2312,7 +2312,7 @@ fn the_quick_start_works_as_written() {
     assert!(log(&gamma).contains("later"));
 
     let _filters = snapshot_filters(&env);
-    insta::assert_snapshot!(transcript, @r#"
+    insta::assert_snapshot!(transcript, @"
     $ musubi hub
     Created a new hub in $ROOT/home/musubi-hub
     To share a repository:               musubi create --hub $HOST
@@ -2336,9 +2336,8 @@ fn the_quick_start_works_as_written() {
         here: $ROOT/beta  synced N ago
     Daemon: running, serving 1 repository; doesn't start at login; `musubi daemon install` makes it
     beta$ musubi clone alpha $ROOT/gamma --hub $HOST
-    Cloning hive alpha into $ROOT/gamma
-    Initialized repo in "../gamma"
-    "#);
+    Cloned hive alpha into $ROOT/gamma
+    ");
 }
 
 /// A `musubi` command with this process's environment, so the real user's service manager

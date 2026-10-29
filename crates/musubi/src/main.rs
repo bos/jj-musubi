@@ -1218,8 +1218,15 @@ fn clone(
     };
     let mut jj = Process::new("jj");
     musubi_jj::git_command::without_repository_env(&mut jj);
-    let status = jj.args(init).arg(dest).status()?;
-    anyhow::ensure!(status.success(), "`jj {} {dest}` failed", init.join(" "));
+    // Its "Initialized repo in" names the directory relative to wherever this runs, ahead of
+    // what musubi says, so it shows only if init fails.
+    let output = jj.args(init).arg(dest).output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "`jj {} {dest}` failed: {}",
+        init.join(" "),
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
     let located = Located::find(destination)?;
     set_machine_name(&located, machine)?;
     let joined = Joined {
@@ -1229,12 +1236,13 @@ fn clone(
         present: vec![],
     };
     become_node(ui, &located, &joined, &hub, false, None)?;
+    start_serving(ui, &located, socket)
+        .with_context(|| format!("the new copy at {} didn't sync", destination.display()))?;
     let mut out = ui.stdout();
-    write!(out, "Cloning hive ")?;
+    write!(out, "Cloned hive ")?;
     write!(out.labeled("hive"), "{}", info.name)?;
     writeln!(out, " into {}", destination.display())?;
     drop(out);
-    start_serving(ui, &located, socket)?;
     if let Err(err) = check_out_trunk(&located) {
         writeln!(
             ui.warning(),

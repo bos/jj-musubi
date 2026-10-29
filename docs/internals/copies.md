@@ -137,7 +137,11 @@ it's worth. Each says what happens if it occurs anyway.
   a sync that fails checks again before reopening. Closing the gap would mean pinning the
   directory with an open handle throughout, through jj's path-based API. A sync cut short
   this way may leave a git ref's lock file behind in the moved repository, which makes its
-  syncs fail until the lock is removed, as after a crash.
+  syncs fail until the lock is removed, as after a crash. A copy moved as the daemon opens
+  it may have musubi's directories made again where it was, so that jj takes the moved copy
+  for a duplicate; `musubi join --original` there adopts it (R2). What the daemon does
+  after a sync, as recording the hive's name when the hub answers its report, never makes
+  `.jj/repo` again: that would leave the same for any move just after a sync.
 - **A VM, disk image or home directory cloned with musubi's state directory, while the
   original still runs** (a VM snapshot, Migration Assistant, a full restore onto a new
   machine). Both machines have the same entries and config-ids, so both sync under one key.

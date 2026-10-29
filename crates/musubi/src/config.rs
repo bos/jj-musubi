@@ -75,12 +75,11 @@ impl HiveConfig {
     /// as read, until dropped: so that a name recorded late doesn't bring back a membership a
     /// leave has removed meanwhile.
     pub fn lock(repo_path: &Path) -> anyhow::Result<crate::lock::Lock> {
-        crate::lock::lock(&repo_path.join("musubi/hive.lock"))
+        crate::lock::lock(&musubi_dir(repo_path)?.join("hive.lock"))
     }
 
     pub fn save(&self, repo_path: &Path) -> anyhow::Result<()> {
-        let dir = repo_path.join("musubi");
-        fs::create_dir_all(&dir)?;
+        let dir = musubi_dir(repo_path)?;
         write_private(&dir.join("hive.toml"), toml::to_string(self)?.as_bytes())
     }
 
@@ -126,6 +125,20 @@ impl HiveConfig {
             ..now
         };
         renamed.save(repo_path).ok();
+    }
+}
+
+/// The directory musubi keeps a repository's files in, made if need be, but never with
+/// `repo_path` itself. A copy moved away has none: making it again, as when the daemon
+/// records the hive's name after a sync that started before the move, would leave jj taking
+/// the moved copy for a duplicate (docs/internals/copies.md), so that it never synced again.
+fn musubi_dir(repo_path: &Path) -> anyhow::Result<PathBuf> {
+    let dir = repo_path.join("musubi");
+    match fs::create_dir(&dir) {
+        Err(err) if err.kind() != std::io::ErrorKind::AlreadyExists => {
+            Err(err).with_context(|| format!("making {dir:?}"))
+        }
+        _ => Ok(dir),
     }
 }
 
@@ -383,5 +396,30 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "new");
         let mode = fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    /// Recording the hive's name where a copy was, after it moved, makes nothing there, which
+    /// jj would take for the copy, and the moved copy for a duplicate.
+    #[test]
+    fn a_moved_copy_is_not_made_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let (old, new) = (dir.path().join("alpha"), dir.path().join("moved"));
+        let repo_path = |workspace: &Path| workspace.join(".jj/repo");
+        fs::create_dir_all(repo_path(&old)).unwrap();
+        let record = HiveConfig {
+            hive: Uuid::nil(),
+            name: None,
+            hub: "devbox".to_owned(),
+            node: "alpha".to_owned(),
+            config_id: "id".to_owned(),
+            state: Membership::Joined,
+        };
+        record.save(&repo_path(&old)).unwrap();
+        fs::rename(&old, &new).unwrap();
+        record.note_name(&repo_path(&old), "app");
+        assert!(!old.exists());
+        record.note_name(&repo_path(&new), "app");
+        let noted = HiveConfig::load(&repo_path(&new)).unwrap().unwrap();
+        assert_eq!(noted.name.as_deref(), Some("app"));
     }
 }

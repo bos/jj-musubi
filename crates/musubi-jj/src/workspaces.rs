@@ -97,11 +97,12 @@ fn suffix(key: &str) -> &str {
     key.split_once('#').map_or("", |(_, id)| id)
 }
 
-/// The start of a machine key's suffix. Keys come from other machines, whose `musubi/machine`
-/// may have been edited by hand: whatever follows the `#`, this cuts it between characters.
+/// The start of a machine key's suffix: its first four characters, as `candidates` in
+/// formal/Musubi/Names.lean. Keys come from other machines, whose `musubi/machine` may have
+/// been edited by hand, so the suffix may have characters of more than one byte.
 fn short_id(key: &str) -> &str {
     let id = suffix(key);
-    &id[..id.floor_char_boundary(4)]
+    &id[..id.char_indices().nth(4).map_or(id.len(), |(at, _)| at)]
 }
 
 /// The name under which a machine's workspaces are shown when its plain name isn't free:
@@ -355,13 +356,13 @@ mod tests {
         }
     }
 
-    /// A suffix edited by hand to start with characters of more than one byte is cut between
-    /// characters.
+    /// A suffix edited by hand to have characters of more than one byte is cut after four
+    /// characters, not four bytes.
     #[test]
     fn names_qualify_with_any_suffix() {
-        let machines: BTreeSet<String> = ["mac#abcé", "mac#ü"].map(str::to_owned).into();
+        let machines: BTreeSet<String> = ["mac#abcéf", "mac#ü"].map(str::to_owned).into();
         let names = display_names(&machines, |_| false);
-        assert_eq!(names["mac#abcé"], "mac-abc");
+        assert_eq!(names["mac#abcéf"], "mac-abcé");
         assert_eq!(names["mac#ü"], "mac-ü");
     }
 

@@ -153,6 +153,8 @@ struct Hub {
     url: String,
     /// The first line it printed.
     greeting: String,
+    /// What it printed on starting, through its last line of instructions.
+    printed: Vec<String>,
 }
 
 impl Hub {
@@ -180,13 +182,14 @@ impl Hub {
         Self::spawn(env, logs, name, command, dir)
     }
 
-    /// The hub `musubi hub` serves by default on `repo`'s machine, `~/musubi-hub`.
+    /// The hub `musubi hub` serves by default on `repo`'s machine, `~/musubi-hub`, run in
+    /// the repository, as a user might run it anywhere.
     #[cfg(unix)]
     fn start_on(env: &TestEnv, logs: &mut Logs, repo: &TestRepo) -> Self {
-        let home = env.root().join("home");
         let mut command = repo.program(musubi());
-        command.arg("hub").current_dir(&home);
-        Self::spawn(env, logs, "hub", command, home.join("musubi-hub"))
+        command.arg("hub");
+        let dir = env.root().join("home/musubi-hub");
+        Self::spawn(env, logs, "hub", command, dir)
     }
 
     /// Runs `command`, a hub serving `dir`, and waits until it is serving.
@@ -219,20 +222,25 @@ impl Hub {
             dir,
             url: String::new(),
             greeting: String::new(),
+            printed: vec![],
         };
         let deadline = Instant::now() + DEADLINE;
-        while hub.url.is_empty() {
+        // Its instructions end with what to pass on this machine.
+        while !hub
+            .printed
+            .last()
+            .is_some_and(|line| line.starts_with("On this machine"))
+        {
             let left = deadline.saturating_duration_since(Instant::now());
             let line = rx
                 .recv_timeout(left)
                 .unwrap_or_else(|_| panic!("the hub did not start serving:\n{}", logs.dump()));
-            if hub.greeting.is_empty() {
-                hub.greeting = line.trim().to_owned();
-            }
             if line.starts_with("To share a repository:") {
                 hub.url = hub.dir.display().to_string();
             }
+            hub.printed.push(line.trim_end().to_owned());
         }
+        hub.greeting.clone_from(&hub.printed[0]);
         hub
     }
 
@@ -1876,6 +1884,31 @@ fn rewrites_are_signed_as_jj_signs_them() {
     }
 }
 
+/// Stands in for ssh to the hub's machine, whatever its name, noting each call's arguments in
+/// `ssh-args`: runs what a machine's key may run there, after printing `banner` (in `printf`'s
+/// notation), and takes anything else to be adding a key, to `authorized_keys`.
+#[cfg(unix)]
+fn fake_ssh(env: &TestEnv, hub: &Hub, banner: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let ssh = env.root().join("ssh");
+    fs::write(
+        &ssh,
+        format!(
+            "#!/bin/sh\necho \"$*\" >> '{args}'\ncase \"$*\" in\n  *'hub connect')\n    \
+             printf '{banner}'\n    exec '{musubi}' hub connect --dir '{dir}' ;;\n  \
+             *) cat >> '{authorized}' ;;\nesac\n",
+            args = env.root().join("ssh-args").display(),
+            musubi = musubi().display(),
+            dir = hub.dir.display(),
+            authorized = env.root().join("authorized_keys").display(),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&ssh, fs::Permissions::from_mode(0o755)).unwrap();
+    ssh
+}
+
 /// Machines reach a hub over ssh: joining creates the machine's key and adds it on the hub's
 /// machine, allowed only to run `musubi hub connect`, and the daemon syncs through that,
 /// which relays to the hub's socket; and what the shell's startup files there print first,
@@ -1883,32 +1916,20 @@ fn rewrites_are_signed_as_jj_signs_them() {
 #[cfg(unix)]
 #[test]
 fn machines_reach_the_hub_over_ssh() {
-    use std::os::unix::fs::PermissionsExt as _;
-
     let env = TestEnv::with_real_op_times();
     let mut logs = Logs::default();
     let hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
     let mut daemons = Daemons::default();
-    // Stands in for ssh to the hub's machine: runs what the machine's key may run there, after
-    // a banner and a line with no newline, and takes anything else to be adding a key.
-    let ssh = env.root().join("ssh");
+    // What the shell's startup files print first, as some do for every shell: a banner and a
+    // line with no newline.
+    let ssh = fake_ssh(
+        &env,
+        &hub,
+        "  _))\\n > *\\\\  Welcome to hubhost\\n\\033[0mLast login: never",
+    );
     let args = env.root().join("ssh-args");
     let authorized = env.root().join("authorized_keys");
-    fs::write(
-        &ssh,
-        format!(
-            "#!/bin/sh\necho \"$*\" >> '{args}'\ncase \"$*\" in\n  *'hub connect')\n    \
-             printf '  _))\\n > *\\\\  Welcome to hubhost\\n\\033[0mLast login: never'\n    \
-             exec '{musubi}' hub connect --dir '{dir}' ;;\n  *) cat >> '{authorized}' ;;\nesac\n",
-            args = args.display(),
-            musubi = musubi().display(),
-            dir = hub.dir.display(),
-            authorized = authorized.display(),
-        ),
-    )
-    .unwrap();
-    fs::set_permissions(&ssh, fs::Permissions::from_mode(0o755)).unwrap();
     let alpha = env.init_repo("alpha");
     let beta = env.init_repo("beta");
     logs.daemon_of(&env, &alpha);
@@ -2010,6 +2031,140 @@ fn localhost_reaches_the_hub_here_without_ssh() {
         list.contains(&format!("Hub {}:", hub.dir.display())),
         "{list}"
     );
+}
+
+/// The README's quick start, as a new user follows it: `musubi hub` run wherever they happen
+/// to be, then on each machine the command it printed, pasted as printed, then commands with
+/// no `--hub`, and the refusals a new user meets on the way. The snapshot is everything they
+/// see, so that a review reads it as they would: a change to it is a change to their first
+/// experience of musubi.
+///
+/// alpha is the hub's machine, and beta reaches it through a stand-in for ssh. Starting at login
+/// changes the real machine, so this leaves it out.
+#[cfg(unix)]
+#[test]
+fn the_quick_start_works_as_written() {
+    let env = TestEnv::with_real_op_times();
+    let mut logs = Logs::default();
+    let alpha = env.init_repo("alpha");
+    let beta = env.init_repo("beta");
+    let mut daemons = Daemons::default();
+    for repo in [&alpha, &beta] {
+        logs.daemon_of(&env, repo);
+        daemons.of(repo);
+    }
+    // Run in a repository, the hub still lives in ~/musubi-hub.
+    let hub = Hub::start_on(&env, &mut logs, &alpha);
+    let mut transcript = format!("$ musubi hub\n{}\n", hub.printed.join("\n"));
+    let printed = |what: &str| -> Vec<String> {
+        let line = hub.printed.iter().find(|line| line.starts_with(what));
+        let line = line.unwrap_or_else(|| panic!("no {what:?} in {:#?}", hub.printed));
+        let command = line.split_once(':').unwrap().1;
+        command
+            .split_whitespace()
+            .skip(1)
+            .map(str::to_owned)
+            .collect()
+    };
+    let (create, join, clone) = (
+        printed("To share a repository"),
+        printed("To add another machine's copy"),
+        printed("To make a new copy of a hive"),
+    );
+    // Runs musubi on `repo`'s machine, adding what it printed to the transcript.
+    let ssh = fake_ssh(&env, &hub, "");
+    let mut musubi_on = |repo: &TestRepo, args: &[&str], succeeds: bool| {
+        let mut command = repo.program(musubi());
+        command.args(args);
+        if repo.machine() != "alpha" {
+            command.env("MUSUBI_SSH", &ssh);
+        }
+        let (ok, stdout, stderr) = try_run(&logs, &env, command);
+        writeln!(transcript, "{}$ musubi {}", repo.machine(), args.join(" ")).unwrap();
+        transcript.push_str(&stdout);
+        transcript.push_str(&stderr);
+        assert_eq!(ok, succeeds, "musubi {args:?}:\n{stdout}{stderr}");
+    };
+    fn strs(args: &[String]) -> Vec<&str> {
+        args.iter().map(String::as_str).collect()
+    }
+
+    // A machine that has heard of no hub, and a repository with nothing in it, are where a
+    // new user starts.
+    musubi_on(&beta, &["create"], false);
+    musubi_on(&alpha, &strs(&create), false);
+    alpha.write_file("a", "from alpha");
+    alpha.jj(&["commit", "-m", "from alpha"]);
+    alpha.jj(&["bookmark", "create", "main", "-r", "@-"]);
+    musubi_on(&alpha, &strs(&create), true);
+    fetch_history(&alpha, &beta);
+    musubi_on(&beta, &strs(&join), true);
+    // From now on, no command needs --hub.
+    musubi_on(&beta, &["list"], true);
+    alpha.write_file("b", "later");
+    alpha.jj(&["commit", "-m", "later"]);
+    wait_for(&logs, "beta's daemon to bring alpha's commit", || {
+        try_log(&beta).is_some_and(|log| log.contains("later"))
+    });
+    let gamma = env.repo_handle("gamma");
+    let dir = gamma.path().to_str().unwrap();
+    let args: Vec<&str> = strs(&clone)
+        .into_iter()
+        .map(|arg| match arg {
+            "<name>" => "alpha",
+            "<dir>" => dir,
+            arg => arg,
+        })
+        .collect();
+    musubi_on(&beta, &args, true);
+    assert!(log(&gamma).contains("later"));
+
+    // What differs from run to run.
+    let root = env.root().canonicalize().unwrap();
+    let transcript = transcript
+        .replace(root.to_str().unwrap(), "$ROOT")
+        .replace(env.root().to_str().unwrap(), "$ROOT");
+    // A host name is letters, digits, dashes and dots. `$$` is a `$` in a replacement.
+    let host = format!(r"\b{}\b", whoami::hostname().unwrap().replace('.', r"\."));
+    insta::with_settings!({filters => [
+        (host.as_str(), "$$HOST"),
+        (r"synced \d+s ago", "synced Ns ago"),
+        (r"hive at #\d+", "hive at #N"),
+    ]}, {
+        insta::assert_snapshot!(transcript, @r#"
+        $ musubi hub
+        Created a new hub in $ROOT/home/musubi-hub
+        To share a repository:               musubi create --hub $HOST
+        To add another machine's copy of it: musubi join --hub $HOST
+        To make a new copy of a hive:        musubi clone <name> <dir> --hub $HOST
+        Other machines reach this hub over ssh: use the name they ssh to this machine by, if it isn't $HOST.
+        On this machine, leave out --hub.
+        beta$ musubi create
+        Error: no hub given; pass --hub <host>, or run `musubi hub` to serve one here
+        alpha$ musubi create --hub $HOST
+        Error: this repository has no commits to share yet; commit something first
+        alpha$ musubi create --hub $HOST
+        Created hive alpha
+        Syncing...
+        Synced with the hub (hive at #N).
+        beta$ musubi join --hub $HOST
+        Created an ssh key for musubi: $ROOT/home/musubi-beta/hub_key
+        Adding it to ~/.ssh/authorized_keys on $HOST, allowed only to run `musubi hub connect`. ssh may ask for your password.
+        Joined hive alpha (matched commits), 2 machines
+        Syncing...
+        Synced with the hub (hive at #N).
+        beta$ musubi list
+        Hub $HOST:
+          alpha  2 machines: alpha, beta
+            here: $ROOT/beta  synced Ns ago
+        Daemon: running, serving 1 repositories; doesn't start at login; `musubi daemon install` makes it
+        beta$ musubi clone alpha $ROOT/gamma --hub $HOST
+        Cloning hive alpha into $ROOT/gamma
+        Syncing...
+        Synced with the hub (hive at #N).
+        Initialized repo in "../gamma"
+        "#);
+    });
 }
 
 /// A `musubi` command with this process's environment, so the real user's service manager

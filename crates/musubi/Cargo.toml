@@ -51,6 +51,7 @@ rustix.workspace = true
 widestring.workspace = true
 
 [dev-dependencies]
+insta.workspace = true
 musubi-testutil.workspace = true
 
 [lints]

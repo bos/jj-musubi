@@ -4,3 +4,6 @@
 /bench/work
 __pycache__/
 /mutants.out*
+# What insta leaves when a snapshot fails, for `cargo insta review`.
+*.pending-snap
+*.snap.new

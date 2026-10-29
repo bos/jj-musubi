@@ -423,10 +423,14 @@ impl TestRepo {
     /// environment as `jj`.
     pub fn program(&self, program: &Path) -> Command {
         let mut command = self.command(program.to_str().unwrap(), &self.path);
-        command.env(
-            "MUSUBI_STATE_DIR",
-            self.home.join(format!("musubi-{}", self.machine)),
-        );
+        command
+            .env(
+                "MUSUBI_STATE_DIR",
+                self.home.join(format!("musubi-{}", self.machine)),
+            )
+            // No test reaches a real machine over ssh, even by a name that resolves, such as
+            // this computer's own: one that needs ssh gives a stand-in of its own.
+            .env("MUSUBI_SSH", self.home.join("no-ssh"));
         command
     }
 

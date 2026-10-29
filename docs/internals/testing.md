@@ -139,6 +139,15 @@ the daemons when they finish. One test, Unix only, turns on commit signing with 
 as jj's signer and checks that the commits musubi rewrites are signed, which shows that the
 binary loads jj's config as jj does.
 
+`the_quick_start_works_as_written` follows the README's quick start as a new user would:
+`musubi hub` run in a repository rather than in the home directory, then the commands it
+prints, pasted as printed, on the hub's machine and over the stand-in for ssh, the refusals a
+new user meets first, and `musubi list` with no `--hub`. Its inline insta snapshot is
+everything the user sees, so a change to what a new user meets shows in the diff. Change the
+quick start and the test with it. `cargo insta review` accepts a new snapshot. No test reaches
+a real machine over ssh: `musubi-testutil` points `MUSUBI_SSH` at a program that doesn't
+exist, so a test that needs ssh must give a stand-in.
+
 One CLI test installs a real login service, and so runs only with
 `MUSUBI_TEST_LOGIN_SERVICE=1`, which CI sets on its throwaway runners: never set it where
 musubi is installed for real. It installs the daemon with launchd or systemd and checks that

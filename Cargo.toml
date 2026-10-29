@@ -30,6 +30,7 @@ clap_complete_nushell = "4.6"
 etcetera = "0.11"
 futures = "0.3.32"
 humantime = "2.4"
+insta = { version = "1.48", features = ["filters"] }
 interprocess = { version = "2.4.6", features = ["tokio"] }
 jj-cli = { version = "=0.46.0", default-features = false, features = ["git"] }
 jj-lib = { version = "=0.46.0", default-features = false, features = ["git"] }

@@ -180,10 +180,14 @@ impl RefsModel {
         self.slot_reply("track", &[("s", s)])
     }
 
-    /// `TSlot.import` of `.git`'s `g`, a new remote ref tracked by default.
-    pub fn import(&mut self, s: &Slot, g: &RefTarget) -> Slot {
+    /// `TSlot.import` of `.git`'s `g`, a new remote ref tracked by default, and whether it
+    /// set the bookmark (`TSlot.importSets`).
+    pub fn import(&mut self, s: &Slot, g: &RefTarget) -> (Slot, bool) {
         let reply = self.call("import", &[("s", s)], &[("g", g)], &[]);
-        self.slot_of(&reply["slot"])
+        (
+            self.slot_of(&reply["slot"]),
+            reply["sets"].as_bool().unwrap(),
+        )
     }
 
     /// `TSlot.merge`: jj's merge of `v` with `w` against `b`.

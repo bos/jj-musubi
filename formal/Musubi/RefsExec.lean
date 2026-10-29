@@ -83,9 +83,11 @@ inductive Call where
   | restorable (o s : TSlot Nat)
   | restorableRemote (o s : TSlot Nat)
 
-/-- An answer: a slot and `.git`'s value, or whether a proposition holds. -/
+/-- An answer: a slot and `.git`'s value, a slot after an import and whether the import set
+the bookmark (`TSlot.importSets`), or whether a proposition holds. -/
 inductive Answer where
   | slot (s : TSlot Nat) (g : Option Nat)
+  | imported (s : TSlot Nat) (sets : Bool)
   | holds (b : Bool)
 
 /-- The machine with slot `s` and `.git` at `g`, its tracking state aside. -/
@@ -97,7 +99,8 @@ def withSlot (s : TSlot Nat) (v : Slot Nat) : TSlot Nat := { s with toSlot := v 
 def run (tb : Table) : Call → Answer
   | .set s l => letI := tableAlg tb; .slot (TSlot.set l s) none
   | .track s => letI := tableAlg tb; .slot (TSlot.track s) none
-  | .import s g => letI := tableAlg tb; .slot (TSlot.import true s g) none
+  | .import s g =>
+    letI := tableAlg tb; .imported (TSlot.import true s g) (TSlot.importSets true s g)
   | .merge b v w => letI := tableAlg tb; .slot (TSlot.merge b v w) none
   | .exportLocal s g =>
     letI := tableAlg tb

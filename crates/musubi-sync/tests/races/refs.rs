@@ -155,13 +155,6 @@ impl Alg {
     }
 }
 
-/// Whether jj's import of `g` into `s` sets the bookmark (`set_local_bookmark_target`),
-/// which drops the bookmark's other remote refs with no target if it is gone: where `g` is
-/// new and the remote ref tracked, or new and tracked by default, as every ref here is.
-fn import_sets(s: &Slot, g: &RefTarget) -> bool {
-    *g != s.r && (s.tr || s.r.is_absent())
-}
-
 impl Machine {
     /// `LStep.gitMove` and `RStep.gitMove`.
     fn git_move(&mut self, g: RefTarget) {
@@ -170,10 +163,11 @@ impl Machine {
     }
 
     /// `LStep.jjImport` and `RStep.jjImport`, as `TSlot.import`. Returns whether jj set the
-    /// bookmark.
+    /// bookmark (`set_local_bookmark_target`), which drops the bookmark's other remote refs
+    /// with no target if it is gone.
     fn jj_import(&mut self, alg: &Alg) -> bool {
-        let set = import_sets(&self.v, &self.g);
-        self.v = alg.lean().import(&self.v, &self.g);
+        let set;
+        (self.v, set) = alg.lean().import(&self.v, &self.g);
         self.moved = false;
         self.restored = false;
         self.e = self.g.clone();
@@ -814,7 +808,7 @@ impl Refs {
         }
         match moved {
             None => {
-                let theirs = self
+                let (theirs, _) = self
                     .alg
                     .lean()
                     .import(&expected.get(Ref::Origin).v, &self.upstream);

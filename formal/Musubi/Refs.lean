@@ -1147,6 +1147,19 @@ def TSlot.import (auto : Bool) (s : TSlot T) (g : T) : TSlot T :=
     let tr := if s.R = absent ∧ s.tr = false then auto else s.tr
     TSlot.norm ⟨⟨if tr then merge s.L s.R g else s.L, g, g⟩, tr⟩
 
+/-- Whether jj's import sets the bookmark (`set_local_bookmark_target`), which `import` merges
+the remote ref's change into: where the remote ref moved and is tracked, or is new and tracked
+by default (`import_L`). -/
+def TSlot.importSets (auto : Bool) (s : TSlot T) (g : T) : Bool :=
+  !decide (g = s.R) && (if s.R = absent ∧ s.tr = false then auto else s.tr)
+
+theorem TSlot.import_L (auto : Bool) (s : TSlot T) (g : T) :
+    (s.import auto g).L = if s.importSets auto g then merge s.L s.R g else s.L := by
+  unfold TSlot.import TSlot.importSets
+  by_cases hg : g = s.R
+  · simp [hg]
+  · simp only [hg, ite_false, TSlot.norm_L, decide_false, Bool.not_false, Bool.true_and]
+
 /-- Where the remote ref is tracked, or new and tracked by default, the targets are
 `Slot.import`'s. -/
 theorem TSlot.import_toSlot {s : TSlot T} {auto : Bool} (g : T)

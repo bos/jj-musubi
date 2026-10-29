@@ -326,6 +326,8 @@ def refsReply : Refs.Exec.Answer → Json
   | .slot s none => Json.mkObj [("ok", Json.bool true), ("slot", encodeSlot s)]
   | .slot s (some g) =>
     Json.mkObj [("ok", Json.bool true), ("slot", encodeSlot s), ("g", toJson g)]
+  | .imported s sets =>
+    Json.mkObj [("ok", Json.bool true), ("slot", encodeSlot s), ("sets", Json.bool sets)]
   | .holds b => Json.mkObj [("ok", Json.bool true), ("holds", Json.bool b)]
 
 /-! ## Liveness (`Exec.lean`, "The liveness measure") -/

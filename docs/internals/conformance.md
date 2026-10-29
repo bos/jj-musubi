@@ -508,10 +508,12 @@ The oracle's request names one of the model's functions, `fn`, with its argument
 ```
 
 The functions are `set` (`l`), `track`, `import` (`g`, a new remote ref tracked by default),
-`merge` (`b`, `v`, `w`), `exportLocal` and `exportRemote` (`g`), `exportConflicted` (`g`,
-`e`), which reply with a slot and `.git`'s value `g` too, and `linv` (`g`, `moved`), `cinv`
-(`g`, `moved`, `e`), `restorable` and `restorableRemote` (`o`), which reply whether they
-`holds`. Each takes the slot `s` unless it says otherwise.
+which replies whether jj's import `sets` the bookmark too (`TSlot.importSets`, which
+`import_L` ties to the merge into the bookmark), `merge` (`b`, `v`, `w`), `exportLocal` and
+`exportRemote` (`g`), `exportConflicted` (`g`, `e`), which reply with a slot and `.git`'s value
+`g` too, and `linv` (`g`, `moved`), `cinv` (`g`, `moved`, `e`), `restorable` and
+`restorableRemote` (`o`), which reply whether they `holds`. Each takes the slot `s` unless it
+says otherwise.
 
 ```sh
 cargo nextest run -p musubi-jj -E 'test(/^ref_laws::/) | test(/view::tests/)'

@@ -273,9 +273,10 @@ the model.
 - Otherwise `canon(L)` is `L` with its view's per-machine fields (`git_refs`, `git_heads` and the
   `git` remote) removed; its workspaces, and its operation's workspace name, under
   machine-qualified names, keeping only the workspaces of machines present there; and its parents
-  replaced by their `canon`. It is stored in the canonical op store ([design.md,
-  "Translation"](design.md#translation); [design.md, "Copies that go
-  away"](design.md#copies-that-go-away)).
+  replaced by their `canon`, leaving out any from before the join, which have none. It is stored
+  in the canonical op store ([design.md, "Translation"](design.md#translation); [design.md,
+  "Copies that go away"](design.md#copies-that-go-away)). An operation all of whose parents are
+  from before the join is from before it too, and has no `canon`.
 
 `realize(C)` writes a local operation `L` with `canon(L) = C`. It requires every parent of
 `C` to be realized already.

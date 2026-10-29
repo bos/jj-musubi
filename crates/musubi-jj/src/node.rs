@@ -11,6 +11,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -77,6 +78,13 @@ pub struct NodeRepo {
     /// The canonical join operation each join point maps to, by the join point's
     /// fingerprint, so that a copy of it that `jj op abandon` rewrote maps there too.
     joins: BTreeMap<String, OperationId>,
+    /// The local join points, as recorded.
+    join_points: Vec<OperationId>,
+    /// The ancestors of the join points, once needed: the history from before the joins.
+    join_ancestors: Option<Arc<HashSet<OperationId>>>,
+    /// Local operations found to come from before this repository joined: ancestors of a
+    /// join point, and operations all of whose parents are (see [`Self::canonicalize`]).
+    before_join: BTreeSet<OperationId>,
     /// The hive's settings as of canonical operations, as computed so far.
     settings: HashMap<OperationId, Option<HiveSettings>>,
     /// jj's repo config file for this repository, which holds the config the hive shares.
@@ -184,12 +192,16 @@ impl NodeRepo {
             unmergeable: Mutex::default(),
             unwritten: vec![],
             joins: BTreeMap::new(),
+            join_points: vec![],
+            join_ancestors: None,
+            before_join: BTreeSet::new(),
             settings: HashMap::new(),
             repo_config: None,
             machine: load_machine(repo_path, settings.operation_hostname(), settings)?,
         };
         for (local, canonical, fingerprint) in node.read_joins()? {
             node.joins.insert(fingerprint, canonical.clone());
+            node.join_points.push(local.clone());
             node.insert_map(local, canonical)?;
         }
         Ok(node)

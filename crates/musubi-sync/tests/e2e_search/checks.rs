@@ -131,17 +131,17 @@ impl World {
         }
     }
 
-    /// What the protocol's model assumes of translation (protocol.md, "Translation layer"),
-    /// on every machine: distinct local operations reachable from its op heads have distinct
+    /// What the protocol's model assumes of translation (protocol.md, "Translation layer"), on
+    /// every machine: distinct local operations reachable from its op heads have distinct
     /// canonical forms, and each one's parents canonicalize to its canonical form's parents,
-    /// but for a join point, whose parents have none; and every operation of the hive's
-    /// history has a realization here that canonicalizes back to it, so realizing made no
-    /// canonical operation of its own. Runs after `check_heads`, so every op head here is
-    /// canonicalized already.
+    /// leaving out those from before the join, which have none, as a join point's do; and every
+    /// operation of the hive's history has a realization here that canonicalizes back to it, so
+    /// realizing made no canonical operation of its own. Runs after `check_heads`, so every op
+    /// head here is canonicalized already.
     ///
-    /// A translation remembered wrongly would pass all that, so the check translates again
-    /// from nothing, as a machine that lost its translation cache does, in a copy of the
-    /// repository, and requires the same answers.
+    /// A translation remembered wrongly would pass all that, so the check translates again from
+    /// nothing, as a machine that lost its translation cache does, in a copy of the repository,
+    /// and requires the same answers.
     fn check_translation(&self) {
         let hub = self.fx.hive.hub_head();
         for m in 0..self.nodes() {
@@ -526,16 +526,21 @@ fn translation_failure(node: &NodeRepo, fresh: &mut NodeRepo, hub: &OpId) -> Res
         {
             continue;
         }
-        let canonical_parents: Vec<Option<OpId>> = parents
+        // A parent with no canonical form is from before the join, which a merge leaves out.
+        let hive_parents: Vec<OpId> = parents
             .iter()
-            .map(|parent| fresh.canonical_of(parent))
+            .filter_map(|parent| fresh.canonical_of(parent))
             .collect();
-        if canonical_parents != expected.iter().cloned().map(Some).collect::<Vec<_>>() {
+        if hive_parents != expected {
             return Err(format!(
-                "{local}'s parents translate to {canonical_parents:?}, but {canonical}'s are {expected:?}"
+                "{local}'s parents translate to {hive_parents:?}, but {canonical}'s are {expected:?}"
             ));
         }
-        stack.extend(parents);
+        stack.extend(
+            parents
+                .into_iter()
+                .filter(|parent| fresh.canonical_of(parent).is_some()),
+        );
     }
     let history = fresh
         .canonical_store()

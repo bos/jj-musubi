@@ -250,6 +250,15 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
     ("long_offline_machine_catches_up", Some(&["commit"])),
     ("hub_restart_between_push_and_fetch", Some(&["restart_hub"])),
     ("joining_with_full_history", Some(&["setup:prejoin"])),
+    // The search's machines join before any rule runs.
+    (
+        "an_operation_from_before_the_join_doesnt_bring_its_history",
+        None,
+    ),
+    (
+        "an_operation_on_rewritten_history_from_before_the_join_doesnt_bring_it",
+        None,
+    ),
     ("empty_repositories_make_a_hive", Some(&["setup:empty"])),
     // A documented refusal: rules never run `jj op abandon`.
     ("op_abandon_pauses_replication", None),

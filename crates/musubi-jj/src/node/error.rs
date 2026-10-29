@@ -56,6 +56,14 @@ pub enum NodeError {
     Lock(#[from] FileLockError),
     #[error("I/O error on {path}")]
     Io { path: PathBuf, source: io::Error },
+    /// An op head whose history is from before this repository joined, as a `jj` command
+    /// makes that loaded the repository before `musubi join` and wrote after it: the hive
+    /// takes its work only once a merge with this machine's other op heads does.
+    #[error(
+        "operation {0} comes from before this repository joined its hive; it syncs once jj \
+         merges it with the operation history since, as the next jj command does"
+    )]
+    BeforeJoin(String),
     #[error("the op store wrote realized operation {0} under another id")]
     MisnamedWrite(String),
     #[error("canonical operation {0} is not realized and cannot be: {1}")]

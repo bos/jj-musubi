@@ -92,6 +92,8 @@ impl NodeRepo {
         // In one write, not writeln!'s several, so that a kill seldom tears it.
         file.write_all(line.as_bytes()).map_err(io_err)?;
         self.joins.insert(fingerprint, canonical.clone());
+        self.join_points.push(local.clone());
+        self.join_ancestors = None;
         self.insert_map(local, canonical)
     }
 

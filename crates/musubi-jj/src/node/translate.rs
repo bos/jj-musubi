@@ -1,7 +1,9 @@
 //! Canonicalizing local operations, and finding the local operation for a canonical one.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::Operation as StoreOperation;
@@ -19,10 +21,19 @@ use crate::remote_url::without_credentials;
 use crate::workspaces;
 
 impl NodeRepo {
-    /// The canonical form of each local op head.
+    /// The canonical form of each local op head, but for one from before this repository
+    /// joined, which has none until a merge takes it in (see [`Self::canonicalize`]).
     pub fn canonical_heads(&mut self) -> Result<Vec<OperationId>, NodeError> {
         let heads = self.local_heads()?;
-        heads.iter().map(|head| self.canonicalize(head)).collect()
+        let mut canonical = vec![];
+        for head in &heads {
+            match self.canonicalize(head) {
+                Ok(id) => canonical.push(id),
+                Err(NodeError::BeforeJoin(_)) => {}
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(canonical)
     }
 
     pub fn canonical_of(&self, local: &OperationId) -> Option<OperationId> {
@@ -41,22 +52,41 @@ impl NodeRepo {
 
     /// Returns the canonical id of a local operation, canonicalizing it and any
     /// not-yet-canonicalized ancestors.
+    ///
+    /// The history from before a repository joined isn't the hive's: the join operation
+    /// stands for it. A `jj` command that loaded the repository before `musubi join` and wrote
+    /// after it, or one run with `--at-op` at an operation from then, makes an operation on
+    /// that history. Such an operation has no canonical form, and this fails with
+    /// [`NodeError::BeforeJoin`] for it. A merge of it with this machine's later history,
+    /// which jj makes, has the merged view, so it leaves the parents from before the join
+    /// out of its canonical form.
     pub fn canonicalize(&mut self, local: &OperationId) -> Result<OperationId, NodeError> {
         let op_store = self.loader.op_store().clone();
         // Post-order walk: an operation is canonicalized once all its parents are.
         let mut stack: Vec<(OperationId, Option<StoreOperation>)> = vec![(local.clone(), None)];
         while let Some((id, loaded)) = stack.pop() {
-            if self.canonical_of(&id).is_some() {
+            if self.canonical_of(&id).is_some() || self.before_join.contains(&id) {
                 continue;
             }
             let op = match loaded {
                 Some(op) => op,
                 None => op_store.read_operation(&id).block_on()?,
             };
+            // A join point that `jj op abandon` rewrote, abandoning history from before the
+            // join, which no other machine has: its parents are from before the join.
+            if !op.metadata.attributes.contains_key(CANONICAL_ATTRIBUTE)
+                && let Some(join) = self.joins.get(&fingerprint(&op))
+            {
+                let join = join.clone();
+                self.insert_map(id, join)?;
+                continue;
+            }
             let missing: Vec<_> = op
                 .parents
                 .iter()
-                .filter(|parent| self.canonical_of(parent).is_none())
+                .filter(|parent| {
+                    self.canonical_of(parent).is_none() && !self.before_join.contains(*parent)
+                })
                 .cloned()
                 .collect();
             if !missing.is_empty() {
@@ -67,16 +97,86 @@ impl NodeRepo {
             let canonical_id =
                 if let Some(canonical) = op.metadata.attributes.get(CANONICAL_ATTRIBUTE) {
                     self.realized_canonical(&id, &op, canonical)?
-                } else if let Some(join) = self.joins.get(&fingerprint(&op)) {
-                    // A join point that `jj op abandon` rewrote, abandoning history from before
-                    // the join, which no other machine has.
-                    join.clone()
+                } else if self.is_before_join(&id, &op)? {
+                    self.before_join.insert(id);
+                    continue;
                 } else {
-                    self.write_canonical(&id, &op)?
+                    let parents: Vec<OperationId> = op
+                        .parents
+                        .iter()
+                        .filter(|parent| !self.before_join.contains(*parent))
+                        .map(|parent| {
+                            self.canonical_of(parent)
+                                .expect("parents canonicalized first")
+                        })
+                        .collect();
+                    self.write_canonical(&id, &op, parents)?
                 };
             self.insert_map(id, canonical_id)?;
         }
-        Ok(self.canonical_of(local).expect("canonicalized above"))
+        match self.canonical_of(local) {
+            Some(canonical) => Ok(canonical),
+            None => Err(NodeError::BeforeJoin(local.hex())),
+        }
+    }
+
+    /// Whether a local operation that isn't a join point or a realization, whose parents are
+    /// canonicalized or from before the join, is from before the join too: all of its
+    /// parents are, or it is the first of the history before a join, on the root. Another
+    /// operation on the root, as `jj op abandon` leaves when it abandons everything below
+    /// one, is the hive's, which then finds the history it had abandoned.
+    fn is_before_join(&mut self, id: &OperationId, op: &StoreOperation) -> Result<bool, NodeError> {
+        if op
+            .parents
+            .iter()
+            .all(|parent| self.before_join.contains(parent))
+        {
+            return Ok(!op.parents.is_empty());
+        }
+        if op.parents.as_slice() != std::slice::from_ref(self.root_op_id()) || self.joins.is_empty()
+        {
+            return Ok(false);
+        }
+        Ok(self.join_ancestors()?.contains(id))
+    }
+
+    /// The ancestors of the join points reachable from the op heads, but for the root: the
+    /// history before the joins. A join point `jj op abandon` rewrote is one by its
+    /// fingerprint, as `canonicalize` takes it, with the rewritten history below it.
+    fn join_ancestors(&mut self) -> Result<Arc<HashSet<OperationId>>, NodeError> {
+        if let Some(ancestors) = &self.join_ancestors {
+            return Ok(ancestors.clone());
+        }
+        let op_store = self.loader.op_store().clone();
+        let root = self.root_op_id().clone();
+        let mut seen = HashSet::new();
+        let mut stack = self.local_heads()?;
+        let mut below_joins: Vec<OperationId> = vec![];
+        while let Some(id) = stack.pop() {
+            if id == root || !seen.insert(id.clone()) {
+                continue;
+            }
+            let op = op_store.read_operation(&id).block_on()?;
+            if self.join_points.contains(&id)
+                || (!op.metadata.attributes.contains_key(CANONICAL_ATTRIBUTE)
+                    && self.joins.contains_key(&fingerprint(&op)))
+            {
+                below_joins.extend(op.parents);
+            } else {
+                stack.extend(op.parents);
+            }
+        }
+        let mut ancestors = HashSet::new();
+        let mut stack = below_joins;
+        while let Some(id) = stack.pop() {
+            if id == *self.root_op_id() || !ancestors.insert(id.clone()) {
+                continue;
+            }
+            stack.extend(op_store.read_operation(&id).block_on()?.parents);
+        }
+        let ancestors = Arc::new(ancestors);
+        self.join_ancestors = Some(ancestors.clone());
+        Ok(ancestors)
     }
 
     /// The canonical operation a realization names in its `musubi.canonical` attribute.
@@ -116,17 +216,10 @@ impl NodeRepo {
         &self,
         id: &OperationId,
         op: &StoreOperation,
+        parents: Vec<OperationId>,
     ) -> Result<OperationId, NodeError> {
         self.check_format(id, op)?;
         let view = self.loader.op_store().read_view(&op.view_id).block_on()?;
-        let parents: Vec<OperationId> = op
-            .parents
-            .iter()
-            .map(|parent| {
-                self.canonical_of(parent)
-                    .expect("parents canonicalized first")
-            })
-            .collect();
         let mut metadata = op.metadata.clone();
         if let Some((prefix, target)) = target_of(&metadata.description)
             && let Some(canonical) = self.canonical_of(&target)

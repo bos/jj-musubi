@@ -640,6 +640,13 @@ Earlier operations stay local. A repository in use for years can have tens of th
 operations, and every one of their views pins commits that would otherwise never need
 transferring, such as old working-copy snapshots. `--full-history` replicates everything instead.
 
+A `jj` command that loaded the repository before the join and wrote its operation after it, as an
+editor's can, or one run with `--at-op` at an operation from before the join, makes an operation
+on that local history. It has no canonical form: the hive takes its work once jj merges it with
+the history since the join, as the next `jj` command does, and the merge's canonical form leaves
+out the parents from before the join, whose work its view has merged (`canonicalize`). Until then
+the node syncs the rest of its history.
+
 A repository that was part of a hive before, and left it, writes no join operation when it joins
 again, if its head descends from the history it shared (an operation canonicalized already, a
 realization, or a join point): that history is canonical already, and the head is canonicalized on

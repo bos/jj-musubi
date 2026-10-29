@@ -163,3 +163,97 @@ fn a_torn_join_record_names_nothing() {
     let node = open(&repo);
     assert_eq!(node.canonical_of(&head), Some(second));
 }
+
+/// A `jj` command that loaded the repository before it joined, and wrote its operation after,
+/// leaves an operation whose parent is from before the join, as `--at-op` at such an
+/// operation does. The hive gets its work once jj merges it with the history since, but none
+/// of the history from before the join.
+#[test]
+fn an_operation_from_before_the_join_doesnt_bring_its_history() {
+    let env = TestEnv::new();
+    let a = env.init_repo("alpha");
+    a.write_file("a", "x");
+    a.jj(&["commit", "-m", "before"]);
+    let before = a.jj(&["op", "log", "--no-graph", "-n1", "-T", "id"]);
+    a.jj(&["describe", "-m", "at the join"]);
+    let mut a_node = open(&a);
+    let join = a_node.create_join_operation("musubi: alpha joins").unwrap();
+    drop(a_node);
+    a.jj(&[
+        "--at-op",
+        before.trim(),
+        "--ignore-working-copy",
+        "bookmark",
+        "create",
+        "concurrent",
+        "-r",
+        "@-",
+    ]);
+
+    let mut a_node = open(&a);
+    // Until jj merges it, the operation has no canonical form, and the hive gets the join.
+    assert_eq!(a_node.local_heads().unwrap().len(), 2);
+    assert_eq!(a_node.canonical_heads().unwrap(), vec![join.clone()]);
+    a_node.merge_heads().unwrap();
+    let head = a_node.canonical_heads().unwrap().pop().unwrap();
+    let ancestry = canonical_ancestry(&a_node, &head);
+    assert_eq!(
+        ancestry,
+        vec![head.clone(), join.clone()],
+        "the merge, on the join"
+    );
+
+    let b = env.init_repo("beta");
+    let mut b_node = open(&b);
+    b_node.create_join_operation("musubi: beta joins").unwrap();
+    sync(&a_node, &mut b_node, &head);
+    let bookmarks = b.jj(&["bookmark", "list", "-T", r#"name ++ "\n""#]);
+    assert!(
+        bookmarks.lines().any(|line| line == "concurrent"),
+        "{bookmarks}"
+    );
+}
+
+/// The same after `jj op abandon` rewrote the history from before the join, join point and
+/// all: the rewritten history is from before the join too.
+#[test]
+fn an_operation_on_rewritten_history_from_before_the_join_doesnt_bring_it() {
+    let env = TestEnv::new();
+    let a = env.init_repo("alpha");
+    for name in ["one", "two"] {
+        a.write_file(name, "x");
+        a.jj(&["commit", "-m", name]);
+    }
+    a.jj(&["describe", "-m", "at the join"]);
+    let mut a_node = open(&a);
+    let join = a_node.create_join_operation("musubi: alpha joins").unwrap();
+    drop(a_node);
+    // Abandon the first operations, rewriting every later one, the join point among them.
+    let ops = a.jj(&["op", "log", "--no-graph", "-T", r#"id ++ "\n""#]);
+    let ops: Vec<&str> = ops.lines().collect();
+    a.jj(&["op", "abandon", &format!("..{}", ops[ops.len() - 3])]);
+    let template = r#"id ++ " " ++ description.first_line() ++ "\n""#;
+    let log = a.jj(&["op", "log", "--no-graph", "-T", template]);
+    let before = log
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .find(|(_, description)| description.starts_with("commit "))
+        .map(|(id, _)| id.to_owned())
+        .unwrap_or_else(|| panic!("no commit in {log}"));
+    a.jj(&[
+        "--at-op",
+        &before,
+        "--ignore-working-copy",
+        "bookmark",
+        "create",
+        "concurrent",
+        "-r",
+        "@-",
+    ]);
+
+    let mut a_node = open(&a);
+    assert_eq!(a_node.canonical_heads().unwrap(), vec![join.clone()]);
+    a_node.merge_heads().unwrap();
+    let head = a_node.canonical_heads().unwrap().pop().unwrap();
+    assert_eq!(canonical_ancestry(&a_node, &head), vec![head.clone(), join]);
+}

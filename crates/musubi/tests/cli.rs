@@ -30,6 +30,48 @@ fn musubi() -> &'static Path {
     Path::new(env!("CARGO_BIN_EXE_musubi"))
 }
 
+/// Takes out of the snapshots of the rest of the test what differs from run to run: the test's
+/// directory, this computer's name, process ids, and how long ago something happened.
+#[must_use]
+fn snapshot_filters(env: &TestEnv) -> impl Sized {
+    let mut settings = insta::Settings::clone_current();
+    // The canonical form first: on macOS it holds the other, under /private.
+    for root in [env.root().canonicalize().unwrap(), env.root().to_owned()] {
+        // `$$` is a `$` in a replacement.
+        settings.add_filter(&regex_escape(root.to_str().unwrap()), "$$ROOT");
+    }
+    if cfg!(windows) {
+        settings.add_filter(r"\\", "/");
+    }
+    // This computer's name only where musubi prints a hub's: anywhere else, a computer named
+    // `alpha`, say, would hide what it stood for.
+    let host = regex_escape(&whoami::hostname().unwrap());
+    for (pattern, replacement) in [
+        ("--hub {host}\\b", "--hub $$HOST"),
+        ("Hub {host}:", "Hub $$HOST:"),
+        ("on {host},", "on $$HOST,"),
+        ("isn't {host}\\.", "isn't $$HOST."),
+    ] {
+        settings.add_filter(&pattern.replace("{host}", &host), replacement);
+    }
+    settings.add_filter(r"\b\d+[smhd] ago\b", "N ago");
+    settings.add_filter(r"#\d+", "#N");
+    settings.add_filter(r"\(pid \d+\)", "(pid N)");
+    settings.bind_to_scope()
+}
+
+/// `text`, matching only itself in a regular expression.
+fn regex_escape(text: &str) -> String {
+    let mut escaped = String::new();
+    for c in text.chars() {
+        if "\\.+*?()|[]{}^$".contains(c) {
+            escaped.push('\\');
+        }
+        escaped.push(c);
+    }
+    escaped
+}
+
 /// The logs of the background processes, for failure messages.
 #[derive(Default)]
 struct Logs(Vec<PathBuf>);
@@ -151,7 +193,7 @@ struct Hub {
     dir: PathBuf,
     /// Its directory, which machines here join with.
     url: String,
-    /// The first line it printed.
+    /// The first line it printed; `the_quick_start_works_as_written` pins the rest.
     greeting: String,
     /// What it printed on starting, through its last line of instructions.
     printed: Vec<String>,
@@ -359,14 +401,11 @@ fn fetch_history(from: &TestRepo, to: &TestRepo) {
 fn hub_join_sync_clone_and_list() {
     let env = TestEnv::with_real_op_times();
     let mut logs = Logs::default();
+    let _filters = snapshot_filters(&env);
     let hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
     let mut daemons = Daemons::default();
-    assert!(
-        hub.greeting.starts_with("Created a new hub in"),
-        "{}",
-        hub.greeting
-    );
+    insta::assert_snapshot!(hub.greeting, @"Created a new hub in $ROOT/hub");
     let alpha = env.init_repo("alpha");
     let beta = env.init_repo("beta");
     logs.daemon_of(&env, &alpha);
@@ -376,7 +415,7 @@ fn hub_join_sync_clone_and_list() {
 
     // Nothing to share yet.
     let err = musubi_fails(&env, &logs, &alpha, &["create", "--hub", &hub.url]);
-    assert!(err.contains("commit something first"), "{err}");
+    insta::assert_snapshot!(err, @"Error: this repository has no commits to share yet; commit something first");
 
     alpha.write_file("a", "from alpha");
     alpha.jj(&["commit", "-m", "from alpha"]);
@@ -390,10 +429,13 @@ fn hub_join_sync_clone_and_list() {
     ]);
     // Joining never starts a hive; creating does.
     let err = musubi_fails(&env, &logs, &alpha, &["join", "--hub", &hub.url]);
-    assert!(err.contains("musubi create"), "{err}");
+    insta::assert_snapshot!(err, @"Error: no hive on this hub shares history with this repository; `musubi create` starts one");
     let out = musubi_in(&env, &logs, &alpha, &["create", "--hub", &hub.url]);
-    assert!(out.contains("Created hive project"), "{out}");
-    assert!(out.contains("Synced with the hub"), "{out}");
+    insta::assert_snapshot!(out, @"
+    Created hive project
+    Syncing...
+    Synced with the hub (hive at #N).
+    ");
 
     // A copy of the same repository, with its remote spelled another way, joins it, and
     // the daemon its join started brings it alpha's work.
@@ -406,10 +448,11 @@ fn hub_join_sync_clone_and_list() {
         "git@example.com:team/project",
     ]);
     let out = musubi_in(&env, &logs, &beta, &["join", "--hub", &hub.url]);
-    assert!(
-        out.contains("Joined hive project (matched remote origin), 2 machines"),
-        "{out}"
-    );
+    insta::assert_snapshot!(out, @"
+    Joined hive project (matched remote origin), 2 machines
+    Syncing...
+    Synced with the hub (hive at #N).
+    ");
     assert!(log(&beta).contains("from alpha"));
     // A person joined it, so the hive keeps it however long it goes unused.
     assert_eq!(
@@ -419,34 +462,28 @@ fn hub_join_sync_clone_and_list() {
 
     // The first join saved the hub: from now on no command needs --hub.
     let list = musubi_in(&env, &logs, &beta, &[]);
-    assert!(list.contains("project  2 machines: alpha, beta"), "{list}");
-    assert!(
-        list.contains(&format!(
-            "here: {}",
-            beta.path().canonicalize().unwrap().display()
-        )),
-        "{list}"
-    );
-    assert!(
-        list.contains("Daemon: running, serving 1 repositories;"),
-        "{list}"
-    );
+    insta::assert_snapshot!(list, @"
+    Hub $ROOT/hub:
+      project  2 machines: alpha, beta
+        here: $ROOT/beta  synced N ago
+    Daemon: running, serving 1 repositories; doesn't start at login; `musubi daemon install` makes it
+    ");
     // `musubi status` shows the repository's part in the hive: every machine's working
     // copies, as jj names them here, this machine's first, and each copy.
     let (status, warnings) = status_in(&env, &logs, &beta);
-    assert!(status.contains("Hive: project on "), "{status}");
-    assert!(status.contains("This machine: beta, synced "), "{status}");
-    let own = status.find("\nbeta@: ").expect(&status);
-    let other = status.find("\nalpha/alpha@: ").expect(&status);
-    assert!(own < other, "{status}");
-    assert!(
-        status.contains("beta (this machine): used ") && status.contains("never forgotten"),
-        "{status}"
-    );
-    assert!(
-        status.contains("Daemon: running (pid ") && status.contains("serving this repository"),
-        "{status}"
-    );
+    insta::assert_snapshot!(status, @"
+    Hive: project on $ROOT/hub, at #N
+    This machine: beta, synced N ago; the hub has all its work
+    Working copies:
+    beta@: kkmpptxz aa1f41eb (no description set)
+    alpha/alpha@: vruxwmqv 8a0ddcb6 (no description set)
+    Copies:
+    beta (this machine): used N ago, never forgotten
+    alpha: used N ago, never forgotten
+    Daemon: running (pid N), serving this repository; doesn't start at login
+    Daemon socket: $ROOT/home/musubi-beta/daemon.sock
+    Daemon log: $ROOT/home/musubi-beta/daemon.log
+    ");
     // A sync failing meanwhile, which a retry fixes, would be no fault of status's.
     assert!(!warnings.contains("Warning: The daemon"), "{warnings}");
     // Through a template -T gives, and as JSON, for a script or an agent.
@@ -460,6 +497,7 @@ fn hub_join_sync_clone_and_list() {
             "hive ++ \" \" ++ machine ++ \" \" ++ serving",
         ],
     );
+    // Exactly, as a script reads it: a snapshot would ignore a trailing newline.
     assert_eq!(line, "project beta true");
     let json = musubi_in(&env, &logs, &beta, &["status", "-T", "json(self)"]);
     let json: serde_json::Value = serde_json::from_str(&json).expect(&json);
@@ -484,10 +522,12 @@ fn hub_join_sync_clone_and_list() {
     );
     // It prints through jj's formatting, labelled; the daemon's log has no colour codes.
     let labelled = musubi_in(&env, &logs, &beta, &["--color=debug"]);
-    assert!(
-        labelled.contains("hive::project>>") && labelled.contains("machine::alpha>>"),
-        "{labelled}"
-    );
+    insta::assert_snapshot!(labelled, @"
+    [1m<<heading::Hub >><<heading hub::$ROOT/hub>><<heading:::>>[0m
+      [1m<<hive hive::project>>[0m  <<machines len::2>> machines: [38;5;2m<<machines map join machine::alpha>>[39m<<machines map join::, >>[38;5;2m<<machines map join machine::beta>>[39m
+        here: <<path::$ROOT/beta>>  <<status::synced N ago>>
+    Daemon: running, serving 1 repositories; doesn't start at login; `musubi daemon install` makes it
+    ");
     let daemon_log = fs::read_to_string(state_dir(&env, &beta).join("daemon.log")).unwrap();
     assert!(
         !daemon_log.is_empty() && !daemon_log.contains('\x1b'),
@@ -496,13 +536,16 @@ fn hub_join_sync_clone_and_list() {
 
     // Completing as you type, the shell gets the hub's hives, and the hubs this machine knows.
     let hives = completions(&env, &logs, &beta, &["musubi", "clone", "pr"]);
-    assert_eq!(hives, "project\t2 machines: alpha, beta\n");
+    insta::assert_snapshot!(hives, @"project	2 machines: alpha, beta");
     let hubs = completions(&env, &logs, &beta, &["musubi", "join", "--hub", ""]);
-    assert_eq!(hubs, format!("{}\tthe default hub\n", hub.url));
+    insta::assert_snapshot!(hubs, @"$ROOT/hub	the default hub");
     // `musubi.hub` in jj's config takes the place of the hub the first join saved.
     beta.jj(&["config", "set", "--user", "musubi.hub", "elsewhere"]);
     let hubs = completions(&env, &logs, &beta, &["musubi", "join", "--hub", ""]);
-    assert_eq!(hubs, format!("elsewhere\tthe default hub\n{}\n", hub.url));
+    insta::assert_snapshot!(hubs, @"
+    elsewhere	the default hub
+    $ROOT/hub
+    ");
     beta.jj(&["config", "unset", "--user", "musubi.hub"]);
 
     // Daemons keep the machines in sync on their own.
@@ -513,7 +556,7 @@ fn hub_join_sync_clone_and_list() {
     });
     // `musubi sync` goes through the daemon.
     let out = musubi_in(&env, &logs, &alpha, &["sync"]);
-    assert!(out.contains("Synced (hive at #"), "{out}");
+    insta::assert_snapshot!(out, @"Synced (hive at #N).");
 
     // Without a terminal, `musubi top` prints once what the hub has seen: the heads that
     // came in, and each machine up to date once its daemon has reported the latest.
@@ -522,13 +565,26 @@ fn hub_join_sync_clone_and_list() {
         top = musubi_in(&env, &logs, &beta, &["top"]);
         top.contains("2/2")
     });
-    assert!(top.contains("No issues."), "{top}");
-    assert!(top.contains("\nproject since the hub started"), "{top}");
-    for machine in ["alpha", "beta"] {
-        assert!(top.contains(&format!("  {machine} ")), "{top}");
-    }
-    assert!(top.contains("up to date"), "{top}");
-    assert!(top.contains("AGO"), "{top}");
+    // Its counts and sizes, and so its columns' widths, depend on how the daemons' syncs fell,
+    // as do the heads that came in, listed last.
+    let (top, _heads) = top.split_once("\n\n  AGO").expect(&top);
+    let mut settings = insta::Settings::clone_current();
+    settings.add_filter(r"\d+(\.\d+)?", "N");
+    settings.add_filter(r" {2,}", "  ");
+    settings.bind(|| insta::assert_snapshot!(top, @"
+    musubi top: N hub
+    This machine's daemon is running, serving N repository.
+    Hub $ROOT/hub: up Ns, musubi N.N, N hive.
+    No issues.
+
+    HIVE  HEAD  IN/s  OUT/s  OPS  COMMITS  MACHINES  ISSUES
+    project  #N  —  —  N  N  N/N
+
+    project since the hub started: received N KiB and sent N KiB; N operations, writing N commits, came in, and N went out; N pushes moved the head, and N found it moved first.
+      MACHINE  HEARD  AT  MUSUBI  STATE
+      alpha  N ago  #N  N.N  up to date
+      beta  N ago  #N  N.N  up to date
+    "));
 
     // Operation ids translate between this machine's and the hive's.
     let local = beta.jj(&["op", "log", "--no-graph", "-n1", "-T", "id"]);
@@ -547,7 +603,7 @@ fn hub_join_sync_clone_and_list() {
         &beta,
         &["clone", "proj", delta.to_str().unwrap()],
     );
-    assert!(err.contains("neither `never` nor a duration"), "{err}");
+    insta::assert_snapshot!(err, @"Error: musubi.forget-after in your user config is neither `never` nor a duration such as `6h`; fix it and run this again");
     assert!(!delta.exists());
     beta.jj(&["config", "unset", "--user", "musubi.forget-after"]);
 
@@ -569,7 +625,6 @@ fn hub_join_sync_clone_and_list() {
     // An agent clones it, so the hive forgets gamma's copy once it goes unused for 6h.
     clone.env("CLAUDE_CODE_SESSION_ID", "a session");
     let out = run(&env, &logs, clone);
-    assert!(out.contains("Cloning hive project into"), "{out}");
     // As `jj git clone` checks out the remote's default branch.
     let parent = [
         "log",
@@ -586,10 +641,12 @@ fn hub_join_sync_clone_and_list() {
         "from alpha"
     );
     assert!(log(&gamma).contains("picked up by the daemon"));
-    assert!(
-        out.contains("The hive forgets this copy once it goes unused for 6h."),
-        "{out}"
-    );
+    insta::assert_snapshot!(out, @"
+    The hive forgets this copy once it goes unused for 6h.
+    Cloning hive project into ../gamma
+    Syncing...
+    Synced with the hub (hive at #N).
+    ");
     wait_for(&logs, "beta to hear gamma's musubi.forget-after", || {
         status_in(&env, &logs, &beta)
             .0
@@ -605,10 +662,13 @@ fn hub_join_sync_clone_and_list() {
     let mut sync = alpha.program(musubi());
     sync.arg("sync").current_dir(gamma.path());
     let out = run(&env, &logs, sync);
-    assert!(out.contains("Synced (hive at #"), "{out}");
+    insta::assert_snapshot!(out, @"Synced (hive at #N).");
     musubi_in(&env, &logs, &alpha, &["sync"]);
     let out = musubi_in(&env, &logs, &alpha, &["forget", "gamma"]);
-    assert!(out.contains("Forgot gamma"), "{out}");
+    insta::assert_snapshot!(out, @"
+    Forgot gamma
+    Synced (hive at #N).
+    ");
     // The hub counts gamma out once it has the forget, which `musubi forget`'s sync sends.
     wait_for(&logs, "the hub to count gamma out", || {
         musubi_in(&env, &logs, &alpha, &["list"]).contains("project  2 machines: alpha, beta")
@@ -627,14 +687,14 @@ fn hub_join_sync_clone_and_list() {
         &alpha,
         &["hub", "rename", "project", "renamed"],
     );
-    assert!(out.contains("Renamed hive project to renamed"), "{out}");
+    insta::assert_snapshot!(out, @"Renamed hive project to renamed");
     let out = musubi_in(
         &env,
         &logs,
         &alpha,
         &["hub", "rename", "renamed", "renamed"],
     );
-    assert!(out.contains("Hive renamed already has that name"), "{out}");
+    insta::assert_snapshot!(out, @"Hive renamed already has that name");
     musubi_in(&env, &logs, &beta, &["sync"]);
     wait_for(&logs, "beta's daemon to hear the hive's new name", || {
         status_in(&env, &logs, &beta)
@@ -644,7 +704,7 @@ fn hub_join_sync_clone_and_list() {
 
     // Leaving takes the copy out of the hive, and stops the syncing.
     let out = musubi_in(&env, &logs, &beta, &["leave"]);
-    assert!(out.contains("has left hive renamed"), "{out}");
+    insta::assert_snapshot!(out, @"This repository has left hive renamed.");
     wait_for(&logs, "alpha's daemon to drop beta's working copy", || {
         !alpha.jj(&["workspace", "list"]).contains("beta/")
     });
@@ -655,11 +715,11 @@ fn hub_join_sync_clone_and_list() {
         "{workspaces}"
     );
     let list = musubi_in(&env, &logs, &beta, &["list"]);
-    assert!(!list.contains("here:"), "{list}");
-    assert!(
-        list.contains("Daemon: running, serving 0 repositories;"),
-        "{list}"
-    );
+    insta::assert_snapshot!(list, @"
+    Hub $ROOT/hub:
+      renamed  1 machine: alpha
+    Daemon: running, serving 0 repositories; doesn't start at login; `musubi daemon install` makes it
+    ");
 }
 
 /// `musubi completion` prints a script for each shell it names.
@@ -687,6 +747,7 @@ fn completion_scripts_complete_the_commands() {
 #[test]
 fn commands_carry_on_once_their_output_goes_unread() {
     let env = TestEnv::new();
+    let _filters = snapshot_filters(&env);
     let repo = env.init_repo("alpha");
     // Nothing reads what it prints, from the start.
     let (reader, writer) = std::io::pipe().unwrap();
@@ -697,7 +758,7 @@ fn commands_carry_on_once_their_output_goes_unread() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(3), "{err}");
     // Past the line it couldn't print, to the hint after it.
-    assert!(err.contains("Hint: Run `musubi hub`"), "{err}");
+    insta::assert_snapshot!(err, @"Hint: Run `musubi hub` on one machine, then the join command it prints.");
 }
 
 /// A log file never has colour, even where `--color` asks for it.
@@ -740,6 +801,7 @@ fn logs_have_no_colour() {
 #[test]
 fn the_daemon_picks_up_new_repositories() {
     let env = TestEnv::with_real_op_times();
+    let _filters = snapshot_filters(&env);
     let mut logs = Logs::default();
     let mut hub = Hub::start(&env, &mut logs);
     let mut daemons = Daemons::default();
@@ -769,12 +831,20 @@ fn the_daemon_picks_up_new_repositories() {
     let mut join = alpha.program(musubi());
     join.arg("create").current_dir(&second);
     let out = run(&env, &logs, join);
-    assert!(out.contains("Created hive second"), "{out}");
+    insta::assert_snapshot!(out, @"
+    Created hive second
+    Syncing...
+    Synced with the hub (hive at #N).
+    ");
     let list = musubi_in(&env, &logs, &alpha, &["list"]);
-    assert!(
-        list.contains("Daemon: running, serving 2 repositories;"),
-        "{list}"
-    );
+    insta::assert_snapshot!(list, @"
+    Hub $ROOT/hub:
+      alpha  1 machine: alpha
+        here: $ROOT/alpha  synced N ago
+      second  1 machine: alpha
+        here: $ROOT/second  synced N ago
+    Daemon: running, serving 2 repositories; doesn't start at login; `musubi daemon install` makes it
+    ");
 
     let mut clone = beta.program(musubi());
     clone.args([
@@ -800,20 +870,27 @@ fn the_daemon_picks_up_new_repositories() {
     // Completing a hive's name falls back on this machine's copies when the hub is out of
     // reach. An empty word completes the flags too.
     let hives = completions(&env, &logs, &alpha, &["musubi", "clone", ""]);
-    let names: Vec<&str> = hives
-        .lines()
-        .filter(|line| !line.starts_with('-'))
-        .collect();
-    assert_eq!(names, ["alpha", "second"], "{hives}");
+    insta::assert_snapshot!(hives, @"
+    alpha
+    second
+    --hub	The hub, as `musubi hub` prints it [default: this machine's default hub]
+    --machine	This machine's name in the hive. Defaults to jj's `operation.hostname`
+    --help	Print help (see more with '--help')
+    --socket	The daemon's control socket, in place of the usual one
+    --log	What to log, as a filter in `RUST_LOG`'s syntax: `debug`, or `info,musubi_sync=debug`. It applies to this command, not to a daemon it starts, which uses `musubi.daemon.log` in jj's config
+    --color	When to colour what it prints, as jj's `--color` does [default: as jj's `ui.color` says]
+    ");
     let restarted = Hub::start(&env, &mut logs);
-    assert!(
-        restarted.greeting.starts_with("Serving 2 hives from"),
-        "{}",
-        restarted.greeting
-    );
+    insta::assert_snapshot!(restarted.greeting, @"Serving 2 hives from $ROOT/hub");
     let list = musubi_in(&env, &logs, &alpha, &["list"]);
-    assert!(list.contains("alpha  1 machine: alpha"), "{list}");
-    assert!(list.contains("second  2 machines: alpha, beta"), "{list}");
+    insta::assert_snapshot!(list, @"
+    Hub $ROOT/hub:
+      alpha  1 machine: alpha
+        here: $ROOT/alpha  synced N ago
+      second  2 machines: alpha, beta
+        here: $ROOT/second  synced N ago
+    Daemon: running, serving 2 repositories; doesn't start at login; `musubi daemon install` makes it
+    ");
     let mut describe = alpha.program(Path::new("jj"));
     describe
         .args(["describe", "@-", "-m", "second project, after the restart"])
@@ -827,6 +904,7 @@ fn the_daemon_picks_up_new_repositories() {
 #[test]
 fn machines_whose_workspaces_are_all_default_can_join() {
     let env = TestEnv::with_real_op_times();
+    let _filters = snapshot_filters(&env);
     let mut logs = Logs::default();
     let hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
@@ -842,7 +920,11 @@ fn machines_whose_workspaces_are_all_default_can_join() {
     // Without remotes, a repository joins the one hive it shares history with.
     fetch_history(&alpha, &beta);
     let out = musubi_in(&env, &logs, &beta, &["join", "--hub", &hub.url]);
-    assert!(out.contains("Joined hive alpha (matched commits)"), "{out}");
+    insta::assert_snapshot!(out, @"
+    Joined hive alpha (matched commits), 2 machines
+    Syncing...
+    Synced with the hub (hive at #N).
+    ");
     assert!(log(&beta).contains("from alpha"));
 }
 
@@ -887,6 +969,7 @@ fn two_machines_with(
 #[test]
 fn commands_in_another_workspace_act_on_the_repository() {
     let env = TestEnv::with_real_op_times();
+    let _filters = snapshot_filters(&env);
     let mut logs = Logs::default();
     let hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
@@ -908,24 +991,38 @@ fn commands_in_another_workspace_act_on_the_repository() {
     // Joining again from the other workspace, as to make a lost hive again.
     run(&env, &logs, in_second(&["join"]));
     let list = musubi_in(&env, &logs, &alpha, &["list"]);
-    assert!(
-        list.contains("Daemon: running, serving 1 repositories;"),
-        "{list}"
-    );
+    insta::assert_snapshot!(list, @"
+    Hub $ROOT/hub:
+      alpha  1 machine: alpha
+        here: $ROOT/alpha  synced N ago
+    Daemon: running, serving 1 repositories; doesn't start at login; `musubi daemon install` makes it
+    ");
     // Listed once, through the workspace it joined from, so a daemon starting serves it once.
     let state_path = state_dir(&env, &alpha).join("state.toml");
     let state = fs::read_to_string(&state_path).unwrap();
     assert!(!state.contains("alpha-second"), "{state}");
     let status = run(&env, &logs, in_second(&["status"]));
-    assert!(status.contains("serving this repository"), "{status}");
+    insta::assert_snapshot!(status, @"
+    Hive: alpha on $ROOT/hub, at #N
+    This machine: alpha, synced N ago; the hub has all its work
+    Working copies:
+    alpha@: zsuskuln 95c553be (no description set)
+    alpha-second@: nppvrztz b9a19b48 (no description set)
+    Copies:
+    alpha (this machine): used N ago, never forgotten
+    Daemon: running (pid N), serving this repository; doesn't start at login
+    Daemon socket: $ROOT/home/musubi-alpha/daemon.sock
+    Daemon log: $ROOT/home/musubi-alpha/daemon.log
+    ");
 
     let out = run(&env, &logs, in_second(&["leave"]));
-    assert!(out.contains("has left hive"), "{out}");
+    insta::assert_snapshot!(out, @"This repository has left hive alpha.");
     let list = musubi_in(&env, &logs, &alpha, &["list"]);
-    assert!(
-        list.contains("Daemon: running, serving 0 repositories;"),
-        "{list}"
-    );
+    insta::assert_snapshot!(list, @"
+    Hub $ROOT/hub:
+      alpha  no machines yet
+    Daemon: running, serving 0 repositories; doesn't start at login; `musubi daemon install` makes it
+    ");
     let state = fs::read_to_string(&state_path).unwrap();
     assert!(!state.contains("alpha"), "{state}");
 }
@@ -936,6 +1033,7 @@ fn commands_in_another_workspace_act_on_the_repository() {
 #[test]
 fn a_copy_can_join_again_after_leaving() {
     let env = TestEnv::with_real_op_times();
+    let _filters = snapshot_filters(&env);
     let mut logs = Logs::default();
     let hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
@@ -957,7 +1055,14 @@ fn a_copy_can_join_again_after_leaving() {
         repo.write_file(name, name);
         repo.jj(&["commit", "-m", &message]);
         let out = musubi_in(&env, &logs, repo, &["join"]);
-        assert!(out.contains("Synced with the hub"), "{out}");
+        // Each says the same.
+        insta::allow_duplicates! {
+            insta::assert_snapshot!(out, @"
+            Joined hive alpha (matched commits), 3 machines
+            Syncing...
+            Synced with the hub (hive at #N).
+            ");
+        }
         wait_for(
             &logs,
             &format!("alpha's daemon to fetch {name}'s commit"),
@@ -976,6 +1081,7 @@ fn a_copy_can_join_again_after_leaving() {
 #[test]
 fn copies_make_a_lost_hive_again() {
     let env = TestEnv::with_real_op_times();
+    let _filters = snapshot_filters(&env);
     let mut logs = Logs::default();
     let mut hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
@@ -984,24 +1090,21 @@ fn copies_make_a_lost_hive_again() {
     hub.kill();
     remove_dir_when_free(&hub.dir);
     hub = Hub::start(&env, &mut logs);
-    assert!(
-        hub.greeting.starts_with("Created a new hub"),
-        "{}",
-        hub.greeting
-    );
+    insta::assert_snapshot!(hub.greeting, @"Created a new hub in $ROOT/hub");
     for (repo, file) in [(&alpha, "from alpha"), (&beta, "from beta")] {
         repo.write_file(file, file);
         repo.jj(&["commit", "-m", file]);
     }
     let err = musubi_fails(&env, &logs, &beta, &["sync"]);
-    assert!(err.contains("`musubi join`"), "{err}");
+    insta::assert_snapshot!(err, @"Error: the hub has no record of this repository's hive; if it's the right hub, `musubi join` in this repository makes the hive again");
     let out = musubi_in(&env, &logs, &alpha, &["join"]);
-    assert!(
-        out.contains("Made hive alpha again from this repository"),
-        "{out}"
-    );
+    insta::assert_snapshot!(out, @"
+    Made hive alpha again from this repository
+    Syncing...
+    Synced with the hub (hive at #N).
+    ");
     let out = musubi_in(&env, &logs, &beta, &["sync"]);
-    assert!(out.contains("Synced (hive at #"), "{out}");
+    insta::assert_snapshot!(out, @"Synced (hive at #N).");
     wait_for(&logs, "the machines to share their work", || {
         try_log(&alpha).is_some_and(|log| log.contains("from beta"))
             && try_log(&beta).is_some_and(|log| log.contains("from alpha"))
@@ -1021,6 +1124,7 @@ fn copies_make_a_lost_hive_again() {
 #[test]
 fn copies_move_to_another_hub() {
     let env = TestEnv::with_real_op_times();
+    let _filters = snapshot_filters(&env);
     let mut logs = Logs::default();
     let mut old = Hub::start(&env, &mut logs);
     let new = Hub::start_in(&env, &mut logs, "newhub");
@@ -1029,15 +1133,17 @@ fn copies_move_to_another_hub() {
     let (alpha, beta) = two_machines(&env, &mut logs, &mut daemons, &old);
     old.kill();
     let out = musubi_in(&env, &logs, &alpha, &["join", "--hub", &new.url]);
-    assert!(
-        out.contains("Made hive alpha again from this repository"),
-        "{out}"
-    );
+    insta::assert_snapshot!(out, @"
+    Made hive alpha again from this repository
+    Syncing...
+    Synced with the hub (hive at #N).
+    ");
     let out = musubi_in(&env, &logs, &beta, &["join", "--hub", &new.url]);
-    assert!(
-        out.contains("Hive alpha is on the hub, and this repository is part of it"),
-        "{out}"
-    );
+    insta::assert_snapshot!(out, @"
+    Hive alpha is on the hub, and this repository is part of it
+    Syncing...
+    Synced with the hub (hive at #N).
+    ");
     alpha.write_file("moved", "moved");
     alpha.jj(&["commit", "-m", "after the move"]);
     wait_for(
@@ -1052,6 +1158,7 @@ fn copies_move_to_another_hub() {
 #[test]
 fn copies_leave_a_removed_hive() {
     let env = TestEnv::with_real_op_times();
+    let _filters = snapshot_filters(&env);
     let mut logs = Logs::default();
     let hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
@@ -1061,16 +1168,19 @@ fn copies_leave_a_removed_hive() {
     // hears through `musubi sync`.
     musubi_in(&env, &logs, &beta, &["daemon", "stop"]);
     let out = musubi_in(&env, &logs, &alpha, &["hub", "rm", "alpha"]);
-    assert!(out.contains("Removed hive alpha"), "{out}");
+    insta::assert_snapshot!(out, @"Removed hive alpha");
     let err = musubi_fails(&env, &logs, &beta, &["sync"]);
-    assert!(err.contains("removed from the hub"), "{err}");
+    insta::assert_snapshot!(err, @"Error: this repository's hive was removed from the hub, so this repository no longer syncs with it; everything it has stays");
     assert_eq!(membership(&beta), "removed");
     let list = musubi_in(&env, &logs, &beta, &["list"]);
-    assert!(!list.contains("here:"), "{list}");
+    insta::assert_snapshot!(list, @"
+    Hub $ROOT/hub:
+    Daemon: not running (doesn't start at login; `musubi daemon install` makes it); `musubi daemon start` starts it
+    ");
     assert!(log(&beta).contains("start"));
     // It remembers its hive was removed, rather than joining another its history matches.
     let err = musubi_fails(&env, &logs, &beta, &["join", "--hub", &hub.url]);
-    assert!(err.contains("was removed from its hub"), "{err}");
+    insta::assert_snapshot!(err, @"Error: this repository's hive, alpha, was removed from its hub; `musubi join --hive <name>` joins another, and `musubi create` starts a new one");
     // Alpha's daemon hears when it next syncs, as after an operation here.
     alpha.write_file("after", "after");
     alpha.jj(&["status"]);
@@ -1078,7 +1188,10 @@ fn copies_leave_a_removed_hive() {
         membership(&alpha) == "removed"
     });
     let list = musubi_in(&env, &logs, &alpha, &["list"]);
-    assert!(!list.contains("here:"), "{list}");
+    insta::assert_snapshot!(list, @"
+    Hub $ROOT/hub:
+    Daemon: running, serving 0 repositories; doesn't start at login; `musubi daemon install` makes it
+    ");
     assert!(log(&alpha).contains("start"));
 }
 
@@ -1098,6 +1211,7 @@ fn membership(repo: &TestRepo) -> String {
 #[test]
 fn a_sync_says_at_once_that_the_hub_is_gone() {
     let env = TestEnv::with_real_op_times();
+    let _filters = snapshot_filters(&env);
     let mut logs = Logs::default();
     let mut hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
@@ -1111,19 +1225,20 @@ fn a_sync_says_at_once_that_the_hub_is_gone() {
     hub.kill();
     let started = Instant::now();
     let err = musubi_fails(&env, &logs, &alpha, &["sync"]);
-    assert!(err.contains("no hub is serving"), "{err}");
+    insta::assert_snapshot!(err, @"Error: no hub is serving $ROOT/hub here; start one with `musubi hub`");
     assert!(started.elapsed() < Duration::from_secs(10), "{err}");
     let list = musubi_in(&env, &logs, &alpha, &["list"]);
-    assert!(list.contains("sync failing: no hub is serving"), "{list}");
+    insta::assert_snapshot!(list, @"
+    Hub $ROOT/hub: no hub is serving $ROOT/hub here; start one with `musubi hub`. This machine's copies:
+      alpha
+        here: $ROOT/alpha  sync failing: no hub is serving $ROOT/hub here; start one with `musubi hub`
+    Daemon: running, serving 1 repositories; doesn't start at login; `musubi daemon install` makes it
+    ");
     // As soon as the hub is back, a sync goes through: what the daemon knew is not stale.
     hub = Hub::start(&env, &mut logs);
-    assert!(
-        hub.greeting.starts_with("Serving 1 hive"),
-        "{}",
-        hub.greeting
-    );
+    insta::assert_snapshot!(hub.greeting, @"Serving 1 hive from $ROOT/hub");
     let out = musubi_in(&env, &logs, &alpha, &["sync"]);
-    assert!(out.contains("Synced (hive at #"), "{out}");
+    insta::assert_snapshot!(out, @"Synced (hive at #N).");
 }
 
 /// `musubi leave` with its hub gone fails, leaving the repository part of its hive, served
@@ -1131,6 +1246,7 @@ fn a_sync_says_at_once_that_the_hub_is_gone() {
 #[test]
 fn leaving_needs_the_hub_unless_forced() {
     let env = TestEnv::with_real_op_times();
+    let _filters = snapshot_filters(&env);
     let mut logs = Logs::default();
     let mut hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
@@ -1143,7 +1259,7 @@ fn leaving_needs_the_hub_unless_forced() {
     musubi_in(&env, &logs, &alpha, &["create", "--hub", &hub.url]);
     hub.kill();
     let err = musubi_fails(&env, &logs, &alpha, &["leave"]);
-    assert!(err.contains("`musubi leave --force`"), "{err}");
+    insta::assert_snapshot!(err, @"Error: couldn't tell hive alpha that this repository leaves: no hub is serving $ROOT/hub here; start one with `musubi hub`; `musubi leave --force` leaves without telling the hive");
     assert_eq!(membership(&alpha), "joined");
     // It keeps its working copy, though on the empty commit its forget abandoned.
     let workspaces = alpha.jj(&["workspace", "list", "--ignore-working-copy"]);
@@ -1152,10 +1268,15 @@ fn leaving_needs_the_hub_unless_forced() {
         "{workspaces}"
     );
     let list = musubi_in(&env, &logs, &alpha, &["list"]);
-    assert!(list.contains("here:"), "{list}");
+    insta::assert_snapshot!(list, @"
+    Hub $ROOT/hub: no hub is serving $ROOT/hub here; start one with `musubi hub`. This machine's copies:
+      alpha
+        here: $ROOT/alpha  sync failing: no hub is serving $ROOT/hub here; start one with `musubi hub`
+    Daemon: running, serving 1 repositories; doesn't start at login; `musubi daemon install` makes it
+    ");
     assert!(log(&alpha).contains("start"));
     let out = musubi_in(&env, &logs, &alpha, &["leave", "--force"]);
-    assert!(out.contains("has left hive"), "{out}");
+    insta::assert_snapshot!(out, @"This repository has left hive alpha.");
     assert_eq!(membership(&alpha), "left");
     // With a new commit to work on, which no next work of its in the hive will make now.
     let at = alpha.jj(&[
@@ -1242,6 +1363,7 @@ fn the_daemon_ignores_the_git_repository_it_was_started_in() {
 #[test]
 fn the_daemon_outlives_the_directory_it_was_started_in() {
     let env = TestEnv::new();
+    let _filters = snapshot_filters(&env);
     let mut logs = Logs::default();
     let hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
@@ -1272,7 +1394,11 @@ fn the_daemon_outlives_the_directory_it_was_started_in() {
         .args(["create", "--hub", &hub.url])
         .current_dir(&second);
     let out = run(&env, &logs, create);
-    assert!(out.contains("Synced with the hub"), "{out}");
+    insta::assert_snapshot!(out, @"
+    Created hive second
+    Syncing...
+    Synced with the hub (hive at #N).
+    ");
 }
 
 /// Runs musubi in `dir` as `machine` runs it, which must succeed, returning its stdout.
@@ -1327,6 +1453,7 @@ fn jj_at(env: &TestEnv, logs: &Logs, machine: &TestRepo, dir: &Path, args: &[&st
 #[test]
 fn duplicates_are_never_synced() {
     let env = TestEnv::new();
+    let _filters = snapshot_filters(&env);
     let mut logs = Logs::default();
     let hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
@@ -1335,17 +1462,15 @@ fn duplicates_are_never_synced() {
     settled(&env, &logs, &alpha, alpha.path());
     let duplicate = env.root().join("duplicate");
     musubi_testutil::copy_tree(alpha.path(), &duplicate);
-    let at = format!(
-        "which is at {}",
-        alpha.path().canonicalize().unwrap().display()
-    );
     let status = musubi_at(&env, &logs, &alpha, &duplicate, &["status"]);
-    assert!(
-        status.contains("This repository duplicates a copy"),
-        "{status}"
-    );
-    assert!(status.contains(&at), "{status}");
-    assert!(!status.contains("synced 0s ago"), "{status}");
+    insta::assert_snapshot!(status, @"
+    This repository duplicates a copy in hive alpha, which is at $ROOT/alpha, so musubi doesn't sync it.
+    Default hub: $ROOT/hub
+    Daemon: running (pid N), serving 1 repository; doesn't start at login
+    Daemon socket: $ROOT/home/musubi-alpha/daemon.sock
+    Daemon log: $ROOT/home/musubi-alpha/daemon.log
+    ");
+    let mut errors = String::new();
     for args in [
         &["join"][..],
         &["leave"],
@@ -1353,11 +1478,21 @@ fn duplicates_are_never_synced() {
         &["join", "--original"],
     ] {
         let err = musubi_fails_at(&env, &logs, &alpha, &duplicate, args);
-        assert!(
-            err.contains("duplicates a copy") || err.contains("is at"),
-            "{args:?}: {err}"
-        );
+        writeln!(errors, "$ musubi {}\n{err}", args.join(" ")).unwrap();
     }
+    insta::assert_snapshot!(errors, @"
+    $ musubi join
+    Error: this repository duplicates a copy in hive alpha, which is at $ROOT/alpha, so musubi doesn't sync it; `musubi clone` makes another copy
+
+    $ musubi leave
+    Error: this repository duplicates a copy in hive alpha, which is at $ROOT/alpha, so musubi doesn't sync it; `musubi clone` makes another copy
+
+    $ musubi sync
+    Error: this repository duplicates a copy in hive alpha, which is at $ROOT/alpha, so musubi doesn't sync it; `musubi clone` makes another copy
+
+    $ musubi join --original
+    Error: the copy of this repository's key is at $ROOT/alpha, so this repository isn't it; `musubi clone` makes another copy
+    ");
     jj_at(
         &env,
         &logs,
@@ -1372,10 +1507,12 @@ fn duplicates_are_never_synced() {
     });
     assert!(!log(&beta).contains("in the duplicate"));
     let list = musubi_in(&env, &logs, &alpha, &["list"]);
-    assert!(
-        list.contains("Daemon: running, serving 1 repositories;"),
-        "{list}"
-    );
+    insta::assert_snapshot!(list, @"
+    Hub $ROOT/hub:
+      alpha  2 machines: alpha, beta
+        here: $ROOT/alpha  synced N ago
+    Daemon: running, serving 1 repositories; doesn't start at login; `musubi daemon install` makes it
+    ");
 }
 
 /// A copy restored onto another machine, from a backup, say, is taken for a duplicate until
@@ -1387,6 +1524,7 @@ fn duplicates_are_never_synced() {
 #[test]
 fn a_copy_restored_elsewhere_syncs_as_the_original() {
     let env = TestEnv::new();
+    let _filters = snapshot_filters(&env);
     let mut logs = Logs::default();
     let hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
@@ -1401,9 +1539,13 @@ fn a_copy_restored_elsewhere_syncs_as_the_original() {
     musubi_in(&env, &logs, &alpha, &["daemon", "stop"]);
     fs::remove_dir_all(alpha.path()).unwrap();
     let err = musubi_fails_at(&env, &logs, &gamma, &restored, &["join"]);
-    assert!(err.contains("musubi join --original"), "{err}");
+    insta::assert_snapshot!(err, @"Error: this repository duplicates a copy in hive alpha, so musubi doesn't sync it; `musubi clone` makes another copy; if this is that copy, moved here, and the original is gone, `musubi join --original` syncs it");
     let out = musubi_at(&env, &logs, &gamma, &restored, &["join", "--original"]);
-    assert!(out.contains("Synced with the hub"), "{out}");
+    insta::assert_snapshot!(out, @"
+    Hive alpha is on the hub, and this repository is part of it
+    Syncing...
+    Synced with the hub (hive at #N).
+    ");
     jj_at(
         &env,
         &logs,
@@ -1423,6 +1565,7 @@ fn a_copy_restored_elsewhere_syncs_as_the_original() {
 #[test]
 fn moved_copies_sync_again() {
     let env = TestEnv::new();
+    let _filters = snapshot_filters(&env);
     let mut logs = Logs::default();
     let hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
@@ -1442,9 +1585,12 @@ fn moved_copies_sync_again() {
         try_log(&beta).is_some_and(|log| log.contains("after the move"))
     });
     let list = musubi_at(&env, &logs, &alpha, &moved, &["list"]);
-    let here = format!("here: {}", moved.canonicalize().unwrap().display());
-    assert!(list.contains(&here), "{list}");
-    assert!(!list.contains("not syncing"), "{list}");
+    insta::assert_snapshot!(list, @"
+    Hub $ROOT/hub:
+      alpha  2 machines: alpha, beta
+        here: $ROOT/moved  synced N ago
+    Daemon: running, serving 1 repositories; doesn't start at login; `musubi daemon install` makes it
+    ");
     // Away for a while, as on a disk unmounted, it syncs again when it's back.
     settled(&env, &logs, &alpha, &moved);
     let missing = format!("{} is missing", moved.canonicalize().unwrap().display());
@@ -1477,6 +1623,11 @@ fn moved_copies_sync_again() {
 #[test]
 fn deleted_copies_stop_syncing() {
     let env = TestEnv::new();
+    let _filters = snapshot_filters(&env);
+    // The clone's machine key is new, and the start of it shows in the hive's names for it.
+    let mut settings = insta::Settings::clone_current();
+    settings.add_filter(r"\balpha-[0-9a-f]{4}\b", "alpha-XXXX");
+    let _keys = settings.bind_to_scope();
     let mut logs = Logs::default();
     let hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
@@ -1498,18 +1649,31 @@ fn deleted_copies_stop_syncing() {
     });
     assert!(!alpha.path().exists());
     let list = musubi_at(&env, &logs, &alpha, root, &["list"]);
-    assert!(list.contains("it's missing"), "{list}");
+    insta::assert_snapshot!(list, @"
+    Hub $ROOT/hub:
+      alpha  2 machines: alpha, beta
+        here: $ROOT/alpha  not syncing: it's missing
+    Daemon: running, serving 1 repositories; doesn't start at login; `musubi daemon install` makes it
+    ");
     // A clone in its place takes over its entry.
     musubi_at(&env, &logs, &alpha, root, &["clone", "alpha", path]);
     let list = musubi_at(&env, &logs, &alpha, root, &["list"]);
-    assert!(!list.contains("not syncing"), "{list}");
-    assert!(list.contains("serving 1 repositories"), "{list}");
+    insta::assert_snapshot!(list, @"
+    Hub $ROOT/hub:
+      alpha  3 machines: alpha-XXXX, alpha-XXXX, beta
+        here: $ROOT/alpha  synced N ago
+    Daemon: running, serving 1 repositories; doesn't start at login; `musubi daemon install` makes it
+    ");
     musubi_at(&env, &logs, &alpha, alpha.path(), &["daemon", "stop"]);
     fs::remove_dir_all(alpha.path()).unwrap();
     let out = musubi_at(&env, &logs, &alpha, root, &["leave", path]);
-    assert!(out.contains("no longer syncs the copy"), "{out}");
+    insta::assert_snapshot!(out, @"This machine no longer syncs the copy at $ROOT/alpha.");
     let list = musubi_at(&env, &logs, &alpha, root, &["list"]);
-    assert!(!list.contains("not syncing"), "{list}");
+    insta::assert_snapshot!(list, @"
+    Hub $ROOT/hub:
+      alpha  3 machines: alpha-XXXX, alpha-XXXX, beta
+    Daemon: not running (doesn't start at login; `musubi daemon install` makes it); `musubi daemon start` starts it
+    ");
 }
 
 /// A directory the daemon syncs that comes to hold another repository is never synced into
@@ -1628,6 +1792,7 @@ fn a_copy_restored_in_place_syncs_as_before() {
 #[test]
 fn a_copy_without_its_key_is_not_synced() {
     let env = TestEnv::new();
+    let _filters = snapshot_filters(&env);
     let mut logs = Logs::default();
     let hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
@@ -1636,15 +1801,15 @@ fn a_copy_without_its_key_is_not_synced() {
     let machine = alpha.repo_path().join("musubi/machine");
     fs::remove_file(&machine).unwrap();
     let (status, _) = status_in(&env, &logs, &alpha);
-    assert!(
-        status.contains("machine key or jj config id is missing"),
-        "{status}"
-    );
+    insta::assert_snapshot!(status, @"
+    This repository's record says it is part of hive alpha, but its machine key or jj config id is missing.
+    Default hub: $ROOT/hub
+    Daemon: running (pid N), serving 1 repository; doesn't start at login
+    Daemon socket: $ROOT/home/musubi-alpha/daemon.sock
+    Daemon log: $ROOT/home/musubi-alpha/daemon.log
+    ");
     let err = musubi_fails(&env, &logs, &alpha, &["sync"]);
-    assert!(
-        err.contains("machine key or jj config id is missing"),
-        "{err}"
-    );
+    insta::assert_snapshot!(err, @"Error: this repository's record says it is part of hive alpha, but its machine key or jj config id is missing; `musubi clone` makes a new copy");
     alpha.write_file("b", "b");
     alpha.jj(&["commit", "-m", "without a key"]);
     wait_for(&logs, "alpha's daemon to stop syncing it", || {
@@ -1658,6 +1823,7 @@ fn a_copy_without_its_key_is_not_synced() {
 #[test]
 fn a_new_hive_doesnt_inherit_members() {
     let env = TestEnv::new();
+    let _filters = snapshot_filters(&env);
     let mut logs = Logs::default();
     let hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
@@ -1666,7 +1832,13 @@ fn a_new_hive_doesnt_inherit_members() {
     musubi_in(&env, &logs, &beta, &["leave"]);
     musubi_in(&env, &logs, &beta, &["create", "other"]);
     let list = musubi_in(&env, &logs, &beta, &["list"]);
-    assert!(list.contains("other  1 machine: beta"), "{list}");
+    insta::assert_snapshot!(list, @"
+    Hub $ROOT/hub:
+      alpha  1 machine: alpha
+      other  1 machine: beta
+        here: $ROOT/beta  synced N ago
+    Daemon: running, serving 1 repositories; doesn't start at login; `musubi daemon install` makes it
+    ");
     let workspaces = beta.jj(&["workspace", "list"]);
     assert!(!workspaces.contains("alpha/"), "{workspaces}");
 }
@@ -1688,6 +1860,7 @@ fn file_url(path: &Path) -> String {
 #[test]
 fn shallow_clones_are_refused() {
     let env = TestEnv::with_real_op_times();
+    let _filters = snapshot_filters(&env);
     let mut logs = Logs::default();
     let hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
@@ -1700,14 +1873,13 @@ fn shallow_clones_are_refused() {
     let gamma = env.init_repo("gamma");
     daemons.of(&gamma);
     gamma.git(&["fetch", "--quiet", "--depth=1", &url, "main:alpha"]);
-    for command in ["create", "join"] {
-        let err = musubi_fails(&env, &logs, &gamma, &[command, "--hub", &hub.url]);
-        assert!(err.contains("this one is a shallow clone"), "{err}");
-        assert!(err.contains("musubi clone"), "{err}");
-    }
+    let create = musubi_fails(&env, &logs, &gamma, &["create", "--hub", &hub.url]);
+    insta::assert_snapshot!(create, @"Error: musubi needs all of a repository's history, and this one is a shallow clone. `musubi clone <hive> <dir>` makes a full copy of a hive from its hub, and `jj git clone`, without `--depth`, a full clone of a remote");
+    let join = musubi_fails(&env, &logs, &gamma, &["join", "--hub", &hub.url]);
+    insta::assert_snapshot!(join, @"Error: musubi needs all of a repository's history, and this one is a shallow clone. `musubi clone <hive> <dir>` makes a full copy of a hive from its hub, and `jj git clone`, without `--depth`, a full clone of a remote");
     beta.git(&["fetch", "--quiet", "--depth=1", &url, "main"]);
     let err = musubi_fails(&env, &logs, &beta, &["sync"]);
-    assert!(err.contains("this one is a shallow clone"), "{err}");
+    insta::assert_snapshot!(err, @"Error: musubi needs all of a repository's history, and this one is a shallow clone. `musubi clone <hive> <dir>` makes a full copy of a hive from its hub, and `jj git clone`, without `--depth`, a full clone of a remote");
 }
 
 /// Without a daemon, `musubi sync` syncs in its own process, and records how it went for
@@ -1716,11 +1888,14 @@ fn shallow_clones_are_refused() {
 #[test]
 fn syncing_without_the_daemon_shows_in_the_list() {
     let env = TestEnv::with_real_op_times();
+    let _filters = snapshot_filters(&env);
     let mut logs = Logs::default();
     let hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
     let mut daemons = Daemons::default();
     let (alpha, _beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
+    // So that alpha has beta's join, which its status shows, before its daemon stops.
+    musubi_in(&env, &logs, &alpha, &["sync"]);
     musubi_in(&env, &logs, &alpha, &["daemon", "stop"]);
     // As the daemon left it when its last sync failed, after it had synced.
     let path = alpha.repo_path().join("musubi/status.json");
@@ -1732,26 +1907,59 @@ fn syncing_without_the_daemon_shows_in_the_list() {
     alpha.write_file("unsent", "unsent");
     alpha.jj(&["commit", "-m", "unsent"]);
     let (status, warnings) = status_in(&env, &logs, &alpha);
-    assert!(status.contains("the hub lacks its latest work"), "{status}");
-    assert!(
-        warnings.contains("the hub was out of reach") && warnings.contains("`musubi sync`"),
-        "{warnings}"
-    );
-    assert!(warnings.contains("`musubi daemon start`"), "{warnings}");
+    insta::assert_snapshot!(status, @"
+    Hive: alpha on $ROOT/hub, at #N
+    This machine: alpha, synced N ago; the hub lacks its latest work
+    Working copies:
+    alpha@: nkmrtpmo e3da2e74 (no description set)
+    beta/beta@: kkmpptxz aa1f41eb (no description set)
+    Copies:
+    alpha (this machine): used N ago, never forgotten
+    beta: used N ago, never forgotten
+    Daemon: not running; doesn't start at login
+    Daemon socket: $ROOT/home/musubi-alpha/daemon.sock
+    Daemon log: $ROOT/home/musubi-alpha/daemon.log
+    ");
+    insta::assert_snapshot!(warnings, @"
+    Warning: Syncing fails: the hub was out of reach
+    Hint: `musubi sync` tries again.
+    Warning: The daemon isn't running, so this repository syncs only when you run `musubi sync`.
+    Hint: `musubi daemon start` starts it.
+    ");
     let mut sync = alpha.program(musubi());
     sync.arg("sync");
     let (ok, out, err) = try_run(&logs, &env, sync);
     assert!(ok, "{out}{err}");
-    assert!(
-        err.contains("daemon isn't running") && err.contains("musubi daemon start"),
-        "{err}"
-    );
+    insta::assert_snapshot!(out, @"Synced (hive at #N).");
+    insta::assert_snapshot!(err, @"
+    Warning: The daemon isn't running, so this synced in its own process, and nothing keeps this repository in sync.
+    Hint: `musubi daemon start` starts it.
+    ");
     let list = musubi_in(&env, &logs, &alpha, &["list"]);
-    assert!(list.contains("Daemon: not running"), "{list}");
-    assert!(list.contains("  synced "), "{list}");
+    insta::assert_snapshot!(list, @"
+    Hub $ROOT/hub:
+      alpha  2 machines: alpha, beta
+        here: $ROOT/alpha  synced N ago
+    Daemon: not running (doesn't start at login; `musubi daemon install` makes it); `musubi daemon start` starts it
+    ");
     let (status, warnings) = status_in(&env, &logs, &alpha);
-    assert!(status.contains("the hub has all its work"), "{status}");
-    assert!(!warnings.contains("Syncing fails"), "{warnings}");
+    insta::assert_snapshot!(status, @"
+    Hive: alpha on $ROOT/hub, at #N
+    This machine: alpha, synced N ago; the hub has all its work
+    Working copies:
+    alpha@: nkmrtpmo e3da2e74 (no description set)
+    beta/beta@: kkmpptxz aa1f41eb (no description set)
+    Copies:
+    alpha (this machine): used N ago, never forgotten
+    beta: used N ago, never forgotten
+    Daemon: not running; doesn't start at login
+    Daemon socket: $ROOT/home/musubi-alpha/daemon.sock
+    Daemon log: $ROOT/home/musubi-alpha/daemon.log
+    ");
+    insta::assert_snapshot!(warnings, @"
+    Warning: The daemon isn't running, so this repository syncs only when you run `musubi sync`.
+    Hint: `musubi daemon start` starts it.
+    ");
 }
 
 /// The hive shares remotes and chosen repo config through the binary, which finds jj's
@@ -1787,6 +1995,20 @@ fn settings_are_shared_through_the_binary() {
 #[test]
 fn status_says_when_retrying_cannot_help() {
     let env = TestEnv::with_real_op_times();
+    let _filters = snapshot_filters(&env);
+    // Which of two checks finds the abandoned history first depends on how the syncs fell.
+    let mut settings = insta::Settings::clone_current();
+    settings.add_filter(
+        concat!(
+            "operation [0-9a-f]+ realizes canonical operation [0-9a-f]+ but no longer has its ",
+            "parents|the operation history the hub accepted is no longer reachable from this ",
+            "repository's op heads",
+        ),
+        "[the hive's history is gone from this repository]",
+    );
+    // As does whether the join's first sync meets it, or the daemon's.
+    settings.add_filter("the first sync failed: ", "");
+    let _checks = settings.bind_to_scope();
     let mut logs = Logs::default();
     let hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
@@ -1799,15 +2021,17 @@ fn status_says_when_retrying_cannot_help() {
     alpha.jj(&["describe", "-m", "third"]);
     alpha.jj(&["op", "abandon", &format!("..{accepted}")]);
     let err = musubi_fails(&env, &logs, &alpha, &["sync"]);
-    assert!(err.contains("`musubi leave --force`"), "{err}");
+    insta::assert_snapshot!(err, @"Error: [the hive's history is gone from this repository] (was `jj op abandon` run?); musubi does not replicate op abandon yet, so replication is paused for this repository. It can't sync again: to carry on, run `musubi leave --force`, make a new copy with `musubi clone`, and bring across any work this copy has that the hive lacks");
     let (_, hints) = status_in(&env, &logs, &alpha);
-    assert!(hints.contains("Retrying won't get past this"), "{hints}");
+    insta::assert_snapshot!(hints, @"
+    Warning: Syncing fails: [the hive's history is gone from this repository] (was `jj op abandon` run?); musubi does not replicate op abandon yet, so replication is paused for this repository. It can't sync again: to carry on, run `musubi leave --force`, make a new copy with `musubi clone`, and bring across any work this copy has that the hive lacks
+    Hint: Retrying won't get past this; the warning says what will.
+    ");
 
     // Nor does joining again, which says so, though the copy joins.
     musubi_in(&env, &logs, &alpha, &["leave", "--force"]);
     let err = musubi_fails(&env, &logs, &alpha, &["join"]);
-    assert!(err.contains("`musubi leave --force`"), "{err}");
-    assert!(!err.contains("keeps trying"), "{err}");
+    insta::assert_snapshot!(err, @"Error: [the hive's history is gone from this repository] (was `jj op abandon` run?); musubi does not replicate op abandon yet, so replication is paused for this repository. It can't sync again: to carry on, run `musubi leave --force`, make a new copy with `musubi clone`, and bring across any work this copy has that the hive lacks");
 }
 
 /// With commit signing on, the commits musubi rewrites when it merges another machine's
@@ -1917,6 +2141,7 @@ fn fake_ssh(env: &TestEnv, hub: &Hub, banner: &str) -> PathBuf {
 #[test]
 fn machines_reach_the_hub_over_ssh() {
     let env = TestEnv::with_real_op_times();
+    let _filters = snapshot_filters(&env);
     let mut logs = Logs::default();
     let hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
@@ -1945,12 +2170,13 @@ fn machines_reach_the_hub_over_ssh() {
         run(&env, &logs, command)
     };
     let out = over_ssh(&alpha, &["create", "--hub", "hubhost"]);
-    assert!(out.contains("Created an ssh key for musubi"), "{out}");
-    assert!(
-        out.contains("Adding it to ~/.ssh/authorized_keys on hubhost"),
-        "{out}"
-    );
-    assert!(out.contains("Created hive alpha"), "{out}");
+    insta::assert_snapshot!(out, @"
+    Created an ssh key for musubi: $ROOT/home/musubi-alpha/hub_key
+    Adding it to ~/.ssh/authorized_keys on hubhost, allowed only to run `musubi hub connect`. ssh may ask for your password.
+    Created hive alpha
+    Syncing...
+    Synced with the hub (hive at #N).
+    ");
     let keys = fs::read_to_string(&authorized).unwrap();
     assert!(
         keys.starts_with("restrict,command=\"musubi hub connect\" ssh-ed25519 "),
@@ -1965,11 +2191,21 @@ fn machines_reach_the_hub_over_ssh() {
 
     fetch_history(&alpha, &beta);
     let out = over_ssh(&beta, &["join", "--hub", "hubhost"]);
-    assert!(out.contains("Joined hive alpha"), "{out}");
+    insta::assert_snapshot!(out, @"
+    Created an ssh key for musubi: $ROOT/home/musubi-beta/hub_key
+    Adding it to ~/.ssh/authorized_keys on hubhost, allowed only to run `musubi hub connect`. ssh may ask for your password.
+    Joined hive alpha (matched commits), 2 machines
+    Syncing...
+    Synced with the hub (hive at #N).
+    ");
     // Listing reaches the hub over ssh too.
     let list = over_ssh(&beta, &["list"]);
-    assert!(list.contains("Hub hubhost:"), "{list}");
-    assert!(list.contains("alpha  2 machines: alpha, beta"), "{list}");
+    insta::assert_snapshot!(list, @"
+    Hub hubhost:
+      alpha  2 machines: alpha, beta
+        here: $ROOT/beta  synced N ago
+    Daemon: running, serving 1 repositories; doesn't start at login; `musubi daemon install` makes it
+    ");
 
     alpha.write_file("b", "more");
     alpha.jj(&["commit", "-m", "over ssh"]);
@@ -2011,9 +2247,10 @@ fn machines_reach_the_hub_over_ssh() {
 #[test]
 fn localhost_reaches_the_hub_here_without_ssh() {
     let env = TestEnv::new();
+    let _filters = snapshot_filters(&env);
     let mut logs = Logs::default();
     let alpha = env.init_repo("alpha");
-    let hub = Hub::start_on(&env, &mut logs, &alpha);
+    let _hub = Hub::start_on(&env, &mut logs, &alpha);
     let mut daemons = Daemons::default();
     logs.daemon_of(&env, &alpha);
     daemons.of(&alpha);
@@ -2024,13 +2261,18 @@ fn localhost_reaches_the_hub_here_without_ssh() {
         .args(["create", "--hub", "localhost"])
         .env("MUSUBI_SSH", "/bin/false");
     let out = run(&env, &logs, create);
-    assert!(out.contains("Created hive alpha"), "{out}");
+    insta::assert_snapshot!(out, @"
+    Created hive alpha
+    Syncing...
+    Synced with the hub (hive at #N).
+    ");
     let list = musubi_in(&env, &logs, &alpha, &["list"]);
-    assert_eq!(list.matches("Hub ").count(), 1, "{list}");
-    assert!(
-        list.contains(&format!("Hub {}:", hub.dir.display())),
-        "{list}"
-    );
+    insta::assert_snapshot!(list, @"
+    Hub $ROOT/home/musubi-hub:
+      alpha  1 machine: alpha
+        here: $ROOT/alpha  synced N ago
+    Daemon: running, serving 1 repositories; doesn't start at login; `musubi daemon install` makes it
+    ");
 }
 
 /// The README's quick start, as a new user follows it: `musubi hub` run wherever they happen
@@ -2119,52 +2361,40 @@ fn the_quick_start_works_as_written() {
     musubi_on(&beta, &args, true);
     assert!(log(&gamma).contains("later"));
 
-    // What differs from run to run.
-    let root = env.root().canonicalize().unwrap();
-    let transcript = transcript
-        .replace(root.to_str().unwrap(), "$ROOT")
-        .replace(env.root().to_str().unwrap(), "$ROOT");
-    // A host name is letters, digits, dashes and dots. `$$` is a `$` in a replacement.
-    let host = format!(r"\b{}\b", whoami::hostname().unwrap().replace('.', r"\."));
-    insta::with_settings!({filters => [
-        (host.as_str(), "$$HOST"),
-        (r"synced \d+s ago", "synced Ns ago"),
-        (r"hive at #\d+", "hive at #N"),
-    ]}, {
-        insta::assert_snapshot!(transcript, @r#"
-        $ musubi hub
-        Created a new hub in $ROOT/home/musubi-hub
-        To share a repository:               musubi create --hub $HOST
-        To add another machine's copy of it: musubi join --hub $HOST
-        To make a new copy of a hive:        musubi clone <name> <dir> --hub $HOST
-        Other machines reach this hub over ssh: use the name they ssh to this machine by, if it isn't $HOST.
-        On this machine, leave out --hub.
-        beta$ musubi create
-        Error: no hub given; pass --hub <host>, or run `musubi hub` to serve one here
-        alpha$ musubi create --hub $HOST
-        Error: this repository has no commits to share yet; commit something first
-        alpha$ musubi create --hub $HOST
-        Created hive alpha
-        Syncing...
-        Synced with the hub (hive at #N).
-        beta$ musubi join --hub $HOST
-        Created an ssh key for musubi: $ROOT/home/musubi-beta/hub_key
-        Adding it to ~/.ssh/authorized_keys on $HOST, allowed only to run `musubi hub connect`. ssh may ask for your password.
-        Joined hive alpha (matched commits), 2 machines
-        Syncing...
-        Synced with the hub (hive at #N).
-        beta$ musubi list
-        Hub $HOST:
-          alpha  2 machines: alpha, beta
-            here: $ROOT/beta  synced Ns ago
-        Daemon: running, serving 1 repositories; doesn't start at login; `musubi daemon install` makes it
-        beta$ musubi clone alpha $ROOT/gamma --hub $HOST
-        Cloning hive alpha into $ROOT/gamma
-        Syncing...
-        Synced with the hub (hive at #N).
-        Initialized repo in "../gamma"
-        "#);
-    });
+    let _filters = snapshot_filters(&env);
+    insta::assert_snapshot!(transcript, @r#"
+    $ musubi hub
+    Created a new hub in $ROOT/home/musubi-hub
+    To share a repository:               musubi create --hub $HOST
+    To add another machine's copy of it: musubi join --hub $HOST
+    To make a new copy of a hive:        musubi clone <name> <dir> --hub $HOST
+    Other machines reach this hub over ssh: use the name they ssh to this machine by, if it isn't $HOST.
+    On this machine, leave out --hub.
+    beta$ musubi create
+    Error: no hub given; pass --hub <host>, or run `musubi hub` to serve one here
+    alpha$ musubi create --hub $HOST
+    Error: this repository has no commits to share yet; commit something first
+    alpha$ musubi create --hub $HOST
+    Created hive alpha
+    Syncing...
+    Synced with the hub (hive at #N).
+    beta$ musubi join --hub $HOST
+    Created an ssh key for musubi: $ROOT/home/musubi-beta/hub_key
+    Adding it to ~/.ssh/authorized_keys on $HOST, allowed only to run `musubi hub connect`. ssh may ask for your password.
+    Joined hive alpha (matched commits), 2 machines
+    Syncing...
+    Synced with the hub (hive at #N).
+    beta$ musubi list
+    Hub $HOST:
+      alpha  2 machines: alpha, beta
+        here: $ROOT/beta  synced N ago
+    Daemon: running, serving 1 repositories; doesn't start at login; `musubi daemon install` makes it
+    beta$ musubi clone alpha $ROOT/gamma --hub $HOST
+    Cloning hive alpha into $ROOT/gamma
+    Syncing...
+    Synced with the hub (hive at #N).
+    Initialized repo in "../gamma"
+    "#);
 }
 
 /// A `musubi` command with this process's environment, so the real user's service manager

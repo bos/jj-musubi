@@ -60,7 +60,7 @@ is `formal/.lake/build/bin/oracle`.
 | `Musubi/PreserveSync.lean` | `Inv` is preserved by every sync, hub and crash step; `inv_reachable`. |
 | `Musubi/Safety.lean` | The safety properties and no feedback. |
 | `Musubi/Liveness.lean` | The policy model `PStep`, its simulation in the asynchronous model, the measure, progress, termination and convergence. |
-| `Musubi/Merged.lean` | The merged `Push` and `Fetch` exchanges reach states that agree with policy steps on everything the measure and convergence read. |
+| `Musubi/Merged.lean` | The merged `Push` and `Fetch` exchanges reach states that agree with policy steps on everything the measure and convergence read, with a hub that may have gone back too. |
 | `Musubi/Regress.lean` | A hub that goes back to an earlier accepted head, as after a power cut or a remade hive: the extended system `RStep`, the invariant that survives, and convergence once the hub stops going back. |
 | `Musubi/Scenario.lean` | A concrete reachable run (a lost Cas race, then fetch, advance, merge, and the merge accepted), showing the model is not vacuous. |
 | `Musubi/RegressScenario.lean` | A run of the executable model in which the hub goes back and two nodes then merge the same heads. |
@@ -184,6 +184,18 @@ is staged (`AgreeUpToStaging`).
   operation the node lacks below the head, with its objects at hand.
 - `realize_agree`: realizing a staged operation agrees with `PStep.realize`.
 - `measure_agree`, `converged_agree`: the measure and convergence see no difference.
+
+The same holds with a hub that may have gone back, in the extended system of `Regress.lean`
+(`RReachable`), against `PStepR` and `rmeasure`. There the node takes the head in a reply
+whatever it knew (`learnUnfiltered`), as `PStepR` does.
+
+- `pushAcceptR_merged`, `pushIdemR_merged`, `pushRejectR_merged`: for a merged `Push`
+  exchange and the corresponding `PStepR` step.
+- `fetchR_merged`: for a merged `Fetch` exchange and `PStepR.learn`, staging as
+  `fetch_merged` does. `fetchR_current`: a `Fetch` by a node that knows the hub's head
+  and `seq` already, for which `PStepR` has no step, ends agreeing with the state before it.
+- `rmeasure_agree`: `rmeasure` sees no difference. `realize_agree` and `converged_agree` hold
+  of any states.
 
 ### A hub that goes back (`Regress.lean`)
 
@@ -355,8 +367,7 @@ and 4 are theorems; 2 and 3 are argued here, not proved; 5 is checked by a test.
    every policy step, so no schedule runs forever, and `progress` gives a node following the
    policy something to do until convergence.
 5. **The Rust policy's steps make the measure fall**, and its pushes upload `upOps` and
-   `upObjs`, as `Merged.lean` assumes. For a hub that has gone back, which `Merged.lean`
-   doesn't cover, the test alone stands for it ([conformance.md,
+   `upObjs`, as `Merged.lean` assumes, for a hub that has gone back too ([conformance.md,
    "Liveness"](../docs/internals/conformance.md#liveness)).
 
 ## Modeling choices

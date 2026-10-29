@@ -55,6 +55,12 @@ open Musubi
 #print axioms pushReject_merged
 #print axioms fetch_merged
 #print axioms realize_agree
+#print axioms rmeasure_agree
+#print axioms pushAcceptR_merged
+#print axioms pushIdemR_merged
+#print axioms pushRejectR_merged
+#print axioms fetchR_merged
+#print axioms fetchR_current
 -- A hub that goes back
 #print axioms invR_reachable
 #print axioms hubClosedR

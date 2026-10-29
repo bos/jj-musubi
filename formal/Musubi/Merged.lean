@@ -6,8 +6,15 @@ merged exchange is shown to be a run of the asynchronous model that ends in a st
 with the corresponding policy step's on everything the measure and convergence depend on:
 all but the network and what nodes have staged. So the liveness theorems carry over to a
 node that uses the merged requests.
+
+The same holds of a hub that may have gone back (`Regress.lean`): each merged exchange is a
+run of the extended system that ends in a state agreeing with the corresponding `PStepR`
+step's, and `rmeasure` and convergence read nothing else (`rmeasure_agree`). There a node takes
+the head in a reply whatever it knew, as `PStepR` does, which `learnUnfiltered` allows; and a
+`Fetch` whose head and `seq` the node knows already stages what it lacks and learns nothing, agreeing
+with the state before it (`fetchR_current`).
 -/
-import Musubi.Liveness
+import Musubi.Regress
 
 namespace Musubi
 
@@ -18,6 +25,12 @@ def AgreeUpToStaging (s t : State) : Prop :=
   s.U = t.U ∧ s.hub = t.hub ∧ ∀ n, (s.node n).lops = (t.node n).lops ∧
     (s.node n).lobj = (t.node n).lobj ∧ (s.node n).heads = (t.node n).heads ∧
     (s.node n).known = (t.node n).known
+
+theorem AgreeUpToStaging.trans {s t u : State} (h₁ : AgreeUpToStaging s t)
+    (h₂ : AgreeUpToStaging t u) : AgreeUpToStaging s u :=
+  ⟨h₁.1.trans h₂.1, h₁.2.1.trans h₂.2.1, fun n =>
+    ⟨(h₁.2.2 n).1.trans (h₂.2.2 n).1, (h₁.2.2 n).2.1.trans (h₂.2.2 n).2.1,
+      (h₁.2.2 n).2.2.1.trans (h₂.2.2 n).2.2.1, (h₁.2.2 n).2.2.2.trans (h₂.2.2 n).2.2.2⟩⟩
 
 theorem measure_agree {s t : State} (h : AgreeUpToStaging s t) : measure N s = measure N t := by
   obtain ⟨hU, hhub, hn⟩ := h
@@ -156,5 +169,140 @@ theorem realize_agree {s : State} {n x : Nat} :
       State.send]
   · simp [State.realize, State.pRealize, State.recvObjs, State.recvOps, State.setNode,
       State.send, upd, hi]
+
+/-! ## A hub that may have gone back -/
+
+theorem rmeasure_agree {s t : State} (h : AgreeUpToStaging s t) :
+    rmeasure N s = rmeasure N t := by
+  obtain ⟨hU, hhub, hn⟩ := h
+  have hgood : ∀ i, Good s i ↔ Good t i := fun i =>
+    (good_congr hU.symm (congrArg (·.head) hhub).symm (congrArg (·.seq) hhub).symm
+      (congrArg (·.hist) hhub).symm (hn i).2.2.1.symm (hn i).2.2.2.symm).symm
+  have hcons : ∀ i, Consistent s i ↔ Consistent t i := fun i =>
+    (consistent_congr (congrArg (·.seq) hhub).symm (congrArg (·.hist) hhub).symm
+      (hn i).2.2.2.symm).symm
+  unfold rmeasure mBad mIncons
+  have e1 : cnt N (fun n => ¬ Good s n) = cnt N (fun n => ¬ Good t n) := by
+    apply cnt_congr; intro i _; rw [hgood i]
+  have e2 : cnt N (fun n => ¬ Consistent s n) = cnt N (fun n => ¬ Consistent t n) := by
+    apply cnt_congr; intro i _; rw [hcons i]
+  have e3 : sumN N (mStaleR s) = sumN N (mStaleR t) := by
+    apply sumN_congr; intro i _
+    exact (staleR_congr (congrArg (·.seq) hhub).symm (congrArg (·.hist) hhub).symm
+      (hn i).2.2.2.symm).symm
+  have e4 : sumN N (mMiss s) = sumN N (mMiss t) := by
+    apply sumN_congr; intro i _; unfold mMiss; rw [hU, hhub, (hn i).1]
+  have e5 : sumN N (mAdv s) = sumN N (mAdv t) := by
+    apply sumN_congr; intro i _; unfold mAdv; rw [hU, (hn i).2.2.1, (hn i).2.2.2]
+  have e6 : sumN N (mMulti s) = sumN N (mMulti t) := by
+    apply sumN_congr; intro i _; unfold mMulti; rw [(hn i).2.2.1]
+  rw [e1, e2, e3, e4, e5, e6]
+
+/-- The effect of `PStepR.pushAccept`. -/
+theorem pushAcceptR_merged {s : State} (h : RReachable N s) {n hd : Nat} (hn : n < N)
+    (hh : ∀ y, (s.node n).heads y ↔ y = hd) (hne : hd ≠ (s.node n).known.2)
+    (hk : Anc s.U.par (s.node n).known.2 hd) (hacc : s.hub.head = (s.node n).known.2) :
+    ∃ s', RReachable N s' ∧ AgreeUpToStaging s' (s.pPushAccept n hd) := by
+  have hI := invR_reachable h
+  have hl := hI.headsLocal n hd ((hh hd).2 rfl)
+  have r1 := h.sync (SyncStep.pushAll s n (s.upOps n hd) (s.upObjs n hd)
+    (s.node n).known.2 hd hn (fun x hx => hI.lopsAnc hl hx.1)
+    (fun o ho => by
+      obtain ⟨⟨y, hy, hoy⟩, -⟩ := ho
+      exact hI.lObjs n y o (hI.lopsAnc hl hy) hoy) hl)
+  have r2 := r1.sync (SyncStep.hubPushAccept _ n (s.upOps n hd) (s.upObjs n hd)
+    (s.node n).known.2 hd (Or.inr rfl)
+    (fun e => hne ((show s.hub.head = hd from e).symm.trans hacc)) hacc hk
+    (pUpload_closed_of hI.hubClosed (by rw [hacc]; exact Anc.refl)))
+  have r3 := r2.sync (SyncStep.learnUnfiltered _ n .accepted (s.hub.seq + 1) hd hn
+    (Or.inl (Or.inr rfl)))
+  exact ⟨_, r3, rfl, rfl, fun _ => ⟨rfl, rfl, rfl, rfl⟩⟩
+
+/-- The effect of `PStepR.pushIdem`. -/
+theorem pushIdemR_merged {s : State} (h : RReachable N s) {n hd : Nat} (hn : n < N)
+    (hh : ∀ y, (s.node n).heads y ↔ y = hd) (hidem : s.hub.head = hd) :
+    ∃ s', RReachable N s' ∧ AgreeUpToStaging s' (s.pPushIdem n hd) := by
+  have hI := invR_reachable h
+  have hl := hI.headsLocal n hd ((hh hd).2 rfl)
+  have r1 := h.sync (SyncStep.pushAll s n (s.upOps n hd) (s.upObjs n hd)
+    (s.node n).known.2 hd hn (fun x hx => hI.lopsAnc hl hx.1)
+    (fun o ho => by
+      obtain ⟨⟨y, hy, hoy⟩, -⟩ := ho
+      exact hI.lObjs n y o (hI.lopsAnc hl hy) hoy) hl)
+  have r2 := r1.sync (SyncStep.hubPushIdem _ n (s.upOps n hd) (s.upObjs n hd)
+    (s.node n).known.2 hd (Or.inr rfl) hidem)
+  have r3 := r2.sync (SyncStep.learnUnfiltered _ n .accepted s.hub.seq s.hub.head hn
+    (Or.inr rfl))
+  exact ⟨_, r3, rfl, rfl, fun _ => ⟨rfl, rfl, rfl, rfl⟩⟩
+
+/-- The effect of `PStepR.pushReject`. -/
+theorem pushRejectR_merged {s : State} (h : RReachable N s) {n hd : Nat} (hn : n < N)
+    (hh : ∀ y, (s.node n).heads y ↔ y = hd) (hrej : s.hub.head ≠ (s.node n).known.2)
+    (hrej' : s.hub.head ≠ hd) :
+    ∃ s', RReachable N s' ∧ AgreeUpToStaging s' (s.pPushReject n hd) := by
+  have hI := invR_reachable h
+  have hl := hI.headsLocal n hd ((hh hd).2 rfl)
+  have r1 := h.sync (SyncStep.pushAll s n (s.upOps n hd) (s.upObjs n hd)
+    (s.node n).known.2 hd hn (fun x hx => hI.lopsAnc hl hx.1)
+    (fun o ho => by
+      obtain ⟨⟨y, hy, hoy⟩, -⟩ := ho
+      exact hI.lObjs n y o (hI.lopsAnc hl hy) hoy) hl)
+  have r2 := r1.sync (SyncStep.hubPushReject _ n (s.upOps n hd) (s.upObjs n hd)
+    (s.node n).known.2 hd (Or.inr rfl) hrej' (Or.inl hrej))
+  have r3 := r2.sync (SyncStep.learnUnfiltered _ n .rejected s.hub.seq s.hub.head hn
+    (Or.inr rfl))
+  exact ⟨_, r3, rfl, rfl, fun _ => ⟨rfl, rfl, rfl, rfl⟩⟩
+
+/-- A `fetch` from a local base `b`, with haves the node has, answered and taken in, whatever
+head the node knew: the effect of `PStepR.learn`, and every operation the node lacks below
+the hub's head staged with its objects at hand. -/
+theorem fetchR_merged {s : State} (h : RReachable N s) {n b : Nat} {H : OSet} (hn : n < N)
+    (hb : (s.node n).lops b) (hH : ∀ o, H o → (s.node n).lobj o) :
+    ∃ s', RReachable N s' ∧ AgreeUpToStaging s' (s.pLearn n) ∧
+      ∀ x, Anc s.U.par x s.hub.head → ¬ (s.node n).lops x →
+        (s'.node n).sops x ∧ ∀ o ∈ s.U.objs x, (s'.node n).lobj o ∨ (s'.node n).sobj o := by
+  have hI := invR_reachable h
+  have r1 := h.sync (SyncStep.fetchAll s n b H hn)
+  have r2 := r1.sync (SyncStep.hubFetch _ n b H (Or.inr rfl))
+  have r3 := r2.sync (SyncStep.learnUnfiltered _ n .head s.hub.seq s.hub.head hn
+    (Or.inl (Or.inl (Or.inr rfl))))
+  have r4 := r3.sync (SyncStep.recvOps _ n (s.sinceOps b) hn (Or.inl (Or.inr rfl)))
+  have r5 := r4.sync (SyncStep.recvObjs _ n (s.sinceObjs b H) hn (Or.inr rfl))
+  refine ⟨_, r5, ⟨rfl, rfl, fun i => ?_⟩, fun x hx hnl => ?_⟩
+  · by_cases hi : i = n
+    · subst hi
+      simp [State.recvObjs, State.recvOps, State.learn, State.pLearn, State.setNode,
+        State.send]
+    · simp [State.recvObjs, State.recvOps, State.learn, State.pLearn, State.setNode,
+        State.send, upd, hi]
+  · have hxb : ¬ Anc s.U.par x b := fun hxb => hnl (hI.lopsAnc hb hxb)
+    have hsince : s.sinceOps b x := ⟨hx, hxb, (hI.hubClosed x hx).1⟩
+    refine ⟨?_, fun o ho => ?_⟩
+    · simp [State.recvObjs, State.recvOps, State.learn, State.setNode, State.send, hsince]
+    · by_cases hoH : H o
+      · left
+        simp [State.recvObjs, State.recvOps, State.learn, State.setNode, State.send]
+        exact hH o hoH
+      · right
+        have : s.sinceObjs b H o := ⟨⟨x, hsince, ho⟩, hoH, (hI.hubClosed x hx).2 o ho⟩
+        simp [State.recvObjs, State.recvOps, State.learn, State.setNode, State.send, this]
+
+/-- A `fetch` by a node that knows the hub's head and `seq` already learns nothing, so no policy step
+corresponds to it: it ends agreeing with the state before it, and stages what the node lacks
+below the head as `fetchR_merged` does. -/
+theorem fetchR_current {s : State} (h : RReachable N s) {n b : Nat} {H : OSet} (hn : n < N)
+    (hb : (s.node n).lops b) (hH : ∀ o, H o → (s.node n).lobj o)
+    (hk : (s.node n).known = (s.hub.seq, s.hub.head)) :
+    ∃ s', RReachable N s' ∧ AgreeUpToStaging s' s ∧
+      ∀ x, Anc s.U.par x s.hub.head → ¬ (s.node n).lops x →
+        (s'.node n).sops x ∧ ∀ o ∈ s.U.objs x, (s'.node n).lobj o ∨ (s'.node n).sobj o := by
+  obtain ⟨s', r, ha, hst⟩ := fetchR_merged h hn hb hH
+  have hp : AgreeUpToStaging (s.pLearn n) s := by
+    refine ⟨rfl, rfl, fun i => ?_⟩
+    by_cases hi : i = n
+    · subst hi
+      simp [State.pLearn, State.learn, State.setNode, State.send, hk]
+    · simp [State.pLearn, State.learn, State.setNode, State.send, upd, hi]
+  exact ⟨s', r, ha.trans hp, hst⟩
 
 end Musubi

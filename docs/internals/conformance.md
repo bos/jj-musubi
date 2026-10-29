@@ -110,9 +110,10 @@ has gone back, with the policy `PStepR` and the measure `rmeasure`. The policy t
 single steps; the Rust core sends merged requests instead. `Merged.lean` shows that the
 merged `Push` and `Fetch` reach states that agree with policy steps on everything the measure
 reads, provided a `Push` uploads `upOps` and `upObjs`: `anc*(new) \ anc*(known.head)` and the
-objects of `closure(new) \ closure(known.head)`. `Merged.lean` covers only a hub that has
-never gone back; after it has, that the merged requests serve the policy rests on this test
-alone.
+objects of `closure(new) \ closure(known.head)`, both for a hub that has never gone back,
+against `PStep`, and for one that may have, against `PStepR` and `rmeasure`
+(`pushAcceptR_merged`, `fetchR_merged` and the rest; `fetchR_current` for a `Fetch` by a
+node that knows the hub's head and `seq` already, for which the policy has no step).
 
 `formal/Musubi/Exec.lean` computes these on the oracle's state: `measureE`, `rmeasureE`,
 `convergedE`, `upOpsL` and `upObjsL`, proved equal to `measure`, `rmeasure`, `Converged`,

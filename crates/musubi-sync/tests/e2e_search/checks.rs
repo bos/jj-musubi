@@ -4,6 +4,11 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
+use std::fs;
+
+use futures::executor::block_on;
+use musubi_jj::node::NodeRepo;
+use musubi_sync::OpId;
 
 use crate::reference::Reference;
 use crate::view::View;
@@ -55,6 +60,7 @@ impl World {
         }
         let views: Vec<View> = (0..self.nodes()).map(|m| self.view_at_head(m)).collect();
         self.check_heads();
+        self.check_translation();
         self.check_operations();
         self.check_tags();
         self.check_workspaces(&views);
@@ -121,6 +127,36 @@ impl World {
                     "{}'s canonical heads are not the hub's head",
                     self.machine(m)
                 ));
+            }
+        }
+    }
+
+    /// What the protocol's model assumes of translation (protocol.md, "Translation layer"),
+    /// on every machine: distinct local operations reachable from its op heads have distinct
+    /// canonical forms, and each one's parents canonicalize to its canonical form's parents,
+    /// but for a join point, whose parents have none; and every operation of the hive's
+    /// history has a realization here that canonicalizes back to it, so realizing made no
+    /// canonical operation of its own. Runs after `check_heads`, so every op head here is
+    /// canonicalized already.
+    ///
+    /// A translation remembered wrongly would pass all that, so the check translates again
+    /// from nothing, as a machine that lost its translation cache does, in a copy of the
+    /// repository, and requires the same answers.
+    fn check_translation(&self) {
+        let hub = self.fx.hive.hub_head();
+        for m in 0..self.nodes() {
+            let node = self.fx.hive.members[m].adapter.repo();
+            let repo = self.fx.repo(m);
+            let dir = musubi_testutil::tempdir();
+            let copy = dir.path().join("copy");
+            musubi_testutil::copy_tree(repo.path(), &copy);
+            fs::remove_file(copy.join(".jj/repo/musubi/translation")).ok();
+            let failure = NodeRepo::open(&copy.join(".jj/repo"), &repo.settings())
+                .map_err(|err| format!("reopening a copy: {err}"))
+                .and_then(|mut fresh| translation_failure(node, &mut fresh, &hub))
+                .err();
+            if let Some(failure) = failure {
+                self.fail(&format!("{}'s translation: {failure}", self.machine(m)));
             }
         }
     }
@@ -433,4 +469,95 @@ impl World {
             }
         }
     }
+}
+
+/// What [`World::check_translation`] finds wrong with `node`'s translation, where `fresh`
+/// is the same repository with no translation cache and `hub` the hive's head.
+fn translation_failure(node: &NodeRepo, fresh: &mut NodeRepo, hub: &OpId) -> Result<(), String> {
+    let err = |err: &dyn std::fmt::Display| err.to_string();
+    let before: BTreeSet<OpId> = fresh
+        .canonical_store()
+        .operation_ids()
+        .map_err(|e| err(&e))?
+        .into_iter()
+        .collect();
+    let heads = fresh.canonical_heads().map_err(|e| err(&e))?;
+    if heads != [hub.clone()] {
+        return Err(format!("translated afresh, its op heads are {heads:?}"));
+    }
+    // The local operations reachable from the op heads, down to the join points.
+    let op_store = fresh.loader().op_store().clone();
+    let mut stack = fresh.local_heads().map_err(|e| err(&e))?;
+    let mut seen: BTreeSet<OpId> = BTreeSet::new();
+    let mut canonical_forms: BTreeMap<OpId, OpId> = BTreeMap::new();
+    while let Some(local) = stack.pop() {
+        if !seen.insert(local.clone()) || local == *op_store.root_operation_id() {
+            continue;
+        }
+        let Some(canonical) = fresh.canonical_of(&local) else {
+            return Err(format!("{local} is reachable but has no canonical form"));
+        };
+        if node
+            .canonical_of(&local)
+            .is_some_and(|known| known != canonical)
+        {
+            return Err(format!(
+                "{local} is remembered as {}, but translates to {canonical}",
+                node.canonical_of(&local).unwrap()
+            ));
+        }
+        if let Some(other) = canonical_forms.insert(canonical.clone(), local.clone()) {
+            return Err(format!(
+                "{other} and {local} both have the canonical form {canonical}"
+            ));
+        }
+        let parents = block_on(op_store.read_operation(&local))
+            .map_err(|e| err(&e))?
+            .parents;
+        let expected = fresh
+            .canonical_store()
+            .parents(&canonical)
+            .map_err(|e| err(&e))?;
+        // A join point: its join operation's only parent is the root, and what came before it
+        // here is not the hive's, though a command at an operation from then can give it
+        // canonical forms.
+        if expected == [fresh.canonical_store().root_operation_id().clone()]
+            && parents != [op_store.root_operation_id().clone()]
+        {
+            continue;
+        }
+        let canonical_parents: Vec<Option<OpId>> = parents
+            .iter()
+            .map(|parent| fresh.canonical_of(parent))
+            .collect();
+        if canonical_parents != expected.iter().cloned().map(Some).collect::<Vec<_>>() {
+            return Err(format!(
+                "{local}'s parents translate to {canonical_parents:?}, but {canonical}'s are {expected:?}"
+            ));
+        }
+        stack.extend(parents);
+    }
+    let history = fresh
+        .canonical_store()
+        .ancestors_until(std::slice::from_ref(hub), |_| false)
+        .map_err(|e| err(&e))?;
+    for canonical in &history {
+        if !canonical_forms.contains_key(canonical) {
+            return Err(format!(
+                "{canonical} of the hive's history has no realization here"
+            ));
+        }
+    }
+    let after: BTreeSet<OpId> = fresh
+        .canonical_store()
+        .operation_ids()
+        .map_err(|e| err(&e))?
+        .into_iter()
+        .collect();
+    if let Some(new) = after.difference(&before).next() {
+        return Err(format!(
+            "translating afresh made the canonical operation {new}"
+        ));
+    }
+    Ok(())
 }

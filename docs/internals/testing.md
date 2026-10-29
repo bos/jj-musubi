@@ -294,6 +294,12 @@ At the end of a sequence, and at most once in the middle, the hive syncs to a fi
 and the test checks that:
 
 - every node's canonical head equals the hub's;
+- translation does what the protocol's model assumes of it ([protocol.md, "Translation
+  layer"](protocol.md#translation-layer)): in a copy of each repository that has lost its
+  translation cache, translating again from nothing gives what the machine remembered, makes no
+  canonical operation, gives distinct local operations reachable from the op heads distinct
+  canonical forms, with the parents' forms as their parents but at a join point, and gives every
+  operation of the hive's history a realization that translates back to it;
 - all repositories agree on visible commits, change ids, bookmarks, tags, and remote bookmarks;
 - in every colocated repository, `refs/heads` matches the local bookmarks that are neither
   conflicted nor on the root commit (which git can't hold), and a further `jj status` imports

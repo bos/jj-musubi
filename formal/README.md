@@ -385,7 +385,8 @@ and 4 are theorems; 2 and 3 are argued here, not proved; 5 is checked by a test.
   layer"](../docs/internals/protocol.md#translation-layer) requires: `canon` is injective on
   reachable local operations, `canon(realize(C)) = C`, and realization never creates a canonical
   operation. Under those assumptions, the properties over canonical ids carry over to each node's
-  local op log.
+  local op log. The generated end-to-end tests check them at every full convergence
+  ([testing.md](../docs/internals/testing.md#generated-end-to-end-tests)).
 
 ## What the proofs assume of the implementation
 

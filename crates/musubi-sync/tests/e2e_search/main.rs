@@ -9,12 +9,12 @@
 //! every `jj` command and sync step must succeed, and no import of git refs or of git's HEAD
 //! changes a ref that git didn't move, except where jj itself would (`imports`). At every full
 //! convergence (`checks`):
-//! the fixture's `assert_converged`; every node's canonical head is the hub's; every
-//! operation is on every machine; tags agree; each machine has its own workspaces, at
-//! visible commits; no divergence and no bookmark or tag conflict that jj wouldn't make of
-//! the same operations in one repository (`reference`), nor the same rebase done twice
-//! (`ledger`); and every machine shows the others' workspaces at their working copies, and
-//! git never sees them.
+//! the fixture's `assert_converged`; every node's canonical head is the hub's; translating every
+//! operation again from nothing does what the protocol's model assumes; every operation is on
+//! every machine; tags agree; each machine has its own workspaces, at visible commits; no
+//! divergence and no bookmark or tag conflict that jj wouldn't make of the same operations in one
+//! repository (`reference`), nor the same rebase done twice (`ledger`); and every machine shows
+//! the others' workspaces at their working copies, and git never sees them.
 //!
 //! `e2e_smoke` runs in the default suite. The search, `e2e_search_shard_*`, runs with
 //! `cargo nextest run -p musubi-sync --profile search`; each shard has its own example

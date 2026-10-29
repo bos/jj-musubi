@@ -10,6 +10,9 @@ change the protocol, so run the same release on the hub and every machine (see
   is doing: bytes sent or received, with a bar, commits being imported, operations applied,
   or waiting on the hub. They no longer print `Syncing...`. After upgrading, run `musubi
   daemon restart`: commands refuse a daemon from the release before.
+- `create`, `join` and `clone` no longer print `Synced with the hub (hive at #N)`, nor `sync`
+  `Synced (hive at #N)`, nor `musubi status` the hive's operation number: it meant nothing to
+  anyone but musubi. A sync that worked prints nothing.
 - A machine shows another machine that shares its name as `laptop-1a2b`, as the hub's list
   does, where it used to show it as `laptop`.
 - A `jj` command that was already running when a repository joined its hive, or one run with

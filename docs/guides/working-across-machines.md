@@ -78,7 +78,7 @@ snapshotted yet stay on the laptop.
 this copy last synced, and whether the hub has its latest work:
 
 ```text
-Hive: app on devbox, at #412
+Hive: app on devbox
 This machine: desktop, synced 3s ago; the hub has all its work
 Working copies:
 default@: kxqpwzlm 3f2a1c9e fix the parser

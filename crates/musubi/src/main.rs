@@ -1144,7 +1144,7 @@ fn start_serving(ui: &Ui, located: &Located, socket: &Socket) -> anyhow::Result<
     enum Served {
         /// There was no daemon to ask, nor could one be started.
         NoDaemon(anyhow::Error),
-        Synced(Synced),
+        Synced,
         /// The daemon serves it, but its first sync failed, saying this.
         Failed(String),
     }
@@ -1163,7 +1163,7 @@ fn start_serving(ui: &Ui, located: &Located, socket: &Socket) -> anyhow::Result<
             .await
             .context("asking the daemon to serve this repository")?;
         Ok::<_, anyhow::Error>(match first {
-            Ok(synced) => Served::Synced(synced),
+            Ok(_) => Served::Synced,
             Err(message) => Served::Failed(message),
         })
     })?;
@@ -1173,19 +1173,11 @@ fn start_serving(ui: &Ui, located: &Located, socket: &Socket) -> anyhow::Result<
                 ui.warning(),
                 "Could not start the daemon ({err:#}); syncing once instead."
             )?;
-            let synced = sync_directly(ui, located)?;
-            writeln!(ui.stdout(), "Synced (hive at #{}).", synced.seq)?;
+            sync_directly(ui, located)?;
             writeln!(ui.hint(), "Run `musubi daemon` to keep it in sync.")?;
             Ok(())
         }
-        Served::Synced(synced) => {
-            writeln!(
-                ui.stdout(),
-                "Synced with the hub (hive at #{}).",
-                synced.seq
-            )?;
-            Ok(())
-        }
+        Served::Synced => Ok(()),
         // Unless it's a failure no retry gets past, as the daemon recorded before it answered.
         Served::Failed(message)
             if Status::load(&located.repo_path).is_some_and(|status| status.paused) =>
@@ -1300,8 +1292,7 @@ fn sync_directly(ui: &Ui, located: &Located) -> anyhow::Result<Synced> {
 
 /// Syncs through the daemon when it serves the repository, else directly.
 fn sync(ui: &Ui, start: &Path, socket: &Socket) -> anyhow::Result<()> {
-    let (synced, stopped) = sync_quietly(ui, start, socket)?;
-    writeln!(ui.stdout(), "Synced (hive at #{}).", synced.seq)?;
+    let (_, stopped) = sync_quietly(ui, start, socket)?;
     if stopped {
         writeln!(
             ui.warning(),

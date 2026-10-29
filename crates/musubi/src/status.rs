@@ -289,13 +289,9 @@ impl Hive {
     fn print(&self, ui: &Ui, daemon: &Daemon) -> io::Result<()> {
         let mut out = ui.stdout();
         let config = &self.config;
-        let at = match self.sync.as_ref().and_then(|sync| sync.known_seq) {
-            Some(seq) => format!(", at #{seq}"),
-            None => String::new(),
-        };
         write!(out, "Hive: ")?;
         write!(out.labeled("hive"), "{}", config.display_name())?;
-        writeln!(out, " on {}{at}", config.hub)?;
+        writeln!(out, " on {}", config.hub)?;
         let synced = self.synced();
         let sent = match self.sent {
             Some(true) => "; the hub has all its work",

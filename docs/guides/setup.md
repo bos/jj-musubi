@@ -110,8 +110,6 @@ its directory if it has no remotes. To choose another name, pass it: `musubi cre
 Created an ssh key for musubi: /home/you/.local/state/musubi/hub_key
 Adding it to ~/.ssh/authorized_keys on devbox, allowed only to run `musubi hub connect`. ssh may ask for your password.
 Created hive app
-Syncing...
-Synced with the hub (hive at #1).
 ```
 
 The first hub a machine uses becomes its default, so later commands need no `--hub`. The
@@ -130,8 +128,6 @@ and one of its remotes' URLs.
 
 ```text
 Joined hive app (matched remote origin), 2 machines
-Syncing...
-Synced with the hub (hive at #3).
 ```
 
 The copies' histories are merged as jj merges concurrent operations: commits both copies have

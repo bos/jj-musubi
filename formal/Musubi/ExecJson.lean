@@ -8,6 +8,7 @@ import Musubi.PresenceExec
 import Musubi.Copies
 import Musubi.Chunks
 import Musubi.Names
+import Musubi.RefsExec
 
 namespace Musubi.Exec.Json
 
@@ -287,6 +288,46 @@ def namesReply (machines : List Names.Key) (own : List String) : Json :=
   Json.mkObj [("ok", Json.bool true),
     ("prefixes", Json.arr (assigned.map fun (_, p) => Json.str (String.ofList p)).toArray)]
 
+/-! ## Per-machine refs (`RefsExec.lean`) -/
+
+def decodeTable (j : Json) : Except String Refs.Exec.Table := do
+  let terms ← (← j.getObjValAs? (Array Json) "terms").toList.mapM fun t => do
+    pure ((← getNat t "conflict"), (← getNats t "terms"))
+  let merges ← (← j.getObjValAs? (Array (Array Nat)) "merges").toList.mapM fun
+    | #[a, b, c, m] => pure (a, b, c, m)
+    | m => throw s!"a merge is [a, b, c, merged], not {m}"
+  pure { resolved := ← getNats j "resolved", writable := ← getNats j "writable", terms, merges }
+
+def decodeSlot (j : Json) : Except String (Refs.TSlot Nat) := do
+  pure { L := ← getNat j "L", R := ← getNat j "R", K := ← getNat j "K",
+         tr := ← j.getObjValAs? Bool "tr" }
+
+def decodeCall (j : Json) : Except String Refs.Exec.Call := do
+  let slot (k : String) := j.getObjVal? k >>= decodeSlot
+  match ← j.getObjValAs? String "fn" with
+  | "set" => return .set (← slot "s") (← getNat j "l")
+  | "track" => return .track (← slot "s")
+  | "import" => return .import (← slot "s") (← getNat j "g")
+  | "merge" => return .merge (← slot "b") (← slot "v") (← slot "w")
+  | "exportLocal" => return .exportLocal (← slot "s") (← getNat j "g")
+  | "exportRemote" => return .exportRemote (← slot "s") (← getNat j "g")
+  | "exportConflicted" => return .exportConflicted (← slot "s") (← getNat j "g") (← getNat j "e")
+  | "linv" => return .linv (← slot "s") (← getNat j "g") (← j.getObjValAs? Bool "moved")
+  | "cinv" =>
+    return .cinv (← slot "s") (← getNat j "g") (← j.getObjValAs? Bool "moved") (← getNat j "e")
+  | "restorable" => return .restorable (← slot "o") (← slot "s")
+  | "restorableRemote" => return .restorableRemote (← slot "o") (← slot "s")
+  | f => throw s!"unknown fn {f}"
+
+def encodeSlot (s : Refs.TSlot Nat) : Json :=
+  Json.mkObj [("L", toJson s.L), ("R", toJson s.R), ("K", toJson s.K), ("tr", Json.bool s.tr)]
+
+def refsReply : Refs.Exec.Answer → Json
+  | .slot s none => Json.mkObj [("ok", Json.bool true), ("slot", encodeSlot s)]
+  | .slot s (some g) =>
+    Json.mkObj [("ok", Json.bool true), ("slot", encodeSlot s), ("g", toJson g)]
+  | .holds b => Json.mkObj [("ok", Json.bool true), ("holds", Json.bool b)]
+
 /-! ## Liveness (`Exec.lean`, "The liveness measure") -/
 
 /-- The session state's measures, and whether it has converged. -/
@@ -356,6 +397,10 @@ def handle (sess : Session) (line : String) : Json × Session :=
       match j.getObjValAs? (Array Json) "cases" >>= fun cs => cs.toList.mapM decodeCase with
       | .error e => (errReply s!"bad request: {e}", sess)
       | .ok cases => (copiesReply cases, sess)
+    | .ok "refs" =>
+      match j.getObjVal? "table" >>= decodeTable, decodeCall j with
+      | .error e, _ | _, .error e => (errReply s!"bad request: {e}", sess)
+      | .ok tb, .ok call => (refsReply (Refs.Exec.run tb call), sess)
     | .ok op => (errReply s!"bad request: unknown op {op}", sess)
 
 end Musubi.Exec.Json

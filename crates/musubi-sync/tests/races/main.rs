@@ -7,6 +7,11 @@
 #![allow(clippy::unwrap_used)]
 
 mod fixture;
+#[path = "../../../musubi-core/tests/support/oracle.rs"]
+#[allow(dead_code)]
+mod oracle;
+#[path = "../../../musubi-jj/tests/support/refs_model.rs"]
+mod refs_model;
 
 mod bookmarks;
 mod changes;

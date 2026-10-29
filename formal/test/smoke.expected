@@ -30,3 +30,6 @@
 {"ok":true,"presence":[[{"copy":7,"latest":[0]}],[],[{"copy":7,"latest":[2]}],[{"copy":7,"latest":[2]}],[],[{"copy":7,"latest":[2]}]]}
 {"ok":true,"steps":[{"pre":[1,2],"received":2,"stored":false},{"pre":[],"received":0,"stored":false},{"pre":[],"stored":false},{"pre":[],"received":null,"stored":true},{"pre":[],"received":null,"stored":true}]}
 {"ok":true,"prefixes":["mac-aaaa","mac-aaaa2222","beta-1a2b3c4d"]}
+{"ok":true,"slot":{"K":1,"L":4,"R":1,"tr":true}}
+{"g":2,"ok":true,"slot":{"K":2,"L":2,"R":2,"tr":true}}
+{"holds":true,"ok":true}

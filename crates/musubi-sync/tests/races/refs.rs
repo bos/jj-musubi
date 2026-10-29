@@ -3,9 +3,10 @@
 //! `jj` commands, `jj undo` and `jj op restore`, fetches, and has another machine move
 //! bookmarks, move a tag or fetch, for musubi to realize here, its export succeeding or
 //! failing. Beside the real machine it keeps the model's `Machine` for each ref it follows,
-//! with jj's own `merge_ref_targets` as the model's merge (`ref_laws` checks that it obeys
-//! the laws the model assumes), and steps each as the model's `LStep`s or `CStep`s that the
-//! real action performs. After every action each bookmark, its remote bookmark and whether
+//! and steps each as the model's `LStep`s or `CStep`s that the real action performs, asking
+//! the Lean oracle for each of the model's functions (`RefsModel`), with jj's own
+//! `merge_ref_targets` as the model's merge (`ref_laws` checks that it obeys the laws the
+//! model assumes). After every action each bookmark, its remote bookmark and whether
 //! the bookmark tracks it, jj's record of the git ref, and the git ref itself must be the
 //! model's, and the model's invariants `LInv` and `CInv` must hold, unless a restore of a
 //! slot that isn't `Restorable` left the record behind, as only it may
@@ -25,6 +26,8 @@
 //! which git moves, and whose slot is a local bookmark's. The model has one ref per machine;
 //! here `y` and `y@origin` share the bookmark `y`, so a step of one is a `set` of the other.
 
+use std::cell::RefCell;
+use std::cell::RefMut;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -42,11 +45,12 @@ use jj_lib::op_store::View;
 use jj_lib::ref_name::GitRefName;
 use jj_lib::ref_name::RefName;
 use jj_lib::ref_name::RemoteName;
-use jj_lib::refs::merge_ref_targets;
 use jj_lib::repo::ReadonlyRepo;
 use jj_lib::repo::Repo as _;
 
 use crate::fixture::Fixture;
+use crate::refs_model::RefsModel;
+use crate::refs_model::Slot;
 
 /// The machine whose refs are checked, and the other machine, which moves bookmarks.
 const HERE: usize = 0;
@@ -100,15 +104,6 @@ impl Ref {
     }
 }
 
-/// The model's `TSlot`: its `Slot`, and whether the bookmark tracks the remote ref `r`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Slot {
-    l: RefTarget,
-    r: RefTarget,
-    k: RefTarget,
-    tr: bool,
-}
-
 /// The model's `Machine`: the view's slot, `.git`'s ref, and the ghost `moved`; for
 /// `y@origin`, `CMachine`, with the expected value of a conflicted remote bookmark.
 #[derive(Clone, Debug)]
@@ -124,14 +119,16 @@ struct Machine {
     restored: bool,
 }
 
-/// The model's `RefAlg` instance: jj's merge, and its notions of resolved and writable.
+/// The model's `RefAlg` instance, jj's, and `Sides`: the model itself, the oracle's
+/// (`RefsModel`), and what the test reads of jj's targets.
 struct Alg {
     repo: Arc<ReadonlyRepo>,
+    lean: RefCell<RefsModel>,
 }
 
 impl Alg {
-    fn merge(&self, a: &RefTarget, b: &RefTarget, c: &RefTarget) -> RefTarget {
-        block_on(merge_ref_targets(self.repo.index(), a, b, c)).unwrap()
+    fn lean(&self) -> RefMut<'_, RefsModel> {
+        self.lean.borrow_mut()
     }
 
     fn resolved(t: &RefTarget) -> bool {
@@ -158,97 +155,11 @@ impl Alg {
     }
 }
 
-/// `bmerge`, two-valued `trivial_merge`.
-fn bmerge(a: bool, b: bool, c: bool) -> bool {
-    if a == b { c } else { a }
-}
-
-impl Slot {
-    /// `TSlot.norm`: no remote ref with no target unless tracked and the bookmark exists.
-    fn norm(mut self) -> Self {
-        if self.r.is_absent() && (!self.tr || self.l.is_absent()) {
-            self.tr = false;
-        }
-        self
-    }
-
-    /// `TSlot.set`.
-    fn set(&self, l: RefTarget) -> Self {
-        Self { l, ..self.clone() }.norm()
-    }
-
-    /// `TSlot.track`.
-    fn track(&self, alg: &Alg) -> Self {
-        let base = if self.tr {
-            self.r.clone()
-        } else {
-            RefTarget::absent()
-        };
-        Self {
-            l: alg.merge(&self.l, &base, &self.r),
-            tr: true,
-            ..self.clone()
-        }
-        .norm()
-    }
-
-    /// `TSlot.import`, every ref here tracked by default (`auto`). Also returns whether jj
-    /// set the bookmark (`set_local_bookmark_target`), which drops the bookmark's other remote
-    /// refs with no target if it is gone.
-    fn import(&self, alg: &Alg, g: &RefTarget) -> (Self, bool) {
-        if *g == self.r {
-            return (
-                Self {
-                    k: g.clone(),
-                    ..self.clone()
-                },
-                false,
-            );
-        }
-        let tr = if self.r.is_absent() && !self.tr {
-            true
-        } else {
-            self.tr
-        };
-        let l = if tr {
-            alg.merge(&self.l, &self.r, g)
-        } else {
-            self.l.clone()
-        };
-        let imported = Self {
-            l,
-            r: g.clone(),
-            k: g.clone(),
-            tr,
-        };
-        (imported.norm(), tr)
-    }
-
-    /// `TSlot.mergeL`.
-    fn merge_l(alg: &Alg, b: &Self, v: &Self, w: &Self) -> Self {
-        if b.l == w.l {
-            v.clone()
-        } else {
-            v.set(alg.merge(&v.l, &b.l, &w.l))
-        }
-    }
-
-    /// `TSlot.merge`: jj's merge of `v` with `w` against `b`.
-    fn merge(alg: &Alg, b: &Self, v: &Self, w: &Self) -> Self {
-        let r = Self::merge_l(alg, b, v, w);
-        let k = alg.merge(&v.k, &b.k, &w.k);
-        if b.r == w.r && b.tr == w.tr {
-            Self { k, ..r }
-        } else {
-            Self {
-                l: alg.merge(&v.l, &b.l, &w.l),
-                r: alg.merge(&r.r, &b.r, &w.r),
-                k,
-                tr: bmerge(r.tr, b.tr, w.tr),
-            }
-            .norm()
-        }
-    }
+/// Whether jj's import of `g` into `s` sets the bookmark (`set_local_bookmark_target`),
+/// which drops the bookmark's other remote refs with no target if it is gone: where `g` is
+/// new and the remote ref tracked, or new and tracked by default, as every ref here is.
+fn import_sets(s: &Slot, g: &RefTarget) -> bool {
+    *g != s.r && (s.tr || s.r.is_absent())
 }
 
 impl Machine {
@@ -261,50 +172,28 @@ impl Machine {
     /// `LStep.jjImport` and `RStep.jjImport`, as `TSlot.import`. Returns whether jj set the
     /// bookmark.
     fn jj_import(&mut self, alg: &Alg) -> bool {
-        let (v, set) = self.v.import(alg, &self.g);
-        self.v = v;
+        let set = import_sets(&self.v, &self.g);
+        self.v = alg.lean().import(&self.v, &self.g);
         self.moved = false;
         self.restored = false;
         self.e = self.g.clone();
         set
     }
 
-    /// `LStep.jjExport`, `TSlot.exportLocal`, where the update of `.git` can succeed; where
-    /// it can't, because `.git` is locked, no step, as the model has a failed update. An
-    /// update to the value `.git` already has writes nothing, so succeeds. Copying the
-    /// bookmark to `R` tracks it.
+    /// `LStep.jjExport`, `TSlot.exportLocal`, where the update of `.git` can succeed. Where
+    /// `.git` is locked (not `git_writable`), an update that would write fails, which is no
+    /// step, as the model has a failed update; one to the value `.git` already has, or none,
+    /// writes nothing, so succeeds.
     fn export_local(&mut self, alg: &Alg, git_writable: bool) {
-        let before = self.v.r.clone();
-        let v = &mut self.v;
-        if v.l == v.k {
-            if Alg::resolved(&v.l) {
-                v.r = v.l.clone();
-            }
-        } else if alg.writable(&v.l)
-            && Alg::resolved(&v.k)
-            && (self.g == v.l || (git_writable && self.g == v.k))
-        {
-            v.r = v.l.clone();
-            v.k = v.l.clone();
-            self.g = v.l.clone();
+        if !git_writable && self.v.l != self.v.k && self.g != self.v.l {
+            return;
         }
-        if self.v.r != before {
-            self.v.tr = true;
-            self.v = self.v.clone().norm();
-        }
+        (self.v, self.g) = alg.lean().export_local(&self.v, &self.g);
     }
 
     /// `RStep.jjExport`, `exportRemote`.
     fn export_remote(&mut self, alg: &Alg) {
-        let v = &mut self.v;
-        if v.r != v.k
-            && alg.writable(&v.r)
-            && Alg::resolved(&v.k)
-            && (self.g == v.k || self.g == v.r)
-        {
-            v.k = v.r.clone();
-            self.g = v.r.clone();
-        }
+        (self.v, self.g) = alg.lean().export_remote(&self.v, &self.g);
     }
 
     /// The expected value: the remote bookmark if it is resolved, otherwise `e`.
@@ -321,39 +210,23 @@ impl Machine {
     /// holds it, or a value the hive knows of, a term of the conflict or the record, and it
     /// can be written; and to the record.
     fn export_conflicted(&mut self, alg: &Alg) {
-        if Alg::resolved(&self.v.r) {
-            return;
-        }
-        let e = self.e.clone();
-        let v = &mut self.v;
-        if self.g != e {
-            let actual = self.g.as_normal();
-            let known = v.r.iter().any(|term| term.as_ref() == actual)
-                || (Alg::resolved(&v.k) && v.k.as_normal() == actual);
-            if !known || !alg.writable(&e) {
-                return;
-            }
-            self.g = e.clone();
-        }
-        v.k = e;
+        (self.v, self.g) = alg.lean().export_conflicted(&self.v, &self.g, &self.e);
     }
 
     /// The model's invariant for `r`: `LInv`, or for `y@origin` `CInv`, which is `RInv`
     /// but for a conflicted remote bookmark, with `.git` at the expected value.
-    fn strict_inv(&self, r: Ref) -> bool {
-        if r != Ref::Origin {
-            return self.moved || (self.v.r == self.g && self.v.k == self.g);
+    fn strict_inv(&self, alg: &Alg, r: Ref) -> bool {
+        if r == Ref::Origin {
+            alg.lean()
+                .cinv(&self.v, &self.g, self.moved, &self.expected())
+        } else {
+            alg.lean().linv(&self.v, &self.g, self.moved)
         }
-        Alg::resolved(&self.g)
-            && (self.moved
-                || (self.v.k == self.g
-                    && self.expected() == self.g
-                    && (self.v.r == self.g || !Alg::resolved(&self.v.r))))
     }
 
     /// `strict_inv`, but where a restore left the record behind (`restored`).
-    fn inv(&self, r: Ref) -> bool {
-        self.restored || self.strict_inv(r)
+    fn inv(&self, alg: &Alg, r: Ref) -> bool {
+        self.restored || self.strict_inv(alg, r)
     }
 
     /// `Restorable`: whether restoring `o` here keeps the invariant, as the export puts
@@ -361,11 +234,7 @@ impl Machine {
     /// about its target, which may be a conflict too (`CStep.restore`), otherwise about the
     /// bookmark's.
     fn restorable(&self, alg: &Alg, o: &Slot, remote: bool) -> bool {
-        let target = if remote { &o.r } else { &o.l };
-        alg.writable(target)
-            || *target == self.v.k
-            || o.r == self.v.r
-            || (remote && !Alg::resolved(target))
+        alg.lean().restorable(o, &self.v, remote)
     }
 }
 
@@ -399,10 +268,10 @@ impl Model {
     }
 
     /// `set` on the bookmark's refs, as jj's `set_local_bookmark_target`.
-    fn set(&mut self, bookmark: Ref, l: RefTarget) {
+    fn set(&mut self, alg: &Alg, bookmark: Ref, l: RefTarget) {
         for r in Ref::ALL {
             if r.bookmark() == bookmark.bookmark() {
-                let v = self.at(r).v.set(l.clone());
+                let v = alg.lean().set(&self.get(r).v, &l);
                 self.at(r).v = v;
             }
         }
@@ -413,10 +282,10 @@ impl Model {
     /// and a `set` of `y@git` with the bookmark that merges into.
     fn bookmark_set(&mut self, alg: &Alg, bookmark: Ref, l: RefTarget) {
         let created = self.get(bookmark).v.l.is_absent() && l.is_present();
-        self.set(bookmark, l);
+        self.set(alg, bookmark, l);
         if created && bookmark.bookmark() == Ref::Origin.bookmark() {
-            let origin = self.get(Ref::Origin).v.track(alg);
-            let y = self.get(Ref::Y).v.set(origin.l.clone());
+            let origin = alg.lean().track(&self.get(Ref::Origin).v);
+            let y = alg.lean().set(&self.get(Ref::Y).v, &origin.l);
             self.at(Ref::Origin).v = origin;
             self.at(Ref::Y).v = y;
         }
@@ -460,7 +329,7 @@ impl Model {
         self.export(alg, false, false);
         for r in Ref::ALL {
             let m = self.at(r);
-            if !m.inv(r) {
+            if !m.inv(alg, r) {
                 assert!(
                     !restorable[r as usize],
                     "{r:?}: a restorable slot left the record behind: {m:?}"
@@ -472,7 +341,10 @@ impl Model {
 
     /// jj's merge of op heads, `first` merged with `second` against `base`.
     fn merge(alg: &Alg, base: &Self, first: &Self, second: &Self) -> [Slot; 4] {
-        Ref::ALL.map(|r| Slot::merge(alg, &base.get(r).v, &first.get(r).v, &second.get(r).v))
+        Ref::ALL.map(|r| {
+            alg.lean()
+                .merge_slots(&base.get(r).v, &first.get(r).v, &second.get(r).v)
+        })
     }
 
     fn slots(&self) -> Vec<Slot> {
@@ -486,7 +358,7 @@ impl Model {
         for &r in refs {
             if self.at(r).jj_import(alg) {
                 let l = self.at(r).v.l.clone();
-                self.set(r, l);
+                self.set(alg, r, l);
             }
         }
         self.slots() != before
@@ -623,7 +495,10 @@ impl Refs {
         let head = (repo.op_id().clone(), model.clone());
         let mut refs = Self {
             fixture,
-            alg: Alg { repo },
+            alg: Alg {
+                lean: RefCell::new(RefsModel::new(repo.clone())),
+                repo,
+            },
             model,
             latest: head.clone(),
             older: head.clone(),
@@ -662,12 +537,12 @@ impl Refs {
             assert_eq!(v, model.v, "{r:?}: bookmark, remote bookmark and git_refs");
             assert_eq!(g, model.g, "{r:?}: .git's {}", r.git_ref());
             assert!(
-                model.inv(r),
+                model.inv(&self.alg, r),
                 "{r:?}: the model's invariant fails: {model:?}"
             );
             // Once the record is back, as a realization's export can put it, the invariant
             // holds again in full.
-            if model.strict_inv(r) {
+            if model.strict_inv(&self.alg, r) {
                 self.model.at(r).restored = false;
             }
         }
@@ -939,17 +814,17 @@ impl Refs {
         }
         match moved {
             None => {
-                let (theirs, _) = expected
-                    .get(Ref::Origin)
-                    .v
-                    .import(&self.alg, &self.upstream);
-                expected.set(Ref::Y, theirs.l.clone());
+                let theirs = self
+                    .alg
+                    .lean()
+                    .import(&expected.get(Ref::Origin).v, &self.upstream);
+                expected.set(&self.alg, Ref::Y, theirs.l.clone());
                 expected.at(Ref::Origin).v = Slot {
                     k: expected.get(Ref::Origin).v.k.clone(),
                     ..theirs
                 };
             }
-            Some((r, c)) => expected.set(r, c),
+            Some((r, c)) => expected.set(&self.alg, r, c),
         }
         assert_eq!(
             canonical,

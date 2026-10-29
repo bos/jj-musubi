@@ -644,11 +644,20 @@ pub(super) fn key_workspace(key: &WorkspaceName) -> &str {
     workspaces::split_key(key.as_str()).map_or(key.as_str(), |(_, workspace)| workspace)
 }
 
+// The Lean oracle, and the model of one ref's slot it answers, for the tests.
+#[cfg(test)]
+use crate::oracle;
+#[cfg(test)]
+#[path = "../../tests/support/refs_model.rs"]
+#[allow(dead_code, clippy::unwrap_used)]
+mod refs_model;
+
 #[cfg(test)]
 mod tests {
-    //! jj's merge of one bookmark's views, against `TSlot.merge` in formal/Musubi/Refs.lean,
-    //! and `PerMachine::merged_trivially` against jj's merge wherever it applies
-    //! (`shortcut_agrees`). docs/internals/conformance.md, "Per-machine refs".
+    //! jj's merge of one bookmark's views, against `TSlot.merge` in formal/Musubi/Refs.lean
+    //! as the oracle computes it, and `PerMachine::merged_trivially` against jj's merge
+    //! wherever it applies (`shortcut_agrees`). docs/internals/conformance.md, "Per-machine
+    //! refs".
 
     use hegel::TestCase;
     use hegel::generators as gs;
@@ -664,56 +673,16 @@ mod tests {
 
     use super::*;
 
-    /// The model's `TSlot` for `x`: the bookmark, `x@git` and whether it is tracked, and
-    /// `git_refs["refs/heads/x"]`.
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    struct Slot {
-        l: RefTarget,
-        r: RefTarget,
-        tr: bool,
-        k: RefTarget,
-    }
+    use std::cell::RefCell;
+
+    use super::refs_model::RefsModel;
+    use super::refs_model::Slot;
 
     const X: &str = "refs/heads/x";
 
+    /// A slot for `x`: the bookmark, `x@git` and whether it is tracked, and
+    /// `git_refs["refs/heads/x"]`.
     impl Slot {
-        fn norm(mut self) -> Self {
-            if self.r.is_absent() && (!self.tr || self.l.is_absent()) {
-                self.tr = false;
-            }
-            self
-        }
-
-        /// `TSlot.merge`.
-        fn merge(repo: &ReadonlyRepo, b: &Self, v: &Self, w: &Self) -> Self {
-            let merge = |a: &RefTarget, b: &RefTarget, c: &RefTarget| {
-                jj_lib::refs::merge_ref_targets(repo.index(), a, b, c)
-                    .block_on()
-                    .unwrap()
-            };
-            let r = if b.l == w.l {
-                v.clone()
-            } else {
-                Self {
-                    l: merge(&v.l, &b.l, &w.l),
-                    ..v.clone()
-                }
-                .norm()
-            };
-            let k = merge(&v.k, &b.k, &w.k);
-            if b.r == w.r && b.tr == w.tr {
-                Self { k, ..r }
-            } else {
-                Self {
-                    l: merge(&v.l, &b.l, &w.l),
-                    r: merge(&r.r, &b.r, &w.r),
-                    tr: if r.tr == b.tr { w.tr } else { r.tr },
-                    k,
-                }
-                .norm()
-            }
-        }
-
         /// `repo`'s view with `x` as this slot has it, verbatim.
         fn view(&self, repo: &ReadonlyRepo) -> View {
             let mut view = repo.view().store_view().clone();
@@ -850,11 +819,16 @@ mod tests {
 
     /// Checks jj's merge of `v` with `w` against `b`: it is the model's, and the shortcut,
     /// where it applies, is jj's. Returns jj's merge, and what the shortcut gave.
-    fn check(repo: &ReadonlyRepo, b: &Slot, v: &Slot, w: &Slot) -> (Slot, Option<PerMachine>) {
+    fn check(repo: &Arc<ReadonlyRepo>, b: &Slot, v: &Slot, w: &Slot) -> (Slot, Option<PerMachine>) {
         let (merged, [base, ours, theirs, jj]) = jj_merge(repo, b, v, w);
+        let model = MODEL.with(|model| {
+            model
+                .borrow_mut()
+                .get_or_insert_with(|| RefsModel::new(repo.clone()))
+                .merge_slots(b, v, w)
+        });
         assert_eq!(
-            merged,
-            Slot::merge(repo, b, v, w),
+            merged, model,
             "TSlot.merge of {v:?} with {w:?} against {b:?}"
         );
         let shortcut = PerMachine::merged_trivially(&base, ours, theirs);
@@ -868,6 +842,8 @@ mod tests {
     }
 
     thread_local!(static REPO: (TestEnv, Arc<ReadonlyRepo>, [CommitId; 4]) = repository());
+    // The model for every case on this thread, merging with `REPO`'s index.
+    thread_local!(static MODEL: RefCell<Option<RefsModel>> = const { RefCell::new(None) });
 
     /// A slot: the bookmark absent or at either commit; `x@git` none, tracked with no
     /// target, or at either commit, tracked or not; and `git_refs` absent or at the first

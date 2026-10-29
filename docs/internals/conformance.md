@@ -2,17 +2,17 @@
 
 The Lean models in [formal/](../../formal/README.md) prove properties of musubi's designs. This
 document says how each is tied to the code that implements it. Each tie is a chain: the model's
-own definitions, where they compute, or an executable form of the model, proved to agree with it,
-or a copy of the model in Rust; and a Hegel property-based test ([testing.md](testing.md)) that
-runs the real code and requires it to agree with the model: step by step for the protocol and the
-blob receiver, and operation by operation, law by law or merge by merge for the others. The Lean
-side runs as the *oracle*, a program the tests send JSON requests to.
+own definitions, where they compute, or an executable form of the model, proved to agree with it;
+and a Hegel property-based test ([testing.md](testing.md)) that runs the real code and requires it
+to agree with the model: step by step for the protocol and the blob receiver, and operation by
+operation, law by law or merge by merge for the others. The Lean side runs as the *oracle*, a
+program the tests send JSON requests to.
 
 | Model | Code | Test | Section |
 | --- | --- | --- | --- |
 | The sync protocol ([protocol.md](protocol.md)) | `crates/musubi-core` | `conformance`, through the oracle | [The claim](#the-claim) to [Wire format](#wire-format) |
 | `Presence.lean`: which copies a hive shows | `Presence` | `presence::conformance`, through the oracle | [Presence](#presence) |
-| `Refs.lean`: per-machine refs | jj's import and export, and musubi's realization | `ref_laws` (the laws the model assumes), and `refs` and `view::tests`, against a Rust copy | [Per-machine refs](#per-machine-refs) |
+| `Refs.lean`: per-machine refs | jj's import and export, and musubi's realization | `ref_laws` (the laws the model assumes), and `refs` and `view::tests`, through the oracle | [Per-machine refs](#per-machine-refs) |
 | `Chunks.lean`: chunked blobs | `BlobStore::receive` | `receive_follows_the_prefix_model`, through the oracle | [Chunked blobs](#chunked-blobs) |
 | `Names.lean`: the names other machines' workspaces show under | `workspaces::display_names` | `workspaces::tests::names_conform`, through the oracle | [Workspace names](#workspace-names) |
 
@@ -363,9 +363,19 @@ that once musubi writes a conflicted remote bookmark's expected value, every mac
 resolves it alike, a restore of the conflict included; and that `jj undo` and `jj op restore` keep
 the invariant where jj's export can write what they restore, or restore a conflicted remote
 bookmark ([formal/README.md, "Per-machine refs
-(`Refs.lean`)"](../../formal/README.md#per-machine-refs-refslean) lists the theorems). Its state
-is a few ref targets, so the tests keep a copy of the model in Rust rather than running an oracle.
-The chain has three links:
+(`Refs.lean`)"](../../formal/README.md#per-machine-refs-refslean) lists the theorems).
+
+The model's functions are executable already, over any `RefAlg`, but the tests' targets are
+jj's, merged by jj-lib, which the oracle can't run. So `formal/Musubi/RefsExec.lean` runs them
+on targets a test numbers, `0` for none, with `tableAlg` as the `RefAlg`: the three laws, which
+so hold by construction, and otherwise jj's merge as a table the test sends with each request,
+with which targets are resolved and writable and the terms of each conflict. Every merge the
+slot functions make is of their arguments' targets, so the test, in
+`crates/musubi-jj/tests/support/refs_model.rs` (`RefsModel`), sends jj-lib's
+`merge_ref_targets` of every triple of a request's targets that the laws don't settle. A target
+the request needed and wasn't sent comes back as `4294967295`, which the test refuses. Equal
+targets have equal numbers, so the model compares targets as jj does. The chain has three
+links:
 
 1. **The laws.** `ref_laws::merge_ref_targets_obeys_ref_alg`, in
    `crates/musubi-jj/tests/it/ref_laws.rs`, checks `merge a b b = a`, `merge b b c = c` and
@@ -380,7 +390,8 @@ The chain has three links:
    which `y` tracks and which git and fetches move; and a tag `t`, which git moves, whose slot
    is a local bookmark's (`t`, `t@git`, `refs/tags/t`). Beside the real machine it keeps the
    model's `Machine` for each of the four, its slot a `TSlot` with the remote ref's tracking
-   state, with jj's `merge_ref_targets` as the merge, and steps them as each real action does:
+   state, and steps them as each real action does, each of the model's functions asked of the
+   oracle:
 
    | Real action | Model steps |
    | --- | --- |
@@ -422,7 +433,8 @@ The chain has three links:
    `crates/musubi-jj/src/node/view.rs`, writes three operations whose views give a bookmark
    `x`, `x@git` and its tracking state, and `git_refs`, drawn from a small real repository,
    including views musubi's realization makes and jj doesn't, and merges them with jj's own
-   merge, as `merged_by_jj` does. It requires jj's merge to be the model's `TSlot.merge`,
+   merge, as `merged_by_jj` does. It requires jj's merge to be the model's `TSlot.merge`, as the
+   oracle computes it,
    and the shortcut, wherever it applies, to be jj's (`shortcut_agrees`). Beside it are
    tests of the two shapes of #56, where an unguarded shortcut disagrees with jj, and of a
    criss-cross merge, where musubi must merge against the heads' closest common ancestors
@@ -486,6 +498,20 @@ What the test relies on of jj, and what it leaves out:
   can succeed (a failed one ends as `remote_reset_without_export` says). The realization
   keeps a tracked absent `x@git` that jj would drop when the canonical operation deletes `x`
   (`realize_not_WF`); the test's model does the same, so the test checks the code as it is.
+
+The oracle's request names one of the model's functions, `fn`, with its arguments, slots
+`{"L", "R", "K", "tr"}` and targets, and the table:
+
+```json
+{"op": "refs", "fn": "merge", "table": {"resolved": [0, 1, 2, 3], "writable": [1, 2, 3], "terms": [{"conflict": 4, "terms": [1, 2, 3]}], "merges": [[2, 1, 3, 4]]}, "b": {"L": 1, "R": 1, "K": 1, "tr": true}, "v": {"L": 2, "R": 1, "K": 1, "tr": true}, "w": {"L": 3, "R": 1, "K": 1, "tr": true}}
+{"ok": true, "slot": {"K": 1, "L": 4, "R": 1, "tr": true}}
+```
+
+The functions are `set` (`l`), `track`, `import` (`g`, a new remote ref tracked by default),
+`merge` (`b`, `v`, `w`), `exportLocal` and `exportRemote` (`g`), `exportConflicted` (`g`,
+`e`), which reply with a slot and `.git`'s value `g` too, and `linv` (`g`, `moved`), `cinv`
+(`g`, `moved`, `e`), `restorable` and `restorableRemote` (`o`), which reply whether they
+`holds`. Each takes the slot `s` unless it says otherwise.
 
 ```sh
 cargo nextest run -p musubi-jj -E 'test(/^ref_laws::/) | test(/view::tests/)'

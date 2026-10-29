@@ -72,10 +72,11 @@ is `formal/.lake/build/bin/oracle`.
 | `Musubi/Refs.lean` | Per-machine refs, for one git ref: imports, exports, merges, conflicted remote bookmarks, and `jj undo` and `jj op restore`. |
 | `Musubi/Presence.lean` | Which copies a hive shows. |
 | `Musubi/PresenceExec.lean` | The presence rule on a finite history, executable, for the oracle. |
+| `Musubi/RefsExec.lean` | `Refs.lean`'s slot functions on targets a test numbers, with jj's merges as a table, for the oracle. |
 | `Musubi/Copies.lean` | Which repository is the copy of a key: musubi's decisions, jj's config-id rule, and a machine's repositories moved, copied, deleted and replaced. |
 | `Musubi/Names.lean` | The names a machine shows other machines' workspaces under, and `#guard` tests of them. |
 | `Musubi/Axioms.lean` | `#print axioms` for every main theorem. |
-| `Oracle.lean` | The `oracle` executable: a stdin/stdout loop around `ExecJson.handle`, which also answers measure, upload, presence, copies, chunks and names requests. |
+| `Oracle.lean` | The `oracle` executable: a stdin/stdout loop around `ExecJson.handle`, which also answers measure, upload, presence, copies, chunks, names and refs requests. |
 | `test/smoke.jsonl`, `test/smoke.expected`, `test/run_smoke.sh` | The oracle smoke test. |
 
 
@@ -517,7 +518,8 @@ match, such as staging never being cleared):
 The oracle also answers with the prefix receiver of `Chunks.lean` and the naming rule of
 `Names.lean`, whose definitions run as they are, so they need no executable form of their own
 ([conformance.md, "Chunked blobs"](../docs/internals/conformance.md#chunked-blobs) and
-["Workspace names"](../docs/internals/conformance.md#workspace-names)). `Refs.lean` has no
-executable model or oracle: its state is small, so its tests keep a Rust copy of the model
-beside the real code and step both together ([conformance.md, "Per-machine
+["Workspace names"](../docs/internals/conformance.md#workspace-names)). `Refs.lean`'s functions
+are executable as they are too, over any `RefAlg`: `RefsExec.lean` runs them on numbered
+targets, with jj's merges as a table each request carries, and the oracle answers refs requests
+with them ([conformance.md, "Per-machine
 refs"](../docs/internals/conformance.md#per-machine-refs)).

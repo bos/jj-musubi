@@ -6,6 +6,8 @@ import Lean.Data.Json
 import Musubi.Exec
 import Musubi.PresenceExec
 import Musubi.Copies
+import Musubi.Chunks
+import Musubi.Names
 
 namespace Musubi.Exec.Json
 
@@ -237,6 +239,54 @@ def copiesReply (cases : List CopiesCase) : Json :=
     | some e => Json.mkObj (standings ++ [("check", Json.bool (Copies.check e c.repo))])
   Json.mkObj [("ok", Json.bool true), ("copies", Json.arr (cases.map answer).toArray)]
 
+/-! ## Chunked blobs (`Chunks.lean`) -/
+
+/-- A step of the prefix receiver: a chunk delivered with the length it claims (`recv`), or a
+sweep of the partial blob, the stored one, or both (`sweepPartial`, `sweepStored`). -/
+inductive ChunkStep where
+  | chunk (c : Chunks.Chunk) (total : Nat)
+  | sweep (pre stored : Bool)
+
+def decodeChunkStep (j : Json) : Except String ChunkStep :=
+  match j.getObjVal? "sweep" with
+  | .ok s => return .sweep (← s.getObjValAs? Bool "partial") (← s.getObjValAs? Bool "stored")
+  | .error _ => return .chunk ⟨← getNat j "off", ← getNats j "data"⟩ (← getNat j "total")
+
+/-- The hash the oracle takes for blob `b`: `0` for `b` and `1` for anything else. The proofs
+take the hash injective; this one tells the blob from every other byte string, which is all
+`receive` asks of it. -/
+def blobHash (b : List Nat) (p : List Nat) : Nat := if p = b then 0 else 1
+
+/-- The prefix receiver's state after each step from `initP`: its reply to a chunk
+(`Chunks.receive`; a number for `Received::Prefix`, null for `Received::Complete`), the
+prefix it has, and whether it has stored the blob. -/
+def chunksReply (b : List Nat) (steps : List ChunkStep) : Json :=
+  let state (s : Chunks.PState) (fields : List (String × Json)) : Json :=
+    Json.mkObj (fields ++ [("pre", toJson s.pre.toArray), ("stored", Json.bool s.store.isSome)])
+  let rec go (s : Chunks.PState) : List ChunkStep → List Json
+    | [] => []
+    | .chunk c total :: rest =>
+      let (s', reply) := Chunks.receive (blobHash b) b s c total
+      state s' [("received", match reply with | some n => toJson n | none => Json.null)] ::
+        go s' rest
+    | .sweep pre stored :: rest =>
+      let s' := { s with pre := if pre then [] else s.pre,
+                         store := if stored then none else s.store }
+      state s' [] :: go s' rest
+  Json.mkObj [("ok", Json.bool true), ("steps", Json.arr (go Chunks.initP steps).toArray)]
+
+/-! ## Workspace names (`Names.lean`) -/
+
+def decodeKey (j : Json) : Except String Names.Key := do
+  pure ⟨(← j.getObjValAs? String "name").toList, (← j.getObjValAs? String "suffix").toList⟩
+
+/-- Each machine's prefix (`Names.assign`), in the order given, among the machines given and
+the names of this machine's own. -/
+def namesReply (machines : List Names.Key) (own : List String) : Json :=
+  let assigned := Names.assign machines (own.map String.toList)
+  Json.mkObj [("ok", Json.bool true),
+    ("prefixes", Json.arr (assigned.map fun (_, p) => Json.str (String.ofList p)).toArray)]
+
 /-! ## Liveness (`Exec.lean`, "The liveness measure") -/
 
 /-- The session state's measures, and whether it has converged. -/
@@ -292,6 +342,16 @@ def handle (sess : Session) (line : String) : Json × Session :=
       | .ok ops =>
         if Presence.EHist.orderedB ops then (presenceReply ops, sess)
         else (errReply "presence: an operation's parents must come before it", sess)
+    | .ok "chunks" =>
+      match getNats j "blob", j.getObjValAs? (Array Json) "steps" >>= fun ss =>
+          ss.toList.mapM decodeChunkStep with
+      | .error e, _ | _, .error e => (errReply s!"bad request: {e}", sess)
+      | .ok b, .ok steps => (chunksReply b steps, sess)
+    | .ok "names" =>
+      match j.getObjValAs? (Array Json) "machines" >>= fun ms => ms.toList.mapM decodeKey,
+          j.getObjValAs? (Array String) "own" with
+      | .error e, _ | _, .error e => (errReply s!"bad request: {e}", sess)
+      | .ok machines, .ok own => (namesReply machines own.toList, sess)
     | .ok "copies" =>
       match j.getObjValAs? (Array Json) "cases" >>= fun cs => cs.toList.mapM decodeCase with
       | .error e => (errReply s!"bad request: {e}", sess)

@@ -1,21 +1,20 @@
 # Conformance between the Lean models and the code
 
-The Lean models in [formal/](../../formal/README.md) prove properties of musubi's designs.
-This document says how each is tied to the code that implements it. Each tie is a chain: an
-executable form of the model, proved to agree with it, or, where the model's state is small,
-a copy of the model in Rust; and a Hegel property-based test ([testing.md](testing.md)) that
-runs the real code and requires it to agree with the model: step by step for the protocol and
-the blob receiver, and operation by operation, law by law or merge by merge for the others. An
-executable form in Lean runs as the *oracle*, a program
-the tests send JSON requests to.
+The Lean models in [formal/](../../formal/README.md) prove properties of musubi's designs. This
+document says how each is tied to the code that implements it. Each tie is a chain: the model's
+own definitions, where they compute, or an executable form of the model, proved to agree with it,
+or a copy of the model in Rust; and a Hegel property-based test ([testing.md](testing.md)) that
+runs the real code and requires it to agree with the model: step by step for the protocol and the
+blob receiver, and operation by operation, law by law or merge by merge for the others. The Lean
+side runs as the *oracle*, a program the tests send JSON requests to.
 
 | Model | Code | Test | Section |
 | --- | --- | --- | --- |
 | The sync protocol ([protocol.md](protocol.md)) | `crates/musubi-core` | `conformance`, through the oracle | [The claim](#the-claim) to [Wire format](#wire-format) |
 | `Presence.lean`: which copies a hive shows | `Presence` | `presence::conformance`, through the oracle | [Presence](#presence) |
 | `Refs.lean`: per-machine refs | jj's import and export, and musubi's realization | `ref_laws` (the laws the model assumes), and `refs` and `view::tests`, against a Rust copy | [Per-machine refs](#per-machine-refs) |
-| `Chunks.lean`: chunked blobs | `BlobStore::receive` | `receive_follows_the_prefix_model`, against a Rust copy | [Chunked blobs](#chunked-blobs) |
-| `Names.lean`: the names other machines' workspaces show under | `workspaces::display_names` | `local_names_are_distinct`, against the rule | [Workspace names](#workspace-names) |
+| `Chunks.lean`: chunked blobs | `BlobStore::receive` | `receive_follows_the_prefix_model`, through the oracle | [Chunked blobs](#chunked-blobs) |
+| `Names.lean`: the names other machines' workspaces show under | `workspaces::display_names` | `workspaces::tests::names_conform`, through the oracle | [Workspace names](#workspace-names) |
 
 ## The claim
 
@@ -503,9 +502,8 @@ starts it early, as the longest test after the protocol's conformance test.
 `formal/Musubi/Chunks.lean` proves that a finished blob is the one sent, despite corrupt, stale or
 duplicated chunks, and that every transfer finishes once chunks are delivered. It also models
 musubi's narrower receiver, `BlobStore::receive` (`crates/musubi-sync/src/blobs.rs`), which keeps
-only a contiguous prefix ([protocol.md, "Chunked blobs"](protocol.md#chunked-blobs)). That
-receiver's state is a byte string and a flag, so, as for the per-machine refs, the test keeps a
-copy of the model in Rust rather than running an oracle. The chain has two links:
+only a contiguous prefix ([protocol.md, "Chunked blobs"](protocol.md#chunked-blobs)). The chain
+has two links:
 
 1. **Refinement.** `Chunks.receive` is the prefix receiver, and `PStep` its steps: a chunk
    delivered with any claimed length, and a sweep of the partial blob or the stored one.
@@ -514,17 +512,18 @@ copy of the model in Rust rather than running an oracle. The chain has two links
    `finishOk` then `crashRecv`, a mismatch is `crashRecv`, a chunk of a stored blob is
    `finishStored`, and the sweeps are `crashRecv` and `evict`. So `stored_identical` holds
    of it. A sender that resends from the prefix it reports finishes (`prefix_finishes`).
-2. **The steps.** The Hegel test `receive_follows_the_prefix_model` keeps a Rust copy of
-   `receive`, taking the hash to be injective as the proofs do. It delivers up to 40 chunks
-   at any offset up to one past the blob's end, some corrupt, some running past the end,
-   some claiming a length one short or one long, and among them sweeps that remove the
-   partial blob, the stored one, or both, so that chunks also reach a stored blob. After
-   each, the reply, the partial file's bytes and whether the blob is stored must be the
-   model's. Then a sender resends from the prefix it was last told, and the blob must be
-   stored, and be the one sent, within `2 ⌈len / chunk⌉ + 1` resends (3 for an empty
-   blob): `⌈len / chunk⌉` to reach the end of a corrupt prefix and start over, as many
-   again from the start (the steps of `prefix_finishes`'s measure), and one that finds the
-   prefix gone after a sweep.
+2. **The steps.** The Hegel test `receive_follows_the_prefix_model`, in
+   `crates/musubi-sync/src/blobs.rs`, delivers up to 40 chunks at any offset up to one past the
+   blob's end, some corrupt, some running past the end, some claiming a length one short or one
+   long, and among them sweeps that remove the partial blob, the stored one, or both, so that
+   chunks also reach a stored blob. It sends the case's steps to the oracle, which takes them from
+   `initP` with `Chunks.receive` itself and the sweeps, its hash telling the blob from every other
+   byte string, as an injective hash does. After each step, the reply, the partial file's bytes
+   and whether the blob is stored must be the oracle's. Then a sender resends from the prefix it
+   was last told, and the blob must be stored, and be the one sent, within `2 ⌈len / chunk⌉ + 1`
+   resends (3 for an empty blob): `⌈len / chunk⌉` to reach the end of a corrupt prefix and start
+   over, as many again from the start (the steps of `prefix_finishes`'s measure), and one that
+   finds the prefix gone after a sweep.
 
 | `BlobStore` | Model |
 | --- | --- |
@@ -549,9 +548,22 @@ replies give the real prefix: the test's extra resend.
 cargo nextest run -p musubi-sync -E 'test(/^blobs::/)'
 ```
 
-The test makes 200 cases, about a millisecond each. Dropping the check that the prefix is
-the length the chunk claims, so that a blob is stored when a chunk claims one byte too few,
-fails it at once.
+The test makes 200 cases, a few milliseconds each, one oracle serving them all. Dropping the
+check that the prefix is the length the chunk claims, so that a blob is stored when a chunk
+claims one byte too few, fails it at once, as does checking the hash a byte early.
+
+The oracle's chunks request and reply, for a blob of three bytes:
+
+```json
+{"op": "chunks", "blob": [1, 2, 3], "steps": [{"off": 0, "data": [1, 2], "total": 3}, {"sweep": {"partial": true, "stored": false}}, {"off": 0, "data": [1, 2, 3], "total": 3}]}
+{"ok": true, "steps": [{"received": 2, "pre": [1, 2], "stored": false}, {"pre": [], "stored": false}, {"received": null, "pre": [], "stored": true}]}
+```
+
+A step is a chunk, `off` and `data`, delivered claiming the blob is `total` bytes long, or a
+sweep of the partial blob, the stored one, or both. The reply has, for each step, the
+receiver's reply to a chunk (`n` for `Received::Prefix(n)`, `null` for `Received::Complete`),
+the prefix it has, and whether it has stored the blob. A chunks request leaves the oracle's
+session as it was.
 
 ## Copies
 
@@ -640,13 +652,24 @@ links:
    names are injective, whatever the machines and the names of this machine's own
    (`localName_injective`).
 2. **The code.** `workspaces::display_names` makes the same choices. The Hegel test
-   `workspaces::tests::local_names_are_distinct`, in `crates/musubi-jj/src/workspaces.rs`,
-   draws up to four machines and three names of this machine's own from names, suffixes and
-   names of its own chosen to clash. It requires every candidate before each machine's prefix
-   to be taken already, the prefix itself free, and the names of the view's workspaces
-   distinct. `longer_names_where_shorter_clash` pins the cases the rule before this one named
-   alike, which `Names.lean` checks with `#guard`.
+   `workspaces::tests::names_conform`, in `crates/musubi-jj/src/workspaces.rs`, draws up to
+   four machines and three names of this machine's own from names, suffixes and names of its
+   own chosen to clash, and requires each machine's prefix to be the one the oracle's
+   `assign` gives it. Letting a machine take a prefix an earlier one took, or one that starts
+   a name of this machine's own, fails it. `longer_names_where_shorter_clash` pins the cases
+   the rule before this one named alike, which `Names.lean` checks with `#guard`.
 
 The test checks the rule, not where musubi applies it: that `local_names` and `canonical_view`
 pass it every machine the history has known and this machine's own names is for the race
 catalogue (`crates/musubi-sync/tests/races/forget.rs`) to check.
+
+The oracle's names request and reply:
+
+```json
+{"op": "names", "machines": [{"name": "mac", "suffix": "aaaa1111"}, {"name": "mac", "suffix": "aaaa2222"}], "own": ["mac-aaaa2222/x"]}
+{"ok": true, "prefixes": ["mac-aaaa", "mac-aaaa2222-"]}
+```
+
+The machines go in the order `display_names` takes them, their keys' order, each a key's name
+and suffix, and `own` holds the names of this machine's own. The reply has each machine's
+prefix, in the same order. A names request leaves the oracle's session as it was.

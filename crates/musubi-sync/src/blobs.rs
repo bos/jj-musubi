@@ -252,10 +252,14 @@ fn renew(path: &Path) -> io::Result<()> {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
+    use std::cell::Cell;
+
+    use hegel::HealthCheck;
     use hegel::TestCase;
     use hegel::generators as gs;
 
     use super::*;
+    use crate::oracle::Oracle;
 
     /// A file this side created goes into the store without being copied.
     #[cfg(unix)]
@@ -317,40 +321,27 @@ mod tests {
         assert_eq!(received, Received::Prefix(0));
     }
 
-    /// The prefix receiver of `formal/Musubi/Chunks.lean` (`PState`): the prefix it has,
-    /// and whether it has stored the blob. Its hash is taken to be injective, as the proofs
-    /// take it, so the hash check compares the prefix with the blob.
-    #[derive(Default)]
-    struct Prefix {
-        pre: Vec<u8>,
+    /// A step the test took, and what `BlobStore` made of it: its reply to a chunk (none
+    /// for a sweep), the partial blob, and whether it has the blob.
+    struct Taken {
+        step: serde_json::Value,
+        received: Option<Received>,
+        partial: Vec<u8>,
         stored: bool,
     }
 
-    impl Prefix {
-        /// `Chunks.receive`.
-        fn receive(&mut self, blob: &[u8], total: u64, offset: u64, data: &[u8]) -> Received {
-            if self.stored {
-                return Received::Complete;
-            }
-            // `extend`
-            let have = self.pre.len() as u64;
-            if offset <= have && have < offset + data.len() as u64 {
-                let skip = usize::try_from(have - offset).unwrap();
-                self.pre.extend_from_slice(&data[skip..]);
-            }
-            let have = self.pre.len() as u64;
-            if have < total {
-                return Received::Prefix(have);
-            }
-            let finished = self.pre == blob && have == total;
-            self.pre.clear();
-            if finished {
-                self.stored = true;
-                Received::Complete
-            } else {
-                Received::Prefix(0)
-            }
-        }
+    /// The prefix receiver's steps, `receive` among them, as `formal/Musubi/Chunks.lean`
+    /// takes them from `initP`, through the oracle: after each, its reply, its prefix, and
+    /// whether it has stored the blob.
+    fn modelled(oracle: &mut Oracle, blob: &[u8], taken: &[Taken]) -> Vec<serde_json::Value> {
+        let steps: Vec<&serde_json::Value> = taken.iter().map(|taken| &taken.step).collect();
+        let reply = oracle.call(&serde_json::json!({
+            "op": "chunks",
+            "blob": blob,
+            "steps": steps,
+        }));
+        assert_eq!(reply["ok"], true, "the oracle refused the steps: {reply}");
+        reply["steps"].as_array().unwrap().clone()
     }
 
     /// Makes a file older than any sweep's cutoff here, if it exists.
@@ -369,7 +360,9 @@ mod tests {
     /// prefix it was last told finishes within the resends that `prefix_finishes`'s measure
     /// comes to: to the end of a corrupt prefix, and from the start again; and one more for a
     /// sweep it wasn't told of.
-    #[hegel::test(test_cases = 200)]
+    // Each case asks the Lean oracle, a process of its own, which on a small machine running
+    // other tests at once can slow generating cases past Hegel's health check.
+    #[hegel::test(test_cases = 200, suppress_health_check = [HealthCheck::TooSlow])]
     fn receive_follows_the_prefix_model(tc: TestCase) {
         let dir = musubi_testutil::tempdir();
         let store = BlobStore::open(dir.path()).unwrap();
@@ -377,15 +370,18 @@ mod tests {
         let blob: Vec<u8> = (0..len).map(|i| (i * 7 % 251) as u8).collect();
         let id = BlobId::of_bytes(&blob);
         let chunk = tc.draw(gs::integers::<usize>().min_value(1).max_value(64));
-        let mut model = Prefix::default();
+        let mut taken: Vec<Taken> = vec![];
         let mut told = 0;
-        let step = |model: &mut Prefix, total: usize, offset: usize, data: &[u8]| {
-            let (total, offset) = (total as u64, offset as u64);
-            let received = store.receive(&id, total, offset, data).unwrap();
-            assert_eq!(received, model.receive(&blob, total, offset, data));
-            let partial = fs::read(store.partial_path(&id)).unwrap_or_default();
-            assert_eq!(partial, model.pre);
-            assert_eq!(store.get(&id).is_some(), model.stored);
+        let step = |taken: &mut Vec<Taken>, total: usize, offset: usize, data: &[u8]| {
+            let received = store
+                .receive(&id, total as u64, offset as u64, data)
+                .unwrap();
+            taken.push(Taken {
+                step: serde_json::json!({"off": offset, "data": data, "total": total}),
+                received: Some(received),
+                partial: fs::read(store.partial_path(&id)).unwrap_or_default(),
+                stored: store.get(&id).is_some(),
+            });
             received
         };
         for _ in 0..tc.draw(gs::integers::<usize>().max_value(40)) {
@@ -395,18 +391,17 @@ mod tests {
                 let stored = tc.draw(gs::booleans());
                 if partial {
                     age(&store.partial_path(&id));
-                    model.pre.clear();
                 }
                 if stored {
                     age(&store.complete_path(&id));
-                    model.stored = false;
                 }
                 store.sweep(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1));
-                assert_eq!(
-                    fs::read(store.partial_path(&id)).unwrap_or_default(),
-                    model.pre
-                );
-                assert_eq!(store.get(&id).is_some(), model.stored);
+                taken.push(Taken {
+                    step: serde_json::json!({"sweep": {"partial": partial, "stored": stored}}),
+                    received: None,
+                    partial: fs::read(store.partial_path(&id)).unwrap_or_default(),
+                    stored: store.get(&id).is_some(),
+                });
                 continue;
             }
             // `send` or `inject`, then `recv`.
@@ -423,7 +418,7 @@ mod tests {
                 1 => len + 1,
                 _ => len,
             };
-            if let Received::Prefix(have) = step(&mut model, total, offset, &data) {
+            if let Received::Prefix(have) = step(&mut taken, total, offset, &data) {
                 told = usize::try_from(have).unwrap();
             }
         }
@@ -432,13 +427,32 @@ mod tests {
         for _ in 0..resends {
             let from = told.min(len);
             let end = (told + chunk).min(len);
-            match step(&mut model, len, told, &blob[from..end.max(from)]) {
+            match step(&mut taken, len, told, &blob[from..end.max(from)]) {
                 Received::Complete => {
                     finished = true;
                     break;
                 }
                 Received::Prefix(have) => told = usize::try_from(have).unwrap(),
             }
+        }
+        // One oracle for every case: chunks requests leave it as they found it.
+        thread_local!(static ORACLE: Cell<Option<Oracle>> = const { Cell::new(None) });
+        let mut oracle = ORACLE.take().unwrap_or_else(Oracle::spawn);
+        let modelled = modelled(&mut oracle, &blob, &taken);
+        ORACLE.set(Some(oracle));
+        for (at, (taken, model)) in taken.iter().zip(&modelled).enumerate() {
+            let received = taken.received.map(|received| match received {
+                Received::Prefix(have) => serde_json::json!(have),
+                Received::Complete => serde_json::Value::Null,
+            });
+            assert_eq!(
+                received.as_ref(),
+                model.get("received"),
+                "step {at}: {}",
+                taken.step
+            );
+            assert_eq!(serde_json::json!(taken.partial), model["pre"], "step {at}");
+            assert_eq!(taken.stored, model["stored"], "step {at}");
         }
         assert!(finished, "transfer did not finish in {resends} resends");
         assert_eq!(store.read(&id, 0, len + 1).unwrap(), (len as u64, blob));

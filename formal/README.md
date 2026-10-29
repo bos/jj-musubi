@@ -75,7 +75,7 @@ is `formal/.lake/build/bin/oracle`.
 | `Musubi/Copies.lean` | Which repository is the copy of a key: musubi's decisions, jj's config-id rule, and a machine's repositories moved, copied, deleted and replaced. |
 | `Musubi/Names.lean` | The names a machine shows other machines' workspaces under, and `#guard` tests of them. |
 | `Musubi/Axioms.lean` | `#print axioms` for every main theorem. |
-| `Oracle.lean` | The `oracle` executable: a stdin/stdout loop around `ExecJson.handle`, which also answers measure, upload, presence and copies requests. |
+| `Oracle.lean` | The `oracle` executable: a stdin/stdout loop around `ExecJson.handle`, which also answers measure, upload, presence, copies, chunks and names requests. |
 | `test/smoke.jsonl`, `test/smoke.expected`, `test/run_smoke.sh` | The oracle smoke test. |
 
 
@@ -514,8 +514,10 @@ match, such as staging never being cleared):
 - **The hub forgetting.** `hubForget ops objs` names what the hub keeps, as
   `SyncStep.hubForget` does.
 
-`Refs.lean` and the prefix receiver of `Chunks.lean` have no executable model or oracle: their
-state is small, so their tests keep a Rust copy of the model beside the real code and step both
-together. [conformance.md](../docs/internals/conformance.md) describes those tests, in
-["Per-machine refs"](../docs/internals/conformance.md#per-machine-refs) and ["Chunked
-blobs"](../docs/internals/conformance.md#chunked-blobs).
+The oracle also answers with the prefix receiver of `Chunks.lean` and the naming rule of
+`Names.lean`, whose definitions run as they are, so they need no executable form of their own
+([conformance.md, "Chunked blobs"](../docs/internals/conformance.md#chunked-blobs) and
+["Workspace names"](../docs/internals/conformance.md#workspace-names)). `Refs.lean` has no
+executable model or oracle: its state is small, so its tests keep a Rust copy of the model
+beside the real code and step both together ([conformance.md, "Per-machine
+refs"](../docs/internals/conformance.md#per-machine-refs)).

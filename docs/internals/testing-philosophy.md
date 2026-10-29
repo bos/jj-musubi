@@ -58,11 +58,12 @@ test what a model assumes of jj as laws, as `ref_laws` does.
 
 ## What each kind of change needs
 
-- **A Lean model, added or changed,** is tied to the code in the same change: an executable
-  version proved sound and answered by the oracle, or, where its state is small, a Rust copy of it
-  in the test; a test checking the implementation against that, step by step; and the
-  correspondence in [conformance.md](conformance.md) and
-  [formal/README.md](../../formal/README.md). A model no test refers to is a gap.
+- **A Lean model, added or changed,** is tied to the code in the same change: its own definitions
+  answered by the oracle where they compute, or else an executable version proved sound and
+  answered by the oracle, or, where neither will do, a Rust copy of it in the test; a test
+  checking the implementation against that, step by step; and the correspondence in
+  [conformance.md](conformance.md) and [formal/README.md](../../formal/README.md). A model no test
+  refers to is a gap.
 - **A change to the protocol** changes the model with it: the new step, its case in each
   invariant proof, its executable version and soundness proof, and its JSON in the oracle.
   The conformance test must reach the step, and the model's preconditions must be tight enough

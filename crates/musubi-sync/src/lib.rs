@@ -29,6 +29,12 @@ pub mod server;
 pub mod service;
 pub mod wire;
 
+/// The Lean model as an oracle, for tests checking code against it.
+#[cfg(test)]
+#[path = "../../musubi-core/tests/support/oracle.rs"]
+#[allow(dead_code, clippy::unwrap_used)]
+mod oracle;
+
 pub type OpId = jj_lib::op_store::OperationId;
 
 /// An abbreviated id, for logs. Ids from the wire are not checked for length.

@@ -15,3 +15,9 @@ mod protobuf;
 pub mod remote_url;
 mod translation_map;
 pub mod workspaces;
+
+/// The Lean model as an oracle, for tests checking code against it.
+#[cfg(test)]
+#[path = "../../musubi-core/tests/support/oracle.rs"]
+#[allow(dead_code, clippy::unwrap_used)]
+mod oracle;

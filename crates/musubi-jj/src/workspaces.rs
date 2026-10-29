@@ -231,10 +231,14 @@ mod tests {
     use jj_lib::config::StackedConfig;
     use jj_lib::settings::UserSettings;
 
+    use std::cell::Cell;
+
+    use hegel::HealthCheck;
     use hegel::TestCase;
     use hegel::generators as gs;
 
     use super::*;
+    use crate::oracle::Oracle;
 
     #[test]
     fn names_are_qualified_only_when_ambiguous() {
@@ -278,13 +282,14 @@ mod tests {
         assert_eq!(names["beta#1a2b3c4d"], "beta-1a2b3c4d");
     }
 
-    /// `display_names` against `assign` in formal/Musubi/Names.lean: each machine, in order,
-    /// is shown under the first of its candidates that no machine before it took and that
-    /// starts no name of this machine's own, and so the names here of a view's workspaces are
-    /// distinct (`localName_injective`). Names and suffixes are drawn from few, so that they
-    /// clash.
-    #[hegel::test(test_cases = 300)]
-    fn local_names_are_distinct(tc: TestCase) {
+    /// `display_names` against `assign` in formal/Musubi/Names.lean, through the oracle
+    /// (docs/internals/conformance.md, "Workspace names"): each machine's prefix, among
+    /// machines and names of this machine's own drawn from few, so that they clash. The model
+    /// proves the names it gives a view's workspaces distinct (`localName_injective`).
+    // Each case asks the Lean oracle, a process of its own, which on a small machine running
+    // other tests at once can slow generating cases past Hegel's health check.
+    #[hegel::test(test_cases = 300, suppress_health_check = [HealthCheck::TooSlow])]
+    fn names_conform(tc: TestCase) {
         const NAMES: [&str; 3] = ["mac", "mac-aaaa", "mac-aaaa1111"];
         const SUFFIXES: [&str; 4] = ["aaaa1111", "aaaa2222", "bbbb0000", "aaaa"];
         const OWN: [&str; 7] = [
@@ -307,53 +312,32 @@ mod tests {
             })
             .collect();
         let own: BTreeSet<&str> = (0..pick(4)).map(|_| OWN[pick(OWN.len())]).collect();
-        let taken = |prefix: &str| own.iter().any(|w| w.starts_with(&format!("{prefix}/")));
-        let names = display_names(&machines, taken);
+        let names = display_names(&machines, |prefix| {
+            own.iter().any(|w| w.starts_with(&format!("{prefix}/")))
+        });
 
-        let mut used = BTreeSet::new();
-        for machine in &machines {
-            let plain = machines
-                .iter()
-                .filter(|other| machine_name(other) == machine_name(machine))
-                .count()
-                == 1;
-            let shown = &names[machine];
-            // `candidates` in formal/Musubi/Names.lean, spelled out here.
-            let (name, suffix) = machine.split_once('#').unwrap();
-            let full = format!("{name}-{suffix}");
-            let earlier: Vec<String> = plain
-                .then(|| name.to_owned())
-                .into_iter()
-                .chain([format!("{name}-{}", &suffix[..4]), full.clone()])
-                .chain((1..).map(|dashes| format!("{full}{}", "-".repeat(dashes))))
-                .take_while(|candidate| candidate != shown)
-                .take(64)
-                .collect();
-            assert!(
-                earlier.len() < 64,
-                "{machine} is shown as {shown}, not a candidate"
-            );
-            for candidate in &earlier {
-                assert!(
-                    used.contains(candidate) || taken(candidate),
-                    "{candidate} was free"
-                );
-            }
-            assert!(
-                !taken(shown) && used.insert(shown.clone()),
-                "{shown} wasn't free"
-            );
-        }
-
-        let mut local: BTreeSet<String> = own.iter().map(|w| (*w).to_owned()).collect();
-        for workspace in ["default", "x"] {
-            for shown in names.values() {
-                assert!(
-                    local.insert(format!("{shown}/{workspace}")),
-                    "{names:?}, {own:?}"
-                );
-            }
-        }
+        // One oracle for every case: names requests leave it as they found it.
+        thread_local!(static ORACLE: Cell<Option<Oracle>> = const { Cell::new(None) });
+        let mut oracle = ORACLE.take().unwrap_or_else(Oracle::spawn);
+        let keys: Vec<serde_json::Value> = machines
+            .iter()
+            .map(|key| serde_json::json!({"name": machine_name(key), "suffix": suffix(key)}))
+            .collect();
+        let reply = oracle.call(&serde_json::json!({"op": "names", "machines": keys, "own": own}));
+        ORACLE.set(Some(oracle));
+        assert_eq!(
+            reply["ok"], true,
+            "the oracle refused the machines: {reply}"
+        );
+        let shown: Vec<serde_json::Value> = machines
+            .iter()
+            .map(|machine| serde_json::json!(names[machine]))
+            .collect();
+        assert_eq!(
+            serde_json::json!(shown),
+            reply["prefixes"],
+            "{machines:?}, own {own:?}"
+        );
     }
 
     /// A suffix edited by hand to have characters of more than one byte is cut after four

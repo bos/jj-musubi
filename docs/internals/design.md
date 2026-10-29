@@ -264,11 +264,15 @@ is. Canonicalizing has to tell the two apart, from history alone, so that it sta
 
 Another machine is shown under its name, or, where two machines share a name or the name would
 clash with a workspace of this machine's own, under its name and the start of its key's random
-suffix (`laptop-1a2b`; `local_names`). The names are chosen among every machine the history has
-known, present or forgotten (`Presence::known`), so a machine keeps its name as others come and
-go, and a forgotten machine's name is never another's. This machine's own names as of a canonical
-operation are its workspaces in that view, or, where the hive has forgotten it, those as of its
-latest work, which `Presence` keeps through forgets (`own_names`).
+suffix (`laptop-1a2b`; `local_names`). Where that clashes too, with another machine's name or a
+workspace of this machine's own, it is shown under its name and its whole suffix, then that with
+ever more dashes: each machine in turn takes the first of these that is free, and
+`formal/Musubi/Names.lean` proves that no two workspaces are shown alike. The names are chosen
+among every machine the history has known, present or forgotten (`Presence::known`), so a machine
+keeps its name as others come and go, and a forgotten machine's name is never another's. This
+machine's own names as of a canonical operation are its workspaces in that view, or, where the
+hive has forgotten it, those as of its latest work, which `Presence` keeps through forgets
+(`own_names`).
 
 `jj undo` and `jj op restore` bring back older views, with names the hive no longer gives: a
 forgotten machine's, say, or, as here, one shown plainly before another machine of its name

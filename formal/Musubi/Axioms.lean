@@ -14,6 +14,7 @@ import Musubi.Refs
 import Musubi.Presence
 import Musubi.PresenceExec
 import Musubi.Copies
+import Musubi.Names
 
 open Musubi
 
@@ -164,3 +165,7 @@ open Musubi
 #print axioms Copies.join_refuses_duplicate
 #print axioms Copies.duplicate_taken_for_moved
 #print axioms Copies.move_taken_for_duplicate
+
+-- Names
+#print axioms Names.choose_free
+#print axioms Names.localName_injective

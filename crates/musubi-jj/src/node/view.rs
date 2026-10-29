@@ -341,9 +341,10 @@ impl NodeRepo {
 
     /// The local name of each workspace in a canonical view, whose operation has `presence`:
     /// this machine's own keep their names, and another machine's are prefixed with the
-    /// machine's name, as in `beta/default`, or with its name and part of its id when two
-    /// machines share a name or the prefix would make a name of this machine's own
-    /// (`own_names_in`, which the hive having forgotten this machine doesn't change). The
+    /// machine's name, as in `beta/default`, or with its name and part or all of its id when
+    /// two machines share a name or the prefix would start a name of this machine's own
+    /// (`workspaces::display_names`; `own_names_in`, which the hive having forgotten this
+    /// machine doesn't change). The
     /// names are chosen among every machine the view's history has known
     /// (`Presence::known`), so that a machine's name doesn't change as others are forgotten
     /// and come back, and a forgotten machine's is never another's.
@@ -409,8 +410,8 @@ impl NodeRepo {
     }
 
     /// Whether `name`, a workspace in this machine's view, is one this machine shows, or
-    /// once showed, another machine's under: `<prefix>/<workspace>`, with either of the
-    /// prefixes one of `machines` other than this one can have (`workspaces::display_forms`).
+    /// once showed, another machine's under: `<prefix>/<workspace>`, with a prefix one of
+    /// `machines` other than this one can be shown under (`workspaces::could_be_shown_as`).
     /// `jj undo` and `jj op restore` bring back older views, with names the hive no longer
     /// gives: a forgotten machine's, or one shown by another name since a machine of the same
     /// name joined. Such a name is this machine's own only if the hive has it so already, or
@@ -426,11 +427,7 @@ impl NodeRepo {
         machines
             .iter()
             .filter(|machine| machine.as_str() != self.machine.key())
-            .any(|machine| {
-                workspaces::display_forms(machine)
-                    .iter()
-                    .any(|form| form == prefix)
-            })
+            .any(|machine| workspaces::could_be_shown_as(machine, prefix))
     }
 
     /// Where every machine's workspaces were, as of the canonical form of this machine's

@@ -265,7 +265,7 @@ fn own_workspaces_named_like_another_machine_are_own() {
     let beta = hive.machine_key(1);
     let gamma = hive.machine_key(2);
     for (key, workspace) in [(&beta, "beta"), (&gamma, "gamma")] {
-        let [_, qualified] = musubi_jj::workspaces::display_forms(key);
+        let qualified = musubi_jj::workspaces::qualified_name(key);
         assert!(
             alpha.contains(&format!("{qualified}/{workspace}")),
             "{alpha:?}"
@@ -282,7 +282,7 @@ fn own_workspaces_named_like_another_machine_are_own() {
     hive.assert_converged();
     // `musubi forget` takes the name a machine is shown by, the plain one `musubi list` gives
     // it, or its key.
-    let [_, qualified] = musubi_jj::workspaces::display_forms(&beta);
+    let qualified = musubi_jj::workspaces::qualified_name(&beta);
     for name in [qualified.as_str(), "beta", beta.as_str()] {
         assert_eq!(
             hive.node(0).machine_named(name).unwrap(),

@@ -199,9 +199,11 @@ impl NodeRepo {
     }
 
     /// The key of the other machine shown here as `name`, as of this machine's op head: the
-    /// machine whose workspaces are `name/...`, as in `name/default@`. Its plain name, as the
-    /// hub lists it (`laptop` for one shown as `laptop-1a2b`), or a whole machine key
-    /// (`laptop#1a2b3c4d`), names it too, if no other machine shown here has it.
+    /// machine whose workspaces are `name/...`, as in `name/default@`. Any other name it could
+    /// be shown under (`workspaces::could_be_shown_as`), as the hub, which names machines
+    /// among every machine, may list it, or its plain name (`laptop` for one shown as
+    /// `laptop-1a2b`), or a whole machine key (`laptop#1a2b3c4d`), names it too, if no other
+    /// machine shown here has it.
     pub fn machine_named(&mut self, name: &str) -> Result<Option<String>, NodeError> {
         let head = self.merge_heads()?;
         let canonical = self.canonicalize(&head)?;
@@ -226,6 +228,14 @@ impl NodeRepo {
                 .map(|(machine, _)| machine)
                 .collect(),
         )
+        .or_else(|| {
+            only(
+                shown
+                    .keys()
+                    .filter(|machine| workspaces::could_be_shown_as(machine, name))
+                    .collect(),
+            )
+        })
         .or_else(|| {
             only(
                 shown

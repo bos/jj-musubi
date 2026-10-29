@@ -92,19 +92,49 @@ pub fn machine_name(key: &str) -> &str {
     key.split_once('#').map_or(key, |(name, _)| name)
 }
 
+/// A machine key's suffix: `1a2b3c4d` of `beta#1a2b3c4d`.
+fn suffix(key: &str) -> &str {
+    key.split_once('#').map_or("", |(_, id)| id)
+}
+
 /// The start of a machine key's suffix. Keys come from other machines, whose `musubi/machine`
 /// may have been edited by hand: whatever follows the `#`, this cuts it between characters.
 fn short_id(key: &str) -> &str {
-    key.split_once('#')
-        .map_or("", |(_, id)| &id[..id.floor_char_boundary(4)])
+    let id = suffix(key);
+    &id[..id.floor_char_boundary(4)]
 }
 
-/// Both names under which a machine's workspaces can be shown, `name` and `name-1a2b`
-/// (see [`display_names`]): which one depends on the other machines, and changes as they come
-/// and go.
-pub fn display_forms(key: &str) -> [String; 2] {
+/// The name under which a machine's workspaces are shown when its plain name isn't free:
+/// `beta-1a2b`, the first of `candidates` after the name.
+pub fn qualified_name(key: &str) -> String {
+    format!("{}-{}", machine_name(key), short_id(key))
+}
+
+/// The names under which a machine's workspaces can be shown, in the order
+/// [`display_names`] tries them: `name`, if `plain`; `name-1a2b`; `name-1a2b3c4d`, with the
+/// whole suffix; then that with ever more dashes, so that one is free however many names are
+/// taken. This is `candidates` in formal/Musubi/Names.lean.
+fn candidates(key: &str, plain: bool) -> impl Iterator<Item = String> {
     let name = machine_name(key);
-    [name.to_owned(), format!("{name}-{}", short_id(key))]
+    let full = format!("{name}-{}", suffix(key));
+    plain
+        .then(|| name.to_owned())
+        .into_iter()
+        .chain([qualified_name(key), full.clone()])
+        .chain((1..).map(move |dashes| format!("{full}{}", "-".repeat(dashes))))
+}
+
+/// Whether a machine's workspaces could be shown under `prefix`, whichever machines it is
+/// shown among: whether `prefix` is one of its `candidates`. Which one it is shown under
+/// changes as other machines come and go.
+pub fn could_be_shown_as(key: &str, prefix: &str) -> bool {
+    let name = machine_name(key);
+    let full = format!("{name}-{}", suffix(key));
+    prefix == name
+        || prefix == qualified_name(key)
+        || prefix
+            .strip_prefix(full.as_str())
+            .is_some_and(|dashes| dashes.chars().all(|c| c == '-'))
 }
 
 /// The canonical key of `workspace` on `machine`.
@@ -117,9 +147,11 @@ pub fn split_key(key: &str) -> Option<(&str, &str)> {
     key.split_once('/')
 }
 
-/// The names under which machines' workspaces are shown, as `<name>/<workspace>`: the
-/// machine's name, or `name-1a2b` when two machines share a name or `taken` says the name
-/// is in use.
+/// The names under which machines' workspaces are shown, as `<name>/<workspace>`: each
+/// machine, in order, takes the first of its `candidates` that no machine before it took
+/// and that `taken` doesn't say is in use; its plain name only if no other machine has that
+/// name. So no two machines are shown alike, nor any as a name `taken` holds: formal/Musubi/
+/// Names.lean proves the names injective (`localName_injective`).
 pub fn display_names(
     machines: &BTreeSet<String>,
     taken: impl Fn(&str) -> bool,
@@ -128,15 +160,15 @@ pub fn display_names(
     for machine in machines {
         *by_name.entry(machine_name(machine)).or_default() += 1;
     }
+    let mut used: BTreeSet<String> = BTreeSet::new();
     machines
         .iter()
         .map(|machine| {
-            let name = machine_name(machine);
-            let display = if by_name[name] > 1 || taken(name) {
-                format!("{name}-{}", short_id(machine))
-            } else {
-                name.to_owned()
-            };
+            let plain = by_name[machine_name(machine)] == 1;
+            let display = candidates(machine, plain)
+                .find(|name| !used.contains(name) && !taken(name))
+                .expect("a name longer than every one taken is free");
+            used.insert(display.clone());
             (machine.clone(), display)
         })
         .collect()
@@ -198,6 +230,9 @@ mod tests {
     use jj_lib::config::StackedConfig;
     use jj_lib::settings::UserSettings;
 
+    use hegel::TestCase;
+    use hegel::generators as gs;
+
     use super::*;
 
     #[test]
@@ -217,6 +252,107 @@ mod tests {
         assert_eq!(names["mac#bbbb0000"], "mac-bbbb");
         assert_eq!(names["git#cccc0000"], "git");
         assert_eq!(names["origin#dddd0000"], "origin-dddd");
+    }
+
+    /// Where the start of a suffix doesn't tell two machines apart, or a machine's name is
+    /// another's longer one, the later machine takes a longer name: the cases in
+    /// formal/Musubi/Names.lean.
+    #[test]
+    fn longer_names_where_shorter_clash() {
+        let machines: BTreeSet<String> = ["mac#aaaa1111", "mac#aaaa2222"].map(str::to_owned).into();
+        let names = display_names(&machines, |_| false);
+        assert_eq!(names["mac#aaaa1111"], "mac-aaaa");
+        assert_eq!(names["mac#aaaa2222"], "mac-aaaa2222");
+        let machines: BTreeSet<String> = ["mac#aaaa0000", "mac#bbbb0000", "mac-aaaa#12345678"]
+            .map(str::to_owned)
+            .into();
+        let names = display_names(&machines, |_| false);
+        assert_eq!(names["mac#aaaa0000"], "mac-aaaa");
+        assert_eq!(names["mac-aaaa#12345678"], "mac-aaaa-1234");
+        let machines: BTreeSet<String> = ["beta#1a2b3c4d"].map(str::to_owned).into();
+        let own = ["beta/x", "beta-1a2b/default"];
+        let names = display_names(&machines, |prefix| {
+            own.iter().any(|w| w.starts_with(&format!("{prefix}/")))
+        });
+        assert_eq!(names["beta#1a2b3c4d"], "beta-1a2b3c4d");
+    }
+
+    /// `display_names` against `assign` in formal/Musubi/Names.lean: each machine, in order,
+    /// is shown under the first of its candidates that no machine before it took and that
+    /// starts no name of this machine's own, and so the names here of a view's workspaces are
+    /// distinct (`localName_injective`). Names and suffixes are drawn from few, so that they
+    /// clash.
+    #[hegel::test(test_cases = 300)]
+    fn local_names_are_distinct(tc: TestCase) {
+        const NAMES: [&str; 3] = ["mac", "mac-aaaa", "mac-aaaa1111"];
+        const SUFFIXES: [&str; 4] = ["aaaa1111", "aaaa2222", "bbbb0000", "aaaa"];
+        const OWN: [&str; 7] = [
+            "default",
+            "mac/x",
+            "mac-aaaa/default",
+            "mac-aaaa2222/default",
+            "mac-aaaa1111-/x",
+            "mac-aaaa1111/default",
+            "mac-aaaa-aaaa/x",
+        ];
+        let pick = |n: usize| tc.draw(gs::integers::<usize>().max_value(n - 1));
+        let machines: BTreeSet<String> = (0..pick(5))
+            .map(|_| {
+                format!(
+                    "{}#{}",
+                    NAMES[pick(NAMES.len())],
+                    SUFFIXES[pick(SUFFIXES.len())]
+                )
+            })
+            .collect();
+        let own: BTreeSet<&str> = (0..pick(4)).map(|_| OWN[pick(OWN.len())]).collect();
+        let taken = |prefix: &str| own.iter().any(|w| w.starts_with(&format!("{prefix}/")));
+        let names = display_names(&machines, taken);
+
+        let mut used = BTreeSet::new();
+        for machine in &machines {
+            let plain = machines
+                .iter()
+                .filter(|other| machine_name(other) == machine_name(machine))
+                .count()
+                == 1;
+            let shown = &names[machine];
+            // `candidates` in formal/Musubi/Names.lean, spelled out here.
+            let (name, suffix) = machine.split_once('#').unwrap();
+            let full = format!("{name}-{suffix}");
+            let earlier: Vec<String> = plain
+                .then(|| name.to_owned())
+                .into_iter()
+                .chain([format!("{name}-{}", &suffix[..4]), full.clone()])
+                .chain((1..).map(|dashes| format!("{full}{}", "-".repeat(dashes))))
+                .take_while(|candidate| candidate != shown)
+                .take(64)
+                .collect();
+            assert!(
+                earlier.len() < 64,
+                "{machine} is shown as {shown}, not a candidate"
+            );
+            for candidate in &earlier {
+                assert!(
+                    used.contains(candidate) || taken(candidate),
+                    "{candidate} was free"
+                );
+            }
+            assert!(
+                !taken(shown) && used.insert(shown.clone()),
+                "{shown} wasn't free"
+            );
+        }
+
+        let mut local: BTreeSet<String> = own.iter().map(|w| (*w).to_owned()).collect();
+        for workspace in ["default", "x"] {
+            for shown in names.values() {
+                assert!(
+                    local.insert(format!("{shown}/{workspace}")),
+                    "{names:?}, {own:?}"
+                );
+            }
+        }
     }
 
     /// A suffix edited by hand to start with characters of more than one byte is cut between

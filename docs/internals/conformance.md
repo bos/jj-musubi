@@ -15,6 +15,7 @@ the tests send JSON requests to.
 | `Presence.lean`: which copies a hive shows | `Presence` | `presence::conformance`, through the oracle | [Presence](#presence) |
 | `Refs.lean`: per-machine refs | jj's import and export, and musubi's realization | `ref_laws` (the laws the model assumes), and `refs` and `view::tests`, against a Rust copy | [Per-machine refs](#per-machine-refs) |
 | `Chunks.lean`: chunked blobs | `BlobStore::receive` | `receive_follows_the_prefix_model`, against a Rust copy | [Chunked blobs](#chunked-blobs) |
+| `Names.lean`: the names other machines' workspaces show under | `workspaces::display_names` | `local_names_are_distinct`, against the rule | [Workspace names](#workspace-names) |
 
 ## The claim
 
@@ -621,3 +622,30 @@ cargo nextest run -p jj-musubi -E 'test(/^copy::conformance::/)'
 The test takes under a second. Dropping, from the oracle's check, the comparison of the
 record's config-id with the entry's fails 32 of the 4212 cases, and ignoring `sameDirectory`
 in its `refine` fails 8.
+
+## Workspace names
+
+`formal/Musubi/Names.lean` proves that the names under which a machine shows a view's
+workspaces are distinct: its own under their own names, and each other machine's as
+`<prefix>/<workspace>` ([design.md, "Which workspaces are this machine's
+own"](design.md#which-workspaces-are-this-machines-own)). Canonicalizing reads the names back as
+machine-qualified keys, so two workspaces shown alike would be taken for one. The chain has two
+links:
+
+1. **The rule.** `assign` gives each machine, in order, the first of its candidate prefixes
+   that is free: its name, if no other machine has it, then `name-1a2b`, `name-1a2b3c4d`, and
+   that with ever more dashes. A prefix is free if no machine before took it and no name of
+   this machine's own starts with it and `/`. One is always free (`choose_free`), and so the
+   names are injective, whatever the machines and the names of this machine's own
+   (`localName_injective`).
+2. **The code.** `workspaces::display_names` makes the same choices. The Hegel test
+   `workspaces::tests::local_names_are_distinct`, in `crates/musubi-jj/src/workspaces.rs`,
+   draws up to four machines and three names of this machine's own from names, suffixes and
+   names of its own chosen to clash. It requires every candidate before each machine's prefix
+   to be taken already, the prefix itself free, and the names of the view's workspaces
+   distinct. `longer_names_where_shorter_clash` pins the cases the rule before this one named
+   alike, which `Names.lean` checks with `#guard`.
+
+The test checks the rule, not where musubi applies it: that `local_names` and `canonical_view`
+pass it every machine the history has known and this machine's own names is for the race
+catalogue (`crates/musubi-sync/tests/races/forget.rs`) to check.

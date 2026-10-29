@@ -13,8 +13,11 @@ other terms are those of [design.md, "Vocabulary"](../docs/internals/design.md#v
   [design.md, "Copies that go away"](../docs/internals/design.md#copies-that-go-away)).
 - Which repository on a machine is the copy of a key, and which a duplicate made of its files
   (`Musubi/Copies.lean`; [copies.md](../docs/internals/copies.md)).
+- The names a machine shows other machines' workspaces under (`Musubi/Names.lean`; [design.md,
+  "Which workspaces are this machine's
+  own"](../docs/internals/design.md#which-workspaces-are-this-machines-own)).
 
-The last four are separate models, independent of the protocol model's state.
+The last five are separate models, independent of the protocol model's state.
 
 No proof is left unfinished (Lean's `sorry`) and the model adds no axioms. Every main theorem
 depends only on Lean's standard `propext`, `Classical.choice` and `Quot.sound`, some on fewer;
@@ -70,6 +73,7 @@ is `formal/.lake/build/bin/oracle`.
 | `Musubi/Presence.lean` | Which copies a hive shows. |
 | `Musubi/PresenceExec.lean` | The presence rule on a finite history, executable, for the oracle. |
 | `Musubi/Copies.lean` | Which repository is the copy of a key: musubi's decisions, jj's config-id rule, and a machine's repositories moved, copied, deleted and replaced. |
+| `Musubi/Names.lean` | The names a machine shows other machines' workspaces under, and `#guard` tests of them. |
 | `Musubi/Axioms.lean` | `#print axioms` for every main theorem. |
 | `Oracle.lean` | The `oracle` executable: a stdin/stdout loop around `ExecJson.handle`, which also answers measure, upload, presence and copies requests. |
 | `test/smoke.jsonl`, `test/smoke.expected`, `test/run_smoke.sh` | The oracle smoke test. |
@@ -299,6 +303,21 @@ defines work and forgets). For any operation graph:
 - `umax_merge`, `umax_work`, `umax_forget`, `present_iff_umax`: what musubi keeps of each
   copy, its latest work that no forget saw (`UMax`), follows from an operation's parents'
   alone, and says whether the copy is present.
+
+### Workspace names (`Names.lean`)
+
+Each other machine is shown under the first of its candidate prefixes that no machine before it
+took and that starts no name of this machine's own and `/`: its name, if no other machine has
+it, then its name and the start of its key's suffix, its name and the whole suffix, and that
+with ever more dashes ([conformance.md, "Workspace
+names"](../docs/internals/conformance.md#workspace-names)).
+
+- `choose_free`: one candidate is always free, one longer than every prefix taken and every
+  name of this machine's own.
+- `localName_injective`: the names of a view's workspaces, this machine's under their own
+  names and the others' as `<prefix>/<workspace>`, are distinct, whatever the machines and the
+  names of this machine's own, given machine names and suffixes without `/`, as musubi makes
+  them; only a machine key edited by hand could have one.
 
 ## Why the policy model suffices for liveness
 

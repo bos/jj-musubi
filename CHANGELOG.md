@@ -6,6 +6,10 @@ change the protocol, so run the same release on the hub and every machine (see
 
 ## Unreleased
 
+- Two machines are never shown under one name, as `laptop-1a2b/default@` could show two
+  machines named `laptop` whose ids start alike, and another machine's working copy never
+  shows under the name of a workspace of this machine's own. Where `laptop-1a2b` is taken, a
+  machine shows under its whole id, `laptop-1a2b3c4d`.
 - On the hub's machine, `--hub localhost`, or the machine's name as `musubi hub` prints it,
   now reaches the hub `musubi hub` serves there without `--dir` through its directory rather
   than over ssh, and so does such a name in `musubi.hub` or saved as the default hub. A copy

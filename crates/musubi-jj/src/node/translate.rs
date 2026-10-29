@@ -204,10 +204,13 @@ impl NodeRepo {
             })
             .collect();
         if parents != self.canonical.parents(&canonical_id)? {
-            return Err(NodeError::RewrittenRealization {
-                op: id.hex(),
-                canonical: canonical_id.hex(),
-            });
+            // For the daemon's log: the error says what a user needs.
+            tracing::info!(
+                "operation {} realizes canonical operation {} but no longer has its parents",
+                id.hex(),
+                canonical_id.hex()
+            );
+            return Err(NodeError::RewrittenRealization);
         }
         Ok(canonical_id)
     }

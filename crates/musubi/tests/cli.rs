@@ -1954,17 +1954,9 @@ fn settings_are_shared_through_the_binary() {
 fn status_says_when_retrying_cannot_help() {
     let env = TestEnv::with_real_op_times();
     let _filters = snapshot_filters(&env);
-    // Which of two checks finds the abandoned history first depends on how the syncs fell.
+    // Whether the join's first sync meets the abandoned history, or the daemon's, depends on
+    // how the syncs fell.
     let mut settings = insta::Settings::clone_current();
-    settings.add_filter(
-        concat!(
-            "operation [0-9a-f]+ realizes canonical operation [0-9a-f]+ but no longer has its ",
-            "parents|the operation history the hub accepted is no longer reachable from this ",
-            "repository's op heads",
-        ),
-        "[the hive's history is gone from this repository]",
-    );
-    // As does whether the join's first sync meets it, or the daemon's.
     settings.add_filter("the first sync failed: ", "");
     let _checks = settings.bind_to_scope();
     let mut logs = Logs::default();
@@ -1979,17 +1971,17 @@ fn status_says_when_retrying_cannot_help() {
     alpha.jj(&["describe", "-m", "third"]);
     alpha.jj(&["op", "abandon", &format!("..{accepted}")]);
     let err = musubi_fails(&env, &logs, &alpha, &["sync"]);
-    insta::assert_snapshot!(err, @"Error: [the hive's history is gone from this repository] (was `jj op abandon` run?); musubi does not replicate op abandon yet, so replication is paused for this repository. It can't sync again: to carry on, run `musubi leave --force`, make a new copy with `musubi clone`, and bring across any work this copy has that the hive lacks");
+    insta::assert_snapshot!(err, @"Error: this repository lost history the hive has (was `jj op abandon` run?), so it can't sync again: make a new copy with `musubi clone`, bring this one's work across to it, then run `musubi leave --force` here");
     let (_, hints) = status_in(&env, &logs, &alpha);
     insta::assert_snapshot!(hints, @"
-    Warning: Syncing fails: [the hive's history is gone from this repository] (was `jj op abandon` run?); musubi does not replicate op abandon yet, so replication is paused for this repository. It can't sync again: to carry on, run `musubi leave --force`, make a new copy with `musubi clone`, and bring across any work this copy has that the hive lacks
+    Warning: Syncing fails: this repository lost history the hive has (was `jj op abandon` run?), so it can't sync again: make a new copy with `musubi clone`, bring this one's work across to it, then run `musubi leave --force` here
     Hint: Retrying won't get past this; the warning says what will.
     ");
 
     // Nor does joining again, which says so, though the copy joins.
     musubi_in(&env, &logs, &alpha, &["leave", "--force"]);
     let err = musubi_fails(&env, &logs, &alpha, &["join"]);
-    insta::assert_snapshot!(err, @"Error: [the hive's history is gone from this repository] (was `jj op abandon` run?); musubi does not replicate op abandon yet, so replication is paused for this repository. It can't sync again: to carry on, run `musubi leave --force`, make a new copy with `musubi clone`, and bring across any work this copy has that the hive lacks");
+    insta::assert_snapshot!(err, @"Error: this repository lost history the hive has (was `jj op abandon` run?), so it can't sync again: make a new copy with `musubi clone`, bring this one's work across to it, then run `musubi leave --force` here");
 }
 
 /// With commit signing on, the commits musubi rewrites when it merges another machine's

@@ -18,6 +18,9 @@ change the protocol, so run the same release on the hub and every machine (see
   messages, and `leave`'s hint, `musubi leave --force`, is on a line of its own too.
 - `musubi clone` says "Cloned hive ... into ..." once it has, rather than "Cloning" before,
   and no longer passes on jj's `Initialized repo in` line.
+- After `jj op abandon` removes history the hive has, musubi says so in one shorter message,
+  the same whichever check found it, without operation ids; the troubleshooting page has the
+  rest.
 - A machine shows another machine that shares its name as `laptop-1a2b`, as the hub's list
   does, where it used to show it as `laptop`.
 - A `jj` command that was already running when a repository joined its hive, or one run with

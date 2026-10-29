@@ -283,7 +283,7 @@ pub fn history_abandoned(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
         matches!(
             cause.downcast_ref::<NodeError>(),
-            Some(NodeError::UnreachableHistory | NodeError::RewrittenRealization { .. })
+            Some(NodeError::UnreachableHistory | NodeError::RewrittenRealization)
         )
     })
 }

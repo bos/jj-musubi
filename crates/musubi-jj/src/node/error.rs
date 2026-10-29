@@ -20,9 +20,11 @@ use crate::git_command::GitError;
 use crate::objects::Incompleteness;
 use crate::objects::ObjectError;
 
-/// How to carry on after `jj op abandon` pauses syncing, which no retry gets past.
-const CARRY_ON: &str = ". It can't sync again: to carry on, run `musubi leave --force`, make a \
-     new copy with `musubi clone`, and bring across any work this copy has that the hive lacks";
+/// What a user sees once `jj op abandon` has paused syncing, which no retry gets past, and
+/// the way on. docs/troubleshooting.md says the rest, such as bringing work across.
+const HISTORY_GONE: &str = "this repository lost history the hive has (was `jj op abandon` \
+     run?), so it can't sync again: make a new copy with `musubi clone`, bring this one's work \
+     across to it, then run `musubi leave --force` here";
 
 #[derive(Debug, Error)]
 pub enum NodeError {
@@ -94,18 +96,12 @@ pub enum NodeError {
     Config { path: PathBuf, message: String },
     /// `jj op abandon` made operations that the hub accepted unreachable. Replicating the
     /// history that is left would put them back on every other machine.
-    #[error(
-        "the operation history the hub accepted is no longer reachable from this repository's \
-         op heads (was `jj op abandon` run?); musubi does not replicate op abandon yet, so \
-         replication is paused for this repository{CARRY_ON}"
-    )]
+    #[error("{HISTORY_GONE}")]
     UnreachableHistory,
-    #[error(
-        "operation {op} realizes canonical operation {canonical} but no longer has its parents \
-         (was `jj op abandon` run?); musubi does not replicate op abandon yet, so replication is \
-         paused for this repository{CARRY_ON}"
-    )]
-    RewrittenRealization { op: String, canonical: String },
+    /// An operation that realizes one of the hive's no longer has that operation's parents,
+    /// as after `jj op abandon`. Which, the log says.
+    #[error("{HISTORY_GONE}")]
+    RewrittenRealization,
     /// The hub accepts an operation only with everything it requires, which a shallow or
     /// partial clone can't send.
     #[error(

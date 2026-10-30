@@ -76,6 +76,16 @@ and wire formats outright, with no aliases or migrations, but:
 - Say what breaks, and what a user must do on upgrading, under an Unreleased heading at the top
   of `CHANGELOG.md`, adding the heading if it's missing.
 
+## Building against jj's main branch
+
+The `jj-next` bookmark holds what musubi needs to build and pass against jj's main branch,
+and nothing else: mutable changes on top of musubi's `main`, one for each change in jj that
+musubi must adapt to. Before working on it, rebase it onto `main`; pushing it rewrites it.
+
+A fix that builds and passes against the jj release `main` pins goes on `main`, not
+`jj-next`; split a fix that does so only in part. Drop from `jj-next` what lands on `main`.
+Bumping the pinned jj release lands `jj-next` on `main`, which leaves it empty.
+
 ## Style
 
 - Comments and Markdown wrap at 98 columns; rustfmt formats code at 100.

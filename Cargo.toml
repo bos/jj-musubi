@@ -42,7 +42,7 @@ tempfile = "3"
 # jj-lib's, so that musubi builds no second copy.
 gix = { version = "0.88", default-features = false }
 # Exact: a `reproduce_failure` blob replays only with the version of Hegel that made it.
-hegeltest = "=0.50.2"
+hegeltest = "=0.50.3"
 # jj-lib's: musubi decodes jj-lib's protobuf types with it.
 prost = "0.14.4"
 # The same as jj-cli's, so that musubi builds no second copy.

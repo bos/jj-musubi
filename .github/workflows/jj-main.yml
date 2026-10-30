@@ -2,8 +2,10 @@ name: jj main
 
 # musubi built and tested against jj's main branch rather than the release it pins, so that
 # changes to jj-lib that will break musubi show up before a release brings them. Nightly, and
-# by hand against any commit of jj. It changes nothing in the repository: the job rewrites
-# its own checkout (.github/scripts/use-jj-checkout.sh) and builds jj from the same source.
+# by hand against any commit of jj. It builds jj-next, the changes musubi already has for jj's
+# main branch, rebased onto the commit it runs for, so that it fails only for what jj-next
+# lacks. It changes nothing in the repository: the job rewrites its own checkout
+# (.github/scripts/use-jj-checkout.sh) and builds jj from the same source.
 on:
   schedule:
     - cron: "47 5 * * *"
@@ -17,7 +19,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: jj-main-${{ inputs.rev || 'main' }}
+  group: jj-main-${{ github.ref }}-${{ inputs.rev || 'main' }}
   cancel-in-progress: false
 
 env:
@@ -33,6 +35,20 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # All history and branches, for origin/jj-next and where it left this commit.
+          fetch-depth: 0
+      - name: Rebase jj-next
+        run: |
+          if git rev-parse -q --verify refs/remotes/origin/jj-next >/dev/null; then
+            onto=$(git rev-parse HEAD)
+            # Against all of $onto, so that what has landed there drops out.
+            if ! git -c user.name=CI -c user.email=ci@invalid rebase -q "$onto" origin/jj-next; then
+              echo "::error::jj-next doesn't rebase onto $onto"
+              exit 1
+            fi
+            echo "jj-next: $(git rev-list --count "$onto"..HEAD) commits" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "musubi: $(git log -1 --format='%H %s')" >> "$GITHUB_STEP_SUMMARY"
       # Outside the workspace, or cargo takes jj's crates for members of musubi's.
       - name: Fetch jj
         env:

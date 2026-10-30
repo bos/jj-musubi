@@ -81,10 +81,13 @@ and wire formats outright, with no aliases or migrations, but:
 The `jj-next` bookmark holds what musubi needs to build and pass against jj's main branch,
 and nothing else: mutable changes on top of musubi's `main`, one for each change in jj that
 musubi must adapt to. Before working on it, rebase it onto `main`; pushing it rewrites it.
+Leave the jj release musubi pins as it is there: the job that builds it points it at jj's
+main branch.
 
 A fix that builds and passes against the jj release `main` pins goes on `main`, not
 `jj-next`; split a fix that does so only in part. Drop from `jj-next` what lands on `main`.
-Bumping the pinned jj release lands `jj-next` on `main`, which leaves it empty.
+Bumping the pinned jj release lands `jj-next` on `main`, which leaves it empty. The nightly
+job against jj's main branch builds `jj-next` rebased onto `main`.
 
 ## Style
 

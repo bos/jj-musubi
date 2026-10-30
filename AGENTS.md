@@ -68,11 +68,11 @@ path that runs often:
 Until 1.0, musubi promises no compatibility with earlier releases. Rename flags, config keys
 and wire formats outright, with no aliases or migrations, but:
 
-- If a change alters the wire format and `PROTOCOL_VERSION` hasn't changed since the latest
-  `v*` tag (`jj tag list`), bump it, so that machines and hubs of different releases refuse
-  each other, saying so; with no tag yet, leave it alone. Never change how an `Envelope`
-  (`crates/musubi-sync/src/wire.rs`) encodes the versions it starts with: every release reads
-  them first.
+- Every change to the wire format bumps `PROTOCOL_VERSION` and the minor version in the
+  workspace `Cargo.toml` (0.1.x to 0.2.0), even if an earlier change since the last release
+  already did, so that machines and hubs built either side of it refuse each other, saying so.
+  Never change how an `Envelope` (`crates/musubi-sync/src/wire.rs`) encodes the versions it
+  starts with: every release reads them first.
 - Say what breaks, and what a user must do on upgrading, under an Unreleased heading at the top
   of `CHANGELOG.md`, adding the heading if it's missing.
 

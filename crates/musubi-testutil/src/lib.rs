@@ -528,7 +528,11 @@ fn rfc3339(millis: u64) -> String {
         timestamp: MillisSinceEpoch(i64::try_from(EPOCH_MILLIS + millis).unwrap()),
         tz_offset: 0,
     };
-    timestamp.to_datetime().unwrap().to_rfc3339()
+    timestamp
+        .to_zoned()
+        .unwrap()
+        .strftime("%Y-%m-%dT%H:%M:%S%.f%:z")
+        .to_string()
 }
 
 /// A config layer giving what jj writes the times that a `jj` command with `seed` gives

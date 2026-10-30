@@ -44,7 +44,7 @@ fn repository() -> (TestEnv, std::sync::Arc<ReadonlyRepo>, Vec<CommitId>) {
         &default_backend_factories(),
     )
     .unwrap();
-    let loaded = loader.load_at_head().block_on().unwrap();
+    let loaded = loader.load_at_head(None).block_on().unwrap();
     let mut commits = vec![loaded.store().root_commit_id().clone()];
     commits.extend(
         ["base", "one", "two", "three"].map(|name| CommitId::try_from_hex(&ids[name]).unwrap()),

@@ -745,7 +745,7 @@ mod tests {
             &default_backend_factories(),
         )
         .unwrap();
-        let loaded = loader.load_at_head().block_on().unwrap();
+        let loaded = loader.load_at_head(None).block_on().unwrap();
         let tree = loaded.store().empty_merged_tree();
         let mut tx = loaded.start_transaction();
         let mut commit = |parent: &CommitId, name: &str| {

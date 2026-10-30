@@ -60,12 +60,12 @@ fn workspace_merge_matches_jj() {
     for &base in &choices {
         for &ours in &choices {
             for &theirs in &choices {
-                let base_repo = set(&loader.load_at_head().block_on().unwrap(), base, "base");
+                let base_repo = set(&loader.load_at_head(None).block_on().unwrap(), base, "base");
                 // Described apart, so that two sides setting the same are still two
                 // operations: the settings' operation time is the same for both.
                 let one = set(&base_repo, ours, "ours");
                 set(&base_repo, theirs, "theirs");
-                let merged = loader.load_at_head().block_on().unwrap();
+                let merged = loader.load_at_head(None).block_on().unwrap();
                 // jj merges with the merge operation's first parent as its own side.
                 let (first, second) = if merged.operation().parent_ids()[0] == *one.op_id() {
                     (ours, theirs)

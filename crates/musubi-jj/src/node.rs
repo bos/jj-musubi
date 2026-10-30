@@ -390,7 +390,7 @@ impl NodeRepo {
 
     /// Loads the repository at its op head, letting jj merge concurrent heads.
     fn load_at_head(&self) -> Result<Arc<ReadonlyRepo>, NodeError> {
-        let loaded = catch_jj_panic(|| Ok(self.loader.load_at_head().block_on()));
+        let loaded = catch_jj_panic(|| Ok(self.loader.load_at_head(None).block_on()));
         match loaded {
             Ok(Ok(repo)) => Ok(repo),
             Ok(Err(err)) if format!("{err:?}").contains("root commit as one of the parents") => {

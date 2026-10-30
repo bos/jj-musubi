@@ -278,7 +278,7 @@ impl Fixture {
             &default_backend_factories(),
         )
         .unwrap();
-        block_on(loader.load_at_head()).unwrap()
+        block_on(loader.load_at_head(None)).unwrap()
     }
 
     /// The hive's invariants once synced: running `jj` everywhere and syncing again

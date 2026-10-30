@@ -55,6 +55,7 @@ use jj_lib::op_store::OperationId;
 use jj_lib::op_store::RefTarget;
 use jj_lib::op_store::View;
 use jj_lib::operation::Operation;
+use jj_lib::ref_name::WorkspaceName;
 use jj_lib::repo::ReadonlyRepo;
 use jj_lib::repo::RepoLoader;
 use jj_lib::settings::UserSettings;
@@ -149,7 +150,13 @@ impl Reference {
         let settings = settings();
         let root = dir.path().join("repo");
         fs::create_dir(&root).unwrap();
-        block_on(Workspace::init_external_git(&settings, &root, &git)).unwrap();
+        block_on(Workspace::init_external_git(
+            &settings,
+            &root,
+            WorkspaceName::DEFAULT,
+            &git,
+        ))
+        .unwrap();
         let repo_path = root.join(".jj/repo");
         let extra = repo_path.join("store/extra");
         fs::remove_dir_all(&extra).unwrap();

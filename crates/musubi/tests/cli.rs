@@ -26,6 +26,10 @@ use musubi_testutil::TestRepo;
 /// stopped answering, so failing here, with their logs, says more than nextest's timeout.
 const DEADLINE: Duration = Duration::from_secs(45);
 
+/// A `jj workspace list` template giving only each working copy's name, one to a line: jj's
+/// default format differs between releases.
+const NAMES: &str = "name ++ \"\\n\"";
+
 fn musubi() -> &'static Path {
     Path::new(env!("CARGO_BIN_EXE_musubi"))
 }
@@ -701,9 +705,9 @@ fn hub_join_sync_clone_and_list() {
         !alpha.jj(&["workspace", "list"]).contains("beta/")
     });
     // It keeps its working copy.
-    let workspaces = beta.jj(&["workspace", "list"]);
+    let workspaces = beta.jj(&["workspace", "list", "-T", NAMES]);
     assert!(
-        workspaces.lines().any(|line| line.starts_with("beta: ")),
+        workspaces.lines().any(|line| line == "beta"),
         "{workspaces}"
     );
     let list = musubi_in(&env, &logs, &beta, &["list"]);
@@ -1050,8 +1054,8 @@ fn a_copy_can_join_again_after_leaving() {
         );
     }
     // Every machine's working copy keeps its own name.
-    let list = alpha.jj(&["workspace", "list"]);
-    let listed: Vec<&str> = list.lines().filter_map(|l| l.split(':').next()).collect();
+    let list = alpha.jj(&["workspace", "list", "-T", NAMES]);
+    let listed: Vec<&str> = list.lines().collect();
     assert_eq!(listed, ["alpha", "beta/beta", "gamma/gamma"], "{list}");
 }
 
@@ -1089,8 +1093,8 @@ fn copies_make_a_lost_hive_again() {
         (&alpha, ["alpha", "beta/beta"]),
         (&beta, ["alpha/alpha", "beta"]),
     ] {
-        let list = repo.jj(&["workspace", "list"]);
-        let listed: Vec<&str> = list.lines().filter_map(|l| l.split(':').next()).collect();
+        let list = repo.jj(&["workspace", "list", "-T", NAMES]);
+        let listed: Vec<&str> = list.lines().collect();
         assert_eq!(listed, names, "{list}");
     }
 }
@@ -1388,9 +1392,9 @@ fn leaving_needs_the_hub_unless_forced() {
     ");
     assert_eq!(membership(&alpha), "joined");
     // It keeps its working copy, though on the empty commit its forget abandoned.
-    let workspaces = alpha.jj(&["workspace", "list", "--ignore-working-copy"]);
+    let workspaces = alpha.jj(&["workspace", "list", "--ignore-working-copy", "-T", NAMES]);
     assert!(
-        workspaces.lines().any(|line| line.starts_with("alpha: ")),
+        workspaces.lines().any(|line| line == "alpha"),
         "{workspaces}"
     );
     let list = musubi_in(&env, &logs, &alpha, &["list"]);

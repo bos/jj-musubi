@@ -26,6 +26,7 @@ on the next run. *The search* is the generated end-to-end tests below, run with 
 | Example tests | each crate's `tests/` | jj integration details: translation, git refs, objects, joins, transports, the hub's hives, the CLI | ~0.2–0.5 s per test |
 | Fault tests | `crates/musubi-sync/tests/it/faults.rs` | Malformed requests reaching the hub's decoders, and links that die or stall partway through a sync | ~0.2–1.5 s per test |
 | Fuzz targets | `fuzz/` | Bytes no honest peer sends reaching the decoders of frames, messages, bundles, and imported operations and views | Minutes to hours a run; opt-in |
+| Kani proofs | `#[cfg(kani)]` modules | Arithmetic on sizes and offsets a peer controls going wrong for any value, however unlikely | Under a second each; opt-in |
 | Generated end-to-end tests | `crates/musubi-sync/tests/e2e_search` | Everything interacting: real `jj` commands, real repositories, faults | Seconds per case; opt-in |
 
 Costs are for one test running among the rest of the suite, on 32 Linux cores. When a change
@@ -255,6 +256,27 @@ The files musubi appends lines to have Hegel properties beside their parsers ins
   grown with zeros), reads each operation and view back as written or not at all, loses only
   what was written after the damage, and is whole again once the next record is appended; two
   writers sharing one log each find what the other appended.
+
+## Kani proofs
+
+[Kani](https://model-checking.github.io/kani/) checks a Rust function for every value of its
+inputs at once, rather than for those a test or a fuzzer happens to try, and gives a failing
+input when it finds one. It suits small, pure arithmetic on numbers a peer sends or a hub
+offers, where the case that goes wrong is one no test would pick:
+
+- `blobs::proofs`: where the bytes of a chunk that extend what a blob's receiver has start,
+  for any length so far, offset and chunk length, including offsets near `u64::MAX`.
+- `wire::proofs`: a chunk leaves at least as much room for its envelope at every payload a
+  hub may offer as at the smallest, where the unit test `a_full_chunk_fits` shows that it is
+  enough.
+
+It is slow on code that handles strings or long buffers: a proof that `fit_error` cuts a
+message to fit, which takes more than 1 KiB of message to reach the cut, ran for 15 minutes
+without finishing. Keep that to the fuzz targets and Hegel.
+
+`just kani` runs every proof. It needs `cargo install --locked kani-verifier` and then
+`cargo kani setup`, once. The proofs build only under `cargo kani`, so `just check` doesn't
+build them.
 
 ## Generated end-to-end tests
 

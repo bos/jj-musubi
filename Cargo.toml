@@ -70,8 +70,9 @@ let_underscore_drop = "warn"
 redundant_imports = "warn"
 unsafe_code = "forbid"
 unused_qualifications = "warn"
-# cargo-fuzz builds everything with `--cfg fuzzing`, for the entry points fuzz/ reaches.
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)'] }
+# cargo-fuzz builds everything with `--cfg fuzzing`, for the entry points fuzz/ reaches, and
+# `cargo kani` with `--cfg kani`, for its proof harnesses.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(fuzzing)', 'cfg(kani)'] }
 
 # jj's own lint set, plus a few that matter for a daemon that must not panic.
 [workspace.lints.clippy]

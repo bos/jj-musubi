@@ -49,6 +49,7 @@ Some runs are slow, and not part of `just check`:
 just property       # the generated end-to-end search
 just fuzz bundle    # one fuzz target, until stopped (needs cargo-fuzz and nightly Rust)
 just mutants        # mutation testing of the protocol core (needs cargo-mutants)
+just kani           # every Kani proof (needs kani-verifier; see testing.md)
 just bench-smoke    # every benchmark script, once (see bench/README.md)
 ```
 

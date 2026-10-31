@@ -168,10 +168,7 @@ impl BlobStore {
             .append(true)
             .open(&partial)?;
         let have = file.metadata()?.len();
-        // A chunk at an offset near `u64::MAX`, which no honest sender uses, extends nothing.
-        let end = offset.saturating_add(data.len() as u64);
-        if offset <= have && end > have {
-            let skip = usize::try_from(have - offset).expect("chunks are small");
+        if let Some(skip) = new_from(have, offset, data.len()) {
             file.write_all(&data[skip..])?;
         }
         let have = file.metadata()?.len();
@@ -221,6 +218,15 @@ impl BlobStore {
             sweep_dir(&self.dir.join(sub), cutoff);
         }
     }
+}
+
+/// Where the bytes of a chunk of `len` bytes at `offset` that extend a prefix of `have` bytes
+/// start, if any do.
+fn new_from(have: u64, offset: u64, len: usize) -> Option<usize> {
+    // A chunk at an offset near `u64::MAX`, which no honest sender uses, extends nothing.
+    let end = offset.saturating_add(len as u64);
+    (offset <= have && end > have)
+        .then(|| usize::try_from(have - offset).expect("chunks are small"))
 }
 
 /// Removes the files in `dir` last modified before `cutoff`.
@@ -456,5 +462,24 @@ mod tests {
         }
         assert!(finished, "transfer did not finish in {resends} resends");
         assert_eq!(store.read(&id, 0, len + 1).unwrap(), (len as u64, blob));
+    }
+}
+
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    /// A chunk extends the prefix exactly where the prefix ends, with at least one byte, for
+    /// any prefix, offset and length, however large or hostile.
+    #[kani::proof]
+    fn a_chunk_extends_the_prefix_where_it_ends() {
+        let (have, offset, len): (u64, u64, usize) = kani::any();
+        match new_from(have, offset, len) {
+            Some(skip) => {
+                assert!(skip < len);
+                assert_eq!(offset + skip as u64, have);
+            }
+            None => assert!(offset > have || offset.saturating_add(len as u64) <= have),
+        }
     }
 }

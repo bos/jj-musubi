@@ -475,3 +475,22 @@ mod tests {
         assert_eq!(release_of(&[]), None);
     }
 }
+
+#[cfg(kani)]
+mod proofs {
+    use musubi_transport::stream::PLAUSIBLE_PAYLOADS;
+
+    use super::*;
+
+    /// Whatever messages a hub takes, a chunk leaves at least the room for its envelope that
+    /// it does for the smallest, where `tests::a_full_chunk_fits` shows that room is enough.
+    #[kani::proof]
+    fn a_chunk_leaves_room_for_the_envelope() {
+        let max_payload: usize = kani::any();
+        kani::assume(PLAUSIBLE_PAYLOADS.contains(&max_payload));
+        let smallest = *PLAUSIBLE_PAYLOADS.start();
+        let chunk = chunk_size(max_payload);
+        assert!(chunk > 0);
+        assert!(max_payload - chunk >= smallest - chunk_size(smallest));
+    }
+}

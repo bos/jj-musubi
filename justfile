@@ -121,6 +121,10 @@ fuzz-smoke:
         cargo fuzz run "$target" -- -runs=2000
     done
 
+# Run every Kani proof. See "Kani proofs" in docs/internals/testing.md.
+kani:
+    cargo kani --workspace
+
 # Mutation testing of the protocol core against its property and conformance tests. Each
 # mutant runs against the oracle built here, not one it builds for itself.
 mutants: oracle

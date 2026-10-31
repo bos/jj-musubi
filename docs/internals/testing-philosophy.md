@@ -152,6 +152,7 @@ new test, and [efficient-tests.md](efficient-tests.md) says how to stay within i
   [conformance.md](conformance.md)'s table of hand-made mutants gets a row when a new check
   catches one it lacks.
 - `just fuzz-smoke`, after changing a decoder or a fuzz target.
+- `just kani`, after changing a Kani proof or the code one covers.
 - The search (`just property`), nightly. When it fails, find out why first:
   - a failure that doesn't replay exactly is a bug in determinism;
   - one the harness causes, doing what no user or fault could, or a check that is wrong, is

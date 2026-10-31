@@ -280,9 +280,12 @@ message to fit, which takes more than 1 KiB of message to reach the cut, ran for
 without finishing. Keep that to the fuzz targets and Hegel. A harness that collects into a
 `Vec` can run out of memory where one that walks the same iterator takes a second.
 
-`just kani` runs every proof. It needs `cargo install --locked kani-verifier` and then
-`cargo kani setup`, once. The proofs build only under `cargo kani`, so `just check` doesn't
-build them.
+`just kani` runs every proof, and takes cargo-kani's options, as in `just kani --harness
+window`. It needs `cargo install --locked kani-verifier` and then `cargo kani setup`, once.
+The proofs build only under `cargo kani`, so `just check` doesn't build them. CBMC, which Kani
+runs, can take all a machine's memory on a proof it can't finish, and macOS enforces no
+`ulimit` on memory, so `just kani` stops the run once it holds more than `KANI_MEMORY_MB`
+(4096 unless set). Run Kani only through it.
 
 ## Generated end-to-end tests
 

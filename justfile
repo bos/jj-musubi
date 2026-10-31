@@ -121,9 +121,32 @@ fuzz-smoke:
         cargo fuzz run "$target" -- -runs=2000
     done
 
-# Run every Kani proof. See "Kani proofs" in docs/internals/testing.md.
-kani:
-    cargo kani --workspace
+# Run every Kani proof, or as cargo-kani's options say: `just kani --harness window`. See
+# "Kani proofs" in docs/internals/testing.md.
+kani *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # CBMC can take all a machine's memory on a proof it can't finish, and macOS enforces no
+    # ulimit on memory, so stop the run once it holds more than KANI_MEMORY_MB.
+    limit=${KANI_MEMORY_MB:-4096}
+    set -m # The run in a process group of its own, to add up and stop.
+    cargo kani --workspace {{args}} &
+    run=$!
+    # Out of the terminal's foreground group, the run misses its Ctrl-C: pass it on, and stop
+    # the run however this ends.
+    trap 'kill -TERM -- "-$run" 2> /dev/null || true' EXIT
+    trap 'exit 130' INT TERM HUP
+    while kill -0 "$run" 2> /dev/null; do
+        kb=$(ps -o rss= -p "$(pgrep -d, -g "$run")" 2> /dev/null | awk '{ n += $1 } END { print n + 0 }' || true)
+        if (( ${kb:-0} > limit * 1024 )); then
+            kill -TERM -- "-$run" 2> /dev/null || true
+            wait "$run" 2> /dev/null || true
+            echo "kani: stopped at over $limit MB (KANI_MEMORY_MB)" >&2
+            exit 1
+        fi
+        sleep 0.2
+    done
+    wait "$run"
 
 # Mutation testing of the protocol core against its property and conformance tests. Each
 # mutant runs against the oracle built here, not one it builds for itself.

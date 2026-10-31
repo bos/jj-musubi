@@ -24,7 +24,7 @@ on the next run. *The search* is the generated end-to-end tests below, run with 
 | Race catalogue | `crates/musubi-sync/tests/races` | Concurrent changes on different machines resolving differently from jj's local behavior ([races.md](races.md)) | ~0.3 s per test |
 | Unit tests | `#[cfg(test)]` modules | Pure logic: URL normalization and hive names across forges, matching joining repositories to hives | Microseconds |
 | Example tests | each crate's `tests/` | jj integration details: translation, git refs, objects, joins, transports, the hub's hives, the CLI | ~0.2–0.5 s per test |
-| Fault tests | `crates/musubi-sync/tests/it/faults.rs` | Malformed requests reaching the hub's decoders, and links that die or stall partway through a sync | ~0.2–1.5 s per test |
+| Fault tests | `crates/musubi-sync/tests/it/faults.rs` | Malformed requests reaching the hub's decoders, malformed replies reaching a node's, and links that die or stall partway through a sync | ~0.2–1.5 s per test |
 | Fuzz targets | `fuzz/` | Bytes no honest peer sends reaching the decoders of frames, messages, bundles, and imported operations and views | Minutes to hours a run; opt-in |
 | Kani proofs | `#[cfg(kani)]` modules | Arithmetic on sizes and offsets a peer controls going wrong for any value, however unlikely | Under a second each; opt-in |
 | Generated end-to-end tests | `crates/musubi-sync/tests/e2e_search` | Everything interacting: real `jj` commands, real repositories, faults | Seconds per case; opt-in |
@@ -183,6 +183,14 @@ build"](efficient-tests.md#make-an-expensive-fixture-once-per-build)).
   version. The hub must answer each without panicking; its head must move only forward, to
   operations whose closure it has (HubMonotone and HubClosed); and afterwards it must still
   answer a fetch from the root.
+- `calls_survive_malformed_replies` gives a node, partway through one of the session's calls,
+  replies no honest hub sends in place of the hub's. Half are the real reply with its numbers
+  wrong: acknowledgements of any amount, chunks of any total or with the wrong data, indirect
+  replies and attachments of any length. The rest are the real reply corrupted, another
+  request's reply, a reply of another kind, garbage, or a reply from another version. Requests
+  are picked by kind, so that a call's one protocol request is as likely to get one as its
+  dozens of chunks. The call must end without panicking or sending requests forever, and,
+  once the hub answers honestly again, get the reply it got in the session.
 - `calls_finish_once_the_link_is_back` makes one of the session's calls through a link that
   fails at a chosen request, in one of three ways: the request and everything after it are
   lost, as when the wifi goes off; the request arrives but its reply and everything after it

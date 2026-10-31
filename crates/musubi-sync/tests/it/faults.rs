@@ -1,11 +1,12 @@
-//! What the protocol tests never send: malformed requests, and a link that dies or stalls
-//! partway through a sync (docs/internals/testing.md, "Faults").
+//! What the protocol tests never send: malformed requests and replies, and a link that dies
+//! or stalls partway through a sync (docs/internals/testing.md, "Faults").
 //!
 //! The protocol tests deliver well-formed messages, and lose, duplicate, or delay whole ones.
 //! Here the hub takes requests no honest node sends, built from a real session's: cut short,
-//! corrupted, spliced, pointing at the wrong blobs, from another version. And a real node's
-//! link fails partway through a sync, as when the wifi goes off or a laptop's lid closes,
-//! while the hub hears such requests and another machine carries on.
+//! corrupted, spliced, pointing at the wrong blobs, from another version. A node takes
+//! replies no honest hub sends, made the same way. And a real node's link fails partway
+//! through a sync, as when the wifi goes off or a laptop's lid closes, while the hub hears
+//! such requests and another machine carries on.
 
 #![allow(clippy::unwrap_used)]
 
@@ -42,6 +43,7 @@ use musubi_sync::wire::Envelope;
 use musubi_sync::wire::HubReply;
 use musubi_sync::wire::HubRequest;
 use musubi_sync::wire::WireAttachment;
+use musubi_sync::wire::WireReply;
 use musubi_sync::wire::WireRequest;
 use musubi_sync::wire::chunk_size;
 use musubi_sync::wire::fit_error;
@@ -167,6 +169,58 @@ fn calls_finish_once_the_link_is_back(tc: TestCase) {
         if !moved {
             assert_eq!(reply, call.reply);
         }
+    });
+}
+
+/// A call that gets replies no honest hub sends, in place of some of the real ones, ends,
+/// failing or not, without panicking or sending requests forever; and once the hub answers
+/// honestly again, the call made again gets the reply it got in the session, so nothing the
+/// replies left in the node's blob store stands in its way. Each case is one call of the
+/// session, from the hub's state just before it, as in
+/// [`calls_finish_once_the_link_is_back`].
+#[hegel::test(test_cases = 50, suppress_health_check = [HealthCheck::TooSlow])]
+fn calls_survive_malformed_replies(tc: TestCase) {
+    let session = session();
+    let call = pick(&tc, &session.calls);
+    // The call's requests by kind, so that the one protocol request among a download's
+    // dozens of chunks is as likely to get a bad reply as they are.
+    let mut kinds: BTreeMap<u8, Vec<usize>> = BTreeMap::new();
+    for at in 0..call.requests {
+        let kind = match Envelope::decode(&session.seen.requests[call.start + at]).unwrap() {
+            HubRequest::Protocol(_) => 0,
+            HubRequest::PutChunk { .. } => 1,
+            HubRequest::GetChunk { .. } => 2,
+            HubRequest::Indirect { .. } => 3,
+        };
+        kinds.entry(kind).or_default().push(at);
+    }
+    let kinds: Vec<Vec<usize>> = kinds.into_values().collect();
+    let mut garbled = BTreeMap::new();
+    for _ in 0..tc.draw(gs::integers::<usize>().min_value(1).max_value(3)) {
+        let at = *pick(&tc, pick(&tc, &kinds));
+        garbled.insert(at, malformed_reply(&tc, session, call.start + at));
+    }
+    run_local(async {
+        let dir = musubi_testutil::tempdir();
+        let hub_dir = dir.path().join("hub");
+        let network = MemoryNetwork::new(1, MAX_PAYLOAD);
+        serve(
+            session.hub_after(call.start, &hub_dir),
+            Arc::new(network.connect()),
+        )
+        .await;
+        let link = Link::new(Arc::new(network.connect()), &hub_dir, None);
+        link.garble(garbled);
+        let blobs = dir.path().join("node");
+        let remote = RemoteHub::new(link.clone(), RPC.into(), &blobs, TIMEOUT).unwrap();
+        // Whatever it makes of them, as long as it gets there.
+        drop(remote.call(call.request(&session.seen, &blobs)).await);
+        link.check_progress();
+        link.heal();
+        let reply = remote.call(call.request(&session.seen, &blobs)).await;
+        link.check_progress();
+        let reply = map_reply(reply.unwrap(), |id| id.to_bytes(), |_| Ok(())).unwrap();
+        assert_eq!(reply, call.reply);
     });
 }
 
@@ -500,6 +554,8 @@ struct LinkState {
     /// The replies that came back, by request.
     replies: BTreeMap<usize, Vec<u8>>,
     fault: Option<(usize, Fault)>,
+    /// Replies to give in place of the hub's, by request.
+    garbled: BTreeMap<usize, Vec<u8>>,
     since_healed: usize,
 }
 
@@ -512,6 +568,7 @@ impl Link {
                 sent: vec![],
                 replies: BTreeMap::new(),
                 fault,
+                garbled: BTreeMap::new(),
                 since_healed: 0,
             }),
         })
@@ -525,9 +582,17 @@ impl Link {
         self.state.lock().unwrap().replies.clone()
     }
 
+    /// From now on, gives `replies` in place of the hub's to the requests they're keyed by,
+    /// counting from the first this link carried. The hub still gets each request. A garbled
+    /// reply comes back even where a fault would have lost it, and is what `replies` records.
+    fn garble(&self, replies: BTreeMap<usize, Vec<u8>>) {
+        self.state.lock().unwrap().garbled = replies;
+    }
+
     fn heal(&self) {
         let mut state = self.state.lock().unwrap();
         state.fault = None;
+        state.garbled.clear();
         state.since_healed = 0;
     }
 
@@ -583,6 +648,8 @@ impl Transport for Link {
             }
             _ => self.inner.request(subject, payload, timeout).await,
         };
+        let garbled = self.state.lock().unwrap().garbled.remove(&n);
+        let reply = garbled.map_or(reply, |garbled| Ok(Bytes::from(garbled)));
         if let Ok(reply) = &reply {
             self.state.lock().unwrap().replies.insert(n, reply.to_vec());
         }
@@ -606,6 +673,8 @@ fn an_hour_passes(hub_dir: &Path) {
 /// own, and the first fetches that.
 struct Session {
     seen: Seen,
+    /// The hub's replies, by request.
+    replies: BTreeMap<usize, Vec<u8>>,
     calls: Vec<Call>,
     head: Vec<u8>,
     /// The hub's directory as each call starts, `<n>` after the first `n` requests: copying
@@ -620,7 +689,7 @@ impl Session {
     /// ends at, and the hub's snapshots.
     fn load(dir: &Path) -> Self {
         let requests = read_frames(&dir.join("requests"));
-        let replies = read_frames(&dir.join("replies"))
+        let replies: BTreeMap<usize, Vec<u8>> = read_frames(&dir.join("replies"))
             .into_iter()
             .map(|frame| {
                 let (n, reply) = frame.split_at(8);
@@ -633,6 +702,7 @@ impl Session {
         Self {
             calls: Call::all(&requests, &replies),
             seen: Seen::new(requests),
+            replies,
             head: std::fs::read(dir.join("head")).unwrap(),
             snapshots: dir.join("snapshots"),
         }
@@ -939,6 +1009,98 @@ fn malformed(tc: &TestCase, seen: &Seen, heads: &[Vec<u8>]) -> Vec<Vec<u8>> {
     } else {
         as_blob(&request)
     }
+}
+
+/// A reply no honest hub sends to request `n` of the session, built from what the session
+/// carried. Half the time it is the real reply with its numbers wrong: an acknowledgement of
+/// any amount, a chunk of any total or the wrong data, an indirect reply or attachments of
+/// any length, as the code that reads them takes on trust. Otherwise it is the real reply
+/// corrupted, the reply to another request, a reply of another kind, garbage, or a reply
+/// from another version.
+fn malformed_reply(tc: &TestCase, session: &Session, n: usize) -> Vec<u8> {
+    let seen = &session.seen;
+    let encode = |reply| Envelope::encode(reply).unwrap();
+    let real = session.replies.get(&n);
+    if let Some(real) = real
+        && tc.draw(gs::booleans())
+    {
+        return encode(match Envelope::decode(real).unwrap() {
+            HubReply::ChunkAck { .. } => HubReply::ChunkAck {
+                received: number(tc, seen),
+                complete: tc.draw(gs::booleans()),
+            },
+            HubReply::Chunk { total, data } => HubReply::Chunk {
+                total: if tc.draw(gs::booleans()) {
+                    number(tc, seen)
+                } else {
+                    total
+                },
+                data: mutate(tc, &data, seen),
+            },
+            HubReply::Indirect { blob, .. } => HubReply::Indirect {
+                blob,
+                len: number(tc, seen),
+            },
+            HubReply::Protocol(reply) => HubReply::Protocol(damaged_reply(tc, seen, reply)),
+            other => other,
+        });
+    }
+    match tc.draw(gs::integers::<u8>().max_value(6)) {
+        0 => tc.draw(gs::binary().max_size(64)),
+        // The real reply, cut short, corrupted, or spliced.
+        1 if real.is_some() => mutate(tc, real.unwrap(), seen),
+        // The reply to another request, as from a hub that mixed them up.
+        2 => (*pick(tc, &session.replies.values().collect::<Vec<_>>())).clone(),
+        3 => encode(HubReply::ChunkAck {
+            received: number(tc, seen),
+            complete: tc.draw(gs::booleans()),
+        }),
+        4 => encode(HubReply::Indirect {
+            blob: blob(tc, seen),
+            len: number(tc, seen),
+        }),
+        5 => encode(match tc.draw(gs::integers::<u8>().max_value(2)) {
+            0 => HubReply::Error(tc.draw(gs::text().max_size(64))),
+            1 => HubReply::NoHive,
+            _ => HubReply::Removed,
+        }),
+        // From a hub of another version.
+        _ => postcard::to_stdvec(&Envelope {
+            protocol: tc.draw(gs::integers::<u32>()),
+            jj_lib: tc.draw(gs::text().max_size(8)),
+            release: tc.draw(gs::text().max_size(8)),
+            body: HubReply::NoHive,
+        })
+        .unwrap(),
+    }
+}
+
+/// `reply` with each attachment as it was, another blob or the same one of any length, or a
+/// real bundle cut short or corrupted.
+fn damaged_reply(tc: &TestCase, seen: &Seen, reply: WireReply) -> WireReply {
+    map_reply(
+        reply,
+        |id| id,
+        |attachment| {
+            Ok(
+                match (tc.draw(gs::integers::<u8>().max_value(3)), attachment) {
+                    (0, WireAttachment::Blob { blob, .. }) => WireAttachment::Blob {
+                        blob,
+                        len: number(tc, seen),
+                    },
+                    (1, _) => WireAttachment::Blob {
+                        blob: blob(tc, seen),
+                        len: number(tc, seen),
+                    },
+                    (2, _) if !seen.payloads.is_empty() => {
+                        WireAttachment::Inline(mutate(tc, pick(tc, &seen.payloads), seen))
+                    }
+                    (_, attachment) => attachment,
+                },
+            )
+        },
+    )
+    .unwrap()
 }
 
 /// A real push with its bundles inline, one of them damaged: cut short, as by a connection

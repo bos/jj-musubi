@@ -70,7 +70,8 @@ test what a model assumes of jj as laws, as `ref_laws` does.
   that a core taking the wrong step fails.
 - **A change to the wire format** needs no model change where the model abstracts it away, but the
   fuzz targets for what it changes (`frames`, `envelope`, `bundle`, `import`) must reach the new
-  form, as must `hub_survives_malformed_requests` for a message or a bundle.
+  form, as must `hub_survives_malformed_requests` for a request or a bundle, and
+  `calls_survive_malformed_replies` for a reply.
   [AGENTS.md](../../AGENTS.md) says when `PROTOCOL_VERSION` changes.
 - **A change to how concurrent changes resolve** gets a row in [races.md](races.md), the race test
   it names, and a rule in the search if the search can't yet produce the situation.

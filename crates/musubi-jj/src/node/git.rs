@@ -25,6 +25,7 @@ use jj_lib::repo::ReadonlyRepo;
 use jj_lib::repo::Repo as _;
 use jj_lib::repo::RepoLoader;
 use jj_lib::store::Store;
+use jj_lib::view::View;
 use pollster::FutureExt as _;
 
 use super::NodeError;
@@ -296,11 +297,14 @@ impl Colocation {
     /// Runs jj's `export_refs` on top of a realization and returns the operation that
     /// records the result: the same operation if nothing changed, otherwise a copy with the
     /// updated per-machine fields. `is_join` says whether a local operation is a join point.
+    /// `beside` are this machine's op heads concurrent with the realization, whose merge with
+    /// it musubi exports next.
     pub fn export_refs(
         &self,
         loader: &RepoLoader,
         realized: &OperationId,
         is_join: &dyn Fn(&Operation) -> bool,
+        beside: &[Operation],
     ) -> Result<OperationId, NodeError> {
         let op = loader.load_operation(realized).block_on()?;
         let repo: Arc<ReadonlyRepo> = loader.load_at(&op).block_on()?;
@@ -313,7 +317,7 @@ impl Colocation {
             root: loader.op_store().root_operation_id(),
             is_join,
         };
-        let expected = export_conflicted_remote_bookmarks(tx.repo_mut(), &op, &history)?;
+        let expected = export_conflicted_remote_bookmarks(tx.repo_mut(), &op, &history, beside)?;
         let remember = |exported: &OperationId| {
             let ids = [realized, exported];
             *self.expected.lock().expect("not poisoned") = ids
@@ -364,12 +368,16 @@ impl Colocation {
 /// `git fetch` that happens to match a term; the next fetch after the conflict resolves
 /// corrects it. Any other value, absent included, was put there by git since, and the import
 /// takes it, as it would without musubi. A ref that can't be read or written is left alone, as
-/// jj's export leaves a failed ref (Refs.lean, `exportConflicted`).
+/// jj's export leaves a failed ref (Refs.lean, `exportConflicted`). Nor is a ref written where
+/// `.git` holds the value an op head `beside` the realization records and the realization
+/// doesn't: that head put it there, as by a fetch, and the merge of the two, exported next,
+/// can keep it, which a write for the realization alone would undo.
 /// Returns the expected values, by git ref.
 fn export_conflicted_remote_bookmarks(
     mut_repo: &mut MutableRepo,
     op: &Operation,
     history: &History<'_>,
+    beside: &[Operation],
 ) -> Result<Vec<(GitRefNameBuf, Option<RefTarget>)>, NodeError> {
     type Terms = Vec<Option<CommitId>>;
     let conflicted: Vec<(GitRefNameBuf, Option<RefTarget>, Terms)> = mut_repo
@@ -405,6 +413,10 @@ fn export_conflicted_remote_bookmarks(
         .iter()
         .map(|(name, expected, _)| (name.clone(), expected.clone()))
         .collect();
+    let beside = beside
+        .iter()
+        .map(|op| op.view().block_on())
+        .collect::<Result<Vec<_>, _>>()?;
     let git_repo = jj_lib::git::get_git_repo(mut_repo.store()).map_err(GitExportError::from)?;
     for (name, expected, terms) in conflicted {
         let Some(expected) = expected else {
@@ -421,6 +433,13 @@ fn export_conflicted_remote_bookmarks(
             None => None,
         };
         let recorded = mut_repo.view().get_git_ref(&name);
+        let theirs = |view: &View| {
+            let other = view.get_git_ref(&name);
+            other != recorded && other.is_resolved() && other.as_normal() == actual.as_ref()
+        };
+        if beside.iter().any(theirs) {
+            continue;
+        }
         let known = terms.contains(&actual)
             || (recorded.is_resolved() && recorded.as_normal() == actual.as_ref());
         if actual.as_ref() != expected.as_normal() {

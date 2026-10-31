@@ -1078,6 +1078,29 @@ fn restore_of_a_conflicted_remote_bookmark_resolves_alike() {
     assert_eq!((&origin.v.l, &origin.v.r), (&base, &base));
 }
 
+/// A fetch beside a realization of a conflict, as Hegel found: after both machines have
+/// `two`, this machine fetches `base` while the other, behind, fetches `one`, so that the
+/// merge conflicts `y@origin`, with `one` as its expected value, and `jj undo` here brings the
+/// conflict back once the undo's import has resolved it. Meanwhile the other machine, behind
+/// again, fetches `base`, a term of the conflict, then realizes the undo beside its fetch,
+/// and merges the two, keeping the fetch. musubi must leave `base` in that machine's `.git`:
+/// had it written `one` for the realization, the other machine's next command, which moves
+/// `x`, would import that as a move made with git, and move `y` back to `one`.
+#[test]
+fn realization_beside_a_fetch_keeps_the_fetch() {
+    let mut refs = Refs::new();
+    let [root, base, one, two] = [0, 1, 2, 3].map(|i| RefTarget::normal(refs.commits[i].clone()));
+    refs.musubi_realizes_with(None, two, false, false);
+    refs.jj_fetches_from(base.clone());
+    refs.musubi_realizes_with(None, one, false, true);
+    refs.jj_restores_to(None);
+    assert!(!refs.model.get(Ref::Origin).v.r.is_resolved());
+    refs.musubi_realizes_with(None, base.clone(), false, true);
+    let (there, g) = read(&refs.fixture.load(THERE), Ref::Origin);
+    assert_eq!((&there.r, &there.k, &g), (&base, &base, &base));
+    refs.musubi_realizes_with(Some((Ref::X, root)), base, false, false);
+}
+
 /// How many cases to make: `MUSUBI_CONFORMANCE_CASES`, as for the other conformance tests,
 /// or 12, each a few tenths of a second of real `jj`, `git` and syncs.
 fn refs_cases() -> u64 {

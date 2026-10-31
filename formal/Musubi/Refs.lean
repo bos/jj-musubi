@@ -102,6 +102,11 @@ What the model still leaves out, as testing it against jj showed
   enters `CStep` only by musubi's realization, as of a merge another machine made; a `jj`
   command merging this machine's own heads to one is jj's merge, whose import resolves it to
   this machine's `.git`.
+- musubi doesn't write the expected value for a realization where `.git` holds the value
+  that one of the machine's own op heads concurrent with it records and the realization
+  doesn't: that head put it there, as by a fetch of a term of the conflict, and the merge of
+  the two, which musubi exports next, can keep it. The model has no concurrent heads of
+  remote bookmarks.
 - The expected value is a ghost: the model takes it as given with each realized operation,
   and doesn't model the history it is computed from. A `jj` command that merges op heads
   itself imports at once, so its machine resolves a conflict the merge makes to its own

@@ -420,7 +420,10 @@ links:
    and `restore_of_a_conflicted_remote_bookmark_resolves_alike` drives the state machine
    through `restore_import_agrees`: concurrent fetches conflict `y@origin`, a fetch here
    settles it, this machine restores the conflict, and both machines' commands resolve it to
-   the fetched value.
+   the fetched value. `realization_beside_a_fetch_keeps_the_fetch` is a run Hegel found:
+   the other machine fetches a term of a restored conflict before realizing the restore,
+   and the merge keeps its fetch, so musubi must not write the conflict's expected value to
+   that machine's `.git` for the realization alone.
 
    musubi's *shortcut* for merging per-machine fields (`PerMachine::merged_trivially`) takes
    the side that changed, where at most one did; otherwise, or where a side has a tracked
@@ -491,7 +494,12 @@ What the test relies on of jj, and what it leaves out:
   instead of the side. The model takes the expected value as given with each operation; the
   test computes it from the parents' as `export_conflicted_remote_bookmarks` does, and checks
   that both machines' `.git`s have it, but makes no joins, where musubi takes the side too,
-  as the history before a join is only the joining machine's.
+  as the history before a join is only the joining machine's. A realization writes no
+  conflicted remote bookmark where `.git` holds the value that one of the machine's own op
+  heads concurrent with it records and the realization doesn't, since their merge, which
+  musubi exports next, may keep that head's value; the model has no concurrent heads of
+  remote bookmarks, so the test checks that through the other machine's `.git` and its next
+  command.
 - **Not covered.** The state machine makes no merges of more than two heads and no
   criss-cross merges. It locks no remote ref, since `CStep.advance` admits only exports that
   can succeed (a failed one ends as `remote_reset_without_export` says). The realization

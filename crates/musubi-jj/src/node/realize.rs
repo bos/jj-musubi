@@ -595,13 +595,17 @@ impl NodeRepo {
         let realized = self.realize(canonical)?;
         // Views made ahead inherit what this changes, in a colocated repository.
         self.prepared = None;
-        let superseded = self.check_mergeable(canonical, &realized)?;
+        let (superseded, concurrent) = self.check_mergeable(canonical, &realized)?;
         let colocation = self.colocation();
         let _lock = colocation.map(Colocation::lock).transpose()?;
         let head = match colocation {
             Some(colocation) => {
-                let exported = colocation
-                    .export_refs(&self.loader, &realized, &|op| self.is_join_point(op))?;
+                let exported = colocation.export_refs(
+                    &self.loader,
+                    &realized,
+                    &|op| self.is_join_point(op),
+                    &concurrent,
+                )?;
                 self.insert_map(exported.clone(), canonical.clone())?;
                 exported
             }
@@ -631,12 +635,13 @@ impl NodeRepo {
     /// each would fail, or for some jj bugs panic, until someone reverted an operation by
     /// hand. Unpublished, jj keeps working, and the error says which operations to revert.
     /// Returns the op heads the realization descends from, beyond its parents, which are
-    /// not concurrent with it: after a catch-up of several operations, the previous head.
+    /// not concurrent with it: after a catch-up of several operations, the previous head;
+    /// and those that are.
     fn check_mergeable(
         &self,
         canonical: &OperationId,
         realized: &OperationId,
-    ) -> Result<Vec<OperationId>, NodeError> {
+    ) -> Result<(Vec<OperationId>, Vec<Operation>), NodeError> {
         let realized_op = self.loader.load_operation(realized).block_on()?;
         let mut heads = self.local_heads()?;
         let others: Vec<OperationId> = heads
@@ -661,7 +666,7 @@ impl NodeRepo {
             }
         }
         if theirs.is_empty() {
-            return Ok(superseded);
+            return Ok((superseded, theirs));
         }
         // This machine's operations that the hive doesn't have: one of them conflicts.
         let roots = realized_op.parents().block_on()?;
@@ -707,7 +712,7 @@ impl NodeRepo {
             drop(memo);
             return Err(self.unmergeable(&ours, culprit, reason));
         }
-        Ok(superseded)
+        Ok((superseded, theirs))
     }
 
     /// Whether jj can merge `operations` without failing or panicking. jj merges op heads in

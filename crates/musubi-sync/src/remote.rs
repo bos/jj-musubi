@@ -203,7 +203,11 @@ impl RemoteHub {
         // Once, though the reply names it twice: each path deletes its file.
         blobs.sort();
         blobs.dedup();
-        let total = blobs.iter().map(|(_, len)| len).sum();
+        // The lengths the hub claims set progress, the lane, and which chunks a download asks
+        // for, but a download ends by the chunks it gets, so a claim past `u64::MAX` saturates.
+        let total = blobs
+            .iter()
+            .fold(0, |total: u64, (_, len)| total.saturating_add(*len));
         let lane = lanes.lane(total).await;
         if total > 0 {
             self.progress.set(Activity::Receiving { done: 0, total });
@@ -212,7 +216,7 @@ impl RemoteHub {
         let mut received = 0;
         for (blob, len) in blobs {
             let path = self.download(&blob, len, &*lane, received).await?;
-            received += len;
+            received = received.saturating_add(len);
             downloads.push((blob, Arc::new(tempfile::TempPath::try_from_path(path)?)));
         }
         // Handling the reply imports its bundles.
@@ -347,7 +351,7 @@ impl RemoteHub {
         let mut restarts = 0;
         loop {
             if let Some(path) = self.blobs.get(blob) {
-                self.progress.moved(received + total);
+                self.progress.moved(received.saturating_add(total));
                 return Ok(path);
             }
             let start = offset;
@@ -367,12 +371,12 @@ impl RemoteHub {
                 };
                 offset = match self.blobs.receive(blob, total, at, &data)? {
                     Received::Complete => {
-                        self.progress.moved(received + total);
+                        self.progress.moved(received.saturating_add(total));
                         break;
                     }
                     Received::Prefix(have) => have,
                 };
-                self.progress.moved(received + offset);
+                self.progress.moved(received.saturating_add(offset));
             }
             // A window takes the download further, unless what came failed the hash check
             // and it started over.

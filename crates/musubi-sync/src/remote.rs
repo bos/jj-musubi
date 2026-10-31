@@ -311,6 +311,10 @@ impl RemoteHub {
                         return Ok(total);
                     }
                     HubReply::ChunkAck { received, .. } => {
+                        anyhow::ensure!(
+                            received <= total,
+                            "the hub claims {received} bytes of {blob:?}, which is {total} bytes long"
+                        );
                         furthest = furthest.max(received);
                         self.progress.moved(sent + furthest);
                     }

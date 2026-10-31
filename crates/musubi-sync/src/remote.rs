@@ -290,8 +290,7 @@ impl RemoteHub {
         let mut restarts = 0;
         loop {
             let mut acks = FuturesOrdered::new();
-            let mut next = offset;
-            loop {
+            for next in window(offset, total, chunk as u64) {
                 let (_, data) = self.blobs.read(blob, next, chunk)?;
                 let request = HubRequest::PutChunk {
                     blob: *blob,
@@ -300,10 +299,6 @@ impl RemoteHub {
                     data,
                 };
                 acks.push_back(self.exchange(transport, Envelope::encode(request)?));
-                next += chunk as u64;
-                if next >= total || acks.len() == WINDOW {
-                    break;
-                }
             }
             // The hub may take a window's chunks in any order, so go on from the furthest it
             // reported. If it started over during the window, that is too far, and the next
@@ -353,19 +348,13 @@ impl RemoteHub {
             }
             let start = offset;
             let mut chunks = FuturesOrdered::new();
-            let mut next = offset;
-            loop {
+            for at in window(offset, total, chunk) {
                 let request = Envelope::encode(HubRequest::GetChunk {
                     blob: *blob,
-                    offset: next,
+                    offset: at,
                     len: chunk,
                 })?;
-                let at = next;
                 chunks.push_back(async move { (at, self.exchange(transport, request).await) });
-                next += chunk;
-                if next >= total || chunks.len() == WINDOW {
-                    break;
-                }
             }
             while let Some((at, reply)) = chunks.next().await {
                 let (total, data) = match reply? {
@@ -392,6 +381,15 @@ impl RemoteHub {
             }
         }
     }
+}
+
+/// The offsets of one window's chunks of `chunk` bytes, of a blob of `total` bytes, from
+/// `offset`: that one, and those after it short of the end, up to [`WINDOW`] in all.
+fn window(offset: u64, total: u64, chunk: u64) -> impl Iterator<Item = u64> {
+    std::iter::successors(Some(offset), move |&at| {
+        at.checked_add(chunk).filter(|&next| next < total)
+    })
+    .take(WINDOW)
 }
 
 /// Blobs put in the store to upload, removed when this is dropped: once the hub has them,
@@ -551,5 +549,34 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("failed its hash check"), "{err:#}");
         assert_eq!(transport.chunks.load(Ordering::SeqCst), RESTARTS + 1);
+    }
+}
+
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    /// For any offset, length and chunk size, a window starts where it is asked to, goes up
+    /// a chunk at a time without overflowing, and ends either at the end of the blob or after
+    /// a full window.
+    #[kani::proof]
+    #[kani::unwind(10)]
+    fn a_window_goes_on_from_its_offset() {
+        let (offset, total, chunk): (u64, u64, u64) = kani::any();
+        kani::assume(chunk > 0);
+        let mut count = 0;
+        let mut last = offset;
+        for at in window(offset, total, chunk) {
+            if count == 0 {
+                assert_eq!(at, offset);
+            } else {
+                assert_eq!(at - last, chunk);
+                assert!(at < total);
+            }
+            last = at;
+            count += 1;
+        }
+        assert!(count >= 1 && count <= WINDOW);
+        assert!(count == WINDOW || last.saturating_add(chunk) >= total);
     }
 }

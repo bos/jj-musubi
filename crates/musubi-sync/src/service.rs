@@ -150,7 +150,7 @@ impl HubService {
                 let (total, data) = self.prepared.read(&blob, offset, len)?;
                 // Once one download has finished, another may still be going: the minute
                 // runs from the last chunk anyone asks for.
-                if offset + data.len() as u64 >= total || self.served.contains_key(&blob) {
+                if reaches_end(offset, data.len(), total) || self.served.contains_key(&blob) {
                     self.served.insert(blob, Instant::now());
                 }
                 Ok((HubReply::Chunk { total, data }, None))
@@ -251,6 +251,12 @@ impl HubService {
     }
 }
 
+/// Whether a chunk of `got` bytes read from `offset` of a blob of `total` bytes is the last a
+/// download asks for: it ends the blob, or the download asked past the end.
+fn reaches_end(offset: u64, got: usize, total: u64) -> bool {
+    offset + got as u64 >= total
+}
+
 /// Logs a protocol request, returning how many operations it pushes.
 fn log_request(request: &Request<OpId, Attachment>) -> usize {
     match request {
@@ -290,5 +296,22 @@ fn log_reply(reply: &Reply<OpId, Attachment>) {
         Reply::Objects { for_ops, .. } => {
             tracing::debug!("sent the objects of {} operations", for_ops.len());
         }
+    }
+}
+
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+    use crate::blobs::span;
+
+    /// For any offset and length a node asks for, however hostile, the check after a read
+    /// can't overflow, and holds exactly when the read reached the end of the blob.
+    #[kani::proof]
+    fn a_download_ends_where_the_blob_does() {
+        let (total, offset, len): (u64, u64, usize) = kani::any();
+        let span = span(total, offset, len);
+        assert!(span.start <= span.end && span.end <= total);
+        let got = usize::try_from(span.end - span.start).unwrap();
+        assert_eq!(reaches_end(offset, got, total), span.end == total);
     }
 }

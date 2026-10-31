@@ -269,10 +269,16 @@ offers, where the case that goes wrong is one no test would pick:
 - `wire::proofs`: a chunk leaves at least as much room for its envelope at every payload a
   hub may offer as at the smallest, where the unit test `a_full_chunk_fits` shows that it is
   enough.
+- `service::proofs`: the hub's check for the last chunk of a download can't overflow, for any
+  offset and length a node asks for, and holds exactly when the read reached the end.
+- `remote::proofs`: each window of chunks an upload or download sends starts at its offset,
+  goes up a chunk at a time without overflowing, and either reaches the end or is a full
+  window.
 
 It is slow on code that handles strings or long buffers: a proof that `fit_error` cuts a
 message to fit, which takes more than 1 KiB of message to reach the cut, ran for 15 minutes
-without finishing. Keep that to the fuzz targets and Hegel.
+without finishing. Keep that to the fuzz targets and Hegel. A harness that collects into a
+`Vec` can run out of memory where one that walks the same iterator takes a second.
 
 `just kani` runs every proof. It needs `cargo install --locked kani-verifier` and then
 `cargo kani setup`, once. The proofs build only under `cargo kani`, so `just check` doesn't

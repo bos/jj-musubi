@@ -18,6 +18,7 @@ use std::io::Read as _;
 use std::io::Seek as _;
 use std::io::SeekFrom;
 use std::io::Write as _;
+use std::ops::Range;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -194,9 +195,10 @@ impl BlobStore {
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such blob"))?;
         let mut file = File::open(path)?;
         let total = file.metadata()?.len();
-        file.seek(SeekFrom::Start(offset.min(total)))?;
+        let span = span(total, offset, len);
+        file.seek(SeekFrom::Start(span.start))?;
         let mut data = vec![];
-        file.take(len as u64).read_to_end(&mut data)?;
+        file.take(span.end - span.start).read_to_end(&mut data)?;
         Ok((total, data))
     }
 
@@ -218,6 +220,13 @@ impl BlobStore {
             sweep_dir(&self.dir.join(sub), cutoff);
         }
     }
+}
+
+/// The bytes [`BlobStore::read`] takes of a blob of `total` bytes: up to `len` from `offset`,
+/// and none past the end.
+pub(crate) fn span(total: u64, offset: u64, len: usize) -> Range<u64> {
+    let start = offset.min(total);
+    start..start + (len as u64).min(total - start)
 }
 
 /// Where the bytes of a chunk of `len` bytes at `offset` that extend a prefix of `have` bytes

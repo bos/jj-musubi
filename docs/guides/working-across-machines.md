@@ -47,15 +47,15 @@ forgotten by itself after 6 hours unused (`musubi.forget-after`), so a short-liv
 doesn't linger in every machine's `jj log`.
 
 Another machine's rewrites can repeatedly make a coding agent's working copy stale. The
-[`musubi` skill](../../skills/musubi/SKILL.md) helps agents choose a stable base, avoid
+[`jj-musubi` skill](../../skills/jj-musubi/SKILL.md) helps agents choose a stable base, avoid
 disrupting other machines, and handle stale copies and sync failures.
 
 To install it, link it into your agent's skills directory. Replace `~/src/jj-musubi` with the
 path to your clone:
 
 ```sh
-ln -s ~/src/jj-musubi/skills/musubi ~/.claude/skills/musubi   # Claude Code
-ln -s ~/src/jj-musubi/skills/musubi ~/.codex/skills/musubi    # Codex
+ln -s ~/src/jj-musubi/skills/jj-musubi ~/.claude/skills/jj-musubi   # Claude Code
+ln -s ~/src/jj-musubi/skills/jj-musubi ~/.codex/skills/jj-musubi    # Codex
 ```
 
 ## See what other machines are doing

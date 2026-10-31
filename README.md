@@ -22,7 +22,7 @@ own machines, over plain ssh, with no service to sign up for.
   `jj log` shows what every agent everywhere is doing. Review an agent's change from wherever
   you are, hand it to an agent on another machine with `jj new devbox/default@`, and never ask
   "which machine was that on?" again. A [skill for
-  agents](skills/musubi/SKILL.md) keeps them from tripping over each other.
+  agents](skills/jj-musubi/SKILL.md) keeps them from tripping over each other.
 - **Every machine current, all the time.** Laptop, desktop, home server: each has every
   commit, bookmark and change you've made on any of them, within a second or so of the `jj`
   command that made it, and a machine that was asleep catches up within seconds of waking. You

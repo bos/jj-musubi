@@ -1,12 +1,12 @@
 ---
-name: musubi
+name: jj-musubi
 description: >
-  Work in jj repositories on machines where musubi is installed. Use with the jj skill to
-  check hive membership, choose a stable base, avoid disrupting other machines, and handle
-  stale working copies or sync failures.
+  Work in jj repositories on machines where musubi is installed. Use before starting work in
+  such a repository, before choosing a base or rewriting commits there, when jj says the
+  working copy is stale, and when a musubi command or sync fails.
 ---
 
-# musubi
+# jj-musubi
 
 musubi syncs jj's operation log through a hub. Copies in one **hive** behave like workspaces:
 other machines appear as `laptop/default@`, and their operations appear in `jj op log`.
@@ -14,15 +14,17 @@ other machines appear as `laptop/default@`, and their operations appear in `jj o
 ## Check hive membership once
 
 After confirming that the repository uses jj, run `musubi status`. It reads local state
-without contacting the hub or starting the daemon. Record the hive name for this session, or
-`musubi: none` if the repository is outside a hive or musubi isn't installed. Check again only
-after joining or leaving. Outside a hive, stop here unless the user asks to join one.
+without contacting the hub or starting the daemon. Record for this session the hive name it
+shows, or that there is none: the repository isn't part of a hive, or musubi isn't installed.
+Check again only after joining or leaving. Outside a hive, stop here unless the user asks to
+join one.
 
 ## Choose a base
 
 Another machine can rewrite `@` or a mutable ancestor, making your working copy stale.
-Updating it brings those edits into your files. If already stale, follow
-[Update a stale working copy](#update-a-stale-working-copy) first. Then inspect the history:
+Updating it changes the files in your checkout to match that machine's rewrite. If already
+stale, follow [Update a stale working copy](#update-a-stale-working-copy) first. Then list
+your mutable ancestors, the nearest immutable one, and every machine's working copy:
 
 ```sh
 jj log -r '(::@ & mutable()) | heads(::@ & immutable()) | working_copies()'
@@ -32,8 +34,27 @@ Use the nearest immutable ancestor, or `trunk()` for the latest trunk commit. Bu
 mutable change only if the task requires it, and inspect incoming rewrites after each stale
 update. If the only immutable ancestor is `root()`, ask the user which base to use.
 
-If `@` contains someone else's edits, preserve them and create a separate workspace on that
-base; see the jj skill. Otherwise, start a new change on the chosen base; for example:
+Run `jj diff -s` before you edit anything: the files it lists that you haven't edited
+yourself aren't yours. If there are any, work in place, and ask the user before editing one
+of those files. Don't put `@` on another commit (`jj new`, `jj edit`), and don't restore,
+abandon, or describe it while it holds those edits. After editing, commit only your paths,
+which makes your change `@-` and leaves the other edits pending in `@`; fold later edits into
+it with `squash`:
+
+```sh
+jj commit -m MESSAGE PATHS
+jj squash -u --into @- PATHS
+```
+
+Until you move it, your change stays the parent of `@`, so its files remain in the checkout
+for building and testing. When the task is done, move it onto the chosen base by its change id
+with `jj rebase -r CHANGE -d BASE`. jj rebases `@` onto your change's old parent, so the other
+edits stay in the checkout but yours leave it. Before squashing or rebasing, check for other
+working copies as [described below](#avoid-disrupting-other-working-copies). Run `jj diff -s`
+again before each commit; if files you didn't touch have changed, someone is editing live, so
+ask the user before going on.
+
+If `@` holds no one else's edits, start a new change on the chosen base; for example:
 
 ```sh
 jj new 'latest(heads(::@ & immutable()))'
@@ -46,7 +67,8 @@ working copies as [described below](#avoid-disrupting-other-working-copies). For
 jj rebase -r @ -d 'latest(heads(::@ & immutable()))'
 ```
 
-The user can protect `main` from rewrites by making it immutable across the hive:
+The user can protect `main` from rewrites by making it immutable across the hive. Suggest it;
+don't set it unasked:
 
 ```sh
 jj config set --repo 'revset-aliases."immutable_heads()"' \
@@ -85,12 +107,13 @@ jj log -r '::@ & mutable()'
 
 Inspect the result:
 
-- If another machine's rewrite changed files your task doesn't need, move your change to an
-  immutable base: `jj rebase -r @ -d 'latest(heads(::@- & immutable()))'`.
+- If another machine's rewrite changed files your task doesn't need, move your change onto
+  an immutable base as [Choose a base](#choose-a-base) says.
 - If `@` is divergent, your unsnapshotted edits may be in another version of the change.
-  Inspect the versions with `jj log -r 'change_id(<change>)'`. If another commit contains your
-  edits on the same parent, run `jj restore --from <other-commit-id>`, then
-  `jj abandon <other-commit-id>`.
+  List the versions with `jj log -r 'change_id(<id>)'`, using `@`'s change id. If another
+  version has the same parent and `jj diff --from @ --to <other-commit-id>` shows only your
+  edits, run `jj restore --from <other-commit-id>`, then `jj abandon <other-commit-id>`.
+  Otherwise, ask the user.
 
 ## Join or leave
 
@@ -98,8 +121,9 @@ Join or leave only when asked. `musubi list` shows hubs, hives, and this machine
 
 - `musubi join` adds this copy to an existing hive; `musubi create` starts a hive;
   `musubi clone <hive> <dir>` makes a new copy. Each accepts `--hub <host>`, starts the daemon,
-  and performs the first sync. For agents, `musubi.forget-after` defaults to six hours unused
-  unless jj's config already sets it. Tell the user which setting applies.
+  and performs the first sync. Run by a coding agent, each sets `musubi.forget-after` to `6h`
+  unless jj's config already sets it: the hive forgets the copy once no operation has been
+  recorded in it for six hours. Each command says what it set; tell the user.
 - `musubi daemon install` starts the daemon at login. Don't run it or change
   `musubi.forget-after` unless asked; explain the effect when proposing either.
 - `musubi leave` removes this copy from its hive and needs to reach the hub. Offer `--force`

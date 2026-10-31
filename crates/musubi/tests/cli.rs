@@ -1328,6 +1328,92 @@ chmod +x "{exe}.new" && mv "{exe}.new" "{exe}"
     ");
 }
 
+/// The example `musubi.upgrade-command`, `contrib/upgrade-from-source`, installs the release
+/// it is told from a revision of a jj repository of musubi's source, run from another
+/// directory as the daemon runs it, and builds neither the edit in progress in that
+/// repository's working copy nor snapshots it. Asked for another release, it says what the
+/// revision is instead, and installs nothing. The source is a stand-in whose `musubi` says
+/// only its release, which builds in a second. Fetching from a remote isn't tried.
+#[cfg(unix)]
+#[test]
+fn the_example_upgrade_command_installs_from_source() {
+    let env = TestEnv::new();
+    let _filters = snapshot_filters(&env);
+    let source = env.init_repo("source");
+    let manifest = |release: &str| {
+        format!(
+            "[workspace]\nmembers = [\"crates/musubi\"]\nresolver = \"3\"\n\n\
+             [workspace.package]\nversion = \"{release}\"\nedition = \"2024\"\n"
+        )
+    };
+    source.write_file("Cargo.toml", &manifest("0.2.0"));
+    source.write_file(
+        "Cargo.lock",
+        "version = 4\n\n[[package]]\nname = \"jj-musubi\"\nversion = \"0.2.0\"\n",
+    );
+    source.write_file(
+        "crates/musubi/Cargo.toml",
+        "[package]\nname = \"jj-musubi\"\nversion.workspace = true\n\
+         edition.workspace = true\n\n[[bin]]\nname = \"musubi\"\npath = \"main.rs\"\n",
+    );
+    source.write_file(
+        "crates/musubi/main.rs",
+        "fn main() {\n    println!(\"musubi {}\", env!(\"CARGO_PKG_VERSION\"));\n}\n",
+    );
+    source.jj(&["commit", "-m", "musubi 0.2.0"]);
+    source.jj(&["bookmark", "create", "main", "-r", "@-"]);
+    let op_log = [
+        "op",
+        "log",
+        "--ignore-working-copy",
+        "--no-graph",
+        "-T",
+        "id",
+    ];
+    let op = source.jj(&op_log);
+    source.write_file("Cargo.toml", &manifest("0.3.0"));
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contrib/upgrade-from-source");
+    let installed = env.root().join("installed");
+    // The cargo building this test, ahead of any rustup proxy, which would look for its
+    // toolchains in the test's home.
+    let cargo = Path::new(env!("CARGO"));
+    let path = std::env::join_paths(
+        std::iter::once(cargo.parent().unwrap().to_owned())
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let upgrade = |release: &str| {
+        let mut command = source.program(&script);
+        command
+            .arg(source.path())
+            .current_dir(env.root())
+            .env("MUSUBI_UPGRADE_TO", release)
+            .env("PATH", &path)
+            .env("CARGO_INSTALL_ROOT", &installed);
+        command.output().unwrap()
+    };
+    let refused = upgrade("0.3.0");
+    assert!(!refused.status.success());
+    insta::assert_snapshot!(String::from_utf8_lossy(&refused.stderr), @"upgrade-from-source: main in $ROOT/source is musubi 0.2.0, not musubi 0.3.0");
+    assert!(!installed.exists());
+    let output = upgrade("0.2.0");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let version = Command::new(installed.join("bin/musubi"))
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&version.stdout), "musubi 0.2.0\n");
+    assert_eq!(source.jj(&op_log), op, "the command changed the source");
+    assert_eq!(
+        fs::read_to_string(source.path().join("Cargo.toml")).unwrap(),
+        manifest("0.3.0")
+    );
+}
+
 /// Serves the hub's socket in `dir` as a hub of musubi 99.0.0, on another protocol, would:
 /// answering every request with a message this release refuses. Serves until the runtime it
 /// returns is dropped.

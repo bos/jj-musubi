@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+#
+# Builds and installs the release of musubi a hub runs from a jj repository of musubi's
+# source, for the daemon to run as `musubi.upgrade-command` (docs/guides/manage.md, "Upgrade
+# musubi").
+#
+# Usage: upgrade-from-source [SOURCE [REVISION]]
+#
+#   SOURCE    the jj repository of musubi's source; ~/dev/jj-musubi unless given
+#   REVISION  the revision of it to build; main unless given
+#
+# Set it up on each machine with:
+#
+#   jj config set --user musubi.upgrade-command '~/bin/upgrade-from-source ~/dev/jj-musubi'
+#
+# The daemon runs it with MUSUBI_UPGRADE_TO set to the release the hub runs, such as 0.3.0.
+# It installs REVISION if its top-level Cargo.toml says that is the release, fetching from
+# SOURCE's remotes first if it doesn't, and fails, saying so, if it still doesn't. It builds
+# a copy of REVISION's files, never touching SOURCE's working copy or snapshotting your
+# edits there: you may be in the middle of a change when it runs.
+#
+# It needs jj, git and cargo on the daemon's PATH (the one `musubi daemon install` saw), and
+# installs with `cargo install`, where cargo does by default: ~/.cargo/bin, or
+# CARGO_INSTALL_ROOT. That must be the `musubi` the daemon runs. It builds in
+# ~/.cache/musubi/upgrade-from-source (in XDG_CACHE_HOME if set), which keeps the build's
+# dependencies, so that the next upgrade builds only musubi's own crates.
+#
+# To try it, name the release REVISION is; this installs it:
+#
+#   MUSUBI_UPGRADE_TO=0.3.0 upgrade-from-source ~/dev/jj-musubi
+
+set -euo pipefail
+
+name=${0##*/}
+source=${1:-$HOME/dev/jj-musubi}
+revision=${2:-main}
+want=${MUSUBI_UPGRADE_TO:-}
+cache=${XDG_CACHE_HOME:-$HOME/.cache}/musubi/upgrade-from-source
+
+if [[ -z $want ]]; then
+    echo "$name: MUSUBI_UPGRADE_TO must name the release to install" >&2
+    exit 1
+fi
+
+# Never snapshot or update SOURCE's working copy, which may be in the middle of a change.
+jj() {
+    command jj --repository "$source" --ignore-working-copy "$@"
+}
+
+# The commit REVISION names, and the release its workspace Cargo.toml gives.
+commit=
+release=
+resolve() {
+    commit=$(jj log --no-graph --revisions "exactly($revision, 1)" --template commit_id)
+    release=$(jj file show --revision "$commit" 'root:"Cargo.toml"' |
+        awk -F'"' '/^\[/ { section = $0 }
+            section == "[workspace.package]" && /^version *=/ { print $2; exit }')
+}
+
+resolve
+if [[ $release != "$want" && -n $(jj git remote list) ]]; then
+    jj git fetch
+    resolve
+fi
+if [[ $release != "$want" ]]; then
+    found=${release:+musubi $release}
+    echo "$name: $revision in $source is ${found:-no release of musubi}, not musubi $want" >&2
+    exit 1
+fi
+
+# A fresh copy of the commit's files, each as new as the copy, so that cargo builds every
+# one of them again rather than trusting the times recorded in the commit.
+rm -rf "$cache/src"
+mkdir -p "$cache/src"
+git --git-dir="$(jj git root)" archive "$commit" | tar -x -m -C "$cache/src"
+# From inside the copy, so that its own cargo config and toolchain apply, as in a checkout.
+cd "$cache/src"
+cargo install --locked --force --path crates/musubi --target-dir "$cache/target"

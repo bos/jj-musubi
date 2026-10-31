@@ -11,7 +11,8 @@ change the protocol, so run the same release on the hub and every machine (see
   hub runs a newer release, then starts again from it. See [Upgrade
   musubi](docs/guides/manage.md#upgrade-musubi). Every message now carries the sender's
   release, so this release talks to no hub or machine of an earlier one: upgrade them all
-  together, by hand this once.
+  together, by hand this once. For musubi built from a jj repository of its source,
+  [contrib/upgrade-from-source](contrib/upgrade-from-source) is such a command.
 - On a terminal, `musubi create`, `join`, `clone` and `sync` show what the sync they wait on
   is doing: bytes sent or received, with a bar, commits being imported, operations applied,
   or waiting on the hub. They no longer print `Syncing...`. After upgrading, run `musubi

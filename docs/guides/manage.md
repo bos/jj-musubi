@@ -195,6 +195,26 @@ set -e
 cargo install --locked --version "$MUSUBI_UPGRADE_TO" jj-musubi
 ```
 
+If you build musubi on each machine from a jj repository of its source (made with `jj git
+clone`), copy [contrib/upgrade-from-source](../../contrib/upgrade-from-source) into your
+dotfiles and give it the repository, and optionally the revision to build, `main` unless you
+say:
+
+```sh
+jj config set --user musubi.upgrade-command '~/bin/upgrade-from-source ~/dev/jj-musubi'
+```
+
+It builds the revision only if its `Cargo.toml` gives the release asked for, fetching first
+if not; otherwise it fails, saying which release it found. So push the new release to the
+remote the machines fetch from before upgrading the hub. It builds a copy of the revision's
+files, so it never touches the repository's working copy, or your edits in progress there. It
+needs `jj`, `git` and `cargo` on the daemon's `PATH`. To try it, name the release the
+revision is; this installs it:
+
+```sh
+MUSUBI_UPGRADE_TO=0.3.0 ~/bin/upgrade-from-source ~/dev/jj-musubi
+```
+
 If the command fails, or installs another release, the daemon carries on as it was, and
 `musubi status` says why. Once the command works, `musubi daemon restart` tries again.
 

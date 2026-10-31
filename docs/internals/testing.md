@@ -142,7 +142,11 @@ binary loads jj's config as jj does. Another, Unix only too, puts a stand-in for
 release on a hub's socket, and checks that the daemon runs `musubi.upgrade-command`, starts
 again in place once its binary is that release, and that `musubi status` shows an upgrade that
 installed nothing; it can't run a real newer release, so the command installs a script that
-only says it is one.
+only says it is one. A third, Unix only, runs `contrib/upgrade-from-source`, the example
+upgrade command, against a stand-in for musubi's source that builds in a second, and checks
+that it installs the release asked for from `main`, not the edit in the working copy, leaves
+the repository's operation log as it was, and refuses another release; it doesn't try fetching
+from a remote.
 
 `the_quick_start_works_as_written` follows the README's quick start as a new user would:
 `musubi hub` run in a repository rather than in the home directory, then the commands it

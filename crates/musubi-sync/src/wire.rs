@@ -278,9 +278,10 @@ impl<T: for<'de> Deserialize<'de>> Envelope<T> {
     }
 }
 
-/// The largest chunk to put in one message, leaving room for the envelope.
+/// The largest chunk to put in one message, leaving room for the envelope: 1024 bytes, or half
+/// of `max_payload` where that is less.
 pub fn chunk_size(max_payload: usize) -> usize {
-    max_payload.saturating_sub(1024).max(1024)
+    max_payload.saturating_sub(1024).max(max_payload / 2)
 }
 
 /// An error's message, cut short to fit in one reply: it can quote what the peer sent, and
@@ -441,6 +442,26 @@ mod tests {
         let bytes = envelope(PROTOCOL_VERSION, JJ_LIB_VERSION, unknown_variant);
         let err = Envelope::<HubReply>::decode(&bytes).unwrap_err();
         assert!(!err.to_string().contains("incompatible"), "{err}");
+    }
+
+    /// A whole chunk for the smallest messages a hub may take, at offsets as long as they
+    /// encode, fits in one, as does a reply carrying it.
+    #[test]
+    fn a_full_chunk_fits() {
+        let max_payload = *musubi_transport::stream::PLAUSIBLE_PAYLOADS.start();
+        let data = vec![0xff; chunk_size(max_payload)];
+        let put = HubRequest::PutChunk {
+            blob: BlobId::of_bytes(&data),
+            total: u64::MAX,
+            offset: u64::MAX,
+            data: data.clone(),
+        };
+        let reply = HubReply::Chunk {
+            total: u64::MAX,
+            data,
+        };
+        assert!(Envelope::encode(put).unwrap().len() <= max_payload);
+        assert!(Envelope::encode(reply).unwrap().len() <= max_payload);
     }
 
     /// Any release reads the release that sent a message, whatever its protocol, so that a

@@ -60,7 +60,7 @@ pub const GREETING: &[u8; 9] = b"\0musubi1\n";
 
 /// The payload limits a hub may offer: what it says outside this is more likely to be noise
 /// than a hub.
-const PLAUSIBLE_PAYLOADS: std::ops::RangeInclusive<usize> = 1024..=64 << 20;
+pub const PLAUSIBLE_PAYLOADS: std::ops::RangeInclusive<usize> = 1024..=64 << 20;
 
 /// The most the hub's machine may print before the hub greets: a banner of ASCII art, say,
 /// that a shell's startup files print for every shell.

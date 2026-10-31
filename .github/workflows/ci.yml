@@ -102,8 +102,8 @@ jobs:
           exe=""
           if [ "$RUNNER_OS" = Windows ]; then dir=$(pwd -W); exe=.exe; fi
           echo "MUSUBI_ORACLE=$dir/.lake/build/bin/oracle$exe" >> "$GITHUB_ENV"
-      # The login service test installs the daemon with systemd's user manager, which a
-      # runner doesn't start without a login session.
+      # The login service tests install the daemon and the hub with systemd's user manager,
+      # which a runner doesn't start without a login session.
       - name: Start a systemd user manager
         if: runner.os == 'Linux'
         run: |
@@ -113,7 +113,7 @@ jobs:
           echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
       - run: cargo nextest run --workspace --locked
         env:
-          # Runners are thrown away, so the test may install a login service for real.
+          # Runners are thrown away, so tests may install login services for real.
           MUSUBI_TEST_LOGIN_SERVICE: "1"
       # Every benchmark script, briefly, so that they keep up with the CLI.
       - name: Benchmark smoke run

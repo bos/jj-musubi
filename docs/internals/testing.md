@@ -157,14 +157,18 @@ quick start and the test with it. `cargo insta review` accepts a new snapshot. N
 a real machine over ssh: `musubi-testutil` points `MUSUBI_SSH` at a program that doesn't
 exist, so a test that needs ssh must give a stand-in.
 
-One CLI test installs a real login service, and so runs only with
+Two CLI tests install real login services, and so run only with
 `MUSUBI_TEST_LOGIN_SERVICE=1`, which CI sets on its throwaway runners: never set it where
-musubi is installed for real. It installs the daemon with launchd or systemd and checks that
+musubi is installed for real. One installs the daemon with launchd or systemd and checks that
 the service manager starts it, restarts it after it is killed but not after
 `musubi daemon stop`, and starts it for a command that needs it; on Windows it runs the `Run`
-registry entry's command as a login would. CI's Linux runners have no systemd user manager
-without a login session, so the workflow enables lingering and starts one first. Logging in
-itself is the one step no test exercises.
+registry entry's command as a login would. The other installs the hub, and checks that a
+repository syncs through it, that the service manager restarts it after it is killed, that
+installing it again for another directory replaces it, and that `musubi hub uninstall` stops
+it; on Windows, which runs no hub at login, it checks the refusal, which changes nothing, and
+so runs always. CI's Linux runners have no systemd user manager without a login session, so
+the workflow enables lingering and starts one first. Logging in itself is the one step no test
+exercises.
 
 ## Faults
 

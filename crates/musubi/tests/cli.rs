@@ -2726,3 +2726,134 @@ fn the_daemon_starts_through_the_login_service() {
     let line = daemon_line(&env, &logs, &state);
     assert!(line.contains("not running"), "{line}");
 }
+
+/// The pid the service manager runs the hub as, if it runs it.
+fn hub_service_pid() -> Option<String> {
+    if cfg!(target_os = "macos") {
+        let uid = String::from_utf8(Command::new("id").arg("-u").output().unwrap().stdout).unwrap();
+        ["gui", "user"].iter().find_map(|domain| {
+            let print = Command::new("launchctl")
+                .args([
+                    "print",
+                    &format!("{domain}/{}/io.github.bos.musubi.hub", uid.trim()),
+                ])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&print.stdout)
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("pid = ").map(str::to_owned))
+        })
+    } else {
+        let show = Command::new("systemctl")
+            .args([
+                "--user",
+                "show",
+                "-p",
+                "MainPID",
+                "--value",
+                "musubi-hub.service",
+            ])
+            .output()
+            .unwrap();
+        let pid = String::from_utf8_lossy(&show.stdout).trim().to_owned();
+        (!pid.is_empty() && pid != "0").then_some(pid)
+    }
+}
+
+/// `musubi hub install` hands the hub to the platform's service manager, which then runs
+/// it, serving repositories, and starts it again after a crash; installing again, for
+/// another directory, replaces it, and `musubi hub uninstall` stops it. Windows runs no hub at login, and says so. Like
+/// `the_daemon_starts_through_the_login_service`, this installs a real login service, and so
+/// runs only when `MUSUBI_TEST_LOGIN_SERVICE` is set.
+#[test]
+fn the_hub_runs_through_the_login_service() {
+    let env = TestEnv::with_real_op_times();
+    let state = env.root().join("hub-state");
+    let dir = env.root().join("hub");
+    let install = |dir: &Path| {
+        let dir = dir.to_str().unwrap();
+        musubi_as_user(
+            &state,
+            &["hub", "install", "--dir", dir, "--advertise", "127.0.0.1"],
+        )
+    };
+    if cfg!(windows) {
+        let (ok, _, err) = try_run(&Logs::default(), &env, install(&dir));
+        assert!(!ok);
+        assert_eq!(err, "Error: musubi can't run a hub at login on Windows\n");
+        return;
+    }
+    if std::env::var_os("MUSUBI_TEST_LOGIN_SERVICE").is_none() {
+        eprintln!("skipped: set MUSUBI_TEST_LOGIN_SERVICE=1 to install a login service");
+        return;
+    }
+    // Where launchd sends the hub's output; systemd sends it to the journal.
+    let mut logs = Logs(vec![state.join("hub.log")]);
+    fs::create_dir_all(&state).unwrap();
+    // Uninstalls, and so stops the hub, whatever happens below, once the daemons stop.
+    let mut uninstall = musubi_as_user(&state, &["hub", "uninstall"]);
+    uninstall.stdout(Stdio::null()).stderr(Stdio::null());
+    let _uninstall = Daemons(vec![uninstall]);
+    let out = run(&env, &logs, install(&dir));
+    assert!(out.contains("runs at login from now on"), "{out}");
+    assert!(out.contains("musubi create --hub 127.0.0.1"), "{out}");
+    let first = hub_service_pid().expect("the service manager isn't running the hub");
+
+    // It serves the directory as it would serve it run by hand: the path it names, symbolic
+    // links resolved.
+    let hub = fs::canonicalize(&dir).unwrap();
+    let hub = hub.to_str().unwrap();
+    let mut daemons = Daemons::default();
+    let alpha = env.init_repo("alpha");
+    // Shares through the hub installed for another directory, below.
+    let beta = env.init_repo("beta");
+    for repo in [&alpha, &beta] {
+        logs.daemon_of(&env, repo);
+        daemons.of(repo);
+    }
+    alpha.write_file("a", "a");
+    alpha.jj(&["commit", "-m", "start"]);
+    musubi_in(&env, &logs, &alpha, &["create", "--hub", hub]);
+    let syncs = |repo: &TestRepo| {
+        let mut sync = repo.program(musubi());
+        sync.arg("sync");
+        try_run(&logs, &env, sync).0
+    };
+
+    // A crash: the service manager starts it again.
+    Command::new("kill").args(["-9", &first]).status().unwrap();
+    wait_for(&logs, "the service manager to restart the hub", || {
+        hub_service_pid().is_some_and(|pid| pid != first) && syncs(&alpha)
+    });
+
+    // Installing again, for another directory, replaces the hub it runs: the first is
+    // stopped by the time it returns, and the second serves.
+    let restarted = hub_service_pid().unwrap();
+    let other = env.root().join("other-hub");
+    let out = run(&env, &logs, install(&other));
+    assert!(out.contains("runs at login from now on"), "{out}");
+    let replaced = hub_service_pid().expect("the service manager isn't running the hub");
+    assert_ne!(replaced, restarted);
+    let err = musubi_fails(&env, &logs, &alpha, &["sync"]);
+    assert!(err.contains("no hub is serving"), "{err}");
+    let other = fs::canonicalize(&other).unwrap();
+    beta.write_file("b", "b");
+    beta.jj(&["commit", "-m", "start"]);
+    musubi_in(
+        &env,
+        &logs,
+        &beta,
+        &["create", "--hub", other.to_str().unwrap()],
+    );
+
+    let out = run(&env, &logs, musubi_as_user(&state, &["hub", "uninstall"]));
+    assert_eq!(out, "The hub no longer runs at login, and is stopped.\n");
+    // launchd may return while the hub is still on its way out.
+    wait_for(&logs, "the hub to stop", || {
+        hub_service_pid().is_none() && !syncs(&beta)
+    });
+    let err = musubi_fails(&env, &logs, &beta, &["sync"]);
+    assert!(err.contains("no hub is serving"), "{err}");
+    let out = run(&env, &logs, musubi_as_user(&state, &["hub", "uninstall"]));
+    assert_eq!(out, "The hub wasn't set to run at login.\n");
+}

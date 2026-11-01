@@ -4,6 +4,7 @@
 use std::path::Path;
 
 use musubi_core::hub;
+use musubi_core::hub::Handled;
 use musubi_core::message::HeadKind;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
@@ -37,6 +38,14 @@ pub struct Hive {
     /// copy the hive hasn't forgotten has taken them, as a hub does. On unless a test turns
     /// it off.
     pub pruning: bool,
+    /// The `heads` log as it was before the hub's latest prune wrote it again, until the hub
+    /// restarts or accepts another head: what a power cut just after that write leaves
+    /// (`Self::hub_loses_prune`).
+    before_prune: Option<Vec<u8>>,
+    /// The hub's sequence number when it last wrote its `heads` log whole, pruning: a power cut
+    /// loses lines appended since, or the whole write (`Self::hub_loses_prune`), never part of
+    /// it.
+    pruned_at: Option<u64>,
 }
 
 impl Hive {
@@ -46,6 +55,8 @@ impl Hive {
             members: vec![],
             hub_dir: hub_dir.to_owned(),
             pruning: true,
+            before_prune: None,
+            pruned_at: None,
         })
     }
 
@@ -57,13 +68,40 @@ impl Hive {
             members: vec![],
             hub_dir: hub_dir.to_owned(),
             pruning: true,
+            before_prune: None,
+            pruned_at: None,
         })
+    }
+
+    /// The oldest head a power cut can send the hub back to: the one it wrote its log whole
+    /// at, as after its latest prune, or its first.
+    pub fn oldest_head(&self) -> u64 {
+        self.pruned_at.unwrap_or(0)
     }
 
     /// Restarts the hub from its directory, as after a crash.
     pub fn restart_hub(&mut self) -> anyhow::Result<()> {
+        self.before_prune = None;
         self.hub = HubAdapter::open(&self.hub_dir)?;
         Ok(())
+    }
+
+    /// Whether the hub has pruned its records since it last restarted.
+    pub fn pruned_since_restart(&self) -> bool {
+        self.before_prune.is_some()
+    }
+
+    /// Restarts the hub with the `heads` log it had before its latest prune wrote it again,
+    /// as a power cut that loses that write, and everything written after it, leaves it.
+    /// Returns false, changing nothing, if the hub hasn't pruned since it last restarted.
+    pub fn hub_loses_prune(&mut self) -> anyhow::Result<bool> {
+        let Some(before) = self.before_prune.take() else {
+            return Ok(false);
+        };
+        std::fs::write(self.hub_dir.join("heads"), before)?;
+        self.pruned_at = None;
+        self.restart_hub()?;
+        Ok(true)
     }
 
     /// Restarts the hub having lost every head it accepted after the `seq`th, and the records
@@ -83,6 +121,8 @@ impl Hive {
 
     /// Makes the hive again, empty, as a hub does whose store is corrupt.
     pub fn remake_hub(&mut self) -> anyhow::Result<()> {
+        self.before_prune = None;
+        self.pruned_at = None;
         let backend = self.hub.store().backend();
         std::fs::remove_dir_all(&self.hub_dir)?;
         self.hub = HubAdapter::init(&self.hub_dir, backend)?;
@@ -122,10 +162,7 @@ impl Hive {
             self.members[node].uploaded +=
                 attachment_size(ops_attachment)? + attachment_size(objects)?;
         }
-        let handled = hub::handle(&mut self.hub, request.clone())?;
-        if self.pruning {
-            self.hub.prune()?;
-        }
+        let handled = self.handle(request.clone())?;
         match &handled.reply {
             Reply::Fetched {
                 ops_attachment,
@@ -156,6 +193,33 @@ impl Hive {
             }
         }
         Ok(())
+    }
+
+    /// Has the hub handle `request`, then prune its records if it can, as it does after every
+    /// request, unless pruning is off.
+    pub fn handle(
+        &mut self,
+        request: Request<OpId, Attachment>,
+    ) -> anyhow::Result<Handled<OpId, Attachment>> {
+        let handled = hub::handle(&mut self.hub, request)?;
+        // The prune's write is on disk by the time the hub writes another head after it.
+        if handled.publish.is_some() {
+            self.before_prune = None;
+        }
+        if self.pruning {
+            let path = self.hub_dir.join("heads");
+            // Read only while there is something to prune.
+            let before = if self.hub.store().records().is_empty() {
+                None
+            } else {
+                Some(std::fs::read(&path)?)
+            };
+            if self.hub.prune()?.is_some() {
+                self.before_prune = before;
+                self.pruned_at = Some(self.hub.store().head().0);
+            }
+        }
+        Ok(handled)
     }
 
     /// Polls the hub, then runs the node's policy until it has nothing left to do. Returns

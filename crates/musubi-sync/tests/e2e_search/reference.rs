@@ -64,6 +64,7 @@ use musubi_jj::op_id::LocalOp;
 use tempfile::TempDir;
 
 use crate::world::World;
+use crate::world::merge_key;
 
 /// What the reference needs of a commit, read once.
 struct Facts {
@@ -235,8 +236,21 @@ impl Reference {
                         .push((id.clone(), new.clone(), predecessors.clone()));
                 }
             }
+            // One a `jj op abandon` rewrote keeps the view of the merge it replaced, as jj keeps
+            // every operation's, whatever its parents are now: it must be that view, as the
+            // realizations are held to theirs (`check_realizations`).
+            let kept = world.kept_merges.get(&merge_key(op));
+            if let Some(replaced) = kept
+                && let Some(why) = reference.unlike_replaced(replaced, &view)
+            {
+                reference.unexplained.push(format!(
+                    "{}, which jj op abandon rewrote, keeping its view: {why}",
+                    describe(&id, op)
+                ));
+            }
             if let [parent] = op_parents.as_slice()
                 && !explained(op)
+                && kept.is_none()
             {
                 let parent_view = views[parent].clone();
                 let made: Vec<String> = reference
@@ -263,7 +277,9 @@ impl Reference {
             let copy = block_on(reference.loader.load_operation(&copy_id)).unwrap();
             let parents: Vec<&Operation> = op_parents.iter().map(|p| &replays[p]).collect();
             let agreed = op_parents.iter().all(|p| replays[p].id() == copies[p].id());
-            let replay = if op_parents.len() < 2 && agreed {
+            // A merge `jj op abandon` gave other parents keeps its view, as jj keeps every
+            // operation's: it goes in as the hive has it, as a command does.
+            let replay = if (op_parents.len() < 2 || kept.is_some()) && agreed {
                 copy.clone()
             } else {
                 let (replayed, how) = if op_parents.len() < 2 {
@@ -446,10 +462,7 @@ impl Reference {
                 let local_op = block_on(op_store.read_operation(&local.0)).unwrap();
                 let ours = block_on(op_store.read_view(&local_op.view_id)).unwrap();
                 let theirs = canonical.read_operation_view(&id).unwrap();
-                let realized = local_op
-                    .metadata
-                    .attributes
-                    .contains_key("musubi.canonical");
+                let realized = crate::world::realized(&local_op, node);
                 let mut why = vec![];
                 if realized {
                     if ours.head_ids != theirs.head_ids {
@@ -557,10 +570,7 @@ impl Reference {
                     let node = member.adapter.repo();
                     let local = node.local_of(id)?;
                     let local_op = block_on(node.loader().load_operation(&local.0)).unwrap();
-                    let made = !local_op
-                        .metadata()
-                        .attributes
-                        .contains_key("musubi.canonical");
+                    let made = !crate::world::realized(local_op.store_operation(), node);
                     made.then_some((m, node, local_op))
                 })?;
         let local_parents = block_on(local_op.parents()).unwrap();
@@ -665,6 +675,50 @@ impl Reference {
             self.facts.insert(id.clone(), facts);
         }
         &self.facts[id]
+    }
+
+    /// How `view`, the hive's, differs from `replaced`, a machine's view of the merge an
+    /// operation replaced, exactly as `check_realizations` holds a machine's operation to the
+    /// hive's: a realization has the same heads; an operation of the machine's own has no
+    /// commit visible that the hive's hides; either has the same bookmarks and tags.
+    fn unlike_replaced(&mut self, replaced: &(View, bool), view: &View) -> Option<String> {
+        let (replaced, realized) = replaced;
+        let short = |ids: &mut Vec<String>| {
+            ids.sort();
+            ids.clone()
+        };
+        let mut why = vec![];
+        let theirs = self.visible(view);
+        if *realized {
+            if replaced.head_ids != view.head_ids {
+                why.push("the heads differ".to_owned());
+            }
+        } else {
+            // Checked before walking: the reference's store may lack what the hive hides.
+            let mut lacked: Vec<String> = replaced
+                .head_ids
+                .iter()
+                .filter(|c| !theirs.contains(*c))
+                .map(|c| c.hex()[..12].to_owned())
+                .collect();
+            if lacked.is_empty() {
+                let ours = self.visible(replaced);
+                lacked = ours
+                    .difference(&theirs)
+                    .map(|c| c.hex()[..12].to_owned())
+                    .collect();
+            }
+            if !lacked.is_empty() {
+                why.push(format!("the hive's hides {:?}", short(&mut lacked)));
+            }
+        }
+        if replaced.local_bookmarks != view.local_bookmarks {
+            why.push("bookmarks differ".to_owned());
+        }
+        if replaced.local_tags != view.local_tags {
+            why.push("tags differ".to_owned());
+        }
+        (!why.is_empty()).then(|| why.join(", "))
     }
 
     /// The commits visible in `view`, the root's aside.

@@ -356,6 +356,20 @@ impl TestRepo {
         &self.machine
     }
 
+    /// A handle for another repository of this one's machine, at `path`, which may not exist
+    /// yet: it has this one's jj config and hostname, as a second copy on one machine does.
+    pub fn another_copy(&self, path: &Path) -> Self {
+        Self {
+            home: self.home.clone(),
+            config_path: self.config_path.clone(),
+            path: path.to_owned(),
+            machine: self.machine.clone(),
+            hostname: self.hostname.clone(),
+            seeds: self.seeds.clone(),
+            real_op_times: self.real_op_times,
+        }
+    }
+
     /// The `.jj/repo` directory.
     pub fn repo_path(&self) -> PathBuf {
         self.path.join(".jj/repo")

@@ -16,6 +16,7 @@ use hegel::generators as gs;
 use crate::coverage::fired;
 use crate::world::BOOKMARKS;
 use crate::world::FILES;
+use crate::world::MACHINES;
 use crate::world::TAGS;
 use crate::world::World;
 
@@ -462,16 +463,17 @@ impl Search {
         self.note(&tc);
     }
 
-    /// `jj op abandon` of an operation since setup, below the head: every machine drops it,
-    /// and the repository stays as it was at each operation left.
+    /// `jj op abandon` of an operation since setup, below the head and not a merge (which jj
+    /// refuses to abandon): every machine drops it, and the repository stays as it was at each
+    /// operation left. Once every copy the hive shows has taken it, the hub prunes its record.
     #[rule]
     fn op_abandon(&mut self, tc: TestCase) {
         let m = self.machine(&tc);
         let mut world = self.world.borrow_mut();
-        let ops = world.older_ops(m);
+        let ops = world.abandonable_ops(m);
         let op = choose(&tc, &ops);
         fired("op_abandon");
-        world.jj(m, &["op", "abandon", &op]);
+        world.op_abandon(m, &op);
         drop(world);
         self.note(&tc);
     }
@@ -556,6 +558,41 @@ impl Search {
         self.note(&tc);
     }
 
+    /// A copy goes offline, and a machine still in the hive forgets it, then runs `jj op
+    /// abandon`, and the rest of the hive syncs, twice, taking the abandon: the hub prunes its
+    /// record, which the forgotten copy never took. A sequence rarely does all that by itself.
+    #[rule]
+    fn abandon_while_forgotten(&mut self, tc: TestCase) {
+        let m = self.machine(&tc);
+        let mut world = self.world.borrow_mut();
+        let others: Vec<usize> = (0..world.nodes()).filter(|&o| o != m).collect();
+        let o = others[pick(&tc, others.len())];
+        let ops = world.abandonable_ops(m);
+        let op = choose(&tc, &ops);
+        fired("abandon_while_forgotten");
+        world.forget_copy(m, o);
+        world.op_abandon(m, &op);
+        for _ in 0..2 {
+            for x in (0..world.nodes()).filter(|&x| x != o) {
+                world.sync(x);
+            }
+        }
+        drop(world);
+        self.note(&tc);
+    }
+
+    /// Another machine joins, with a new copy made by `musubi clone`.
+    #[rule]
+    fn join(&mut self, tc: TestCase) {
+        let mut world = self.world.borrow_mut();
+        let m = world.nodes();
+        tc.assume(m < MACHINES.len());
+        fired("join");
+        world.clone_copy(m);
+        drop(world);
+        self.note(&tc);
+    }
+
     /// Sets this copy's `musubi.forget-after`, as `musubi join` does, to an hour or never,
     /// and records it, as the daemon does.
     #[rule]
@@ -593,6 +630,7 @@ impl Search {
     #[rule(weight = 2)]
     fn fetch(&mut self, tc: TestCase) {
         let m = self.machine(&tc);
+        tc.assume(self.world.borrow().has_origin(m));
         fired("fetch");
         self.world.borrow_mut().jj(m, &["git", "fetch"]);
         self.note(&tc);
@@ -602,6 +640,7 @@ impl Search {
     fn push(&mut self, tc: TestCase) {
         let m = self.machine(&tc);
         let mut world = self.world.borrow_mut();
+        tc.assume(world.has_origin(m));
         let name = choose(&tc, &world.observe(m).pushable_bookmarks());
         fired("push");
         let pushed = world.try_jj_in(m, 0, &["git", "push", "--bookmark", &name], PUSH_REFUSALS);
@@ -739,10 +778,33 @@ impl Search {
     fn hub_goes_back(&mut self, tc: TestCase) {
         tc.assume(self.faults < MAX_FAULTS);
         let lost = tc.draw(gs::integers::<usize>().min_value(1).max_value(3));
-        tc.assume(self.world.borrow().hub_seq() > 0);
+        tc.assume(self.world.borrow().hub_can_go_back());
         self.faults += 1;
         fired("hub_goes_back");
         self.world.borrow_mut().hub_goes_back(lost);
+        self.note(&tc);
+    }
+
+    /// A power cut on the hub's machine just after it pruned its records: it loses the
+    /// `heads` log it wrote pruning, and everything after, and comes back with the one before.
+    #[rule]
+    fn hub_loses_prune(&mut self, tc: TestCase) {
+        tc.assume(self.faults < MAX_FAULTS);
+        tc.assume(self.world.borrow().hub_pruned_since_restart());
+        self.faults += 1;
+        fired("hub_loses_prune");
+        self.world.borrow_mut().hub_loses_prune();
+        self.note(&tc);
+    }
+
+    /// The hub finds its store corrupt, as a power cut can leave it, and makes the hive
+    /// again, empty.
+    #[rule]
+    fn remake_hub(&mut self, tc: TestCase) {
+        tc.assume(self.faults < MAX_FAULTS);
+        self.faults += 1;
+        fired("remake_hub");
+        self.world.borrow_mut().remake_hub();
         self.note(&tc);
     }
 

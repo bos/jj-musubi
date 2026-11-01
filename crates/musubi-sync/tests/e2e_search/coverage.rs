@@ -35,6 +35,7 @@ pub const RULES: &[&str] = &[
     "undo",
     "at_op",
     "op_abandon",
+    "abandon_while_forgotten",
     "status",
     "workspace_add",
     "workspace_commit",
@@ -58,7 +59,10 @@ pub const RULES: &[&str] = &[
     "lose_cache",
     "restart_hub",
     "hub_goes_back",
+    "hub_loses_prune",
+    "remake_hub",
     "lose_reply",
+    "join",
 ];
 
 /// Events that are not rules: how the hive was set up, and outcomes some rows need.
@@ -79,6 +83,17 @@ pub const EVENTS: &[&str] = &[
     // Imports of git's HEAD, by what explains each.
     "import:head_git_move",
     "import:concurrent_heads",
+    // What the hub did about pruning its records, and faults after it.
+    "prune",
+    "prune:held_back",
+    "prune:forgotten_behind",
+    "prune:forgotten_took",
+    "prune:stopped",
+    "join:after_prune",
+    "restart_hub:after_prune",
+    "hub_goes_back:after_prune",
+    "remake_hub:after_prune",
+    "remake_hub:joiner_with_prefix",
 ];
 
 /// Each catalogue row, by test name, with the rules and events that together exercise it
@@ -254,8 +269,13 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
     ("concurrent_operation_on_one_machine", Some(&["at_op"])),
     ("long_offline_machine_catches_up", Some(&["commit"])),
     ("hub_restart_between_push_and_fetch", Some(&["restart_hub"])),
+    (
+        "a_push_to_a_hive_made_again_is_rejected",
+        Some(&["remake_hub", "lose_reply"]),
+    ),
     ("joining_with_full_history", Some(&["setup:prejoin"])),
-    // The search's machines join before any rule runs.
+    // The search's machines with history of their own join before any rule runs; later
+    // ones join empty, as `musubi clone` makes them.
     (
         "an_operation_from_before_the_join_doesnt_bring_its_history",
         None,
@@ -294,22 +314,37 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         "hub_goes_back_or_is_remade_after_a_rewrite",
         Some(&["op_abandon", "hub_goes_back"]),
     ),
+    (
+        "an_abandon_a_stale_workspace_brought_back_stays",
+        Some(&["op_abandon", "workspace_commit"]),
+    ),
     // The search runs no `jj util gc`.
     ("op_abandon_then_gc", None),
-    // The search's hub doesn't prune, and no machine joins later.
-    ("a_trim_makes_the_hub_smaller", None),
-    ("an_offline_machine_holds_pruning_back", None),
-    ("a_forgotten_copy_behind_pruned_records_stops", None),
+    (
+        "a_trim_makes_the_hub_smaller",
+        Some(&["op_abandon", "prune"]),
+    ),
+    (
+        "an_offline_machine_holds_pruning_back",
+        Some(&["prune:held_back", "prune"]),
+    ),
+    (
+        "a_forgotten_copy_behind_pruned_records_stops",
+        Some(&["prune:stopped"]),
+    ),
     (
         "a_forgotten_copy_that_took_the_pruned_records_comes_back",
-        None,
+        Some(&["prune:forgotten_took", "commit"]),
     ),
-    ("a_machine_joins_after_a_prune", None),
-    ("hub_restarts_after_a_prune", None),
-    ("hub_goes_back_across_a_prune", None),
+    ("a_machine_joins_after_a_prune", Some(&["join:after_prune"])),
+    (
+        "hub_restarts_after_a_prune",
+        Some(&["restart_hub:after_prune"]),
+    ),
+    ("hub_goes_back_across_a_prune", Some(&["hub_loses_prune"])),
     (
         "a_machine_that_joined_after_a_prune_carries_on_when_the_hive_is_made_again",
-        None,
+        Some(&["remake_hub:joiner_with_prefix"]),
     ),
     ("restart_with_lost_cache", Some(&["lose_cache"])),
     (

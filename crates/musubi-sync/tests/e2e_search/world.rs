@@ -8,22 +8,20 @@ use std::fs;
 use std::path::PathBuf;
 
 use jj_lib::object_id::ObjectId as _;
-use musubi_core::hub;
+use musubi_core::hub::HubStorage as _;
 use musubi_core::message::HeadKind;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
 use musubi_core::node::Step;
 use musubi_jj::node::NodeError;
-use musubi_jj::node::NodeRepo;
 use musubi_jj::op_id::CanonicalOp;
 use musubi_sync::Attachment;
 use musubi_sync::OpId;
-use musubi_sync::node::NodeAdapter;
 use musubi_testutil::TestEnv;
 use musubi_testutil::TestRepo;
 
+use crate::coverage::fired;
 use crate::fixture::Fixture;
-use crate::fixture::TestClock;
 use crate::imports::Imports;
 use crate::ledger::Ledger;
 use crate::ledger::Seen;
@@ -43,6 +41,58 @@ pub const FILES: [&str; 3] = ["a.txt", "b.txt", "dir/c.txt"];
 /// Operation metadata, which a realization shares with the operation it realizes, so it
 /// identifies an operation across machines even though local ids differ.
 const OP_KEY_TEMPLATE: &str = r#"time.start().format("%Y-%m-%dT%H:%M:%S%.f") ++ " " ++ time.end().format("%Y-%m-%dT%H:%M:%S%.f") ++ " " ++ user ++ " " ++ description.first_line() ++ "\n""#;
+
+/// The one id of `ids`, if it has exactly one.
+fn single(ids: Option<&BTreeSet<String>>) -> Option<&String> {
+    match ids.map(|ids| ids.iter().collect::<Vec<_>>()).as_deref() {
+        Some([id]) => Some(id),
+        _ => None,
+    }
+}
+
+/// What identifies an operation across rewrites and canonicalizing, as `merge_key` has it:
+/// its times, to the millisecond, and description.
+const MERGE_KEY_TEMPLATE: &str = r#"time.start().format("%s%3f") ++ " " ++ time.end().format("%s%3f") ++ " " ++ description.first_line()"#;
+
+/// Whether `op`, an operation of `node`'s, is a realization of another machine's. musubi marks
+/// a realization with the canonical operation it realizes, but marks so too every rewrite of
+/// the machine's own operations: whose it is, the canonical operation's work says, or for
+/// one that is no copy's work, as a merge, its host (machines can share a host here, which
+/// then takes a realization for the machine's own: a weaker check, not a false failure). A
+/// fix-up's work, which another machine may write for a copy, counts as that copy's; and an
+/// operation whose canonical one can't be read, as a realization.
+pub fn realized(op: &jj_lib::op_store::Operation, node: &musubi_jj::node::NodeRepo) -> bool {
+    let Some(canonical) = op
+        .metadata
+        .attributes
+        .get("musubi.canonical")
+        .and_then(jj_lib::op_store::OperationId::try_from_hex)
+    else {
+        return false;
+    };
+    let key = node.machine().key();
+    match node
+        .canonical_store()
+        .read_operation(&CanonicalOp(canonical))
+    {
+        Ok(canonical) => match musubi_jj::presence::Kind::of(&canonical.metadata).work {
+            Some(work) => work != key,
+            None => op.metadata.hostname != musubi_jj::workspaces::machine_name(key),
+        },
+        Err(_) => true,
+    }
+}
+
+/// An operation's key, as `MERGE_KEY_TEMPLATE` gives it.
+pub fn merge_key(op: &jj_lib::op_store::Operation) -> String {
+    let metadata = &op.metadata;
+    format!(
+        "{} {} {}",
+        metadata.time.start.timestamp.0,
+        metadata.time.end.timestamp.0,
+        metadata.description.lines().next().unwrap_or_default()
+    )
+}
 
 /// jj 0.46 cannot merge concurrent operations when one abandons (or moves away) a child of
 /// the root that the other made a parent of a merge commit: the rebased merge would have
@@ -93,6 +143,7 @@ const MAX_UNMERGEABLE_REVERTS: usize = 10;
 pub struct World {
     pub fx: Fixture,
     pub origin: Origin,
+    naming: Naming,
     /// Machines with file edits that no `jj` command has snapshotted yet.
     dirty: Vec<bool>,
     /// Each machine's workspaces; the first is the primary.
@@ -100,6 +151,16 @@ pub struct World {
     /// Each machine's operation ids and keys once the hive was set up.
     baseline_ids: Vec<BTreeSet<String>>,
     pub baseline_keys: Vec<BTreeSet<String>>,
+    /// The keys of every machine's operations once the hive was set up: what a copy made
+    /// later has of them is its baseline too.
+    hive_baseline: BTreeSet<String>,
+    /// The key of each operation a `jj op abandon` dropped, with the machine that ran it and
+    /// its `merge_key`: none comes back, unless jj brings it back there.
+    pub abandoned: Vec<(usize, String, String)>,
+    /// Merges a `jj op abandon` rewrote, by `merge_key`, with the view of the merge each
+    /// replaced, which jj keeps as it keeps every operation's, and whether that was a
+    /// realization: no longer, perhaps, jj's merge of their parents, or a merge at all.
+    pub kept_merges: BTreeMap<String, (jj_lib::op_store::View, bool)>,
     /// What each machine saw at its op heads, when it last looked.
     seen: Vec<Option<(Vec<String>, Seen)>>,
     pub ledger: Ledger,
@@ -180,18 +241,18 @@ impl World {
                 workspaces
             })
             .collect();
-        let mut fx = Fixture::join(env, repos);
-        // The search doesn't generate pruning yet: a copy the hive forgot that comes back
-        // behind pruned records stops, which its checks would take for a failure. The race
-        // catalogue covers pruning (docs/internals/races.md, "Operation history").
-        fx.hive.pruning = false;
+        let fx = Fixture::join(env, repos);
         let mut world = Self {
             fx,
             origin,
+            naming: setup.naming,
             dirty: vec![false; setup.nodes],
             workspaces,
             baseline_ids: vec![],
             baseline_keys: vec![],
+            hive_baseline: BTreeSet::new(),
+            abandoned: vec![],
+            kept_merges: BTreeMap::new(),
             seen: vec![None; setup.nodes],
             ledger: Ledger::default(),
             imports: Imports::default(),
@@ -212,6 +273,9 @@ impl World {
             let keys = world.op_keys(m);
             world.baseline_keys.push(keys);
         }
+        // Each machine's history from before it joined is its own, and a later copy has none
+        // of it; and its join is its own last operation from then, under its own key there.
+        world.hive_baseline = world.baseline_keys.iter().flatten().cloned().collect();
         let view = world.view_at_head(0);
         world.ledger.reset(&view);
         world.start_imports();
@@ -364,8 +428,10 @@ impl World {
     pub fn observe(&mut self, m: usize) -> View {
         let before = self.seen(m);
         self.dirty[m] = false;
+        let present = self.abandoned_present(m);
         let view =
             View::parse(&self.raw_jj(m, &["log", "--no-graph", "-r", "all()", "-T", TEMPLATE]));
+        self.forgive_jj_returns(m, present);
         self.learn(&view);
         let after = Seen::of(std::slice::from_ref(&view));
         let what = format!("{}: (looking)", self.machine(m));
@@ -475,6 +541,7 @@ impl World {
         refusals: &[&str],
     ) -> Result<String, String> {
         let before = self.seen(m);
+        let present = self.abandoned_present(m);
         let stale = self.is_stale(m, ws);
         let path = self.workspaces[m][ws]
             .path
@@ -512,6 +579,7 @@ impl World {
         // was last updated at, before updating it: a command at an older operation, which
         // can leave the working-copy change divergent, as on one machine.
         self.ledger.record(m, &what, &before, &after, stale);
+        self.forgive_jj_returns(m, present);
         Ok(String::from_utf8(output.stdout).unwrap())
     }
 
@@ -562,6 +630,7 @@ impl World {
     /// operation, and records what it changed relative to `op`.
     pub fn jj_at_op(&mut self, m: usize, op: &str, args: &[&str]) {
         let before = Seen::of(&[self.view_at(m, op)]);
+        let present = self.abandoned_present(m);
         let heads_before = self.op_heads(m);
         let mut full = vec!["--at-op", op];
         full.extend_from_slice(args);
@@ -589,19 +658,70 @@ impl World {
         let after = Seen::of(&views);
         let what = self.trace.last().cloned().unwrap_or_default();
         self.ledger.record(m, &what, &before, &after, true);
+        self.forgive_jj_returns(m, present);
     }
 
     /// Operations made since setup that machine `m` can run a command at, other than its
     /// current head. (`jj op log` merges concurrent operations first, like any command.)
     pub fn older_ops(&mut self, m: usize) -> Vec<String> {
-        let out = self.jj(
-            m,
-            &["op", "log", "--no-graph", "-n", "8", "-T", "id ++ \"\\n\""],
-        );
-        out.lines()
+        // Through a recorded command: it merges concurrent operations first.
+        self.jj(m, &["op", "log", "--no-graph", "-n", "8", "-T", "id"]);
+        self.op_ids_and_keys(m, Some(8))
+            .into_iter()
             .skip(1)
-            .filter(|id| !self.baseline_ids[m].contains(*id))
+            .filter(|(id, key)| {
+                !self.baseline_ids[m].contains(id) && !self.baseline_keys[m].contains(key)
+            })
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// Those of `older_ops` that `jj op abandon` can abandon: not merges, which it refuses.
+    pub fn abandonable_ops(&mut self, m: usize) -> Vec<String> {
+        let older = self.older_ops(m);
+        let merges: BTreeSet<String> = self
+            .raw_jj(
+                m,
+                &[
+                    "--ignore-working-copy",
+                    "op",
+                    "log",
+                    "--no-graph",
+                    "-n",
+                    "8",
+                    "-T",
+                    r#"if(parents.len() > 1, id ++ "\n")"#,
+                ],
+            )
+            .lines()
             .map(str::to_owned)
+            .collect();
+        older
+            .into_iter()
+            .filter(|op| !merges.contains(op))
+            .collect()
+    }
+
+    /// Machine `m`'s operations, newest first, or only the first `limit`, by id with their
+    /// keys, as `op_keys` has them.
+    fn op_ids_and_keys(&self, m: usize, limit: Option<usize>) -> Vec<(String, String)> {
+        let template = format!(r#"id ++ " " ++ {OP_KEY_TEMPLATE}"#);
+        let limit = limit.map(|n| n.to_string());
+        let mut args = vec![
+            "--ignore-working-copy",
+            "op",
+            "log",
+            "--no-graph",
+            "-T",
+            &template,
+        ];
+        if let Some(limit) = &limit {
+            args.extend(["-n", limit]);
+        }
+        self.raw_jj(m, &args)
+            .lines()
+            .filter_map(|line| line.split_once(' '))
+            .map(|(id, key)| (id.to_owned(), without_op_ids(key)))
             .collect()
     }
 
@@ -775,24 +895,30 @@ impl World {
     pub fn sync_counted(&mut self, m: usize) -> usize {
         self.touched.insert(m);
         self.merge_local_heads(m);
+        let pruned = self.fx.hive.hub.store().pruned();
         let steps = loop {
             match self.fx.hive.sync(m) {
                 Ok(steps) => break steps,
-                Err(err) => self.recover_unmergeable(m, "sync", &err),
+                Err(err) => self.recover(m, "sync", &err),
             }
         };
+        self.note_pruning(pruned);
         self.record_merges(m);
         steps
     }
 
-    /// Recovers from a sync of node `m` that failed because of a known jj limitation
-    /// (docs/internals/races.md): jj can't merge this machine's operations with the hive's, so
-    /// musubi pauses. Recovers as the error says, by reverting the operation it names, or
-    /// where it names none, as a user given its list would: by reverting the newest, other
+    /// Recovers from a sync of node `m` that failed, as a user would from what it says: from
+    /// a stop behind records the hub pruned, by making a new copy (`stopped_behind_prune`);
+    /// or from a known jj limitation (docs/internals/races.md), where jj can't merge this
+    /// machine's operations with the hive's, so musubi pauses, by reverting the operation the
+    /// error names, or where it names none, as a user given its list would: the newest, other
     /// than the recovery's own. Fails the case on any other error, or if the operation to
     /// revert is one already reverted, or a revert the recovery made: reverting it would put
     /// back what it reverted.
-    fn recover_unmergeable(&mut self, m: usize, what: &str, err: &anyhow::Error) {
+    fn recover(&mut self, m: usize, what: &str, err: &anyhow::Error) {
+        if self.stopped_behind_prune(m, what, err) {
+            return;
+        }
         let found = err
             .chain()
             .find_map(|e| match e.downcast_ref::<NodeError>() {
@@ -802,7 +928,16 @@ impl World {
                 _ => None,
             });
         let Some((ours, culprit)) = found else {
-            self.fail(&format!("{what} of {} failed: {err:#}", self.machine(m)));
+            // Several errors share a message: name which.
+            let which = err
+                .chain()
+                .find_map(|e| e.downcast_ref::<NodeError>())
+                .map(|e| format!(" ({e:?})"))
+                .unwrap_or_default();
+            self.fail(&format!(
+                "{what} of {} failed: {err:#}{which}",
+                self.machine(m)
+            ));
         };
         let ops = self.op_summaries(m);
         let op = match culprit {
@@ -877,10 +1012,12 @@ impl World {
                 .unwrap_or_default()
         ));
         self.merge_local_heads(m);
+        let pruned = self.fx.hive.hub.store().pruned();
         // Progress stops here either way: a partial sync that pauses has nothing to retry.
         if let Err(err) = self.try_sync_partial(m, steps, lose, None) {
-            self.recover_unmergeable(m, "partial sync", &err);
+            self.recover(m, "partial sync", &err);
         }
+        self.note_pruning(pruned);
         self.record_merges(m);
     }
 
@@ -903,9 +1040,11 @@ impl World {
             self.machine(m)
         ));
         self.merge_local_heads(m);
+        let pruned = self.fx.hive.hub.store().pruned();
         if let Err(err) = self.try_sync_partial(m, usize::MAX, None, Some(count)) {
-            self.recover_unmergeable(m, "partial sync", &err);
+            self.recover(m, "partial sync", &err);
         }
+        self.note_pruning(pruned);
         self.record_merges(m);
     }
 
@@ -953,8 +1092,8 @@ impl World {
         Ok(())
     }
 
-    /// Delivers a request to the hub and its reply back (unless lost), then any new head to
-    /// every node, as `Hive` does.
+    /// Delivers a request to the hub, which then prunes if it can, and its reply back (unless
+    /// lost), then any new head to every node, as `Hive` does.
     fn deliver(
         &mut self,
         m: usize,
@@ -962,7 +1101,7 @@ impl World {
         lost: bool,
     ) -> anyhow::Result<()> {
         let hive = &mut self.fx.hive;
-        let handled = hub::handle(&mut hive.hub, request)?;
+        let handled = hive.handle(request)?;
         if !lost {
             let member = &mut hive.members[m];
             member
@@ -991,10 +1130,19 @@ impl World {
 
     /// Crashes the hub, which reopens its store.
     pub fn restart_hub(&mut self) {
+        if self.fx.hive.hub.store().pruned() > 0 {
+            fired("restart_hub:after_prune");
+        }
         self.record("hub: restart".to_owned());
         if let Err(err) = self.fx.hive.restart_hub() {
             self.fail(&format!("restarting the hub: {err:#}"));
         }
+    }
+
+    /// Whether a power cut can send the hub back: it accepted a head since the one it wrote
+    /// its log whole at.
+    pub fn hub_can_go_back(&self) -> bool {
+        self.hub_seq() > self.fx.hive.oldest_head()
     }
 
     pub fn hub_seq(&self) -> u64 {
@@ -1004,15 +1152,424 @@ impl World {
     /// Has the hub lose its last `lost` heads, but not its root, as a power cut can make
     /// it, and restarts it.
     pub fn hub_goes_back(&mut self, lost: usize) {
+        if self.fx.hive.hub.store().pruned() > 0 {
+            fired("hub_goes_back:after_prune");
+        }
         self.record(format!("hub: goes back {lost}"));
-        let heads = self.fx.env.root().join("hub/heads");
-        let text = fs::read_to_string(&heads).unwrap();
-        let lines: Vec<&str> = text.lines().collect();
-        let kept = lines.len().saturating_sub(lost).max(1);
-        fs::write(&heads, lines[..kept].join("\n") + "\n").unwrap();
-        if let Err(err) = self.fx.hive.restart_hub() {
+        let seq = self
+            .hub_seq()
+            .saturating_sub(lost as u64)
+            .max(self.fx.hive.oldest_head());
+        if let Err(err) = self.fx.hive.hub_goes_back(seq) {
             self.fail(&format!("restarting the hub: {err:#}"));
         }
+    }
+
+    /// Whether the hub has pruned its records since it last restarted.
+    pub fn hub_pruned_since_restart(&self) -> bool {
+        self.fx.hive.pruned_since_restart()
+    }
+
+    /// Has the hub lose the `heads` log its latest prune wrote, and everything after it, as a
+    /// power cut just after the prune can make it, and restarts it: it names the records it
+    /// pruned again.
+    pub fn hub_loses_prune(&mut self) {
+        self.record("hub: loses its prune".to_owned());
+        match self.fx.hive.hub_loses_prune() {
+            Ok(true) => {}
+            Ok(false) => self.fail("the hub had no prune to lose"),
+            Err(err) => self.fail(&format!("restarting the hub: {err:#}")),
+        }
+    }
+
+    /// Makes the hive again, empty, as a hub does whose store is corrupt.
+    pub fn remake_hub(&mut self) {
+        if self.fx.hive.hub.store().pruned() > 0 {
+            fired("remake_hub:after_prune");
+        }
+        if self
+            .fx
+            .hive
+            .members
+            .iter()
+            .any(|member| member.adapter.repo().record_prefix().count > 0)
+        {
+            fired("remake_hub:joiner_with_prefix");
+        }
+        self.record("hub: made again".to_owned());
+        if let Err(err) = self.fx.hive.remake_hub() {
+            self.fail(&format!("making the hive again: {err:#}"));
+        }
+    }
+
+    /// Notes, for coverage, what the hub did about pruning during a sync that started with
+    /// `before` of its records pruned: whether it pruned, and whether a copy the hive forgot
+    /// had taken what it pruned; or, if not, whether a copy the hive shows that hasn't said it
+    /// took the hub's records held it back, where another had.
+    fn note_pruning(&mut self, before: usize) {
+        let hub = &self.fx.hive.hub;
+        let pruned = hub.store().pruned();
+        let shown = self.fx.shown_machines();
+        let keys: Vec<String> = (0..self.nodes()).map(|m| self.fx.machine_key(m)).collect();
+        if pruned > before {
+            fired("prune");
+            self.trace
+                .push(format!("hub: pruned the first {pruned} records"));
+            for (m, key) in keys.iter().enumerate() {
+                if shown.contains(key) {
+                    continue;
+                }
+                let (taken, _) = self.fx.hive.members[m].adapter.repo().record_state();
+                fired(if taken < pruned as u64 {
+                    "prune:forgotten_behind"
+                } else {
+                    "prune:forgotten_took"
+                });
+            }
+        } else if !hub.store().records().is_empty() {
+            let records = hub.records();
+            let reported = |key: &String| hub.reported(key).as_ref() == Some(&records);
+            if keys.iter().any(reported)
+                && keys.iter().any(|key| shown.contains(key) && !reported(key))
+            {
+                fired("prune:held_back");
+            }
+        }
+    }
+
+    /// If `err`, from node `m`'s `what`, is its stop behind records the hub pruned, checks
+    /// that it is expected, and recovers from it as a user would, and returns true. It is
+    /// expected only of a copy the hive forgot, which the hub doesn't wait for, that hasn't
+    /// taken as many records as the hub pruned. The user makes a new copy with `musubi clone`,
+    /// and runs `musubi leave --force` in this one, which tells the hive nothing and keeps all
+    /// it has (docs/troubleshooting.md): this one stays on its machine, out of the hive, and
+    /// out of the checks. Whatever it did since its last sync never reached the hive, and the
+    /// user brings none of it across.
+    fn stopped_behind_prune(&mut self, m: usize, what: &str, err: &anyhow::Error) -> bool {
+        let stopped = err.chain().any(|e| {
+            matches!(
+                e.downcast_ref::<NodeError>(),
+                Some(NodeError::PrunedRecords)
+            )
+        });
+        if !stopped {
+            return false;
+        }
+        let pruned = self.fx.hive.hub.store().pruned() as u64;
+        let (taken, _) = self.fx.hive.members[m].adapter.repo().record_state();
+        let forgotten = self.forgotten(m);
+        if !forgotten || taken >= pruned {
+            self.fail(&format!(
+                "{what} of {} stopped behind pruned records, but the hive {} it, and it took {taken} of the {pruned} the hub pruned: {err:#}",
+                self.machine(m),
+                if forgotten { "forgot" } else { "hasn't forgotten" },
+            ));
+        }
+        fired("prune:stopped");
+        self.record(format!(
+            "{}: {what} stopped behind records the hub pruned; musubi leave --force",
+            self.machine(m)
+        ));
+        self.clone_copy(m);
+        true
+    }
+
+    /// The `merge_key` of every operation of the hub's history.
+    fn hub_merge_keys(&self) -> BTreeSet<String> {
+        let store = self.fx.hive.hub.store();
+        let canonical = store.canonical();
+        let head = CanonicalOp(store.head().1.clone());
+        canonical
+            .ancestors_until(&[head], |_| false)
+            .unwrap()
+            .iter()
+            .map(|op| merge_key(&canonical.read_operation(op).unwrap()))
+            .collect()
+    }
+
+    /// Whether the hive has forgotten machine `m`'s copy: the hub's head doesn't show it, and
+    /// its history has a forget of it, by `musubi forget` or once it went unused.
+    fn forgotten(&self, m: usize) -> bool {
+        let key = self.fx.machine_key(m);
+        if self.fx.shown_machines().contains(&key) {
+            return false;
+        }
+        let store = self.fx.hive.hub.store();
+        let canonical = store.canonical();
+        let head = CanonicalOp(store.head().1.clone());
+        let history = canonical.ancestors_until(&[head], |_| false).unwrap();
+        history.iter().any(|op| {
+            canonical
+                .read_operation(op)
+                .unwrap()
+                .metadata
+                .attributes
+                .get(musubi_jj::presence::FORGET_ATTRIBUTE)
+                .is_some_and(|keys| keys.split_whitespace().any(|k| k == key))
+        })
+    }
+
+    /// A new copy of the hive on machine `m`, as `musubi clone` makes: an empty colocated
+    /// repository at a path of its own, with the machine's jj config, joined to the hive on
+    /// the root and synced, then on the hive's trunk. A new machine's, if `m` is `nodes()`, or
+    /// else in place of machine `m`'s copy, which has left the hive.
+    pub fn clone_copy(&mut self, m: usize) {
+        let n = self.next();
+        let repo = if m == self.nodes() {
+            let machine = MACHINES[m];
+            let hostname = match self.naming {
+                Naming::SharedHostname => "mac",
+                Naming::Own | Naming::Default => machine,
+            };
+            let repo = self.fx.env.init_repo_with_hostname(machine, hostname);
+            let config = self.fx.env.root().join(format!("config-{machine}.toml"));
+            let mut text = fs::read_to_string(&config).unwrap();
+            text.push_str(JJ_CONFIG);
+            fs::write(&config, text).unwrap();
+            repo
+        } else {
+            let path = self
+                .fx
+                .env
+                .root()
+                .join(format!("{}-copy{n}", self.machine(m)));
+            let repo = self.fx.repo(m).another_copy(&path);
+            fs::create_dir_all(&path).unwrap();
+            repo.jj(&["git", "init", "--colocate"]);
+            repo
+        };
+        if self.fx.hive.hub.store().pruned() > 0 {
+            fired("join:after_prune");
+        }
+        self.record(format!(
+            "{}: musubi clone into {}",
+            self.machine(m),
+            repo.path().display()
+        ));
+        let own: BTreeSet<String> = repo
+            .jj(&["op", "log", "--no-graph", "-T", OP_KEY_TEMPLATE])
+            .lines()
+            .map(without_op_ids)
+            .collect();
+        self.fx.add(repo);
+        let primary = vec![Workspace {
+            name: "default".to_owned(),
+            path: None,
+        }];
+        if m < self.dirty.len() {
+            self.fx.repos.swap_remove(m);
+            self.fx.hive.members.swap_remove(m);
+            self.dirty[m] = false;
+            self.workspaces[m] = primary;
+            self.seen[m] = None;
+            // Its abandons that never reached the hive, whose operations the hub or another
+            // machine still has, are gone with it; the rest stay checked.
+            let mut others: Vec<BTreeSet<String>> = (0..self.nodes())
+                .filter(|&o| o != m)
+                .map(|o| self.merge_keys(o))
+                .collect();
+            others.push(self.hub_merge_keys());
+            self.abandoned.retain(|(by, _, merge)| {
+                *by != m || !others.iter().any(|keys| keys.contains(merge))
+            });
+        } else {
+            self.dirty.push(false);
+            self.workspaces.push(primary);
+            self.seen.push(None);
+            self.baseline_ids.push(BTreeSet::new());
+            self.baseline_keys.push(BTreeSet::new());
+        }
+        self.sync_counted(m);
+        // The hive's history from before it was set up, and its own from before it joined,
+        // are its baseline, as each machine's are. It may have only some of the hive's yet,
+        // as from a hive made again, which the machines that have it fill again later.
+        let keys: BTreeSet<String> = own.union(&self.hive_baseline).cloned().collect();
+        self.baseline_ids[m] = self
+            .op_ids_and_keys(m, None)
+            .into_iter()
+            .filter(|(_, key)| keys.contains(key))
+            .map(|(id, _)| id)
+            .collect();
+        self.baseline_keys[m] = keys;
+        self.restart_imports(m);
+        // As `musubi clone` checks out the hive's trunk.
+        let trunk = self.raw_jj(
+            m,
+            &[
+                "log",
+                "--ignore-working-copy",
+                "--no-graph",
+                "-n1",
+                "-r",
+                "trunk() ~ root()",
+                "-T",
+                "commit_id",
+            ],
+        );
+        if !trunk.is_empty() {
+            self.jj(m, &["new", &trunk]);
+        }
+    }
+
+    /// Whether machine `m`'s git has the `origin` remote: every machine but a new copy that
+    /// hasn't yet taken the hive's settings, which name it.
+    pub fn has_origin(&self, m: usize) -> bool {
+        self.fx
+            .repo(m)
+            .git(&["remote"])
+            .lines()
+            .any(|r| r == "origin")
+    }
+
+    /// Takes an operation machine `m` abandoned that a `jj` command there brought back into its
+    /// history, absent before it, for jj's doing, not musubi's, which runs no command: with
+    /// auto-update-stale, a command in a workspace whose working copy recorded an operation
+    /// `jj op abandon` rewrote brings back what it abandoned, as on one machine
+    /// (docs/internals/races.md, "Known jj limitations"). jj leaves a working copy so where
+    /// the abandon ran in another workspace, or where an operation came after its last
+    /// command, as musubi's do. `before` is `abandoned_present` from before the command.
+    fn forgive_jj_returns(&mut self, m: usize, before: Option<BTreeSet<String>>) {
+        let Some(before) = before else {
+            return;
+        };
+        let keys = self.merge_keys(m);
+        let count = self.abandoned.len();
+        self.abandoned
+            .retain(|(by, _, merge)| *by != m || before.contains(merge) || !keys.contains(merge));
+        if self.abandoned.len() < count {
+            self.record("  (jj brought back an operation it abandoned)".to_owned());
+        }
+    }
+
+    /// What `forgive_jj_returns` needs before a `jj` command on machine `m`: if `m` abandoned
+    /// anything, the keys of what is in its history now.
+    fn abandoned_present(&self, m: usize) -> Option<BTreeSet<String>> {
+        self.abandoned
+            .iter()
+            .any(|(by, ..)| *by == m)
+            .then(|| self.merge_keys(m))
+    }
+
+    /// The `merge_key` of every operation in machine `m`'s history, read in process: a `jj`
+    /// command could merge op heads.
+    fn merge_keys(&self, m: usize) -> BTreeSet<String> {
+        let store = self.fx.hive.members[m]
+            .adapter
+            .repo()
+            .loader()
+            .op_store()
+            .clone();
+        let root = store.root_operation_id().clone();
+        let mut keys = BTreeSet::new();
+        let mut seen = BTreeSet::new();
+        let mut stack: Vec<jj_lib::op_store::OperationId> = self
+            .op_heads(m)
+            .iter()
+            .map(|hex| jj_lib::op_store::OperationId::try_from_hex(hex).unwrap())
+            .collect();
+        while let Some(id) = stack.pop() {
+            if id == root || !seen.insert(id.clone()) {
+                continue;
+            }
+            let Ok(op) = futures::executor::block_on(store.read_operation(&id)) else {
+                continue;
+            };
+            keys.insert(merge_key(&op));
+            stack.extend(op.parents.iter().cloned());
+        }
+        keys
+    }
+
+    /// Machine `m` runs `jj op abandon` of its operation `op`, which no machine may have
+    /// afterwards.
+    pub fn op_abandon(&mut self, m: usize, op: &str) {
+        let key = self.op_key(m, op);
+        let at = jj_lib::op_store::OperationId::try_from_hex(op).unwrap();
+        let store = self.fx.hive.members[m]
+            .adapter
+            .repo()
+            .loader()
+            .op_store()
+            .clone();
+        let merge = merge_key(&futures::executor::block_on(store.read_operation(&at)).unwrap());
+        // The merges whose parents it changes, keeping their views as it keeps every
+        // operation's: those above what it abandons, and those above the operations beside it,
+        // which it moves onto the abandoned operation's parent, one of them perhaps left a
+        // merge of one parent. Each with the view of the merge it replaced, which the
+        // reference holds the hive's to.
+        let before = self.ops_by_key(m, false);
+        let merges = self.ops_by_key(m, true);
+        self.jj(m, &["op", "abandon", op]);
+        let after = self.ops_by_key(m, false);
+        for (key, old) in &before {
+            // Only a key one operation had before, and has after: operations sharing a key,
+            // as two merges a node makes at one tick of its clock can, can't be told apart,
+            // and stay jj's merges of their parents.
+            let (Some(old), Some(new)) = (single(Some(old)), single(after.get(key))) else {
+                continue;
+            };
+            if old == new || merges.get(key).is_none_or(|ids| !ids.contains(old)) {
+                continue;
+            }
+            let id = jj_lib::op_store::OperationId::try_from_hex(old).unwrap();
+            let replaced = futures::executor::block_on(async {
+                let op = store.read_operation(&id).await.unwrap();
+                let realized = realized(&op, self.fx.hive.members[m].adapter.repo());
+                (store.read_view(&op.view_id).await.unwrap(), realized)
+            });
+            self.kept_merges.insert(key.clone(), replaced);
+        }
+        self.abandoned.push((m, key, merge));
+    }
+
+    /// Machine `m`'s operations, or only its merges, by `merge_key`, with their ids: more
+    /// than one where operations share a key, as two merges a node makes at one tick of its
+    /// clock can.
+    fn ops_by_key(&self, m: usize, merges: bool) -> BTreeMap<String, BTreeSet<String>> {
+        let template = if merges {
+            format!(r#"if(parents.len() > 1, {MERGE_KEY_TEMPLATE} ++ "\t" ++ id ++ "\n")"#)
+        } else {
+            format!(r#"{MERGE_KEY_TEMPLATE} ++ "\t" ++ id ++ "\n""#)
+        };
+        self.raw_jj(
+            m,
+            &[
+                "--ignore-working-copy",
+                "op",
+                "log",
+                "--no-graph",
+                "-T",
+                &template,
+            ],
+        )
+        .lines()
+        .filter_map(|line| line.rsplit_once('\t'))
+        .fold(BTreeMap::new(), |mut merges, (key, id)| {
+            merges
+                .entry(key.to_owned())
+                .or_insert_with(BTreeSet::new)
+                .insert(id.to_owned());
+            merges
+        })
+    }
+
+    /// The key of machine `m`'s operation `op`, as `op_keys` has it.
+    pub fn op_key(&self, m: usize, op: &str) -> String {
+        let key = self.raw_jj(
+            m,
+            &[
+                "--at-op",
+                op,
+                "op",
+                "log",
+                "--no-graph",
+                "-n",
+                "1",
+                "-T",
+                OP_KEY_TEMPLATE,
+            ],
+        );
+        without_op_ids(key.trim_end_matches('\n'))
     }
 
     /// Crashes node `m`'s daemon: it reopens the repository, losing every in-memory cache,
@@ -1065,14 +1622,7 @@ impl World {
                 fs::remove_file(path).unwrap();
             }
         }
-        let node = match NodeRepo::open(&repo.repo_path(), &repo.settings()) {
-            Ok(node) => node.with_repo_config(Some(repo.repo_config_path())),
-            Err(err) => self.fail(&format!("reopening {}: {err}", self.machine(m))),
-        };
-        let mut adapter = NodeAdapter::new(node).unwrap();
-        adapter.set_clock(Box::new(TestClock(self.fx.env.clock())));
-        self.fx.hive.members[m].adapter = adapter;
-        self.fx.hive.restart(m);
+        self.fx.reopen(m);
         self.touched.insert(m);
         in_flight.len()
     }

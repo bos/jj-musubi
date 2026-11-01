@@ -365,24 +365,43 @@ runs, can take all a machine's memory on a proof it can't finish, and macOS enfo
 
 A Hegel state machine drives two or three real colocated repositories, each served by a musubi
 node, through an in-process hub. `musubi_sync::hive::Hive` delivers their requests to the hub
-directly, one step at a time, so that a failing case replays exactly. The rules fall into
-groups, kept separate so that the inconsistent states between them get explored: a machine can
-work on a stale view, git can move a branch jj hasn't imported, a node can stop halfway through
-a sync.
+directly, one step at a time, so that a failing case replays exactly, and has the hub prune its
+records after each request, as a hub does. The rules fall into groups, kept separate so that the
+inconsistent states between them get explored: a machine can work on a stale view, git can move a
+branch jj hasn't imported, a node can stop halfway through a sync.
 
 - **Local work**, through the `jj` CLI on a chosen machine: commit, edit without snapshotting,
   describe, new (including merges), rebase, squash, abandon, resolve, bookmark and tag changes,
-  undo, and commands at an older operation (`--at-op`), which create concurrent operations.
+  undo, `jj op abandon`, and commands at an older operation (`--at-op`), which create
+  concurrent operations.
 - **Workspaces**: add, rename and forget them; forget another machine's; and rewrite or abandon
   another machine's working-copy commit.
+- **Copies**: forget another machine's copy, with `musubi forget` or once it has gone unused
+  past its `musubi.forget-after`; forget one, abandon an operation, and sync the rest of the
+  hive while the forgotten copy is away, so that the hub prunes the record it never took, as
+  one rule, which a sequence would rarely do by itself; or, with two machines, have a third
+  join, with an empty copy made as `musubi clone` makes one.
 - **The remote**: someone outside the hive advances `origin`; a machine fetches or pushes.
 - **Git-side work**: move or delete a branch with `git`.
 - **Sync**: one node syncs until it is idle, or takes only a few steps of a sync, which may stop
   partway through an upload.
 - **Faults**: restart or crash a node, with or without its translation cache, or while it is
   still writing realizations; restart the hub, or send it back by dropping the last one to
-  three lines of its `heads` before it restarts, as a power cut would; or lose a reply the hub
-  sent. Faults are capped per sequence, so that a short sequence still reaches recovery.
+  three lines of its `heads` before it restarts, as a power cut would; have it lose the `heads`
+  log its latest prune wrote, going back to the one before, as a power cut just after the
+  prune would; have it make the hive again, empty, as it does when its store is corrupt; or lose
+  a reply the hub sent. Faults are capped per sequence, so that a short sequence still reaches
+  recovery.
+
+Every sync step must succeed, but for two stops a user recovers from as the error says. One is jj
+failing to merge a machine's operations with the hive's ([races.md, "Known jj
+limitations"](races.md#known-jj-limitations)), which the test gets past by reverting the operation
+named. The other is a copy behind records the hub pruned, which is expected only of a copy the
+hive forgot, whose forget the hub's history has and whose work its head no longer shows, and that
+has taken fewer records than the hub pruned; anywhere else it fails the case. The user then makes
+a new copy with `musubi clone`, bringing nothing across, and runs `musubi leave --force` in the
+old one, which tells the hive nothing: the new copy takes the old one's place in the rest of the
+sequence, and the old one, out of the hive, is out of the checks.
 
 After each rule, every repository must still load, and no import of git refs or of git's HEAD
 may revert anything (`e2e_search/imports.rs`; for refs, `noSpuriousRevert` in
@@ -423,7 +442,11 @@ and the test checks that:
 - in every colocated repository, `refs/heads` matches the local bookmarks that are neither
   conflicted nor on the root commit (which git can't hold), and a further `jj status` imports
   nothing;
-- every operation made on any machine appears in every machine's `jj op log`;
+- every operation made on any machine appears in every machine's `jj op log`, but for a copy's
+  join, which on the copy itself is the last operation it made before joining, and for those
+  `jj op abandon` dropped, which appear in none, unless jj brought one back on the machine that
+  abandoned it, through a stale working copy ([races.md, "Known jj
+  limitations"](races.md#known-jj-limitations));
 - no change diverges, and no bookmark or tag conflicts, unless jj makes the same of the same
   operations in one repository (the reference, below);
 - no change has two commits with the same parents and contents that two merges rewrote from
@@ -436,7 +459,11 @@ the hub's history, operation by operation, with the same parents:
 
 1. Each machine's commands, and the operations musubi writes for it such as a forget, go in as
    the hive has them. Each merge goes in as jj's own merge of the same parents, in the same
-   order, as jj merges concurrent processes on one machine.
+   order, as jj merges concurrent processes on one machine, but for a merge whose parents `jj
+   op abandon` changed, as it does for every operation above what it abandoned and above the
+   operations beside it, which it moves onto the abandoned operation's parent: jj keeps its
+   view, as it keeps every operation's, so the hive's must be the view of the merge it
+   replaced, as the realizations are held to theirs, and it goes in as the hive has it.
 2. Where jj's merge gives what the hive's did, comparing commits by contents, change ids and
    parents, the reference goes on from the hive's operation. Where it doesn't, it goes on from
    its own, applying later operations three-way as jj applies a concurrent one, until the two

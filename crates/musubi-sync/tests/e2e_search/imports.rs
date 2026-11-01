@@ -44,6 +44,11 @@
 //! Anything else is a finding: the operation that left the record differing from `.git`, if
 //! any, is named in the failure.
 //!
+//! Each import is judged once, against the parent it was written on: `jj op abandon` gives the
+//! operations after the one it abandons new parents, and so new ids, but keeps their metadata
+//! and views, and an import judged again against its new parent would seem to make what the
+//! abandoned operation made.
+//!
 //! Imports of git's HEAD are checked the same way. Every `jj` command first compares its op
 //! head's record of the workspace's HEAD (`git_heads`) with `.git`'s, and where they differ
 //! writes "import git head", which takes `.git`'s and moves the working copy onto it, making a
@@ -102,6 +107,9 @@ pub struct Imports {
     setup: Vec<HashSet<OperationId>>,
     /// Each machine's operations already looked at.
     seen: Vec<HashSet<OperationId>>,
+    /// Each machine's imports already judged, by what `jj op abandon` keeps of an operation
+    /// it rewrites onto another parent: its metadata, and its view (`judged_key`).
+    judged: Vec<HashSet<String>>,
     /// Each machine's git refs that git moved since jj last imported there, with what `.git`
     /// had before each of those moves.
     moved: Vec<BTreeMap<String, Vec<RefTarget>>>,
@@ -231,24 +239,39 @@ fn restore(op: &op_store::Operation) -> bool {
         .any(|prefix| op.metadata.description.starts_with(prefix))
 }
 
-fn own(op: &op_store::Operation) -> bool {
-    !op.metadata.attributes.contains_key(CANONICAL_ATTRIBUTE)
+/// Whose a marked operation is, to tell a machine's own from a realization of another's
+/// (`world::realized`): the machine's key and host, and each canonical operation's work.
+struct Owner {
+    key: String,
+    host: String,
+    works: HashMap<String, Option<String>>,
 }
 
-/// One of this machine's own imports: a realization of another machine's is that machine's.
-fn own_import(op: &op_store::Operation) -> bool {
-    own(op) && op.metadata.description.starts_with("import git refs")
+/// Whether `op` is the machine's own rather than a realization of another machine's.
+fn own(owner: &Owner, op: &op_store::Operation) -> bool {
+    let Some(canonical) = op.metadata.attributes.get(CANONICAL_ATTRIBUTE) else {
+        return true;
+    };
+    match owner.works.get(canonical) {
+        Some(Some(work)) => *work == owner.key,
+        Some(None) => op.metadata.hostname == owner.host,
+        None => false,
+    }
+}
+
+fn own_import(owner: &Owner, op: &op_store::Operation) -> bool {
+    own(owner, op) && op.metadata.description.starts_with("import git refs")
 }
 
 /// One of this machine's own imports of git's HEAD.
-fn own_head_import(op: &op_store::Operation) -> bool {
-    own(op) && op.metadata.description.starts_with("import git head")
+fn own_head_import(owner: &Owner, op: &op_store::Operation) -> bool {
+    own(owner, op) && op.metadata.description.starts_with("import git head")
 }
 
 /// An operation a `jj` command of this machine's made, which names its workspace, unlike
 /// musubi's own.
-fn jj_command(op: &op_store::Operation) -> bool {
-    own(op) && op.metadata.workspace_name.is_some()
+fn jj_command(owner: &Owner, op: &op_store::Operation) -> bool {
+    own(owner, op) && op.metadata.workspace_name.is_some()
 }
 
 /// jj's record of workspace `ws`'s HEAD in `view`.
@@ -259,17 +282,39 @@ fn head(view: &View, ws: &str) -> RefTarget {
         .unwrap_or_else(RefTarget::absent)
 }
 
-fn describe(id: &OperationId, op: &op_store::Operation) -> String {
+/// What identifies an import across `jj op abandon`, which gives the operations after the one
+/// it abandons new parents, and so new ids, keeping their metadata and views: judged again
+/// against its new parent, an import would seem to make what the abandoned operation made.
+fn judged_key(op: &op_store::Operation) -> String {
+    let metadata = &op.metadata;
+    format!(
+        "{} {} {} {} {} {}",
+        metadata.time.start.timestamp.0,
+        metadata.time.end.timestamp.0,
+        metadata.hostname,
+        metadata.username,
+        op.view_id.hex(),
+        metadata.description,
+    )
+}
+
+fn describe(owner: &Owner, id: &OperationId, op: &op_store::Operation) -> String {
     format!(
         "\"{}\" ({}{})",
         op.metadata.description.lines().next().unwrap_or_default(),
         &id.hex()[..12],
-        if own(op) { "" } else { ", a realization" }
+        if own(owner, op) {
+            ""
+        } else {
+            ", a realization"
+        }
     )
 }
 
 /// What one check reads of a machine's operation log, cached.
 struct Log {
+    /// Whose its marked operations are.
+    owner: Owner,
     loader: RepoLoader,
     store: Arc<dyn op_store::OpStore>,
     ops: HashMap<OperationId, op_store::Operation>,
@@ -386,13 +431,13 @@ impl Log {
             return Err(format!(
                 "the merge {} made jj's record of {r} {now}, which isn't jj's merge of its \
                  parents'",
-                describe(id, &op)
+                describe(&self.owner, id, &op)
             ));
         };
         // A restore whose export could write the bookmark leaves it as an export does.
         if self.record(parent, r) == now
-            || own_import(&op)
-            || own(&op) && restore(&op) && !exportable(&local)
+            || own_import(&self.owner, &op)
+            || own(&self.owner, &op) && restore(&op) && !exportable(&local)
             || r.kind == Kind::Remote && !now.0.is_resolved()
         {
             return Ok(());
@@ -402,7 +447,7 @@ impl Log {
         }
         Err(format!(
             "{} left jj's record of {r} {now}, as no export or fetch does",
-            describe(id, &op)
+            describe(&self.owner, id, &op)
         ))
     }
 
@@ -438,7 +483,7 @@ impl Log {
             let op = self.op(&id).clone();
             let parents: Vec<RefTarget> = op.parents.iter().map(|p| self.head(p, ws)).collect();
             let plausible = match parents.as_slice() {
-                [parent] => jj_command(&op) || *parent == now,
+                [parent] => jj_command(&self.owner, &op) || *parent == now,
                 [left, right] if !parents.contains(&now) => {
                     let bases = self.bases(&op.parents);
                     let base_heads: Vec<RefTarget> =
@@ -455,7 +500,7 @@ impl Log {
             if !plausible {
                 return Err(format!(
                     "{} made jj's record of {ws}'s HEAD {}, as jj doesn't",
-                    describe(&id, &op),
+                    describe(&self.owner, &id, &op),
                     show(&now)
                 ));
             }
@@ -536,12 +581,33 @@ impl World {
     pub fn start_imports(&mut self) {
         for m in 0..self.nodes() {
             self.imports.seen.push(HashSet::new());
+            self.imports.judged.push(HashSet::new());
             self.imports.moved.push(BTreeMap::new());
             self.imports.head_moved.push(BTreeMap::new());
             self.check_imports(m);
             self.imports.setup.push(self.imports.seen[m].clone());
         }
         self.imports.started = true;
+    }
+
+    /// Starts again on machine `m`, a new copy that has just joined and synced: what its
+    /// operations so far did is its setup's.
+    pub fn restart_imports(&mut self, m: usize) {
+        if m == self.imports.seen.len() {
+            self.imports.seen.push(HashSet::new());
+            self.imports.judged.push(HashSet::new());
+            self.imports.moved.push(BTreeMap::new());
+            self.imports.head_moved.push(BTreeMap::new());
+            self.imports.setup.push(HashSet::new());
+        }
+        self.imports.seen[m].clear();
+        self.imports.judged[m].clear();
+        self.imports.moved[m].clear();
+        self.imports.head_moved[m].clear();
+        self.imports.started = false;
+        self.check_imports(m);
+        self.imports.started = true;
+        self.imports.setup[m] = self.imports.seen[m].clone();
     }
 
     /// git is about to move `git_ref` on machine `m`: imports before now can't follow it.
@@ -574,10 +640,32 @@ impl World {
             .push(value);
     }
 
+    /// Whose machine `m`'s marked operations are.
+    fn owner(&self, m: usize) -> Owner {
+        let node = self.fx.hive.members[m].adapter.repo();
+        let store = node.canonical_store();
+        let works = store
+            .operation_ids()
+            .unwrap()
+            .into_iter()
+            .filter_map(|id| {
+                let op = store.read_operation(&id).ok()?;
+                Some((id.0.hex(), musubi_jj::presence::Kind::of(&op.metadata).work))
+            })
+            .collect();
+        let key = node.machine().key().to_owned();
+        Owner {
+            host: musubi_jj::workspaces::machine_name(&key).to_owned(),
+            key,
+            works,
+        }
+    }
+
     /// Checks machine `m`'s imports since the last check, oldest first.
     pub fn check_imports(&mut self, m: usize) {
         let loader = self.fx.hive.members[m].adapter.repo().loader().clone();
         let mut log = Log {
+            owner: self.owner(m),
             store: loader.op_store().clone(),
             loader,
             ops: HashMap::new(),
@@ -625,8 +713,10 @@ impl World {
         }
         let mut failures = vec![];
         for id in order {
-            let refs = own_import(&log.ops[&id]);
-            if !refs && !own_head_import(&log.ops[&id]) {
+            let refs = own_import(&log.owner, &log.ops[&id]);
+            if (!refs && !own_head_import(&log.owner, &log.ops[&id]))
+                || !self.imports.judged[m].insert(judged_key(&log.ops[&id]))
+            {
                 continue;
             }
             // Reading the log fails only if musubi lost an operation file it refers to.
@@ -668,7 +758,10 @@ impl World {
     fn check_import(&self, m: usize, log: &mut Log, id: &OperationId) -> Result<(), String> {
         let op = log.op(id).clone();
         let [parent] = op.parents.as_slice() else {
-            return Err(format!("{} has several parents", describe(id, &op)));
+            return Err(format!(
+                "{} has several parents",
+                describe(&log.owner, id, &op)
+            ));
         };
         let before = log.view(parent).clone();
         let after = log.view(id).clone();
@@ -754,13 +847,16 @@ impl World {
             if refs.is_empty() {
                 failures.push(format!(
                     "{} changed {what} without changing jj's record of git's refs",
-                    describe(id, &op)
+                    describe(&log.owner, id, &op)
                 ));
             }
             for r in refs {
                 let taken = r.record(&after).0;
                 if let Err(why) = self.justify(m, log, parent, &r, &taken) {
-                    failures.push(format!("{} changed {what}: {why}", describe(id, &op)));
+                    failures.push(format!(
+                        "{} changed {what}: {why}",
+                        describe(&log.owner, id, &op)
+                    ));
                 }
             }
         }
@@ -819,12 +915,12 @@ impl World {
                 ));
             }
             let op = log.op(&at).clone();
-            if own_import(&op) {
+            if own_import(&log.owner, &op) {
                 return Err(format!(
                     "git didn't move {}, and jj's record of {r}, {target}, is the same as at the \
                      import {}",
                     r.git_ref(),
-                    describe(&at, &op)
+                    describe(&log.owner, &at, &op)
                 ));
             }
             if let [before] = op.parents.as_slice() {
@@ -836,27 +932,30 @@ impl World {
                 }
                 // jj's export after the restore wrote whatever it could, so only a value it
                 // can't write leaves the record differing from `.git`.
-                if own(&op) && restore(&op) && !exportable(&r.local(log.view(&at))) {
+                if own(&log.owner, &op) && restore(&op) && !exportable(&r.local(log.view(&at))) {
                     fired("import:undo");
                     return Ok(());
                 }
                 return Err(format!(
                     "git didn't move {}, and {} changed jj's record of {r} from {was} to {now}",
                     r.git_ref(),
-                    describe(&at, &op)
+                    describe(&log.owner, &at, &op)
                 ));
             }
             let bases = log.bases(&op.parents);
             let base_records: Vec<Record> = bases.iter().map(|b| log.record(b, r)).collect();
             let Some(base) = base_records.first() else {
-                return Err(format!("{} has no common ancestor", describe(&at, &op)));
+                return Err(format!(
+                    "{} has no common ancestor",
+                    describe(&log.owner, &at, &op)
+                ));
             };
             let now = log.record(&at, r);
             if base_records.iter().any(|b| b != base) {
                 return Err(format!(
                     "the merge {}, whose closest common ancestors record {r} differently, made \
                      jj's record of it {now}; criss-cross merges aren't modeled",
-                    describe(&at, &op),
+                    describe(&log.owner, &at, &op),
                 ));
             }
             let before = log.ancestors(bases.clone());
@@ -871,7 +970,7 @@ impl World {
                     return Err(format!(
                         "the merge {} of {} heads, several of which changed jj's record of {r}, \
                          made it {now}; such merges aren't modeled",
-                        describe(&at, &op),
+                        describe(&log.owner, &at, &op),
                         op.parents.len()
                     ));
                 };
@@ -884,7 +983,7 @@ impl World {
                     "git didn't move {}, and the merge {} made jj's record of {r} {now}, where \
                      jj's merge of its parents' makes {merged}",
                     r.git_ref(),
-                    describe(&at, &op),
+                    describe(&log.owner, &at, &op),
                 ));
             }
             let next = touched.first().unwrap_or(&bases[0]).clone();
@@ -892,7 +991,7 @@ impl World {
                 return Err(format!(
                     "the merge {} made jj's record of {r} {now}, which neither the one parent \
                      that changed it nor their common ancestor have",
-                    describe(&at, &op),
+                    describe(&log.owner, &at, &op),
                 ));
             }
             at = next;
@@ -905,10 +1004,16 @@ impl World {
     fn check_head_import(&self, m: usize, log: &mut Log, id: &OperationId) -> Result<(), String> {
         let op = log.op(id).clone();
         let [parent] = op.parents.as_slice() else {
-            return Err(format!("{} has several parents", describe(id, &op)));
+            return Err(format!(
+                "{} has several parents",
+                describe(&log.owner, id, &op)
+            ));
         };
         let Some(ws) = op.metadata.workspace_name.clone() else {
-            return Err(format!("{} names no workspace", describe(id, &op)));
+            return Err(format!(
+                "{} names no workspace",
+                describe(&log.owner, id, &op)
+            ));
         };
         let (was, taken) = (log.head(parent, ws.as_str()), log.head(id, ws.as_str()));
         if was == taken {
@@ -926,7 +1031,7 @@ impl World {
                 format!(
                     "{} moved {}'s working copy, taking HEAD {} for jj's record of it, {}: \
                      git didn't move HEAD from that, and {why}",
-                    describe(id, &op),
+                    describe(&log.owner, id, &op),
                     ws.as_str(),
                     show(&taken),
                     show(&was),
@@ -960,7 +1065,7 @@ impl World {
                     continue;
                 }
                 // A rename takes the record with it.
-                if jj_command(&op)
+                if jj_command(&log.owner, &op)
                     && let Some(old) = op
                         .metadata
                         .description
@@ -975,10 +1080,10 @@ impl World {
                 // jj records HEAD as it writes or imports it, so `.git` had this record then.
                 return Err(format!(
                     "{} changed the record from {} to {}{}",
-                    describe(&at, &op),
+                    describe(&log.owner, &at, &op),
                     show(&was),
                     show(&now),
-                    if jj_command(&op) {
+                    if jj_command(&log.owner, &op) {
                         ", as HEAD was then"
                     } else {
                         ", as only jj does"
@@ -988,13 +1093,16 @@ impl World {
             let bases = log.bases(&op.parents);
             let base_heads: Vec<RefTarget> = bases.iter().map(|b| log.head(b, &ws)).collect();
             let Some(base) = base_heads.first().cloned() else {
-                return Err(format!("{} has no common ancestor", describe(&at, &op)));
+                return Err(format!(
+                    "{} has no common ancestor",
+                    describe(&log.owner, &at, &op)
+                ));
             };
             if base_heads.iter().any(|b| *b != base) {
                 return Err(format!(
                     "the merge {}, whose closest common ancestors record it differently, made it \
                      {}; criss-cross merges aren't modeled",
-                    describe(&at, &op),
+                    describe(&log.owner, &at, &op),
                     show(&now)
                 ));
             }
@@ -1010,7 +1118,7 @@ impl World {
                     return Err(format!(
                         "the merge {} of {} heads, several of which changed the record, made it \
                          {}; such merges aren't modeled",
-                        describe(&at, &op),
+                        describe(&log.owner, &at, &op),
                         op.parents.len(),
                         show(&now)
                     ));
@@ -1025,7 +1133,7 @@ impl World {
                 if merged == now {
                     return Err(format!(
                         "the merge {} of records {} and {} can't have left HEAD {}",
-                        describe(&at, &op),
+                        describe(&log.owner, &at, &op),
                         show(&left),
                         show(&right),
                         show(taken)
@@ -1033,7 +1141,7 @@ impl World {
                 }
                 return Err(format!(
                     "the merge {} made the record {}, where jj's merge of its parents' makes {}",
-                    describe(&at, &op),
+                    describe(&log.owner, &at, &op),
                     show(&now),
                     show(&merged)
                 ));
@@ -1043,7 +1151,7 @@ impl World {
                 return Err(format!(
                     "the merge {} made the record {}, which neither the one parent that changed \
                      it nor their common ancestor have",
-                    describe(&at, &op),
+                    describe(&log.owner, &at, &op),
                     show(&now)
                 ));
             }

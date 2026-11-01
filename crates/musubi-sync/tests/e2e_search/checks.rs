@@ -44,6 +44,18 @@ impl World {
             }
             self.sync_everything();
         }
+        // `assert_converged` runs `jj status` everywhere, unrecorded: first, each workspace of a
+        // machine that abandoned an operation runs it as a user would, so that jj bringing that
+        // operation back through a stale working copy is seen as jj's.
+        let abandoning: BTreeSet<usize> = self.abandoned.iter().map(|(by, ..)| *by).collect();
+        for &m in &abandoning {
+            for ws in 0..self.workspaces[m].len() {
+                self.jj_in(m, ws, &["status"]);
+            }
+        }
+        if !abandoning.is_empty() {
+            self.sync_everything();
+        }
         // Visible commits with change ids and descriptions, local bookmarks (conflicted
         // ones identically), git branches, and a quiet `jj status`.
         let converged = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -163,11 +175,28 @@ impl World {
         }
     }
 
-    /// Every operation made on any machine since setup is in every machine's op log.
+    /// Every operation made on any machine since setup is in every machine's op log, but for
+    /// those a `jj op abandon` dropped, which are in none.
     fn check_operations(&self) {
+        for m in 0..self.nodes() {
+            let keys = self.op_keys(m);
+            if let Some((by, key, _)) = self.abandoned.iter().find(|(_, key, _)| keys.contains(key))
+            {
+                self.fail(&format!(
+                    "{} has the operation {key:?}, which {} abandoned",
+                    self.machine(m),
+                    self.machine(*by)
+                ));
+            }
+        }
+        // A copy's join is, on the copy itself, the last operation it made before it joined,
+        // under its own key there (the join point, `translation_failure`): it shows as itself
+        // only on the others.
+        let joins = |key: &String| key.ends_with(" joins") && key.contains(" musubi: ");
         let new_ops = |m: usize| -> BTreeSet<String> {
             self.op_keys(m)
                 .difference(&self.baseline_keys[m])
+                .filter(|key| !joins(key))
                 .cloned()
                 .collect()
         };
@@ -484,7 +513,9 @@ fn translation_failure(node: &NodeRepo, fresh: &mut NodeRepo, hub: &OpId) -> Res
         .map_err(|e| err(&e))?
         .into_iter()
         .collect();
-    let heads = fresh.canonical_heads().map_err(|e| err(&e))?;
+    let heads = fresh
+        .canonical_heads()
+        .map_err(|e| format!("translating afresh: {e} ({e:?})"))?;
     if heads != [hub.clone()] {
         return Err(format!("translated afresh, its op heads are {heads:?}"));
     }

@@ -1,20 +1,22 @@
 //! Generated end-to-end tests (docs/internals/testing.md, "Generated end-to-end tests"): a Hegel
 //! state machine drives two or three real colocated repositories, each a musubi node of an
-//! in-process hive, through local `jj` work, workspaces, a shared `origin`, git-side work,
-//! partial syncs, and faults, then syncs to a fixed point and checks that the hive
-//! converged. The rules can reach every row of the race catalogue (docs/internals/races.md) but
-//! the documented refusals; `coverage` maps rows to rules.
+//! in-process hive whose hub prunes its records as a hub does, through local `jj` work,
+//! workspaces, forgotten and new copies, a shared `origin`, git-side work, partial syncs, and
+//! faults, then syncs to a fixed point and checks that the hive converged. The rules can reach
+//! every row of the race catalogue (docs/internals/races.md) but the documented refusals;
+//! `coverage` maps rows to rules.
 //!
-//! After every rule, every op head of every repository a sync or fault touched loads,
-//! every `jj` command and sync step must succeed, and no import of git refs or of git's HEAD
-//! changes a ref that git didn't move, except where jj itself would (`imports`). At every full
-//! convergence (`checks`):
-//! the fixture's `assert_converged`; every node's canonical head is the hub's; translating every
-//! operation again from nothing does what the protocol's model assumes; every operation is on
-//! every machine; tags agree; each machine has its own workspaces, at visible commits; no
-//! divergence and no bookmark or tag conflict that jj wouldn't make of the same operations in one
-//! repository (`reference`), nor the same rebase done twice (`ledger`); and every machine shows
-//! the others' workspaces at their working copies, and git never sees them.
+//! After every rule, every op head of every repository a sync or fault touched loads, every `jj`
+//! command and sync step must succeed (but for stops a user gets past as the error says, a copy's
+//! behind pruned records only where the hive forgot it: `World::recover`), and no import of git
+//! refs or of git's HEAD changes a ref that git didn't move, except where jj itself would
+//! (`imports`). At every full convergence (`checks`): the fixture's `assert_converged`; every
+//! node's canonical head is the hub's; translating every operation again from nothing does what
+//! the protocol's model assumes; every operation is on every machine, but those `jj op abandon`
+//! dropped, which are on none; tags agree; each machine has its own workspaces, at visible
+//! commits; no divergence and no bookmark or tag conflict that jj wouldn't make of the same
+//! operations in one repository (`reference`), nor the same rebase done twice (`ledger`); and
+//! every machine shows the others' workspaces at their working copies, and git never sees them.
 //!
 //! `e2e_smoke` runs in the default suite. The search, `e2e_search_shard_*`, runs with
 //! `cargo nextest run -p musubi-sync --profile search`; each shard has its own example

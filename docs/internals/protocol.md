@@ -263,6 +263,59 @@ durable, and keying chunk sessions by blob id.
 [conformance.md](conformance.md) describes how the Rust implementation is checked against
 the model.
 
+## Supersedes
+
+A replicated `jj op abandon` ([design.md, "Abandoning
+operations"](design.md#abandoning-operations)) drops operations from the hive's history. The
+protocol above is unchanged by it, taken over each operation's *original*, the operation it was
+before any drop renamed it: a renamed operation is the same operation, so dropping changes no
+operation, no head and no `seq`. What it adds is a dropped set at each party, and which of its
+operations each shows, under which ids.
+
+State:
+
+- `contract(D)`: the history with the operations in `D` dropped. Each survivor's parents are its
+  parent list with each dropped parent replaced by that parent's parents, the same done to them,
+  and duplicates after the first removed. Its id changes exactly when some proper ancestor is
+  in `D`. `contract(D₁)` and then `contract(D₂)` is `contract(D₁ ∪ D₂)`.
+- Hub: `dropped`, the records it took, in order, each a set of operations dropped at once.
+  `D_hub` is their union. A hub that goes back to a head goes back to the records it had then.
+- Node: `D_node`, what it dropped, by its own `jj op abandon` or by applying the hub's records;
+  `pending = D_node \ D_hub`, as far as it knows.
+
+Each party shows `contract(D)` of what it has, for its own `D`. A head is never in its holder's
+dropped set: the hub never takes such a head, and a node never advances to one.
+
+Steps:
+
+- `Abandon(D)`, on a node through `jj op abandon`: `D` is below the node's heads, holds none of
+  them and not the root. `D_node := D_node ∪ D`.
+- `Supersede`: a `Push` that also carries `D_node`, from a node that has every record of the hub
+  and pending drops. The node first writes the fix-up on its single head and pushes that. The
+  hub answers it as any `Push`, checking the compare-and-swap against `contract(D_hub)`, and
+  also requires the new head to survive the union; on accepting, it appends `D_node \ D_hub` as
+  a record. A node whose records the hub lacks, or differs from, sends no ordinary push the hub
+  will accept: its ids aren't the hub's.
+- `Adopt`: a node that lacks some of the hub's records, none of whose heads they drop, applies
+  them: `D_node := D_node ∪ D_hub`, renaming what it has and what it pends. A node whose
+  pending drops the hub's history no longer has under those ids, after the hub went back or took
+  another record, renames them to the hub's history first.
+
+Policy, before the steps above: if a record the node lacks drops none of its heads, adopt; if
+it has pending drops and the hub's records, supersede, instead of an ordinary push.
+
+Properties, proved over the original operations in `formal/Musubi/Supersede.lean`:
+
+- Every safety property above holds as stated, MergeOwnership and no duplicate merges
+  included: renaming creates no operation, and so performs no merge.
+- **DroppedGrows**: `D_node` only grows; `D_hub` too while the hub doesn't go back.
+- **SupersededGone**: an id that a node's dropped set has superseded is never again the id of an
+  operation that node shows; on the hub, while it doesn't go back.
+- **HeadsSurvive**: no head is in its holder's dropped set, and every dropped operation is below
+  a head of a node that dropped it.
+- Liveness: once users stop and the hub stops going back, every node reaches `heads =
+  {hub.head}` and `D_node = D_hub`, which then holds every operation any node dropped.
+
 ## Translation layer
 
 `canon(L)` maps a local operation to its canonical form:

@@ -729,14 +729,94 @@ hub rename` changes one. Commands that take a hive accept any unique prefix of i
 
 ## Abandoning operations
 
-`jj op abandon` rewrites the descendants of the abandoned operations into new operations with new
-ids. If musubi ignored that, the next pull would bring the old operations straight back. So a node
-notices when canonical operations it had published stop being reachable from its op heads, which
-happens only in `op abandon`, and pauses replication for that repository, saying why, rather than
-undoing it.
+`jj op abandon` removes operations from the operation log. jj keeps every view, so the repository
+is as it was at each operation that stays, but it rewrites every operation after the removed
+ones, with a new id, since an operation's id hashes its parents. musubi replicates it: the
+operations go from every machine and the hub, and their old ids, and those of the operations
+after them, never come back.
 
-Replicating an op abandon, as a record that the new history supersedes the old for every machine
-to apply, is not built yet.
+### Contraction
+
+The hive's history drops a set of canonical operations. Each surviving operation's parent list
+has every dropped parent replaced, where it stands, by that parent's own parents, themselves so
+replaced, and then each duplicate after the first removed. A survivor whose parents change gets a
+new id, and so does every operation after it; the others keep theirs. Dropping one set and then
+another gives the same ids as dropping both at once, in either order
+(`formal/Musubi/Contract.lean`). So two machines' abandons taken in either order, or an abandon
+published again to a hub that lost it, reach the same history.
+
+This isn't jj's own rewrite. jj's `op_walk::reparent_range` puts every operation outside the
+abandoned range that has a parent anywhere in `::abandon_heads` on the range's root, which moves
+concurrent branches as well, and two such abandons give different ids in different orders.
+Where the two differ, as for a branch of the operation log that forks inside the range and
+merges after it, musubi rewrites the abandoning machine's local operations again to match
+contraction.
+
+### Publishing an abandon
+
+A machine notices an abandon as before: canonical operations it had published are no longer
+reachable from its op heads. What was dropped is each canonical operation it had that no
+reachable local operation now stands for. A realization stands for the canonical operation its
+`musubi.canonical` names, even with its parents changed; any other local operation for the one
+that is the same but for its parents. The machine records the dropped set as pending, writes
+the fix-up (below) on its head, and pushes it with the dropped set: a *supersede*. The hub takes
+it with the push, in the push's compare-and-swap, and computes the rewritten history itself, so
+the push carries only the machine's new operations. A supersede that loses the race, to another
+push or another supersede, is rewritten by what won, and pushed again.
+
+### Taking the hub's
+
+The hub keeps the dropped sets it took, in order, each a *record* naming operations by the ids
+they had before it. A machine that lacks some of the hub's records applies them in order. It
+rewrites the history it has from the hub, and its own operations the hub lacks, by contraction.
+It reparents each local operation, which keeps the operation's view and per-machine fields, so
+nothing is exported to `.git` and no ref moves; and it renames its own pending drops. It applies
+a record only once none of its heads is dropped by it. A machine whose head a record drops, as
+one that stood still at an operation another machine abandoned, first fetches and advances to the
+hub's head, which descends from it. So applying a record never leaves a machine two heads to
+merge, and never repeats a merge another machine made. The hub never takes a head it has
+dropped, and a machine never advances to one.
+
+Each machine keeps, for every id a record superseded, the id or ids it became, and translation
+renames through it. An operation that a `jj` command wrote on a superseded operation, having
+loaded the repository before the record arrived, is canonicalized with its parents renamed;
+musubi then reparents it locally too, before anything merges it. musubi also moves each other
+workspace's recorded operation to its rewrite, which `jj op abandon` itself doesn't do. A `jj`
+command that merges such an operation with the rewritten head before musubi reparents it merges
+against an older common ancestor, as jj does after a local `jj op abandon` ([races.md, "Known jj
+limitations"](races.md#known-jj-limitations)).
+
+Each machine's dropped set, and the hub's, only grows, the hub's while it doesn't go back. So an
+id once superseded on a machine never again names an operation it has, whether the operation
+comes back through a rejoin, an offline machine or a command that started before the abandon. A
+hub that goes back loses the records it took after the head it goes back to, and an offline
+machine that never saw them can then push old ids to it. The machines that have the records
+publish them again, renamed to the hub's history, and the hive converges with every machine's
+drops on every machine. [formal/README.md](../../formal/README.md), "Abandoned operations",
+lists the theorems.
+
+### The fix-up
+
+musubi works some state out from the history rather than from views: which copies are present,
+each copy's latest work and forget-after, the machines the hive has known (and so the names other
+machines' workspaces show under), the hive's settings, and the expected value of a conflicted
+remote bookmark. Dropping operations would change it. So the machine that publishes a dropped
+set first writes, on its head, a fix-up that puts it back as it was at its head before the
+abandon:
+
+- a forget of every copy the rewrite would bring back, and of every machine it would drop from
+  those known;
+- work by every copy it would leave absent, or whose latest work or forget-after it dropped, one
+  operation each, recording that work's time and forget-after;
+- in the first operation, the hive's settings and the conflicted remote bookmarks' expected
+  values as they were.
+
+Each operation is work by one copy or a forget, as presence requires, and `Presence.lean` proves
+that such a chain leaves each copy present exactly as it was (`fixup_present`, `pass_present`).
+The state is then as it was at the head and from there on. An operation from before the abandon
+keeps the rewritten history's own state, so `jj op restore` to one can resolve a conflicted
+remote bookmark to the other side. A machine the hive has forgotten, whose work the abandon
+dropped, keeps its own workspaces as they are.
 
 `jj util gc` removes only data that is no longer reachable locally, so it needs no special
 handling. Neither the hub nor the nodes ever delete an object, and the daemon's own cleanup on a

@@ -5,6 +5,9 @@ other terms are those of [design.md, "Vocabulary"](../docs/internals/design.md#v
 
 - The sync protocol of [protocol.md](../docs/internals/protocol.md), with its safety and
   liveness properties, and what still holds when the hub goes back to an earlier head.
+- Replicated `jj op abandon`: contracting operations out of a history (`Musubi/Contract.lean`),
+  and the protocol with dropped sets (`Musubi/Supersede.lean`; [design.md, "Abandoning
+  operations"](../docs/internals/design.md#abandoning-operations)).
 - Chunked blob transfer (`Musubi/Chunks.lean`), from the same document.
 - The per-machine state of a replicated view, for one git ref (`Musubi/Refs.lean`; [design.md,
   "Per-machine state in a replicated
@@ -53,6 +56,7 @@ is `formal/.lake/build/bin/oracle`.
 | File | Contents |
 | --- | --- |
 | `Musubi/Basic.lean` | Sets as predicates (`OSet`), point update `upd`, counting `cnt`, sums `sumN`. |
+| `Musubi/Contract.lean` | Contracting dropped operations out of a history: parents (`cpar`), ids as terms (`cid`), composition, and when ids agree. |
 | `Musubi/Dag.lean` | `Anc` (`anc*`), `ParLt` (parents have smaller ids, so the graph is acyclic), `maxSet` (`max`), and how `anc*` is preserved when a fresh op is created. |
 | `Musubi/Model.lean` | The asynchronous model: state, messages, transitions, `EnvStep`, `SyncStep`, `Step`, `Reachable`. |
 | `Musubi/Invariant.lean` | The inductive invariant `Inv` and the message invariant `MsgOK`. |
@@ -62,6 +66,7 @@ is `formal/.lake/build/bin/oracle`.
 | `Musubi/Liveness.lean` | The policy model `PStep`, its simulation in the asynchronous model, the measure, progress, termination and convergence. |
 | `Musubi/Merged.lean` | The merged `Push` and `Fetch` exchanges reach states that agree with policy steps on everything the measure and convergence read, with a hub that may have gone back too. |
 | `Musubi/Regress.lean` | A hub that goes back to an earlier accepted head, as after a power cut or a remade hive: the extended system `RStep`, the invariant that survives, and convergence once the hub stops going back. |
+| `Musubi/Supersede.lean` | Replicated `jj op abandon`: the protocol over original operations with each party's dropped set (`SStep`, `SRStep`), its invariant, superseded ids never coming back, and liveness with supersedes (`SPStepR`). |
 | `Musubi/Scenario.lean` | A concrete reachable run (a lost Cas race, then fetch, advance, merge, and the merge accepted), showing the model is not vacuous. |
 | `Musubi/RegressScenario.lean` | A run of the executable model in which the hub goes back and two nodes then merge the same heads. |
 | `Musubi/Chunks.lean` | The chunked-blob model, its safety and liveness; and musubi's receiver, which keeps only a prefix, proved a refinement of it, with its own liveness. |
@@ -241,6 +246,50 @@ in that history. The dirty count of `Liveness.lean` does not work here: after th
 back, a node can hold two accepted heads that are not comparable, and merging them makes it
 dirty. A good node stays good under every policy step of every node, and an accepted push
 makes its node good, so the hub head moves at most once per node that is not good.
+
+### Abandoned operations (`Contract.lean`, `Supersede.lean`)
+
+`Contract.lean` is about any history (`ParLt par`) and a dropped set `D`. Ids are terms
+(`CId`), so the hash they stand for is injective.
+
+- `cpar_union`, `cid_union`: dropping `D₁`, then `D₂` from what is left, gives the parents and
+  ids that dropping `D₁ ∪ D₂` gives; hence `cid_comm`, either order.
+- `cid_eq`: two survivors' ids under two dropped sets are equal only for the same operation,
+  with the sets agreeing on its proper ancestors. `superseded_ne`: an id from before a dropped
+  set grew to include the operation or one of its ancestors is no survivor's id after.
+- `anc_cpar_iff`: among survivors, contraction keeps ancestry; `cid_congr`: ids depend only on
+  what is below.
+
+`Supersede.lean` models the protocol over each operation's original, so the states of
+`Model.lean` stay as they are, and adds the hub's and each node's dropped sets (`SState`).
+`SStep` is a `Step` that leaves the hub and each node no head of its own dropped set, or one of
+`sup` (the hub takes a dropped set with a push it accepts), `abandon`, `sendSup`, `sendD` and
+`adopt`; `SRStep` adds the hub going back, to the dropped set it had with that head.
+
+- `SReachable.base`, `SRReachable.base`: every state is one of `Model.lean`, or of
+  `Regress.lean` with the hub going back, so every theorem there holds as stated;
+  `noDuplicateMergeS` restates one.
+- `sinv_reachable`: the invariant `SInv`. No head is in its holder's dropped set, the root is in
+  none, and every dropped operation is below a head of a node that dropped it.
+- `nodeD_grows`, `hubD_grows`: a node's dropped set only grows, and the hub's while it doesn't
+  go back. `superseded_never_returns`, `superseded_never_returns_hub`: so, by `superseded_ne`,
+  an id superseded on a node is never again an id of an operation it keeps, nor on the hub
+  while it doesn't go back.
+- `spstepR_reachable`, `smeasure_decreases`, `no_infinite_policy_runS`, `progressS`,
+  `converged_quiescentS`, `terminal_iff_convergedS`, `eventually_convergesS`,
+  `maximal_run_convergesS`: liveness once the hub stops going back, for the policy `SPStepR`,
+  the steps of `PStepR` and `adopt`, `supPush` and `supFix`.
+- `converged_all_droppedS`, `converged_all_acceptedS`: once converged, the hub and every node
+  have dropped every operation any node dropped, and every operation any node made is below the
+  hub's head.
+
+The measure puts `(drops not yet on the hub, drops not yet on each node)` before `rmeasure`. A
+node can wait on another: with a head the hub dropped, or on a hub head it dropped and isn't
+past. `progressS` shows the node with the newest head above the hub's head can always act, since
+every dropped operation is below a newer head of a node that dropped it.
+
+`Presence.lean`'s `fixup_present` and `pass_present` cover the fix-up chain that restores
+which copies are present after a rewrite.
 
 ### Chunked blobs (`Chunks.lean`)
 
@@ -423,6 +472,12 @@ and 4 are theorems; 2 and 3 are argued here, not proved; 5 is checked by a test.
   objects outside `closure(head)`. All safety theorems hold with these steps included.
 - **Ghost state.** `creator`, `isMerge` and `birth` record each op's creator, whether it is a
   merge, and the hub `seq` at its creation; `hist` records the history of accepted heads.
+- **Original operations.** `Supersede.lean` identifies each canonical operation a drop renamed
+  with its original. A node's operations there include the dropped ones it had, with their
+  objects, as an abstraction of the real node, which keeps only survivors; the real hub's
+  closure check, and a node's realization, are then taken over survivors, which contraction
+  keeps in the same ancestry (`anc_cpar_iff`). The ids each party shows are
+  `cid` of its operations under its own dropped set.
 - **Translation layer.** It is not modeled. The model assumes what [protocol.md, "Translation
   layer"](../docs/internals/protocol.md#translation-layer) requires: `canon` is injective on
   reachable local operations, `canon(realize(C)) = C`, and realization never creates a canonical
@@ -449,6 +504,10 @@ rest on:
   local operations; `Merge` takes all current heads as parents. No other node-side check is
   needed for safety: the `Upload` and `Push` guards, the order of policy steps, and `Learn`'s
   filter matter only for liveness and efficiency.
+- **Supersedes:** the hub refuses a push whose new head it has dropped, and takes a dropped set
+  only with a push that leaves the new head; a node advances to no head it has dropped, and
+  applies a dropped set only once none of its heads is in it. When the hub takes a dropped set,
+  it holds the contraction of its history: it computes it, rather than taking a node's word.
 - **Chunks:** use unique session ids, or tag chunks with the blob id; ignore duplicate and
   overlapping bytes; check `hash(assembled) = id` at `Finish`, and restart on a mismatch;
   treat a stored blob as finished. A receiver may instead keep only a contiguous prefix,

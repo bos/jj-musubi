@@ -620,13 +620,16 @@ fn a_later_operation_published_again_after_the_hub_took_others() {
 
 /// The operation the working copy at `path` last recorded, read without updating it.
 fn recorded_op(repo: &musubi_testutil::TestRepo, path: &std::path::Path) -> String {
-    let workspace = jj_lib::workspace::Workspace::load(
-        &repo.settings(),
-        path,
-        &jj_lib::default_backend_factories::default_backend_factories(),
-        &jj_lib::default_backend_factories::default_working_copy_factories(),
-    )
-    .unwrap();
+    use jj_lib::workspace::WorkspaceLoaderFactory as _;
+    let workspace = jj_lib::workspace::DefaultWorkspaceLoaderFactory
+        .create(path)
+        .unwrap()
+        .load(
+            &repo.settings(),
+            &jj_lib::default_backend_factories::default_backend_factories(),
+            &jj_lib::default_backend_factories::default_working_copy_factories(),
+        )
+        .unwrap();
     jj_lib::object_id::ObjectId::hex(workspace.working_copy().operation_id())
 }
 

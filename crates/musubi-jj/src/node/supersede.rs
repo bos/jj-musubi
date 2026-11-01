@@ -1331,12 +1331,14 @@ impl NodeRepo {
         if !root.join(".jj").join("working_copy").is_dir() {
             return Ok(());
         }
-        let mut workspace = jj_lib::workspace::Workspace::load(
-            self.loader.settings(),
-            root,
-            &jj_lib::default_backend_factories::default_backend_factories(),
-            &jj_lib::default_backend_factories::default_working_copy_factories(),
-        )?;
+        use jj_lib::workspace::WorkspaceLoaderFactory as _;
+        let mut workspace = jj_lib::workspace::DefaultWorkspaceLoaderFactory
+            .create(root)?
+            .load(
+                self.loader.settings(),
+                &jj_lib::default_backend_factories::default_backend_factories(),
+                &jj_lib::default_backend_factories::default_working_copy_factories(),
+            )?;
         let same = |a: &Path, b: &Path| match (a.canonicalize(), b.canonicalize()) {
             (Ok(a), Ok(b)) => a == b,
             _ => false,

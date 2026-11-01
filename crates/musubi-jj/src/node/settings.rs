@@ -43,7 +43,10 @@ impl NodeRepo {
     /// The hive's settings as of a canonical operation: what its nearest recording
     /// ancestor recorded, combined where concurrent operations met, the later write to each
     /// setting winning, or `None` if no ancestor recorded any.
-    fn settings_at(&mut self, op: &OperationId) -> Result<Option<HiveSettings>, NodeError> {
+    pub(super) fn settings_at(
+        &mut self,
+        op: &OperationId,
+    ) -> Result<Option<HiveSettings>, NodeError> {
         let root = self.canonical.root_operation_id().clone();
         let mut stack = vec![op.clone()];
         while let Some(id) = stack.last().cloned() {

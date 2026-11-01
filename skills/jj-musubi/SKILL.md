@@ -89,8 +89,8 @@ change, or ask before rewriting them. Description-only changes are safe.
 
 - `jj rebase -b @` can move other people's mutable ancestors. Select your changes by change id.
 - Revsets such as `empty()` and `mine()` can match other machines' commits. Use change ids.
-- `jj op restore` moves every machine's working copy. `jj op abandon` permanently stops this
-  copy syncing if it removes operations the hive already has. Run either only when asked.
+- `jj op restore` moves every machine's working copy, and `jj op abandon` removes operations
+  from every machine's operation log. Run either only when asked.
 - Forgetting a `<machine>/...` workspace removes it locally; it returns on a later sync.
 
 Every working-copy snapshot replicates, even if you immediately abandon the change. Keep

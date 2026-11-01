@@ -80,7 +80,7 @@ fn closure_and_head_persist() {
         .unwrap();
     assert_eq!(hub.missing_closure(&head).unwrap(), Vec::<String>::new());
 
-    hub.set_head(1, &head).unwrap();
+    hub.set_head(1, &head, None).unwrap();
     // Refs name the head's visible heads, for git to index.
     let refs = Command::new("git")
         .arg("-C")
@@ -256,7 +256,7 @@ fn closure_check_skips_accepted_history() {
         .unwrap();
     unpack_loose(bundle_file.path(), &hub_dir.join("git"));
     assert_eq!(hub.missing_closure(&first).unwrap(), Vec::<String>::new());
-    hub.set_head(1, &first).unwrap();
+    hub.set_head(1, &first, None).unwrap();
 
     repo.write_file("b", "two");
     repo.jj(&["commit", "-m", "two"]);
@@ -322,7 +322,7 @@ fn small_edits_stay_small_beside_a_bitmap() {
     hub.object_store()
         .import(bundle.path(), &old_wants, &[])
         .unwrap();
-    hub.set_head(1, &old).unwrap();
+    hub.set_head(1, &old, None).unwrap();
     // A bitmap index of what the head reaches, as the hub's gc writes once it's big.
     let git_dir = hub_dir.join("git");
     let repack = Command::new("git")

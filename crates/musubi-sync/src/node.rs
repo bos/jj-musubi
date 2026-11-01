@@ -13,10 +13,14 @@ use anyhow::bail;
 use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
 use musubi_core::message::OpEntry;
+use musubi_core::message::RecordState;
 use musubi_core::node::LocalRepo;
 use musubi_jj::node::NodeError;
+use musubi_jj::node::NodeOp;
 use musubi_jj::node::NodeRepo;
 use musubi_jj::node::REALIZE_AT_ONCE;
+use musubi_jj::records::HubOp;
+use musubi_jj::records::Record;
 
 use crate::Attachment;
 use crate::OpId;
@@ -168,22 +172,28 @@ impl NodeAdapter {
         Ok(self.repo.canonical_store().is_ancestor_of(ancestor, op)?)
     }
 
-    /// Makes `base_ancestry` hold `anc*(base)`, extending what it held where `base` descends
-    /// from that.
+    /// Makes `base_ancestry` hold `anc*(base)`, `base` a hub name, as this node names the
+    /// history, extending what it held where `base` descends from that.
     fn cache_ancestry(&self, base: &OpId) -> anyhow::Result<()> {
         let store = self.repo.canonical_store();
+        let bases: Vec<OpId> = self
+            .repo
+            .to_node(&hub(base))?
+            .into_iter()
+            .map(|NodeOp(op)| op)
+            .collect();
         let mut cache = self.base_ancestry.borrow_mut();
         let set = match cache.take() {
             Some((cached, set)) if cached == *base => set,
-            Some((cached, mut set)) if self.canonical_is_ancestor(&cached, base)? => {
-                set.extend(
-                    store.ancestors_until(std::slice::from_ref(base), |id| set.contains(id))?,
-                );
+            Some((cached, mut set))
+                if bases.len() == 1 && self.canonical_is_ancestor(&cached, &bases[0])? =>
+            {
+                set.extend(store.ancestors_until(&bases, |id| set.contains(id))?);
                 set
             }
             _ => {
                 let mut set: HashSet<OpId> = store
-                    .ancestors_until(std::slice::from_ref(base), |_| false)?
+                    .ancestors_until(&bases, |_| false)?
                     .into_iter()
                     .collect();
                 set.insert(self.root().clone());
@@ -192,6 +202,14 @@ impl NodeAdapter {
         };
         *cache = Some((base.clone(), set));
         Ok(())
+    }
+
+    /// The one node name of `op`, a hub name for an operation this node doesn't drop.
+    fn node_name(&self, op: &OpId) -> anyhow::Result<OpId> {
+        match self.repo.to_node(&hub(op))?.as_slice() {
+            [NodeOp(node)] => Ok(node.clone()),
+            _ => anyhow::bail!("operation {} is one this machine dropped", op.hex()),
+        }
     }
 
     fn required_commits(&self, ops: &[OpId]) -> anyhow::Result<Vec<CommitId>> {
@@ -278,12 +296,33 @@ impl NodeAdapter {
     }
 }
 
-/// Whether `err` is that `jj op abandon` paused syncing, which no retry gets past.
-pub fn history_abandoned(err: &anyhow::Error) -> bool {
+/// The hub's name for `op`. The core speaks of the hub's history in hub names (`known`, staged
+/// operations, the base, records) and of this machine's op heads, and what it pushes, in node
+/// names (`musubi_jj::node::NodeOp`), which differ only while this machine has drops to
+/// publish: each method below says which it takes.
+fn hub(op: &OpId) -> HubOp {
+    HubOp(op.clone())
+}
+
+/// Records from the core, in hub names.
+fn records_of(records: &[Vec<OpId>]) -> Vec<Record> {
+    records
+        .iter()
+        .map(|record| Record::new(record.iter().cloned().map(HubOp)))
+        .collect()
+}
+
+/// Whether `err` is that this repository lost history the hive has, which no `jj op abandon`
+/// explains and no retry gets past.
+pub fn history_lost(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
         matches!(
             cause.downcast_ref::<NodeError>(),
-            Some(NodeError::UnreachableHistory | NodeError::RewrittenRealization)
+            Some(
+                NodeError::UnreachableHistory
+                    | NodeError::RewrittenRealization
+                    | NodeError::DamagedLog
+            )
         )
     })
 }
@@ -294,15 +333,22 @@ impl LocalRepo for NodeAdapter {
     type Error = anyhow::Error;
 
     fn heads(&mut self) -> anyhow::Result<Vec<OpId>> {
-        let heads = self.repo.canonical_heads()?;
-        // jj never makes an operation unreachable from the op heads except through
-        // `jj op abandon`. Replicating the rewritten history would put the abandoned
-        // operations back on every other machine, so stop instead (docs/internals/design.md,
+        // jj never makes an operation the hub accepted unreachable from the op heads except
+        // through `jj op abandon`, which this node then publishes (docs/internals/design.md,
         // "Abandoning operations").
         let base = self.accepted_base()?;
+        self.repo.settle()?;
+        if self.repo.check_abandon()? {
+            self.staged.clear();
+            self.staged_children.clear();
+            *self.base_ancestry.borrow_mut() = None;
+        }
+        let heads = self.repo.canonical_heads()?;
         let mut reachable = false;
-        for head in &heads {
-            reachable |= self.canonical_is_ancestor(&base, head)?;
+        for NodeOp(base) in self.repo.to_node(&hub(&base))? {
+            for head in &heads {
+                reachable |= self.canonical_is_ancestor(&base, head)?;
+            }
         }
         if !reachable {
             return Err(NodeError::UnreachableHistory.into());
@@ -311,11 +357,21 @@ impl LocalRepo for NodeAdapter {
     }
 
     fn is_local(&self, op: &OpId) -> anyhow::Result<bool> {
-        Ok(self.repo.local_of(op).is_some())
+        let nodes = self.repo.to_node(&hub(op))?;
+        Ok(!nodes.is_empty()
+            && nodes
+                .iter()
+                .all(|node| self.repo.local_of(&node.0).is_some()))
     }
 
     fn is_ancestor(&self, ancestor: &OpId, op: &OpId) -> anyhow::Result<bool> {
-        self.canonical_is_ancestor(ancestor, op)
+        let ancestors = self.repo.to_node(&hub(ancestor))?;
+        for NodeOp(ancestor) in &ancestors {
+            if !self.canonical_is_ancestor(ancestor, op)? {
+                return Ok(false);
+            }
+        }
+        Ok(!ancestors.is_empty())
     }
 
     fn merge_heads(&mut self) -> anyhow::Result<()> {
@@ -415,7 +471,7 @@ impl LocalRepo for NodeAdapter {
     }
 
     fn staged_parents(&self, op: &OpId) -> anyhow::Result<Option<Vec<OpId>>> {
-        if self.repo.local_of(op).is_some() {
+        if self.is_local(op)? {
             return Ok(None);
         }
         if let Some(parents) = self.staged.get(op) {
@@ -482,14 +538,20 @@ impl LocalRepo for NodeAdapter {
         }
         // Written meanwhile: `advance` waits for them, and so does anything else here that
         // reads local operations.
-        self.repo.realize_pending(op, &next)?;
+        let node = self.node_name(op)?;
+        let next = next
+            .iter()
+            .map(|op| self.node_name(op))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        self.repo.realize_pending(&node, &next)?;
         self.staged.remove(op);
         self.staged_children.remove(op);
         Ok(())
     }
 
     fn advance(&mut self, op: &OpId) -> anyhow::Result<()> {
-        self.repo.advance(op)?;
+        let node = self.node_name(op)?;
+        self.repo.advance(&node)?;
         Ok(())
     }
 
@@ -514,5 +576,69 @@ impl LocalRepo for NodeAdapter {
         file.write_all(hex.as_bytes())?;
         file.set_len(hex.len() as u64)?;
         Ok(())
+    }
+
+    fn applied_records(&self) -> anyhow::Result<Vec<Vec<OpId>>> {
+        Ok(self
+            .repo
+            .applied_records()
+            .iter()
+            .map(|record| record.ops().iter().map(|op| op.0.clone()).collect())
+            .collect())
+    }
+
+    fn records(&self) -> anyhow::Result<RecordState> {
+        let (count, digest) = self.repo.record_state();
+        Ok(RecordState {
+            count,
+            digest: digest.bytes().to_vec(),
+        })
+    }
+
+    fn pending(&self) -> anyhow::Result<Vec<OpId>> {
+        Ok(self
+            .repo
+            .pending_drops()
+            .ops()
+            .iter()
+            .map(|op| op.0.clone())
+            .collect())
+    }
+
+    fn records_with(&self, record: &[OpId]) -> anyhow::Result<RecordState> {
+        let record = Record::new(record.iter().cloned().map(HubOp));
+        let (count, digest) = self.repo.record_state_with(&record);
+        Ok(RecordState {
+            count,
+            digest: digest.bytes().to_vec(),
+        })
+    }
+
+    fn prepare_records(&mut self, records: &[Vec<OpId>]) -> anyhow::Result<bool> {
+        self.repo.settle()?;
+        Ok(self.repo.prepare_records(&records_of(records))?)
+    }
+
+    fn adopt(&mut self, records: &[Vec<OpId>]) -> anyhow::Result<()> {
+        self.repo.settle()?;
+        // The base, as the hub names it now: what it became, or, if dropped, the first of
+        // what was below it, also accepted.
+        if let Some(HubOp(base)) = self.repo.adopt_records(&records_of(records))? {
+            self.set_accepted_base(&base)?;
+        }
+        // Staged operations, as the hub named them before, are stale.
+        self.staged.clear();
+        self.staged_children.clear();
+        *self.base_ancestry.borrow_mut() = None;
+        Ok(())
+    }
+
+    fn is_dropped(&self, op: &OpId) -> anyhow::Result<bool> {
+        Ok(self.repo.is_dropped(&hub(op)))
+    }
+
+    fn write_fixup(&mut self) -> anyhow::Result<Option<OpId>> {
+        self.repo.settle()?;
+        Ok(self.repo.write_fixup()?.map(|NodeOp(op)| op))
     }
 }

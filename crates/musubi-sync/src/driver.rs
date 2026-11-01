@@ -84,6 +84,14 @@ impl NodeDriver {
                     tracing::debug!("realized {}", short(&op));
                 }
                 Step::Advanced(op) => tracing::debug!("advanced to {}", short(&op)),
+                Step::Adopted => tracing::info!("took the hive's dropped operations"),
+                Step::Superseded { fixup, push } => {
+                    if let Some(fixup) = fixup {
+                        tracing::debug!("wrote the fix-up {}", short(&fixup));
+                    }
+                    tracing::info!("publishing the operations this machine dropped");
+                    self.deliver(push).await?;
+                }
             }
             steps += 1;
         }
@@ -153,6 +161,7 @@ impl NodeDriver {
             kind: HeadKind::Notify,
             seq: notice.seq,
             head: OpId::new(notice.head),
+            records: notice.records,
         };
         log_handled(&self.core.handle(&mut self.adapter, reply)?);
         Ok(())
@@ -193,5 +202,6 @@ fn log_handled(handled: &Handled<OpId>) {
             tracing::debug!("staged the objects of {} operations", ops.len());
         }
         Handled::Ignored => tracing::debug!("nothing new"),
+        Handled::Refused => tracing::debug!("the hub took other records first"),
     }
 }

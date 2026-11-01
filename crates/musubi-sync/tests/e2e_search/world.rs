@@ -941,7 +941,8 @@ impl World {
                 }
                 // Advancing finishes writing what was realized.
                 Step::Advanced(_) if realizing.is_some() => break,
-                Step::Merged | Step::Advanced(_) => {}
+                Step::Superseded { push, .. } => deliver(self, push)?,
+                Step::Merged | Step::Advanced(_) | Step::Adopted => {}
             }
         }
         Ok(())
@@ -963,12 +964,13 @@ impl World {
                 .core
                 .handle_reply(&mut member.adapter, handled.reply)?;
         }
-        if let Some((seq, head)) = handled.publish {
+        if let Some((seq, head, records)) = handled.publish {
             for member in &mut hive.members {
                 let notify = Reply::Head {
                     kind: HeadKind::Notify,
                     seq,
                     head: head.clone(),
+                    records: records.clone(),
                 };
                 member.core.handle(&mut member.adapter, notify)?;
             }

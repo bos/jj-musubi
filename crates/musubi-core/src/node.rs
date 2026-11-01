@@ -1,4 +1,4 @@
-//! A node's side of the protocol (docs/internals/protocol.md, "Node").
+//! A node's side of the protocol (docs/internals/protocol.md, "Node" and "Supersedes").
 //!
 //! [`NodeCore`] holds the node's volatile protocol state and implements the policy. Its
 //! persistent state lives in the [`LocalRepo`]: the jj repository in production, a model of
@@ -13,6 +13,7 @@ use std::hash::Hash;
 
 use crate::message::HeadKind;
 use crate::message::OpEntry;
+use crate::message::RecordState;
 use crate::message::Reply;
 use crate::message::Request;
 
@@ -90,6 +91,36 @@ pub trait LocalRepo {
     fn accepted_base(&self) -> Result<Self::Op, Self::Error>;
 
     fn set_accepted_base(&mut self, op: &Self::Op) -> Result<(), Self::Error>;
+
+    /// The hub's records this node took last, oldest first, each sorted.
+    fn applied_records(&self) -> Result<Vec<Vec<Self::Op>>, Self::Error>;
+
+    /// The state of [`Self::applied_records`].
+    fn records(&self) -> Result<RecordState, Self::Error>;
+
+    /// What this node dropped that the records it took don't drop: what it has yet to
+    /// publish, sorted. Empty if nothing.
+    fn pending(&self) -> Result<Vec<Self::Op>, Self::Error>;
+
+    /// The state of this node's records once the hub takes `record` after them.
+    fn records_with(&self, record: &[Self::Op]) -> Result<RecordState, Self::Error>;
+
+    /// Gets ready to take `records`, the hub's: names what this node has as the hub does,
+    /// beside what it has, without changing its op heads, so that it can realize and advance
+    /// to the hub's head first. Returns whether they drop one of the op heads.
+    fn prepare_records(&mut self, records: &[Vec<Self::Op>]) -> Result<bool, Self::Error>;
+
+    /// Takes the hub's records, none of which drops an op head: drops what they drop, and
+    /// names what this node has as the hub does. What else this node dropped stays pending.
+    fn adopt(&mut self, records: &[Vec<Self::Op>]) -> Result<(), Self::Error>;
+
+    /// Whether this node dropped `op`, an operation the hub named.
+    fn is_dropped(&self, op: &Self::Op) -> Result<bool, Self::Error>;
+
+    /// Writes the fix-up on the single op head, before a supersede, and returns it
+    /// (docs/internals/design.md, "The fix-up"); or `None` if the head already descends
+    /// from the one for what this node has yet to publish.
+    fn write_fixup(&mut self) -> Result<Option<Self::Op>, Self::Error>;
 }
 
 /// What [`NodeCore::step`] did.
@@ -102,6 +133,14 @@ pub enum Step<O, A> {
     Realized(O),
     Advanced(O),
     Send(Vec<Request<O, A>>),
+    /// Took the hub's records.
+    Adopted,
+    /// Wrote the fix-up, if it hadn't, and pushes it, or the head, with what this node
+    /// dropped.
+    Superseded {
+        fixup: Option<O>,
+        push: Request<O, A>,
+    },
 }
 
 /// What [`NodeCore::handle`] did with a reply.
@@ -117,6 +156,8 @@ pub enum Handled<O> {
     },
     /// Staged the objects of an `Objects` reply.
     StagedObjects(Vec<O>),
+    /// The hub refused a push: this node's records aren't the hub's.
+    Refused,
     /// Ignored: stale, or about another head, or not all reachable from the head it names.
     Ignored,
 }
@@ -128,6 +169,11 @@ pub struct NodeCore<O> {
     /// and its objects are available. Planned by one walk, rather than one per step, for
     /// `known.head`, and dropped with it.
     plan: VecDeque<O>,
+    /// The hub's records as of the newest head this node heard of, or as a refusal said.
+    hub_records: Option<RecordState>,
+    /// The hub's records, all of them, where they aren't this node's: to take once none of
+    /// them drops an op head.
+    announced: Option<Vec<Vec<O>>>,
 }
 
 /// What [`NodeCore::survey`] found below `known.head`.
@@ -147,6 +193,8 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
             known: (0, root.clone()),
             root,
             plan: VecDeque::new(),
+            hub_records: None,
+            announced: None,
         }
     }
 
@@ -163,15 +211,27 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
         Ok(Request::Fetch {
             base: repo.accepted_base()?,
             haves: repo.fetch_haves()?,
+            records: repo.records()?,
         })
     }
 
-    /// Takes the next policy step (docs/internals/protocol.md, "Policy").
+    /// Takes the next policy step (docs/internals/protocol.md, "Policy" and "Supersedes").
     pub fn step<R>(&mut self, repo: &mut R) -> Result<Step<O, R::Attachment>, R::Error>
     where
         R: LocalRepo<Op = O>,
     {
         let heads = repo.heads()?;
+        // Take the hub's records first, once none drops a head: a head they drop waits for
+        // the hub's head, which comes after it, so that taking them leaves nothing to merge.
+        if let Some(records) = self.announced.take()
+            && records != repo.applied_records()?
+        {
+            if !repo.prepare_records(&records)? {
+                repo.adopt(&records)?;
+                return Ok(Step::Adopted);
+            }
+            self.announced = Some(records);
+        }
         if heads.len() >= 2 {
             repo.merge_heads()?;
             return Ok(Step::Merged);
@@ -195,6 +255,10 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
             descends |= repo.is_ancestor(&known, head)?;
         }
         if !descends {
+            // Never to a head this node dropped: it waits for the hub to move past it.
+            if repo.is_dropped(&known)? {
+                return Ok(Step::Idle);
+            }
             repo.advance(&known)?;
             repo.set_accepted_base(&known)?;
             return Ok(Step::Advanced(known));
@@ -205,20 +269,64 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
         if self.known.0 > 0 && repo.accepted_base()? != known {
             repo.set_accepted_base(&known)?;
         }
+        let records = repo.records()?;
+        let dropped = repo.pending()?;
+        let differ = match &self.hub_records {
+            Some(hub) => *hub != records,
+            // A supersede writes the fix-up first, so it waits to know the hub's records, as
+            // after a restart: the hub may have taken this node's drops already.
+            None => !dropped.is_empty(),
+        };
+        if differ {
+            // The hub refuses what this node would push, its ids not being the hub's, until
+            // this node takes the hub's records, which a fetch brings.
+            return Ok(if self.announced.is_some() {
+                Step::Idle
+            } else {
+                Step::Send(vec![self.poll(repo)?])
+            });
+        }
         // Not two or more heads, and op heads are never empty.
-        let head = &heads[0];
-        if *head == known {
+        let head = heads[0].clone();
+        if dropped.is_empty() {
+            if head == known {
+                return Ok(Step::Idle);
+            }
+            // `known ∈ anc*(head)`: push, uploading what the hub lacks with it.
+            return Ok(Step::Send(vec![self.push(repo, &head, records, vec![])?]));
+        }
+        // A supersede: the fix-up, pushed with what this node dropped.
+        let fixup = repo.write_fixup()?;
+        let new = fixup.clone().unwrap_or(head);
+        if new == known {
             return Ok(Step::Idle);
         }
-        // `known ∈ anc*(head)`: push, uploading what the hub lacks with it.
+        let push = self.push(repo, &new, records, dropped)?;
+        Ok(Step::Superseded { fixup, push })
+    }
+
+    /// A `Push` of `head`, which descends from `known.head`, uploading what the hub lacks.
+    fn push<R>(
+        &self,
+        repo: &R,
+        head: &O,
+        records: RecordState,
+        dropped: Vec<O>,
+    ) -> Result<Request<O, R::Attachment>, R::Error>
+    where
+        R: LocalRepo<Op = O>,
+    {
+        let known = self.known.1.clone();
         let ops = repo.ops_between(head, &known)?;
-        Ok(Step::Send(vec![Request::Push {
+        Ok(Request::Push {
             ops_attachment: repo.ops_attachment(&ops)?,
             objects: repo.objects_attachment(&ops, &known)?,
             ops,
             expected: known,
             new: head.clone(),
-        }]))
+            records,
+            dropped,
+        })
     }
 
     /// Walks `anc*(known)` down to the local operations, once: which staged operations can
@@ -320,11 +428,20 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
         R: LocalRepo<Op = O>,
     {
         match reply {
-            Reply::Head { kind, seq, head } => {
+            Reply::Head {
+                kind,
+                seq,
+                head,
+                records,
+            } => {
                 if seq > self.known.0 {
                     self.learn(seq, head.clone());
+                    self.note_records(repo, records)?;
                     Ok(Handled::Learned { kind, seq, head })
                 } else {
+                    if seq == self.known.0 && head == self.known.1 {
+                        self.note_records(repo, records)?;
+                    }
                     Ok(Handled::Ignored)
                 }
             }
@@ -334,11 +451,17 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
                 ops,
                 ops_attachment,
                 objects,
+                records,
+                records_from,
+                new_records,
             } => {
                 let learned = (seq > self.known.0).then(|| {
                     self.learn(seq, head.clone());
                     (seq, head.clone())
                 });
+                if seq == self.known.0 && head == self.known.1 {
+                    self.note_announced(repo, records, records_from, new_records)?;
+                }
                 // Stage only operations in `anc*(known.head)`: the guard Locality, and so
                 // MergeOwnership, depend on (docs/internals/protocol.md, "Fetch").
                 if ops.is_empty() || head != self.known.1 || !all_reach(&head, &ops) {
@@ -363,7 +486,53 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
                 repo.stage_objects(&for_ops, &attachment)?;
                 Ok(Handled::StagedObjects(for_ops))
             }
+            Reply::Refused { records } => {
+                self.hub_records = Some(records);
+                Ok(Handled::Refused)
+            }
         }
+    }
+
+    /// Takes in the hub's records as of the head this node knows. Where the hub took this
+    /// node's pending drops as its next record, this node takes that record too.
+    fn note_records<R>(&mut self, repo: &R, records: RecordState) -> Result<(), R::Error>
+    where
+        R: LocalRepo<Op = O>,
+    {
+        if records != repo.records()? {
+            let dropped = repo.pending()?;
+            if !dropped.is_empty() && records == repo.records_with(&dropped)? {
+                let mut all = repo.applied_records()?;
+                all.push(dropped);
+                self.announced = Some(all);
+            }
+        }
+        self.hub_records = Some(records);
+        Ok(())
+    }
+
+    /// Takes in the hub's records from a `Fetched` reply about the head this node knows.
+    fn note_announced<R>(
+        &mut self,
+        repo: &R,
+        records: RecordState,
+        from: u64,
+        new_records: Vec<Vec<O>>,
+    ) -> Result<(), R::Error>
+    where
+        R: LocalRepo<Op = O>,
+    {
+        let mut all = repo.applied_records()?;
+        match usize::try_from(from) {
+            Ok(from) if from <= all.len() => all.truncate(from),
+            // Not records this node can have asked about: not the hub's, as an honest one
+            // sends them.
+            _ => return Ok(()),
+        }
+        all.extend(new_records);
+        self.announced = (all != repo.applied_records()?).then_some(all);
+        self.hub_records = Some(records);
+        Ok(())
     }
 
     /// Whether `reply`, to this node's own request, says that the hub has gone back: to a
@@ -380,17 +549,20 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
                 kind: HeadKind::Notify,
                 ..
             }
-            | Reply::Objects { .. } => return false,
+            | Reply::Objects { .. }
+            | Reply::Refused { .. } => return false,
             Reply::Head { seq, head, .. } | Reply::Fetched { seq, head, .. } => (*seq, head),
         };
         seq < self.known.0 || (seq == self.known.0 && *head != self.known.1)
     }
 
     /// Adopts `(seq, head)`. A plan made for the head known before may realize operations
-    /// that aren't in `anc*(head)`, if the hub went back, so it goes.
+    /// that aren't in `anc*(head)`, if the hub went back, so it goes, and so do the records
+    /// known as of it.
     fn learn(&mut self, seq: u64, head: O) {
         self.known = (seq, head);
         self.plan.clear();
+        self.hub_records = None;
     }
 
     /// Takes a reply to this node's own request, as [`Self::handle`] does, having first
@@ -439,8 +611,18 @@ fn all_reach<O: Hash + Eq>(head: &O, ops: &[OpEntry<O>]) -> bool {
 mod tests {
     use super::*;
 
+    const NO_RECORDS: RecordState = RecordState {
+        count: 0,
+        digest: vec![],
+    };
+
     fn head(kind: HeadKind, seq: u64, head: u32) -> Reply<u32, ()> {
-        Reply::Head { kind, seq, head }
+        Reply::Head {
+            kind,
+            seq,
+            head,
+            records: NO_RECORDS,
+        }
     }
 
     #[test]
@@ -464,14 +646,20 @@ mod tests {
             ops: vec![],
             ops_attachment: (),
             objects: (),
+            records: NO_RECORDS,
+            records_from: 0,
+            new_records: vec![],
         };
         assert!(core.hub_went_back(&fetched(0, 0)));
         assert!(!core.hub_went_back(&fetched(4, 40)));
-        // A notification can be stale, and an `Objects` reply names no head.
+        // A notification can be stale, and an `Objects` reply or a refusal names no head.
         assert!(!core.hub_went_back(&head(HeadKind::Notify, 3, 30)));
         assert!(!core.hub_went_back(&Reply::<u32, ()>::Objects {
             for_ops: vec![],
             attachment: (),
+        }));
+        assert!(!core.hub_went_back(&Reply::<u32, ()>::Refused {
+            records: NO_RECORDS
         }));
     }
 }

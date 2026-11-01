@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -59,7 +60,12 @@ pub(super) struct Colocation {
 }
 
 /// Expected values of conflicted remote bookmarks, by operation and git ref.
-type Expected = HashMap<(OperationId, GitRefNameBuf), Option<RefTarget>>;
+pub(super) type Expected = HashMap<(OperationId, GitRefNameBuf), Option<RefTarget>>;
+
+/// The attribute of a fix-up's first operation recording the expected value ([`expected`]) of
+/// each conflicted remote bookmark there as the history before the abandon had it, one line
+/// each: the git ref, then the value ([`expected_token`]).
+pub(super) const EXPECTED_ATTRIBUTE: &str = "musubi.expected";
 
 impl NodeGit {
     /// The git repository of the jj repository whose `.jj/repo` directory is `repo_path` and
@@ -298,13 +304,15 @@ impl Colocation {
     /// records the result: the same operation if nothing changed, otherwise a copy with the
     /// updated per-machine fields. `is_join` says whether a local operation is a join point.
     /// `beside` are this machine's op heads concurrent with the realization, whose merge with
-    /// it musubi exports next, and publishes in its place.
+    /// it musubi exports next, and publishes in its place. `pending` holds expected values a
+    /// fix-up not yet written will record.
     pub fn export_refs(
         &self,
         loader: &RepoLoader,
         realized: &OperationId,
         is_join: &dyn Fn(&Operation) -> bool,
         beside: &[Operation],
+        pending: &Expected,
     ) -> Result<OperationId, NodeError> {
         let op = loader.load_operation(realized).block_on()?;
         let repo: Arc<ReadonlyRepo> = loader.load_at(&op).block_on()?;
@@ -312,10 +320,17 @@ impl Colocation {
         // Refs that fail to export keep their recorded values, exactly as after a failed
         // export in a local `jj` command; jj's next import reconciles them.
         let _stats = jj_lib::git::export_refs(tx.repo_mut())?;
+        let mut known = self.expected.lock().expect("not poisoned").clone();
+        known.extend(
+            pending
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
         let history = History {
-            known: &self.expected.lock().expect("not poisoned").clone(),
-            root: loader.op_store().root_operation_id(),
+            known: &known,
+            roots: std::slice::from_ref(loader.op_store().root_operation_id()),
             is_join,
+            parents: &|_| Ok(None),
         };
         let expected = export_conflicted_remote_bookmarks(tx.repo_mut(), &op, &history, beside)?;
         let remember = |exported: &OperationId| {
@@ -380,33 +395,7 @@ fn export_conflicted_remote_bookmarks(
     history: &History<'_>,
     beside: &[Operation],
 ) -> Result<Vec<(GitRefNameBuf, Option<RefTarget>)>, NodeError> {
-    type Terms = Vec<Option<CommitId>>;
-    let conflicted: Vec<(GitRefNameBuf, Option<RefTarget>, Terms)> = mut_repo
-        .view()
-        .all_remote_bookmarks()
-        .filter(|(symbol, remote_ref)| {
-            symbol.remote != REMOTE_NAME_FOR_LOCAL_GIT_REPO
-                && symbol.name.as_str() != "HEAD"
-                && !remote_ref.target.is_resolved()
-        })
-        .map(|(symbol, remote_ref)| {
-            let name: GitRefNameBuf = format!(
-                "refs/remotes/{}/{}",
-                symbol.remote.as_str(),
-                symbol.name.as_str()
-            )
-            .into();
-            let expected = expected(
-                mut_repo.store(),
-                history,
-                op,
-                symbol,
-                &name,
-                &remote_ref.target,
-            )?;
-            Ok((name, expected, remote_ref.target.iter().cloned().collect()))
-        })
-        .collect::<Result<_, NodeError>>()?;
+    let conflicted = conflicted_remote_bookmarks(mut_repo.store(), mut_repo.view(), op, history)?;
     if conflicted.is_empty() {
         return Ok(vec![]);
     }
@@ -481,15 +470,123 @@ fn export_conflicted_remote_bookmarks(
     Ok(all)
 }
 
-/// What [`expected`] knows of history beyond the op store.
-struct History<'a> {
-    /// Expected values remembered from the last export.
-    known: &'a Expected,
-    /// The root operation.
-    root: &'a OperationId,
-    /// Whether a local operation is a join point.
-    is_join: &'a dyn Fn(&Operation) -> bool,
+type Terms = Vec<Option<CommitId>>;
+
+/// Each conflicted remote bookmark of `view`, the view at `op`, with its git ref, its expected
+/// value ([`expected`]) and its target's terms.
+fn conflicted_remote_bookmarks(
+    store: &Arc<Store>,
+    view: &View,
+    op: &Operation,
+    history: &History<'_>,
+) -> Result<Vec<(GitRefNameBuf, Option<RefTarget>, Terms)>, NodeError> {
+    view.all_remote_bookmarks()
+        .filter(|(symbol, remote_ref)| {
+            symbol.remote != REMOTE_NAME_FOR_LOCAL_GIT_REPO
+                && symbol.name.as_str() != "HEAD"
+                && !remote_ref.target.is_resolved()
+        })
+        .map(|(symbol, remote_ref)| {
+            let name: GitRefNameBuf = format!(
+                "refs/remotes/{}/{}",
+                symbol.remote.as_str(),
+                symbol.name.as_str()
+            )
+            .into();
+            let expected = expected(store, history, op, symbol, &name, &remote_ref.target)?;
+            Ok((name, expected, remote_ref.target.iter().cloned().collect()))
+        })
+        .collect()
 }
+
+/// The expected value ([`expected`]) of each conflicted remote bookmark at `op`, by git ref,
+/// as `history` has history.
+pub(super) fn expected_values(
+    store: &Arc<Store>,
+    op: &Operation,
+    history: &History<'_>,
+) -> Result<Vec<(GitRefNameBuf, Option<RefTarget>)>, NodeError> {
+    let view = op.view().block_on()?;
+    let conflicted = conflicted_remote_bookmarks(store, &view, op, history)?;
+    Ok(conflicted
+        .into_iter()
+        .map(|(name, expected, _)| (name, expected))
+        .collect())
+}
+
+/// Expected values as [`EXPECTED_ATTRIBUTE`] holds them, if there are any.
+pub(super) fn format_expected(values: &[(GitRefNameBuf, Option<RefTarget>)]) -> Option<String> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut text = String::new();
+    for (name, expected) in values {
+        writeln!(
+            text,
+            "{} {}",
+            name.as_str(),
+            expected_token(expected.as_ref())
+        )
+        .expect("writing to a String");
+    }
+    Some(text)
+}
+
+/// An expected value in a word: the commit id, `absent` where the ref should be absent, or
+/// `none` where there is none and musubi leaves the ref alone. [`expected`] never makes a
+/// conflict one.
+pub(super) fn expected_token(expected: Option<&RefTarget>) -> String {
+    match expected {
+        Some(target) if target.is_absent() => "absent".to_owned(),
+        Some(target) => target
+            .as_normal()
+            .map_or_else(|| "none".to_owned(), CommitId::hex),
+        None => "none".to_owned(),
+    }
+}
+
+/// The expected value [`expected_token`] put in a word, if it is one.
+pub(super) fn parse_expected_token(token: &str) -> Option<Option<RefTarget>> {
+    match token {
+        "absent" => Some(Some(RefTarget::absent())),
+        "none" => Some(None),
+        hex => CommitId::try_from_hex(hex).map(|id| Some(RefTarget::normal(id))),
+    }
+}
+
+/// The expected value of git ref `name` that `op`'s [`EXPECTED_ATTRIBUTE`] records, if it
+/// records one.
+fn recorded(op: &Operation, name: &GitRefNameBuf) -> Option<Option<RefTarget>> {
+    recorded_in(op.metadata().attributes.get(EXPECTED_ATTRIBUTE)?, name)
+}
+
+/// The expected value of git ref `name` that `text`, as [`EXPECTED_ATTRIBUTE`] holds it,
+/// records, if it records one.
+fn recorded_in(text: &str, name: &GitRefNameBuf) -> Option<Option<RefTarget>> {
+    text.lines().find_map(|line| {
+        let (refname, value) = line.split_once(' ')?;
+        (refname == name.as_str())
+            .then(|| parse_expected_token(value))
+            .flatten()
+    })
+}
+
+/// What [`expected`] knows of history beyond the op store.
+pub(super) struct History<'a> {
+    /// Expected values already worked out: as the last export remembers them, and as a
+    /// fix-up not yet written will record them.
+    pub known: &'a Expected,
+    /// The root operations: the op store's, and the canonical store's where the walk goes
+    /// there.
+    pub roots: &'a [OperationId],
+    /// Whether a local operation is a join point.
+    pub is_join: &'a dyn Fn(&Operation) -> bool,
+    /// An operation's parents as the walk takes them, where they aren't the op store's.
+    pub parents: &'a Parents<'a>,
+}
+
+/// An operation's parents as [`expected`]'s walk takes them, or none for the op store's.
+pub(super) type Parents<'a> = dyn Fn(&Operation) -> Result<Option<Vec<Operation>>, NodeError> + 'a;
 
 /// The value every machine's `.git` should hold for the conflicted remote bookmark `symbol`,
 /// whose git ref is `name` and whose target at `op` is `target`, so that every machine's import
@@ -501,7 +598,9 @@ struct History<'a> {
 /// for the conflict. Where a merge made the conflict, it is one of the conflict's sides, the
 /// one committed last (then the greatest commit id), or none if no side is present; and so it
 /// is at a join, whose history before it only the machine that joined has: a join operation,
-/// whose realization's only parent is the root, or the join point it is on that machine.
+/// whose realization's only parent is the root, or the join point it is on that machine. Where
+/// `op` is a fix-up's first operation, it is what that records, as the history before the
+/// abandon had it (docs/internals/design.md, "The fix-up").
 fn expected(
     store: &Arc<Store>,
     history: &History<'_>,
@@ -516,9 +615,15 @@ fn expected(
         if let Some(known) = history.known.get(&(op.id().clone(), name.clone())) {
             return Ok(known.clone());
         }
-        let mut parents = op.parents().block_on()?;
+        if let Some(recorded) = recorded(&op, name) {
+            return Ok(recorded);
+        }
+        let mut parents = match (history.parents)(&op)? {
+            Some(parents) => parents,
+            None => op.parents().block_on()?,
+        };
         let joined = (history.is_join)(&op)
-            || matches!(parents.as_slice(), [parent] if parent.id() == history.root);
+            || matches!(parents.as_slice(), [parent] if history.roots.contains(parent.id()));
         if joined {
             return Ok(side(store, &target)?.map(RefTarget::normal));
         }
@@ -567,6 +672,26 @@ mod tests {
 
     use super::*;
     use crate::git_command::git;
+
+    /// What a fix-up records reads back as it was: a commit, a ref that should be absent, and
+    /// none, which leaves the ref alone, each told apart.
+    #[test]
+    fn recorded_expected_values_read_back() {
+        let commit = CommitId::from_bytes(&[7; 20]);
+        let values: Vec<(GitRefNameBuf, Option<RefTarget>)> = vec![
+            (
+                "refs/remotes/origin/a".into(),
+                Some(RefTarget::normal(commit)),
+            ),
+            ("refs/remotes/origin/b".into(), Some(RefTarget::absent())),
+            ("refs/remotes/origin/c".into(), None),
+        ];
+        let text = format_expected(&values).unwrap();
+        for (name, value) in &values {
+            assert_eq!(recorded_in(&text, name), Some(value.clone()), "{name:?}");
+        }
+        assert_eq!(recorded_in(&text, &"refs/remotes/origin/d".into()), None);
+    }
 
     #[test]
     fn shallow_and_partial_clones_are_incomplete() {

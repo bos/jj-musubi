@@ -48,9 +48,11 @@ Much of musubi's safety comes from what it doesn't do.
   anything uses it.
 - **What it doesn't understand, it refuses.** An operation from a newer jj, with fields musubi
   doesn't know, is refused rather than passed on with those fields dropped. A machine and a hub
-  that speak different versions of the protocol refuse each other, saying so. A `jj op
-  abandon` of history other machines have pauses syncing rather than bring the abandoned
-  history back.
+  that speak different versions of the protocol refuse each other, saying so.
+- **Abandoned history stays abandoned.** A `jj op abandon` of history other machines have
+  reaches every machine, and the abandoned operations never come back, even from a machine
+  that was offline, or after you replace the hub ([Abandoning
+  operations](guides/working-across-machines.md#abandoning-operations)).
 - **A copy of a copy isn't the copy.** A repository duplicated by copying its directory, by
   hand or by a file-syncing tool, isn't synced as the original, so two repositories never sync
   as one and overwrite each other's working copy.

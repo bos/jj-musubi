@@ -1,6 +1,6 @@
 //! Operation-log level races: undo, op abandon, offline machines, restarts.
 
-use musubi_sync::node::history_abandoned;
+use musubi_sync::node::history_lost;
 use musubi_testutil::TestEnv;
 
 use crate::fixture::Fixture;
@@ -172,38 +172,464 @@ fn long_offline_machine_catches_up() {
     );
 }
 
-/// `jj op abandon` rewrites operations the hub already accepted. Until it can be
-/// replicated, the node must stop rather than reintroduce or duplicate history.
+/// `jj op abandon` of operations the hub accepted replicates: the other machine drops them
+/// too, the repository staying as it was, and the hive converges.
 #[test]
-fn op_abandon_pauses_replication() {
+fn op_abandon_replicates() {
     let mut hive = Fixture::new(&["alpha", "beta"]);
     hive.commit(0, "a", "first");
     hive.commit(0, "b", "second");
     hive.sync();
+    hive.assert_converged();
+    let abandoned = commit_op(hive.repo(0));
     hive.repo(0).jj(&["op", "abandon", "..@-"]);
-    let err = hive.try_sync().unwrap_err();
-    assert!(format!("{err:#}").contains("op abandon"), "{err:#}");
-    // No retry gets past it, and it says what does.
-    assert!(history_abandoned(&err), "{err:#}");
-    assert!(format!("{err:#}").contains("`musubi clone`"), "{err:#}");
+    hive.sync();
+    hive.assert_converged();
+    for machine in 0..2 {
+        assert!(
+            !has_operation(hive.repo(machine), &abandoned.1),
+            "{machine}"
+        );
+    }
+    assert!(hive.visible(1).iter().any(|c| c.ends_with("second")));
+    hive.commit(1, "c", "third");
+    hive.sync();
+    hive.assert_converged();
+    assert!(hive.visible(0).iter().any(|c| c.ends_with("third")));
 }
 
 /// The same when this machine's latest operation is a realization of another machine's:
 /// `jj op abandon` rewrites the realizations above what it abandons, and they still name
 /// their canonical operations.
 #[test]
-fn op_abandon_under_a_realized_head_pauses_replication() {
+fn op_abandon_under_a_realized_head_replicates() {
     let mut hive = Fixture::new(&["alpha", "beta"]);
     hive.commit(0, "a", "alpha 1");
     hive.sync();
     hive.commit(1, "b", "beta 1");
     hive.sync();
+    hive.assert_converged();
+    let abandoned = commit_op(hive.repo(0));
     hive.repo(0).jj(&["op", "abandon", "..@-"]);
-    let err = hive.try_sync().unwrap_err();
-    assert!(format!("{err:#}").contains("op abandon"), "{err:#}");
-    // No retry gets past it, and it says what does.
-    assert!(history_abandoned(&err), "{err:#}");
-    assert!(format!("{err:#}").contains("`musubi clone`"), "{err:#}");
+    hive.sync();
+    hive.assert_converged();
+    for machine in 0..2 {
+        assert!(
+            !has_operation(hive.repo(machine), &abandoned.1),
+            "{machine}"
+        );
+    }
+    assert!(hive.visible(0).iter().any(|c| c.ends_with("beta 1")));
+}
+
+/// Each operation `repo`'s op log shows, newest first: its id and description.
+fn op_log(repo: &musubi_testutil::TestRepo) -> Vec<(String, String)> {
+    repo.jj(&[
+        "op",
+        "log",
+        "--no-graph",
+        "-T",
+        "id ++ \" \" ++ description.first_line() ++ \"\\n\"",
+    ])
+    .lines()
+    .map(|line| {
+        let (id, description) = line.split_once(' ').unwrap_or((line, ""));
+        (id.to_owned(), description.to_owned())
+    })
+    .collect()
+}
+
+/// The newest operation below `repo`'s head that made a commit, described by its id.
+fn commit_op(repo: &musubi_testutil::TestRepo) -> (String, String) {
+    op_log(repo)
+        .into_iter()
+        .skip(1)
+        .find(|(_, description)| description.starts_with("commit "))
+        .expect("an operation that made a commit")
+}
+
+/// Whether `repo`'s op log has an operation described as `description`.
+fn has_operation(repo: &musubi_testutil::TestRepo, description: &str) -> bool {
+    op_log(repo).iter().any(|(_, d)| d == description)
+}
+
+/// Two machines abandon different operations of the hive's at once: whichever supersede the
+/// hub takes first, the other is published again after it, and every machine drops both.
+#[test]
+fn concurrent_op_abandons_on_two_machines() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    for i in 0..4 {
+        hive.commit(0, &format!("a{i}"), &format!("alpha {i}"));
+    }
+    hive.sync();
+    hive.assert_converged();
+    let (alpha, beta) = (op_log(hive.repo(0)), op_log(hive.repo(1)));
+    let (first, second) = (alpha[2].clone(), beta[4].clone());
+    assert!(first.1.starts_with("commit") && second.1.starts_with("commit"));
+    assert_ne!(first.1, second.1);
+    hive.repo(0).jj(&["op", "abandon", &first.0]);
+    hive.repo(1).jj(&["op", "abandon", &second.0]);
+    hive.sync();
+    hive.assert_converged();
+    assert_eq!(hive.hive.hub.store().records().len(), 2);
+    for machine in 0..2 {
+        assert!(
+            !has_operation(hive.repo(machine), &first.1),
+            "{machine}: {first:?}"
+        );
+        assert!(
+            !has_operation(hive.repo(machine), &second.1),
+            "{machine}: {second:?}"
+        );
+    }
+    assert!(hive.visible(1).iter().any(|c| c.ends_with("alpha 3")));
+}
+
+/// A `jj` command that loaded the repository before the abandon arrived writes on an
+/// operation it rewrote: its work syncs, on the rewritten history, and the abandoned
+/// operations don't come back.
+#[test]
+fn a_jj_command_in_flight_during_the_rewrite() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(0, "a", "first");
+    hive.commit(0, "b", "second");
+    hive.sync();
+    let stale = op_log(hive.repo(1))[0].0.clone();
+    let abandoned = commit_op(hive.repo(0));
+    hive.repo(0).jj(&["op", "abandon", &abandoned.0]);
+    hive.sync();
+    hive.assert_converged();
+    let second = hive.commit_id(1, "second");
+    hive.repo(1).jj(&[
+        "--at-op", &stale, "bookmark", "create", "late", "-r", &second,
+    ]);
+    hive.sync();
+    hive.assert_converged();
+    assert!(hive.bookmarks(0).contains_key("late@"));
+    for machine in 0..2 {
+        assert!(
+            !has_operation(hive.repo(machine), &abandoned.1),
+            "{machine}"
+        );
+    }
+}
+
+/// A machine offline while another abandons operations, which keeps working, takes the
+/// abandon when it comes back: its work syncs on the rewritten history.
+#[test]
+fn an_offline_machine_comes_back_after_an_abandon() {
+    let mut hive = Fixture::new(&["alpha", "beta", "gamma"]);
+    hive.commit(0, "a", "first");
+    hive.commit(0, "b", "second");
+    hive.sync();
+    let abandoned = commit_op(hive.repo(0));
+    hive.commit(2, "g", "offline work");
+    hive.repo(0).jj(&["op", "abandon", &abandoned.0]);
+    for _ in 0..2 {
+        hive.hive.sync(0).unwrap();
+        hive.hive.sync(1).unwrap();
+    }
+    hive.sync();
+    hive.assert_converged();
+    assert!(hive.visible(0).iter().any(|c| c.ends_with("offline work")));
+    for machine in 0..3 {
+        assert!(
+            !has_operation(hive.repo(machine), &abandoned.1),
+            "{machine}"
+        );
+    }
+}
+
+/// The hub restarts between taking a supersede and the other machine fetching it, and before
+/// it: its records are on disk with its heads.
+#[test]
+fn hub_restarts_during_and_after_a_rewrite() {
+    for after in [false, true] {
+        let mut hive = Fixture::new(&["alpha", "beta"]);
+        hive.commit(0, "a", "first");
+        hive.commit(0, "b", "second");
+        hive.sync();
+        let abandoned = commit_op(hive.repo(0));
+        hive.repo(0).jj(&["op", "abandon", &abandoned.0]);
+        if after {
+            hive.hive.sync(0).unwrap();
+        }
+        hive.hive.restart_hub().unwrap();
+        hive.sync();
+        hive.assert_converged();
+        assert_eq!(hive.hive.hub.store().records().len(), 1, "after: {after}");
+        for machine in 0..2 {
+            assert!(
+                !has_operation(hive.repo(machine), &abandoned.1),
+                "{machine}"
+            );
+        }
+    }
+}
+
+/// The hub loses the supersede, going back to before it, or is made again empty, after the
+/// other machine took it: the machines that have the record publish it again, and the hive
+/// converges without the abandoned operations.
+#[test]
+fn hub_goes_back_or_is_remade_after_a_rewrite() {
+    for remade in [false, true] {
+        let mut hive = Fixture::new(&["alpha", "beta"]);
+        hive.commit(0, "a", "first");
+        hive.commit(0, "b", "second");
+        hive.sync();
+        let seq = hive.hive.hub.store().head().0;
+        let abandoned = commit_op(hive.repo(0));
+        hive.repo(0).jj(&["op", "abandon", &abandoned.0]);
+        hive.sync();
+        hive.assert_converged();
+        if remade {
+            hive.hive.remake_hub().unwrap();
+        } else {
+            hive.hive.hub_goes_back(seq).unwrap();
+        }
+        hive.commit(1, "c", "after");
+        hive.sync();
+        hive.assert_converged();
+        assert_eq!(hive.hive.hub.store().records().len(), 1, "remade: {remade}");
+        for machine in 0..2 {
+            assert!(
+                !has_operation(hive.repo(machine), &abandoned.1),
+                "{machine}"
+            );
+        }
+        assert!(hive.visible(0).iter().any(|c| c.ends_with("after")));
+    }
+}
+
+/// A machine abandons twice before it syncs: both abandons reach every machine.
+#[test]
+fn two_op_abandons_before_a_sync() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    for i in 0..3 {
+        hive.commit(0, &format!("a{i}"), &format!("alpha {i}"));
+    }
+    hive.sync();
+    let first = commit_op(hive.repo(0));
+    hive.repo(0).jj(&["op", "abandon", &first.0]);
+    let second = commit_op(hive.repo(0));
+    hive.repo(0).jj(&["op", "abandon", &second.0]);
+    hive.sync();
+    hive.assert_converged();
+    for machine in 0..2 {
+        assert!(!has_operation(hive.repo(machine), &first.1), "{machine}");
+        assert!(!has_operation(hive.repo(machine), &second.1), "{machine}");
+    }
+}
+
+/// `jj util gc` removes what an abandon left unreachable before musubi sees it: the abandon
+/// still reaches the other machine.
+#[test]
+fn op_abandon_then_gc() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(0, "a", "first");
+    hive.commit(0, "b", "second");
+    hive.sync();
+    let abandoned = commit_op(hive.repo(0));
+    hive.repo(0).jj(&["op", "abandon", &abandoned.0]);
+    hive.repo(0).jj(&["util", "gc", "--expire=now"]);
+    hive.sync();
+    hive.assert_converged();
+    for machine in 0..2 {
+        assert!(
+            !has_operation(hive.repo(machine), &abandoned.1),
+            "{machine}"
+        );
+    }
+}
+
+/// Where the operation a machine last fetched from is out of reach though jj rewrote
+/// nothing, which no abandon explains, the machine stops syncing rather than tell the hive
+/// to drop what it has.
+#[test]
+fn an_unexplained_lost_base_pauses_without_dropping() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(0, "a", "first");
+    hive.hive.sync(0).unwrap();
+    // beta has alpha's operation, fetched but not applied.
+    hive.hive.fetch(1).unwrap();
+    let staged = hive.hive.hub_head();
+    std::fs::write(
+        hive.repo(1).repo_path().join("musubi/accepted_base"),
+        jj_lib::object_id::ObjectId::hex(&staged),
+    )
+    .unwrap();
+    hive.hive.restart(1);
+    let err = hive.hive.sync(1).unwrap_err();
+    assert!(history_lost(&err), "{err:#}");
+    assert!(hive.hive.hub.store().records().is_empty());
+}
+
+/// The operation `repo`'s op log shows described as `description`: its id.
+fn op_described(repo: &musubi_testutil::TestRepo, description: &str) -> String {
+    op_log(repo)
+        .into_iter()
+        .find(|(_, d)| d == description)
+        .unwrap_or_else(|| panic!("no operation described as {description:?}"))
+        .0
+}
+
+/// The hub loses two records it took, going back, and then takes another machine's first:
+/// the machines that took the lost ones publish them again, named as the hub's history now
+/// names those operations, and every machine drops all three.
+#[test]
+fn records_published_again_after_the_hub_took_others() {
+    let mut hive = Fixture::new(&["alpha", "beta", "gamma"]);
+    for i in 0..4 {
+        hive.commit(0, &format!("a{i}"), &format!("alpha {i}"));
+    }
+    hive.sync();
+    hive.assert_converged();
+    let seq = hive.hive.hub.store().head().0;
+    let commits: Vec<String> = op_log(hive.repo(0))
+        .into_iter()
+        .skip(1)
+        .filter(|(_, d)| d.starts_with("commit "))
+        .map(|(_, d)| d)
+        .collect();
+    let (first, second, theirs) = (&commits[1], &commits[0], &commits[2]);
+    // alpha abandons two operations, one after the other, publishing each; beta takes both.
+    for abandoned in [first, second] {
+        let op = op_described(hive.repo(0), abandoned);
+        hive.repo(0).jj(&["op", "abandon", &op]);
+        for _ in 0..2 {
+            hive.hive.sync(0).unwrap();
+            hive.hive.sync(1).unwrap();
+        }
+    }
+    assert_eq!(hive.hive.hub.store().records().len(), 2);
+    // The hub loses both; gamma, which saw neither, abandons another and publishes first.
+    hive.hive.hub_goes_back(seq).unwrap();
+    let op = op_described(hive.repo(2), theirs);
+    hive.repo(2).jj(&["op", "abandon", &op]);
+    hive.hive.sync(2).unwrap();
+    assert_eq!(hive.hive.hub.store().records().len(), 1);
+    hive.sync();
+    hive.assert_converged();
+    for machine in 0..3 {
+        for abandoned in [first, second, theirs] {
+            assert!(
+                !has_operation(hive.repo(machine), abandoned),
+                "{machine}: {abandoned}"
+            );
+        }
+    }
+}
+
+/// The same where a machine also abandoned an operation it made after the records the hub
+/// lost, on history the other machine's record then drops: published again, it is named as
+/// the hive will have it.
+#[test]
+fn a_later_operation_published_again_after_the_hub_took_others() {
+    let mut hive = Fixture::new(&["alpha", "beta", "gamma"]);
+    for i in 0..4 {
+        hive.commit(0, &format!("a{i}"), &format!("alpha {i}"));
+    }
+    hive.sync();
+    let seq = hive.hive.hub.store().head().0;
+    let commits: Vec<String> = op_log(hive.repo(0))
+        .into_iter()
+        .skip(1)
+        .filter(|(_, d)| d.starts_with("commit "))
+        .map(|(_, d)| d)
+        .collect();
+    // gamma's is above alpha's first, so alpha's record renamed it.
+    let (first, theirs) = (&commits[2], &commits[0]);
+    let op = op_described(hive.repo(0), first);
+    hive.repo(0).jj(&["op", "abandon", &op]);
+    for _ in 0..2 {
+        hive.hive.sync(0).unwrap();
+        hive.hive.sync(1).unwrap();
+    }
+    // alpha makes two more operations, which beta takes, then abandons the first of them.
+    hive.commit(0, "a4", "alpha 4");
+    hive.commit(0, "a5", "alpha 5");
+    for _ in 0..2 {
+        hive.hive.sync(0).unwrap();
+        hive.hive.sync(1).unwrap();
+    }
+    let later = op_log(hive.repo(0))
+        .into_iter()
+        .skip(1)
+        .find(|(_, d)| d.starts_with("commit "))
+        .unwrap();
+    hive.repo(0).jj(&["op", "abandon", &later.0]);
+    hive.hive.hub_goes_back(seq).unwrap();
+    let op = op_described(hive.repo(2), theirs);
+    hive.repo(2).jj(&["op", "abandon", &op]);
+    hive.hive.sync(2).unwrap();
+    // beta, which kept the later operation, publishes before alpha.
+    hive.hive.sync(1).unwrap();
+    hive.sync();
+    hive.assert_converged();
+    for machine in 0..3 {
+        for abandoned in [first, theirs, &later.1] {
+            assert!(
+                !has_operation(hive.repo(machine), abandoned),
+                "{machine}: {abandoned}"
+            );
+        }
+    }
+}
+
+/// The operation the working copy at `path` last recorded, read without updating it.
+fn recorded_op(repo: &musubi_testutil::TestRepo, path: &std::path::Path) -> String {
+    let workspace = jj_lib::workspace::Workspace::load(
+        &repo.settings(),
+        path,
+        &jj_lib::default_backend_factories::default_backend_factories(),
+        &jj_lib::default_backend_factories::default_working_copy_factories(),
+    )
+    .unwrap();
+    jj_lib::object_id::ObjectId::hex(workspace.working_copy().operation_id())
+}
+
+/// Every workspace's working copy, on every machine, records an operation still in its
+/// history once an abandon has rewritten it, as jj's own `jj op abandon` leaves the
+/// workspace it runs in: otherwise jj takes the working copy for a sibling of the history
+/// the next time its commit changes.
+#[test]
+fn op_abandon_moves_every_workspace() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    let second = hive.repo(0).path().with_file_name("alpha-second");
+    hive.repo(0)
+        .jj(&["workspace", "add", second.to_str().unwrap()]);
+    hive.commit(0, "a", "first");
+    hive.commit(0, "b", "second");
+    hive.sync();
+    // Each working copy records an operation above the one alpha abandons.
+    hive.repo(0).jj(&["-R", second.to_str().unwrap(), "status"]);
+    hive.repo(1).jj(&["status"]);
+    let abandoned = commit_op(hive.repo(0));
+    hive.repo(0).jj(&["op", "abandon", &abandoned.0]);
+    hive.sync();
+    let workspaces = [
+        (0, hive.repo(0).path().to_owned()),
+        (0, second),
+        (1, hive.repo(1).path().to_owned()),
+    ];
+    for (machine, path) in workspaces {
+        let repo = hive.repo(machine);
+        let recorded = recorded_op(repo, &path);
+        let ops = repo.jj(&[
+            "--ignore-working-copy",
+            "op",
+            "log",
+            "--no-graph",
+            "-T",
+            "id ++ \"\\n\"",
+        ]);
+        assert!(
+            ops.lines().any(|id| id == recorded),
+            "{} records {recorded}, not in its history",
+            path.display()
+        );
+    }
+    hive.assert_converged();
 }
 
 /// Abandoning only history from before a machine joined rewrites the operations since

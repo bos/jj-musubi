@@ -60,6 +60,27 @@ impl Hive {
         Ok(())
     }
 
+    /// Restarts the hub having lost every head it accepted after the `seq`th, and the records
+    /// with them, as a power cut can make it.
+    pub fn hub_goes_back(&mut self, seq: u64) -> anyhow::Result<()> {
+        let path = self.hub_dir.join("heads");
+        let text = std::fs::read_to_string(&path)?;
+        let kept: String = text
+            .split_inclusive('\n')
+            .take(usize::try_from(seq)? + 1)
+            .collect();
+        std::fs::write(&path, kept)?;
+        self.restart_hub()
+    }
+
+    /// Makes the hive again, empty, as a hub does whose store is corrupt.
+    pub fn remake_hub(&mut self) -> anyhow::Result<()> {
+        let backend = self.hub.store().backend();
+        std::fs::remove_dir_all(&self.hub_dir)?;
+        self.hub = HubAdapter::init(&self.hub_dir, backend)?;
+        Ok(())
+    }
+
     /// Adds a node; returns its index.
     pub fn add(&mut self, repo: NodeRepo) -> anyhow::Result<usize> {
         let adapter = NodeAdapter::new(repo)?;
@@ -106,18 +127,19 @@ impl Hive {
             Reply::Objects { attachment, .. } => {
                 self.members[node].downloaded += attachment_size(attachment)?;
             }
-            Reply::Head { .. } => {}
+            Reply::Head { .. } | Reply::Refused { .. } => {}
         }
         let member = &mut self.members[node];
         member
             .core
             .handle_reply(&mut member.adapter, through(&request, handled.reply))?;
-        if let Some((seq, head)) = handled.publish {
+        if let Some((seq, head, records)) = handled.publish {
             for member in &mut self.members {
                 let notify = Reply::Head {
                     kind: HeadKind::Notify,
                     seq,
                     head: head.clone(),
+                    records: records.clone(),
                 };
                 member.core.handle(&mut member.adapter, notify)?;
             }
@@ -157,7 +179,8 @@ impl Hive {
                         self.request(node, request, through)?;
                     }
                 }
-                Step::Merged | Step::Realized(_) | Step::Advanced(_) => {}
+                Step::Superseded { push, .. } => self.request(node, push, through)?,
+                Step::Merged | Step::Realized(_) | Step::Advanced(_) | Step::Adopted => {}
             }
         }
         anyhow::bail!("node {node} did not settle")

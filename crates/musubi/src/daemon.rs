@@ -31,7 +31,7 @@ use futures::future::Shared;
 use jj_lib::object_id::ObjectId as _;
 use musubi_hub::activity::Report;
 use musubi_sync::driver::NodeDriver;
-use musubi_sync::node::history_abandoned;
+use musubi_sync::node::history_lost;
 use musubi_sync::progress::Activity;
 use musubi_sync::progress::Progress;
 use musubi_sync::remote::HiveGone;
@@ -125,7 +125,7 @@ impl Status {
 
     fn set_error(&mut self, error: Option<&anyhow::Error>) {
         self.error = error.map(|err| format!("{err:#}"));
-        self.paused = error.is_some_and(history_abandoned);
+        self.paused = error.is_some_and(history_lost);
     }
 
     /// Overwrites the status in place: it changes at every sync attempt, and ext4 writes out

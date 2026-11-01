@@ -2224,40 +2224,69 @@ fn settings_are_shared_through_the_binary() {
     );
 }
 
-/// Once `jj op abandon` pauses syncing, the error says how to carry on, and `musubi status`,
-/// reading what the daemon recorded, says that retrying won't help.
+/// `jj op abandon` of history the hive has syncs like any other change, printing nothing:
+/// the other machine's operation log loses the abandoned operations too, and `musubi status`
+/// has nothing to warn about. History the hive has lost some other way, as when a power cut
+/// loses jj's last write of the op heads but not musubi's of the operation it fetches from,
+/// stops syncing: the error says how to carry on, and `musubi status`, reading what the
+/// daemon recorded, says that retrying won't help.
 #[test]
-fn status_says_when_retrying_cannot_help() {
+fn op_abandon_syncs_but_history_otherwise_lost_stops_syncing() {
     let env = TestEnv::with_real_op_times();
     let _filters = snapshot_filters(&env);
-    // Whether the join's first sync meets the abandoned history, or the daemon's, depends on
-    // how the syncs fell.
-    let mut settings = insta::Settings::clone_current();
-    settings.add_filter("the first sync failed: ", "");
-    let _checks = settings.bind_to_scope();
     let mut logs = Logs::default();
     let hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
     let mut daemons = Daemons::default();
-    let (alpha, _beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
+    let (alpha, beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
     alpha.write_file("b", "b");
     alpha.jj(&["commit", "-m", "second"]);
     let accepted = alpha.jj(&["op", "log", "--no-graph", "-n1", "-T", "id"]);
+    // The operation that made the commit, which only it describes so.
+    let abandoned = alpha
+        .jj(&["op", "log", "--no-graph", "-T", "description ++ \"\\n\""])
+        .lines()
+        .find(|line| line.starts_with("commit "))
+        .expect("an operation that made a commit")
+        .to_owned();
     musubi_in(&env, &logs, &alpha, &["sync"]);
+    musubi_in(&env, &logs, &beta, &["sync"]);
+    let ops =
+        |repo: &TestRepo| repo.jj(&["op", "log", "--no-graph", "-T", "description ++ \"\\n\""]);
+    let has = |repo: &TestRepo| ops(repo).lines().any(|line| line == abandoned);
+    assert!(has(&beta), "{}", ops(&beta));
     alpha.jj(&["describe", "-m", "third"]);
     alpha.jj(&["op", "abandon", &format!("..{accepted}")]);
+    insta::assert_snapshot!(musubi_in(&env, &logs, &alpha, &["sync"]), @"");
+    insta::assert_snapshot!(musubi_in(&env, &logs, &beta, &["sync"]), @"");
+    assert!(!has(&beta), "{}", ops(&beta));
+    let log = |repo: &TestRepo| repo.jj(&["log", "--no-graph", "-r", "all()", "-T", "description"]);
+    assert_eq!(log(&alpha), log(&beta));
+    assert!(log(&beta).contains("third"), "{}", log(&beta));
+    let (_, hints) = status_in(&env, &logs, &alpha);
+    insta::assert_snapshot!(hints, @"");
+
+    let before = alpha.jj(&["op", "log", "--no-graph", "-n1", "-T", "id"]);
+    alpha.write_file("c", "c");
+    alpha.jj(&["commit", "-m", "fourth"]);
+    musubi_in(&env, &logs, &alpha, &["sync"]);
+    // What a power cut can leave: the op heads as they were before the commit.
+    let heads = alpha.repo_path().join("op_heads/heads");
+    for head in fs::read_dir(&heads).unwrap() {
+        fs::remove_file(head.unwrap().path()).unwrap();
+    }
+    fs::write(heads.join(before.trim()), "").unwrap();
+    // Whether the daemon's sync meets the lost history first, or this one, depends on timing.
+    let mut settings = insta::Settings::clone_current();
+    settings.add_filter("the first sync failed: ", "");
+    let _checks = settings.bind_to_scope();
     let err = musubi_fails(&env, &logs, &alpha, &["sync"]);
-    insta::assert_snapshot!(err, @"Error: this repository lost history the hive has (was `jj op abandon` run?), so it can't sync again: make a new copy with `musubi clone`, bring this one's work across to it, then run `musubi leave --force` here");
+    insta::assert_snapshot!(err, @"Error: this repository's history no longer matches the hive's, so it can't sync again: make a new copy with `musubi clone`, bring this one's work across to it, then run `musubi leave --force` here");
     let (_, hints) = status_in(&env, &logs, &alpha);
     insta::assert_snapshot!(hints, @"
-    Warning: Syncing fails: this repository lost history the hive has (was `jj op abandon` run?), so it can't sync again: make a new copy with `musubi clone`, bring this one's work across to it, then run `musubi leave --force` here
+    Warning: Syncing fails: this repository's history no longer matches the hive's, so it can't sync again: make a new copy with `musubi clone`, bring this one's work across to it, then run `musubi leave --force` here
     Hint: Retrying won't get past this; the warning says what will.
     ");
-
-    // Nor does joining again, which says so, though the copy joins.
-    musubi_in(&env, &logs, &alpha, &["leave", "--force"]);
-    let err = musubi_fails(&env, &logs, &alpha, &["join"]);
-    insta::assert_snapshot!(err, @"Error: this repository lost history the hive has (was `jj op abandon` run?), so it can't sync again: make a new copy with `musubi clone`, bring this one's work across to it, then run `musubi leave --force` here");
 }
 
 /// With commit signing on, the commits musubi rewrites when it merges another machine's

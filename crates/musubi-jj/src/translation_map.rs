@@ -22,7 +22,7 @@ use jj_lib::op_store::OperationId;
 /// The length of an operation id in hex, local or canonical: 64 bytes, as jj's simple op
 /// store, the only one musubi opens, makes them. jj takes hex of any even length for an id,
 /// so a torn line could otherwise name one.
-const ID_HEX_LEN: usize = 128;
+pub(crate) const ID_HEX_LEN: usize = 128;
 
 pub struct TranslationMap {
     file: File,

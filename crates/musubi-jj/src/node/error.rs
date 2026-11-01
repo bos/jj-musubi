@@ -20,11 +20,12 @@ use crate::git_command::GitError;
 use crate::objects::Incompleteness;
 use crate::objects::ObjectError;
 
-/// What a user sees once `jj op abandon` has paused syncing, which no retry gets past, and
-/// the way on. docs/troubleshooting.md says the rest, such as bringing work across.
-const HISTORY_GONE: &str = "this repository lost history the hive has (was `jj op abandon` \
-     run?), so it can't sync again: make a new copy with `musubi clone`, bring this one's work \
-     across to it, then run `musubi leave --force` here";
+/// What a user sees once this repository lost history the hive has in a way musubi can't pass
+/// on, which no retry gets past, and the way on. docs/troubleshooting.md says the rest, such
+/// as bringing work across.
+const HISTORY_GONE: &str = "this repository's history no longer matches the hive's, so it \
+     can't sync again: make a new copy with `musubi clone`, bring this one's work across to \
+     it, then run `musubi leave --force` here";
 
 #[derive(Debug, Error)]
 pub enum NodeError {
@@ -102,6 +103,10 @@ pub enum NodeError {
     /// as after `jj op abandon`. Which, the log says.
     #[error("{HISTORY_GONE}")]
     RewrittenRealization,
+    /// A log of how this machine renamed history lacks what `records.json` counts on, as a
+    /// power cut can leave it. Which, the daemon's log says.
+    #[error("{HISTORY_GONE}")]
+    DamagedLog,
     /// The hub accepts an operation only with everything it requires, which a shallow or
     /// partial clone can't send.
     #[error(

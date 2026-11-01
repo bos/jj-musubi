@@ -34,6 +34,7 @@ pub const RULES: &[&str] = &[
     "tag_delete",
     "undo",
     "at_op",
+    "op_abandon",
     "status",
     "workspace_add",
     "workspace_commit",
@@ -264,8 +265,31 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         None,
     ),
     ("empty_repositories_make_a_hive", Some(&["setup:empty"])),
-    // A documented refusal: rules never run `jj op abandon`.
-    ("op_abandon_pauses_replication", None),
+    ("op_abandon_replicates", Some(&["op_abandon"])),
+    (
+        "op_abandon_under_a_realized_head_replicates",
+        Some(&["op_abandon"]),
+    ),
+    (
+        "concurrent_op_abandons_on_two_machines",
+        Some(&["op_abandon"]),
+    ),
+    (
+        "a_jj_command_in_flight_during_the_rewrite",
+        Some(&["op_abandon", "at_op"]),
+    ),
+    (
+        "an_offline_machine_comes_back_after_an_abandon",
+        Some(&["op_abandon"]),
+    ),
+    (
+        "hub_restarts_during_and_after_a_rewrite",
+        Some(&["op_abandon", "restart_hub"]),
+    ),
+    (
+        "hub_goes_back_or_is_remade_after_a_rewrite",
+        Some(&["op_abandon", "hub_goes_back"]),
+    ),
     ("restart_with_lost_cache", Some(&["lose_cache"])),
     (
         "lost_cache_does_not_duplicate_realizations",

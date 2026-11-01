@@ -463,7 +463,7 @@ fn reply_blobs(reply: &Reply<Vec<u8>, WireAttachment>) -> Vec<(BlobId, u64)> {
             ..
         } => vec![ops_attachment, objects],
         Reply::Objects { attachment, .. } => vec![attachment],
-        Reply::Head { .. } => vec![],
+        Reply::Head { .. } | Reply::Refused { .. } => vec![],
     };
     attachments
         .into_iter()

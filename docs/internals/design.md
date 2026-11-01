@@ -655,8 +655,8 @@ again, if its head descends from the history it shared (an operation canonicaliz
 realization, or a join point): that history is canonical already, and the head is canonicalized on
 top of it as any operation is. A join operation on the root would hide that history from the head.
 The head the old hub last accepted, which the node keeps, would no longer be reachable from it,
-which musubi takes for an op abandon ([Abandoning operations](#abandoning-operations)), whichever
-hive the repository joins; and other machines' workspaces, no longer recognized as theirs, would
+which musubi takes for an op abandon, and would publish as one ([Abandoning
+operations](#abandoning-operations)), whichever hive the repository joins; and other machines' workspaces, no longer recognized as theirs, would
 come back as this machine's own. So joining a different hive brings the old hive's shared history
 with it, its machines' workspaces included, which show on every machine of the new hive, as a
 machine's workspaces do once it stops syncing.
@@ -809,7 +809,9 @@ abandon:
 - work by every copy it would leave absent, or whose latest work or forget-after it dropped, one
   operation each, recording that work's time and forget-after;
 - in the first operation, the hive's settings and the conflicted remote bookmarks' expected
-  values as they were.
+  values as they were. These are worked out when the machine notices the abandon, and until
+  the fix-up is written, every export of the machine's refs takes them as known at the op head
+  they were worked out at.
 
 Each operation is work by one copy or a forget, as presence requires, and `Presence.lean` proves
 that such a chain leaves each copy present exactly as it was (`fixup_present`, `pass_present`).
@@ -821,6 +823,35 @@ dropped, keeps its own workspaces as they are.
 `jj util gc` removes only data that is no longer reachable locally, so it needs no special
 handling. Neither the hub nor the nodes ever delete an object, and the daemon's own cleanup on a
 machine ([git backend](#git-backend)) deletes only operations that no op head reaches.
+
+### What an abandon costs the hub
+
+The hub keeps in memory the records it took, every id they dropped, and, for every id they
+superseded, the id or ids it became. It needs them to send a machine the records it lacks, to
+rename such a machine's fetch base, and to refuse a push whose new head is an old id. It writes a
+rewrite of each operation a record renames and keeps the old one, and a record's line in the
+`heads` log names every operation it drops. On opening a hive's store, the hub takes every record
+in the log again, working out each contraction as it first did.
+
+A record renames every operation after one it drops. In a hive that is nearly every operation
+since the oldest one dropped, because merges tie every machine's work back together. So
+abandoning recent operations costs little, but trimming the history (`jj op abandon ..X`) leaves
+the hub no smaller. The dropped operations' ids still take the memory that the operations did.
+The kept operations' old ids are added, and every kept operation is stored twice.
+
+So before a trim meant to bound the history's size is replicated, the hub must forget what every
+machine already has. The hub sees each machine's records in its fetches and pushes. Once every
+machine of the hive has taken the first records, those records, their ids and the old ids they
+renamed matter only to a machine coming back from before them. The check of each push's records
+already keeps old ids out, since a machine that has taken the records holds none. The hub could
+then drop all of that, write the `heads` log again in current ids, so that opening takes no
+record again, and delete the old operations. Three questions are open:
+
+- A machine that is offline but not forgotten holds the trim back until it syncs or its
+  forget-after passes.
+- A machine that comes back from before the trim needs a way back, such as rejoining.
+- The model assumes the hub refuses every dropped head (`HeadOK` in `Supersede.lean`), so the
+  model must be extended to a hub that forgets.
 
 ## Transport
 

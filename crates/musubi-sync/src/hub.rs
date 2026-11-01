@@ -1,5 +1,6 @@
 //! The core's `HubStorage` over a hub store.
 
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::path::PathBuf;
@@ -8,8 +9,11 @@ use anyhow::bail;
 use jj_lib::backend::CommitId;
 use musubi_core::hub::HubStorage;
 use musubi_core::message::OpEntry;
+use musubi_core::message::RecordState;
+use musubi_hub::store::Contracted;
 use musubi_hub::store::HubStore;
 use musubi_jj::objects::Backend;
+use musubi_jj::records::HubOp;
 
 use crate::Attachment;
 use crate::OpId;
@@ -20,6 +24,9 @@ use crate::temp_bundle;
 pub struct HubAdapter {
     store: HubStore,
     tmp: PathBuf,
+    /// The history with a supersede's drops dropped too, as a push asks about it: the same
+    /// for each of its questions, and for taking it.
+    contracted: RefCell<Option<Contracted>>,
 }
 
 impl HubAdapter {
@@ -34,7 +41,34 @@ impl HubAdapter {
     pub fn new(store: HubStore, dir: &Path) -> anyhow::Result<Self> {
         let tmp = dir.join("tmp");
         open_bundle_dir(&tmp)?;
-        Ok(Self { store, tmp })
+        Ok(Self {
+            store,
+            tmp,
+            contracted: RefCell::new(None),
+        })
+    }
+
+    /// Runs `f` on the history with `dropped` dropped too, worked out once for them.
+    fn with_contracted<T>(
+        &self,
+        dropped: &[OpId],
+        f: impl FnOnce(&Contracted) -> anyhow::Result<T>,
+    ) -> anyhow::Result<T> {
+        let mut cached = self.contracted.borrow_mut();
+        let wanted: BTreeSet<&OpId> = dropped
+            .iter()
+            .filter(|op| !self.store.is_superseded(op))
+            .collect();
+        // For the history as of the head now: another push may have moved it since.
+        let fresh = cached.as_ref().is_none_or(|contracted| {
+            contracted.head != *self.store.head().1
+                || contracted.dropped.iter().collect::<BTreeSet<_>>() != wanted
+        });
+        if fresh {
+            let dropped: Vec<HubOp> = dropped.iter().cloned().map(HubOp).collect();
+            *cached = Some(self.store.contract(&dropped)?);
+        }
+        f(cached.as_ref().expect("contracted above"))
     }
 
     pub fn store(&self) -> &HubStore {
@@ -52,8 +86,47 @@ impl HubStorage for HubAdapter {
         (seq, head.clone())
     }
 
-    fn set_head(&mut self, seq: u64, head: &OpId) -> anyhow::Result<()> {
-        Ok(self.store.set_head(seq, head)?)
+    fn set_head(&mut self, seq: u64, head: &OpId, dropped: &[OpId]) -> anyhow::Result<()> {
+        let contracted = if dropped.is_empty() {
+            self.contracted.take();
+            None
+        } else {
+            self.with_contracted(dropped, |_| Ok(()))?;
+            self.contracted.take()
+        };
+        Ok(self.store.set_head(seq, head, contracted)?)
+    }
+
+    fn records(&self) -> RecordState {
+        let count = self.store.records().len();
+        RecordState {
+            count: count as u64,
+            digest: self
+                .store
+                .digest(count)
+                .expect("a digest per prefix")
+                .bytes()
+                .to_vec(),
+        }
+    }
+
+    fn records_since(&self, records: &RecordState) -> anyhow::Result<(u64, Vec<Vec<OpId>>)> {
+        let all = self.store.records();
+        let from = usize::try_from(records.count)
+            .ok()
+            .filter(|&count| {
+                self.store.digest(count).map(|digest| digest.bytes()) == Some(&records.digest[..])
+            })
+            .unwrap_or(0);
+        let records = all[from..]
+            .iter()
+            .map(|record| record.ops().iter().map(|op| op.0.clone()).collect())
+            .collect();
+        Ok((from as u64, records))
+    }
+
+    fn is_dropped(&self, op: &OpId, dropped: &[OpId]) -> anyhow::Result<bool> {
+        Ok(self.store.is_superseded(op) || dropped.contains(op))
     }
 
     fn store_ops(&mut self, ops: &[OpId], attachment: &Attachment) -> anyhow::Result<()> {
@@ -129,8 +202,14 @@ impl HubStorage for HubAdapter {
         Ok(Attachment::bundle(bundle))
     }
 
-    fn is_closed(&self, op: &OpId) -> anyhow::Result<bool> {
-        let missing = self.store.missing_closure(op)?;
+    fn is_closed(&self, op: &OpId, dropped: &[OpId]) -> anyhow::Result<bool> {
+        let missing = if dropped.is_empty() {
+            self.store.missing_closure(op)?
+        } else {
+            self.with_contracted(dropped, |contracted| {
+                Ok(self.store.missing_closure_with(op, Some(contracted))?)
+            })?
+        };
         if !missing.is_empty() {
             // The node hears only that something is missing (`Incomplete`).
             let shown: Vec<&str> = missing.iter().take(5).map(String::as_str).collect();
@@ -144,7 +223,20 @@ impl HubStorage for HubAdapter {
         Ok(missing.is_empty())
     }
 
-    fn descends(&self, ancestor: &OpId, op: &OpId) -> anyhow::Result<bool> {
+    fn descends(&self, ancestor: &OpId, op: &OpId, dropped: &[OpId]) -> anyhow::Result<bool> {
+        if !dropped.is_empty() {
+            // `ancestor`, as the history names it with `dropped` dropped too: what it is
+            // then, every operation of which `op` must descend from.
+            let images =
+                self.with_contracted(dropped, |contracted| Ok(contracted.image(ancestor)))?;
+            let canonical = self.store.canonical();
+            for image in &images {
+                if !canonical.is_ancestor_of(image, op)? {
+                    return Ok(false);
+                }
+            }
+            return Ok(!images.is_empty());
+        }
         if ancestor == self.store.head().1 {
             return Ok(self.store.descends_from_head(op)?);
         }

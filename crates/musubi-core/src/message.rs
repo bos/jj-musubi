@@ -22,24 +22,43 @@ pub enum HeadKind {
     Notify,
 }
 
+/// The hub's records as a party took them: how many, and a digest of them all, so that two
+/// parties can tell whether they took the same ones (docs/internals/protocol.md,
+/// "Supersedes"). A record is a set of operations the hive dropped at once.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RecordState {
+    pub count: u64,
+    /// Opaque to the core: only compared.
+    pub digest: Vec<u8>,
+}
+
 /// A request. Each takes one round trip.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Request<O, A> {
     /// The hub's head, with the stored operations in `anc*(head) \ anc*(base)` and the
     /// stored objects they require. `base` is an operation the hub accepted that the node
-    /// has, so the hub leaves out `closure(base)`; `haves` says what else the node has.
-    Fetch { base: O, haves: A },
+    /// has, so the hub leaves out `closure(base)`; `haves` says what else the node has. The
+    /// hub sends the records the node lacks, of its own, with them.
+    Fetch {
+        base: O,
+        haves: A,
+        records: RecordState,
+    },
     /// The stored objects these operations require, less `closure(base)` and what `haves`
     /// says the node has.
     GetObjects { for_ops: Vec<O>, base: O, haves: A },
     /// Store these operations and objects, then `Cas(expected, new)`, in one critical
-    /// section. The attachments carry the operations and the objects they require.
+    /// section. The attachments carry the operations and the objects they require. The hub
+    /// refuses it unless `records` are its own. A supersede drops `dropped` too, which the
+    /// hub then takes as its next record; an ordinary push drops nothing.
     Push {
         ops: Vec<O>,
         ops_attachment: A,
         objects: A,
         expected: O,
         new: O,
+        records: RecordState,
+        dropped: Vec<O>,
     },
 }
 
@@ -54,20 +73,31 @@ pub struct OpEntry<O> {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Reply<O, A> {
     /// Answer to `Push` (`Accepted`, `Rejected` or `Incomplete`), and the hub's announcements
-    /// (`Notify`).
+    /// (`Notify`), with the hub's records as of `head`.
     Head {
         kind: HeadKind,
         seq: u64,
         head: O,
+        records: RecordState,
     },
     /// Answer to `Fetch`: the hub's `(seq, head)`, and the operations since the base,
-    /// ancestors first, with their objects.
+    /// ancestors first, with their objects. With the hub's records: `new_records` are those
+    /// from the `records_from`th on, the ones the node lacks, or all of them if the node's
+    /// aren't the first of the hub's.
     Fetched {
         seq: u64,
         head: O,
         ops: Vec<OpEntry<O>>,
         ops_attachment: A,
         objects: A,
+        records: RecordState,
+        records_from: u64,
+        new_records: Vec<Vec<O>>,
+    },
+    /// Answer to a `Push` whose records aren't the hub's, so that its ids aren't either, or
+    /// whose new head is dropped: the hub took nothing of it.
+    Refused {
+        records: RecordState,
     },
     Objects {
         for_ops: Vec<O>,

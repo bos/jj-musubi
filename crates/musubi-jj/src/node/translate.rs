@@ -14,6 +14,7 @@ use super::CANONICAL_ATTRIBUTE;
 use super::NodeError;
 use super::NodeRepo;
 use super::join::fingerprint;
+use super::supersede::FIXUP_ATTRIBUTE;
 use crate::format_guard;
 use crate::format_guard::FormatError;
 use crate::presence::Kind;
@@ -33,7 +34,85 @@ impl NodeRepo {
                 Err(err) => return Err(err),
             }
         }
+        if !self.late.is_empty() {
+            self.reparent_late()?;
+        }
         Ok(canonical)
+    }
+
+    /// Reparents the local operations canonicalized on operations a renaming superseded
+    /// onto the rewrites, as their canonical operations have them, and moves the op heads
+    /// among them there: before anything merges them with the renamed history, which would
+    /// merge against an older common ancestor.
+    fn reparent_late(&mut self) -> Result<(), NodeError> {
+        let late = self.late.clone();
+        let op_store = self.loader.op_store().clone();
+        let mut rewrites: std::collections::HashMap<OperationId, OperationId> =
+            std::collections::HashMap::new();
+        for local in &late {
+            let Some(canonical) = self.canonical_of(local) else {
+                continue;
+            };
+            let mut op = op_store.read_operation(local).block_on()?;
+            let parents: Option<Vec<OperationId>> = self
+                .canonical
+                .parents(&canonical)?
+                .iter()
+                .map(|parent| self.local_of(parent))
+                .collect();
+            let Some(parents) = parents else {
+                tracing::info!(
+                    "operation {} stays on the history it was written on",
+                    local.hex()
+                );
+                continue;
+            };
+            if parents == op.parents {
+                continue;
+            }
+            op.parents = parents;
+            let rewrite = op_store.write_operation(&op).block_on()?;
+            self.insert_map(rewrite.clone(), canonical)?;
+            rewrites.insert(local.clone(), rewrite);
+        }
+        let heads = self.local_heads()?;
+        for head in &heads {
+            if let Some(rewrite) = rewrites.get(head) {
+                self.loader
+                    .op_heads_store()
+                    .update_op_heads(std::slice::from_ref(head), rewrite)
+                    .block_on()?;
+            }
+        }
+        self.late.clear();
+        let rewrites = rewrites
+            .into_iter()
+            .map(|(old, new)| (old, vec![new]))
+            .collect();
+        self.move_workspaces(&rewrites)
+    }
+
+    /// The canonical parents of a local operation, as they are now: what renamings
+    /// superseded, renamed. Also whether any was.
+    fn current_parents(&self, parents: &[OperationId]) -> (Vec<OperationId>, bool) {
+        let mut renamed = false;
+        let mut current = vec![];
+        for parent in parents {
+            if self.before_join.contains(parent) {
+                continue;
+            }
+            let canonical = self
+                .canonical_of(parent)
+                .expect("parents canonicalized first");
+            let now = self.current_ids(&canonical);
+            renamed |= now != [canonical];
+            for op in now {
+                if !current.contains(&op) {
+                    current.push(op);
+                }
+            }
+        }
+        (current, renamed)
     }
 
     pub fn canonical_of(&self, local: &OperationId) -> Option<OperationId> {
@@ -61,6 +140,9 @@ impl NodeRepo {
     /// which jj makes, has the merged view, so it leaves the parents from before the join
     /// out of its canonical form.
     pub fn canonicalize(&mut self, local: &OperationId) -> Result<OperationId, NodeError> {
+        if self.canonical_of(local).is_none() {
+            self.check_abandon()?;
+        }
         let op_store = self.loader.op_store().clone();
         // Post-order walk: an operation is canonicalized once all its parents are.
         let mut stack: Vec<(OperationId, Option<StoreOperation>)> = vec![(local.clone(), None)];
@@ -94,6 +176,7 @@ impl NodeRepo {
                 stack.extend(missing.into_iter().map(|parent| (parent, None)));
                 continue;
             }
+            let late = op.parents.iter().any(|parent| self.late.contains(parent));
             let canonical_id =
                 if let Some(canonical) = op.metadata.attributes.get(CANONICAL_ATTRIBUTE) {
                     self.realized_canonical(&id, &op, canonical)?
@@ -101,15 +184,10 @@ impl NodeRepo {
                     self.before_join.insert(id);
                     continue;
                 } else {
-                    let parents: Vec<OperationId> = op
-                        .parents
-                        .iter()
-                        .filter(|parent| !self.before_join.contains(*parent))
-                        .map(|parent| {
-                            self.canonical_of(parent)
-                                .expect("parents canonicalized first")
-                        })
-                        .collect();
+                    let (parents, renamed) = self.current_parents(&op.parents);
+                    if renamed || late {
+                        self.late.push(id.clone());
+                    }
                     self.write_canonical(&id, &op, parents)?
                 };
             self.insert_map(id, canonical_id)?;
@@ -179,30 +257,32 @@ impl NodeRepo {
         Ok(ancestors)
     }
 
-    /// The canonical operation a realization names in its `musubi.canonical` attribute.
-    /// `jj op abandon` rewrites the operations above the ones it abandons, keeping their
-    /// metadata, so a rewritten realization still names its canonical operation, but has
-    /// other parents. Its parents must already be canonicalized.
+    /// The canonical operation a realization names in its `musubi.canonical` attribute, as
+    /// renamings have it now. `jj op abandon` rewrites the operations above the ones it
+    /// abandons, keeping their metadata, so a rewritten realization still names its canonical
+    /// operation, but has other parents: musubi notices the abandon, and rewrites it again,
+    /// before canonicalizing anything (`NodeRepo::notice_abandon`). Its parents must already
+    /// be canonicalized.
     fn realized_canonical(
-        &self,
+        &mut self,
         id: &OperationId,
         op: &StoreOperation,
         canonical: &str,
     ) -> Result<OperationId, NodeError> {
-        let canonical_id = OperationId::try_from_hex(canonical)
+        let named = OperationId::try_from_hex(canonical)
             .filter(|c| self.canonical.has_operation(c))
             .ok_or_else(|| NodeError::DanglingAttribute {
                 op: id.hex(),
                 canonical: canonical.to_owned(),
             })?;
-        let parents: Vec<OperationId> = op
-            .parents
-            .iter()
-            .map(|parent| {
-                self.canonical_of(parent)
-                    .expect("parents canonicalized first")
-            })
-            .collect();
+        let canonical_id = match self.current_ids(&named).as_slice() {
+            [now] => now.clone(),
+            _ => named,
+        };
+        let (parents, renamed) = self.current_parents(&op.parents);
+        if renamed || op.parents.iter().any(|parent| self.late.contains(parent)) {
+            self.late.push(id.clone());
+        }
         if parents != self.canonical.parents(&canonical_id)? {
             // For the daemon's log: the error says what a user needs.
             tracing::info!(
@@ -244,10 +324,25 @@ impl NodeRepo {
             .workspace_name
             .map(|name| workspaces::workspace_key(self.machine.key(), name.as_str()));
         let kind = Kind::of(&metadata);
-        let (view, presence) =
-            self.canonical_view(id, view, &parents, op.commit_predecessors.as_ref(), &kind)?;
+        // A fix-up changes no view: it restores what musubi works out from history alone.
+        let (view_id, presence) = match parents.as_slice() {
+            [parent] if metadata.attributes.contains_key(FIXUP_ATTRIBUTE) => (
+                self.canonical.read_operation(parent)?.view_id,
+                (*self.presence(parent)?).clone(),
+            ),
+            _ => {
+                let (view, presence) = self.canonical_view(
+                    id,
+                    view,
+                    &parents,
+                    op.commit_predecessors.as_ref(),
+                    &kind,
+                )?;
+                (self.canonical.write_view(&view)?, presence)
+            }
+        };
         let canonical_op = StoreOperation {
-            view_id: self.canonical.write_view(&view)?,
+            view_id,
             parents,
             metadata,
             commit_predecessors: op.commit_predecessors.clone(),

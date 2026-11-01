@@ -1,10 +1,11 @@
-//! The hub's request handling (docs/internals/protocol.md, "Hub").
+//! The hub's request handling (docs/internals/protocol.md, "Hub" and "Supersedes").
 //!
 //! The hub is a function of its storage: [`handle`] answers one request. Callers must run it
 //! for one request at a time per hive, which makes every `Push` atomic.
 
 use crate::message::HeadKind;
 use crate::message::OpEntry;
+use crate::message::RecordState;
 use crate::message::Reply;
 use crate::message::Request;
 
@@ -17,8 +18,31 @@ pub trait HubStorage {
     /// The current `(seq, head)`.
     fn head(&self) -> (u64, Self::Op);
 
-    /// Replaces the head, which must be stored before this returns.
-    fn set_head(&mut self, seq: u64, head: &Self::Op) -> Result<(), Self::Error>;
+    /// Replaces the head, which must be stored before this returns. A supersede's `dropped`
+    /// becomes the next record, less what the records drop already, if that leaves any: the
+    /// storage computes its history with them dropped (docs/internals/design.md, "Abandoning
+    /// operations"), and keeps the records it had as of each head.
+    fn set_head(
+        &mut self,
+        seq: u64,
+        head: &Self::Op,
+        dropped: &[Self::Op],
+    ) -> Result<(), Self::Error>;
+
+    /// The hub's records as of its head.
+    fn records(&self) -> RecordState;
+
+    /// The hub's records that a party with `records` lacks: those from the returned index on.
+    /// That is `records.count` where the party's records are the hub's first ones, and
+    /// otherwise 0, all of them.
+    #[expect(clippy::type_complexity)]
+    fn records_since(
+        &self,
+        records: &RecordState,
+    ) -> Result<(u64, Vec<Vec<Self::Op>>), Self::Error>;
+
+    /// Whether `op` is dropped, by the hub's records or by `dropped`.
+    fn is_dropped(&self, op: &Self::Op, dropped: &[Self::Op]) -> Result<bool, Self::Error>;
 
     fn store_ops(
         &mut self,
@@ -50,20 +74,26 @@ pub trait HubStorage {
         haves: &Self::Attachment,
     ) -> Result<Self::Attachment, Self::Error>;
 
-    /// Whether `closure(op) ⊆ ops ∪ objects`.
-    fn is_closed(&self, op: &Self::Op) -> Result<bool, Self::Error>;
+    /// Whether `closure(op) ⊆ ops ∪ objects`, once the history drops `dropped` too.
+    fn is_closed(&self, op: &Self::Op, dropped: &[Self::Op]) -> Result<bool, Self::Error>;
 
-    /// Whether `ancestor ∈ anc*(op)`, judged from stored operations. Only asked once
-    /// `is_closed(op)` holds.
-    fn descends(&self, ancestor: &Self::Op, op: &Self::Op) -> Result<bool, Self::Error>;
+    /// Whether `ancestor ∈ anc*(op)`, judged from stored operations, once the history drops
+    /// `dropped` too, as `ancestor` is then named. Only asked once `is_closed(op, dropped)`
+    /// holds.
+    fn descends(
+        &self,
+        ancestor: &Self::Op,
+        op: &Self::Op,
+        dropped: &[Self::Op],
+    ) -> Result<bool, Self::Error>;
 }
 
 /// The result of handling a request.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Handled<O, A> {
     pub reply: Reply<O, A>,
-    /// A new head to publish to every node, after the reply.
-    pub publish: Option<(u64, O)>,
+    /// A new head to publish to every node, after the reply, with the hub's records as of it.
+    pub publish: Option<(u64, O, RecordState)>,
 }
 
 /// [`Handled`] for a given storage.
@@ -78,6 +108,8 @@ pub enum CasOutcome {
     Rejected,
     /// `expected` was the head, but `closure(new)` isn't stored.
     Incomplete,
+    /// The push's records aren't the hub's, or its new head is dropped.
+    Refused,
 }
 
 pub fn handle<S: HubStorage>(
@@ -91,17 +123,25 @@ pub fn handle<S: HubStorage>(
         })
     };
     match request {
-        Request::Fetch { base, haves } => {
+        Request::Fetch {
+            base,
+            haves,
+            records,
+        } => {
             let (seq, head) = storage.head();
             let (ops, ops_attachment) = storage.ops_since(&head, &base)?;
             let ids: Vec<S::Op> = ops.iter().map(|entry| entry.id.clone()).collect();
             let objects = storage.objects_for(&ids, &base, &haves)?;
+            let (records_from, new_records) = storage.records_since(&records)?;
             reply(Reply::Fetched {
                 seq,
                 head,
                 ops,
                 ops_attachment,
                 objects,
+                records: storage.records(),
+                records_from,
+                new_records,
             })
         }
         Request::GetObjects {
@@ -121,75 +161,105 @@ pub fn handle<S: HubStorage>(
             objects,
             expected,
             new,
-        } => push(storage, &ops, &ops_attachment, &objects, &expected, &new)
-            .map(|(_, handled)| handled),
+            records,
+            dropped,
+        } => {
+            let push = Push {
+                ops: &ops,
+                ops_attachment: &ops_attachment,
+                objects: &objects,
+                expected: &expected,
+                new: &new,
+                records: &records,
+                dropped: &dropped,
+            };
+            push.answer(storage).map(|(_, handled)| handled)
+        }
     }
 }
 
-/// Answers `Push`: stores the operations and objects, then is idempotent if `new` is already
-/// the head, and otherwise accepts exactly when `head = expected`, `closure(new)` is stored,
-/// and `expected ∈ anc*(new)`. Where `head = expected` but `closure(new)` isn't stored, the
-/// node lacks what `new` requires, and the answer says so.
-pub fn push<S: HubStorage>(
-    storage: &mut S,
-    ops: &[S::Op],
-    ops_attachment: &S::Attachment,
-    objects: &S::Attachment,
-    expected: &S::Op,
-    new: &S::Op,
-) -> Result<(CasOutcome, HandledBy<S>), S::Error> {
-    storage.store_ops(ops, ops_attachment)?;
-    storage.store_objects(ops, objects)?;
-    let (seq, head) = storage.head();
-    if *new == head {
-        let reply = Reply::Head {
-            kind: HeadKind::Accepted,
-            seq,
-            head,
+/// A `Push`, borrowed.
+pub struct Push<'a, O, A> {
+    pub ops: &'a [O],
+    pub ops_attachment: &'a A,
+    pub objects: &'a A,
+    pub expected: &'a O,
+    pub new: &'a O,
+    pub records: &'a RecordState,
+    pub dropped: &'a [O],
+}
+
+impl<O: Clone + Eq, A> Push<'_, O, A> {
+    /// Answers the push. It is refused, storing nothing, unless its records are the hub's and
+    /// `new` isn't dropped, by them or by the push: its ids aren't the hub's. Otherwise it
+    /// stores the operations and objects, then is idempotent if `new` is already the head,
+    /// and otherwise accepted exactly when `head = expected`, `closure(new)` is stored, and
+    /// `expected ∈ anc*(new)`, all once the history drops what the push drops. Where `head =
+    /// expected` but `closure(new)` isn't stored, the node lacks what `new` requires, and the
+    /// answer says so.
+    pub fn answer<S>(&self, storage: &mut S) -> Result<(CasOutcome, HandledBy<S>), S::Error>
+    where
+        S: HubStorage<Op = O, Attachment = A>,
+    {
+        let records = storage.records();
+        if *self.records != records || storage.is_dropped(self.new, self.dropped)? {
+            return Ok((
+                CasOutcome::Refused,
+                Handled {
+                    reply: Reply::Refused { records },
+                    publish: None,
+                },
+            ));
+        }
+        storage.store_ops(self.ops, self.ops_attachment)?;
+        storage.store_objects(self.ops, self.objects)?;
+        let (seq, head) = storage.head();
+        let answer = |outcome, kind, seq, head, records| {
+            let reply = Reply::Head {
+                kind,
+                seq,
+                head,
+                records,
+            };
+            Ok((
+                outcome,
+                Handled {
+                    reply,
+                    publish: None,
+                },
+            ))
         };
-        return Ok((
-            CasOutcome::Idempotent,
-            Handled {
-                reply,
-                publish: None,
-            },
-        ));
+        if *self.new == head {
+            return answer(
+                CasOutcome::Idempotent,
+                HeadKind::Accepted,
+                seq,
+                head,
+                records,
+            );
+        }
+        if head == *self.expected && !storage.is_closed(self.new, self.dropped)? {
+            return answer(
+                CasOutcome::Incomplete,
+                HeadKind::Incomplete,
+                seq,
+                head,
+                records,
+            );
+        }
+        // Closed, if `head = expected`: the ancestry check needs every operation stored.
+        if head == *self.expected && storage.descends(self.expected, self.new, self.dropped)? {
+            storage.set_head(seq + 1, self.new, self.dropped)?;
+            let records = storage.records();
+            let reply = Reply::Head {
+                kind: HeadKind::Accepted,
+                seq: seq + 1,
+                head: self.new.clone(),
+                records: records.clone(),
+            };
+            let publish = Some((seq + 1, self.new.clone(), records));
+            return Ok((CasOutcome::Accepted, Handled { reply, publish }));
+        }
+        answer(CasOutcome::Rejected, HeadKind::Rejected, seq, head, records)
     }
-    if head == *expected && !storage.is_closed(new)? {
-        let reply = Reply::Head {
-            kind: HeadKind::Incomplete,
-            seq,
-            head,
-        };
-        return Ok((
-            CasOutcome::Incomplete,
-            Handled {
-                reply,
-                publish: None,
-            },
-        ));
-    }
-    // Closed, if `head = expected`: the ancestry check needs every operation stored.
-    if head == *expected && storage.descends(expected, new)? {
-        storage.set_head(seq + 1, new)?;
-        let reply = Reply::Head {
-            kind: HeadKind::Accepted,
-            seq: seq + 1,
-            head: new.clone(),
-        };
-        let publish = Some((seq + 1, new.clone()));
-        return Ok((CasOutcome::Accepted, Handled { reply, publish }));
-    }
-    let reply = Reply::Head {
-        kind: HeadKind::Rejected,
-        seq,
-        head,
-    };
-    Ok((
-        CasOutcome::Rejected,
-        Handled {
-            reply,
-            publish: None,
-        },
-    ))
 }

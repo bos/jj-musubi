@@ -10,7 +10,7 @@ program the tests send JSON requests to.
 
 | Model | Code | Test | Section |
 | --- | --- | --- | --- |
-| The sync protocol ([protocol.md](protocol.md)) | `crates/musubi-core` | `conformance`, through the oracle | [The claim](#the-claim) to [Wire format](#wire-format) |
+| The sync protocol ([protocol.md](protocol.md)), with supersedes | `crates/musubi-core` | `conformance`, through the oracle | [The claim](#the-claim) to [Wire format](#wire-format) |
 | `Presence.lean`: which copies a hive shows | `Presence` | `presence::conformance`, through the oracle | [Presence](#presence) |
 | `Refs.lean`: per-machine refs | jj's import and export, and musubi's realization | `ref_laws` (the laws the model assumes), and `refs` and `view::tests`, through the oracle | [Per-machine refs](#per-machine-refs) |
 | `Chunks.lean`: chunked blobs | `BlobStore::receive` | `receive_follows_the_prefix_model`, through the oracle | [Chunked blobs](#chunked-blobs) |
@@ -22,7 +22,9 @@ Every behavior of the Rust protocol core, at the level of abstraction of the mod
 behavior of the Lean model. The Lean safety theorems hold for every reachable model state, so
 they hold for every state the Rust core reaches. A run in which the hub goes back, or the hive
 is made again, is a behavior of the extended model of `formal/Musubi/Regress.lean`, and the
-weaker invariant proved there holds in it.
+weaker invariant proved there holds in it. Every run, with `jj op abandon` and the supersedes
+that publish it, is a behavior of the system with supersedes of
+`formal/Musubi/Supersede.lean`, over each operation's original, and `SInv` holds in it.
 
 The chain has three links:
 
@@ -32,9 +34,11 @@ The chain has three links:
    whenever `execStep` accepts an action other than `hubRegress`, the corresponding
    relational `Step` exists between the abstracted states, and `exec_rsound` that whenever it
    accepts any action, an `RStep` of the extended model does. The executable model therefore
-   never accepts anything the proofs don't cover.
+   never accepts anything the proofs don't cover. `formal/Musubi/SupersedeExec.lean` adds
+   the hub's records and each node's dropped set: `sexec_sound` proves every action
+   `sexecStep` accepts an `SRStep` of the system with supersedes, or no step.
 2. **Executable model to oracle.** `formal/Oracle.lean` is a thin JSON wrapper around
-   `execStep`, built by `lake build oracle`. It contains no protocol logic of its own.
+   `sexecStep`, built by `lake build oracle`. It contains no protocol logic of its own.
 3. **Oracle to Rust.** The Hegel test `conformance`, in `crates/musubi-core/tests/protocol.rs`,
    runs the Rust hub and nodes, translates every step they take into model actions, and checks
    each one with the oracle. It fails on any action the oracle rejects, or any difference
@@ -56,10 +60,14 @@ These keep exactly the model's state:
 | Universe (every operation created): `next`, `par`, `objs` | the test's operation table; operation and object ids are small integers, root `0` |
 | Hub `ops`, `objs`, `head`, `seq` | `FakeHub` |
 | Node `lops`, `lobj`, `heads`, `known`, `sops`, `sobj` | `FakeRepo` (`lops`…`sobj`) and `NodeCore` (`known`) |
+| Hub records, node `nodeD` and the records it took last | `FakeHub::records`, `FakeRepo::dropped` and `applied` |
 | `net`, the set of every message sent | the test's network: a set, so any message can be delivered any number of times, or never |
 
 `lops` and `lobj` are a node's local operations and objects, and `sops` and `sobj` what it
-has staged. The jj-specific parts of a real node (canonicalization, realization, bundles) are
+has staged. Operations are their originals, as in `Supersede.lean`: dropping renames nothing
+here, so the test's storage keeps every operation it had, dropped or not, and checks closure
+and ancestry over all of them. A record state's digest is the index of its records in a
+table of every list of records seen, so equal digests are equal records. The jj-specific parts of a real node (canonicalization, realization, bundles) are
 not covered by this link; the jj example tests and the generated end-to-end tests cover them
 ([testing.md](testing.md)).
 
@@ -71,17 +79,21 @@ core does.
 | Rust core event | Model actions |
 | --- | --- |
 | A machine runs a `jj` command (test rule) | `userOp` |
+| A machine runs `jj op abandon` of operations below its heads (test rule) | `abandon` |
 | `NodeCore` asks the repo to merge heads | `merge` |
 | `NodeCore` sends `Fetch { base, haves }`, on every poll | `fetchAll` |
 | `NodeCore` sends `GetObjects { for_ops: S, haves: H, .. }` | `fetchObjs` with `objs(S) \ H` |
-| `NodeCore` sends `Push { ops: S, objects: O, expected, new, .. }` | `pushAll` |
+| `NodeCore` sends `Push { ops: S, objects: O, expected, new, .. }` | `pushAll`, then `sendSup`: every push carries the records its node took and what it dropped |
+| `NodeCore` takes the hub's records | `adopt`, with all of them |
+| `NodeCore` writes the fix-up and pushes it with what it dropped | `userOp` on its head, then `pushAll` and `sendSup` |
 | `NodeCore` accepts a head-carrying reply | `learn`; a stale one it ignores maps to nothing |
 | `NodeCore` takes in a `Fetched` reply | `learn` if its head is newer, then `recvOps` and `recvObjs` if it stages the operations; the states are compared after the last |
 | `NodeCore` stages an `Objects` reply | `recvObjs` |
 | `NodeCore` realizes or advances | `realize` / `advance` |
-| The hub handles `Fetch` | `hubFetch` |
+| The hub handles `Fetch` | `hubFetch`, then `sendD`: its reply carries the hub's records |
 | The hub handles `GetObjects { for_ops: S, haves: H, .. }` | `hubGetObjs` with `objs(S) \ H` |
-| The hub handles `Push` | `hubPushIdem`, `hubPushAccept`, `hubPushReject`, or `hubPushIncomplete` |
+| The hub handles `Push` | `hubPushIdem`, `hubSupAccept` then `sendD`, `hubPushReject`, `hubPushIncomplete`, or `hubPushRefuse` |
+| `NodeCore` takes in a `Refused` reply | nothing |
 | A node restarts | `loseKnown` (its staged files survive; `known` does not) |
 | A node restarts while taking in a `Fetched` reply, after staging its operations and before staging its objects (test rule) | `learn` if its head is newer, `recvOps`, then `loseKnown` |
 | The hub restarts | `crashHub` |
@@ -91,9 +103,14 @@ core does.
 | A reply to the node's own request that says the hub went back (`NodeCore::handle_reply`) | `loseKnown`, then `learn` if the reply's `seq` is above 0 (at 0, the restarted node already knows `(0, root)`) |
 
 The Rust hub decides how to answer a `Push`, and the test sends whichever of `hubPushIdem`,
-`hubPushAccept`, `hubPushReject`, or `hubPushIncomplete` it chose. The oracle checks that
-choice's guard, so a hub that accepts a `Push` the model would reject is caught, and so is
-one that rejects a `Push` the model says is incomplete. The Rust core sends only the merged
+`hubSupAccept`, `hubPushReject`, `hubPushIncomplete` or `hubPushRefuse` it chose. The oracle
+checks that choice's guard, so a hub that accepts a `Push` the model would reject is caught,
+and so is one that rejects a `Push` the model says is incomplete. Every push the hub accepts
+is a supersede in the model, which adds a record only for what the push drops that the hub
+hadn't; the hub refuses, storing nothing, one whose records aren't its own or whose new head
+is dropped. The reply to an accepted push carries the hub's records as a state, from which,
+with the records it took and what it dropped, the node knows them all, so the model's hub
+announces them with it (`sendD`). The Rust core sends only the merged
 requests (`Push`, `Fetch`); the finer-grained actions remain in the model and the oracle.
 
 The test's objects have no structure, so the test's hub ignores `closure(base)` and leaves
@@ -114,23 +131,32 @@ against `PStep`, and for one that may have, against `PStepR` and `rmeasure`
 (`pushAcceptR_merged`, `fetchR_merged` and the rest; `fetchR_current` for a `Fetch` by a
 node that knows the hub's head and `seq` already, for which the policy has no step).
 
+`Supersede.lean` proves the same with supersedes, for the policy `SPStepR`, which adds
+taking the hub's records (`adopt`) and publishing a node's own drops (`supPush`, and `supFix`,
+which writes the fix-up first, as musubi does), with the measure `smeasure`.
+
 `formal/Musubi/Exec.lean` computes these on the oracle's state: `measureE`, `rmeasureE`,
 `convergedE`, `upOpsL` and `upObjsL`, proved equal to `measure`, `rmeasure`, `Converged`,
 `upOps` and `upObjs` of the abstracted state (`measureE_eq`, `rmeasureE_eq`,
-`convergedE_iff`, `mem_upOpsL`, `mem_upObjsL`, in `ExecSound.lean`). The oracle answers with
-them:
+`convergedE_iff`, `mem_upOpsL`, `mem_upObjsL`, in `ExecSound.lean`); and
+`SupersedeExec.lean` computes `smeasureE` and `sconvergedE`, proved equal to `smeasure` and
+`SConverged` (`smeasureE_eq`, `sconvergedE_iff`). The oracle answers with them:
 
 ```json
 {"op": "measure"}
-{"ok": true, "measure": [1, 0, 0, 0, 0], "rmeasure": [1, 0, 0, 0, 0, 0], "converged": false}
+{"ok": true, "measure": [1, 0, 0, 0, 0], "rmeasure": [1, 0, 0, 0, 0, 0],
+ "smeasure": [0, 0, 1, 0, 0, 0, 0, 0], "converged": false}
 {"op": "upload", "node": 0, "new": 1}
 {"ok": true, "ops": [1], "objs": [10]}
 ```
 
 `measure` is `(dirty nodes, Σ staleness, Σ missing ops, Σ pending advances, Σ pending
 merges)`; `rmeasure` is `(nodes not good, inconsistent nodes, Σ staleness of consistent nodes,
-Σ missing ops, Σ pending advances, Σ pending merges)`. Both compare lexicographically;
-[formal/README.md](../../formal/README.md) defines their terms.
+Σ missing ops, Σ pending advances, Σ pending merges)`; `smeasure` is `(drops not yet the
+hub's, Σ the hub's drops not yet a node's)` and then `rmeasure`. All compare
+lexicographically; [formal/README.md](../../formal/README.md) defines their terms.
+`converged` is `SConverged`: the protocol has converged, and every node has the hub's dropped
+set.
 
 The conformance test checks:
 
@@ -139,15 +165,17 @@ The conformance test checks:
 - `World::quiesce`, which stops users and runs every node's policy over a reliable network,
   asks for the measures after each exchange: a node's `Fetch` and the reply, or one policy
   step and the replies to what it sent. An exchange that changes the node's operations,
-  heads or `known` must make the measure fall, and any other must leave it where it was or
-  lower. `rmeasure` must do so in every case; `measure` only while the hub has never gone
-  back, since its proof needs every state to be `Reachable`. Each node's turn starts with a
+  heads, `known` or dropped set must make the measure fall, and any other must leave it
+  where it was or lower. `smeasure` must do so in every case; `rmeasure` only while no node
+  has dropped anything, and `measure` only while the hub has never gone back too, since its
+  proof needs every state to be `Reachable`. Each node's turn starts with a
   `Fetch`, whose reply puts its `known` in the hub's current history before it realizes
   anything, as `PStepR` requires. A crash the test armed before quiescing, which happens
   when the node next stages a `Fetched` reply, is not a policy step, so the check starts
   afresh after it.
 - Once the Rust side has converged, so has the oracle's state. The states already agree
-  after every action, so this cross-checks `convergedE`.
+  after every action, so this cross-checks `sconvergedE`. The Rust side converges only once
+  every node has taken the hub's records, in order, too.
 
 The measure falling shows that the policy's steps are ones the termination proof covers, not
 that each is a `PStep`. Hub-only work, such as storing a rejected push's upload, changes
@@ -159,7 +187,10 @@ trace, so that nodes A and B both merge heads `{1, 2}` (`duplicateMerge`), and t
 quiesces. The trace restarts A and B before they fetch, so the test crashes them, rather
 than have them restart on the hub's reply. `remade_hive_conformance` makes a hive again
 under nodes that know heads it has lost, and requires each to take the hub's reply as
-saying it went back (`NodeCore::handle_reply`) and fill it again.
+saying it went back (`NodeCore::handle_reply`) and fill it again. `supersede_conformance`
+has a node abandon an operation the hub has, and the other take the record, and
+`concurrent_supersedes_conformance` two nodes abandon different operations at once, the hub
+ending up with both records.
 
 ## Running it
 
@@ -192,9 +223,13 @@ Deliberately broken versions of the core, each caught:
 | Node's `Push` uploads every operation since the root, not since `known.head` | conformance only: not `upOps` |
 | Node with two heads pushes one of them before merging | conformance only: the push raises the other nodes' staleness, and the measure rises; the run still converges |
 | Node that believes a head at the largest sequence number doesn't start over when its own request's reply says otherwise | `nodes_recover_from_false_replies`, and rarely `nodes_recover_from_wrong_replies` with real repositories: no honest hub gets there, and the node never converges |
+| Hub accepts a `Push` whose records aren't its own | `a_push_without_the_hubs_records_is_refused` |
+| Node advances to a head it dropped | `a_node_never_advances_to_a_head_it_dropped`, through the oracle (`HeadsOK`) |
 
 "Invariants" is `protocol_invariants`, which checks the safety properties directly on the
-Rust state, without the oracle. `just mutants` runs cargo-mutants over `hub.rs` and
+Rust state, without the oracle. The random cases rarely reach the last two, which need a
+node behind the hub's records to push from its head, and a hub that goes back to a head a
+node dropped, so fixed tests make them. `just mutants` runs cargo-mutants over `hub.rs` and
 `node.rs`; the property and conformance tests should kill every mutant it makes.
 
 ## Wire format
@@ -213,12 +248,14 @@ request gets exactly one reply.
 
 `measure` and `upload` read the session's state and leave it as it was
 ([Liveness](#liveness)). The oracle also answers presence requests ([Presence](#presence)).
+A session starts with no records and nothing dropped.
 
 ### Actions
 
-Fields mirror the constructors of `EnvStep` and `SyncStep` in `formal/Musubi/Model.lean`.
-`node` is a node index below `nodes`. Op and object ids are naturals. Sets are arrays,
-compared as sets.
+Fields mirror the constructors of `EnvStep` and `SyncStep` in `formal/Musubi/Model.lean`,
+and of `SAction` in `formal/Musubi/SupersedeExec.lean`. `node` is a node index below
+`nodes`. Op and object ids are naturals. Sets are arrays, compared as sets. Records are an
+array of sets, compared in order.
 
 | `"kind"` | Fields | Model step |
 | --- | --- | --- |
@@ -255,7 +292,13 @@ compared as sets.
 | `hubFetch` | `node`, `base`, `haves` | `SyncStep.hubFetch`: replies with a `head`, an `ops` and an `objs` message |
 | `crashHub` | none | `SyncStep.crashHub` |
 | `hubForget` | `ops`, `objs` | `SyncStep.hubForget`: the hub keeps only `ops` and `objs`, which must be among what it stores and hold `closure(head)` |
-| `hubRegress` | `seq` | `RStep`'s `State.regress` (`Regress.lean`), the hub going back: `seq ≤ hub.seq`; `head := hist seq`, `seq := seq`, and nothing else changes |
+| `hubRegress` | `seq` | `RStep`'s `State.regress` (`Regress.lean`), the hub going back: `seq ≤ hub.seq`; `head := hist seq`, `seq := seq`, its records go back to those it had then, and nothing else changes |
+| `abandon` | `node`, `ops` | `SStep.abandon`: `ops` are below `node`'s heads, none of them, and not the root |
+| `sendSup` | `node` | `SStep.sendSup`: a `supersede` message with the records `node` took and its dropped set |
+| `sendD` | `node` | `SStep.sendD`: a `dropped` message with the hub's records |
+| `adopt` | `node`, `records` | `SStep.adopt`: `records` were announced to `node`, and drop none of its heads; its dropped set gains theirs, and they become the records it took |
+| `hubSupAccept` | `node`, `ops`, `objs`, `expected`, `new`, `applied`, `dropped` | `SStep.sup` with the `hubPushAccept` it rides on: a `supersede` message of `applied` and `dropped` is in `net`, `applied` are the hub's records, and neither the hub nor `dropped` drops `new`; the hub adds a record of what `dropped` drops that it doesn't, if any |
+| `hubPushRefuse` | `node`, `ops`, `objs`, `expected`, `new`, `applied`, `dropped` | no step: the `push` and a `supersede` message are in `net`, and `applied` aren't the hub's records or `new` is dropped |
 
 `headKind` is one of `head`, `accepted`, `rejected`, `incomplete`, `notify`.
 
@@ -275,6 +318,8 @@ Two consequences of the model that the Rust test implementations must match:
   from `sops` and `sobj`. Staging is only ever cleared by `loseVolatile`.
 - `casAccept` adds an `accepted` reply for the sender and a `notify` message for every node
   below `nodes`, including the sender.
+- Every push the hub accepts is a `hubSupAccept`; the plain `hubPushAccept` stays in the
+  model, checking only `HeadOK`, but the Rust hub never takes it.
 
 ### State
 
@@ -282,9 +327,10 @@ Two consequences of the model that the Rust test implementations must match:
 {
   "next": 5,
   "ops": [{"id": 1, "parents": [0], "objs": [10]}, ...],
-  "hub": {"ops": [0, 1], "objs": [10], "head": 1, "seq": 1},
+  "hub": {"ops": [0, 1], "objs": [10], "head": 1, "seq": 1, "records": [[2]]},
   "nodes": [
-    {"lops": [0, 1], "lobj": [10], "heads": [1], "known": [1, 1], "sops": [], "sobj": []}
+    {"lops": [0, 1], "lobj": [10], "heads": [1], "known": [1, 1], "sops": [], "sobj": [],
+     "dropped": [2], "applied": [[2]]}
   ],
   "net": [
     {"msg": "getHead", "node": 0},
@@ -298,13 +344,15 @@ Two consequences of the model that the Rust test implementations must match:
     {"msg": "objs", "node": 0, "objs": [10]},
     {"msg": "stored", "node": 0},
     {"msg": "push", "node": 0, "ops": [1], "objs": [10], "expected": 0, "new": 1},
-    {"msg": "fetch", "node": 1, "base": 0, "haves": []}
+    {"msg": "fetch", "node": 1, "base": 0, "haves": []},
+    {"msg": "supersede", "node": 0, "applied": [], "dropped": [2]},
+    {"msg": "dropped", "node": 1, "records": [[2]]}
   ]
 }
 ```
 
-Every array is sorted ascending. `net` is sorted by `(msg, node, ...)`. `ops` lists every
-created operation except the root.
+Every array is sorted ascending, but records, which keep their order, each sorted. `net` is
+sorted by `(msg, node, ...)`. `ops` lists every created operation except the root.
 
 ## Presence
 

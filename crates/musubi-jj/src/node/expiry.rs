@@ -189,7 +189,8 @@ impl NodeRepo {
         Ok(copies)
     }
 
-    /// When a present copy last worked: the latest end of its latest work's operations.
+    /// When a present copy last worked: the latest end of its latest work's operations, or
+    /// when a fix-up says that work was done.
     fn last_work(
         &self,
         presence: &Presence<OperationId>,
@@ -197,14 +198,7 @@ impl NodeRepo {
     ) -> Result<SystemTime, NodeError> {
         let mut last = SystemTime::UNIX_EPOCH;
         for op in presence.latest(copy).into_iter().flatten() {
-            let millis = self
-                .canonical
-                .read_operation(op)?
-                .metadata
-                .time
-                .end
-                .timestamp
-                .0;
+            let millis = self.work_time(op)?;
             let time = SystemTime::UNIX_EPOCH + Duration::from_millis(millis.max(0).unsigned_abs());
             last = last.max(time);
         }

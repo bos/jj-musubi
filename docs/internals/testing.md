@@ -285,6 +285,8 @@ The files musubi appends lines to have Hegel properties beside their parsers ins
 
 - the translation map and the joins: among whole lines, a line torn anywhere names nothing,
   and the whole ones are read;
+- a node's logs of renamings and of how records renamed the hub's history: with more appended
+  after, a line torn anywhere names nothing, and a block counts as far as its whole lines go;
 - the hub's log of heads: cut where a line ends, it reads as the heads before the cut; cut
   anywhere else, it is corrupt;
 - a hub store whose `heads` or `backend` a crash or a disk damaged opens as it was, or is

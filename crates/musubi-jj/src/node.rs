@@ -47,6 +47,7 @@ mod join;
 mod presence;
 mod realize;
 mod settings;
+mod supersede;
 mod translate;
 mod view;
 mod working_copies;
@@ -59,6 +60,9 @@ use git::NodeGit;
 pub use join::JoinSummary;
 pub use realize::REALIZE_AT_ONCE;
 use realize::Unwritten;
+pub use supersede::NodeOp;
+use supersede::Records;
+pub use supersede::WORKED_AT_ATTRIBUTE;
 use view::LocalView;
 use view::PerMachine;
 
@@ -113,6 +117,15 @@ pub struct NodeRepo {
     /// operations with the hive's (see `first_unmergeable`), so that retries of a sync stuck
     /// there don't search again.
     unmergeable: Mutex<UnmergeableMemo>,
+    /// The hive's records this machine took, what it dropped beyond them, and the renamings
+    /// they made (docs/internals/design.md, "Abandoning operations").
+    records: Records,
+    /// Local operations canonicalized on operations a renaming superseded, as a `jj` command
+    /// writes that loaded the repository before it, parents first: to reparent onto the
+    /// rewrites.
+    late: Vec<OperationId>,
+    /// The op heads and base `check_abandon` last checked.
+    abandon_checked: Option<(Vec<OperationId>, Option<crate::records::HubOp>)>,
 }
 
 /// The last search for the operation to revert, and how many searches have run.
@@ -198,6 +211,9 @@ impl NodeRepo {
             settings: HashMap::new(),
             repo_config: None,
             machine: load_machine(repo_path, settings.operation_hostname(), settings)?,
+            records: Records::load(&musubi_dir)?,
+            late: vec![],
+            abandon_checked: None,
         };
         for (local, canonical, fingerprint) in node.read_joins()? {
             node.joins.insert(fingerprint, canonical.clone());
@@ -375,6 +391,7 @@ impl NodeRepo {
             merged.op_id(),
             &|op| self.is_join_point(op),
             &[],
+            &self.pending_expected(),
         )?;
         if exported == *merged.op_id() {
             return Ok(merged);

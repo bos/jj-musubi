@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use jj_lib::object_id::ObjectId as _;
+use musubi_core::message::RecordState;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
 use musubi_hub::activity::Report;
@@ -370,6 +371,11 @@ async fn a_request_that_panics_the_hub_gets_an_error() {
         objects: WireAttachment::None,
         expected: vec![0; 64],
         new: vec![2; 64],
+        records: RecordState {
+            count: 0,
+            digest: vec![0; 64],
+        },
+        dropped: vec![],
     };
     match hive_request(&*client, &hive, HubRequest::Protocol(push)).await {
         HubReply::Error(err) => assert!(err.contains("the hub failed"), "{err}"),
@@ -378,6 +384,10 @@ async fn a_request_that_panics_the_hub_gets_an_error() {
     let fetch = Request::Fetch {
         base: vec![0; 64],
         haves: WireAttachment::Haves(vec![]),
+        records: RecordState {
+            count: 0,
+            digest: vec![0; 64],
+        },
     };
     assert!(matches!(
         hive_request(&*client, &hive, HubRequest::Protocol(fetch)).await,

@@ -8,6 +8,7 @@
 //! decoding and re-hashing round-trips exactly.
 
 mod codec;
+mod contract;
 mod log;
 
 use std::io;
@@ -40,6 +41,8 @@ use pollster::FutureExt as _;
 use thiserror::Error;
 
 use self::codec::ViewCodec;
+pub use self::contract::Contraction;
+pub use self::contract::current;
 use self::log::Log;
 use crate::objects::ObjectError;
 use crate::objects::bundle;
@@ -469,16 +472,7 @@ impl CanonicalStore {
     ) -> Result<Vec<OperationId>, CanonicalError> {
         let to_ops =
             |ids: &[OperationId]| -> Result<Vec<jj_lib::operation::Operation>, CanonicalError> {
-                ids.iter()
-                    .map(|id| {
-                        let store: Arc<dyn OpStore> = self.shared.clone();
-                        Ok(jj_lib::operation::Operation::new(
-                            store,
-                            id.clone(),
-                            self.read_operation(id)?,
-                        ))
-                    })
-                    .collect()
+                ids.iter().map(|id| self.load_operation(id)).collect()
             };
         let ancestors =
             jj_lib::op_walk::closest_common_ancestors(to_ops(left)?, to_ops(right)?).block_on()?;
@@ -491,6 +485,19 @@ impl CanonicalStore {
 
     pub fn read_operation(&self, id: &OperationId) -> Result<Operation, CanonicalError> {
         self.shared.read_operation(id)
+    }
+
+    /// A stored operation as jj's walks over operations take it.
+    pub fn load_operation(
+        &self,
+        id: &OperationId,
+    ) -> Result<jj_lib::operation::Operation, CanonicalError> {
+        let store: Arc<dyn OpStore> = self.shared.clone();
+        Ok(jj_lib::operation::Operation::new(
+            store,
+            id.clone(),
+            self.read_operation(id)?,
+        ))
     }
 
     pub fn read_view(&self, id: &ViewId) -> Result<View, CanonicalError> {

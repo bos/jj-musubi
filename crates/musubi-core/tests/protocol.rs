@@ -15,6 +15,7 @@ use std::rc::Rc;
 
 use hegel::TestCase;
 use hegel::generators as gs;
+use musubi_core::hub::CasOutcome;
 use musubi_core::message::HeadKind;
 use musubi_core::message::OpEntry;
 use musubi_core::message::Reply;
@@ -45,6 +46,21 @@ impl Machine {
         let parent = local[pick(&tc, local.len())];
         let objs = tc.draw(gs::integers::<usize>().max_value(2));
         world.user_op(node, parent, objs);
+    }
+
+    /// `jj op abandon` of some of the operations below a node's heads.
+    #[rule]
+    fn op_abandon(&mut self, tc: TestCase) {
+        let mut world = self.world.borrow_mut();
+        let node = pick(&tc, world.nodes());
+        let candidates = world.abandonable(node);
+        tc.assume(!candidates.is_empty());
+        let ops: Vec<u64> = candidates
+            .into_iter()
+            .filter(|_| tc.draw(gs::booleans()))
+            .collect();
+        tc.assume(!ops.is_empty());
+        world.op_abandon(node, ops);
     }
 
     #[rule(weight = 4)]
@@ -124,6 +140,8 @@ impl Machine {
         let mut world = self.world.borrow_mut();
         let node = pick(&tc, world.nodes());
         let (ops, objs) = world.hub_stored();
+        // The node's own records, so that the reply is judged on its operations alone.
+        let (records, records_from) = world.node_records(node);
         let some = |items: &[u64]| -> Vec<u64> {
             if items.is_empty() {
                 return vec![];
@@ -151,6 +169,7 @@ impl Machine {
                 ])),
                 seq,
                 head,
+                records,
             },
             1 => Reply::Fetched {
                 seq,
@@ -170,6 +189,9 @@ impl Machine {
                 .collect(),
                 ops_attachment: vec![],
                 objects: some(&objs),
+                records,
+                records_from,
+                new_records: vec![],
             },
             _ => Reply::Objects {
                 for_ops: some(&ops),
@@ -470,7 +492,10 @@ fn regress_scenario_conformance() {
     }
     let fetch_all = |node: usize| json!({"kind": "fetchAll", "node": node, "base": 0, "haves": []});
     let hub_fetch = |node: usize| json!({"kind": "hubFetch", "node": node, "base": 0, "haves": []});
+    let send_d = |node: usize| json!({"kind": "sendD", "node": node});
+    let send_sup = |node: usize| json!({"kind": "sendSup", "node": node});
     let push = |kind: &str, node: usize, op: u64| json!({"kind": kind, "node": node, "ops": [op], "objs": [], "expected": 0, "new": op});
+    let accept = |node: usize, op: u64| json!({"kind": "hubSupAccept", "node": node, "ops": [op], "objs": [], "expected": 0, "new": op, "applied": [], "dropped": []});
     let learn = |node: usize, kind: &str, head: u64| json!({"kind": "learn", "node": node, "headKind": kind, "seq": 1, "head": head});
     let (recv_ops, recv_objs, realize, advance, merge, lose_known) = (
         |node: usize, op: u64| json!({"kind": "recvOps", "node": node, "ops": [op]}),
@@ -485,10 +510,13 @@ fn regress_scenario_conformance() {
         user_op(0),
         user_op(2),
         push("pushAll", 0, 1),
-        push("hubPushAccept", 0, 1),
+        send_sup(0),
+        accept(0, 1),
+        send_d(0),
         learn(0, "accepted", 1),
         fetch_all(1),
         hub_fetch(1),
+        send_d(1),
         learn(1, "head", 1),
         recv_ops(1, 1),
         recv_objs(1),
@@ -496,10 +524,13 @@ fn regress_scenario_conformance() {
         advance(1),
         json!({"kind": "hubRegress", "seq": 0}),
         push("pushAll", 2, 2),
-        push("hubPushAccept", 2, 2),
+        send_sup(2),
+        accept(2, 2),
+        send_d(2),
         lose_known(0),
         fetch_all(0),
         hub_fetch(0),
+        send_d(0),
         learn(0, "head", 2),
         recv_ops(0, 2),
         recv_objs(0),
@@ -508,6 +539,7 @@ fn regress_scenario_conformance() {
         merge(0),
         lose_known(1),
         hub_fetch(1),
+        send_d(1),
         learn(1, "head", 2),
         recv_ops(1, 2),
         recv_objs(1),
@@ -543,4 +575,90 @@ fn remade_hive_conformance() {
             "node {node} did not take the hub's reply as saying it went back"
         );
     }
+}
+
+/// A node abandons operations the hub has, and publishes the abandon with a fix-up operation;
+/// the other node takes the hub's record. Through the core and the oracle.
+#[test]
+fn supersede_conformance() {
+    let mut world = World::new(2, Some(Oracle::spawn()));
+    world.user_op(0, 0, 1);
+    world.user_op(0, 1, 1);
+    world.quiesce();
+    world.op_abandon(0, vec![1]);
+    world.quiesce();
+    world.check_invariants();
+    assert_eq!(world.hub_records(), [vec![1]]);
+    assert!(
+        world
+            .trace
+            .iter()
+            .any(|action| action["kind"] == "adopt" && action["node"] == 1),
+        "node 1 did not take the record: {:#?}",
+        world.trace
+    );
+}
+
+/// Two nodes abandon operations concurrently: whichever supersede the hub takes first, the
+/// other is pushed again after it, and the hub ends up with both records.
+#[test]
+fn concurrent_supersedes_conformance() {
+    let mut world = World::new(2, Some(Oracle::spawn()));
+    world.user_op(0, 0, 0);
+    world.user_op(0, 1, 0);
+    world.user_op(0, 2, 0);
+    world.quiesce();
+    world.op_abandon(0, vec![1]);
+    world.op_abandon(1, vec![2]);
+    world.quiesce();
+    world.check_invariants();
+    assert_eq!(world.hub_records().len(), 2);
+}
+
+/// A push whose node hasn't taken the hub's latest record is refused, even from the hub's
+/// head: its ids aren't the hub's. The node never sends one knowingly, so the test answers
+/// one itself.
+#[test]
+fn a_push_without_the_hubs_records_is_refused() {
+    let mut world = World::new(1, None);
+    world.user_op(0, 0, 0);
+    world.user_op(0, 1, 0);
+    world.quiesce();
+    world.op_abandon(0, vec![1]);
+    world.quiesce();
+    assert_eq!(world.hub_records(), [vec![1]]);
+    let head = world.hub_head();
+    world.user_op(0, head, 0);
+    let new = *world.local_ops(0).last().unwrap();
+    assert_eq!(world.answer_push(head, new, &[]), CasOutcome::Refused);
+    assert_eq!(world.hub_head(), head);
+}
+
+/// A node never advances to a head it dropped: here one it took from the hub's records, which
+/// the hub then lost, going back to that head. It waits until another node publishes the
+/// drop again.
+#[test]
+fn a_node_never_advances_to_a_head_it_dropped() {
+    let mut world = World::new(2, Some(Oracle::spawn()));
+    world.user_op(0, 0, 0);
+    world.exchange(0, 0);
+    world.user_op(0, 1, 0);
+    world.exchange(0, 0);
+    world.op_abandon(0, vec![1]);
+    while world.hub_records().is_empty() {
+        world.exchange(0, 0);
+    }
+    // Node 1 fetches the hub's head and records, and takes them: its only head is the root.
+    fetch(&mut world, 1);
+    world.exchange(1, 0);
+    assert!(world.dropped(1).contains(&1));
+    world.hub_goes_back(1);
+    // Node 1 hears that the hub went back to 1, realizes it, and waits there.
+    world.poll_now(1);
+    for _ in 0..4 {
+        world.exchange(1, 0);
+    }
+    assert!(!world.heads(1).contains(&1));
+    world.quiesce();
+    world.check_invariants();
 }

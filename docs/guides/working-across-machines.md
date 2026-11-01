@@ -211,13 +211,22 @@ values. A machine whose clock is wrong can win when it shouldn't.
 A machine joining a hive takes the hive's value for each setting the hive has, and adds the
 others it has, such as a remote the hive lacks.
 
+## Abandoning operations
+
+`jj op abandon` works across machines. The operations you abandon go from every machine's
+operation log, as from this one's, and never come back, even from a machine that was offline
+at the time, so think of it as abandoning them on every machine. As with jj on one machine,
+the repository stays as it was at each operation that's left, and the operations after the
+abandoned ones get new ids: ids you noted from `jj op log` on any machine no longer work.
+musubi adds an operation to the log saying so, `musubi: pass on jj op abandon`.
+
+A `jj` command that was already running on another machine when the abandon reached it,
+such as a long `jj git fetch`, still syncs its work. If a second command there merges that
+work before musubi has seen it, bookmarks the first one changed can come out conflicted, as
+they can after `jj op abandon` on one machine: set them again with `jj bookmark set`.
+
 ## Things to avoid
 
-- **`jj op abandon`** of operations other machines already have. musubi can't replicate it
-  yet, so it pauses syncing that repository with an error rather than bring the abandoned
-  operations back. See [Syncing paused after
-  `jj op abandon`](../troubleshooting.md#syncing-paused-after-jj-op-abandon). Abandoning only
-  operations from before the machine joined is fine.
 - **A newer `jj`** than the one musubi supports, 0.46.0. musubi refuses operations with fields
   it doesn't know rather than drop them. [Upgrade jj and musubi
   together](manage.md#upgrade-musubi).

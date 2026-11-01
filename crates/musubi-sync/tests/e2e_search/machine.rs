@@ -462,6 +462,20 @@ impl Search {
         self.note(&tc);
     }
 
+    /// `jj op abandon` of an operation since setup, below the head: every machine drops it,
+    /// and the repository stays as it was at each operation left.
+    #[rule]
+    fn op_abandon(&mut self, tc: TestCase) {
+        let m = self.machine(&tc);
+        let mut world = self.world.borrow_mut();
+        let ops = world.older_ops(m);
+        let op = choose(&tc, &ops);
+        fired("op_abandon");
+        world.jj(m, &["op", "abandon", &op]);
+        drop(world);
+        self.note(&tc);
+    }
+
     /// Any `jj` command: snapshots, imports git refs, merges concurrent operations, and,
     /// with auto-update-stale as the tests set it, updates a stale working copy.
     #[rule]

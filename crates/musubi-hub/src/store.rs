@@ -8,7 +8,10 @@
 //!   operations require, and backend extras entries a receiver cannot derive from them.
 //! - `simple/` (simple backend): store files, as in a simple-backend repository.
 //! - `heads`: the log of accepted heads, one `<seq> <operation id>` line each, appended
-//!   before any reply that depends on it. Its last line is the current head.
+//!   before any reply that depends on it. Its last line is the current head. A head accepted
+//!   with a record, a supersede's, has the record's operation ids after it on its line, so
+//!   that a log cut short loses heads and records together (docs/internals/design.md,
+//!   "Abandoning operations").
 //!
 //! None of it is synced to disk: a hub only gathers what its machines' repositories hold,
 //! so one that loses its state is made again, empty, and they fill it (see "Replacing the
@@ -28,12 +31,16 @@ use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::OperationId;
 use musubi_jj::canonical::CanonicalError;
 use musubi_jj::canonical::CanonicalStore;
+use musubi_jj::canonical::Contraction;
 use musubi_jj::objects::Backend;
 use musubi_jj::objects::GitObjects;
 use musubi_jj::objects::GitStore;
 use musubi_jj::objects::ObjectError;
 use musubi_jj::objects::ObjectStore;
 use musubi_jj::objects::SimpleStore;
+use musubi_jj::records::HubOp;
+use musubi_jj::records::Record;
+use musubi_jj::records::RecordDigest;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -84,8 +91,35 @@ pub struct HubStore {
     /// accepted after `j` and by `i`.
     accepted: HashMap<OperationId, u64>,
     /// `hist`: the head accepted at each sequence number, the root operation at 0 and the
-    /// head now last.
+    /// head now last. Each as the records now name it, or as it was, if they dropped it.
     history: Vec<OperationId>,
+    /// The records, in the order they were taken, and the digest of each first so many.
+    records: Vec<Record>,
+    digests: Vec<RecordDigest>,
+    /// What each operation the records superseded became when one did: its rewrite, or for a
+    /// dropped one, what its parents were then, which later records may have superseded
+    /// ([`HubStore::current`] composes them).
+    superseded: HashMap<OperationId, Vec<OperationId>>,
+    /// Every operation a record named.
+    named: HashSet<OperationId>,
+}
+
+/// What the history becomes with more dropped: what [`HubStore::contract`] works out.
+pub struct Contracted {
+    /// The head whose history this is.
+    pub head: OperationId,
+    pub dropped: Vec<OperationId>,
+    pub images: HashMap<OperationId, Vec<OperationId>>,
+}
+
+impl Contracted {
+    /// What `op` becomes.
+    pub fn image(&self, op: &OperationId) -> Vec<OperationId> {
+        self.images
+            .get(op)
+            .cloned()
+            .unwrap_or_else(|| vec![op.clone()])
+    }
 }
 
 impl HubStore {
@@ -106,7 +140,7 @@ impl HubStore {
         fs::write(&path, backend.name()).map_err(io_err(&path))?;
         let canonical = CanonicalStore::open(&dir.join("canonical"), backend.root_commit())?;
         let root = canonical.root_operation_id().clone();
-        append_head(dir, 0, &root)?;
+        append_head(dir, 0, &root, &[])?;
         Self::open(dir)
     }
 
@@ -124,11 +158,102 @@ impl HubStore {
             canonical,
             accepted: HashMap::new(),
             history: vec![],
+            records: vec![],
+            digests: vec![RecordDigest::root()],
+            superseded: HashMap::new(),
+            named: HashSet::new(),
         };
-        for head in history {
+        for (head, record) in history {
+            if !record.is_empty() {
+                let record: Vec<HubOp> = record.into_iter().map(HubOp).collect();
+                let contracted = store.contract(&record)?;
+                store.take(contracted);
+            }
             store.accept(head)?;
         }
         Ok(store)
+    }
+
+    /// The records, oldest first.
+    pub fn records(&self) -> &[Record] {
+        &self.records
+    }
+
+    /// The digest of the first `count` records, if there are as many.
+    pub fn digest(&self, count: usize) -> Option<&RecordDigest> {
+        self.digests.get(count)
+    }
+
+    /// Whether the records dropped or superseded `op`: it was, or is, no operation of the
+    /// history as they name it.
+    pub fn is_superseded(&self, op: &OperationId) -> bool {
+        self.named.contains(op) || self.superseded.contains_key(op)
+    }
+
+    /// What `op` is now: itself, or what the records superseded it with. Never an operation
+    /// the records superseded.
+    pub fn current(&self, op: &OperationId) -> Vec<OperationId> {
+        musubi_jj::canonical::current(&self.superseded, op)
+    }
+
+    /// The history with `dropped` dropped too: every accepted operation's image, the rewrites
+    /// written to the store. Ids the history lacks drop nothing.
+    pub fn contract(&self, dropped: &[HubOp]) -> Result<Contracted, StoreError> {
+        let dropped: Vec<OperationId> = dropped
+            .iter()
+            .map(|op| op.0.clone())
+            .filter(|op| !self.is_superseded(op))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let mut contraction = Contraction::new(&self.canonical, dropped.iter().cloned())?;
+        let head = self.head().1.clone();
+        if !contraction.is_empty() {
+            contraction.images(&self.canonical, &head)?;
+        }
+        Ok(Contracted {
+            head,
+            dropped,
+            images: contraction.into_images(),
+        })
+    }
+
+    /// Takes a contraction as the next record: renames the history and what is accepted.
+    fn take(&mut self, contracted: Contracted) {
+        let Contracted {
+            dropped, images, ..
+        } = contracted;
+        if dropped.is_empty() {
+            return;
+        }
+        let image = |op: &OperationId| images.get(op).cloned().unwrap_or_else(|| vec![op.clone()]);
+        let accepted = std::mem::take(&mut self.accepted);
+        for (op, seq) in accepted {
+            if let Some(images) = images.get(&op) {
+                if let [rewrite] = images.as_slice()
+                    && !dropped.contains(&op)
+                {
+                    self.accepted.insert(rewrite.clone(), seq);
+                }
+            } else {
+                self.accepted.insert(op, seq);
+            }
+        }
+        for head in &mut self.history {
+            if let [rewrite] = image(head).as_slice()
+                && !dropped.contains(head)
+            {
+                *head = rewrite.clone();
+            }
+        }
+        // Composed on lookup, so that opening, which takes every record again, costs their
+        // size rather than its square.
+        self.superseded.extend(images);
+        self.named.extend(dropped.iter().cloned());
+        let record = Record::new(dropped.into_iter().map(HubOp));
+        let digest = self.digests.last().expect("the root digest").then(&record);
+        self.digests.push(digest);
+        self.records.push(record);
     }
 
     pub fn head(&self) -> (u64, &OperationId) {
@@ -156,16 +281,29 @@ impl HubStore {
         self.accepted.contains_key(op)
     }
 
-    /// Replaces the head. The caller has checked that `new` is closed and descends from the
-    /// current head.
-    pub fn set_head(&mut self, seq: u64, new: &OperationId) -> Result<(), StoreError> {
+    /// Replaces the head, taking `contracted`'s record with it, if it drops anything. The
+    /// caller has checked that `new` is closed and descends from the current head, once that
+    /// is dropped.
+    pub fn set_head(
+        &mut self,
+        seq: u64,
+        new: &OperationId,
+        contracted: Option<Contracted>,
+    ) -> Result<(), StoreError> {
         assert_eq!(
             seq,
             self.history.len() as u64,
             "heads are accepted in sequence"
         );
+        let record = contracted
+            .as_ref()
+            .map(|contracted| contracted.dropped.clone())
+            .unwrap_or_default();
+        append_head(&self.dir, seq, new, &record)?;
+        if let Some(contracted) = contracted {
+            self.take(contracted);
+        }
         let accepted = self.unaccepted_ancestors(new)?;
-        append_head(&self.dir, seq, new)?;
         for id in accepted {
             self.accepted.insert(id, seq);
         }
@@ -232,9 +370,10 @@ impl HubStore {
         base: &OperationId,
     ) -> Result<Vec<OperationId>, StoreError> {
         let (Some(head_seq), Some(base_seq)) = (self.head_seq(head), self.head_seq(base)) else {
-            let excluded = self
-                .canonical
-                .ancestors_until(std::slice::from_ref(base), |_| false)?;
+            // A base the records superseded, from a node behind them, stands for what it is
+            // now: everything below it that is left.
+            let bases = self.current(base);
+            let excluded = self.canonical.ancestors_until(&bases, |_| false)?;
             let excluded: HashSet<OperationId> = excluded.into_iter().collect();
             return Ok(self
                 .canonical
@@ -285,6 +424,26 @@ impl HubStore {
     /// the walk stops at accepted operations, and so does the walk over objects, at the
     /// commits of those it reached and of the head.
     pub fn missing_closure(&self, op: &OperationId) -> Result<Vec<String>, StoreError> {
+        self.missing_closure_with(op, None)
+    }
+
+    /// [`Self::missing_closure`], once the history drops what `contracted` drops: its rewrites
+    /// of accepted operations are closed as those are, with the same views.
+    pub fn missing_closure_with(
+        &self,
+        op: &OperationId,
+        contracted: Option<&Contracted>,
+    ) -> Result<Vec<String>, StoreError> {
+        let rewrites: HashSet<&OperationId> = contracted
+            .map(|contracted| {
+                contracted
+                    .images
+                    .iter()
+                    .filter(|(old, _)| !contracted.dropped.contains(old))
+                    .filter_map(|(_, images)| images.first())
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut missing = vec![];
         let mut reached = vec![];
         let mut boundary = BTreeSet::from([self.head().1.clone()]);
@@ -294,7 +453,7 @@ impl HubStore {
             if !seen.insert(id.clone()) {
                 continue;
             }
-            if self.accepted.contains_key(&id) {
+            if self.accepted.contains_key(&id) || rewrites.contains(&id) {
                 boundary.insert(id);
                 continue;
             }
@@ -327,9 +486,12 @@ impl HubStore {
     }
 }
 
+/// A head as the log has it, with the record it was accepted with, if any.
+type LoggedHead = (OperationId, Vec<OperationId>);
+
 /// Reads the log of accepted heads. A line torn by a power cut makes it corrupt: the hive
 /// is made again rather than recovered (see "Replacing the hub" in docs/internals/design.md).
-fn read_heads(dir: &Path) -> Result<Vec<OperationId>, StoreError> {
+fn read_heads(dir: &Path) -> Result<Vec<LoggedHead>, StoreError> {
     let path = dir.join("heads");
     let bytes = fs::read(&path).map_err(io_err(&path))?;
     let Ok(text) = String::from_utf8(bytes) else {
@@ -337,11 +499,16 @@ fn read_heads(dir: &Path) -> Result<Vec<OperationId>, StoreError> {
     };
     let mut heads = vec![];
     for line in text.split_terminator('\n') {
-        let parsed = line.split_once(' ').and_then(|(seq, id)| {
-            Some((seq.parse::<usize>().ok()?, OperationId::try_from_hex(id)?))
-        });
-        match parsed {
-            Some((seq, id)) if seq == heads.len() => heads.push(id),
+        // Whole ids only: a line torn and another appended after it can read as a short one.
+        let id = |hex: &str| OperationId::try_from_hex(hex).filter(|id| id.as_bytes().len() == 64);
+        let mut words = line.split(' ');
+        let seq = words.next().and_then(|seq| seq.parse::<usize>().ok());
+        let head = words.next().and_then(id);
+        let record: Option<Vec<OperationId>> = words.map(id).collect();
+        match (seq, head, record) {
+            (Some(seq), Some(head), Some(record)) if seq == heads.len() => {
+                heads.push((head, record));
+            }
             _ => return Err(StoreError::CorruptHead(path)),
         }
     }
@@ -363,16 +530,26 @@ pub fn is_corrupt(err: &StoreError) -> bool {
     }
 }
 
-fn append_head(dir: &Path, seq: u64, head: &OperationId) -> Result<(), StoreError> {
+fn append_head(
+    dir: &Path,
+    seq: u64,
+    head: &OperationId,
+    record: &[OperationId],
+) -> Result<(), StoreError> {
     let path = dir.join("heads");
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
         .map_err(io_err(&path))?;
+    let mut line = format!("{seq} {}", head.hex());
+    for op in record {
+        line.push(' ');
+        line.push_str(&op.hex());
+    }
+    line.push('\n');
     // In one write, not writeln!'s four, so that a process killed partway seldom tears it.
-    file.write_all(format!("{seq} {}\n", head.hex()).as_bytes())
-        .map_err(io_err(&path))
+    file.write_all(line.as_bytes()).map_err(io_err(&path))
 }
 
 #[cfg(test)]
@@ -407,7 +584,12 @@ mod tests {
         fs::write(dir.path().join("heads"), &text[..cut]).unwrap();
         match ends.iter().position(|&end| end == cut) {
             Some(lines) if lines > 0 => {
-                assert_eq!(read_heads(dir.path()).unwrap(), heads[..lines]);
+                let read: Vec<OperationId> = read_heads(dir.path())
+                    .unwrap()
+                    .into_iter()
+                    .map(|(head, _)| head)
+                    .collect();
+                assert_eq!(read, heads[..lines]);
             }
             _ => assert!(matches!(
                 read_heads(dir.path()),

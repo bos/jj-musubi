@@ -300,26 +300,26 @@ command fails. For each operation id in `.jj/repo/op_heads/heads`, run
 `jj --at-op <head> op log -n1` to find the one that made the merge commit, then run
 `jj --at-op <head> op revert @` at that head.
 
-### Syncing paused after `jj op abandon`
+### "this repository's history no longer matches the hive's, so it can't sync again"
 
 ```text
-this repository lost history the hive has (was `jj op abandon` run?), so it can't sync
-again: make a new copy with `musubi clone`, bring this one's work across to it, then run
-`musubi leave --force` here
+this repository's history no longer matches the hive's, so it can't sync again: make a new
+copy with `musubi clone`, bring this one's work across to it, then run `musubi leave --force`
+here
 ```
 
-`jj op abandon` removed operations that the hub, and so other machines, already have. musubi
-can't pass that on yet, and won't bring them back, so it stops syncing this copy, and can't
-sync it again: `musubi status` says that retrying won't help. (Abandoning only operations
-from before this machine first joined is fine.)
-The other machines keep the operations you abandoned. To carry on here, make a new copy with
-`musubi clone`, bring across any work this copy made since its last sync, then run
-`musubi leave --force` in this one, which keeps all it has.
+Operations the hive has went missing from this repository in a way musubi couldn't work out,
+as when a power cut loses jj's latest update to its op heads. musubi passes `jj op abandon` on
+to the other machines, so unless something like that happened, this is a bug: please report it
+at <https://github.com/bos/jj-musubi/issues>, with the daemon's log (`daemon.log`, in the
+[state directory](reference/configuration.md#on-every-machine)). Rather than bring the
+operations back, musubi stops syncing this copy: `musubi status` says retrying won't get past
+it.
 
-If `musubi join` says this, the operations were abandoned while the copy was out of its hive;
-it joined all the same, so do as above. If `musubi create` says this, the hive it made is
-empty, and this copy can't fill it: run `musubi leave --force`, and remove the hive with
-`musubi hub remove`.
+To carry on here, make a new copy with `musubi clone`, bring across any work this copy made
+since its last sync, then run `musubi leave --force` in this one, which keeps all it has. If
+`musubi create` says this, the hive it made is empty, and this copy can't fill it: run
+`musubi leave --force`, and remove the hive with `musubi hub remove`.
 
 ### "unknown field ... (written by a newer jj?)"
 

@@ -6,6 +6,12 @@ change the protocol, so run the same release on the hub and every machine (see
 
 ## Unreleased
 
+- `jj op abandon` of operations the hive has is passed on to every machine, rather than
+  stopping that copy syncing: the abandoned operations go from every machine's operation log
+  and never come back. The protocol changed: upgrade the hub and every machine together, by
+  hand, then run `musubi daemon restart` on each machine. The error that said a repository
+  lost history the hive has now says its history no longer matches the hive's, and means a
+  bug.
 - A machine can upgrade musubi by itself to follow its hub: set `musubi.upgrade-command` to a
   command that installs the release in `$MUSUBI_UPGRADE_TO`, and the daemon runs it when a
   hub runs a newer release, then starts again from it. See [Upgrade
@@ -25,9 +31,6 @@ change the protocol, so run the same release on the hub and every machine (see
   messages, and `leave`'s hint, `musubi leave --force`, is on a line of its own too.
 - `musubi clone` says "Cloned hive ... into ..." once it has, rather than "Cloning" before,
   and no longer passes on jj's `Initialized repo in` line.
-- After `jj op abandon` removes history the hive has, musubi says so in one shorter message,
-  the same whichever check found it, without operation ids; the troubleshooting page has the
-  rest.
 - A machine shows another machine that shares its name as `laptop-1a2b`, as the hub's list
   does, where it used to show it as `laptop`.
 - A `jj` command that was already running when a repository joined its hive, or one run with
@@ -191,8 +194,8 @@ change the protocol, so run the same release on the hub and every machine (see
   another for each transfer of 16 MiB or more, while it lasts; `musubi.daemon.connections =
   "one"` keeps it to one connection to each hub, as where each new ssh is costly (see
   [Configuration](docs/reference/configuration.md#this-machines)).
-- When `jj op abandon` pauses syncing, the error says how to carry on, and `musubi status` says
-  that retrying won't help, where it said that the daemon keeps trying.
+- When syncing can't go on, the error says how to carry on, and `musubi status` says that
+  retrying won't help, where it said that the daemon keeps trying.
 - `musubi clone` checks out the hive's trunk, as `jj git clone` checks out a remote's
   default branch, where it left the new copy's working copy on the root commit, with no files.
 - A daemon started at login on macOS, by `musubi daemon install`, no longer fails every sync

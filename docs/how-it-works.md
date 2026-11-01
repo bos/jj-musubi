@@ -152,6 +152,13 @@ reconnects, its daemon fetches what it missed, merges its own work with it, and 
 result, as for any concurrent change. Meanwhile, `musubi status` shows its syncs failing, which
 is expected.
 
+## Abandoning operations
+
+`jj op abandon` on one machine removes those operations on every machine, and they never come
+back; working copies and git refs are untouched. musubi adds an operation or two to the log,
+`musubi: pass on jj op abandon`, so that what it keeps in the operation history, which
+machines are active and the hive's settings, stays as it was.
+
 ## Disk space
 
 Every machine keeps every operation and commit of its hive, so the daemon cleans up what

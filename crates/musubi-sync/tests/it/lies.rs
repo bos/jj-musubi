@@ -13,6 +13,7 @@ use hegel::HealthCheck;
 use hegel::TestCase;
 use hegel::generators as gs;
 use musubi_core::message::HeadKind;
+use musubi_core::message::RecordState;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
 use musubi_core::node::LocalRepo as _;
@@ -106,6 +107,8 @@ struct Seen {
     known_ops: HashSet<OpId>,
     seqs: Vec<u64>,
     attachments: Vec<Attachment>,
+    /// Never empty once alpha has polled, as every sync starts by doing.
+    records: Vec<RecordState>,
 }
 
 impl Seen {
@@ -115,10 +118,19 @@ impl Seen {
         }
     }
 
+    fn records(&mut self, records: &RecordState) {
+        if !self.records.contains(records) {
+            self.records.push(records.clone());
+        }
+    }
+
     fn request(&mut self, request: &Request<OpId, Attachment>) {
         match request {
             // A request's haves name commits, and a reply can't carry them as a bundle.
-            Request::Fetch { base, .. } => self.op(base),
+            Request::Fetch { base, records, .. } => {
+                self.op(base);
+                self.records(records);
+            }
             Request::GetObjects { for_ops, base, .. } => {
                 for op in for_ops {
                     self.op(op);
@@ -131,12 +143,15 @@ impl Seen {
                 objects,
                 expected,
                 new,
+                records,
+                dropped,
             } => {
-                for op in ops {
+                for op in ops.iter().chain(dropped) {
                     self.op(op);
                 }
                 self.op(expected);
                 self.op(new);
+                self.records(records);
                 self.attachments.push(ops_attachment.clone());
                 self.attachments.push(objects.clone());
             }
@@ -145,9 +160,12 @@ impl Seen {
 
     fn reply(&mut self, reply: &Reply<OpId, Attachment>) {
         match reply {
-            Reply::Head { seq, head, .. } => {
+            Reply::Head {
+                seq, head, records, ..
+            } => {
                 self.seqs.push(*seq);
                 self.op(head);
+                self.records(records);
             }
             Reply::Fetched {
                 seq,
@@ -155,9 +173,16 @@ impl Seen {
                 ops,
                 ops_attachment,
                 objects,
+                records,
+                new_records,
+                ..
             } => {
                 self.seqs.push(*seq);
                 self.op(head);
+                self.records(records);
+                for op in new_records.iter().flatten() {
+                    self.op(op);
+                }
                 for entry in ops {
                     self.op(&entry.id);
                     for op in &entry.parents {
@@ -176,6 +201,7 @@ impl Seen {
                 }
                 self.attachments.push(attachment.clone());
             }
+            Reply::Refused { records } => self.records(records),
         }
         self.replies.push(reply.clone());
     }
@@ -196,6 +222,7 @@ fn lie(tc: &TestCase, seen: &Seen) -> Reply<OpId, Attachment> {
             ])),
             seq: seq(tc, seen),
             head: pick(tc, &seen.ops).clone(),
+            records: pick(tc, &seen.records).clone(),
         },
         1 => fetched(tc, seen),
         2 => Reply::Objects {
@@ -207,8 +234,8 @@ fn lie(tc: &TestCase, seen: &Seen) -> Reply<OpId, Attachment> {
 }
 
 /// A fetch alpha was sent, or an empty one, with any of its parts wrong: its head, its
-/// operations dropped, repeated, reordered or with other parents, or its bundles others alpha
-/// sent or was sent.
+/// operations dropped, repeated, reordered or with other parents, its bundles others alpha
+/// sent or was sent, or its records others alpha has seen.
 fn fetched(tc: &TestCase, seen: &Seen) -> Reply<OpId, Attachment> {
     let fetches: Vec<_> = seen
         .replies
@@ -221,6 +248,9 @@ fn fetched(tc: &TestCase, seen: &Seen) -> Reply<OpId, Attachment> {
         mut ops,
         mut ops_attachment,
         mut objects,
+        mut records,
+        records_from,
+        new_records,
     } = (if fetches.is_empty() {
         Reply::Fetched {
             seq: 0,
@@ -228,6 +258,9 @@ fn fetched(tc: &TestCase, seen: &Seen) -> Reply<OpId, Attachment> {
             ops: vec![],
             ops_attachment: Attachment::None,
             objects: Attachment::None,
+            records: seen.records[0].clone(),
+            records_from: 0,
+            new_records: vec![],
         }
     } else {
         (*pick(tc, &fetches)).clone()
@@ -259,12 +292,18 @@ fn fetched(tc: &TestCase, seen: &Seen) -> Reply<OpId, Attachment> {
     if tc.draw(gs::booleans()) {
         objects = pick(tc, &seen.attachments).clone();
     }
+    if tc.draw(gs::booleans()) {
+        records = pick(tc, &seen.records).clone();
+    }
     Reply::Fetched {
         seq,
         head,
         ops,
         ops_attachment,
         objects,
+        records,
+        records_from,
+        new_records,
     }
 }
 

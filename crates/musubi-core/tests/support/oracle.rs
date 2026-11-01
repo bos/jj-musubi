@@ -90,6 +90,7 @@ impl Oracle {
         Measure {
             measure: numbers(&reply, "measure"),
             rmeasure: numbers(&reply, "rmeasure"),
+            smeasure: numbers(&reply, "smeasure"),
             converged: reply["converged"] == true,
         }
     }
@@ -114,8 +115,12 @@ pub struct Measure {
     /// `measure` of `Liveness.lean`, proved to fall only from states the hub reached
     /// without going back.
     pub measure: Vec<u64>,
-    /// `rmeasure` of `Regress.lean`, which falls whether or not it has.
+    /// `rmeasure` of `Regress.lean`, which falls whether or not it has, while no node has
+    /// dropped anything.
     pub rmeasure: Vec<u64>,
+    /// `smeasure` of `Supersede.lean`, which falls whatever nodes drop.
+    pub smeasure: Vec<u64>,
+    /// `SConverged`.
     pub converged: bool,
 }
 

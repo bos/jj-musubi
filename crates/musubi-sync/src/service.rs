@@ -203,7 +203,7 @@ impl HubService {
                     Reply::Fetched { ops, .. } => Outcome::Sent(ops.len() as u64),
                     _ => Outcome::Other,
                 };
-                if let Some((seq, head)) = &handled.publish {
+                if let Some((seq, head, _)) = &handled.publish {
                     tracing::info!(
                         "accepted {pushed} operations; the head is now {seq} ({})",
                         short(head)
@@ -221,9 +221,10 @@ impl HubService {
                         })
                     },
                 )?;
-                let notice = handled.publish.map(|(seq, head)| HeadNotice {
+                let notice = handled.publish.map(|(seq, head, records)| HeadNotice {
                     seq,
                     head: head.to_bytes(),
+                    records,
                 });
                 Ok((HubReply::Protocol(reply), notice))
             }
@@ -284,7 +285,9 @@ fn log_request(request: &Request<OpId, Attachment>) -> usize {
 
 fn log_reply(reply: &Reply<OpId, Attachment>) {
     match reply {
-        Reply::Head { kind, seq, head } => {
+        Reply::Head {
+            kind, seq, head, ..
+        } => {
             let kind = format!("{kind:?}").to_lowercase();
             tracing::debug!("answered {kind}: {seq} ({})", short(head));
         }
@@ -296,6 +299,7 @@ fn log_reply(reply: &Reply<OpId, Attachment>) {
         Reply::Objects { for_ops, .. } => {
             tracing::debug!("sent the objects of {} operations", for_ops.len());
         }
+        Reply::Refused { .. } => tracing::debug!("refused a push: other records"),
     }
 }
 

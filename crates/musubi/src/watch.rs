@@ -38,23 +38,7 @@ impl Watcher {
         let (sender, events) = mpsc::unbounded_channel();
         let mut watcher =
             notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                // Only a file added, or renamed into place where that's asked for, is news:
-                // inotify reports reads too, and every sync reads the directory; and files
-                // removed, as jj removes heads an operation replaces, are also what `rm -rf`
-                // of the repository looks like, which a sync would race, writing into what it
-                // deletes. A backend that can't say what happened is believed.
-                if let Ok(event) = event
-                    && (matches!(
-                        event.kind,
-                        notify::EventKind::Create(_)
-                            | notify::EventKind::Any
-                            | notify::EventKind::Other
-                    ) || renames
-                        && matches!(
-                            event.kind,
-                            notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
-                        ))
-                {
+                if event.is_ok_and(|event| news(&event, renames)) {
                     // The daemon stopped listening; nothing to notify.
                     sender.send(()).ok();
                 }
@@ -84,5 +68,57 @@ pub async fn changed(watcher: Option<&mut Watcher>) {
     match watcher {
         Some(watcher) => watcher.changed().await,
         None => std::future::pending().await,
+    }
+}
+
+/// Whether `event` in a watched directory is news: a file added, or renamed into place if
+/// `renames`, that is still there. inotify reports reads too, and every sync reads the
+/// directory. Files removed, as jj removes heads an operation replaces, are also what `rm -rf`
+/// of the repository looks like, which a sync would race, writing into what it deletes; and
+/// macOS's FSEvents reports a file's flags together, so the removal of a file soon after it
+/// was added, as when `rm -rf` deletes a head just written, comes as its creation too. A
+/// backend that can't say what happened is believed.
+fn news(event: &notify::Event, renames: bool) -> bool {
+    use notify::EventKind;
+    let added = match event.kind {
+        EventKind::Create(_) | EventKind::Any | EventKind::Other => true,
+        EventKind::Modify(notify::event::ModifyKind::Name(_)) => renames,
+        _ => false,
+    };
+    added && (event.paths.is_empty() || event.paths.iter().any(|path| path.exists()))
+}
+
+#[cfg(test)]
+mod tests {
+    use notify::Event;
+    use notify::EventKind;
+    use notify::event::CreateKind;
+    use notify::event::ModifyKind;
+    use notify::event::RemoveKind;
+    use notify::event::RenameMode;
+
+    use super::*;
+
+    /// A file added is news while it is there, and not once removed, as FSEvents reports the
+    /// removal of a file just added; a removal never is, and a rename only where asked for.
+    #[test]
+    fn only_files_added_and_still_there_are_news() {
+        let dir = tempfile::tempdir().unwrap();
+        let here = dir.path().join("here");
+        std::fs::write(&here, "").unwrap();
+        let gone = dir.path().join("gone");
+        let event = |kind, path: &Path| Event::new(kind).add_path(path.to_owned());
+        let created = EventKind::Create(CreateKind::File);
+        assert!(news(&event(created, &here), false));
+        assert!(!news(&event(created, &gone), false));
+        assert!(!news(
+            &event(EventKind::Remove(RemoveKind::File), &here),
+            false
+        ));
+        let renamed = EventKind::Modify(ModifyKind::Name(RenameMode::To));
+        assert!(news(&event(renamed, &here), true));
+        assert!(!news(&event(renamed, &here), false));
+        assert!(!news(&event(renamed, &gone), true));
+        assert!(news(&Event::new(EventKind::Any), false));
     }
 }

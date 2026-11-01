@@ -795,7 +795,8 @@ async fn serve_async(
     let mut reconnections = transport.reconnections();
     let mut watcher = Watcher::op_heads(&located.repo_path)?;
     // Where jj records the copy's path, which it rewrites when it finds the copy moved. A
-    // copy moved on macOS is news only there, until the poll.
+    // copy moved is news only there, until the poll: the op heads watch, on the old path,
+    // sees nothing on macOS, and on Linux sees heads under paths that no longer exist.
     let mut moves = crate::settings::config_id_dir(&entry.config_id).and_then(|dir| {
         Watcher::moves(&dir)
             .inspect_err(|err| tracing::debug!("{err:#}"))

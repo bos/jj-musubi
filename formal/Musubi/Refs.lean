@@ -128,7 +128,11 @@ What the model still leaves out, as testing it against jj showed
   musubi merges every concurrent head at once and skips where `.git` holds any one's record.
   It reads them under jj's import/export lock, which `jj` commands in the colocated
   workspace hold to publish; an operation published without it, by a command in another
-  workspace or by musubi itself, can land beside the merge. And if jj can't merge the
+  workspace or by musubi itself, can land beside the merge. One that imports and exports
+  nothing, as those musubi records for its own state and most commands in another workspace
+  do, keeps the record of the operation it descends from, so jj's merge with it keeps the invariant, as `fork_merge_inv`
+  shows for a local bookmark; a fetch or push in another workspace changes the record, and
+  can revert (docs/internals/races.md, "Remotes"). And if jj can't merge the
   realization with the heads after all, as `check_mergeable` has made sure it can, musubi
   publishes the realization alone, to merge them as the next step of its sync. Each is a
   realization published apart from a head (`beside_published_apart_disagrees`), which isn't

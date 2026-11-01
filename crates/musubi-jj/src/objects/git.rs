@@ -684,6 +684,18 @@ pub(crate) struct ExtrasEntry {
     pub value: Vec<u8>,
 }
 
+/// The fields of a `git_store.Commit`, the value of a commit in jj's extras table, that
+/// musubi reads, numbered as jj's `git_store.proto` numbers them; decoding skips the rest.
+/// jj's own type is private to its git backend.
+#[derive(Clone, PartialEq, prost::Message)]
+struct CommitExtras {
+    /// Alternating positive and negative terms, for a conflict only.
+    #[prost(bytes = "vec", repeated, tag = "1")]
+    root_tree: Vec<Vec<u8>>,
+    #[prost(bytes = "vec", tag = "4")]
+    change_id: Vec<u8>,
+}
+
 /// The error for `commit`, which couldn't be read for the reason `source` gives.
 fn read_err<E: std::fmt::Display>(commit: &CommitId) -> impl FnOnce(E) -> ObjectError + '_ {
     move |source| ObjectError::ReadCommit {
@@ -707,8 +719,8 @@ pub(crate) fn extras_to_ship(
         let Some(value) = table.get_value(commit.as_bytes()) else {
             continue;
         };
-        let extras = jj_lib::protos::git_store::Commit::decode(value)
-            .map_err(|_| ObjectError::MalformedExtras(commit.hex()))?;
+        let extras =
+            CommitExtras::decode(value).map_err(|_| ObjectError::MalformedExtras(commit.hex()))?;
         let oid = gix::ObjectId::try_from(commit.as_bytes()).map_err(read_err(commit))?;
         let object = git_repo.find_object(oid).map_err(read_err(commit))?;
         let git_commit = object.try_to_commit_ref().map_err(read_err(commit))?;

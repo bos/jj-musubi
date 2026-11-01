@@ -600,10 +600,26 @@ impl NodeRepo {
         let realized = self.realize(canonical)?;
         // Views made ahead inherit what this changes, in a colocated repository.
         self.prepared = None;
-        let (superseded, concurrent) = self.check_mergeable(canonical, &realized)?;
+        let mut heads = self.local_heads()?;
+        let (mut superseded, mut concurrent) = self.check_mergeable(canonical, &realized)?;
         let colocation = self.colocation();
         let colocated = colocation.is_some();
         let _lock = colocation.map(Colocation::lock).transpose()?;
+        // A `jj` command in the colocated workspace publishes only while holding the lock, so
+        // none can until this publishes. One may have published since the op heads were read,
+        // though, which the export and the merge must take in: published beside the merge, it
+        // would be merged by the next `jj` command, which doesn't export. The heads are
+        // checked again only if they changed, so that the first check, whose search for an
+        // operation to revert where jj can't merge them can take a while, keeps `jj` commands
+        // waiting for the lock only in that rare case.
+        if colocated {
+            let mut now = self.local_heads()?;
+            heads.sort();
+            now.sort();
+            if now != heads {
+                (superseded, concurrent) = self.check_mergeable(canonical, &realized)?;
+            }
+        }
         let head = match colocation {
             Some(colocation) => colocation.export_refs(
                 &self.loader,

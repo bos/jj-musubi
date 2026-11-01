@@ -304,8 +304,7 @@ Commit graphs, rebases and jj's conflict algebra are not modeled. The file's hea
 what else it leaves out: tracking in the linear steps; the tracking state of an absent
 `x@git`, which musubi's realization keeps and jj would drop (`realize_not_WF`); as runs,
 merges of more than two heads, criss-cross merges, and a remote bookmark's concurrent heads
-that `jj` commands alone make; a `jj` command publishing between musubi reading the op heads
-and taking jj's lock; and the history the expected value of a conflicted remote
+that `jj` commands alone make; and the history the expected value of a conflicted remote
 bookmark is computed from, which the model takes as given with each operation.
 
 ### Presence (`Presence.lean`)

@@ -126,11 +126,13 @@ What the model still leaves out, as testing it against jj showed
   from is given, not tied to the run: a restore can leave a local bookmark's record
   disagreeing with itself there (`restore_reverts`), and the merge then needn't match `.git`.
   musubi merges every concurrent head at once and skips where `.git` holds any one's record.
-  It reads the op heads before it takes jj's import/export lock, so a `jj` command that
-  publishes in between stays beside the merge, unmerged, and its record unconsulted; and if
-  jj can't merge the realization with the heads, as `check_mergeable` has made sure it can,
-  musubi publishes the realization alone. Neither is modeled: each is a realization
-  published apart from a head (`beside_published_apart_disagrees`).
+  It reads them under jj's import/export lock, which `jj` commands in the colocated
+  workspace hold to publish; an operation published without it, by a command in another
+  workspace or by musubi itself, can land beside the merge. And if jj can't merge the
+  realization with the heads after all, as `check_mergeable` has made sure it can, musubi
+  publishes the realization alone, to merge them as the next step of its sync. Each is a
+  realization published apart from a head (`beside_published_apart_disagrees`), which isn't
+  modeled.
 - The expected value is a ghost: the model takes it as given with each realized operation,
   and doesn't model the history it is computed from. A `jj` command that merges op heads
   itself imports at once, so its machine resolves a conflict the merge makes to its own

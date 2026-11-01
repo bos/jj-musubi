@@ -909,7 +909,9 @@ be exposed. A `--hub` that isn't an absolute path is an ssh destination, passed 
   CLI holds around its own import and export, so the two never interleave. A realization beside
   the machine's own concurrent op heads is merged with them and exported under that lock, and
   only the merge published: a `jj` command that merged them itself wouldn't export, and its
-  import would take `.git` as the realization alone left it.
+  import would take `.git` as the realization alone left it. Those heads are read again under
+  the lock, which `jj` commands in the colocated workspace hold to publish, so none of theirs
+  published meanwhile is left out.
 - Merges that musubi makes rebase commits, which needs the user's jj config (identity, and signing
   if enabled). musubi loads the same system, user, repo, and workspace config that `jj` does. The
   merge operation looks like one `jj` would write ("reconcile divergent operations"), with this

@@ -377,8 +377,13 @@ fn try_log(repo: &TestRepo) -> Option<String> {
         .then(|| String::from_utf8(output.stdout).unwrap())
 }
 
-fn wait_for(logs: &Logs, what: &str, mut done: impl FnMut() -> bool) {
-    let deadline = Instant::now() + DEADLINE;
+fn wait_for(logs: &Logs, what: &str, done: impl FnMut() -> bool) {
+    wait_within(logs, what, DEADLINE, done);
+}
+
+/// As [`wait_for`], for at most `within`: for what the daemon must do before its poll would.
+fn wait_within(logs: &Logs, what: &str, within: Duration, mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + within;
     while !done() {
         assert!(
             Instant::now() < deadline,
@@ -1781,7 +1786,10 @@ fn a_copy_restored_elsewhere_syncs_as_the_original() {
     });
 }
 
-/// A copy moved with `mv` syncs again once jj has run in it, which records where it went.
+/// A copy moved with `mv` syncs again once jj has run in it, which records where it went:
+/// at once, not at the daemon's next poll, half a minute away. Only on macOS does that take
+/// watching jj's record: inotify follows the moved directory, so the op heads watch sees the
+/// new operation.
 // Moving and deleting a repository whose files the daemon has open is for Unix only
 // (docs/internals/copies.md, "Out of scope").
 #[cfg(unix)]
@@ -1804,9 +1812,12 @@ fn moved_copies_sync_again() {
         &moved,
         &["commit", "-m", "after the move"],
     );
-    wait_for(&logs, "the moved copy's work to reach beta", || {
-        try_log(&beta).is_some_and(|log| log.contains("after the move"))
-    });
+    wait_within(
+        &logs,
+        "the moved copy's work to reach beta",
+        Duration::from_secs(15),
+        || try_log(&beta).is_some_and(|log| log.contains("after the move")),
+    );
     let list = musubi_at(&env, &logs, &alpha, &moved, &["list"]);
     insta::assert_snapshot!(list, @"
     Hub $ROOT/hub:

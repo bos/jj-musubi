@@ -902,7 +902,10 @@ be exposed. A `--hub` that isn't an absolute path is an ssh destination, passed 
 - Commands change `state.toml` holding a lock beside it, and write it whole, so that concurrent
   joins keep each other's changes and a crash never leaves half a file.
 - The daemon watches `.jj/repo/op_heads/heads` with filesystem notifications, and also polls
-  slowly. It reads operations through jj-lib's op store and never parses jj files itself.
+  slowly. It also watches where jj records the repository's path, which jj rewrites when it
+  finds the repository moved: on macOS, notifications follow paths, so the op heads of a moved
+  copy go unwatched. It reads operations through jj-lib's op store and never parses jj files
+  itself.
 - Loads and merges go through jj-lib's repo loader, which takes jj's op heads lock, so musubi
   merges concurrent heads exactly once per machine even while `jj` commands run.
 - In colocated repositories, realization holds `.jj/repo/git_import_export.lock`, the lock the jj

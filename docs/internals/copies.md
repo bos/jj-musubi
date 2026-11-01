@@ -76,13 +76,14 @@ machine, and the entries across machines.
   start a sync. A copy whose `.jj/repo` directory was replaced by an identical one, as by
   restoring a backup in place, is opened afresh, and watched again.
 
-- **R4. A moved copy is found again.** A suspended entry asks jj where its config-id was last
-  seen (`copy::moved_to`). If the copy of the key is there, the entry takes that path and
-  syncs again, unless a command changed the entry meanwhile. jj records the new path the first time it runs after a move, so a moved copy
-  syncs again once jj runs in it. Any musubi command run in the copy of a key also moves its
-  entry there. If the copy isn't found, as after `rm -rf` or while a disk is unmounted, the
-  entry stays suspended and syncs again if the copy comes back. `musubi list` shows suspended
-  entries as copies "not syncing", saying why, and `musubi leave <path>` removes one.
+- **R4. A moved copy is found again.** A suspended entry asks jj where its config-id was last seen
+  (`copy::moved_to`). If the copy of the key is there, the entry takes that path and syncs again,
+  unless a command changed the entry meanwhile. jj records the new path the first time it runs
+  after a move, so a moved copy syncs again once jj runs in it: at once, since the daemon watches
+  where jj records it. Any musubi command run in the copy of a key also moves its entry there. If
+  the copy isn't found, as after `rm -rf` or while a disk is unmounted, the entry stays suspended
+  and syncs again if the copy comes back. `musubi list` shows suspended entries as copies "not
+  syncing", saying why, and `musubi leave <path>` removes one.
 
 - **R5. One entry per key.** A second jj workspace of a synced repository has the same key,
   so `musubi join` there joins it again through the same entry, keeping its path. When an
@@ -170,7 +171,7 @@ Each case, what musubi does, and the test in `crates/musubi/tests/cli.rs` that p
 
 | Case | Behaviour | Test |
 | --- | --- | --- |
-| `mv` the repository | Syncs again once jj runs in it (R4). | `moved_copies_sync_again` |
+| `mv` the repository | Syncs again as soon as jj runs in it (R4). | `moved_copies_sync_again` |
 | Disk unmounted, then mounted again | Suspended, then synced again (R4). | `moved_copies_sync_again` |
 | `mv` or delete the directory the daemon was started from | Nothing else stops syncing (R10). | `the_daemon_outlives_the_directory_it_was_started_in` |
 | `rm -rf` a copy while its daemon runs | `rm` succeeds; the entry is suspended and listed until `musubi leave <path>` (R3, R4). | `deleted_copies_stop_syncing` |

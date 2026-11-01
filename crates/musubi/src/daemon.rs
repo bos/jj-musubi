@@ -69,7 +69,7 @@ use crate::hub::Connection;
 use crate::login;
 use crate::repo::Located;
 use crate::socket::Socket;
-use crate::watch::OpHeadsWatcher;
+use crate::watch::Watcher;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -793,7 +793,14 @@ async fn serve_async(
     let transport = connection.transport.clone();
     let mut notices = transport.subscribe(&hive.head_subject()).await?;
     let mut reconnections = transport.reconnections();
-    let mut watcher = OpHeadsWatcher::new(&located.repo_path)?;
+    let mut watcher = Watcher::op_heads(&located.repo_path)?;
+    // Where jj records the copy's path, which it rewrites when it finds the copy moved. A
+    // copy moved on macOS is news only there, until the poll.
+    let mut moves = crate::settings::config_id_dir(&entry.config_id).and_then(|dir| {
+        Watcher::moves(&dir)
+            .inspect_err(|err| tracing::debug!("{err:#}"))
+            .ok()
+    });
     let mut poll = tokio::time::interval(POLL_INTERVAL);
     let mut backoff = Duration::from_millis(500);
     let mut retry = false;
@@ -815,6 +822,13 @@ async fn serve_async(
             tokio::select! {
                 _ = poll.tick() => "the poll interval".to_owned(),
                 () = watcher.changed() => "a local operation".to_owned(),
+                () = crate::watch::changed(moves.as_mut()) => match copy::moved_to(&entry) {
+                    // Served where it is now, once found again.
+                    Some(path) => {
+                        return Err(Suspended(format!("the copy moved to {}", path.display())).into());
+                    }
+                    None => continue,
+                },
                 // Announcements made while it was disconnected, as while the machine
                 // slept, are lost.
                 () = reconnections.next() => "reconnecting to the hub".to_owned(),
@@ -892,7 +906,7 @@ async fn serve_async(
         if now_identity != opened {
             tracing::info!("the repository's directory was replaced; opening it afresh");
             driver.reopen(located.open()?)?;
-            watcher = OpHeadsWatcher::new(&located.repo_path)?;
+            watcher = Watcher::op_heads(&located.repo_path)?;
             opened = now_identity;
         }
         tracing::debug!("syncing after {trigger}");
@@ -969,7 +983,7 @@ async fn serve_async(
                 }
                 // So too may the watcher, if the directory it watches was replaced, as by
                 // restoring a backup: one watching a deleted directory never wakes.
-                match OpHeadsWatcher::new(&located.repo_path) {
+                match Watcher::op_heads(&located.repo_path) {
                     Ok(new) => watcher = new,
                     Err(err) => tracing::debug!("cannot watch afresh: {err:#}"),
                 }

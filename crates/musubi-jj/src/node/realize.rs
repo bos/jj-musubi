@@ -594,8 +594,9 @@ impl NodeRepo {
     /// published merged with them, as jj would merge them, and that merge exported first:
     /// published apart, the heads would be merged by whichever `jj` command loaded them
     /// first, which doesn't export, and whose import takes `.git` as the realization alone
-    /// left it. Returns the realization as exported, which `canonical` translates to, not the
-    /// merge.
+    /// left it. While records are being taken, the heads it is published beside are those
+    /// moving the op heads where the records name the history leaves beside it. Returns the
+    /// realization as exported, which `canonical` translates to, not the merge.
     pub fn advance(&mut self, canonical: &OperationId) -> Result<OperationId, NodeError> {
         let realized = self.realize(canonical)?;
         // Views made ahead inherit what this changes, in a colocated repository.
@@ -620,31 +621,63 @@ impl NodeRepo {
                 (superseded, concurrent) = self.check_mergeable(canonical, &realized)?;
             }
         }
-        // Records being taken move the op heads to their renamed images, the realization's
-        // concurrent heads among them, so it is published beside them, not merged with them.
+        // Records being taken move the op heads where they name the history, as they name the
+        // realization: the heads it is published beside are those that leaves beside it,
+        // renamed. The heads `check_mergeable` found name the history as it was, so most of
+        // them only look concurrent with it, and the records may drop some.
         let taking = self.taking_unswitched();
+        if taking {
+            concurrent = self
+                .taken_beside(&realized)?
+                .iter()
+                .map(|op| self.loader.load_operation(op).block_on())
+                .collect::<Result<_, _>>()?;
+        }
+        let colocation = self.colocation();
         let pending = self.pending_expected();
         let head = match colocation {
             Some(colocation) => colocation.export_refs(
                 &self.loader,
                 &realized,
                 &|op| self.is_join_point(op),
-                if taking { &[] } else { &concurrent },
+                &concurrent,
                 &pending,
             )?,
             None => realized,
         };
-        // The new head replaces those it descends from, as jj's own resolution of op heads
-        // would: otherwise, after realizing several operations, the previous head stays, and
-        // the next step merges it.
-        if taking {
-            if colocated {
-                self.insert_map(head.clone(), canonical.clone())?;
+        let merged = match colocation {
+            Some(colocation) if !concurrent.is_empty() => {
+                match self.merge_unpublished(&head, &concurrent) {
+                    Ok(merged) => Some(colocation.export_refs(
+                        &self.loader,
+                        &merged,
+                        &|op| self.is_join_point(op),
+                        &[],
+                        &pending,
+                    )?),
+                    // `check_mergeable` merged them already, so this is a store error or a jj
+                    // bug, unless records being taken renamed them, which leaves their views
+                    // but changes what they merge against: the heads are published apart, for
+                    // `replace_abandoned_working_copies` to merge as it would any others.
+                    Err(reason) => {
+                        tracing::warn!("merging a realization with this machine's heads: {reason}");
+                        None
+                    }
+                }
             }
+            _ => None,
+        };
+        if colocated {
+            self.insert_map(head.clone(), canonical.clone())?;
+        }
+        if taking {
             // The hub's head, named as records this machine is taking name the history: the
             // op heads move there, renamed, at once (`NodeRepo::switch_to_taken`).
-            self.switch_to_taken(Some(&head))?;
+            self.switch_to_taken(Some(&head), merged.as_ref())?;
         } else {
+            // The new head replaces those it descends from, as jj's own resolution of op
+            // heads would: otherwise, after realizing several operations, the previous head
+            // stays, and the next step merges it.
             let mut replaced = self
                 .loader
                 .op_store()
@@ -652,38 +685,12 @@ impl NodeRepo {
                 .block_on()?
                 .parents;
             replaced.extend(superseded);
-            let published = match colocation {
-                Some(colocation) if !concurrent.is_empty() => {
-                    match self.merge_unpublished(&head, &concurrent) {
-                        Ok(merged) => {
-                            replaced.extend(concurrent.iter().map(|op| op.id().clone()));
-                            colocation.export_refs(
-                                &self.loader,
-                                &merged,
-                                &|op| self.is_join_point(op),
-                                &[],
-                                &pending,
-                            )?
-                        }
-                        // `check_mergeable` merged them already, so this is a store error or
-                        // a jj bug: the heads are published apart, for
-                        // `replace_abandoned_working_copies` to merge as it would any others.
-                        Err(reason) => {
-                            tracing::warn!(
-                                "merging a realization with this machine's heads: {reason}"
-                            );
-                            head.clone()
-                        }
-                    }
-                }
-                _ => head.clone(),
-            };
-            if colocated {
-                self.insert_map(head.clone(), canonical.clone())?;
+            if merged.is_some() {
+                replaced.extend(concurrent.iter().map(|op| op.id().clone()));
             }
             self.loader
                 .op_heads_store()
-                .update_op_heads(&replaced, &published)
+                .update_op_heads(&replaced, merged.as_ref().unwrap_or(&head))
                 .block_on()?;
         }
         drop(_lock);

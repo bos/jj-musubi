@@ -560,9 +560,12 @@ What the test relies on of jj, and what it leaves out:
   for a conflicted `y@origin`, and `realization_beside_a_fetch_keeps_the_fetch` through its
   next command. Since musubi publishes only the merge, the test can't reach the moment between
   a realization's publication and its merge that musubi once left;
-  `beside_published_apart_disagrees` shows what a `jj` command did there. It locks no remote
-  ref, since `CStep.advance` admits only exports that
-  can succeed (a failed one ends as `remote_reset_without_export` says). The realization
+  `beside_published_apart_disagrees` shows what a `jj` command did there. The state machine
+  locks no remote ref, since `CStep.advance` admits only exports that can succeed (a failed
+  one ends as `remote_reset_without_export` says). Nor does it take an abandon: `Refs.lean`
+  knows nothing of supersedes, nor `Supersede.lean` of refs, so a realization beside a `jj`
+  command's operation while a machine takes an abandon is checked only by
+  `realization_beside_a_fetch_keeps_the_fetch_while_taking_an_abandon`. The realization
   keeps a tracked absent `x@git` that jj would drop when the canonical operation deletes `x`
   (`realize_not_WF`); the test's model does the same, so the test checks the code as it is.
 

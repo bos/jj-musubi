@@ -1274,6 +1274,103 @@ fn realization_beside_a_fetch_here_keeps_the_fetch() {
     assert_eq!((&origin.v.r, &origin.v.k, &origin.g), (&two, &two, &two));
 }
 
+/// A fetch beside a realization made while taking another machine's `jj op abandon`: the
+/// fetches of `two` and `three` conflict `y@origin`, and musubi writes its side, `three`, to
+/// both `.git`s. The other machine abandons the operation this machine's op head stands
+/// for, so this machine realizes the hub's head, which keeps the conflict, before taking the
+/// abandon (protocol.md, "Supersedes"). A `jj git fetch` of `two`, a term of the conflict,
+/// publishes after the sync's step has checked the op heads and before the realization is
+/// published, as only a command running concurrently can: the test makes the step's calls
+/// itself. musubi must leave `two` in `.git`, and publish the realization merged with the
+/// fetch, which keeps it: written for the realization alone, `three` would be in `.git`, and
+/// the next command would import it as a move made with git.
+#[test]
+fn realization_beside_a_fetch_keeps_the_fetch_while_taking_an_abandon() {
+    use musubi_core::node::LocalRepo as _;
+    use musubi_core::node::Step;
+
+    let mut f = hive();
+    let origin = f.env.root().join("origin.git");
+    let origin = origin.to_str().unwrap().to_owned();
+    for index in [HERE, THERE] {
+        f.repo(index).git(&["remote", "set-url", "origin", &origin]);
+    }
+    let [two, three] = ["two", "three"].map(|m| f.commit_id(HERE, m));
+    let upstream = |f: &Fixture, id: &str| {
+        f.repo(HERE)
+            .git(&["--git-dir", &origin, "update-ref", "refs/heads/y", id]);
+    };
+    let git_y = |f: &Fixture| {
+        let git = f.repo(THERE).git(&["rev-parse", "refs/remotes/origin/y"]);
+        git.trim().to_owned()
+    };
+    upstream(&f, &two);
+    f.repo(HERE).jj(&["git", "fetch"]);
+    upstream(&f, &three);
+    f.repo(THERE).jj(&["git", "fetch"]);
+    f.hive.sync(HERE).unwrap();
+    f.hive.sync(THERE).unwrap();
+    f.hive.sync(HERE).unwrap();
+    assert_eq!(git_y(&f), three, "musubi's side");
+
+    // Importing nothing, so that the conflict stays.
+    let jj = |f: &Fixture, args: &[&str]| {
+        f.repo(HERE)
+            .jj(&[&["--ignore-working-copy"], args].concat());
+    };
+    jj(&f, &["bookmark", "create", "dropped", "-r", "@"]);
+    let dropped = f.load(HERE).op_id().hex();
+    f.sync();
+    jj(&f, &["new", "-m", "kept"]);
+    jj(&f, &["op", "abandon", &dropped]);
+    f.hive.sync(HERE).unwrap();
+    let (slot, _) = read(&f.load(HERE), Ref::Origin);
+    assert!(!slot.r.is_resolved(), "{slot:?}");
+
+    // The sync's steps up to the realization, the first of which prepares to take the
+    // abandon.
+    f.hive.fetch(THERE).unwrap();
+    let known = loop {
+        let member = &mut f.hive.members[THERE];
+        let known = member.core.known().1.clone();
+        if member.adapter.is_local(&known).unwrap() {
+            break known;
+        }
+        let step = member.core.step(&mut member.adapter).unwrap();
+        assert!(matches!(step, Step::Realized(_)), "{step:?}");
+    };
+    upstream(&f, &two);
+    f.repo(THERE).jj(&["git", "fetch"]);
+    f.hive.members[THERE].adapter.advance(&known).unwrap();
+    assert_eq!(git_y(&f), two, "the fetch in .git");
+    let ops = |f: &Fixture, index: usize| {
+        let template = "description ++ \"\\n\"";
+        f.repo(index).jj(&[
+            "--ignore-working-copy",
+            "op",
+            "log",
+            "--no-graph",
+            "-T",
+            template,
+        ])
+    };
+    // The fetch was moved onto the renamed history before the merge, which otherwise would
+    // have merged it on the dropped operation, against an older common ancestor.
+    let log = ops(&f, THERE);
+    assert!(!log.contains("create bookmark dropped"), "{log}");
+
+    f.repo(THERE).jj(&["status"]);
+    f.sync();
+    f.assert_converged();
+    let two = RefTarget::normal(CommitId::try_from_hex(&two).unwrap());
+    for index in [HERE, THERE] {
+        let (slot, git) = read(&f.load(index), Ref::Origin);
+        assert_eq!((&slot.r, &git), (&two, &two), "y@origin on {index}");
+        let log = ops(&f, index);
+        assert!(!log.contains("create bookmark dropped"), "{log}");
+    }
+}
+
 /// How many cases to make: `MUSUBI_CONFORMANCE_CASES`, as for the other conformance tests,
 /// or 12, each a few tenths of a second of real `jj`, `git` and syncs.
 fn refs_cases() -> u64 {

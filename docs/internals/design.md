@@ -774,8 +774,11 @@ nothing is exported to `.git` and no ref moves; and it renames its own pending d
 a record only once none of its heads is dropped by it. A machine whose head a record drops, as
 one that stood still at an operation another machine abandoned, first fetches and advances to the
 hub's head, which descends from it. So applying a record never leaves a machine two heads to
-merge, and never repeats a merge another machine made. The hub never takes a head it has
-dropped, and a machine never advances to one.
+merge, and never repeats a merge another machine made. A `jj` command can still publish in
+between, beside that realization. musubi reparents its operation onto the renamed history, as
+below, and merges the realization with it, as with any realization beside a machine's own
+heads ([Local integration](#local-integration)); the merge goes where the heads move. The hub never
+takes a head it has dropped, and a machine never advances to one.
 
 Each machine keeps, for every id a record superseded, the id or ids it became, and translation
 renames through it. An operation that a `jj` command wrote on a superseded operation, having
@@ -1025,7 +1028,9 @@ be exposed. A `--hub` that isn't an absolute path is an ssh destination, passed 
   only the merge published: a `jj` command that merged them itself wouldn't export, and its
   import would take `.git` as the realization alone left it. Those heads are read again under
   the lock, which `jj` commands in the colocated workspace hold to publish, so none of theirs
-  published meanwhile is left out.
+  published meanwhile is left out. While the machine takes records that drop its head, the
+  heads the realization is beside are those that moving the heads where the records name the
+  history leaves beside it.
 - Merges that musubi makes rebase commits, which needs the user's jj config (identity, and signing
   if enabled). musubi loads the same system, user, repo, and workspace config that `jj` does. The
   merge operation looks like one `jj` would write ("reconcile divergent operations"), with this

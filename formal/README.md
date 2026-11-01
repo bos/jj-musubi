@@ -289,13 +289,24 @@ obeying three laws (`RefAlg`), which the test `ref_laws` checks against jj-lib.
   Merging the per-machine fields against only the first of several closest common ancestors
   would leave a record the export can't correct, and the next import would move the bookmark
   (`firstBase_reverts`).
+- `besideLocal_inv`, `cbeside_inv`: a realization beside the machine's own op head, which
+  musubi exports, merges with that head and exports again, publishing only the merge, keeps
+  the invariant whatever the head did (`LStep.beside`, `CStep.beside`), so the theorems about
+  `LReach` and `CReach` hold of runs with it, given that the base's record agrees with itself
+  (`LStep.agrees`). musubi's export of the realization leaves a conflicted remote bookmark
+  alone where `.git` holds the head's record and the realization's differs
+  (`exportConflictedBeside`); writing the expected value there moves the bookmark back after a
+  fetch of a term of the conflict (`beside_keeps_fetch`). Published apart, the realization
+  would be merged by a `jj` command, which doesn't export, and that machine would import a
+  value other than the merge's expected value (`beside_published_apart_disagrees`).
 
 Commit graphs, rebases and jj's conflict algebra are not modeled. The file's header lists
 what else it leaves out: tracking in the linear steps; the tracking state of an absent
 `x@git`, which musubi's realization keeps and jj would drop (`realize_not_WF`); as runs,
-merges of more than two heads, criss-cross merges, and concurrent heads of remote bookmarks;
-and the history the expected value of a conflicted remote bookmark is computed from, which
-the model takes as given with each operation.
+merges of more than two heads, criss-cross merges, and a remote bookmark's concurrent heads
+that `jj` commands alone make; a `jj` command publishing between musubi reading the op heads
+and taking jj's lock; and the history the expected value of a conflicted remote
+bookmark is computed from, which the model takes as given with each operation.
 
 ### Presence (`Presence.lean`)
 

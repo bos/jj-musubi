@@ -207,6 +207,15 @@ impl Machine {
         (self.v, self.g) = alg.lean().export_conflicted(&self.v, &self.g, &self.e);
     }
 
+    /// musubi's export of a conflicted remote bookmark of a realization beside an op head
+    /// whose record is `k` (`exportConflictedBeside`): none where `.git` holds `k`, which that
+    /// head put there, and the realization records another value.
+    fn export_conflicted_beside(&mut self, alg: &Alg, k: &RefTarget) {
+        (self.v, self.g) = alg
+            .lean()
+            .export_conflicted_beside(&self.v, &self.g, &self.e, k);
+    }
+
     /// The model's invariant for `r`: `LInv`, or for `y@origin` `CInv`, which is `RInv`
     /// but for a conflicted remote bookmark, with `.git` at the expected value.
     fn strict_inv(&self, alg: &Alg, r: Ref) -> bool {
@@ -234,6 +243,16 @@ impl Machine {
 
 /// The shared fields of the refs: `x`, `t`, and `y@origin`'s slot with no `K`.
 type Shared = (RefTarget, RefTarget, Slot);
+
+/// A `jj` command on this machine after the other machine's operation and before this machine
+/// syncs, so that musubi realizes that operation beside it (`LStep.beside`, `CStep.beside`).
+#[derive(Clone, Debug)]
+enum Beside {
+    /// The command moves `x`, `y` or `t` (`Refs::jj_sets`).
+    Sets(Ref, RefTarget),
+    /// `y` moves in `origin`, and `jj git fetch` fetches it (`Refs::jj_fetches_from`).
+    Fetches(RefTarget),
+}
 
 /// The shared fields of the refs whose slots are `slot`'s.
 fn shared(slot: impl Fn(Ref) -> Slot) -> Shared {
@@ -368,6 +387,25 @@ impl Model {
         if musubi {
             self.at(Ref::Origin).export_conflicted(alg);
         }
+    }
+
+    /// jj's export of a realization beside this machine's op head `head`, `x`'s update failing
+    /// if `x_locked`, then musubi's of a conflicted `y@origin`, which leaves `.git` alone where
+    /// it holds `head`'s record and the realization's differs (`realizeBesideLocal`,
+    /// `realizeBesideRemote`).
+    fn export_beside(&mut self, alg: &Alg, x_locked: bool, head: &Self) {
+        self.export(alg, x_locked, false);
+        let k = &head.get(Ref::Origin).v.k;
+        self.at(Ref::Origin).export_conflicted_beside(alg, k);
+    }
+
+    /// Whether every local bookmark's record agrees with itself, as `LStep.beside` needs of the
+    /// operation a realization beside the op head descends from (`LStep.agrees`).
+    fn records_agree(&self) -> bool {
+        [Ref::X, Ref::Y, Ref::T].iter().all(|&r| {
+            let v = &self.get(r).v;
+            v.r == v.k
+        })
     }
 
     /// A `jj` command: an import, exported if it changed the view, since jj exports only a
@@ -547,6 +585,15 @@ impl Refs {
         self.fixture.load(HERE).op_id().clone()
     }
 
+    /// The parents of `op`.
+    fn parents(&self, op: &OperationId) -> Vec<OperationId> {
+        let repo = self.fixture.load(HERE);
+        block_on(repo.loader().load_operation(op))
+            .unwrap()
+            .parent_ids()
+            .to_vec()
+    }
+
     /// The parents of this machine's latest merge operation, the head or an ancestor.
     fn merge_parents(&self) -> Vec<OperationId> {
         let repo = self.fixture.load(HERE);
@@ -623,6 +670,26 @@ impl Refs {
 fn conflicted_expected(model: &Model) -> Option<RefTarget> {
     let origin = model.get(Ref::Origin);
     (!Alg::resolved(&origin.v.r)).then(|| origin.e.clone())
+}
+
+/// The expected value of `y@origin` in `merged`, a merge of `heads`, in that order if
+/// `in_order`: the first parent's with the same conflict, or the side, where the merge made
+/// it.
+fn merged_expected(
+    alg: &Alg,
+    merged: &[Slot; 4],
+    mut heads: [&Model; 2],
+    in_order: bool,
+) -> RefTarget {
+    let r = &merged[Ref::Origin as usize].r;
+    if !in_order {
+        heads.reverse();
+    }
+    match heads.iter().find(|m| m.get(Ref::Origin).v.r == *r) {
+        Some(parent) => parent.get(Ref::Origin).expected(),
+        // Two fetches' conflict has a side, a commit: one of them fetched it.
+        None => alg.side(r).expect("a fetched side"),
+    }
 }
 
 /// `r` as this machine's view at `repo` has it, and its `.git`.
@@ -765,13 +832,16 @@ impl Refs {
     /// own, and this machine realizes the merge: `realizeMerge`, which is jj's merge
     /// (`realizeMerge_eq`), against the operation both last synced at. Two fetches merge so
     /// to a conflicted `y@origin` if both moved it, and the side musubi writes for it must
-    /// be the same on both machines.
+    /// be the same on both machines. If `beside`, this machine runs that `jj` command before
+    /// it syncs, and musubi realizes the other's operation beside it, merges the two, and
+    /// exports the merge: `LStep.beside` and `CStep.beside`.
     fn musubi_realizes_with(
         &mut self,
         moved: Option<(Ref, RefTarget)>,
         upstream: RefTarget,
         locked: bool,
         concurrent: bool,
+        beside: Option<Beside>,
     ) {
         self.fixture.hive.sync(HERE).unwrap();
         if !concurrent {
@@ -826,6 +896,16 @@ impl Refs {
             "the other machine's x, t, y and y@origin"
         );
         self.fixture.hive.sync(THERE).unwrap();
+        // This machine as of `ours`, which the realization descends from.
+        let at_ours = self.model.clone();
+        match beside {
+            Some(Beside::Sets(r, l)) => self.jj_sets(r, l),
+            Some(Beside::Fetches(upstream)) => self.jj_fetches_from(upstream),
+            None => {}
+        }
+        // The operation the command made, if any, which the realization is beside.
+        let mine = self.head();
+        let beside = mine != ours;
         let lock = self
             .fixture
             .repo(HERE)
@@ -840,51 +920,89 @@ impl Refs {
         }
         // `LStep.advance` for `x`, `y` and `t`, and `CStep.advance` for `y@origin`, then the
         // export, if there was anything to realize: a fetch that brings nothing new makes no
-        // operation.
+        // operation. Beside the command, `LStep.beside` and `CStep.beside`.
         if expected.shared() != base.shared() {
-            // `CStep.advance`'s precondition, which offering no root commit keeps.
-            let g = self.model.at(Ref::Origin).g.clone();
-            let advances = |e: &RefTarget| *e == g || self.alg.writable(e);
+            // The realization, from this machine's refs as of `ours`, against `.git` as it is.
+            let mut realized = at_ours.clone();
+            for r in Ref::ALL {
+                realized.at(r).g = self.model.get(r).g.clone();
+            }
             if ours == synced_op {
                 // The other machine's operations follow on from this machine's head, so a
                 // conflict they keep has the head's expected value.
-                let e = self.model.get(Ref::Origin).expected();
-                self.model.realize(&canonical);
-                self.model.at(Ref::Origin).e = e;
+                let e = at_ours.get(Ref::Origin).expected();
+                realized.realize(&canonical);
+                realized.at(Ref::Origin).e = e;
             } else {
                 // Theirs is realized here from the base, its record the base's, and merged
                 // with ours as the other machine merged them.
                 let mut theirs = base.clone();
                 theirs.realize(&canonical);
-                let parents = self.merge_parents();
+                let parents = if beside {
+                    let merge = self.merge_parents();
+                    let realization = merge.iter().find(|&op| *op != mine).unwrap();
+                    self.parents(realization)
+                } else {
+                    self.merge_parents()
+                };
                 assert!(
                     parents.contains(&ours),
                     "merged {parents:?}, not ours {ours:?}"
                 );
                 let merged = if parents[0] == ours {
-                    Model::merge(&self.alg, &base, &self.model, &theirs)
+                    Model::merge(&self.alg, &base, &at_ours, &theirs)
                 } else {
-                    Model::merge(&self.alg, &base, &theirs, &self.model)
+                    Model::merge(&self.alg, &base, &theirs, &at_ours)
                 };
-                // The merge's expected value: the first parent's with the same conflict, or
-                // the side, where the merge made it.
-                let r = &merged[Ref::Origin as usize].r;
-                let mut heads = [&self.model, &theirs];
-                if parents[0] != ours {
-                    heads.reverse();
-                }
-                let e = match heads.iter().find(|m| m.get(Ref::Origin).v.r == *r) {
-                    Some(parent) => parent.get(Ref::Origin).expected(),
-                    // Two fetches' conflict has a side, a commit: one of them fetched it.
-                    None => self.alg.side(r).expect("a fetched side"),
-                };
+                let e =
+                    merged_expected(&self.alg, &merged, [&at_ours, &theirs], parents[0] == ours);
                 for (r, v) in Ref::ALL.into_iter().zip(merged) {
-                    self.model.at(r).v = v;
+                    realized.at(r).v = v;
                 }
-                self.model.at(Ref::Origin).e = e;
+                realized.at(Ref::Origin).e = e;
             }
-            assert!(advances(&self.model.get(Ref::Origin).expected()));
+            if beside {
+                // Exported against `.git` as the command left it, then merged with the
+                // command's operation, against `ours`, as musubi merged them.
+                realized.export_beside(&self.alg, locked, &self.model);
+                let parents = self.merge_parents();
+                assert!(
+                    parents.contains(&mine),
+                    "merged {parents:?}, not the command's {mine:?}"
+                );
+                let merged = if parents[0] == mine {
+                    Model::merge(&self.alg, &at_ours, &self.model, &realized)
+                } else {
+                    Model::merge(&self.alg, &at_ours, &realized, &self.model)
+                };
+                let e = merged_expected(
+                    &self.alg,
+                    &merged,
+                    [&self.model, &realized],
+                    parents[0] == mine,
+                );
+                for (r, v) in Ref::ALL.into_iter().zip(merged) {
+                    realized.at(r).v = v;
+                }
+                realized.at(Ref::Origin).e = e;
+            }
+            // The ghosts are the command's, if any: musubi neither imports nor moves refs.
+            for r in Ref::ALL {
+                let Machine { v, g, .. } = realized.get(r).clone();
+                let m = self.model.at(r);
+                (m.v, m.g) = (v, g);
+            }
+            self.model.at(Ref::Origin).e = realized.get(Ref::Origin).e.clone();
+            // `CStep.advance`'s and `CStep.beside`'s precondition, which offering no root
+            // commit keeps.
+            let origin = self.model.get(Ref::Origin);
+            let e = origin.expected();
+            assert!(e == origin.g || self.alg.writable(&e));
             self.model.export(&self.alg, locked, true);
+        }
+        if beside {
+            // The other machine catches up, so that both last synced at this machine's head.
+            self.fixture.hive.sync(THERE).unwrap();
         }
         self.check();
         // Every machine has the same expected value of a conflicted `y@origin` in its `.git`.
@@ -1025,7 +1143,19 @@ impl Refs {
             (r, self.target(&tc, true, &current))
         });
         let upstream = self.target(&tc, false, &self.upstream);
-        self.musubi_realizes_with(moved, upstream, locked, concurrent);
+        // A `jj` command here that the realization is beside, where the records agree.
+        let beside = (self.model.records_agree() && tc.draw(gs::booleans())).then(|| {
+            if tc.draw(gs::booleans()) {
+                // Something other than this machine has, but perhaps what the other fetched.
+                let origin = &self.model.get(Ref::Origin).g;
+                Beside::Fetches(self.target(&tc, false, origin))
+            } else {
+                let r = Ref::draw(&tc, &[Ref::X, Ref::T, Ref::Y]);
+                let current = self.imported(r);
+                Beside::Sets(r, self.target(&tc, true, &current))
+            }
+        });
+        self.musubi_realizes_with(moved, upstream, locked, concurrent, beside);
     }
 }
 
@@ -1061,7 +1191,7 @@ fn restore_of_a_conflicted_remote_bookmark_resolves_alike() {
     let mut refs = Refs::new();
     let [base, _, two, three] = [1, 2, 3, 4].map(|i| RefTarget::normal(refs.commits[i].clone()));
     refs.jj_fetches_from(two);
-    refs.musubi_realizes_with(None, three, false, true);
+    refs.musubi_realizes_with(None, three, false, true, None);
     assert!(!refs.model.get(Ref::Origin).v.r.is_resolved());
     let conflicted = refs.head();
     refs.jj_fetches_from(base.clone());
@@ -1071,7 +1201,7 @@ fn restore_of_a_conflicted_remote_bookmark_resolves_alike() {
     assert_eq!(origin.g, base);
     let x = refs.model.get(Ref::X).v.l.clone();
     let moved = RefTarget::normal(refs.commits[if x == base { 2 } else { 1 }].clone());
-    refs.musubi_realizes_with(Some((Ref::X, moved)), base.clone(), false, false);
+    refs.musubi_realizes_with(Some((Ref::X, moved)), base.clone(), false, false, None);
     let y = refs.imported(Ref::Y);
     refs.jj_sets(Ref::Y, y);
     let origin = refs.model.get(Ref::Origin);
@@ -1090,15 +1220,58 @@ fn restore_of_a_conflicted_remote_bookmark_resolves_alike() {
 fn realization_beside_a_fetch_keeps_the_fetch() {
     let mut refs = Refs::new();
     let [root, base, one, two] = [0, 1, 2, 3].map(|i| RefTarget::normal(refs.commits[i].clone()));
-    refs.musubi_realizes_with(None, two, false, false);
+    refs.musubi_realizes_with(None, two, false, false, None);
     refs.jj_fetches_from(base.clone());
-    refs.musubi_realizes_with(None, one, false, true);
+    refs.musubi_realizes_with(None, one, false, true, None);
     refs.jj_restores_to(None);
     assert!(!refs.model.get(Ref::Origin).v.r.is_resolved());
-    refs.musubi_realizes_with(None, base.clone(), false, true);
+    refs.musubi_realizes_with(None, base.clone(), false, true, None);
     let (there, g) = read(&refs.fixture.load(THERE), Ref::Origin);
     assert_eq!((&there.r, &there.k, &g), (&base, &base, &base));
-    refs.musubi_realizes_with(Some((Ref::X, root)), base, false, false);
+    refs.musubi_realizes_with(Some((Ref::X, root)), base, false, false, None);
+}
+
+/// A fetch here beside a realization of a conflict, `beside_keeps_fetch` as musubi does it:
+/// `y@origin` conflicts as in `restore_of_a_conflicted_remote_bookmark_resolves_alike`, a
+/// fetch of `base` here resolves it, and both machines sync. This machine then restores the
+/// conflict, whose expected value is `base`, and while the other machine, behind, moves `t` and
+/// merges that with the restore, keeping the conflict, this machine fetches `two`, a term of
+/// it. musubi realizes the other machine's merge beside the fetch, and must leave `two` in
+/// `.git`, as the merge of the two keeps it: written for the realization alone, `base` would
+/// be in `.git` and `two` in the record.
+#[test]
+fn realization_beside_a_fetch_here_keeps_the_fetch() {
+    let mut refs = Refs::new();
+    let [base, one, two, three] = [1, 2, 3, 4].map(|i| RefTarget::normal(refs.commits[i].clone()));
+    refs.jj_fetches_from(two.clone());
+    refs.musubi_realizes_with(None, three, false, true, None);
+    assert!(!refs.model.get(Ref::Origin).v.r.is_resolved());
+    let conflicted = refs.head();
+    refs.jj_fetches_from(base.clone());
+    // The other machine moves `x` from where it is, `one`, so that both sync.
+    assert_eq!(refs.model.get(Ref::X).v.l, one);
+    refs.musubi_realizes_with(
+        Some((Ref::X, base.clone())),
+        base.clone(),
+        false,
+        false,
+        None,
+    );
+    refs.jj_restores_to(Some(conflicted));
+    assert!(!refs.model.get(Ref::Origin).v.r.is_resolved());
+    let fetch = Some(Beside::Fetches(two.clone()));
+    refs.musubi_realizes_with(Some((Ref::T, two.clone())), base, false, true, fetch);
+    let parents = refs.parents(&refs.head());
+    assert_eq!(parents.len(), 2, "merged beside the fetch");
+    let repo = refs.fixture.load(HERE);
+    let conflicted = parents.iter().any(|op| {
+        let op = block_on(repo.loader().load_operation(op)).unwrap();
+        let view = block_on(op.view()).unwrap();
+        !slot(view.store_view(), Ref::Origin).r.is_resolved()
+    });
+    assert!(conflicted, "the realization keeps the conflict");
+    let origin = refs.model.get(Ref::Origin);
+    assert_eq!((&origin.v.r, &origin.v.k, &origin.g), (&two, &two, &two));
 }
 
 /// How many cases to make: `MUSUBI_CONFORMANCE_CASES`, as for the other conformance tests,

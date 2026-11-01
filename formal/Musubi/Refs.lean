@@ -79,7 +79,26 @@ head before musubi published, are merged as jj merges views (`Slot.merge3`, `TSl
   as it didn't before #56 was fixed (`shortcutUnguarded_keeps_absent`,
   `shortcutUnguarded_untracks`); and where the heads have several closest common ancestors
   it merges against those merged, as jj does, since against the first of them a record can
-  be left that the export can't correct (`firstBase_reverts`).
+  be left that the export can't correct (`firstBase_reverts`);
+- a realization beside an op head of this machine's own, as when a `jj` command ran since
+  musubi last synced, musubi exports, merges with that head, and exports, publishing only the
+  merge, all holding jj's import/export lock (`advance` in `node/realize.rs`). No `jj` command
+  can come between them, so the model takes the four as one step (`LStep.beside`,
+  `CStep.beside`); git can, and a move made with git sets `moved`, after which the invariants
+  ask only that `.git` hold a resolved value, as every export and git leave it. The
+  realization's export runs against `.git` as the head left it, and musubi's skips a
+  conflicted remote bookmark where `.git` holds the head's record and the realization records
+  another value (`exportConflictedBeside`): the head put it there, as by a fetch of a term of
+  the conflict, and the merge can keep it. So the merged record matches `.git` whatever the
+  head did since the operation both descend from, provided, for a local bookmark, that
+  operation's record agrees with itself, as every `LStep` keeps it (`LStep.agrees`), and
+  musubi's export of the merge can write it (`besideLocal_inv`, `cbeside_inv`). Every theorem
+  above about `LReach` and `CReach` holds of runs with the step; `RStep`, which `CStep`
+  extends, doesn't have it. Writing the expected value for the realization alone moves the
+  bookmark back after a fetch (`beside_keeps_fetch`), and publishing the realization for the
+  next `jj` command to merge, which doesn't export, has that machine import a value other than
+  the merge's expected value (`beside_published_apart_disagrees`), which every machine that
+  realizes the merge imports (`conflicted_import_agrees`).
 
 What the model still leaves out, as testing it against jj showed
 (`crates/musubi-sync/tests/races/refs.rs`, docs/internals/conformance.md, "Per-machine refs"):
@@ -97,17 +116,21 @@ What the model still leaves out, as testing it against jj showed
   the canonical operation deletes `x`, which jj would drop (`realize_not_WF`). Only the
   tracking state of a remote ref with no target differs.
 - Merges of more than two heads, which jj and musubi merge one at a time, and criss-cross
-  merges, whose base is itself a merge, are not modeled as runs; nor are concurrent heads of
-  remote bookmarks, though `merge3_synced` is about any slot. A conflicted remote bookmark
-  enters `CStep` only by musubi's realization, as of a merge another machine made; a `jj`
-  command merging this machine's own heads to one is jj's merge, whose import resolves it to
-  this machine's `.git`.
-- musubi doesn't write the expected value for a realization where `.git` holds the value
-  that one of the machine's own op heads concurrent with it records and the realization
-  doesn't: that head put it there, as by a fetch of a term of the conflict, and the merge of
-  the two can keep it. musubi exports that merge under jj's import/export lock and publishes
-  only it, in place of the realization, so no `jj` command loads the realization unmerged.
-  The model has no concurrent heads of remote bookmarks.
+  merges, whose base is itself a merge, are not modeled as runs; nor are a remote bookmark's
+  concurrent heads that `jj` commands alone make, as one at an older operation does, though
+  `merge3_synced` is about any slot. A conflicted remote bookmark enters `CStep` only by
+  musubi's realization, of a merge another machine made or beside this machine's own op
+  head; a `jj` command merging this machine's own heads to one is jj's merge, whose import
+  resolves it to this machine's `.git`.
+- The step beside this machine's op head has one such head, and the operation both descend
+  from is given, not tied to the run: a restore can leave a local bookmark's record
+  disagreeing with itself there (`restore_reverts`), and the merge then needn't match `.git`.
+  musubi merges every concurrent head at once and skips where `.git` holds any one's record.
+  It reads the op heads before it takes jj's import/export lock, so a `jj` command that
+  publishes in between stays beside the merge, unmerged, and its record unconsulted; and if
+  jj can't merge the realization with the heads, as `check_mergeable` has made sure it can,
+  musubi publishes the realization alone. Neither is modeled: each is a realization
+  published apart from a head (`beside_published_apart_disagrees`).
 - The expected value is a ghost: the model takes it as given with each realized operation,
   and doesn't model the history it is computed from. A `jj` command that merges op heads
   itself imports at once, so its machine resolves a conflict the merge makes to its own
@@ -163,6 +186,35 @@ theorem Slot.import_self {v : Slot T} {g : T} (hR : v.R = g) (hK : v.K = g) :
     subst hR hK
     simp [Slot.import]
 
+/-- The targets of jj's merge of two op heads' views of one ref, `v` merged with `w` against
+their base `b`: each field three-way, as `merge_ref_targets`. With tracking states, see
+`TSlot.merge`, whose targets these are (`TSlot.merge_toSlot`). -/
+def Slot.merge3 (b v w : Slot T) : Slot T :=
+  { L := merge v.L b.L w.L, R := merge v.R b.R w.R, K := merge v.K b.K w.K }
+
+/-- jj's merge of this machine's op head `v` with musubi's realization `w` beside it, against
+`b`, the operation both descend from, whose per-machine fields the realization inherits. jj
+merges op heads in the order of their end times (`merge_unpublished` in `node/realize.rs`):
+`first` if the realization ended first. -/
+def Slot.mergeBeside (first : Bool) (b v w : Slot T) : Slot T :=
+  bif first then Slot.merge3 b w v else Slot.merge3 b v w
+
+omit [DecidableEq T] in
+/-- A field of `Slot.mergeBeside`, where the op head's matches `.git`'s `g`: if the realization
+kept the base's, the head's, and `.git` is still `g`; if it moved the field and `.git` to
+`g'`, from the base's value `g` or to `g` itself, `g'`. -/
+theorem merge_beside {b v w g g' : T} (first : Bool) (hv : v = g)
+    (hw : (w = b ∧ g' = g) ∨ (w = g' ∧ (b = g ∨ g' = g))) :
+    (bif first then merge w b v else merge v b w) = g' := by
+  subst hv
+  rcases hw with ⟨rfl, rfl⟩ | ⟨rfl, rfl | rfl⟩ <;> cases first
+  · exact merge_unchanged_other _ _
+  · exact merge_unchanged_self _ _
+  · exact merge_unchanged_self _ _
+  · exact merge_unchanged_other _ _
+  · exact merge_same_change _ _
+  · exact merge_same_change _ _
+
 /-- One machine: its op head's view of the ref, and `.git`. -/
 structure Machine (T : Type) where
   v : Slot T
@@ -192,6 +244,22 @@ def exportLocal (s : Machine T) : Machine T :=
 shared field from the canonical view, the per-machine fields inherited from the parent. -/
 def realizeLocal (c : T) (v : Slot T) : Slot T := { v with L := c }
 
+/-- jj's export of a local bookmark, or, unless `ok`, its update failing, which changes
+nothing. -/
+def exportLocalIf (ok : Bool) (s : Machine T) : Machine T := bif ok then exportLocal s else s
+
+/-- musubi's realization, beside this machine's op head, of a canonical operation whose view
+has the bookmark at `c`, the per-machine fields inherited from `b`, the operation both descend
+from; and jj's export of it, against `.git` as the op head left it. -/
+def realizeBesideLocal (ok : Bool) (c : T) (b : Slot T) (s : Machine T) : Machine T :=
+  exportLocalIf ok { s with v := realizeLocal c b }
+
+/-- The realization beside the op head, then jj's merge of the two, against `b`, and jj's
+export of the merge (`advance` in `node/realize.rs`). -/
+def besideLocal (first ok ok' : Bool) (c : T) (b : Slot T) (s : Machine T) : Machine T :=
+  let w := realizeBesideLocal ok c b s
+  exportLocalIf ok' { w with v := Slot.mergeBeside first b s.v w.v }
+
 /-- A machine's steps. A `jj` command is an import, a `set`, and an export; musubi's sync is
 an `advance` and an export. Steps interleave freely, so a `jj` command may import between
 musubi's `advance` and its export, which jj's import/export lock prevents. -/
@@ -204,9 +272,54 @@ inductive LStep : Machine T → Machine T → Prop
   | set (s : Machine T) (l : T) : LStep s { s with v := { s.v with L := l } }
   /-- musubi realizes a canonical operation and publishes it. -/
   | advance (s : Machine T) (c : T) : LStep s { s with v := realizeLocal c s.v }
+  /-- musubi realizes a canonical operation beside this machine's op head, as when a `jj`
+  command ran since musubi last synced, from `b`, whose record agrees with itself, as every
+  step keeps it (`LStep.agrees`); exports it, merges it with the head, and exports and
+  publishes only the merge, holding jj's import/export lock. -/
+  | beside (s : Machine T) (first ok ok' : Bool) (c : T) (b : Slot T) :
+      b.R = b.K → LStep s (besideLocal first ok ok' c b s)
 
 /-- Unless git moved the ref, the record matches `.git`. -/
 def LInv (s : Machine T) : Prop := s.moved = false → s.v.R = s.G ∧ s.v.K = s.G
+
+theorem exportLocalIf_moved (ok : Bool) (s : Machine T) :
+    (exportLocalIf ok s).moved = s.moved := by
+  cases ok
+  · rfl
+  · unfold exportLocalIf exportLocal; split <;> (try split) <;> rfl
+
+/-- jj's export of a local bookmark whose record agrees with itself keeps the record and
+`.git`, or writes the bookmark to both, from the record's value or to `.git`'s. -/
+theorem exportLocal_agrees {m : Machine T} (hm : m.v.R = m.v.K) :
+    ((exportLocal m).v.R = m.v.R ∧ (exportLocal m).v.K = m.v.K ∧ (exportLocal m).G = m.G) ∨
+      ((exportLocal m).v.R = (exportLocal m).G ∧ (exportLocal m).v.K = (exportLocal m).G ∧
+        (m.v.K = m.G ∨ (exportLocal m).G = m.G)) := by
+  unfold exportLocal
+  by_cases h1 : m.v.L = m.v.K
+  · rw [ite_eq_left h1]
+    by_cases h2 : resolved m.v.L = true
+    · rw [ite_eq_left h2]
+      exact Or.inl ⟨h1.trans hm.symm, rfl, rfl⟩
+    · rw [ite_eq_right h2]
+      exact Or.inl ⟨rfl, rfl, rfl⟩
+  · rw [ite_eq_right h1]
+    by_cases h2 : writable m.v.L = true ∧ resolved m.v.K = true ∧ (m.G = m.v.K ∨ m.G = m.v.L)
+    · rw [ite_eq_left h2]
+      exact Or.inr ⟨rfl, rfl, h2.2.2.imp Eq.symm Eq.symm⟩
+    · rw [ite_eq_right h2]
+      exact Or.inl ⟨rfl, rfl, rfl⟩
+
+/-- The realization beside the op head keeps the record it inherits, `.git` unchanged, or
+writes the bookmark to both, from the record's value or to `.git`'s. -/
+theorem realizeBesideLocal_cases (ok : Bool) (c : T) {b : Slot T} (s : Machine T)
+    (hb : b.R = b.K) :
+    let w := realizeBesideLocal ok c b s
+    w.moved = s.moved ∧ ((w.v.R = b.R ∧ w.v.K = b.K ∧ w.G = s.G) ∨
+      (w.v.R = w.G ∧ w.v.K = w.G ∧ (b.K = s.G ∨ w.G = s.G))) := by
+  refine ⟨exportLocalIf_moved _ _, ?_⟩
+  cases ok
+  · exact Or.inl ⟨rfl, rfl, rfl⟩
+  · exact exportLocal_agrees (m := { s with v := realizeLocal c b }) hb
 
 theorem exportLocal_inv {s : Machine T} (hs : LInv s) : LInv (exportLocal s) := by
   unfold exportLocal
@@ -226,6 +339,31 @@ theorem exportLocal_inv {s : Machine T} (hs : LInv s) : LInv (exportLocal s) := 
     · rw [ite_eq_right h2]
       exact hs
 
+/-- **A realization beside the op head keeps the invariant**: the merged record matches `.git`
+whatever the head did since `b`. -/
+theorem besideLocal_inv {s : Machine T} {first ok ok' : Bool} {c : T} {b : Slot T}
+    (hs : LInv s) (hb : b.R = b.K) : LInv (besideLocal first ok ok' c b s) := by
+  obtain ⟨hmv, hw⟩ := realizeBesideLocal_cases ok c s hb
+  let w := realizeBesideLocal ok c b s
+  have hm : LInv { w with v := Slot.mergeBeside first b s.v w.v } := by
+    intro hm
+    obtain ⟨hR, hK⟩ := hs (hmv ▸ hm)
+    have field := fun {x y z : T} (hx : x = s.G)
+        (hy : (y = z ∧ w.G = s.G) ∨ (y = w.G ∧ (z = s.G ∨ w.G = s.G))) =>
+      merge_beside (b := z) (v := x) (w := y) first hx hy
+    refine ⟨?_, ?_⟩
+    · show (bif first then Slot.merge3 b w.v s.v else Slot.merge3 b s.v w.v).R = w.G
+      have := field (x := s.v.R) (y := w.v.R) (z := b.R) hR
+        (hw.imp (fun h => ⟨h.1, h.2.2⟩) (fun h => ⟨h.1, h.2.2.imp (hb.trans ·) id⟩))
+      cases first <;> exact this
+    · show (bif first then Slot.merge3 b w.v s.v else Slot.merge3 b s.v w.v).K = w.G
+      have := field (x := s.v.K) (y := w.v.K) (z := b.K) hK
+        (hw.imp (fun h => ⟨h.2.1, h.2.2⟩) (fun h => ⟨h.2.1, h.2.2⟩))
+      cases first <;> exact this
+  cases ok'
+  · exact hm
+  · exact exportLocal_inv hm
+
 theorem LStep.inv {s t : Machine T} (h : LStep s t) (hs : LInv s) : LInv t := by
   cases h with
   | gitMove => intro hm; simp at hm
@@ -233,6 +371,39 @@ theorem LStep.inv {s t : Machine T} (h : LStep s t) (hs : LInv s) : LInv t := by
   | jjExport => exact exportLocal_inv hs
   | set => exact hs
   | advance => exact hs
+  | beside _ _ _ _ _ hb => exact besideLocal_inv hs hb
+
+/-- Every step keeps a record that agrees with itself, as `LStep.beside` needs of its base. A
+restore needn't (`restore_reverts`), nor need a state `LReach.init` admits where git moved the
+ref. -/
+theorem LStep.agrees {s t : Machine T} (h : LStep s t) (hs : s.v.R = s.v.K) : t.v.R = t.v.K := by
+  have hexp : ∀ m : Machine T, m.v.R = m.v.K → (exportLocal m).v.R = (exportLocal m).v.K := by
+    intro m hm
+    unfold exportLocal
+    split
+    · next h => split
+                · exact h
+                · exact hm
+    · split
+      · rfl
+      · exact hm
+  have hif : ∀ (ok : Bool) (m : Machine T), m.v.R = m.v.K →
+      (exportLocalIf ok m).v.R = (exportLocalIf ok m).v.K := by
+    intro ok m hm; cases ok
+    · exact hm
+    · exact hexp m hm
+  cases h with
+  | gitMove => exact hs
+  | jjImport => rfl
+  | jjExport => exact hexp s hs
+  | set => exact hs
+  | advance => exact hs
+  | beside first ok _ c b hb =>
+    apply hif
+    obtain ⟨_, hw⟩ := realizeBesideLocal_cases ok c s hb
+    show (Slot.mergeBeside first b s.v _).R = (Slot.mergeBeside first b s.v _).K
+    rcases hw with ⟨hR, hK, _⟩ | ⟨hR, hK, _⟩ <;> cases first <;>
+      simp only [Slot.mergeBeside, Slot.merge3, Bool.cond_true, Bool.cond_false, hR, hK, hs, hb]
 
 /-- Runs from any state satisfying the invariant, such as one just after an import. -/
 inductive LReach : Machine T → Prop
@@ -544,8 +715,38 @@ def cadvance (l c e : T) (s : CMachine T) : CMachine T :=
   exportConflicted
     { toMachine := exportRemote { s.toMachine with v := realizeRemote l c s.v }, E := e }
 
-/-- `RStep`, with the expected value, and the restores. musubi may realize a conflict, whose
-expected value is `.git`'s or one it can write. -/
+/-- jj's export of a remote bookmark, then musubi's with the expected value `e`. -/
+def exportC (e : T) (s : CMachine T) : CMachine T :=
+  exportConflicted { toMachine := exportRemote s.toMachine, E := e }
+
+/-- musubi's export of a realization's conflicted remote bookmark beside an op head of this
+machine's own whose record is `k` (`export_conflicted_remote_bookmarks`, its `beside`):
+nothing where `.git` holds `k`, resolved, and the realization records another value, since
+that head put it there, as by a fetch of a term of the conflict, and the merge of the two,
+exported next, can keep it; otherwise `exportConflicted`. -/
+def exportConflictedBeside (k : T) (s : CMachine T) : CMachine T :=
+  if k ≠ s.v.K ∧ resolved k = true ∧ s.G = k then s else exportConflicted s
+
+/-- musubi's realization, beside this machine's op head, of a canonical operation whose remote
+bookmark is `c`, its bookmark `l`, and expected value `e`, the per-machine fields inherited
+from `b`, the operation both descend from; then jj's export and musubi's, against `.git` as
+the op head left it. -/
+def realizeBesideRemote (l c e : T) (b : Slot T) (s : CMachine T) : CMachine T :=
+  exportConflictedBeside s.v.K
+    { toMachine := exportRemote { s.toMachine with v := realizeRemote l c b }, E := e }
+
+/-- The realization beside the op head merged with it by jj, against `b`. -/
+def mergeBesideRemote (first : Bool) (l c e : T) (b : Slot T) (s : CMachine T) : CMachine T :=
+  let w := realizeBesideRemote l c e b s
+  { w with v := Slot.mergeBeside first b s.v w.v }
+
+/-- The merge exported, by jj and by musubi, with its expected value `e'` (`advance` in
+`node/realize.rs`). -/
+def cbeside (first : Bool) (l c e e' : T) (b : Slot T) (s : CMachine T) : CMachine T :=
+  exportC e' (mergeBesideRemote first l c e b s)
+
+/-- `RStep`, with the expected value, the restores, and realizations beside this machine's op
+head. musubi may realize a conflict, whose expected value is `.git`'s or one it can write. -/
 inductive CStep : CMachine T → CMachine T → Prop
   | gitMove (s : CMachine T) (g : T) :
       resolved g = true → CStep s { s with G := g, moved := true }
@@ -562,6 +763,15 @@ inductive CStep : CMachine T → CMachine T → Prop
   /-- A restore jj's export can write, or of a conflict, which it doesn't write. -/
   | restore (s : CMachine T) (o : Slot T) :
       (resolved o.R = true → RestorableRemote o s.toMachine) → CStep s (restoreC o s)
+  /-- musubi realizes a canonical operation beside this machine's op head, from `b`, exports
+  it, merges it with the head, and exports and publishes only the merge, whose expected value
+  is `e'`, holding jj's import/export lock. Only exports of the merge that succeed:
+  its remote bookmark is a conflict, `.git`'s value, or writable. -/
+  | beside (s : CMachine T) (first : Bool) (l c e e' : T) (b : Slot T) :
+      (resolved (mergeBesideRemote first l c e b s).v.R = true →
+        e' = (mergeBesideRemote first l c e b s).v.R) →
+      (e' = (mergeBesideRemote first l c e b s).G ∨ writable e' = true) →
+      CStep s (cbeside first l c e e' b s)
 
 /-- `RInv`, but the remote bookmark may be a conflict, and `.git` and the record have the
 expected value. -/
@@ -607,34 +817,37 @@ theorem exportConflicted_resolved {s : CMachine T} (h : resolved s.v.R = true) :
   unfold exportConflicted
   rw [ite_eq_right (fun h' => by rw [h] at h'; exact Bool.noConfusion h'.1)]
 
-/-- musubi's export of a realization, conflicted or not. -/
-theorem cadvance_inv {s : CMachine T} {l c e : T} (hs : CInv s) (hce : resolved c = true → e = c)
-    (he : s.moved = false → e = s.G ∨ writable e = true) : CInv (cadvance l c e s) := by
-  obtain ⟨hg, hsync⟩ := hs
-  unfold cadvance exportRemote realizeRemote
-  simp only
-  by_cases h : c ≠ s.v.K ∧ writable c = true ∧ resolved s.v.K = true ∧ (s.G = s.v.K ∨ s.G = c)
+/-- jj's export of a remote bookmark and musubi's, with expected value `e`, from a record that
+matches `.git`, keep `CInv`, if `e` is the remote bookmark where that is resolved, and `.git`'s
+value or writable. -/
+theorem exportC_inv {s : CMachine T} {e : T} (hg : resolved s.G = true)
+    (hK : s.moved = false → s.v.K = s.G) (hre : resolved s.v.R = true → e = s.v.R)
+    (he : s.moved = false → e = s.G ∨ writable e = true) : CInv (exportC e s) := by
+  unfold exportC exportRemote
+  by_cases h : s.v.R ≠ s.v.K ∧ writable s.v.R = true ∧ resolved s.v.K = true ∧
+      (s.G = s.v.K ∨ s.G = s.v.R)
   · have hr := writable_resolved _ h.2.1
-    rw [ite_eq_left h, exportConflicted_resolved hr]
-    exact ⟨hr, fun _ => ⟨rfl, hce hr, Or.inl rfl⟩⟩
+    rw [ite_eq_left h,
+      exportConflicted_resolved (s := ⟨⟨{ s.v with K := s.v.R }, s.v.R, s.moved⟩, e⟩) hr]
+    exact ⟨hr, fun _ => ⟨rfl, hre hr, Or.inl rfl⟩⟩
   · rw [ite_eq_right h]
-    by_cases hr : resolved c = true
-    · rw [exportConflicted_resolved hr]
+    by_cases hr : resolved s.v.R = true
+    · rw [exportConflicted_resolved (s := ⟨s.toMachine, e⟩) hr]
       refine ⟨hg, fun hm => ?_⟩
-      obtain ⟨hK, _⟩ := hsync hm
-      have hcG : c = s.G := by
-        by_cases hcK : c = s.v.K
+      have hK := hK hm
+      have hcG : s.v.R = s.G := by
+        by_cases hcK : s.v.R = s.v.K
         · exact hcK.trans hK
         · rcases he hm with he | hw
-          · exact (hce hr).symm.trans he
-          · rw [hce hr] at hw
+          · exact (hre hr).symm.trans he
+          · rw [hre hr] at hw
             exact absurd ⟨hcK, hw, hK ▸ hg, Or.inl hK.symm⟩ h
-      exact ⟨hK, (hce hr).trans hcG, Or.inl hcG⟩
-    · have hr' : resolved c = false := by simpa using hr
+      exact ⟨hK, (hre hr).trans hcG, Or.inl hcG⟩
+    · have hr' : resolved s.v.R = false := by simpa using hr
       unfold exportConflicted
       simp only
-      by_cases hw : resolved c = false ∧ (s.G = e ∨ (writable e = true ∧
-          (term c s.G = true ∨ (resolved s.v.K = true ∧ s.G = s.v.K))))
+      by_cases hw : resolved s.v.R = false ∧ (s.G = e ∨ (writable e = true ∧
+          (term s.v.R s.G = true ∨ (resolved s.v.K = true ∧ s.G = s.v.K))))
       · rw [ite_eq_left hw]
         have hre : resolved e = true := by
           rcases hw.2 with he | ⟨hwe, _⟩
@@ -643,10 +856,76 @@ theorem cadvance_inv {s : CMachine T} {l c e : T} (hs : CInv s) (hce : resolved 
         exact ⟨hre, fun _ => ⟨rfl, rfl, Or.inr hr'⟩⟩
       · rw [ite_eq_right hw]
         refine ⟨hg, fun hm => absurd ⟨hr', ?_⟩ hw⟩
-        obtain ⟨hK, _⟩ := hsync hm
+        have hK := hK hm
         rcases he hm with he | hwe
         · exact Or.inl he.symm
         · exact Or.inr ⟨hwe, Or.inr ⟨hK ▸ hg, hK.symm⟩⟩
+
+theorem cadvance_eq (l c e : T) (s : CMachine T) :
+    cadvance l c e s = exportC e { s with v := realizeRemote l c s.v } := rfl
+
+/-- musubi's export of a realization, conflicted or not. -/
+theorem cadvance_inv {s : CMachine T} {l c e : T} (hs : CInv s) (hce : resolved c = true → e = c)
+    (he : s.moved = false → e = s.G ∨ writable e = true) : CInv (cadvance l c e s) := by
+  rw [cadvance_eq]
+  exact exportC_inv hs.1 (fun hm => (hs.2 hm).1) hce he
+
+/-- The realization beside the op head keeps the record it inherits, `.git` unchanged, or
+writes a value to both, from the record's value or to `.git`'s: the remote bookmark, or a
+conflict's expected value where the op head's record is the realization's. -/
+theorem realizeBesideRemote_cases {s : CMachine T} (l c e : T) (b : Slot T) (hs : CInv s) :
+    let w := realizeBesideRemote l c e b s
+    w.moved = s.moved ∧ resolved w.G = true ∧ (s.moved = false →
+      (w.v.K = b.K ∧ w.G = s.G) ∨ (w.v.K = w.G ∧ (b.K = s.G ∨ w.G = s.G))) := by
+  obtain ⟨hg, hsync⟩ := hs
+  unfold realizeBesideRemote exportRemote realizeRemote
+  simp only
+  by_cases h : c ≠ b.K ∧ writable c = true ∧ resolved b.K = true ∧ (s.G = b.K ∨ s.G = c)
+  · have hr := writable_resolved _ h.2.1
+    rw [ite_eq_left h]
+    have hw : ∀ m : CMachine T, m.v.R = c → exportConflictedBeside s.v.K m = m := by
+      intro m hm
+      unfold exportConflictedBeside
+      split
+      · rfl
+      · exact exportConflicted_resolved (hm ▸ hr)
+    rw [hw _ rfl]
+    exact ⟨rfl, hr, fun _ => Or.inr ⟨rfl, h.2.2.2.imp Eq.symm Eq.symm⟩⟩
+  · rw [ite_eq_right h]
+    unfold exportConflictedBeside
+    split
+    · exact ⟨rfl, hg, fun _ => Or.inl ⟨rfl, rfl⟩⟩
+    · next hk =>
+      unfold exportConflicted
+      simp only
+      split
+      · next hw =>
+        have hre : resolved e = true := by
+          rcases hw.2 with he | ⟨hwe, _⟩
+          · exact he ▸ hg
+          · exact writable_resolved _ hwe
+        refine ⟨rfl, hre, fun hm => Or.inr ⟨rfl, Or.inl ?_⟩⟩
+        -- Not skipped: `.git` holds the op head's record, so that is the realization's.
+        obtain ⟨hK, _⟩ := hsync hm
+        exact Decidable.byContradiction fun hne =>
+          hk ⟨fun h => hne (h.symm.trans hK), hK ▸ hg, hK.symm⟩ |>.elim
+      · exact ⟨rfl, hg, fun _ => Or.inl ⟨rfl, rfl⟩⟩
+
+/-- **A realization beside the op head keeps `CInv`**: the merged record matches `.git`
+whatever the head did since `b`, a fetch of a term of a conflict the realization keeps
+included, and musubi's export of the merge does the rest. -/
+theorem cbeside_inv {s : CMachine T} {first : Bool} {l c e e' : T} {b : Slot T} (hs : CInv s)
+    (hre : resolved (mergeBesideRemote first l c e b s).v.R = true →
+      e' = (mergeBesideRemote first l c e b s).v.R)
+    (he : e' = (mergeBesideRemote first l c e b s).G ∨ writable e' = true) :
+    CInv (cbeside first l c e e' b s) := by
+  obtain ⟨hmv, hg, hw⟩ := realizeBesideRemote_cases l c e b hs
+  refine exportC_inv hg (fun hm => ?_) hre (fun _ => he)
+  obtain ⟨hK, _⟩ := hs.2 (hmv ▸ hm)
+  have := merge_beside (b := b.K) (v := s.v.K)
+    (w := (realizeBesideRemote l c e b s).v.K) first hK ((hw (hmv ▸ hm)).imp id id)
+  show (bif first then Slot.merge3 b _ s.v else Slot.merge3 b s.v _).K = _
+  cases first <;> exact this
 
 /-- `restoreRemote_inv`, with conflicts: a restore keeps `CInv` if jj's export can write the
 restored remote bookmark, or there is nothing to write, or the restored remote bookmark is
@@ -696,6 +975,7 @@ theorem CStep.inv {s t : CMachine T} (h : CStep s t) (hs : CInv s) : CInv t := b
   | fetch r hr => exact ⟨hr, fun _ => ⟨rfl, rfl, Or.inl rfl⟩⟩
   | advance l c e hce he => exact cadvance_inv hs hce (fun _ => he)
   | restore o h => exact restoreRemote_cinv hs h
+  | beside first l c e e' b hre he => exact cbeside_inv hs hre he
 
 inductive CReach : CMachine T → Prop
   | init {s : CMachine T} : CInv s → CReach s
@@ -824,19 +1104,14 @@ end Conflicts
 /-! ## Merges of concurrent op heads
 
 jj merges concurrent op heads' views three-way against their closest common ancestor, field by
-field (`merge_view` in jj-lib's `repo.rs`), and where they have several closest common
-ancestors, against those merged first (`merge_operations`). Every `jj` command does so when it
-finds several op heads, and so does musubi's `merge_heads`, each followed by its export.
-musubi's realization of a canonical merge operation takes the shared fields from the
-canonical view, which jj merged so on the machine that made it, and merges the per-machine
-fields of its parents' local operations as jj would (`inherited_per_machine` in
-`node/realize.rs`). Merges of more than two heads merge them one at a time. -/
-
-/-- The targets of jj's merge of two op heads' views of one ref, `v` merged with `w` against
-their base `b`: each field three-way, as `merge_ref_targets`. With tracking states, see
-`TSlot.merge`, whose targets these are (`TSlot.merge_toSlot`). -/
-def Slot.merge3 (b v w : Slot T) : Slot T :=
-  { L := merge v.L b.L w.L, R := merge v.R b.R w.R, K := merge v.K b.K w.K }
+field (`merge_view` in jj-lib's `repo.rs`), and where they have several closest common ancestors,
+against those merged first (`merge_operations`). Every `jj` command does so when it finds several
+op heads, and so does musubi's `merge_heads`, each followed by its export, and musubi's `advance`
+beside this machine's own op head (`LStep.beside`, `CStep.beside`). musubi's realization of a
+canonical merge operation takes the shared fields from the canonical view, which jj merged so on
+the machine that made it, and merges the per-machine fields of its parents' local operations as jj
+would (`inherited_per_machine` in `node/realize.rs`). Merges of more than two heads merge them one
+at a time. -/
 
 /-- A head's record is the base's. -/
 def Untouched (b v : Slot T) : Prop := v.R = b.R ∧ v.K = b.K
@@ -1389,10 +1664,10 @@ example : (⟨Tgt.commit 2, .commit 2, .commit 2⟩ : Slot Tgt).import (.commit 
     ⟨.commit 1, .commit 1, .commit 1⟩ := by
   simp [Slot.import, RefAlg.merge]
 
-/-- Every conflict's side is `2`; no value is a term. -/
+/-- Every conflict's side is `2`, and every value a term of it. -/
 instance : Sides Tgt where
   side t := if t = .conflict then some (.commit 2) else none
-  term _ _ := false
+  term t _ := t = .conflict
   side_resolved t c h := by
     by_cases ht : t = .conflict
     · simp only [ht, ite_true, Option.some.injEq] at h
@@ -1434,6 +1709,47 @@ theorem conflicted_restore_resolves :
   refine ⟨CReach.step h0 (CStep.restore _ _ (fun h => absurd h (by decide))),
     CReach.step h0 (CStep.advance _ _ _ _ (by decide) (Or.inl rfl)), ?_⟩
   decide
+
+/-- **A realization beside a fetch keeps the fetch**, as `refs.rs` has it. The remote
+bookmark is a conflict whose expected value is `1`, as `.git` and the record have it, when this
+machine fetches `3`, a term of the conflict. musubi then realizes, beside the fetch, an
+operation of another machine's that keeps the conflict, as a restore of it does. The merge
+keeps the fetch, so musubi leaves `3` in `.git`, and the next import changes nothing. Had it
+written the expected value for the realization alone, as musubi once did, the merge's record
+would be `3` and `.git` `1`, and the next import would move the bookmark back to `1`, with no
+`git` command having run: `u` is the step with `exportConflicted` in place of
+`exportConflictedBeside`. In `Tgt`, every value is a term of the conflict, as `3` must be. -/
+theorem beside_keeps_fetch :
+    let b : Slot Tgt := ⟨.conflict, .conflict, .commit 1⟩
+    let s : CMachine Tgt := ⟨⟨b.import (.commit 3), .commit 3, false⟩, .commit 3⟩
+    let t := cbeside false .conflict .conflict (.commit 1) (.commit 3) b s
+    let w := exportConflicted
+      { toMachine := exportRemote { s.toMachine with v := realizeRemote .conflict .conflict b },
+        E := .commit 1 }
+    let u := exportC (.commit 3) { w with v := Slot.mergeBeside false b s.v w.v }
+    CReach t ∧ t.moved = false ∧ t.G = .commit 3 ∧ t.v.L = .commit 3 ∧
+      (t.v.import t.G).L = .commit 3 ∧ u.moved = false ∧ (u.v.import u.G).L = .commit 1 := by
+  intro b s t w u
+  have h0 : CReach s := CReach.init ⟨rfl, fun _ => ⟨rfl, rfl, Or.inl rfl⟩⟩
+  exact ⟨CReach.step h0 (CStep.beside _ _ _ _ _ _ _ (by decide) (by decide)), by decide⟩
+
+/-- **A realization published apart from the op head beside it.** This machine fetches `3`
+while another moves the remote bookmark from `1` to `2`, and musubi realizes that beside the
+fetch: the merge is a conflict, whose expected value is its side, `2`, which musubi writes,
+so that this machine's import resolves the conflict to it, as every machine that realizes the
+merge does (`conflicted_import_agrees`). Published apart, as musubi once did, the two heads
+are merged by the next `jj` command, which doesn't export, so its import resolves the
+conflict to the fetch, `3`, instead. -/
+theorem beside_published_apart_disagrees :
+    let b : Slot Tgt := ⟨.commit 1, .commit 1, .commit 1⟩
+    let s : CMachine Tgt := ⟨⟨b.import (.commit 3), .commit 3, false⟩, .commit 3⟩
+    let m := mergeBesideRemote false (.commit 2) (.commit 2) (.commit 2) b s
+    let t := cbeside false (.commit 2) (.commit 2) (.commit 2) (.commit 2) b s
+    CReach t ∧ t.v.R = .conflict ∧ t.E = .commit 2 ∧ (t.v.import t.G).L = .commit 2 ∧
+      m.moved = false ∧ (m.v.import m.G).L = .commit 3 := by
+  intro b s m t
+  have h0 : CReach s := CReach.init ⟨rfl, fun _ => ⟨rfl, rfl, Or.inl rfl⟩⟩
+  exact ⟨CReach.step h0 (CStep.beside _ _ _ _ _ _ _ (by decide) (by decide)), by decide⟩
 
 /-! ## What merges do that the theorems exclude -/
 

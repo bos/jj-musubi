@@ -401,6 +401,7 @@ links:
    | `jj undo`, or `jj op restore` to the operation before the latest action or to the one both machines last synced at | as a `jj` command that imports; then, if it restored an operation, which its description names, every ref's slot but `K` from that operation's view (`restoreLocal`, `restoreRemote`), the expected value the head's (`restoreC`), and `jjExport` of every ref |
    | The other machine moves `x` or `t` or fetches `y`, and both sync, with `refs/heads/x.lock` held here or not | `LStep.advance` of `x`, `y` and `t` and `CStep.advance` of `y@origin`, with this machine's expected value, then `jjExport` of every ref, except where the lock makes `x`'s update fail, then `exportConflicted` of `y@origin`; nothing if there was nothing to realize |
    | The other machine moves `x` or `t` or fetches `y` before it has this machine's latest operations, merges them with its own as it syncs, and this machine syncs | the other's operation realized from the slots both last synced at, and `realizeMerge` of it with the head, against those slots, in the order of the merge's parents, which is `TSlot.merge`; then the exports, as above. Two fetches that moved `y@origin` to different values merge to a conflict, whose expected value is its side; a conflict from one parent keeps that parent's |
+   | Either of the last two, with a `jj` command here that moves `x`, `y` or `t` or fetches `y` after the other machine's operations and before this machine syncs | the command, as above; then the other's operation realized as above from this machine's slots before the command, and `jjExport` of every ref, against `.git` as the command left it, then `exportConflictedBeside` of `y@origin` against the command's record; then `TSlot.merge` of the two against the slots before the command, in the order of the merge's parents, and the exports, as above, with the merge's expected value: `LStep.beside` and `CStep.beside`. The other machine then syncs |
 
    The mapping follows what jj does. jj imports `x@git`, `y@git` and `y@origin` in that
    order, and the two refs of `y` share the bookmark, so an import of one that sets the
@@ -424,6 +425,9 @@ links:
    the other machine fetches a term of a restored conflict before realizing the restore,
    and the merge keeps its fetch, so musubi must not write the conflict's expected value to
    that machine's `.git` for the realization alone.
+   `realization_beside_a_fetch_here_keeps_the_fetch` is the same on this machine, against the
+   model (`beside_keeps_fetch`): the other machine merges its own operation with this one's
+   restore of a conflict, keeping it, while this machine fetches a term of it.
 
    musubi's *shortcut* for merging per-machine fields (`PerMachine::merged_trivially`) takes
    the side that changed, where at most one did; otherwise, or where a side has a tracked
@@ -494,14 +498,21 @@ What the test relies on of jj, and what it leaves out:
   instead of the side. The model takes the expected value as given with each operation; the
   test computes it from the parents' as `export_conflicted_remote_bookmarks` does, and checks
   that both machines' `.git`s have it, but makes no joins, where musubi takes the side too,
-  as the history before a join is only the joining machine's. A realization writes no
-  conflicted remote bookmark where `.git` holds the value that one of the machine's own op
-  heads concurrent with it records and the realization doesn't, since their merge, which
-  musubi exports and publishes in its place, may keep that head's value; the model has no
-  concurrent heads of remote bookmarks, so the test checks that through the other machine's
-  `.git` and its next command.
+  as the history before a join is only the joining machine's.
 - **Not covered.** The state machine makes no merges of more than two heads and no
-  criss-cross merges. It locks no remote ref, since `CStep.advance` admits only exports that
+  criss-cross merges. It runs a command beside a realization only while every local
+  bookmark's record agrees with itself, as `LStep.beside` assumes of the operation the
+  realization descends from (`LStep.agrees`): a restore can leave it otherwise. Hegel seldom
+  reaches a realization that keeps a conflicted `y@origin` beside a fetch of one of its
+  terms, where musubi's export skips the ref, so
+  `realization_beside_a_fetch_here_keeps_the_fetch` goes there. The other machine's
+  realizations beside its own operations, when it merges this machine's, aren't modeled,
+  since only this machine's refs are; the test checks them through that machine's `.git`
+  for a conflicted `y@origin`, and `realization_beside_a_fetch_keeps_the_fetch` through its
+  next command. Since musubi publishes only the merge, the test can't reach the moment between
+  a realization's publication and its merge that musubi once left;
+  `beside_published_apart_disagrees` shows what a `jj` command did there. It locks no remote
+  ref, since `CStep.advance` admits only exports that
   can succeed (a failed one ends as `remote_reset_without_export` says). The realization
   keeps a tracked absent `x@git` that jj would drop when the canonical operation deletes `x`
   (`realize_not_WF`); the test's model does the same, so the test checks the code as it is.

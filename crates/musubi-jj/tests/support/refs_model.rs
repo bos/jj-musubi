@@ -225,6 +225,18 @@ impl RefsModel {
         self.exported("exportConflicted", s, &[("g", g), ("e", e)])
     }
 
+    /// `exportConflictedBeside` with `.git` at `g` and expected value `e`, beside an op head
+    /// whose record is `k`.
+    pub fn export_conflicted_beside(
+        &mut self,
+        s: &Slot,
+        g: &RefTarget,
+        e: &RefTarget,
+        k: &RefTarget,
+    ) -> (Slot, RefTarget) {
+        self.exported("exportConflictedBeside", s, &[("g", g), ("e", e), ("k", k)])
+    }
+
     /// `LInv` of the slot with `.git` at `g`, which git `moved` or not.
     pub fn linv(&mut self, s: &Slot, g: &RefTarget, moved: bool) -> bool {
         self.call("linv", &[("s", s)], &[("g", g)], &[("moved", moved)])["holds"]

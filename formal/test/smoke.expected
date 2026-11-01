@@ -33,3 +33,5 @@
 {"ok":true,"slot":{"K":1,"L":4,"R":1,"tr":true}}
 {"g":2,"ok":true,"slot":{"K":2,"L":2,"R":2,"tr":true}}
 {"holds":true,"ok":true}
+{"g":3,"ok":true,"slot":{"K":1,"L":4,"R":4,"tr":true}}
+{"g":1,"ok":true,"slot":{"K":1,"L":4,"R":4,"tr":true}}

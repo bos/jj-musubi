@@ -76,6 +76,8 @@ inductive Call where
   | exportLocal (s : TSlot Nat) (g : Nat)
   | exportRemote (s : TSlot Nat) (g : Nat)
   | exportConflicted (s : TSlot Nat) (g e : Nat)
+  /-- `exportConflictedBeside`, beside an op head whose record is `k`. -/
+  | exportConflictedBeside (s : TSlot Nat) (g e k : Nat)
   /-- `LInv`, and `CInv` with expected value `e`. -/
   | linv (s : TSlot Nat) (g : Nat) (moved : Bool)
   | cinv (s : TSlot Nat) (g : Nat) (moved : Bool) (e : Nat)
@@ -114,6 +116,11 @@ def run (tb : Table) : Call → Answer
     letI := tableAlg tb
     letI := tableSides tb
     let m := exportConflicted (⟨machine s g false, e⟩ : CMachine Nat)
+    .slot (withSlot s m.v) (some m.G)
+  | .exportConflictedBeside s g e k =>
+    letI := tableAlg tb
+    letI := tableSides tb
+    let m := exportConflictedBeside k (⟨machine s g false, e⟩ : CMachine Nat)
     .slot (withSlot s m.v) (some m.G)
   | .linv s g moved => letI := tableAlg tb; .holds (decide (LInv (machine s g moved)))
   | .cinv s g moved e =>

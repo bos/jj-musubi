@@ -322,6 +322,9 @@ def decodeCall (j : Json) : Except String Refs.Exec.Call := do
   | "exportLocal" => return .exportLocal (← slot "s") (← getNat j "g")
   | "exportRemote" => return .exportRemote (← slot "s") (← getNat j "g")
   | "exportConflicted" => return .exportConflicted (← slot "s") (← getNat j "g") (← getNat j "e")
+  | "exportConflictedBeside" =>
+    return .exportConflictedBeside (← slot "s") (← getNat j "g") (← getNat j "e")
+      (← getNat j "k")
   | "linv" => return .linv (← slot "s") (← getNat j "g") (← j.getObjValAs? Bool "moved")
   | "cinv" =>
     return .cinv (← slot "s") (← getNat j "g") (← j.getObjValAs? Bool "moved") (← getNat j "e")

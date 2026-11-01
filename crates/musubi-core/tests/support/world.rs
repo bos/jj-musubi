@@ -143,6 +143,14 @@ impl World {
         self.repos[node].lops.iter().copied().collect()
     }
 
+    /// The local operations `node` can name in a push: those no record it took drops, which
+    /// the root is always among.
+    pub fn nameable_ops(&self, node: usize) -> Vec<Op> {
+        let repo = &self.repos[node];
+        let taken: BTreeSet<Op> = flat(&repo.applied).into_iter().collect();
+        repo.lops.difference(&taken).copied().collect()
+    }
+
     pub fn net_len(&self) -> usize {
         self.net.len()
     }
@@ -313,12 +321,12 @@ impl World {
                     vec![
                         json!({"kind": "pushAll", "node": node, "ops": ops, "objs": objs,
                             "expected": expected, "new": new}),
-                        json!({"kind": "sendSup", "node": node}),
+                        json!({"kind": "sendSup", "node": node, "new": new}),
                     ],
                     vec![
                         json!({"msg": "push", "node": node, "ops": ops, "objs": objs,
                             "expected": expected, "new": new}),
-                        sup_json(node, &sup),
+                        sup_json(node, &sup, *new),
                     ],
                     Some(sup),
                 )
@@ -351,7 +359,9 @@ impl World {
     }
 
     /// A push the policy would never make: `Cas(expected, new)` for any local `new`, without
-    /// uploading anything. The model allows it, so the hub must defend itself.
+    /// uploading anything. The model allows it, so the hub must defend itself. `new` is no
+    /// operation a record the node took drops: a node never names one, which the hub can't
+    /// refuse once it has pruned the record.
     pub fn rogue_push(&mut self, node: usize, expected: Op, new: Op) {
         use musubi_core::node::LocalRepo as _;
         let repo = &self.repos[node];
@@ -668,7 +678,13 @@ impl World {
 
     /// The hub's answer to a push of `new`, which needs nothing uploaded, from `expected`,
     /// with `records`, taken straight from the hub, outside the network and the model.
-    pub fn answer_push(&mut self, expected: Op, new: Op, records: &[Vec<Op>]) -> CasOutcome {
+    pub fn answer_push(
+        &mut self,
+        expected: Op,
+        new: Op,
+        records: &[Vec<Op>],
+        dropped: &[Op],
+    ) -> CasOutcome {
         let records = self.univ.borrow_mut().record_state(records);
         let push = hub::Push {
             ops: &[],
@@ -677,7 +693,7 @@ impl World {
             expected: &expected,
             new: &new,
             records: &records,
-            dropped: &[],
+            dropped,
         };
         push.answer(&mut self.hub).unwrap().0
     }
@@ -1095,8 +1111,9 @@ impl World {
         json!({
             "next": univ.next(),
             "ops": ops,
+            // The Rust hub prunes no records yet.
             "hub": {"ops": self.hub.ops, "objs": self.hub.objs, "head": self.hub.head, "seq": self.hub.seq,
-                "records": records_json(&self.hub.records)},
+                "records": records_json(&self.hub.records), "pruned": 0},
             "nodes": nodes,
             "net": net.into_iter().map(|m| serde_json::from_str::<Value>(&m).unwrap()).collect::<Vec<_>>(),
         })
@@ -1114,9 +1131,10 @@ fn records_json(records: &[Vec<Op>]) -> Value {
 }
 
 /// The model's supersede message: the records a node had taken, and what it had dropped.
-fn sup_json(node: usize, (applied, dropped): &Sup) -> Value {
+/// A supersede message, riding on a push to `new`.
+fn sup_json(node: usize, (applied, dropped): &Sup, new: Op) -> Value {
     json!({"msg": "supersede", "node": node, "applied": records_json(applied),
-        "dropped": sorted(dropped.iter().copied())})
+        "dropped": sorted(dropped.iter().copied()), "new": new})
 }
 
 /// Normalizes a state for comparison: sets become sorted arrays and `net` a sorted,

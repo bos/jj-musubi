@@ -36,10 +36,6 @@ theorem recordMeasureE_eq {N : Nat} {ses : SEState} (hok : ses.es.parOK = true) 
     ses.recordMeasureE N = recordMeasure N ses := by
   simp [SEState.recordMeasureE, recordMeasure, smeasureE_eq hok]
 
-theorem appliedF_adoptR (ses : SEState) (n : Nat) (R : List Rec) (i : Nat) :
-    (ses.adoptR n R).appliedF i = if i = n then R else ses.appliedF i :=
-  assocF_set _ _ _ _ _
-
 /-- Taking current records removes one mismatch; all other nodes keep theirs. -/
 theorem recordLag_adopt_lt {N n : Nat} {ses : SEState} (hn : n < N)
     (hm : recEq (ses.appliedF n) ses.recs = false) :
@@ -67,7 +63,7 @@ theorem sabs_adoptR_same {ses : SEState} {n : Nat}
       simp only [upd, ↓reduceIte]
       exact propext ⟨fun h => h.elim id (hsub x), Or.inl⟩
     · simp [upd, hi]
-  show SState.mk _ _ _ _ _ _ = SState.mk _ _ _ _ _ _
+  show SState.mk _ _ _ _ _ _ _ _ = SState.mk _ _ _ _ _ _ _ _
   congr 1
 
 /-- Effective exchanges: a projected set-based policy step, or adoption of current records
@@ -84,10 +80,11 @@ inductive RecordPolicy (N : Nat) : SEState → SEState → Prop
 
 /-- Both kinds of effective progress decrease the refined well-founded measure. -/
 theorem recordMeasure_decreases {N : Nat} {ses ses' : SEState}
-    (hr : SRReachable N (sabs ses)) (hp : RecordPolicy N ses ses') :
+    (hr : SRReachable N (sabs ses)) (hA : AllPruned N (sabs ses))
+    (hp : RecordPolicy N ses ses') :
     RecordLex (recordMeasure N ses') (recordMeasure N ses) := by
   cases hp with
-  | projected h => exact Prod.Lex.left _ _ (smeasure_decreases hr h)
+  | projected h => exact Prod.Lex.left _ _ (smeasure_decreases hr hA h)
   | reconcile n hn hm hsub _ =>
     have he := sabs_adoptR_same hsub
     unfold recordMeasure
@@ -95,8 +92,9 @@ theorem recordMeasure_decreases {N : Nat} {ses ses' : SEState}
     exact Prod.Lex.right _ (recordLag_adopt_lt hn hm)
 
 theorem recordPolicy_wf : WellFounded
-    (fun ses' ses => SRReachable N (sabs ses) ∧ RecordPolicy N ses ses') :=
-  Subrelation.wf (fun ⟨hr, hp⟩ => recordMeasure_decreases hr hp)
+    (fun ses' ses => (SRReachable N (sabs ses) ∧ AllPruned N (sabs ses)) ∧
+      RecordPolicy N ses ses') :=
+  Subrelation.wf (fun ⟨⟨hr, hA⟩, hp⟩ => recordMeasure_decreases hr hA hp)
     (InvImage.wf (recordMeasure N) recordLex_wf)
 
 /-- An actual executable adoption after announcing current records, with exactly the head
@@ -148,7 +146,7 @@ inductive RecordSteps (N : Nat) : SEState → SEState → Prop
 /-- Abstract convergence suffices for a finite completion with exactly the hub's ordered
 records. All these remaining steps preserve the abstract state, including the hub. -/
 theorem record_finish {N : Nat} {ses : SEState} (hr : SRReachable N (sabs ses))
-    (hc : SConverged N (sabs ses)) :
+    (hA : AllPruned N (sabs ses)) (hc : SConverged N (sabs ses)) :
     ∃ ses', RecordSteps N ses ses' ∧
       sabs ses' = sabs ses ∧ RecordConverged N ses' := by
   induction ses using (recordPolicy_wf (N := N)).induction with
@@ -161,8 +159,9 @@ theorem record_finish {N : Nat} {ses : SEState} (hr : SRReachable N (sabs ses))
       | projected hp => exact False.elim (converged_quiescentS hr hc hp)
       | reconcile n _ _ hsub _ => exact sabs_adoptR_same hsub
     have hr' : SRReachable N (sabs next) := by rw [he]; exact hr
+    have hA' : AllPruned N (sabs next) := by rw [he]; exact hA
     have hc' : SConverged N (sabs next) := by rw [he]; exact hc
-    obtain ⟨last, steps, same, done⟩ := ih next ⟨hr, hp⟩ hr' hc'
+    obtain ⟨last, steps, same, done⟩ := ih next ⟨⟨hr, hA⟩, hp⟩ hr' hA' hc'
     exact ⟨last, .head hp steps, same.trans he, done⟩
 
 end Musubi.Exec

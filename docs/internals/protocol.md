@@ -282,7 +282,10 @@ State:
   and duplicates after the first removed. Its id changes exactly when some proper ancestor is
   in `D`. `contract(D₁)` and then `contract(D₂)` is `contract(D₁ ∪ D₂)`.
 - Hub: `dropped`, the records it took, in order, each a set of operations dropped at once.
-  `D_hub` is their union. A hub that goes back to a head goes back to the records it had then.
+  `D_hub` is their union. `pruned`, how many of its first records it has pruned, keeping of them
+  only their count and digest, which a push's records must match; `P_hub` is their union, and
+  the hub remembers `D_hub \ P_hub`. A hub that goes back to a head goes back to the records it
+  had then, and how many it had pruned.
 - Node: `D_node`, what it dropped, by its own `jj op abandon` or by applying the hub's records;
   `pending = D_node \ D_hub`, as far as it knows.
 
@@ -293,16 +296,20 @@ Steps:
 
 - `Abandon(D)`, on a node through `jj op abandon`: `D` is below the node's heads, holds none of
   them and not the root. `D_node := D_node ∪ D`.
-- `Supersede`: a `Push` that also carries `D_node`, from a node that has every record of the hub
-  and pending drops. The node first writes the fix-up on its single head and pushes that. The
-  hub answers it as any `Push`, checking the compare-and-swap against `contract(D_hub)`, and
-  also requires the new head to survive the union; on accepting, it appends `D_node \ D_hub` as
-  a record. A node whose records the hub lacks, or differs from, sends no ordinary push the hub
-  will accept: its ids aren't the hub's.
+- Every `Push` carries the records its node took, as a count and a digest, and the hub refuses
+  one whose records aren't its own: its ids aren't the hub's. Nor does it take a new head it
+  remembers dropping. A node never pushes a head that a record it took drops.
+- `Supersede`: a `Push` that also carries `pending`, from a node that has every record of the
+  hub and pending drops. The node first writes the fix-up on its single head and pushes that.
+  The hub answers it as any `Push`, checking the compare-and-swap against `contract(D_hub)`,
+  and also requires the new head not to be among `pending`; on accepting, it appends `pending`
+  as a record, needing no id it pruned.
 - `Adopt`: a node that lacks some of the hub's records, none of whose heads they drop, applies
   them: `D_node := D_node ∪ D_hub`, renaming what it has and what it pends. A node whose
   pending drops the hub's history no longer has under those ids, after the hub went back or took
   another record, renames them to the hub's history first.
+- `Prune(k)`, on the hub, once every node's records start with the hub's first `k`: `pruned :=
+  k`. It no longer knows their ids, nor can it send those records. The hub doesn't prune yet.
 
 Policy, before the steps above: if a record the node lacks drops none of its heads, adopt; if
 it has pending drops and the hub's records, supersede, instead of an ordinary push.
@@ -316,8 +323,14 @@ Properties, proved over the original operations in `formal/Musubi/Supersede.lean
   operation that node shows; on the hub, while it doesn't go back.
 - **HeadsSurvive**: no head is in its holder's dropped set, and every dropped operation is below
   a head of a node that dropped it.
-- Liveness: once users stop and the hub stops going back, every node reaches `heads =
-  {hub.head}` and `D_node = D_hub`, which then holds every operation any node dropped.
+- **DroppedNeverHead**: once the hub has dropped an operation, it never takes it as its head
+  again while it doesn't go back, though it may have pruned it, whatever it prunes.
+- **BehindRefused**: a node that hasn't dropped an operation the hub pruned has no supersede the
+  hub takes.
+- Liveness: once users stop and the hub stops going back, if every node has dropped what the
+  hub pruned, as pruning only records every node has taken ensures, every node reaches `heads =
+  {hub.head}` and `D_node = D_hub`, which then holds every operation any node dropped, though
+  the hub sends only the records it remembers.
 
 ## Translation layer
 

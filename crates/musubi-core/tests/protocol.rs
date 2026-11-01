@@ -107,8 +107,8 @@ impl Machine {
         let node = pick(&tc, world.nodes());
         let accepted = world.accepted_heads();
         let expected = accepted[pick(&tc, accepted.len())];
-        let local = world.local_ops(node);
-        let new = local[pick(&tc, local.len())];
+        let nameable = world.nameable_ops(node);
+        let new = nameable[pick(&tc, nameable.len())];
         world.rogue_push(node, expected, new);
     }
 
@@ -493,7 +493,7 @@ fn regress_scenario_conformance() {
     let fetch_all = |node: usize| json!({"kind": "fetchAll", "node": node, "base": 0, "haves": []});
     let hub_fetch = |node: usize| json!({"kind": "hubFetch", "node": node, "base": 0, "haves": []});
     let send_d = |node: usize| json!({"kind": "sendD", "node": node});
-    let send_sup = |node: usize| json!({"kind": "sendSup", "node": node});
+    let send_sup = |node: usize, new: u64| json!({"kind": "sendSup", "node": node, "new": new});
     let push = |kind: &str, node: usize, op: u64| json!({"kind": kind, "node": node, "ops": [op], "objs": [], "expected": 0, "new": op});
     let accept = |node: usize, op: u64| json!({"kind": "hubSupAccept", "node": node, "ops": [op], "objs": [], "expected": 0, "new": op, "applied": [], "dropped": []});
     let learn = |node: usize, kind: &str, head: u64| json!({"kind": "learn", "node": node, "headKind": kind, "seq": 1, "head": head});
@@ -510,7 +510,7 @@ fn regress_scenario_conformance() {
         user_op(0),
         user_op(2),
         push("pushAll", 0, 1),
-        send_sup(0),
+        send_sup(0, 1),
         accept(0, 1),
         send_d(0),
         learn(0, "accepted", 1),
@@ -524,7 +524,7 @@ fn regress_scenario_conformance() {
         advance(1),
         json!({"kind": "hubRegress", "seq": 0}),
         push("pushAll", 2, 2),
-        send_sup(2),
+        send_sup(2, 2),
         accept(2, 2),
         send_d(2),
         lose_known(0),
@@ -670,7 +670,35 @@ fn a_push_without_the_hubs_records_is_refused() {
     let head = world.hub_head();
     world.user_op(0, head, 0);
     let new = *world.local_ops(0).last().unwrap();
-    assert_eq!(world.answer_push(head, new, &[]), CasOutcome::Refused);
+    assert_eq!(world.answer_push(head, new, &[], &[]), CasOutcome::Refused);
+    assert_eq!(world.hub_head(), head);
+}
+
+/// A push with the hub's records is refused if its new head is one the hub dropped, or one
+/// the push itself drops. A node never names an operation a record it took drops, so neither
+/// conformance nor the model reaches the first; the hub checks it anyway, while it remembers
+/// dropping the operation.
+#[test]
+fn a_push_to_a_dropped_head_is_refused() {
+    let mut world = World::new(1, None);
+    world.user_op(0, 0, 0);
+    world.user_op(0, 1, 0);
+    world.quiesce();
+    world.op_abandon(0, vec![1]);
+    world.quiesce();
+    assert_eq!(world.hub_records(), [vec![1]]);
+    let head = world.hub_head();
+    let records = [vec![1]];
+    assert_eq!(
+        world.answer_push(head, 1, &records, &[]),
+        CasOutcome::Refused
+    );
+    world.user_op(0, head, 0);
+    let new = *world.local_ops(0).last().unwrap();
+    assert_eq!(
+        world.answer_push(head, new, &records, &[new]),
+        CasOutcome::Refused
+    );
     assert_eq!(world.hub_head(), head);
 }
 

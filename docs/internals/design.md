@@ -920,19 +920,37 @@ trimming the history (`jj op abandon ..X`) leaves
 the hub no smaller. The dropped operations' ids still take the memory that the operations did.
 The kept operations' old ids are added, and every kept operation is stored twice.
 
-So before a trim meant to bound the history's size is replicated, the hub must forget what every
-machine already has. The hub sees each machine's records in its fetches and pushes. Once every
-machine of the hive has taken the first records, those records, their ids and the old ids they
-renamed matter only to a machine coming back from before them. The check of each push's records
-already keeps old ids out, since a machine that has taken the records holds none. The hub could
-then drop all of that, write the `heads` log again in current ids, so that opening takes no
-record again, and delete the old operations. Three questions are open:
+So that a trim makes the hub smaller, the hub is to prune the records every machine has taken;
+it doesn't yet, and this is the design `Supersede.lean` models.
+Every push and fetch carries the records its machine took, as a count and a digest, and names
+the machine, so the hub knows how far each has taken them; it waits for every copy the hive
+hasn't forgotten, as the history it holds says. Once every such machine has taken the hub's
+first records, those records, their ids and the old ids they renamed matter only to a machine
+coming back from before them. The hub then deletes them and the old operations, keeping of the
+pruned records only their count and digest, which a push's records must match, and writes the
+`heads` log again in current ids, so that opening takes no pruned record again.
 
-- A machine that is offline but not forgotten holds the trim back until it syncs or its
-  forget-after passes.
-- A machine that comes back from before the trim needs a way back, such as rejoining.
-- The model assumes the hub refuses every dropped head (`HeadOK` in `Supersede.lean`), so the
-  model must be extended to a hub that forgets.
+A hub that has pruned an id can't refuse a push to it by the id. The check of each push's
+records keeps it out instead: a push whose records are the hub's comes from a machine that took
+every record the hub pruned, and a machine never pushes an operation that a record it took
+drops. A buggy machine that did could make the hub take back an operation it pruned, which
+nothing the hub checks would catch: the protocol trusts every machine that can reach the hub,
+as with any history it pushes. `Supersede.lean` proves that, whatever the hub prunes, it never
+takes a head it dropped while it doesn't go back (`dropped_never_head`), as long as no machine
+names such an operation; and that every machine still converges when the hub prunes only
+records every machine has taken (`eventually_convergesS`, `Exec.sexec_allPruned`).
+
+What this means for a machine:
+
+- One that is offline, and that the hive hasn't forgotten, holds pruning back until it syncs.
+- Once the hive forgets a copy, the hub no longer waits for it, so forgetting is no longer soft
+  ([Copies that go away](#copies-that-go-away)) for a copy behind what the hub has pruned: if
+  it comes back, the hub refuses its pushes, whose records aren't its own, and can't send it
+  the records it lacks (`behind_not_carried`, for a copy that hasn't dropped what was pruned). It stops, with the message
+  for a history that no longer matches the hive's, and a new copy takes its work.
+- One that joins after a prune must start from the hub's records where it pruned them, holding
+  their count and digest but none of the pruned ids. The model, whose machines are fixed,
+  doesn't cover joining.
 
 ## Transport
 

@@ -14,16 +14,29 @@ operation the set leaves, the abandoning machine's own work or the fix-up operat
 `SState` adds to a `State` of `Model.lean`:
 
 - `hubD`, `nodeD n`: the hub's and each node's dropped sets;
-- `hubDHist`: ghost, the hub's dropped set as of each accepted head, which a hub that goes
-  back returns to with the head;
-- `sups`, `dmsgs`: the supersedes nodes have sent, and the dropped sets the hub has announced.
+- `hubP`: what of `hubD` the hub has pruned, keeping no id of it, so that it can neither check
+  a head against it nor announce it;
+- `hubDHist`, `hubPHist`: ghost, the hub's dropped and pruned sets as of each accepted head,
+  which a hub that goes back returns to with the head;
+- `sups`, `dmsgs`: the supersedes nodes have sent, each with what the records its node took
+  drop and the head of the push it rides on, and the dropped sets the hub has announced.
 
-`SStep` is any `Step` of the protocol, guarded so that the hub never takes a head it dropped
-and a node never takes a head it dropped (both refuse superseded ids), plus: `sup`, the hub
-taking a supersede with an accepted push; `abandon`, `jj op abandon` on a node, which drops
-operations below its heads but none of them; `sendSup` and `sendD`; and `adopt`, a node taking
-the hub's dropped set once no head of its own is in it. `SRStep` adds the hub going back, to a
-head it accepted and the dropped set it had then (`Regress.lean`).
+`SStep` is any `Step` of the protocol, guarded so that the hub takes no new head it remembers
+dropping and, once it has pruned anything, only one pushed with the hub's records, and a node
+never takes a head it dropped (both refuse superseded ids), plus: `sup`, the hub taking a
+supersede with the push it rides on, to a head the push doesn't drop; `abandon`, `jj op
+abandon` on a node, which drops operations below its heads but none of them; `sendSup`, with a
+head no record its node took drops; `sendD`, of at least what the hub remembers; `adopt`, a
+node taking a dropped set the hub announced once no head of its own is in it; and `prune`, the
+hub deleting the ids of some of what it dropped. `SRStep` adds the hub going back, to a head
+it accepted and the dropped and pruned sets it had then (`Regress.lean`).
+
+A hub that has pruned an operation can't refuse a push to it by its id, so the guard is what it
+can check: the push's records are the hub's, so they drop everything it pruned (here, the
+supersede's records drop `hubP`; `SupersedeExec.lean` has the records themselves), its head
+isn't among the push's pending drops, and the hub doesn't remember dropping it. That no record
+its node took drops the head is up to the node, which never names such an operation: a buggy
+node that did could make the hub take back an operation it pruned.
 
 What holds:
 
@@ -35,10 +48,17 @@ What holds:
   never reappears on that node (`superseded_never_returns`), nor on the hub while it doesn't go
   back (`superseded_never_returns_hub`).
 - The hub's head and every node's heads survive their dropped sets, and every dropped
-  operation is below a head of a node that dropped it (`SInv`).
-- Liveness, once the hub stops going back: the policy with supersedes (`SPStepR`) ends with
-  every node at the hub's head and with the hub's dropped set, which then holds every
-  operation any node dropped (`eventually_convergesS`).
+  operation is below a head of a node that dropped it (`SInv`), whatever the hub prunes. So
+  while the hub doesn't go back, it never takes a head it dropped, though it may have pruned it
+  (`dropped_never_head`); and a node that hasn't dropped an operation the hub pruned has no
+  supersede the hub takes (`behind_not_carried`).
+- Liveness, once the hub stops going back, from a state where every node has dropped what the
+  hub pruned (`AllPruned`): the policy with supersedes (`SPStepR`) ends with every node at the
+  hub's head and with the hub's dropped set, which then holds every operation any node dropped
+  (`eventually_convergesS`), though the hub announces only what it remembers. A step keeps
+  `AllPruned` as long as what it prunes, every node had dropped (`allPruned_step`); the
+  executable hub, which prunes only records every node has taken, keeps it in every state it
+  reaches (`Exec.sexec_allPruned`).
 -/
 import Musubi.Regress
 import Musubi.Contract
@@ -57,10 +77,16 @@ structure SState where
   hubD : OSet
   /-- Ghost: the hub's dropped set as of the head accepted at each sequence number. -/
   hubDHist : Nat → OSet
+  /-- The operations of `hubD` the hub has pruned: it knows none of their ids, so refuses a
+  push of one only by the push's records. -/
+  hubP : OSet
+  /-- Ghost: the hub's pruned set as of the head accepted at each sequence number. -/
+  hubPHist : Nat → OSet
   /-- The operations each node has dropped, by its own `jj op abandon` or the hub's. -/
   nodeD : Nat → OSet
-  /-- Supersedes sent: the node, and its dropped set then. -/
-  sups : Nat → OSet → Prop
+  /-- Supersedes sent: the node, what the records it took drop, what it dropped then, and the
+  head of the push it rides on. -/
+  sups : Nat → OSet → OSet → Nat → Prop
   /-- The hub's dropped set, as announced to a node. -/
   dmsgs : Nat → OSet → Prop
 
@@ -70,27 +96,47 @@ def init : SState where
   s := Musubi.init
   hubD := fun _ => False
   hubDHist := fun _ _ => False
+  hubP := fun _ => False
+  hubPHist := fun _ _ => False
   nodeD := fun _ _ => False
-  sups := fun _ _ => False
+  sups := fun _ _ _ _ => False
   dmsgs := fun _ _ => False
 
-/-- A step of the protocol to `t`, recording the hub's dropped set as of a head it accepts. -/
+/-- A step of the protocol to `t`, recording the hub's dropped and pruned sets as of a head it
+accepts. -/
 def withBase (S : SState) (t : State) : SState :=
   { S with s := t,
            hubDHist := if t.hub.seq = S.s.hub.seq then S.hubDHist
-                       else upd S.hubDHist t.hub.seq S.hubD }
+                       else upd S.hubDHist t.hub.seq S.hubD,
+           hubPHist := if t.hub.seq = S.s.hub.seq then S.hubPHist
+                       else upd S.hubPHist t.hub.seq S.hubP }
 
-/-- The hub goes back to the head it accepted at sequence number `i`, and to the dropped set it
-had then. -/
+/-- The hub goes back to the head it accepted at sequence number `i`, and to the dropped and
+pruned sets it had then. -/
 def regress (S : SState) (i : Nat) : SState :=
-  { S with s := S.s.regress i, hubD := S.hubDHist i }
+  { S with s := S.s.regress i, hubD := S.hubDHist i, hubP := S.hubPHist i }
+
+/-- Node `n` sends a supersede, records dropping `T` and its dropped set, with a push to `h`. -/
+def sendSupS (S : SState) (n h : Nat) (T : OSet) : SState :=
+  { S with sups := fun m T' Δ g =>
+      S.sups m T' Δ g ∨ (m = n ∧ T' = T ∧ Δ = S.nodeD n ∧ g = h) }
 
 end SState
 
-/-- A protocol step from `S` to `t` keeps the hub's head, or moves it to one the hub hasn't
-dropped: the hub refuses a push whose new head it has superseded. -/
+/-- The hub remembers dropping `x`: it dropped it and hasn't pruned it. -/
+def Remembered (S : SState) (x : Nat) : Prop := S.hubD x ∧ ¬ S.hubP x
+
+/-- A push to `h` carries a supersede whose records drop every operation the hub has pruned:
+the hub checks the push's records are its own. -/
+def Carried (S : SState) (h : Nat) : Prop :=
+  ∃ n T Δ, S.sups n T Δ h ∧ ∀ x, S.hubP x → T x
+
+/-- A protocol step from `S` to `t` keeps the hub's head, or moves it as the hub accepts a
+push: to a head it doesn't remember dropping, and, once it has pruned anything, with records
+that are its own. -/
 def HeadOK (S : SState) (t : State) : Prop :=
-  t.hub.head = S.s.hub.head ∨ ¬ S.hubD t.hub.head
+  t.hub.head = S.s.hub.head ∨
+    (¬ Remembered S t.hub.head ∧ (Carried S t.hub.head ∨ ∀ x, ¬ S.hubP x))
 
 /-- A protocol step keeps each node's heads, or gives it only heads it hasn't dropped: a node
 refuses to advance to a head it has superseded, and the operations it writes are new. -/
@@ -101,29 +147,42 @@ inductive SStep (N : Nat) : SState → SState → Prop
   /-- A step of the protocol. -/
   | base (S : SState) (t : State) (hs : Step N S.s t) (hh : HeadOK S t) (hn : HeadsOK S t) :
       SStep N S (S.withBase t)
-  /-- The hub takes a supersede from node `n` with a push it accepts, whose head the
-  supersede leaves. -/
-  | sup (S : SState) (t : State) (n : Nat) (Δ : OSet) (hs : Step N S.s t)
-      (hseq : t.hub.seq = S.s.hub.seq + 1) (hm : S.sups n Δ)
-      (hh : ¬ S.hubD t.hub.head ∧ ¬ Δ t.hub.head) (hn : HeadsOK S t) :
+  /-- The hub takes a supersede from node `n` with the push it rides on, which it accepts:
+  the push's records are the hub's, so they drop all it pruned, and its head is neither one
+  the hub remembers dropping nor one of the push's pending drops. -/
+  | sup (S : SState) (t : State) (n : Nat) (T Δ : OSet) (hs : Step N S.s t)
+      (hseq : t.hub.seq = S.s.hub.seq + 1) (hm : S.sups n T Δ t.hub.head)
+      (hP : ∀ x, S.hubP x → T x) (hh : ¬ Remembered S t.hub.head)
+      (hp : ¬ (Δ t.hub.head ∧ ¬ T t.hub.head)) (hn : HeadsOK S t) :
       SStep N S { S with s := t, hubD := fun x => S.hubD x ∨ Δ x,
-                         hubDHist := upd S.hubDHist t.hub.seq (fun x => S.hubD x ∨ Δ x) }
+                         hubDHist := upd S.hubDHist t.hub.seq (fun x => S.hubD x ∨ Δ x),
+                         hubPHist := upd S.hubPHist t.hub.seq S.hubP }
   /-- `jj op abandon` on node `n` drops operations below its heads, none of the heads (jj
   refuses to abandon the current operation), and not the root. -/
   | abandon (S : SState) (n : Nat) (D : OSet) (hn : n < N)
       (hD : ∀ x, D x → ∃ h, (S.s.node n).heads h ∧ Anc S.s.U.par x h)
       (hheads : ∀ h, (S.s.node n).heads h → ¬ D h) (hroot : ¬ D root) :
       SStep N S { S with nodeD := upd S.nodeD n (fun x => S.nodeD n x ∨ D x) }
-  /-- Node `n` sends a supersede: its dropped set. -/
-  | sendSup (S : SState) (n : Nat) (hn : n < N) :
-      SStep N S { S with sups := fun m Δ => S.sups m Δ ∨ (m = n ∧ Δ = S.nodeD n) }
-  /-- The hub announces its dropped set to node `n`. -/
-  | sendD (S : SState) (n : Nat) :
-      SStep N S { S with dmsgs := fun m Δ => S.dmsgs m Δ ∨ (m = n ∧ Δ = S.hubD) }
+  /-- Node `n` sends a supersede, records dropping `T`, which it dropped, and its dropped set,
+  with a push to `h`, which no record it took drops: it never names one. -/
+  | sendSup (S : SState) (n h : Nat) (T : OSet) (hn : n < N) (hT : ∀ x, T x → S.nodeD n x)
+      (hh : ¬ T h) :
+      SStep N S (S.sendSupS n h T)
+  /-- The hub announces to node `n` what it dropped: at least what it remembers dropping. -/
+  | sendD (S : SState) (n : Nat) (Δ : OSet) (hlo : ∀ x, Remembered S x → Δ x)
+      (hhi : ∀ x, Δ x → S.hubD x) :
+      SStep N S { S with dmsgs := fun m Δ' => S.dmsgs m Δ' ∨ (m = n ∧ Δ' = Δ) }
   /-- Node `n` takes a dropped set the hub announced, once none of its heads is in it. -/
   | adopt (S : SState) (n : Nat) (Δ : OSet) (hn : n < N) (hm : S.dmsgs n Δ)
       (hheads : ∀ h, (S.s.node n).heads h → ¬ Δ h) :
       SStep N S { S with nodeD := upd S.nodeD n (fun x => S.nodeD n x ∨ Δ x) }
+  /-- The hub prunes `F`, of what it dropped: it deletes their ids, and what it dropped as of
+  its head is as it is. Whether every node has dropped `F` matters only for liveness
+  (`AllPruned`). -/
+  | prune (S : SState) (F : OSet) (hF : ∀ x, F x → S.hubD x) :
+      SStep N S { S with hubP := fun x => S.hubP x ∨ F x,
+                         hubPHist := upd S.hubPHist S.s.hub.seq (fun x => S.hubP x ∨ F x),
+                         hubDHist := upd S.hubDHist S.s.hub.seq S.hubD }
 
 /-- A step, or the hub going back. -/
 def SRStep (N : Nat) (S S' : SState) : Prop :=
@@ -148,7 +207,7 @@ theorem SReachable.sr {S : SState} (h : SReachable N S) : SRReachable N S := by
 theorem SStep.base_step {S S' : SState} (h : SStep N S S') : S'.s = S.s ∨ Step N S.s S'.s := by
   cases h with
   | base t hs => exact Or.inr hs
-  | sup t n Δ hs => exact Or.inr hs
+  | sup t n T Δ hs => exact Or.inr hs
   | _ => exact Or.inl rfl
 
 /-- **The protocol is unchanged**: every state the system with supersedes reaches is reachable
@@ -294,8 +353,14 @@ structure SInv (N : Nat) (S : SState) : Prop where
   hist : ∀ i, i ≤ S.s.hub.seq → DOK N S (S.hubDHist i)
   histCur : ∀ x, S.hubDHist S.s.hub.seq x ↔ S.hubD x
   histHead : ∀ i, i ≤ S.s.hub.seq → ¬ S.hubDHist i (S.s.hub.hist i)
+  prunedCur : ∀ x, S.hubPHist S.s.hub.seq x ↔ S.hubP x
+  prunedHist : ∀ i, i ≤ S.s.hub.seq → ∀ x, S.hubPHist i x → S.hubDHist i x
   node : ∀ n, DOK N S (S.nodeD n)
-  sups : ∀ n Δ, S.sups n Δ → DOK N S Δ
+  sups : ∀ n T Δ h, S.sups n T Δ h → DOK N S Δ
+  /-- The records a supersede carries drop no head of the push it rides on. -/
+  supsHead : ∀ n T Δ h, S.sups n T Δ h → ¬ T h
+  /-- What the records a node's supersede carries drop, the node has dropped. -/
+  supsNode : ∀ n T Δ h, S.sups n T Δ h → ∀ x, T x → S.nodeD n x
   dmsgs : ∀ n Δ, S.dmsgs n Δ → DOK N S Δ
   headsOK : ∀ n x, (S.s.node n).heads x → ¬ S.nodeD n x
 
@@ -309,6 +374,30 @@ theorem headOK (hI : SInv N S) : ¬ S.hubD S.s.hub.head := by
   apply hI.histHead S.s.hub.seq (Nat.le_refl _)
   rw [hI.base.histHead]; exact (hI.histCur _).2 h
 
+/-- What the hub has pruned, it dropped. -/
+theorem pruned (hI : SInv N S) {x : Nat} (hx : S.hubP x) : S.hubD x :=
+  (hI.histCur x).1 (hI.prunedHist _ (Nat.le_refl _) x ((hI.prunedCur x).2 hx))
+
+
+/-- A head the hub accepts with a push carrying its records, and doesn't remember dropping, it
+didn't drop: the records drop every operation the hub pruned, and the push's node never names
+an operation they drop. -/
+theorem not_dropped (hI : SInv N S) {h : Nat} (hc : Carried S h) (hr : ¬ Remembered S h) :
+    ¬ S.hubD h := by
+  obtain ⟨n, T, Δ, hm, hP⟩ := hc
+  intro hd
+  by_cases hf : S.hubP h
+  · exact hI.supsHead n T Δ h hm (hP h hf)
+  · exact hr ⟨hd, hf⟩
+
+/-- So a step keeps the hub's head, or moves it to one the hub hasn't dropped. -/
+theorem head_step (hI : SInv N S) {t : State} (hh : HeadOK S t) :
+    t.hub.head = S.s.hub.head ∨ ¬ S.hubD t.hub.head := by
+  refine hh.imp id fun ⟨hr, hc⟩ => ?_
+  rcases hc with hc | hnone
+  · exact hI.not_dropped hc hr
+  · exact fun hd => hr ⟨hd, hnone _⟩
+
 end SInv
 
 theorem sinv_init (N : Nat) : SInv N SState.init where
@@ -317,8 +406,12 @@ theorem sinv_init (N : Nat) : SInv N SState.init where
   hist := fun _ _ _ h => h.elim
   histCur := fun _ => Iff.rfl
   histHead := fun _ _ h => h
+  prunedCur := fun _ => Iff.rfl
+  prunedHist := fun _ _ _ h => h.elim
   node := fun _ _ h => h.elim
-  sups := fun _ _ h => h.elim
+  sups := fun _ _ _ _ h => h.elim
+  supsHead := fun _ _ _ _ h => h.elim
+  supsNode := fun _ _ _ _ h => h.elim
   dmsgs := fun _ _ h => h.elim
   headsOK := fun _ _ _ h => h
 
@@ -332,14 +425,21 @@ theorem DOK.mono {S S' : SState} {Δ : OSet} (h : DOK N S Δ) (hn : S.s.U.next �
   obtain ⟨hr, hlt, m, hm, hDm, hcov⟩ := h x hx
   exact ⟨hr, Nat.lt_of_lt_of_le hlt hn, m, hm, hD m x hDm, hc m x hcov⟩
 
+/-- Part of a good dropped set is good. -/
+theorem DOK.sub {S : SState} {Δ Δ' : OSet} (h : DOK N S Δ) (hs : ∀ x, Δ' x → Δ x) :
+    DOK N S Δ' := fun x hx => h x (hs x hx)
+
 theorem sinv_base {S : SState} (hI : SInv N S) {t : State} (hs : Step N S.s t)
     (hn : HeadsOK S t) {D' : OSet} (hD' : DOK N S D') {H' : Nat → OSet}
     (hH : ∀ i, i ≤ t.hub.seq → DOK N S (H' i) ∧ ¬ H' i (t.hub.hist i))
-    (hcur : ∀ x, H' t.hub.seq x ↔ D' x) :
-    SInv N { S with s := t, hubD := D', hubDHist := H' } := by
+    (hcur : ∀ x, H' t.hub.seq x ↔ D' x) {FH' : Nat → OSet}
+    (hFH : ∀ i, i ≤ t.hub.seq → ∀ x, FH' i x → H' i x)
+    (hfcur : ∀ x, FH' t.hub.seq x ↔ S.hubP x) :
+    SInv N { S with s := t, hubD := D', hubDHist := H', hubPHist := FH' } := by
   have hIt : InvR N t := invR_rstep hI.base (Or.inl hs)
   obtain ⟨hnext, -⟩ := step_par hs
-  have mono : ∀ {Δ}, DOK N S Δ → DOK N { S with s := t, hubD := D', hubDHist := H' } Δ :=
+  have mono : ∀ {Δ}, DOK N S Δ →
+      DOK N { S with s := t, hubD := D', hubDHist := H', hubPHist := FH' } Δ :=
     fun h => h.mono hnext (fun _ _ h => h) (fun _ _ hc => step_heads_cover hI.base hs hc)
   exact
     { base := hIt
@@ -347,8 +447,12 @@ theorem sinv_base {S : SState} (hI : SInv N S) {t : State} (hs : Step N S.s t)
       hist := fun i hi => mono (hH i hi).1
       histCur := hcur
       histHead := fun i hi => (hH i hi).2
+      prunedCur := hfcur
+      prunedHist := hFH
       node := fun n => mono (hI.node n)
-      sups := fun n Δ h => mono (hI.sups n Δ h)
+      sups := fun n T Δ h hm => mono (hI.sups n T Δ h hm)
+      supsHead := hI.supsHead
+      supsNode := hI.supsNode
       dmsgs := fun n Δ h => mono (hI.dmsgs n Δ h)
       headsOK := fun n x hx => (hn n x hx).elim (hI.headsOK n x) id }
 
@@ -371,6 +475,73 @@ theorem hist_upd_ok {S : SState} (hI : SInv N S) {t : State} (hs : Step N S.s t)
     have hle : i ≤ S.s.hub.seq := by omega
     rw [hhist i hle]; exact ⟨hI.hist i hle, hI.histHead i hle⟩
 
+/-- The obligations of `sinv_base` for the pruned sets, for a step that accepts a head,
+recording `D'`, which holds what the hub has pruned, as the hub's dropped set as of it. -/
+theorem phist_upd_ok {S : SState} (hI : SInv N S) {t : State}
+    (hseq : t.hub.seq = S.s.hub.seq + 1) {D' : OSet} (hFD : ∀ x, S.hubP x → D' x) :
+    ∀ i, i ≤ t.hub.seq →
+      ∀ x, upd S.hubPHist t.hub.seq S.hubP i x → upd S.hubDHist t.hub.seq D' i x := by
+  intro i hi
+  by_cases hit : i = t.hub.seq
+  · subst hit; simp only [upd_same]; exact hFD
+  · simp only [upd_ne _ _ hit]
+    exact hI.prunedHist i (by omega)
+
+/-- A node's dropped set grows: every good dropped set stays good. -/
+theorem sinv_nodeD {S : SState} (hI : SInv N S) {n : Nat} {D : OSet}
+    (hgood : ∀ x, D x → S.nodeD n x ∨ (x ≠ root ∧ x < S.s.U.next ∧
+      ∃ g, (S.s.node n).heads g ∧ Anc S.s.U.par x g) ∨ ∃ Δ, S.dmsgs n Δ ∧ Δ x)
+    (hn : n < N) (hheads : ∀ h, (S.s.node n).heads h → ¬ D h) :
+    SInv N { S with nodeD := upd S.nodeD n (fun x => S.nodeD n x ∨ D x) } := by
+  have hD' : ∀ m x, S.nodeD m x → upd S.nodeD n (fun x => S.nodeD n x ∨ D x) m x := by
+    intro m x hx
+    by_cases hmn : m = n
+    · subst hmn; rw [upd_same]; exact Or.inl hx
+    · rw [upd_ne _ _ hmn]; exact hx
+  have mono : ∀ {Δ}, DOK N S Δ →
+      DOK N { S with nodeD := upd S.nodeD n (fun x => S.nodeD n x ∨ D x) } Δ :=
+    fun h => h.mono (Nat.le_refl _) hD' (fun _ _ hc => hc)
+  refine
+    { base := hI.base
+      hub := mono hI.hub
+      hist := fun i hi => mono (hI.hist i hi)
+      histCur := hI.histCur
+      histHead := hI.histHead
+      prunedCur := hI.prunedCur
+      prunedHist := hI.prunedHist
+      node := ?_
+      sups := fun m T Δ h hm => mono (hI.sups m T Δ h hm)
+      supsHead := hI.supsHead
+      supsNode := fun m T Δ h hm x hx => hD' m x (hI.supsNode m T Δ h hm x hx)
+      dmsgs := fun m Δ h => mono (hI.dmsgs m Δ h)
+      headsOK := ?_ }
+  · intro m x hx
+    by_cases hmn : m = n
+    · subst hmn
+      have : S.nodeD m x ∨ D x := by
+        have := hx; simp only [upd_same] at this; exact this
+      rcases this with h | h
+      · exact mono (hI.node m) x h
+      · rcases hgood x h with h' | ⟨hr, hlt, g, hg, hA⟩ | ⟨Δ, hm, hΔ⟩
+        · exact mono (hI.node m) x h'
+        · refine ⟨hr, hlt, m, hn, ?_, g, hg, hA⟩
+          show upd S.nodeD m _ m x; rw [upd_same]; exact Or.inr h
+        · exact mono (hI.dmsgs m Δ hm) x hΔ
+    · have : upd S.nodeD n (fun x => S.nodeD n x ∨ D x) m x := hx
+      rw [upd_ne _ _ hmn] at this
+      exact mono (hI.node m) x this
+  · intro m x hx hd
+    by_cases hmn : m = n
+    · subst hmn
+      have : S.nodeD m x ∨ D x := by
+        have := hd; simp only [upd_same] at this; exact this
+      rcases this with h | h
+      · exact hI.headsOK m x hx h
+      · exact hheads x hx h
+    · have : upd S.nodeD n (fun x => S.nodeD n x ∨ D x) m x := hd
+      rw [upd_ne _ _ hmn] at this
+      exact hI.headsOK m x hx this
+
 theorem sinv_step {S S' : SState} (hI : SInv N S) (h : SStep N S S') : SInv N S' := by
   cases h with
   | base t hs hh hn =>
@@ -378,129 +549,76 @@ theorem sinv_step {S S' : SState} (hI : SInv N S) (h : SStep N S S') : SInv N S'
     rcases step_hub hs with ⟨hq, hhd, hhist⟩ | ⟨hq, -⟩
     · simp only [hq, ↓reduceIte]
       refine sinv_base hI hs hn hI.hub (fun i hi => ?_) (by rw [hq]; exact hI.histCur)
-      rw [hq] at hi; rw [hhist]; exact ⟨hI.hist i hi, hI.histHead i hi⟩
+        (fun i hi => ?_) (by rw [hq]; exact hI.prunedCur)
+      · rw [hq] at hi; rw [hhist]; exact ⟨hI.hist i hi, hI.histHead i hi⟩
+      · rw [hq] at hi; exact hI.prunedHist i hi
     · have hq' : ¬ t.hub.seq = S.s.hub.seq := by omega
       simp only [hq', ↓reduceIte]
       refine sinv_base hI hs hn hI.hub (hist_upd_ok hI hs hq hI.hub ?_) (by simp)
-      rcases hh with e | e
+        (phist_upd_ok hI hq (fun x hx => hI.pruned hx)) (by simp)
+      rcases hI.head_step hh with e | e
       · rw [e]; exact hI.headOK
       · exact e
-  | sup t n Δ hs hseq hm hh hn =>
+  | sup t n T Δ hs hseq hm hP hh hp hn =>
     have hD' : DOK N S (fun x => S.hubD x ∨ Δ x) := by
       intro x hx
       rcases hx with hx | hx
       · exact hI.hub x hx
-      · exact hI.sups n Δ hm x hx
+      · exact hI.sups n T Δ _ hm x hx
+    have hnd : ¬ S.hubD t.hub.head := hI.not_dropped ⟨n, T, Δ, hm, hP⟩ hh
     have hD'h : ¬ (S.hubD t.hub.head ∨ Δ t.hub.head) := by
       rintro (h | h)
-      · exact hh.1 h
-      · exact hh.2 h
+      · exact hnd h
+      · exact hI.supsHead n T Δ _ hm (Classical.byContradiction fun hT => hp ⟨h, hT⟩)
     exact sinv_base hI hs hn hD' (hist_upd_ok hI hs hseq hD' hD'h) (by simp)
+      (phist_upd_ok hI hseq (fun x hx => Or.inl (hI.pruned hx))) (by simp)
   | abandon n D hn hD hheads hroot =>
-    have hD' : ∀ m x, S.nodeD m x →
-        upd S.nodeD n (fun x => S.nodeD n x ∨ D x) m x := by
-      intro m x hx
-      by_cases hmn : m = n
-      · subst hmn; rw [upd_same]; exact Or.inl hx
-      · rw [upd_ne _ _ hmn]; exact hx
-    have mono : ∀ {Δ}, DOK N S Δ →
-        DOK N { S with nodeD := upd S.nodeD n (fun x => S.nodeD n x ∨ D x) } Δ :=
-      fun h => h.mono (Nat.le_refl _) hD' (fun _ _ hc => hc)
-    refine
-      { base := hI.base
-        hub := mono hI.hub
-        hist := fun i hi => mono (hI.hist i hi)
-        histCur := hI.histCur
-        histHead := hI.histHead
-        node := ?_
-        sups := fun m Δ h => mono (hI.sups m Δ h)
-        dmsgs := fun m Δ h => mono (hI.dmsgs m Δ h)
-        headsOK := ?_ }
-    · intro m
-      by_cases hmn : m = n
-      · subst hmn
-        intro x hx
-        show x ≠ root ∧ x < S.s.U.next ∧ _
-        change upd S.nodeD m (fun x => S.nodeD m x ∨ D x) m x at hx
-        rw [upd_same] at hx
-        rcases hx with hx | hx
-        · exact mono (hI.node m) x hx
-        · obtain ⟨g, hg, hA⟩ := hD x hx
-          refine ⟨fun e => hroot (e ▸ hx), ?_, m, hn, ?_, g, hg, hA⟩
-          · exact Nat.lt_of_le_of_lt (hA.le hI.base.parLt) (hI.base.headsLt hg)
-          · show upd S.nodeD m _ m x; rw [upd_same]; exact Or.inr hx
-      · intro x hx
-        have hx' : S.nodeD m x := by
-          have : upd S.nodeD n (fun x => S.nodeD n x ∨ D x) m x := hx
-          rwa [upd_ne _ _ hmn] at this
-        exact mono (hI.node m) x hx'
-    · intro m x hx hd
-      by_cases hmn : m = n
-      · subst hmn
-        have : S.nodeD m x ∨ D x := by
-          have := hd; simp only [upd_same] at this; exact this
-        rcases this with h | h
-        · exact hI.headsOK m x hx h
-        · exact hheads x hx h
-      · have : upd S.nodeD n (fun x => S.nodeD n x ∨ D x) m x := hd
-        rw [upd_ne _ _ hmn] at this
-        exact hI.headsOK m x hx this
-  | sendSup n hn =>
+    refine sinv_nodeD hI (fun x hx => Or.inr (Or.inl ?_)) hn hheads
+    obtain ⟨g, hg, hA⟩ := hD x hx
+    exact ⟨fun e => hroot (e ▸ hx),
+      Nat.lt_of_le_of_lt (hA.le hI.base.parLt) (hI.base.headsLt hg), g, hg, hA⟩
+  | sendSup n h T hn hT hh =>
     exact
       { hI with
         sups := by
-          rintro m Δ (h | ⟨-, rfl⟩)
-          · exact hI.sups m Δ h
-          · exact hI.node n }
-  | sendD n =>
+          rintro m T' Δ g (hm | ⟨-, -, rfl, -⟩)
+          · exact hI.sups m T' Δ g hm
+          · exact hI.node n
+        supsHead := by
+          rintro m T' Δ g (hm | ⟨-, rfl, -, rfl⟩)
+          · exact hI.supsHead m T' Δ g hm
+          · exact hh
+        supsNode := by
+          rintro m T' Δ g (hm | ⟨rfl, rfl, -, -⟩)
+          · exact hI.supsNode m T' Δ g hm
+          · exact hT }
+  | sendD n Δ hlo hhi =>
     exact
       { hI with
         dmsgs := by
-          rintro m Δ (h | ⟨-, rfl⟩)
-          · exact hI.dmsgs m Δ h
-          · exact hI.hub }
+          rintro m Δ' (h | ⟨-, rfl⟩)
+          · exact hI.dmsgs m Δ' h
+          · exact hI.hub.sub hhi }
   | adopt n Δ hn hm hheads =>
-    have hD' : ∀ m x, S.nodeD m x →
-        upd S.nodeD n (fun x => S.nodeD n x ∨ Δ x) m x := by
-      intro m x hx
-      by_cases hmn : m = n
-      · subst hmn; rw [upd_same]; exact Or.inl hx
-      · rw [upd_ne _ _ hmn]; exact hx
-    have mono : ∀ {Δ'}, DOK N S Δ' →
-        DOK N { S with nodeD := upd S.nodeD n (fun x => S.nodeD n x ∨ Δ x) } Δ' :=
-      fun h => h.mono (Nat.le_refl _) hD' (fun _ _ hc => hc)
+    exact sinv_nodeD hI (fun x hx => Or.inr (Or.inr ⟨Δ, hm, hx⟩)) hn hheads
+  | prune F hF =>
     refine
-      { base := hI.base
-        hub := mono hI.hub
-        hist := fun i hi => mono (hI.hist i hi)
-        histCur := hI.histCur
-        histHead := hI.histHead
-        node := ?_
-        sups := fun m Δ h => mono (hI.sups m Δ h)
-        dmsgs := fun m Δ h => mono (hI.dmsgs m Δ h)
-        headsOK := ?_ }
-    · intro m x hx
-      by_cases hmn : m = n
-      · subst hmn
-        have : S.nodeD m x ∨ Δ x := by
-          have := hx; simp only [upd_same] at this; exact this
-        rcases this with h | h
-        · exact mono (hI.node m) x h
-        · exact mono (hI.dmsgs m Δ hm) x h
-      · have : upd S.nodeD n (fun x => S.nodeD n x ∨ Δ x) m x := hx
-        rw [upd_ne _ _ hmn] at this
-        exact mono (hI.node m) x this
-    · intro m x hx hd
-      by_cases hmn : m = n
-      · subst hmn
-        have : S.nodeD m x ∨ Δ x := by
-          have := hd; simp only [upd_same] at this; exact this
-        rcases this with h | h
-        · exact hI.headsOK m x hx h
-        · exact hheads x hx h
-      · have : upd S.nodeD n (fun x => S.nodeD n x ∨ Δ x) m x := hd
-        rw [upd_ne _ _ hmn] at this
-        exact hI.headsOK m x hx this
+      { hI with
+        hist := fun i hi => ?_
+        histCur := fun x => by simp only [upd_same]
+        histHead := fun i hi => ?_
+        prunedCur := fun x => by simp only [upd_same]
+        prunedHist := fun i hi x hx => ?_ }
+    · by_cases hit : i = S.s.hub.seq
+      · subst hit; simp only [upd_same]; exact hI.hub
+      · simp only [upd_ne _ _ hit]; exact hI.hist i hi
+    · by_cases hit : i = S.s.hub.seq
+      · subst hit; simp only [upd_same]; rw [hI.base.histHead]; exact hI.headOK
+      · simp only [upd_ne _ _ hit]; exact hI.histHead i hi
+    · by_cases hit : i = S.s.hub.seq
+      · subst hit; simp only [upd_same] at hx ⊢
+        exact hx.elim (fun h => hI.pruned h) (hF x)
+      · simp only [upd_ne _ _ hit] at hx ⊢; exact hI.prunedHist i hi x hx
 
 theorem sinv_regress {S : SState} (hI : SInv N S) {i : Nat} (hi : i ≤ S.s.hub.seq) :
     SInv N (S.regress i) := by
@@ -512,8 +630,12 @@ theorem sinv_regress {S : SState} (hI : SInv N S) {i : Nat} (hi : i ≤ S.s.hub.
       hist := fun j hj => mono (hI.hist j (Nat.le_trans hj hi))
       histCur := fun _ => Iff.rfl
       histHead := fun j hj => hI.histHead j (Nat.le_trans hj hi)
+      prunedCur := fun _ => Iff.rfl
+      prunedHist := fun j hj => hI.prunedHist j (Nat.le_trans hj hi)
       node := fun n => mono (hI.node n)
-      sups := fun n Δ h => mono (hI.sups n Δ h)
+      sups := fun n T Δ h hm => mono (hI.sups n T Δ h hm)
+      supsHead := hI.supsHead
+      supsNode := hI.supsNode
       dmsgs := fun n Δ h => mono (hI.dmsgs n Δ h)
       headsOK := hI.headsOK }
 
@@ -605,6 +727,15 @@ theorem SRSteps.par {S T : SState} (h : SRSteps N S T) :
     obtain ⟨hn', hp'⟩ := hstep hs
     exact ⟨Nat.le_trans hn hn', fun y hy => (hp' y (Nat.lt_of_lt_of_le hy hn)).trans (hp y hy)⟩
 
+/-- **A hub that prunes never takes a head it dropped**: once the hub has dropped `x`, it is
+never its head again while the hub doesn't go back, though it may prune `x` and so no longer
+know its id. A push to `x` carries records, which the hub checks are its own and so drop all
+it pruned, and its node never names an operation they drop. -/
+theorem dropped_never_head {S T : SState} (hS : SReachable N S) (hST : SSteps N S T) {x : Nat}
+    (hx : S.hubD x) : T.s.hub.head ≠ x := by
+  intro e
+  exact (sinv_reachable (hST.sr.reachable hS.sr)).headOK (e ▸ hST.hubD hx)
+
 /-! ## Superseded ids never come back -/
 
 open Classical in
@@ -668,27 +799,54 @@ theorem superseded_never_returns_hub {S T T' : SState} (hS : SReachable N S)
 
 /-! ## Liveness once the hub stops going back -/
 
+/-- Every node has dropped what the hub has pruned: as when the hub waits for every node. -/
+def AllPruned (N : Nat) (S : SState) : Prop := ∀ n, n < N → ∀ x, S.hubP x → S.nodeD n x
+
+theorem allPruned_init (N : Nat) : AllPruned N SState.init := fun _ _ _ h => h.elim
+
+/-- **A step keeps every node with what the hub pruned**, as long as what it prunes, every node
+had dropped. -/
+theorem allPruned_step {S S' : SState} (hA : AllPruned N S) (h : SStep N S S')
+    (hp : ∀ x, S'.hubP x → ¬ S.hubP x → ∀ n, n < N → S.nodeD n x) : AllPruned N S' := by
+  intro n hn x hx
+  by_cases hs : S.hubP x
+  · exact nodeD_grows (Or.inl h) (hA n hn x hs)
+  · exact nodeD_grows (Or.inl h) (hp x hx hs n hn)
+
+/-- **A node that hasn't dropped an operation the hub pruned has no supersede the hub takes**:
+none it has sent carries records dropping all the hub pruned. The implementation checks the
+records themselves, so it refuses too a node that dropped the operation but never took the
+record. -/
+theorem behind_not_carried {S : SState} (hI : SInv N S) {n x : Nat} (hx : S.hubP x)
+    (hnx : ¬ S.nodeD n x) {T Δ : OSet} {h : Nat} (hm : S.sups n T Δ h) :
+    ¬ ∀ y, S.hubP y → T y :=
+  fun hT => hnx (hI.supsNode n T Δ h hm x (hT x hx))
+
 namespace SState
 
-/-- Node `n` takes the hub's dropped set, which the hub announces to it. -/
+/-- Node `n` takes what the hub remembers dropping, which the hub announces to it: what it has
+pruned, the node dropped already, where every node has (`AllPruned`). -/
 def adoptHub (S : SState) (n : Nat) : SState :=
-  { S with dmsgs := fun m Δ => S.dmsgs m Δ ∨ (m = n ∧ Δ = S.hubD),
-           nodeD := upd S.nodeD n (fun x => S.nodeD n x ∨ S.hubD x) }
+  { S with dmsgs := fun m Δ => S.dmsgs m Δ ∨ (m = n ∧ Δ = Remembered S),
+           nodeD := upd S.nodeD n (fun x => S.nodeD n x ∨ Remembered S x) }
 
-/-- Node `n` sends its dropped set with a push the hub accepts, reaching `t`. -/
-def supWith (S : SState) (n : Nat) (t : State) : SState :=
+/-- Node `n` sends its dropped set with a push to `h` the hub accepts, reaching `t`. -/
+def supWith (S : SState) (n h : Nat) (t : State) : SState :=
   { S with s := t,
-           sups := fun m Δ => S.sups m Δ ∨ (m = n ∧ Δ = S.nodeD n),
+           sups := fun m T Δ g =>
+             S.sups m T Δ g ∨ (m = n ∧ T = S.nodeD n ∧ Δ = S.nodeD n ∧ g = h),
            hubD := fun x => S.hubD x ∨ S.nodeD n x,
-           hubDHist := upd S.hubDHist (S.s.hub.seq + 1) (fun x => S.hubD x ∨ S.nodeD n x) }
+           hubDHist := upd S.hubDHist (S.s.hub.seq + 1) (fun x => S.hubD x ∨ S.nodeD n x),
+           hubPHist := upd S.hubPHist (S.s.hub.seq + 1) S.hubP }
 
 end SState
 
 /-- The policy with supersedes. The steps of `PStepR`, where a node advances only to a head it
-hasn't dropped, and pushes, to be accepted, only with the hub's dropped set; and three more. A
-node takes the hub's dropped set once none of its heads is in it (`adopt`). A node that has
-dropped operations the hub hasn't sends its dropped set with its push (`supPush`), or first
-writes the fix-up operation on its head and pushes that (`supFix`), as musubi does. -/
+hasn't dropped, and pushes, to be accepted, only with the hub's dropped set, which it sends
+with the push; and three more. A node takes what the hub remembers dropping once none of its
+heads is in it (`adopt`). A node that has dropped operations the hub hasn't sends its dropped
+set with its push (`supPush`), or first writes the fix-up operation on its head and pushes that
+(`supFix`), as musubi does. -/
 inductive SPStepR (N : Nat) : SState → SState → Prop
   | learn (S : SState) (n : Nat) (hn : n < N)
       (hs : (S.s.node n).known ≠ (S.s.hub.seq, S.s.hub.head)) :
@@ -708,7 +866,7 @@ inductive SPStepR (N : Nat) : SState → SState → Prop
       (hh : ∀ y, (S.s.node n).heads y ↔ y = h) (hne : h ≠ (S.s.node n).known.2)
       (hk : Anc S.s.U.par (S.s.node n).known.2 h) (hacc : S.s.hub.head = (S.s.node n).known.2)
       (hD : ∀ x, S.nodeD n x ↔ S.hubD x) :
-      SPStepR N S (S.withBase (S.s.pPushAccept n h))
+      SPStepR N S ((S.sendSupS n h (S.nodeD n)).withBase (S.s.pPushAccept n h))
   | pushIdem (S : SState) (n h : Nat) (hn : n < N)
       (hh : ∀ y, (S.s.node n).heads y ↔ y = h) (hne : h ≠ (S.s.node n).known.2)
       (hk : Anc S.s.U.par (S.s.node n).known.2 h) (hidem : S.s.hub.head = h) :
@@ -725,13 +883,13 @@ inductive SPStepR (N : Nat) : SState → SState → Prop
       (hh : ∀ y, (S.s.node n).heads y ↔ y = h) (hne : h ≠ (S.s.node n).known.2)
       (hk : Anc S.s.U.par (S.s.node n).known.2 h) (hacc : S.s.hub.head = (S.s.node n).known.2)
       (hsub : ∀ x, S.hubD x → S.nodeD n x) (hpend : ∃ x, S.nodeD n x ∧ ¬ S.hubD x) :
-      SPStepR N S (S.supWith n (S.s.pPushAccept n h))
+      SPStepR N S (S.supWith n h (S.s.pPushAccept n h))
   | supFix (S : SState) (n g : Nat) (hn : n < N)
       (hh : ∀ y, (S.s.node n).heads y ↔ y = g)
       (hk : (S.s.node n).known = (S.s.hub.seq, S.s.hub.head))
       (hkg : Anc S.s.U.par S.s.hub.head g)
       (hsub : ∀ x, S.hubD x → S.nodeD n x) (hpend : ∃ x, S.nodeD n x ∧ ¬ S.hubD x) :
-      SPStepR N S (S.supWith n ((S.s.userOp n g []).pPushAccept n S.s.U.next))
+      SPStepR N S (S.supWith n S.s.U.next ((S.s.userOp n g []).pPushAccept n S.s.U.next))
 
 inductive SPStepsR (N : Nat) : SState → SState → Prop
   | refl (S : SState) : SPStepsR N S S
@@ -813,11 +971,12 @@ theorem learn_srun {S T : SState} (h : SRSteps N S T) {n : Nat} {k : HeadKind} {
 theorem hist_cur_eq {S : SState} (hI : SInv N S) : S.hubDHist S.s.hub.seq = S.hubD :=
   funext fun x => propext (hI.histCur x)
 
-/-- An upload, a push the hub accepts, carrying `Δ` or not, and learning the head. -/
+/-- An upload, a push the hub accepts, carrying records that drop what it pruned, and learning
+the head. -/
 theorem pushAccept_srun {S : SState} (hS : SRReachable N S) {n hd : Nat} (hn : n < N)
     (hh : ∀ y, (S.s.node n).heads y ↔ y = hd) (hne : hd ≠ (S.s.node n).known.2)
     (hk : Anc S.s.U.par (S.s.node n).known.2 hd) (hacc : S.s.hub.head = (S.s.node n).known.2)
-    (hdh : ¬ S.hubD hd) :
+    (hc : Carried S hd) (hdh : ¬ Remembered S hd) :
     SRSteps N S (S.withBase (S.s.pPushAccept n hd)) := by
   have hI := sinv_reachable hS
   have hIb := hI.base
@@ -825,8 +984,8 @@ theorem pushAccept_srun {S : SState} (hS : SRReachable N S) {n hd : Nat} (hn : n
   have hcas := SyncStep.casAccept (N := N) (S.s.pUpload n hd) n (S.s.node n).known.2 hd
     (Or.inr rfl) (fun e => hne ((show S.s.hub.head = hd from e).symm.trans hacc)) hacc hk
     (pUpload_closed_of hIb.hubClosed (by rw [hacc]; exact Anc.refl))
-  have st := SStep.base { S with s := S.s.pUpload n hd } _ (Or.inr hcas) (Or.inr hdh)
-    (fun _ _ hx => Or.inl hx)
+  have st := SStep.base { S with s := S.s.pUpload n hd } _ (Or.inr hcas)
+    (Or.inr ⟨hdh, Or.inl hc⟩) (fun _ _ hx => Or.inl hx)
   simp only [SState.withBase, State.hubAccept, State.notifyAll, State.send, pUpload_seq,
     Nat.succ_ne_self, ↓reduceIte] at st
   have r' := r.tail (Or.inl st)
@@ -836,13 +995,15 @@ theorem pushAccept_srun {S : SState} (hS : SRReachable N S) {n hd : Nat} (hn : n
     simp [State.pPushAccept, State.learn, State.notifyAll, State.send, State.hubAccept]
   have e : S.withBase (S.s.pPushAccept n hd) =
       { S with s := S.s.pPushAccept n hd,
-               hubDHist := upd S.hubDHist (S.s.hub.seq + 1) S.hubD } := by
+               hubDHist := upd S.hubDHist (S.s.hub.seq + 1) S.hubD,
+               hubPHist := upd S.hubPHist (S.s.hub.seq + 1) S.hubP } := by
     simp only [SState.withBase, hq, ↓reduceIte]; rfl
   rw [e]; exact r''
 
-/-- Every policy step is a run of the system. -/
-theorem spstepR_reachable {S S' : SState} (hS : SRReachable N S) (hp : SPStepR N S S') :
-    SRReachable N S' := by
+/-- Every policy step is a run of the system, from a state where every node has what the hub
+pruned. -/
+theorem spstepR_reachable {S S' : SState} (hS : SRReachable N S) (hA : AllPruned N S)
+    (hp : SPStepR N S S') : SRReachable N S' := by
   have hI := sinv_reachable hS
   have hIb := hI.base
   -- a step that keeps the hub's sequence number leaves the dropped-set history as it was
@@ -880,8 +1041,11 @@ theorem spstepR_reachable {S S' : SState} (hS : SRReachable N S) (hp : SPStepR N
       exact Or.inr (fun hD => Nat.lt_irrefl _ (hy' ▸ (hI.node m y hD).2.1))
     · exact Or.inl (by simpa [State.mergeOp, State.createOp, hmn] using hy)
   | pushAccept n hd hn hh hne hk hacc hD =>
-    have hdh : ¬ S.hubD hd := fun h => hI.headsOK n hd ((hh hd).2 rfl) ((hD hd).2 h)
-    exact (pushAccept_srun hS hn hh hne hk hacc hdh).reachable hS
+    have hdn : ¬ S.nodeD n hd := hI.headsOK n hd ((hh hd).2 rfl)
+    have S1 := hS.step (Or.inl (SStep.sendSup S n hd (S.nodeD n) hn (fun _ h => h) hdn))
+    exact (pushAccept_srun S1 hn hh hne hk hacc
+      ⟨n, S.nodeD n, S.nodeD n, Or.inr ⟨rfl, rfl, rfl, rfl⟩, hA n hn⟩
+      (fun h => hdn ((hD hd).2 h.1))).reachable S1
   | pushIdem n hd hn hh hne hk hidem =>
     rw [keep (t := S.s.pPushIdem n hd) rfl]
     have r := pUpload_srun (S := S) hn hIb (hIb.headsLocal n hd ((hh hd).2 rfl))
@@ -895,27 +1059,25 @@ theorem spstepR_reachable {S S' : SState} (hS : SRReachable N S) (hp : SPStepR N
       hrej' (fun ⟨e, _, _⟩ => hrej e)) rfl rfl (fun _ => rfl)
     exact (learn_srun r' (k := .rejected) hn (Or.inr rfl)).reachable hS
   | adopt n hn hlag hheads =>
-    have r1 := hS.step (Or.inl (SStep.sendD S n))
-    exact r1.step (Or.inl (SStep.adopt _ n S.hubD hn (Or.inr ⟨rfl, rfl⟩) hheads))
+    have r1 := hS.step (Or.inl (SStep.sendD S n (Remembered S) (fun _ h => h) (fun _ h => h.1)))
+    exact r1.step (Or.inl (SStep.adopt _ n (Remembered S) hn (Or.inr ⟨rfl, rfl⟩)
+      (fun g hg hr => hheads g hg hr.1)))
   | supPush n hd hn hh hne hk hacc hsub hpend =>
-    have S1 := hS.step (Or.inl (SStep.sendSup S n hn))
-    have r := pUpload_srun
-      (S := { S with sups := fun m Δ => S.sups m Δ ∨ (m = n ∧ Δ = S.nodeD n) }) hn hIb
-      (hIb.headsLocal n hd ((hh hd).2 rfl))
     have hdn : ¬ S.nodeD n hd := hI.headsOK n hd ((hh hd).2 rfl)
+    have S1 := hS.step (Or.inl (SStep.sendSup S n hd (S.nodeD n) hn (fun _ h => h) hdn))
+    have r := pUpload_srun (S := S.sendSupS n hd (S.nodeD n)) hn hIb
+      (hIb.headsLocal n hd ((hh hd).2 rfl))
     have hcas := SyncStep.casAccept (N := N) (S.s.pUpload n hd) n (S.s.node n).known.2 hd
       (Or.inr rfl) (fun e => hne ((show S.s.hub.head = hd from e).symm.trans hacc)) hacc hk
       (pUpload_closed_of hIb.hubClosed (by rw [hacc]; exact Anc.refl))
-    have st := SStep.sup
-      { S with sups := fun m Δ => S.sups m Δ ∨ (m = n ∧ Δ = S.nodeD n),
-               s := S.s.pUpload n hd } _ n (S.nodeD n) (Or.inr hcas) rfl
-      (Or.inr ⟨rfl, rfl⟩) ⟨fun h => hdn (hsub hd h), hdn⟩ (fun _ _ hx => Or.inl hx)
+    have st := SStep.sup { S.sendSupS n hd (S.nodeD n) with s := S.s.pUpload n hd } _ n
+      (S.nodeD n) (S.nodeD n) (Or.inr hcas) rfl (Or.inr ⟨rfl, rfl, rfl, rfl⟩) (hA n hn)
+      (fun h => hdn (hsub hd h.1)) (fun h => h.2 h.1) (fun _ _ hx => Or.inl hx)
     have r' := r.tail (Or.inl st)
     have r'' := learn_srun r' (k := .accepted) (sq := S.s.hub.seq + 1) (hd := hd) hn
       (Or.inl (Or.inr rfl))
     exact r''.reachable S1
   | supFix n g hn hh hk hkg hsub hpend =>
-    have S1 := hS.step (Or.inl (SStep.sendSup S n hn))
     have hg : (S.s.node n).heads g := (hh g).2 rfl
     have hhl : (S.s.node n).lops g := hIb.headsLocal n _ hg
     -- the fix-up operation, on the node's head
@@ -932,8 +1094,9 @@ theorem spstepR_reachable {S S' : SState} (hS : SRReachable N S) (hp : SPStepR N
         rcases hz with ⟨hz1, hzne⟩ | hz
         · exact absurd ((hh z).1 hz1) hzne
         · exact hz.symm
-    have st0 := SStep.base { S with sups := fun m Δ => S.sups m Δ ∨ (m = n ∧ Δ = S.nodeD n) }
-      _ (Or.inl hu) (Or.inl rfl) (by
+    have hfD : ∀ D : OSet, DOK N S D → ¬ D S.s.U.next := fun D hD h =>
+      Nat.lt_irrefl _ (hD _ h).2.1
+    have st0 := SStep.base S _ (Or.inl hu) (Or.inl rfl) (by
         intro m y hy
         by_cases hmn : m = n
         · subst hmn
@@ -943,15 +1106,18 @@ theorem spstepR_reachable {S S' : SState} (hS : SRReachable N S) (hp : SPStepR N
         · left; simpa [State.userOp, State.createOp, hmn] using hy)
     simp only [SState.withBase, show (S.s.userOp n g []).hub.seq = S.s.hub.seq from rfl,
       ↓reduceIte] at st0
+    -- then the supersede, with the push to it
+    have S1 := hS.step (Or.inl st0)
+    have S2 := S1.step (Or.inl (SStep.sendSup { S with s := S.s.userOp n g [] } n S.s.U.next
+      (S.nodeD n) hn (fun _ h => h) (hfD _ (hI.node n))))
     have hIu : InvR N (S.s.userOp n g []) := invR_rstep hIb (Or.inl (Or.inl hu))
     have huknown : ((S.s.userOp n g []).node n).known =
         (S.s.hub.seq, S.s.hub.head) := by
       simp only [State.userOp, createOp_known]; exact hk
     have hul : ((S.s.userOp n g []).node n).lops S.s.U.next := by
       simp [State.userOp, State.createOp]
-    have r := (SRSteps.single (Or.inl st0)).trans (pUpload_srun
-      (S := { S with sups := fun m Δ => S.sups m Δ ∨ (m = n ∧ Δ = S.nodeD n),
-                     s := S.s.userOp n g [] }) hn hIu hul)
+    have r := pUpload_srun
+      (S := ({ S with s := S.s.userOp n g [] }).sendSupS n S.s.U.next (S.nodeD n)) hn hIu hul
     have hfk : Anc (S.s.userOp n g []).U.par
         ((S.s.userOp n g []).node n).known.2 S.s.U.next := by
       rw [huknown]
@@ -968,23 +1134,35 @@ theorem spstepR_reachable {S S' : SState} (hS : SRReachable N S) (hp : SPStepR N
       (fun e => hfne ((show (S.s.userOp n g []).hub.head = S.s.U.next from e).symm.trans
         huhead)) huhead hfk
       (pUpload_closed_of hIu.hubClosed (by rw [huhead]; exact Anc.refl))
-    have hfD : ∀ D : OSet, DOK N S D → ¬ D S.s.U.next := fun D hD h =>
-      Nat.lt_irrefl _ (hD _ h).2.1
-    have st := SStep.sup
-      { S with sups := fun m Δ => S.sups m Δ ∨ (m = n ∧ Δ = S.nodeD n),
-               s := (S.s.userOp n g []).pUpload n S.s.U.next } _ n (S.nodeD n)
-      (Or.inr hcas) rfl (Or.inr ⟨rfl, rfl⟩) ⟨hfD _ hI.hub, hfD _ (hI.node n)⟩
+    let S2' := ({ S with s := S.s.userOp n g [] }).sendSupS n S.s.U.next (S.nodeD n)
+    have hm : S2'.sups n (S.nodeD n) (S.nodeD n) S.s.U.next := Or.inr ⟨rfl, rfl, rfl, rfl⟩
+    have hr : ¬ Remembered S2' S.s.U.next := fun h => hfD _ hI.hub h.1
+    have st := SStep.sup { S2' with s := (S.s.userOp n g []).pUpload n S.s.U.next } _ n
+      (S.nodeD n) (S.nodeD n) (Or.inr hcas) rfl hm (hA n hn) hr (fun h => h.2 h.1)
       (fun _ _ hx => Or.inl hx)
     have r' := r.tail (Or.inl st)
     have r'' := learn_srun r' (k := .accepted) (sq := S.s.hub.seq + 1) (hd := S.s.U.next) hn
       (Or.inl (Or.inr rfl))
-    exact r''.reachable S1
+    exact r''.reachable S2
 
-theorem spstepsR_reachable {S S' : SState} (hS : SRReachable N S) (hp : SPStepsR N S S') :
-    SRReachable N S' := by
+/-- Policy steps prune nothing, and a node's dropped set only grows: they keep every node with
+what the hub pruned. -/
+theorem allPruned_spstep {S S' : SState} (hA : AllPruned N S) (hp : SPStepR N S S') :
+    AllPruned N S' := by
+  cases hp with
+  | adopt n hn hlag hheads =>
+    intro m hm x hx
+    show upd S.nodeD n (fun x => S.nodeD n x ∨ Remembered S x) m x
+    by_cases hmn : m = n
+    · subst hmn; rw [upd_same]; exact Or.inl (hA m hm x hx)
+    · rw [upd_ne _ _ hmn]; exact hA m hm x hx
+  | _ => exact hA
+
+theorem spstepsR_reachable {S S' : SState} (hS : SRReachable N S) (hA : AllPruned N S)
+    (hp : SPStepsR N S S') : SRReachable N S' ∧ AllPruned N S' := by
   induction hp with
-  | refl => exact hS
-  | tail _ hst ih => exact spstepR_reachable ih hst
+  | refl => exact ⟨hS, hA⟩
+  | tail _ hst ih => exact ⟨spstepR_reachable ih.1 ih.2 hst, allPruned_spstep ih.2 hst⟩
 
 
 /-! ### The measure -/
@@ -1048,9 +1226,9 @@ theorem withBase_nodeD (S : SState) (t : State) : (S.withBase t).nodeD = S.nodeD
 theorem withBase_hubD (S : SState) (t : State) : (S.withBase t).hubD = S.hubD := rfl
 
 /-- Publishing a dropped set the hub lacks part of lowers the count of unpublished drops. -/
-theorem pend_sup {S : SState} (hI : SInv N S) {n : Nat} (hn : n < N) {t : State}
+theorem pend_sup {S : SState} (hI : SInv N S) {n h : Nat} (hn : n < N) {t : State}
     (hnext : S.s.U.next ≤ t.U.next) (hpend : ∃ x, S.nodeD n x ∧ ¬ S.hubD x) :
-    mPend N (S.supWith n t) < mPend N S := by
+    mPend N (S.supWith n h t) < mPend N S := by
   obtain ⟨x, hxn, hxh⟩ := hpend
   unfold mPend
   have e : cnt t.U.next (fun x => (∃ m, m < N ∧ S.nodeD m x) ∧ ¬ S.hubD x) =
@@ -1064,8 +1242,8 @@ theorem pend_sup {S : SState} (hI : SInv N S) {n : Nat} (hn : n < N) {t : State}
     ⟨x, Nat.lt_of_lt_of_le (hI.node n x hxn).2.1 hnext, ⟨⟨n, hn, hxn⟩, hxh⟩, ?_⟩
   rintro ⟨-, h⟩; exact h (Or.inr hxn)
 
-theorem smeasure_decreases {S S' : SState} (hS : SRReachable N S) (hp : SPStepR N S S') :
-    Lex8 (smeasure N S') (smeasure N S) := by
+theorem smeasure_decreases {S S' : SState} (hS : SRReachable N S) (hA : AllPruned N S)
+    (hp : SPStepR N S S') : Lex8 (smeasure N S') (smeasure N S) := by
   have hI := sinv_reachable hS
   have hb := hS.base
   cases hp with
@@ -1094,13 +1272,14 @@ theorem smeasure_decreases {S S' : SState} (hS : SRReachable N S) (hp : SPStepR 
     have e1 : mPend N (S.adoptHub n) = mPend N S := by
       unfold mPend
       refine cnt_congr (fun x _ => ?_)
-      show ((∃ m, m < N ∧ upd S.nodeD n (fun x => S.nodeD n x ∨ S.hubD x) m x) ∧ ¬ S.hubD x) ↔ _
+      show ((∃ m, m < N ∧ upd S.nodeD n (fun x => S.nodeD n x ∨ Remembered S x) m x) ∧
+        ¬ S.hubD x) ↔ _
       constructor
       · rintro ⟨⟨m, hm, hx⟩, hh⟩
         refine ⟨⟨m, hm, ?_⟩, hh⟩
         by_cases hmn : m = n
         · subst hmn; rw [upd_same] at hx
-          exact hx.elim id (fun h => absurd h hh)
+          exact hx.elim id (fun h => absurd h.1 hh)
         · rwa [upd_ne _ _ hmn] at hx
       · rintro ⟨⟨m, hm, hx⟩, hh⟩
         refine ⟨⟨m, hm, ?_⟩, hh⟩
@@ -1110,14 +1289,16 @@ theorem smeasure_decreases {S S' : SState} (hS : SRReachable N S) (hp : SPStepR 
     have e2 : mLag N (S.adoptHub n) < mLag N S := by
       unfold mLag
       obtain ⟨x, hxh, hxn⟩ := hlag
+      -- what it lacks, the hub hasn't pruned: it remembers, and announces, all of it
+      have hxr : Remembered S x := ⟨hxh, fun hf => hxn (hA n hn x hf)⟩
       refine sumN_lt hn ?_ (fun m _ hmn => ?_)
       · show cnt S.s.U.next (fun y => S.hubD y ∧
-            ¬ upd S.nodeD n (fun x => S.nodeD n x ∨ S.hubD x) n y) < _
+            ¬ upd S.nodeD n (fun x => S.nodeD n x ∨ Remembered S x) n y) < _
         refine cnt_lt (fun y _ ⟨h1, h2⟩ => ⟨h1, fun h => h2 (by rw [upd_same]; exact Or.inl h)⟩)
           ⟨x, (hI.hub x hxh).2.1, ⟨hxh, hxn⟩, ?_⟩
-        rintro ⟨-, h⟩; exact h (by rw [upd_same]; exact Or.inr hxh)
+        rintro ⟨-, h⟩; exact h (by rw [upd_same]; exact Or.inr hxr)
       · show cnt S.s.U.next (fun y => S.hubD y ∧
-            ¬ upd S.nodeD n (fun x => S.nodeD n x ∨ S.hubD x) m y) = _
+            ¬ upd S.nodeD n (fun x => S.nodeD n x ∨ Remembered S x) m y) = _
         simp only [upd_ne _ _ hmn]
     unfold smeasure
     rw [e1]
@@ -1136,19 +1317,21 @@ theorem no_infinite_run_auxS {r : SState → SState → Prop} {a : SState} (ha :
     intro f hf hall
     exact ih (f 1) (hf ▸ hall 0) (fun i => f (i + 1)) rfl (fun i => hall (i + 1))
 
-theorem spstepR_wf : WellFounded (fun S' S => SRReachable N S ∧ SPStepR N S S') :=
-  Subrelation.wf (fun ⟨h, hp⟩ => smeasure_decreases h hp) (InvImage.wf (smeasure N) lex8_wf)
+theorem spstepR_wf :
+    WellFounded (fun S' S => (SRReachable N S ∧ AllPruned N S) ∧ SPStepR N S S') :=
+  Subrelation.wf (fun ⟨⟨h, hA⟩, hp⟩ => smeasure_decreases h hA hp)
+    (InvImage.wf (smeasure N) lex8_wf)
 
-/-- **Termination** with supersedes, once the hub stops going back: no infinite sequence of
-policy steps, whatever the scheduling. -/
-theorem no_infinite_policy_runS {S : SState} (h : SRReachable N S) :
+/-- **Termination** with supersedes, once the hub stops going back, from a state where every
+node has what the hub pruned: no infinite sequence of policy steps, whatever the scheduling. -/
+theorem no_infinite_policy_runS {S : SState} (h : SRReachable N S) (hA : AllPruned N S) :
     ¬ ∃ f : Nat → SState, f 0 = S ∧ ∀ i, SPStepR N (f i) (f (i + 1)) := by
   rintro ⟨f, hf0, hf⟩
-  have hreach : ∀ i, SRReachable N (f i) := by
+  have hreach : ∀ i, SRReachable N (f i) ∧ AllPruned N (f i) := by
     intro i
     induction i with
-    | zero => exact hf0 ▸ h
-    | succ i ih => exact spstepR_reachable ih (hf i)
+    | zero => exact hf0 ▸ ⟨h, hA⟩
+    | succ i ih => exact ⟨spstepR_reachable ih.1 ih.2 (hf i), allPruned_spstep ih.2 (hf i)⟩
   exact no_infinite_run_auxS (spstepR_wf.apply S) f hf0 (fun i => ⟨hreach i, hf i⟩)
 
 /-! ### Progress -/
@@ -1336,22 +1519,24 @@ theorem SPStepsR.head {S T U : SState} (h1 : SPStepR N S T) (h2 : SPStepsR N T U
   | refl => exact SPStepsR.tail (SPStepsR.refl _) h1
   | tail _ hst ih => exact SPStepsR.tail ih hst
 
-/-- **Liveness** with supersedes, once the hub stops going back: from every state, policy steps
-reach a converged state. -/
-theorem eventually_convergesS {S : SState} (h : SRReachable N S) :
+/-- **Liveness** with supersedes, once the hub stops going back: from every state where every
+node has dropped what the hub pruned, policy steps reach a converged state. -/
+theorem eventually_convergesS {S : SState} (h : SRReachable N S) (hA : AllPruned N S) :
     ∃ S', SPStepsR N S S' ∧ SConverged N S' := by
-  refine WellFounded.induction (C := fun S => SRReachable N S → ∃ S', SPStepsR N S S' ∧
-    SConverged N S') (spstepR_wf (N := N)) S (fun S ih h => ?_) h
+  refine WellFounded.induction (C := fun S => SRReachable N S ∧ AllPruned N S →
+    ∃ S', SPStepsR N S S' ∧ SConverged N S') (spstepR_wf (N := N)) S
+    (fun S ih h => ?_) ⟨h, hA⟩
   by_cases hc : SConverged N S
   · exact ⟨S, SPStepsR.refl S, hc⟩
-  · obtain ⟨S', hS'⟩ := progressS h hc
-    obtain ⟨U, hU, hUc⟩ := ih S' ⟨h, hS'⟩ (spstepR_reachable h hS')
+  · obtain ⟨S', hS'⟩ := progressS h.1 hc
+    obtain ⟨U, hU, hUc⟩ := ih S' ⟨h, hS'⟩
+      ⟨spstepR_reachable h.1 h.2 hS', allPruned_spstep h.2 hS'⟩
     exact ⟨U, SPStepsR.head hS' hU, hUc⟩
 
 /-- Every policy run that cannot be extended ends converged. -/
-theorem maximal_run_convergesS {S S' : SState} (h : SRReachable N S) (hr : SPStepsR N S S')
-    (hmax : ∀ S'', ¬ SPStepR N S' S'') : SConverged N S' :=
-  (terminal_iff_convergedS (spstepsR_reachable h hr)).1 hmax
+theorem maximal_run_convergesS {S S' : SState} (h : SRReachable N S) (hA : AllPruned N S)
+    (hr : SPStepsR N S S') (hmax : ∀ S'', ¬ SPStepR N S' S'') : SConverged N S' :=
+  (terminal_iff_convergedS (spstepsR_reachable h hA hr).1).1 hmax
 
 /-- **Once converged, every abandon has reached every machine**: the hub has dropped every
 operation any node dropped, every node has dropped exactly what the hub has, and every

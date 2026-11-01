@@ -307,16 +307,25 @@ describes the observation points and premises. This boundary does not replace th
 model, derive expected values from all jj histories, or prove publication's lock discipline.
 
 `Supersede.lean` models the protocol over each operation's original, so the states of
-`Model.lean` stay as they are, and adds the hub's and each node's dropped sets (`SState`).
-`SStep` is a `Step` that leaves the hub and each node no head of its own dropped set, or one of
-`sup` (the hub takes a dropped set with a push it accepts), `abandon`, `sendSup`, `sendD` and
-`adopt`; `SRStep` adds the hub going back, to the dropped set it had with that head.
+`Model.lean` stay as they are, and adds the hub's and each node's dropped sets, and which of the
+hub's it has pruned (`SState`). `SStep` is a `Step` that gives each node no head of its own
+dropped set, and the hub none it remembers dropping and, once it has pruned anything, none
+whose push doesn't carry the hub's records; or one of `sup` (the hub takes a dropped set with
+the push it rides on, to a head the push doesn't drop), `abandon`, `sendSup` (what the records a
+node took drop, its dropped set, and the head of its push, which those records don't drop),
+`sendD` (at least what the hub remembers), `adopt` and `prune` (the hub deletes the ids of some
+of what it dropped); `SRStep` adds the hub going back, to the dropped and pruned sets it had
+with that head.
 
 - `SReachable.base`, `SRReachable.base`: every state is one of `Model.lean`, or of
   `Regress.lean` with the hub going back, so every theorem there holds as stated;
   `noDuplicateMergeS` restates one.
-- `sinv_reachable`: the invariant `SInv`. No head is in its holder's dropped set, the root is in
-  none, and every dropped operation is below a head of a node that dropped it.
+- `sinv_reachable`: the invariant `SInv`, whatever the hub prunes. No head is in its holder's
+  dropped set, the root is in none, every dropped operation is below a head of a node that
+  dropped it, and the records a supersede carries drop no head of its push.
+- `dropped_never_head`: so, while the hub doesn't go back, it never takes a head it dropped,
+  though it may have pruned it. `behind_not_carried`: a node that hasn't dropped an operation the
+  hub pruned has no supersede the hub takes.
 - `nodeD_grows`, `hubD_grows`: a node's dropped set only grows, and the hub's while it doesn't
   go back. `superseded_never_returns`, `superseded_never_returns_hub`: so, by `superseded_ne`,
   an id superseded on a node is never again an id of an operation it keeps, nor on the hub
@@ -324,7 +333,10 @@ model, derive expected values from all jj histories, or prove publication's lock
 - `spstepR_reachable`, `smeasure_decreases`, `no_infinite_policy_runS`, `progressS`,
   `converged_quiescentS`, `terminal_iff_convergedS`, `eventually_convergesS`,
   `maximal_run_convergesS`: liveness once the hub stops going back, for the policy `SPStepR`,
-  the steps of `PStepR` and `adopt`, `supPush` and `supFix`.
+  the steps of `PStepR` and `adopt`, `supPush` and `supFix`, from every reachable state where
+  every node has dropped what the hub pruned (`AllPruned`), though the hub announces only what
+  it remembers. `allPruned_step`: a step keeps `AllPruned` as long as what it prunes, every node
+  had dropped; `Exec.sexec_allPruned`: the executable hub keeps it in every state it reaches.
 - `converged_all_droppedS`, `converged_all_acceptedS`: once converged, the hub and every node
   have dropped every operation any node dropped, and every operation any node made is below the
   hub's head.
@@ -547,9 +559,12 @@ and 4 are theorems; 2 and 3 are argued here, not proved; 5 is checked by a test.
   - `Learn` is also allowed without its staleness filter (`learnUnfiltered`), so `known`
     can move backwards.
 
-  The policy's own actions are instances of these. Only one node-side guard carries weight:
-  `GetOps` requests only operations in `anc*(known.head)`. The merged `Fetch` needs none,
-  since the hub chooses the operations, all of them accepted.
+  The policy's own actions are instances of these. Only one node-side guard of `Model.lean`
+  carries weight: `GetOps` requests only operations in `anc*(known.head)`. The merged `Fetch`
+  needs none, since the hub chooses the operations, all of them accepted. The model with
+  supersedes adds one more: a node never names, as the head of its push, an operation that a
+  record it took drops (`sendSup`). A hub that has pruned the record can't refuse that
+  operation, so `dropped_never_head` doesn't hold of a buggy node that does.
 - **Relaxations of durability, proved safe.** `loseKnown` lets a restarting node lose `known`
   (reset to `(0, root)`) while keeping `staged`, as the Rust node does. `loseVolatile` lets it
   lose `staged` as well. `hubForget` lets the hub lose or garbage-collect any operations and
@@ -644,12 +659,18 @@ Theorems (`Musubi/ExecSound.lean`):
   answers `measure` and `upload` requests with them.
 
 With supersedes (`Musubi/SupersedeExec.lean`, `Musubi/SupersedeExecSound.lean`), `SEState`
-adds to an `EState` the hub's records, in the order it took them, with a ghost copy as of each
-sequence number, each node's dropped set and the records it took last, and the supersedes and
-announcements in flight. `sabs` maps it to an `SState`. `sexecStep` runs every action of
-`execStep`, checking `HeadOK` and `HeadsOK` too, and the actions of `SStep`:
+adds to an `EState` the hub's records, in the order it took them, and how many of the first it
+has pruned, with a ghost copy of both as of each sequence number, each node's dropped set and
+the records it took last, and the supersedes and announcements in flight.
+`sabs` maps it to an `SState`. `sexecStep` runs every action of `execStep`, checking `HeadOK`
+and `HeadsOK` too, and the actions of `SStep`:
 
-- `sexec_sound : sexecStep N ses a = .ok ses' → SRStep N (sabs ses) (sabs ses') ∨
+- `sexec_ok`: every action keeps `SEOK`, which holds of `initSE`: a node has dropped the
+  operations of the records it took, and the hub has pruned no more records than it has.
+- `sexec_allPruned`: every state reached has `AllPruned`, since the hub prunes only records
+  every node has taken, now and as of any head it can go back to (`SEPruned`), so
+  `eventually_convergesS` applies to it.
+- `sexec_sound : SEOK ses → sexecStep N ses a = .ok ses' → SRStep N (sabs ses) (sabs ses') ∨
   sabs ses' = sabs ses`, for every action, and `sabs_initSE`. So `sexec_reachable` and
   `sexec_inv`: every state reached is `SRReachable`, and `SInv` holds in it, as do the
   theorems that superseded ids never come back.
@@ -680,9 +701,11 @@ accepts as a supersede, carrying the node's dropped set and the records the node
 (`sendSup`), and accepts it only if those are the hub's records (`hubSupAccept`); it adds a
 record only for what the push drops that it hadn't. It refuses a push whose node's records
 aren't its own, changing nothing (`hubPushRefuse`), since that node's ids aren't the hub's, and
-one whose new head it or the push dropped. A
+one whose new head is among the records it remembers or the push drops beyond its records. A
 node takes the hub's records as announced (`sendD`, `adopt`), and the records it took last
-become those.
+become those. The hub prunes its first records (`prune`) once every node's records start with
+them; `recs` stays whole, standing for what a push's records must match, and the hub checks a
+head only against the records after those.
 
 `PresenceExec.lean` does the same for presence: `presentB` and `latestB` are proved to compute
 `Present` and `UMax` (`presentB_iff`, `mem_latestB`), and the oracle answers presence requests

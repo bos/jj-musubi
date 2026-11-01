@@ -100,11 +100,12 @@ def decodeSAction (j : Json) : Except String SAction := do
     return f n S O e d A Δ
   match kind with
   | "abandon" => return .abandon (← node) (← getNats j "ops")
-  | "sendSup" => return .sendSup (← node)
+  | "sendSup" => return .sendSup (← node) (← getNat j "new")
   | "sendD" => return .sendD (← node)
   | "adopt" => return .adopt (← node) (← getRecs j "records")
   | "hubSupAccept" => push .hubSupAccept
   | "hubPushRefuse" => push .hubPushRefuse
+  | "prune" => return .prune (← getNat j "count")
   | _ => return .base (← decodeAction j)
 
 /-! ## Encoding -/
@@ -174,7 +175,7 @@ def encodeNode (nd : ENode) (dropped : List Nat) (applied : List Rec) : Json :=
 /-- The supersedes and announcements in flight, as wire messages. -/
 def encodeSMsgs (ses : SEState) : List Json :=
   ses.sups.map (fun e => msgObj "supersede" e.1 [("applied", recsJson e.2.1),
-      ("dropped", nats e.2.2)]) ++
+      ("dropped", nats e.2.2.1), ("new", toJson e.2.2.2)]) ++
     ses.dmsgs.map (fun e => msgObj "dropped" e.1 [("records", recsJson e.2)])
 
 def encodeOp (o : EOp) : Json :=
@@ -187,7 +188,7 @@ def encodeState (N : Nat) (ses : SEState) : Json :=
     ("ops", Json.arr ((es.ops.mergeSort (fun a b => a.id ≤ b.id)).map encodeOp).toArray),
     ("hub", Json.mkObj [("ops", nats es.hub.ops), ("objs", nats es.hub.objs),
       ("head", toJson es.hub.head), ("seq", toJson es.hub.seq),
-      ("records", recsJson ses.recs)]),
+      ("records", recsJson ses.recs), ("pruned", toJson ses.pruned)]),
     ("nodes", Json.arr ((List.range N).map (fun i =>
       encodeNode (es.nodeOf i) (ses.nodeDF i) (ses.appliedF i))).toArray),
     ("net", encodeNet N es.net (encodeSMsgs ses))]

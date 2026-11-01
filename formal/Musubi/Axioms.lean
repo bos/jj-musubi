@@ -116,6 +116,8 @@ open Musubi
 #print axioms Exec.mem_upObjsL
 #print axioms Exec.sexec_sound
 #print axioms Exec.sabs_initSE
+#print axioms Exec.sexec_ok
+#print axioms Exec.sexec_allPruned
 #print axioms Exec.sexec_reachable
 #print axioms Exec.sexec_inv
 #print axioms Exec.smeasureE_eq
@@ -228,6 +230,9 @@ open Musubi
 #print axioms hubD_grows
 #print axioms superseded_never_returns
 #print axioms superseded_never_returns_hub
+#print axioms dropped_never_head
+#print axioms behind_not_carried
+#print axioms allPruned_step
 #print axioms spstepR_reachable
 #print axioms smeasure_decreases
 #print axioms no_infinite_policy_runS

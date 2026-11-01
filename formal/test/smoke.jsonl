@@ -38,17 +38,17 @@
 {"op": "reset", "nodes": 2}
 {"op": "step", "action": {"kind": "userOp", "node": 0, "parent": 0, "objs": []}}
 {"op": "step", "action": {"kind": "pushAll", "node": 0, "ops": [1], "objs": [], "expected": 0, "new": 1}}
-{"op": "step", "action": {"kind": "sendSup", "node": 0}}
+{"op": "step", "action": {"kind": "sendSup", "node": 0, "new": 1}}
 {"op": "step", "action": {"kind": "hubSupAccept", "node": 0, "ops": [1], "objs": [], "expected": 0, "new": 1, "applied": [], "dropped": []}}
 {"op": "step", "action": {"kind": "userOp", "node": 0, "parent": 1, "objs": []}}
 {"op": "step", "action": {"kind": "pushAll", "node": 0, "ops": [2], "objs": [], "expected": 1, "new": 2}}
-{"op": "step", "action": {"kind": "sendSup", "node": 0}}
+{"op": "step", "action": {"kind": "sendSup", "node": 0, "new": 2}}
 {"op": "step", "action": {"kind": "hubSupAccept", "node": 0, "ops": [2], "objs": [], "expected": 1, "new": 2, "applied": [], "dropped": []}}
 {"op": "step", "action": {"kind": "abandon", "node": 0, "ops": [2]}}
 {"op": "step", "action": {"kind": "abandon", "node": 0, "ops": [1]}}
 {"op": "step", "action": {"kind": "userOp", "node": 0, "parent": 2, "objs": []}}
 {"op": "step", "action": {"kind": "pushAll", "node": 0, "ops": [3], "objs": [], "expected": 2, "new": 3}}
-{"op": "step", "action": {"kind": "sendSup", "node": 0}}
+{"op": "step", "action": {"kind": "sendSup", "node": 0, "new": 3}}
 {"op": "step", "action": {"kind": "hubSupAccept", "node": 0, "ops": [3], "objs": [], "expected": 2, "new": 3, "applied": [], "dropped": [1]}}
 {"op": "step", "action": {"kind": "fetchAll", "node": 1, "base": 0, "haves": []}}
 {"op": "step", "action": {"kind": "hubFetch", "node": 1, "base": 0, "haves": []}}
@@ -70,3 +70,8 @@
 {"op": "expected", "nodes": [{"target": 4, "parents": [], "known": [], "recorded": [0], "boundary": true}], "resolved": [0, 1, 2], "sides": [{"target": 4, "candidates": [[2, 1], [1, 2]]}], "head": 0}
 {"op": "expected", "nodes": [{"target": 4, "parents": [], "known": [null], "recorded": [0], "boundary": true}], "resolved": [0, 1, 2], "sides": [{"target": 4, "candidates": [[2, 1], [1, 2]]}], "head": 0}
 {"op": "expected", "nodes": [{"target": 4, "parents": [0], "known": [null], "recorded": [0], "boundary": true}], "resolved": [0, 1, 2], "sides": [{"target": 4, "candidates": [[2, 1], [1, 2]]}], "head": 0}
+{"op": "step", "action": {"kind": "prune", "count": 1}}
+{"op": "step", "action": {"kind": "sendD", "node": 0}}
+{"op": "step", "action": {"kind": "adopt", "node": 0, "records": [[1]]}}
+{"op": "step", "action": {"kind": "prune", "count": 1}}
+{"op": "measure"}

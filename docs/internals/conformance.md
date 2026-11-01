@@ -85,7 +85,7 @@ core does.
 | `NodeCore` asks the repo to merge heads | `merge` |
 | `NodeCore` sends `Fetch { base, haves }`, on every poll | `fetchAll` |
 | `NodeCore` sends `GetObjects { for_ops: S, haves: H, .. }` | `fetchObjs` with `objs(S) \ H` |
-| `NodeCore` sends `Push { ops: S, objects: O, expected, new, .. }` | `pushAll`, then `sendSup`: every push carries the records its node took and what it dropped |
+| `NodeCore` sends `Push { ops: S, objects: O, expected, new, .. }` | `pushAll`, then `sendSup` with `new`: every push carries the records its node took and what it dropped |
 | `NodeCore` takes the hub's records | `adopt`, with all of them |
 | `NodeCore` writes the fix-up and pushes it with what it dropped | `userOp` on its head, then `pushAll` and `sendSup` |
 | `NodeCore` accepts a head-carrying reply | `learn`; a stale one it ignores maps to nothing |
@@ -110,11 +110,13 @@ The Rust hub decides how to answer a `Push`, and the test sends whichever of `hu
 checks that choice's guard, so a hub that accepts a `Push` the model would reject is caught,
 and so is one that rejects a `Push` the model says is incomplete. Every push the hub accepts
 is a supersede in the model, which adds a record only for what the push drops that the hub
-hadn't; the hub refuses, storing nothing, one whose records aren't its own or whose new head
-is dropped. The reply to an accepted push carries the hub's records as a state, from which,
-with the records it took and what it dropped, the node knows them all, so the model's hub
-announces them with it (`sendD`). The Rust core sends only the merged
-requests (`Push`, `Fetch`); the finer-grained actions remain in the model and the oracle.
+hadn't; the hub refuses, storing nothing, one whose records aren't its own, or whose new head
+is among the records it remembers or the push's pending drops. The reply to an accepted push
+carries the hub's records as a state, from which, with the records it took and what it
+dropped, the node knows them all, so the model's hub announces them with it (`sendD`). The
+Rust core sends only the merged requests (`Push`, `Fetch`); the finer-grained actions remain in
+the model and the oracle. The Rust hub prunes no records yet, so no event maps to `prune`, and
+the test's states have `"pruned": 0`.
 
 The test's objects have no structure, so the test's hub ignores `closure(base)` and leaves
 out exactly what the haves name, as the model's `hubFetch` does; a node's haves there are
@@ -357,13 +359,15 @@ Deliberately broken versions of the core, each caught:
 | Node with two heads pushes one of them before merging | conformance only: the push raises the other nodes' staleness, and the measure rises; the run still converges |
 | Node that believes a head at the largest sequence number doesn't start over when its own request's reply says otherwise | `nodes_recover_from_false_replies`, and rarely `nodes_recover_from_wrong_replies` with real repositories: no honest hub gets there, and the node never converges |
 | Hub accepts a `Push` whose records aren't its own | `a_push_without_the_hubs_records_is_refused` |
+| Hub accepts a `Push` with its records to a head it dropped, or that the push drops | `a_push_to_a_dropped_head_is_refused`; rarely conformance, for the second, through `rogue_push` |
 | Node advances to a head it dropped | `a_node_never_advances_to_a_head_it_dropped`, through the oracle (`HeadsOK`) |
 
-"Invariants" is `protocol_invariants`, which checks the safety properties directly on the
-Rust state, without the oracle. The random cases rarely reach the last two, which need a
-node behind the hub's records to push from its head, and a hub that goes back to a head a
-node dropped, so fixed tests make them. `just mutants` runs cargo-mutants over `hub.rs` and
-`node.rs`; the property and conformance tests should kill every mutant it makes.
+"Invariants" is `protocol_invariants`, which checks the safety properties directly on the Rust
+state, without the oracle. The random cases rarely reach the last three, which need a node behind
+the hub's records to push from its head, a push to a head the hub dropped, which no node makes,
+and a hub that goes back to a head a node dropped, so fixed tests make them. `just mutants` runs
+cargo-mutants over `hub.rs` and `node.rs`; the property and conformance tests should kill every
+mutant it makes.
 
 ## Wire format
 
@@ -425,13 +429,14 @@ array of sets, compared in order.
 | `hubFetch` | `node`, `base`, `haves` | `SyncStep.hubFetch`: replies with a `head`, an `ops` and an `objs` message |
 | `crashHub` | none | `SyncStep.crashHub` |
 | `hubForget` | `ops`, `objs` | `SyncStep.hubForget`: the hub keeps only `ops` and `objs`, which must be among what it stores and hold `closure(head)` |
-| `hubRegress` | `seq` | `RStep`'s `State.regress` (`Regress.lean`), the hub going back: `seq ≤ hub.seq`; `head := hist seq`, `seq := seq`, its records go back to those it had then, and nothing else changes |
+| `hubRegress` | `seq` | `RStep`'s `State.regress` (`Regress.lean`), the hub going back: `seq ≤ hub.seq`; `head := hist seq`, `seq := seq`, its records, and how many of them it had pruned, go back to what they were then, and nothing else changes |
 | `abandon` | `node`, `ops` | `SStep.abandon`: `ops` are below `node`'s heads, none of them, and not the root |
-| `sendSup` | `node` | `SStep.sendSup`: a `supersede` message with the records `node` took and its dropped set |
+| `sendSup` | `node`, `new` | `SStep.sendSup`: a `supersede` message with the records `node` took, its dropped set, and `new`, the head of the push it rides on, which no record `node` took drops |
 | `sendD` | `node` | `SStep.sendD`: a `dropped` message with the hub's records |
 | `adopt` | `node`, `records` | `SStep.adopt`: `records` were announced to `node`, and drop none of its heads; its dropped set gains theirs, and they become the records it took |
-| `hubSupAccept` | `node`, `ops`, `objs`, `expected`, `new`, `applied`, `dropped` | `SStep.sup` with the `hubPushAccept` it rides on: a `supersede` message of `applied` and `dropped` is in `net`, `applied` are the hub's records, and neither the hub nor `dropped` drops `new`; the hub adds a record of what `dropped` drops that it doesn't, if any |
-| `hubPushRefuse` | `node`, `ops`, `objs`, `expected`, `new`, `applied`, `dropped` | no step: the `push` and a `supersede` message are in `net`, and `applied` aren't the hub's records or `new` is dropped |
+| `hubSupAccept` | `node`, `ops`, `objs`, `expected`, `new`, `applied`, `dropped` | `SStep.sup` with the `hubPushAccept` it rides on: a `supersede` message of `applied`, `dropped` and `new` is in `net`, `applied` are the hub's records, and `new` is neither among the records the hub remembers nor among what `dropped` drops beyond `applied`; the hub adds a record of what `dropped` drops that it doesn't, if any |
+| `hubPushRefuse` | `node`, `ops`, `objs`, `expected`, `new`, `applied`, `dropped` | no step: the `push` and a `supersede` message are in `net`, and `applied` aren't the hub's records, or `new` is among the records it remembers or what `dropped` drops beyond `applied` |
+| `prune` | `count` | `SStep.prune`: the hub prunes its first `count` records, at least as many as it had pruned and at most as many as it has; the oracle requires every node's records to start with them, though `SStep.prune` needs no such guard for safety |
 
 `headKind` is one of `head`, `accepted`, `rejected`, `incomplete`, `notify`.
 
@@ -445,14 +450,18 @@ array of sets, compared in order.
 A rejected action leaves the oracle's state unchanged. The error names the action and the
 guard that failed, as `"<action>: <guard>"`.
 
-Two consequences of the model that the Rust test implementations must match:
+Consequences of the model that the Rust test implementations must match:
 
 - `realize` adds an operation to `lops` and its objects to `lobj` but does not remove them
   from `sops` and `sobj`. Staging is only ever cleared by `loseVolatile`.
 - `casAccept` adds an `accepted` reply for the sender and a `notify` message for every node
   below `nodes`, including the sender.
-- Every push the hub accepts is a `hubSupAccept`; the plain `hubPushAccept` stays in the
-  model, checking only `HeadOK`, but the Rust hub never takes it.
+- Every push the hub accepts is a `hubSupAccept`. The plain `hubPushAccept` stays in the
+  model, guarded only by `HeadOK`; once the hub has pruned any records, that needs a
+  `supersede` message with the hub's records for the new head. The Rust hub never takes it.
+- A node's push never names an operation a record it took drops: `sendSup` refuses one, and
+  the test's `rogue_push` picks only other operations. `a_push_to_a_dropped_head_is_refused`
+  checks the Rust hub refuses one anyway, while it remembers dropping it.
 
 ### State
 
@@ -460,7 +469,7 @@ Two consequences of the model that the Rust test implementations must match:
 {
   "next": 5,
   "ops": [{"id": 1, "parents": [0], "objs": [10]}, ...],
-  "hub": {"ops": [0, 1], "objs": [10], "head": 1, "seq": 1, "records": [[2]]},
+  "hub": {"ops": [0, 1], "objs": [10], "head": 1, "seq": 1, "records": [[2]], "pruned": 0},
   "nodes": [
     {"lops": [0, 1], "lobj": [10], "heads": [1], "known": [1, 1], "sops": [], "sobj": [],
      "dropped": [2], "applied": [[2]]}
@@ -478,7 +487,7 @@ Two consequences of the model that the Rust test implementations must match:
     {"msg": "stored", "node": 0},
     {"msg": "push", "node": 0, "ops": [1], "objs": [10], "expected": 0, "new": 1},
     {"msg": "fetch", "node": 1, "base": 0, "haves": []},
-    {"msg": "supersede", "node": 0, "applied": [], "dropped": [2]},
+    {"msg": "supersede", "node": 0, "applied": [], "dropped": [2], "new": 1},
     {"msg": "dropped", "node": 1, "records": [[2]]}
   ]
 }
@@ -486,6 +495,7 @@ Two consequences of the model that the Rust test implementations must match:
 
 Every array is sorted ascending, but records, which keep their order, each sorted. `net` is
 sorted by `(msg, node, ...)`. `ops` lists every created operation except the root.
+`pruned` is how many of the hub's first records it has pruned.
 
 ## Presence
 

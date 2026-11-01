@@ -35,3 +35,33 @@
 {"op": "refs", "fn": "cinv", "table": {"resolved": [0, 1, 2], "writable": [1, 2], "terms": [], "merges": []}, "s": {"L": 1, "R": 1, "K": 1, "tr": true}, "g": 1, "moved": false, "e": 1}
 {"op": "refs", "fn": "exportConflictedBeside", "table": {"resolved": [0, 1, 2, 3], "writable": [1, 2, 3], "terms": [{"conflict": 4, "terms": [1, 2, 3]}], "merges": []}, "s": {"L": 4, "R": 4, "K": 1, "tr": true}, "g": 3, "e": 1, "k": 3}
 {"op": "refs", "fn": "exportConflictedBeside", "table": {"resolved": [0, 1, 2, 3], "writable": [1, 2, 3], "terms": [{"conflict": 4, "terms": [1, 2, 3]}], "merges": []}, "s": {"L": 4, "R": 4, "K": 1, "tr": true}, "g": 3, "e": 1, "k": 1}
+{"op": "reset", "nodes": 2}
+{"op": "step", "action": {"kind": "userOp", "node": 0, "parent": 0, "objs": []}}
+{"op": "step", "action": {"kind": "pushAll", "node": 0, "ops": [1], "objs": [], "expected": 0, "new": 1}}
+{"op": "step", "action": {"kind": "sendSup", "node": 0}}
+{"op": "step", "action": {"kind": "hubSupAccept", "node": 0, "ops": [1], "objs": [], "expected": 0, "new": 1, "applied": [], "dropped": []}}
+{"op": "step", "action": {"kind": "userOp", "node": 0, "parent": 1, "objs": []}}
+{"op": "step", "action": {"kind": "pushAll", "node": 0, "ops": [2], "objs": [], "expected": 1, "new": 2}}
+{"op": "step", "action": {"kind": "sendSup", "node": 0}}
+{"op": "step", "action": {"kind": "hubSupAccept", "node": 0, "ops": [2], "objs": [], "expected": 1, "new": 2, "applied": [], "dropped": []}}
+{"op": "step", "action": {"kind": "abandon", "node": 0, "ops": [2]}}
+{"op": "step", "action": {"kind": "abandon", "node": 0, "ops": [1]}}
+{"op": "step", "action": {"kind": "userOp", "node": 0, "parent": 2, "objs": []}}
+{"op": "step", "action": {"kind": "pushAll", "node": 0, "ops": [3], "objs": [], "expected": 2, "new": 3}}
+{"op": "step", "action": {"kind": "sendSup", "node": 0}}
+{"op": "step", "action": {"kind": "hubSupAccept", "node": 0, "ops": [3], "objs": [], "expected": 2, "new": 3, "applied": [], "dropped": [1]}}
+{"op": "step", "action": {"kind": "fetchAll", "node": 1, "base": 0, "haves": []}}
+{"op": "step", "action": {"kind": "hubFetch", "node": 1, "base": 0, "haves": []}}
+{"op": "step", "action": {"kind": "sendD", "node": 1}}
+{"op": "step", "action": {"kind": "learn", "node": 1, "headKind": "head", "seq": 3, "head": 3}}
+{"op": "step", "action": {"kind": "recvOps", "node": 1, "ops": [1, 2, 3]}}
+{"op": "step", "action": {"kind": "recvObjs", "node": 1, "objs": []}}
+{"op": "step", "action": {"kind": "adopt", "node": 1, "records": [[1]]}}
+{"op": "step", "action": {"kind": "realize", "node": 1, "opId": 1}}
+{"op": "step", "action": {"kind": "realize", "node": 1, "opId": 2}}
+{"op": "step", "action": {"kind": "realize", "node": 1, "opId": 3}}
+{"op": "step", "action": {"kind": "advance", "node": 1}}
+{"op": "measure"}
+{"op": "step", "action": {"kind": "adopt", "node": 1, "records": [[1]]}}
+{"op": "step", "action": {"kind": "learn", "node": 0, "headKind": "accepted", "seq": 3, "head": 3}}
+{"op": "measure"}

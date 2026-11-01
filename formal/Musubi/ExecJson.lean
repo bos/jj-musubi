@@ -4,6 +4,7 @@ only; no protocol logic.
 -/
 import Lean.Data.Json
 import Musubi.Exec
+import Musubi.SupersedeExec
 import Musubi.PresenceExec
 import Musubi.Copies
 import Musubi.Chunks
@@ -82,6 +83,29 @@ def decodeAction (j : Json) : Except String Action := do
   | "hubRegress" => return .hubRegress (← getNat j "seq")
   | k => throw s!"unknown action kind {k}"
 
+def getRecs (j : Json) (k : String) : Except String (List Rec) := do
+  let a ← j.getObjValAs? (Array (Array Nat)) k
+  pure (a.toList.map Array.toList)
+
+/-- An action of `SupersedeExec.lean`: one of `Exec.lean`'s, or one with supersedes. -/
+def decodeSAction (j : Json) : Except String SAction := do
+  let kind ← j.getObjValAs? String "kind"
+  let node := getNat j "node"
+  let push (f : Nat → List Nat → List Nat → Nat → Nat → List Rec → List Nat → SAction) :=
+    do
+    let (n, S, O) := (← node, ← getNats j "ops", ← getNats j "objs")
+    let (e, d, A, Δ) := (← getNat j "expected", ← getNat j "new", ← getRecs j "applied",
+      ← getNats j "dropped")
+    return f n S O e d A Δ
+  match kind with
+  | "abandon" => return .abandon (← node) (← getNats j "ops")
+  | "sendSup" => return .sendSup (← node)
+  | "sendD" => return .sendD (← node)
+  | "adopt" => return .adopt (← node) (← getRecs j "records")
+  | "hubSupAccept" => push .hubSupAccept
+  | "hubPushRefuse" => push .hubPushRefuse
+  | _ => return .base (← decodeAction j)
+
 /-! ## Encoding -/
 
 /-- Sorted, without duplicates. -/
@@ -129,33 +153,46 @@ def msgKey (j : Json) : String × Nat × String :=
 def keyLe (a b : String × Nat × String) : Bool :=
   a.1 < b.1 || (a.1 == b.1 && (a.2.1 < b.2.1 || (a.2.1 == b.2.1 && a.2.2 ≤ b.2.2)))
 
-def encodeNet (N : Nat) (net : List EMsg) : Json :=
-  let js := (net.flatMap (encodeMsg N)).mergeSort (fun a b => keyLe (msgKey a) (msgKey b))
+def encodeNet (N : Nat) (net : List EMsg) (extra : List Json) : Json :=
+  let js := (net.flatMap (encodeMsg N) ++ extra).mergeSort
+    (fun a b => keyLe (msgKey a) (msgKey b))
   let dedup := js.foldr (fun j acc =>
     match acc with
     | j' :: _ => if j.compress == j'.compress then acc else j :: acc
     | [] => [j]) []
   Json.arr dedup.toArray
 
-def encodeNode (nd : ENode) : Json :=
+/-- Records, each sorted. -/
+def recsJson (R : List Rec) : Json := Json.arr (R.map nats).toArray
+
+def encodeNode (nd : ENode) (dropped : List Nat) (applied : List Rec) : Json :=
   Json.mkObj [("lops", nats nd.lops), ("lobj", nats nd.lobj), ("heads", nats nd.heads),
     ("known", toJson #[nd.known.1, nd.known.2]), ("sops", nats nd.sops),
-    ("sobj", nats nd.sobj)]
+    ("sobj", nats nd.sobj), ("dropped", nats dropped), ("applied", recsJson applied)]
+
+/-- The supersedes and announcements in flight, as wire messages. -/
+def encodeSMsgs (ses : SEState) : List Json :=
+  ses.sups.map (fun e => msgObj "supersede" e.1 [("applied", recsJson e.2.1),
+      ("dropped", nats e.2.2)]) ++
+    ses.dmsgs.map (fun e => msgObj "dropped" e.1 [("records", recsJson e.2)])
 
 def encodeOp (o : EOp) : Json :=
   Json.mkObj [("id", toJson o.id), ("parents", nats o.parents), ("objs", nats o.objs)]
 
-def encodeState (N : Nat) (es : EState) : Json :=
+def encodeState (N : Nat) (ses : SEState) : Json :=
+  let es := ses.es
   Json.mkObj [
     ("next", toJson es.next),
     ("ops", Json.arr ((es.ops.mergeSort (fun a b => a.id ≤ b.id)).map encodeOp).toArray),
     ("hub", Json.mkObj [("ops", nats es.hub.ops), ("objs", nats es.hub.objs),
-      ("head", toJson es.hub.head), ("seq", toJson es.hub.seq)]),
-    ("nodes", Json.arr ((List.range N).map (fun i => encodeNode (es.nodeOf i))).toArray),
-    ("net", encodeNet N es.net)]
+      ("head", toJson es.hub.head), ("seq", toJson es.hub.seq),
+      ("records", recsJson ses.recs)]),
+    ("nodes", Json.arr ((List.range N).map (fun i =>
+      encodeNode (es.nodeOf i) (ses.nodeDF i) (ses.appliedF i))).toArray),
+    ("net", encodeNet N es.net (encodeSMsgs ses))]
 
-def okReply (N : Nat) (es : EState) : Json :=
-  Json.mkObj [("ok", Json.bool true), ("state", encodeState N es)]
+def okReply (N : Nat) (ses : SEState) : Json :=
+  Json.mkObj [("ok", Json.bool true), ("state", encodeState N ses)]
 
 def errReply (e : String) : Json :=
   Json.mkObj [("ok", Json.bool false), ("error", Json.str e)]
@@ -346,11 +383,15 @@ def refsReply : Refs.Exec.Answer → Json
 /-! ## Liveness (`Exec.lean`, "The liveness measure") -/
 
 /-- The session state's measures, and whether it has converged. -/
-def measureReply (N : Nat) (es : EState) : Json :=
+def measureReply (N : Nat) (ses : SEState) : Json :=
+  let es := ses.es
   let (a, b, c, d, e) := es.measureE N
   let (a', b', c', d', e', f') := es.rmeasureE N
+  let (p, l, _) := ses.smeasureE N
   Json.mkObj [("ok", Json.bool true), ("measure", toJson #[a, b, c, d, e]),
-    ("rmeasure", toJson #[a', b', c', d', e', f']), ("converged", Json.bool (es.convergedE N))]
+    ("rmeasure", toJson #[a', b', c', d', e', f']),
+    ("smeasure", toJson #[p, l, a', b', c', d', e', f']),
+    ("converged", Json.bool (ses.sconvergedE N))]
 
 /-- What node `n` uploads with a policy `Push` of `new`: `upOps` and `upObjs`. -/
 def uploadReply (es : EState) (n new : Nat) : Json :=
@@ -360,7 +401,7 @@ def uploadReply (es : EState) (n new : Nat) : Json :=
 /-! ## Request handling -/
 
 /-- The oracle's session: the node count and current state, once `reset`. -/
-abbrev Session := Option (Nat × EState)
+abbrev Session := Option (Nat × SEState)
 
 /-- Handle one request line. A rejected or malformed request leaves the session unchanged. -/
 def handle (sess : Session) (line : String) : Json × Session :=
@@ -372,15 +413,15 @@ def handle (sess : Session) (line : String) : Json × Session :=
     | .ok "reset" =>
       match getNat j "nodes" with
       | .error e => (errReply s!"bad request: {e}", sess)
-      | .ok N => (okReply N initE, some (N, initE))
+      | .ok N => (okReply N initSE, some (N, initSE))
     | .ok "step" =>
       match sess with
       | none => (errReply "bad request: step before reset", sess)
       | some (N, es) =>
-        match j.getObjVal? "action" >>= decodeAction with
+        match j.getObjVal? "action" >>= decodeSAction with
         | .error e => (errReply s!"bad request: {e}", sess)
         | .ok a =>
-          match execStep N es a with
+          match sexecStep N es a with
           | .error e => (errReply e, sess)
           | .ok es' => (okReply N es', some (N, es'))
     | .ok "measure" =>
@@ -391,7 +432,7 @@ def handle (sess : Session) (line : String) : Json × Session :=
       match sess, getNat j "node", getNat j "new" with
       | none, _, _ => (errReply "bad request: upload before reset", sess)
       | _, .error e, _ | _, _, .error e => (errReply s!"bad request: {e}", sess)
-      | some (_, es), .ok n, .ok new => (uploadReply es n new, sess)
+      | some (_, ses), .ok n, .ok new => (uploadReply ses.es n new, sess)
     | .ok "presence" =>
       match j.getObjValAs? (Array Json) "ops" >>= fun ops => ops.toList.mapM decodeEOp with
       | .error e => (errReply s!"bad request: {e}", sess)

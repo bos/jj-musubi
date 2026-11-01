@@ -16,6 +16,9 @@ import Musubi.Exec
 import Musubi.ExecSound
 import Musubi.ExecJson
 import Musubi.ExecTest
+import Musubi.SupersedeExec
+import Musubi.SupersedeExecSound
+import Musubi.SupersedeExecTest
 import Musubi.RegressScenario
 import Musubi.Refs
 import Musubi.Presence

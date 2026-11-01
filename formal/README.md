@@ -45,7 +45,7 @@ lake build
 The toolchain is pinned to `leanprover/lean4:v4.35.0` in `lean-toolchain`. The model uses only
 core Lean: no Mathlib, no dependencies. A clean build of the proofs and the oracle takes about a
 minute on 4 cores. It prints the axioms report of `Musubi/Axioms.lean` and runs the `#guard` smoke
-tests in `Musubi/ExecTest.lean`.
+tests in `Musubi/ExecTest.lean` and `Musubi/SupersedeExecTest.lean`.
 
 `./test/run_smoke.sh` builds the conformance oracle alone (`lake build oracle`), replays
 `test/smoke.jsonl` through it and diffs the output against `test/smoke.expected`. The binary
@@ -74,6 +74,9 @@ is `formal/.lake/build/bin/oracle`.
 | `Musubi/ExecSound.lean` | Soundness of `execStep` and of those computations ([below](#the-executable-model-and-the-conformance-oracle)). |
 | `Musubi/ExecJson.lean` | The oracle's JSON codec and request handler (no protocol logic). |
 | `Musubi/ExecTest.lean` | `#guard` smoke tests of `execStep`, checked at build time. |
+| `Musubi/SupersedeExec.lean` | The executable model with supersedes: `SEState`, which adds the hub's records and each node's dropped set, the `SAction`s, `sexecStep`, and `smeasure` computed (`smeasureE`, `sconvergedE`). |
+| `Musubi/SupersedeExecSound.lean` | Soundness of `sexecStep` against `SRStep`, and of those computations. |
+| `Musubi/SupersedeExecTest.lean` | `#guard` smoke tests of `sexecStep`, checked at build time. |
 | `Musubi/Refs.lean` | Per-machine refs, for one git ref: imports, exports, merges, conflicted remote bookmarks, and `jj undo` and `jj op restore`. |
 | `Musubi/Presence.lean` | Which copies a hive shows. |
 | `Musubi/PresenceExec.lean` | The presence rule on a finite history, executable, for the oracle. |
@@ -557,6 +560,28 @@ Theorems (`Musubi/ExecSound.lean`):
   same for `rmeasure`, and `convergedE_iff : es.convergedE N = true ↔ Converged N (abs es)`.
   `mem_upOpsL` and `mem_upObjsL`: `upOpsL` and `upObjsL` list `upOps` and `upObjs`. The oracle
   answers `measure` and `upload` requests with them.
+
+With supersedes (`Musubi/SupersedeExec.lean`, `Musubi/SupersedeExecSound.lean`), `SEState`
+adds to an `EState` the hub's records, in the order it took them, with a ghost copy as of each
+sequence number, each node's dropped set and the records it took last, and the supersedes and
+announcements in flight. `sabs` maps it to an `SState`. `sexecStep` runs every action of
+`execStep`, checking `HeadOK` and `HeadsOK` too, and the actions of `SStep`:
+
+- `sexec_sound : sexecStep N ses a = .ok ses' → SRStep N (sabs ses) (sabs ses') ∨
+  sabs ses' = sabs ses`, for every action, and `sabs_initSE`. So `sexec_reachable` and
+  `sexec_inv`: every state reached is `SRReachable`, and `SInv` holds in it, as do the
+  theorems that superseded ids never come back.
+- `smeasureE_eq` and `sconvergedE_iff`: `smeasure` and `SConverged`, which the oracle's
+  `measure` reply carries as `smeasure` and `converged`.
+
+It is stricter than `SRStep` where the implementation is. The hub takes every push it
+accepts as a supersede, carrying the node's dropped set and the records the node took last
+(`sendSup`), and accepts it only if those are the hub's records (`hubSupAccept`); it adds a
+record only for what the push drops that it hadn't. It refuses a push whose node's records
+aren't its own, changing nothing (`hubPushRefuse`), since that node's ids aren't the hub's, and
+one whose new head it or the push dropped. A
+node takes the hub's records as announced (`sendD`, `adopt`), and the records it took last
+become those.
 
 `PresenceExec.lean` does the same for presence: `presentB` and `latestB` are proved to compute
 `Present` and `UMax` (`presentB_iff`, `mem_latestB`), and the oracle answers presence requests

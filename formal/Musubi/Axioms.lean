@@ -9,6 +9,7 @@ import Musubi.Regress
 import Musubi.Chunks
 import Musubi.Scenario
 import Musubi.ExecSound
+import Musubi.SupersedeExecSound
 import Musubi.RegressScenario
 import Musubi.Refs
 import Musubi.Presence
@@ -102,6 +103,12 @@ open Musubi
 #print axioms Exec.convergedE_iff
 #print axioms Exec.mem_upOpsL
 #print axioms Exec.mem_upObjsL
+#print axioms Exec.sexec_sound
+#print axioms Exec.sabs_initSE
+#print axioms Exec.sexec_reachable
+#print axioms Exec.sexec_inv
+#print axioms Exec.smeasureE_eq
+#print axioms Exec.sconvergedE_iff
 -- Per-machine and shared view state
 #print axioms Refs.noSpuriousRevert
 #print axioms Refs.import_moves_only_after_git

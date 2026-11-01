@@ -314,6 +314,48 @@ fn a_jj_command_in_flight_during_the_rewrite() {
     }
 }
 
+/// A `jj` command that writes on the operation another machine abandoned while this machine
+/// takes the abandon, between the sync step that prepares to take it and the next, which
+/// gives the command's operation a canonical form on the abandoned one. Taking the abandon
+/// renames that operation too: its work syncs, on the rewritten history, and the abandoned
+/// operation doesn't come back.
+#[test]
+fn a_jj_command_while_taking_an_abandon() {
+    use musubi_core::node::Step;
+
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(0, "a", "first");
+    hive.repo(0)
+        .jj(&["bookmark", "create", "dropped", "-r", "@-"]);
+    let dropped = op_log(hive.repo(0))[0].0.clone();
+    hive.sync();
+    hive.commit(0, "b", "second");
+    hive.repo(0).jj(&["op", "abandon", &dropped]);
+    hive.hive.sync(0).unwrap();
+
+    // The step that prepares to take the abandon, which drops this machine's op head, and
+    // realizes the first of the hub's operations after it.
+    hive.hive.fetch(1).unwrap();
+    let member = &mut hive.hive.members[1];
+    let step = member.core.step(&mut member.adapter).unwrap();
+    assert!(matches!(step, Step::Realized(_)), "{step:?}");
+    hive.commit(1, "c", "on the abandoned operation");
+    hive.hive.sync(1).unwrap();
+
+    hive.sync();
+    hive.assert_converged();
+    let work = "on the abandoned operation";
+    assert!(hive.visible(0).iter().any(|c| c.ends_with(work)));
+    for machine in 0..2 {
+        assert!(
+            !op_log(hive.repo(machine))
+                .iter()
+                .any(|(_, d)| d.starts_with("create bookmark dropped")),
+            "{machine}"
+        );
+    }
+}
+
 /// A machine offline while another abandons operations, which keeps working, takes the
 /// abandon when it comes back: its work syncs on the rewritten history.
 #[test]

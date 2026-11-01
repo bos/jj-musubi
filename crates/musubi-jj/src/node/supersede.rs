@@ -120,6 +120,8 @@ struct Taking {
     pending: Record,
     /// The local operation each local one becomes.
     locals: HashMap<OperationId, Vec<OperationId>>,
+    /// The op heads `locals` was worked out from, sorted.
+    heads: Vec<OperationId>,
     /// The operation the hub accepted that this machine fetches from, as the records name
     /// it: what it became, or, if dropped, the first of what was below it.
     base: Option<HubOp>,
@@ -1382,10 +1384,9 @@ impl NodeRepo {
             .as_ref()
             .is_none_or(|taking| taking.records != records)
         {
-            self.records.taking = None;
-            let taking = self.rename_for(records)?;
-            self.records.taking = Some(taking);
-            self.forget_to_node();
+            self.prepare(records)?;
+        } else {
+            self.prepare_again_if_moved()?;
         }
         let taking = self.records.taking.as_ref().expect("prepared above");
         if taking.switched {
@@ -1396,6 +1397,43 @@ impl NodeRepo {
             self.canonical_of(head)
                 .is_some_and(|c| taking.dropped.contains(&c))
         }))
+    }
+
+    /// Renames this node's history as `records` name it, writing the rewrites of its local
+    /// operations, from scratch.
+    fn prepare(&mut self, records: &[Record]) -> Result<(), NodeError> {
+        self.records.taking = None;
+        // The hub-to-node translation as it is with no records being taken, which
+        // `rename_for` uses.
+        self.forget_to_node();
+        let taking = self.rename_for(records)?;
+        self.records.taking = Some(taking);
+        self.forget_to_node();
+        Ok(())
+    }
+
+    /// Prepares the records being taken again if the op heads moved since they were
+    /// prepared, as a `jj` command moves them. Their rewrites are only of what was reachable
+    /// from the op heads then, and a sync's next step gives the operation such a command wrote
+    /// a canonical form, as `realize` does on a node opened since, on the history the records
+    /// rename: taken without renaming it, it would bring back what they drop. Does nothing if
+    /// the op heads moved there already.
+    fn prepare_again_if_moved(&mut self) -> Result<(), NodeError> {
+        let Some(taking) = self
+            .records
+            .taking
+            .as_ref()
+            .filter(|taking| !taking.switched)
+        else {
+            return Ok(());
+        };
+        let mut heads = self.local_heads()?;
+        heads.sort();
+        if heads == taking.heads {
+            return Ok(());
+        }
+        let records = taking.records.clone();
+        self.prepare(&records)
     }
 
     /// The renaming that taking `records` makes, its local rewrites written.
@@ -1503,6 +1541,8 @@ impl NodeRepo {
         let heads = self.local_heads()?;
         let (_, unmapped) = self.local_walk(&heads)?;
         let locals = self.rewrite_locals(&mut contraction, &heads, &HashMap::new(), &unmapped)?;
+        let mut heads = heads;
+        heads.sort();
         Ok(Taking {
             records: records.to_vec(),
             common,
@@ -1512,6 +1552,7 @@ impl NodeRepo {
             renaming: contraction.into_images(),
             pending: Record::new(mine.into_iter().map(HubOp)),
             locals,
+            heads,
             base: base.map(HubOp),
         })
     }
@@ -1526,78 +1567,38 @@ impl NodeRepo {
 
     /// The op heads that moving them where the records being taken name them leaves beside
     /// `head`, as they name them: `max(images(heads) ∪ {head}) \ {head}`. Empty if no records
-    /// are being taken, or the op heads are there already. A head a `jj` command published
-    /// since they were prepared is rewritten first ([`Self::taken_image`]), so that merging it
-    /// with `head` merges against the renamed history, not an older common ancestor.
+    /// are being taken, or the op heads are there already.
     pub(super) fn taken_beside(
         &mut self,
         head: &OperationId,
     ) -> Result<Vec<OperationId>, NodeError> {
-        let Some(mut taking) = self.records.taking.take() else {
+        self.prepare_again_if_moved()?;
+        let Some(taking) = self
+            .records
+            .taking
+            .as_ref()
+            .filter(|taking| !taking.switched)
+        else {
             return Ok(vec![]);
         };
-        let beside = if taking.switched {
-            Ok(vec![])
-        } else {
-            self.local_heads().and_then(|heads| {
-                for head in &heads {
-                    self.taken_image(head, &mut taking.locals)?;
-                }
-                let mut beside = self.moved_heads(&heads, &taking.locals, Some(head))?;
-                beside.retain(|op| op != head);
-                Ok(beside)
-            })
-        };
-        self.records.taking = Some(taking);
-        beside
-    }
-
-    /// What the local operation `op` becomes as the records being taken name the history,
-    /// `locals` having what those written before they were prepared become. One a `jj`
-    /// command wrote since, which stands for nothing yet, is rewritten on its parents'
-    /// rewrites, as [`Self::rewrite_locals`] rewrites those, and goes in `locals` too.
-    fn taken_image(
-        &self,
-        op: &OperationId,
-        locals: &mut HashMap<OperationId, Vec<OperationId>>,
-    ) -> Result<Vec<OperationId>, NodeError> {
-        if let Some(images) = locals.get(op) {
-            return Ok(images.clone());
-        }
-        if op == self.root_op_id()
-            || self.before_join.contains(op)
-            || self.canonical_of(op).is_some()
-        {
-            return Ok(vec![op.clone()]);
-        }
-        let op_store = self.loader.op_store().clone();
-        let mut store_op = op_store.read_operation(op).block_on()?;
-        let mut parents = vec![];
-        for parent in &store_op.parents {
-            parents.extend(self.taken_image(parent, locals)?);
-        }
-        let parents = dedup(parents);
-        let image = if parents == store_op.parents {
-            op.clone()
-        } else {
-            store_op.parents = parents;
-            op_store.write_operation(&store_op).block_on()?
-        };
-        locals.insert(op.clone(), vec![image.clone()]);
-        Ok(vec![image])
+        let mut beside = self.moved_heads(&self.local_heads()?, &taking.locals, Some(head))?;
+        beside.retain(|op| op != head);
+        Ok(beside)
     }
 
     /// Moves the op heads where the records being taken name them, and to `head` too if
     /// given: `heads := max(images(heads) ∪ {head})`, with `merged`, if given, a merge of
-    /// `head` with heads [`Self::taken_beside`] it, in place of those it merges. Does nothing
-    /// if no records are being taken, or the op heads are there already. The caller moves the
-    /// workspaces after (`move_taken_workspaces`), holding no lock of jj's: jj takes a
-    /// workspace's lock before its colocated git lock.
+    /// `head` with heads [`Self::taken_beside`] it, in place of those it merges, preparing the
+    /// records again first if the op heads moved ([`Self::prepare_again_if_moved`]). Does
+    /// nothing if no records are being taken, or the op heads are there already. The caller
+    /// moves the workspaces after (`move_taken_workspaces`), holding no lock of jj's: jj takes
+    /// a workspace's lock before its colocated git lock.
     pub(super) fn switch_to_taken(
         &mut self,
         head: Option<&OperationId>,
         merged: Option<&OperationId>,
     ) -> Result<(), NodeError> {
+        self.prepare_again_if_moved()?;
         let Some(mut taking) = self.records.taking.take() else {
             return Ok(());
         };

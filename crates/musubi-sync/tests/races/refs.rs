@@ -1281,9 +1281,10 @@ fn realization_beside_a_fetch_here_keeps_the_fetch() {
 /// abandon (protocol.md, "Supersedes"). A `jj git fetch` of `two`, a term of the conflict,
 /// publishes after the sync's step has checked the op heads and before the realization is
 /// published, as only a command running concurrently can: the test makes the step's calls
-/// itself. musubi must leave `two` in `.git`, and publish the realization merged with the
-/// fetch, which keeps it: written for the realization alone, `three` would be in `.git`, and
-/// the next command would import it as a move made with git.
+/// itself, mapping the op heads before the realization as a node opened since does. musubi
+/// must leave `two` in `.git`, and publish the realization merged with the fetch, which keeps
+/// it, the fetch renamed first: written for the realization alone, `three` would be in
+/// `.git`, and the next command would import it as a move made with git.
 #[test]
 fn realization_beside_a_fetch_keeps_the_fetch_while_taking_an_abandon() {
     use musubi_core::node::LocalRepo as _;
@@ -1341,6 +1342,9 @@ fn realization_beside_a_fetch_keeps_the_fetch_while_taking_an_abandon() {
     };
     upstream(&f, &two);
     f.repo(THERE).jj(&["git", "fetch"]);
+    // As `realize` does on a node opened since the records were prepared, which gives the
+    // fetch a canonical form on the abandoned operation.
+    f.node(THERE).canonical_heads().unwrap();
     f.hive.members[THERE].adapter.advance(&known).unwrap();
     assert_eq!(git_y(&f), two, "the fetch in .git");
     let ops = |f: &Fixture, index: usize| {

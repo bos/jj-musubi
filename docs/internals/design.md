@@ -774,11 +774,17 @@ nothing is exported to `.git` and no ref moves; and it renames its own pending d
 a record only once none of its heads is dropped by it. A machine whose head a record drops, as
 one that stood still at an operation another machine abandoned, first fetches and advances to the
 hub's head, which descends from it. So applying a record never leaves a machine two heads to
-merge, and never repeats a merge another machine made. A `jj` command can still publish in
-between, beside that realization. musubi reparents its operation onto the renamed history, as
-below, and merges the realization with it, as with any realization beside a machine's own
-heads ([Local integration](#local-integration)); the merge goes where the heads move. The hub never
-takes a head it has dropped, and a machine never advances to one.
+merge, and never repeats a merge another machine made. The hub never takes a head it has
+dropped, and a machine never advances to one.
+
+A machine works out how records rename its history, and writes the rewrites of its local
+operations, before it takes them, from the op heads as they are then. A `jj` command can write
+in between, and the sync's next step gives its operation a canonical form, on the history the
+records rename, which nothing would rename once they are taken: pushed, it would bring back
+what they drop. So a machine works the rewrites out again whenever the op heads moved before it
+takes the records. Where the command's operation is beside the realization of the hub's head,
+the realization is merged with its rewrite, as with any realization beside a machine's own
+heads ([Local integration](#local-integration)), and the merge goes where the heads move.
 
 Each machine keeps, for every id a record superseded, the id or ids it became, and translation
 renames through it. An operation that a `jj` command wrote on a superseded operation, having

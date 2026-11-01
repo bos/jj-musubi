@@ -3,9 +3,6 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::PoisonError;
 
@@ -22,13 +19,8 @@ use super::index_err;
 use crate::op_id::CanonicalOp;
 use crate::op_id::LocalOp;
 use crate::presence::FORGET_ATTRIBUTE;
-use crate::presence::Kind;
 use crate::presence::Presence;
 use crate::workspaces;
-
-/// How many operations' presence to remember: those computed last, which the next
-/// operations' parents mostly are.
-const REMEMBERED: usize = 256;
 
 /// This machine's own workspace names as of its latest work (`Presence::worked`), the last
 /// asked about.
@@ -43,129 +35,14 @@ fn own_keys(node: &NodeRepo, view: &View) -> BTreeSet<WorkspaceNameBuf> {
         .collect()
 }
 
-/// Presence at canonical operations, for the last [`REMEMBERED`] computed.
-#[derive(Default)]
-pub(super) struct PresenceMemo {
-    presences: HashMap<CanonicalOp, Arc<Presence<CanonicalOp>>>,
-    order: VecDeque<CanonicalOp>,
-}
-
-impl PresenceMemo {
-    fn get(&self, op: &CanonicalOp) -> Option<Arc<Presence<CanonicalOp>>> {
-        self.presences.get(op).cloned()
-    }
-
-    fn insert(&mut self, op: CanonicalOp, presence: Arc<Presence<CanonicalOp>>) {
-        if self.presences.insert(op.clone(), presence).is_none() {
-            self.order.push_back(op);
-        }
-        while self.order.len() > REMEMBERED {
-            if let Some(old) = self.order.pop_front() {
-                self.presences.remove(&old);
-            }
-        }
-    }
-}
-
 impl NodeRepo {
     /// The copies present at canonical operation `op`. Unless an ancestor's presence is
     /// remembered, this reads the history below `op`, once.
     pub fn presence(&self, op: &CanonicalOp) -> Result<Arc<Presence<CanonicalOp>>, NodeError> {
-        let root = self.canonical.root_operation_id();
-        if op == root {
-            return Ok(Arc::default());
-        }
-        if !self.canonical.has_operation(op) {
+        if op != self.canonical.root_operation_id() && !self.canonical.has_operation(op) {
             return Err(NodeError::NotRealizable(op.0.hex(), "operation not stored"));
         }
-        let memo = || {
-            self.presences
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-        };
-        if let Some(presence) = memo().get(op) {
-            return Ok(presence);
-        }
-        // The operations whose presence isn't known, ancestors first, each read once, then each
-        // one's from its parents', keeping each only until the last of its children in the
-        // walk needs it.
-        let mut ops: Vec<(CanonicalOp, Vec<CanonicalOp>, Kind)> = vec![];
-        let mut seen: HashSet<CanonicalOp> = HashSet::new();
-        let mut stack: Vec<(CanonicalOp, Option<jj_lib::op_store::Operation>)> =
-            vec![(op.clone(), None)];
-        while let Some((id, stored)) = stack.pop() {
-            match stored {
-                Some(stored) => ops.push((
-                    id,
-                    CanonicalOp::parents_of(&stored),
-                    Kind::of(&stored.metadata),
-                )),
-                None => {
-                    if !seen.insert(id.clone()) || id == *root || memo().get(&id).is_some() {
-                        continue;
-                    }
-                    let stored = self.canonical.read_operation(&id)?;
-                    let parents: Vec<CanonicalOp> = CanonicalOp::parents_of(&stored)
-                        .into_iter()
-                        .filter(|parent| !seen.contains(parent))
-                        .collect();
-                    stack.push((id, Some(stored)));
-                    stack.extend(parents.into_iter().map(|parent| (parent, None)));
-                }
-            }
-        }
-        // Another thread worked it out meanwhile.
-        if ops.last().map(|(id, _, _)| id) != Some(op) {
-            let remembered = memo().get(op);
-            return remembered.map_or_else(|| self.presence(op), Ok);
-        }
-        let mut children: HashMap<CanonicalOp, usize> = HashMap::new();
-        for (_, parents, _) in &ops {
-            for parent in parents {
-                *children.entry(parent.clone()).or_default() += 1;
-            }
-        }
-        let mut walked: HashMap<CanonicalOp, Arc<Presence<CanonicalOp>>> = HashMap::new();
-        let mut presence = Arc::default();
-        for (id, parents, kind) in ops {
-            self.canonical.note_generation(&id, &parents);
-            let mut of_parents = Vec::with_capacity(parents.len());
-            for parent in &parents {
-                let known = match walked.get(parent) {
-                    Some(known) => known.clone(),
-                    None if parent == root => Arc::default(),
-                    None => {
-                        // Not under the lock: working it out takes it.
-                        let remembered = memo().get(parent);
-                        match remembered {
-                            Some(known) => known,
-                            None => self.presence(parent)?,
-                        }
-                    }
-                };
-                of_parents.push((parent.clone(), known));
-            }
-            presence = if let ([(_, only)], None, true) =
-                (of_parents.as_slice(), &kind.work, kind.forgets.is_empty())
-            {
-                only.clone()
-            } else {
-                Arc::new(self.merge_presence(&of_parents)?.apply(&id, &kind))
-            };
-            for parent in &parents {
-                if let Some(left) = children.get_mut(parent) {
-                    *left -= 1;
-                    if *left == 0 {
-                        walked.remove(parent);
-                    }
-                }
-            }
-            if children.get(&id).is_some_and(|&left| left > 0) {
-                walked.insert(id, presence.clone());
-            }
-        }
-        memo().insert(op.clone(), presence.clone());
-        Ok(presence)
+        Ok(self.presences.presence(&self.canonical, op)?)
     }
 
     /// Presence before an operation's own effect, from its parents'.
@@ -173,21 +50,12 @@ impl NodeRepo {
         &self,
         parents: &[(CanonicalOp, Arc<Presence<CanonicalOp>>)],
     ) -> Result<Presence<CanonicalOp>, NodeError> {
-        let parents: Vec<(CanonicalOp, &Presence<CanonicalOp>)> = parents
-            .iter()
-            .map(|(op, presence)| (op.clone(), presence.as_ref()))
-            .collect();
-        Ok(Presence::merge(&parents, |a, b| {
-            self.canonical.is_ancestor_of(a, b)
-        })?)
+        Ok(crate::canonical::merge_presence(&self.canonical, parents)?)
     }
 
     /// Remembers the presence at canonical operation `op`, just written.
     pub(super) fn remember_presence(&self, op: CanonicalOp, presence: Presence<CanonicalOp>) {
-        self.presences
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(op, Arc::new(presence));
+        self.presences.remember(op, presence);
     }
 
     /// The copies present as of this machine's (merged) op head, and the canonical form of

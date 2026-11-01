@@ -11,6 +11,7 @@ mod codec;
 mod contract;
 mod log;
 mod origin;
+mod presence;
 
 use std::io;
 use std::path::Path;
@@ -45,6 +46,8 @@ use self::codec::ViewCodec;
 pub use self::contract::Contraction;
 pub use self::contract::current;
 use self::log::Log;
+pub use self::presence::PresenceMemo;
+pub use self::presence::merge as merge_presence;
 use crate::objects::ObjectError;
 use crate::objects::bundle;
 use crate::objects::bundle::BundleWriter;

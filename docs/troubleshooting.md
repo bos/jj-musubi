@@ -478,6 +478,17 @@ In a colocated repository, jj exports bookmarks to git only when a command chang
 so after a `jj` command that merged other machines' work, git's branches can lag jj's
 bookmarks. The next command that changes something exports them, as does `jj git export`.
 
+### "Unable to create '.../refs/heads/main.lock': File exists" or "main@git: Failed to set"
+
+If git names a `.lock` file, or jj fails to export a bookmark, a `git`, `jj` or musubi process
+stopped partway through updating a ref may have left the ref's lock file behind: for bookmark
+`main`, `.git/refs/heads/main.lock`, or `.git/packed-refs.lock`. While it is there, neither
+git nor jj, yours or musubi's, updates that ref. Once the lock is ten minutes old, musubi
+removes it the next time it gets in the way of a sync, and says so in the daemon's log; until
+then your own commands keep failing on it. To clear it sooner, if the lock is still there
+after a minute and no `git` or `jj` command, an editor's included, is running in the
+repository, delete it. Nothing is lost: jj exports the bookmark again at its next export.
+
 ### An annotated tag is lightweight on other machines
 
 musubi moves the commits a tag points to, not git's tag objects, so an annotated tag fetched

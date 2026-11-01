@@ -579,6 +579,20 @@ keep refs to clean up, a week after it last ran (even if that run failed partway
 head, not on battery, and not while another process runs it. The hub never runs it: there, what
 git can't reach from the head is history the hive still needs.
 
+A process killed partway through updating refs, musubi, git or jj alike, leaves behind the lock
+file git takes on a ref, `<ref>.lock` or `packed-refs.lock`, and every later update of that ref
+fails until it goes: git never removes one. musubi does, when one of its own ref updates fails:
+an import's keep refs, the cleanup's and the hub's `update-ref`, and the export to a colocated
+`.git`. A lock records nothing of who took it, and git closes it before renaming it, but a ref
+lock is held for one update, seconds at most, so musubi removes those over ten minutes old,
+logging each, then tries the import or `update-ref` again. A ref that failed to export is
+exported again by the next export, musubi's or a `jj` command's, so musubi looks only at the
+locks on the refs that failed, and `packed-refs.lock`, since a failure that isn't a lock's
+recurs at every export. A keep ref matters most: an import that failed on one has its objects
+already, so the next import wouldn't fetch the commit, nor make its keep ref. musubi never
+removes git's other locks, such as `index.lock`, which `git commit -a` holds while its editor
+is open (`crates/musubi-jj/src/ref_locks.rs`).
+
 ### Simple backend
 
 jj's simple backend exists mainly for jj's own tests, but supporting it keeps the operation layer

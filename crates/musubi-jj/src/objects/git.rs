@@ -38,6 +38,7 @@ use crate::git_command::GitRepo;
 use crate::git_command::check_status;
 use crate::git_command::git;
 use crate::git_command::run_err;
+use crate::ref_locks;
 
 /// Where a hub's repository names the commits its head requires (see
 /// [`GitObjects::mark_head`]).
@@ -421,7 +422,7 @@ impl GitObjects {
             writeln!(input, "delete {name}").expect("writing to a String");
         }
         if !input.is_empty() {
-            self.run(&["update-ref", "--stdin"], Some(input.into_bytes()))?;
+            self.update_refs(&input)?;
         }
         // Looked into at most hourly, since counting objects takes a moment, and a large
         // repository on a small machine may fail to write a bitmap index every time.
@@ -585,7 +586,7 @@ impl GitObjects {
         }
         let count = removed.len();
         if !input.is_empty() {
-            self.run(&["update-ref", "--stdin"], Some(input.into_bytes()))?;
+            self.update_refs(&input)?;
         }
         Ok(count)
     }
@@ -610,6 +611,15 @@ impl GitObjects {
 
     fn run(&self, args: &[&str], input: Option<Vec<u8>>) -> Result<Vec<u8>, ObjectError> {
         Ok(self.repo.run(args, input)?)
+    }
+
+    /// Runs `git update-ref --stdin` on `input`, one transaction, again if a ref lock left
+    /// behind was in its way (see [`ref_locks`]).
+    fn update_refs(&self, input: &str) -> Result<(), ObjectError> {
+        ref_locks::retrying(self.git_dir(), || {
+            self.run(&["update-ref", "--stdin"], Some(input.as_bytes().to_vec()))
+                .map(drop)
+        })
     }
 }
 
@@ -900,7 +910,10 @@ impl ObjectStore for GitStore<'_> {
         }
         self.git.check_connected(wants, haves)?;
         if let Extras::Jj { backend, .. } = &self.extras {
-            backend.import_head_commits(wants)?;
+            // jj makes a keep ref for each, after their objects arrive: an import failed by a
+            // lock left on one would leave the commit without it, since the next import
+            // wouldn't fetch the commit again.
+            ref_locks::retrying(self.git.git_dir(), || backend.import_head_commits(wants))?;
         }
         self.git.maintain(matches!(self.extras, Extras::Files(_)))
     }
@@ -934,7 +947,8 @@ mod tests {
     /// Keep refs as jj's gc leaves them: one for each head, made if missing; of the rest,
     /// only those whose loose ref is new; a ref named for one commit but holding another
     /// counts as not a head's, and one with a head's name holding something else is
-    /// replaced. No object goes.
+    /// replaced. No object goes. A lock that a killed process left on a ref to remove goes
+    /// too, rather than fail every gc.
     #[test]
     fn keep_refs_are_left_as_jjs_gc_leaves_them() {
         let dir = musubi_testutil::tempdir();
@@ -965,12 +979,18 @@ mod tests {
                 .set_modified(cutoff - std::time::Duration::from_secs(60))
                 .unwrap();
         }
+        let lock = git_dir.join(format!("{KEEP_REFS}{old}.lock"));
+        fs::File::create(&lock)
+            .unwrap()
+            .set_modified(SystemTime::now() - 2 * ref_locks::STALE)
+            .unwrap();
         let objects = GitObjects::new(Path::new("git"), &git_dir);
         let heads: HashSet<CommitId> = [&head, &missing]
             .into_iter()
             .map(|hex| CommitId::try_from_hex(hex).unwrap())
             .collect();
         assert_eq!(objects.rebuild_keep_refs(&heads, cutoff).unwrap(), 2);
+        assert!(!lock.exists());
         let refs = run(&[
             "for-each-ref",
             "--format=%(refname:lstrip=3) %(objectname)",

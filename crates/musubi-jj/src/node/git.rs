@@ -11,6 +11,7 @@ use std::sync::Mutex;
 
 use gix::refs::transaction::PreviousValue;
 use jj_lib::backend::CommitId;
+use jj_lib::git::FailedRefExportReason;
 use jj_lib::git::GitExportError;
 use jj_lib::git::REMOTE_NAME_FOR_LOCAL_GIT_REPO;
 use jj_lib::lock::FileLock;
@@ -38,6 +39,7 @@ use crate::hive_settings::repository;
 use crate::hive_settings::same_repository;
 use crate::objects::GitObjects;
 use crate::objects::Incompleteness;
+use crate::ref_locks;
 use crate::remote_url::without_credentials;
 
 /// A node's git repository, when its backend is git.
@@ -53,6 +55,8 @@ pub(super) struct NodeGit {
 pub(super) struct Colocation {
     /// jj's lock on importing and exporting refs.
     lock_path: PathBuf,
+    /// The `.git` directory.
+    git_dir: PathBuf,
     /// The expected values of the conflicted remote bookmarks of the operation exported last,
     /// under its realization's id and its exported copy's, where the next export's walk back
     /// through history ([`expected`]) usually stops.
@@ -67,6 +71,9 @@ pub(super) type Expected = HashMap<(OperationId, GitRefNameBuf), Option<RefTarge
 /// each: the git ref, then the value ([`expected_token`]).
 pub(super) const EXPECTED_ATTRIBUTE: &str = "musubi.expected";
 
+/// A conflicted remote bookmark's git ref, and its expected value.
+type Expectation = (GitRefNameBuf, Option<RefTarget>);
+
 impl NodeGit {
     /// The git repository of the jj repository whose `.jj/repo` directory is `repo_path` and
     /// whose store is `store`, if its backend is git, with `executable` the git to run there.
@@ -78,6 +85,7 @@ impl NodeGit {
             repo: GitRepo::new(executable, git_path),
             colocation: colocated.then(|| Colocation {
                 lock_path: repo_path.join("git_import_export.lock"),
+                git_dir: git_path.to_owned(),
                 expected: Mutex::default(),
             }),
             config: ConfigCache::default(),
@@ -319,7 +327,7 @@ impl Colocation {
         let mut tx = repo.start_transaction();
         // Refs that fail to export keep their recorded values, exactly as after a failed
         // export in a local `jj` command; jj's next import reconciles them.
-        let _stats = jj_lib::git::export_refs(tx.repo_mut())?;
+        let stats = jj_lib::git::export_refs(tx.repo_mut())?;
         let mut known = self.expected.lock().expect("not poisoned").clone();
         known.extend(
             pending
@@ -332,7 +340,42 @@ impl Colocation {
             is_join,
             parents: &|_| Ok(None),
         };
-        let expected = export_conflicted_remote_bookmarks(tx.repo_mut(), &op, &history, beside)?;
+        let (expected, unwritten) =
+            export_conflicted_remote_bookmarks(tx.repo_mut(), &op, &history, beside)?;
+        // The next export, this machine's next realization's or a `jj` command's, tries a ref
+        // that failed again, so a ref lock left behind would fail it every time.
+        let written = |reason: &FailedRefExportReason| {
+            matches!(
+                reason,
+                FailedRefExportReason::FailedToSet(_) | FailedRefExportReason::FailedToDelete(_)
+            )
+        };
+        let bookmarks = stats
+            .failed_bookmarks
+            .iter()
+            .filter(|(_, reason)| written(reason));
+        let tags = stats
+            .failed_tags
+            .iter()
+            .filter(|(_, reason)| written(reason));
+        let failed: Vec<String> = bookmarks
+            .map(|(symbol, _)| {
+                if symbol.remote == *REMOTE_NAME_FOR_LOCAL_GIT_REPO {
+                    format!("refs/heads/{}", symbol.name.as_str())
+                } else {
+                    format!(
+                        "refs/remotes/{}/{}",
+                        symbol.remote.as_str(),
+                        symbol.name.as_str()
+                    )
+                }
+            })
+            .chain(tags.map(|(symbol, _)| format!("refs/tags/{}", symbol.name.as_str())))
+            .chain(unwritten.iter().map(|name| name.as_str().to_owned()))
+            .collect();
+        if !failed.is_empty() {
+            ref_locks::remove_stale_of(&self.git_dir, failed.iter().map(String::as_str));
+        }
         let remember = |exported: &OperationId| {
             let ids = [realized, exported];
             *self.expected.lock().expect("not poisoned") = ids
@@ -388,16 +431,16 @@ impl Colocation {
 /// doesn't: that head put it there, as by a fetch, and the merge of the two, exported next and
 /// published in the realization's place, can keep it, which a write for the realization alone
 /// would undo.
-/// Returns the expected values, by git ref.
+/// Returns the expected values, by git ref, and the git refs it failed to write.
 fn export_conflicted_remote_bookmarks(
     mut_repo: &mut MutableRepo,
     op: &Operation,
     history: &History<'_>,
     beside: &[Operation],
-) -> Result<Vec<(GitRefNameBuf, Option<RefTarget>)>, NodeError> {
+) -> Result<(Vec<Expectation>, Vec<GitRefNameBuf>), NodeError> {
     let conflicted = conflicted_remote_bookmarks(mut_repo.store(), mut_repo.view(), op, history)?;
     if conflicted.is_empty() {
-        return Ok(vec![]);
+        return Ok((vec![], vec![]));
     }
     let all = conflicted
         .iter()
@@ -408,6 +451,7 @@ fn export_conflicted_remote_bookmarks(
         .map(|op| op.view().block_on())
         .collect::<Result<Vec<_>, _>>()?;
     let git_repo = jj_lib::git::get_git_repo(mut_repo.store()).map_err(GitExportError::from)?;
+    let mut unwritten = vec![];
     for (name, expected, terms) in conflicted {
         let Some(expected) = expected else {
             continue;
@@ -460,6 +504,7 @@ fn export_conflicted_remote_bookmarks(
                 (None, None) => true,
             };
             if !written {
+                unwritten.push(name);
                 continue;
             }
         }
@@ -467,7 +512,7 @@ fn export_conflicted_remote_bookmarks(
             mut_repo.set_git_ref_target(&name, expected);
         }
     }
-    Ok(all)
+    Ok((all, unwritten))
 }
 
 type Terms = Vec<Option<CommitId>>;

@@ -5,10 +5,12 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::time::SystemTime;
 
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::OperationId;
 use musubi_jj::node::NodeRepo;
+use musubi_jj::ref_locks;
 use musubi_testutil::TestEnv;
 use musubi_testutil::TestRepo;
 
@@ -391,6 +393,59 @@ fn crash_with_writes_in_flight() {
         assert_eq!(realizations[&canonical], BTreeSet::from([local.clone()]));
     }
     b.jj(&["status"]);
+}
+
+/// jj makes a keep ref for each commit it imports, the last step of an import, after the
+/// commit's objects have arrived. A lock that a process killed partway through left on one
+/// would fail the import, and the commit, no longer missing, would never get its keep ref.
+#[test]
+fn a_lock_left_on_a_keep_ref_does_not_fail_an_import() {
+    let env = TestEnv::new();
+    let a = env.init_repo("alpha");
+    let b = env.init_repo("beta");
+    commit(&a, "f", "locked");
+    let mut a_node = open(&a);
+    let b_node = open(&b);
+    let head = single_canonical_head(&mut a_node);
+    let keep_ref = format!(
+        "refs/jj/keep/{}",
+        a.jj(&["log", "--no-graph", "-r", "@-", "-T", "commit_id"])
+    );
+    let lock = b.path().join(format!(".git/{keep_ref}.lock"));
+    std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+    std::fs::File::create(&lock)
+        .unwrap()
+        .set_modified(SystemTime::now() - 2 * ref_locks::STALE)
+        .unwrap();
+    ship_objects(&a_node, &b_node, &head);
+    assert!(!lock.exists());
+    b.git(&["rev-parse", "--verify", "--quiet", &keep_ref]);
+}
+
+/// A bookmark that fails to export to `.git` is exported again by the next export, so a
+/// lock that a process killed partway through left on its ref would fail it every time.
+#[test]
+fn a_lock_left_on_a_bookmark_goes_after_a_failed_export() {
+    let env = TestEnv::new();
+    let a = env.init_repo("alpha");
+    let b = env.init_repo("beta");
+    commit(&a, "f", "locked");
+    a.jj(&["bookmark", "create", "main", "-r", "@-"]);
+    let mut a_node = open(&a);
+    let mut b_node = open(&b);
+    let head = single_canonical_head(&mut a_node);
+    let lock = b.path().join(".git/refs/heads/main.lock");
+    std::fs::File::create(&lock)
+        .unwrap()
+        .set_modified(SystemTime::now() - 2 * ref_locks::STALE)
+        .unwrap();
+    sync(&a_node, &mut b_node, &head);
+    assert!(!lock.exists());
+    b.jj(&["git", "export"]);
+    assert_eq!(
+        b.git(&["rev-parse", "refs/heads/main"]),
+        a.git(&["rev-parse", "refs/heads/main"])
+    );
 }
 
 /// The simple backend replicates through the same path, with store files in place of packs.

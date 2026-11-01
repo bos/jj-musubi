@@ -13,6 +13,7 @@ pub mod objects;
 pub mod presence;
 mod protobuf;
 pub mod records;
+pub mod ref_locks;
 pub mod remote_url;
 mod translation_map;
 pub mod workspaces;

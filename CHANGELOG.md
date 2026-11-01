@@ -204,6 +204,11 @@ change the protocol, so run the same release on the hub and every machine (see
 - The daemon and the hub log only warnings from jj's library, whose notes on every lock it
   took and index it built made up most of `daemon.log`. `--log info` brings them back, as
   does `musubi.daemon.log = "info"` for the daemon.
+- A ref's lock file, left by a `git`, `jj` or musubi killed partway through updating refs,
+  no longer stops musubi updating that ref, or exporting its bookmark to `.git`, until you
+  delete it: once the lock is ten minutes old, musubi removes it the next time it gets in
+  the way, noting it in the daemon's log, and the update works at once, or for a bookmark,
+  at the next export.
 - The hub and machines talk differently, so upgrade the hub and every machine together.
 - On upgrading: `hive.toml` and `state.toml` have changed, and the daemon serves nothing
   until each copy joins again. On each machine, run `musubi daemon restart`, then in each

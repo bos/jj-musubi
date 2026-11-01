@@ -1,5 +1,6 @@
 import Musubi.Basic
 import Musubi.Dag
+import Musubi.Contract
 import Musubi.Model
 import Musubi.Invariant
 import Musubi.PreserveEnv

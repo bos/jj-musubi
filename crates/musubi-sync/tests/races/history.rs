@@ -222,6 +222,48 @@ fn op_abandon_under_a_realized_head_replicates() {
     assert!(hive.visible(0).iter().any(|c| c.ends_with("beta 1")));
 }
 
+/// The same for this machine's own operation below its merge with another machine's work,
+/// made concurrently: jj rewrites every operation above the abandoned one that isn't below it,
+/// putting even the other machine's realized operations on its parent, and musubi puts them
+/// back. Noticed only after the settings reconciled before the sync had read the op heads, the
+/// abandon left those reading an operation jj had rewritten: a realization no longer on its
+/// canonical operation's parents, and the sync stopped for good.
+#[test]
+fn op_abandon_below_a_merge_with_concurrent_work_replicates() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(0, "a", "alpha 1");
+    hive.sync();
+    hive.commit(0, "c", "alpha's concurrent work");
+    hive.commit(1, "b1", "beta 1");
+    let abandoned = op_log(hive.repo(1))[0].clone();
+    assert!(abandoned.1.starts_with("commit "), "{abandoned:?}");
+    hive.commit(1, "b2", "beta 2");
+    hive.sync();
+    // jj merged alpha's realized work with beta's, above the abandoned operation.
+    assert!(
+        op_log(hive.repo(1))
+            .iter()
+            .take_while(|(id, _)| *id != abandoned.0)
+            .any(|(_, description)| description == "reconcile divergent operations")
+    );
+    hive.repo(1).jj(&["op", "abandon", &abandoned.0]);
+    hive.sync();
+    hive.assert_converged();
+    for machine in 0..2 {
+        assert!(
+            !has_operation(hive.repo(machine), &abandoned.1),
+            "{machine}"
+        );
+        let visible = hive.visible(machine);
+        for work in ["alpha 1", "alpha's concurrent work", "beta 1", "beta 2"] {
+            assert!(
+                visible.iter().any(|c| c.ends_with(work)),
+                "{machine}: {work}"
+            );
+        }
+    }
+}
+
 /// Each operation `repo`'s op log shows, newest first: its id and description.
 fn op_log(repo: &musubi_testutil::TestRepo) -> Vec<(String, String)> {
     repo.jj(&[

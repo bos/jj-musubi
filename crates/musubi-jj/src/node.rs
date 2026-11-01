@@ -129,6 +129,9 @@ pub struct NodeRepo {
     late: Vec<LocalOp>,
     /// The op heads and base `check_abandon` last checked.
     abandon_checked: Option<(Vec<LocalOp>, Option<crate::records::HubOp>)>,
+    /// Whether `check_abandon` noticed a `jj op abandon` since [`Self::take_abandon_noticed`]
+    /// last said so.
+    abandon_noticed: bool,
 }
 
 /// The last search for the operation to revert, and how many searches have run.
@@ -218,6 +221,7 @@ impl NodeRepo {
             records: Records::load(&musubi_dir)?,
             late: vec![],
             abandon_checked: None,
+            abandon_noticed: false,
         };
         for (local, canonical, fingerprint) in node.read_joins()? {
             node.joins.insert(fingerprint, canonical.clone());
@@ -373,18 +377,27 @@ impl NodeRepo {
     }
 
     /// Lets jj merge the op heads if there are several, as any `jj` command would. Returns
-    /// the resulting single head.
+    /// the resulting single head. A `jj op abandon` is noticed first: what jj rewrote, musubi
+    /// rewrites again, moving the op heads.
     ///
     /// The merge can move bookmarks (jj rebases descendants of rewritten commits, and their
     /// bookmarks with them), so in a colocated repository it is exported to `.git` before
     /// becoming the op head, under jj's import/export lock, like every other op head musubi
     /// publishes. The exported copy has the same canonical form as the merge.
-    pub fn merge_heads(&self) -> Result<LocalOp, NodeError> {
+    pub fn merge_heads(&mut self) -> Result<LocalOp, NodeError> {
         Ok(LocalOp(self.merged_repo()?.op_id().clone()))
     }
 
-    /// The repository at the single head [`Self::merge_heads`] leaves.
-    fn merged_repo(&self) -> Result<Arc<ReadonlyRepo>, NodeError> {
+    /// The repository at the single head [`Self::merge_heads`] leaves, an abandon noticed
+    /// first.
+    fn merged_repo(&mut self) -> Result<Arc<ReadonlyRepo>, NodeError> {
+        self.check_abandon()?;
+        self.merged_repo_unchecked()
+    }
+
+    /// [`Self::merged_repo`] without noticing an abandon first: for musubi's own operations
+    /// written one on another, an abandon noticed between which would rewrite those written.
+    fn merged_repo_unchecked(&self) -> Result<Arc<ReadonlyRepo>, NodeError> {
         let colocation = match self.colocation() {
             Some(colocation) if self.local_heads()?.len() > 1 => colocation,
             _ => return self.load_at_head(),

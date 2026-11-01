@@ -89,6 +89,8 @@ impl NodeRepo {
         // translation cache, an operation that already has a reachable realization would be
         // realized again, and two reachable local operations would share a canonical form.
         if !self.heads_mapped {
+            // Noticing an abandon there reads every local operation it reaches.
+            self.settle()?;
             self.canonical_heads()?;
             self.heads_mapped = true;
         }

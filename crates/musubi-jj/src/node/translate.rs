@@ -25,8 +25,10 @@ use crate::workspaces;
 
 impl NodeRepo {
     /// The canonical form of each local op head, but for one from before this repository
-    /// joined, which has none until a merge takes it in (see [`Self::canonicalize`]).
+    /// joined, which has none until a merge takes it in (see [`Self::canonicalize`]). A `jj op
+    /// abandon` is noticed first, as in [`Self::merge_heads`].
     pub fn canonical_heads(&mut self) -> Result<Vec<CanonicalOp>, NodeError> {
+        self.check_abandon()?;
         let heads = self.local_heads()?;
         let mut canonical = vec![];
         for head in &heads {

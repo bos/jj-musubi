@@ -271,6 +271,10 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         Some(&["op_abandon"]),
     ),
     (
+        "op_abandon_below_a_merge_with_concurrent_work_replicates",
+        Some(&["op_abandon"]),
+    ),
+    (
         "concurrent_op_abandons_on_two_machines",
         Some(&["op_abandon"]),
     ),

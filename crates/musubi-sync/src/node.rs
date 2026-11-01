@@ -362,12 +362,13 @@ impl LocalRepo for NodeAdapter {
         // "Abandoning operations").
         let base = self.accepted_base()?;
         self.repo.settle()?;
-        if self.repo.check_abandon()? {
+        let heads = op_ids(self.repo.canonical_heads()?);
+        // Noticed here, or by whatever read the op heads since, as reconciling settings does.
+        if self.repo.take_abandon_noticed() {
             self.staged.clear();
             self.staged_children.clear();
             *self.base_ancestry.borrow_mut() = None;
         }
-        let heads = op_ids(self.repo.canonical_heads()?);
         let mut reachable = false;
         for NodeOp(base) in self.repo.to_node(&hub(&base))? {
             for head in &heads {

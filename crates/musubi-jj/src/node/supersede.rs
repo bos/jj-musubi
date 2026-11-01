@@ -698,7 +698,10 @@ impl NodeRepo {
 
     /// Notices a `jj op abandon` of operations the hub accepted, before anything is
     /// canonicalized on what it rewrote, once for each set of op heads. Returns whether it
-    /// noticed one.
+    /// noticed one. It must run before the op heads are read for anything else: jj rewrites
+    /// every operation above the abandoned ones that isn't below them, putting on their parent
+    /// even what was beside them, as a realization merged with them, and musubi puts that
+    /// back, so an op head read before is one it no longer reaches.
     pub fn check_abandon(&mut self) -> Result<bool, NodeError> {
         let base = self.stored_base();
         let heads = self.local_heads()?;
@@ -713,10 +716,18 @@ impl NodeRepo {
         // Only the op heads checked: a `jj op abandon` that moved them meanwhile, remembered as
         // checked, would go unnoticed, and the sync would fail for good. Moved here, they're
         // checked again next time.
-        if !noticed {
+        if noticed {
+            self.abandon_noticed = true;
+        } else {
             self.abandon_checked = Some((heads, base));
         }
         Ok(noticed)
+    }
+
+    /// Whether [`Self::check_abandon`] noticed a `jj op abandon` since this last said so, by
+    /// whatever ran it: what was staged in the history before is stale.
+    pub fn take_abandon_noticed(&mut self) -> bool {
+        std::mem::take(&mut self.abandon_noticed)
     }
 
     /// Moves each op head that stands for an operation a renaming superseded to the local
@@ -1834,12 +1845,15 @@ impl NodeRepo {
     /// Writes the fix-up on the single op head, if it hasn't been, and returns the canonical
     /// operation of its last operation.
     pub fn write_fixup(&mut self) -> Result<Option<NodeOp>, NodeError> {
+        // Before reading the fix-up, which an abandon noticed now replaces, and not between
+        // its operations.
+        self.check_abandon()?;
         if self.records.fixup_written {
             return Ok(None);
         }
         let fixup = self.records.fixup.clone().unwrap_or_default();
         let mut after_work = fixup.forgets.clone();
-        let head = self.merged_repo()?;
+        let head = self.merged_repo_unchecked()?;
         let canonical_head = self.canonicalize(&LocalOp(head.op_id().clone()))?;
         let shown = self.shown_names(&canonical_head)?;
         // The first operation restores them, so that no operation of the fix-up has them as
@@ -1859,7 +1873,7 @@ impl NodeRepo {
             tx
         };
         for work in &fixup.work {
-            let repo = self.merged_repo()?;
+            let repo = self.merged_repo_unchecked()?;
             let mut tx = start(&repo);
             tx.set_attribute(WORK_ATTRIBUTE.to_owned(), work.copy.clone());
             if let Some(after) = &work.forget_after {
@@ -1884,7 +1898,7 @@ impl NodeRepo {
                 after_work.push(work.copy.clone());
             }
         }
-        let repo = self.merged_repo()?;
+        let repo = self.merged_repo_unchecked()?;
         let mut tx = start(&repo);
         if !after_work.is_empty() {
             tx.set_attribute(FORGET_ATTRIBUTE.to_owned(), after_work.join(" "));

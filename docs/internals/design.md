@@ -769,14 +769,16 @@ contraction.
 ### Publishing an abandon
 
 A machine notices an abandon as before: canonical operations it had published are no longer
-reachable from its op heads. What was dropped is each canonical operation it had that no
-reachable local operation now stands for. A realization stands for the canonical operation its
-`musubi.canonical` names, even with its parents changed; any other local operation for the one
-that is the same but for its parents. The machine records the dropped set as pending, writes
-the fix-up (below) on its head, and pushes it with the dropped set: a *supersede*. The hub takes
-it with the push, in the push's compare-and-swap, and computes the rewritten history itself, so
-the push carries only the machine's new operations. A supersede that loses the race, to another
-push or another supersede, is rewritten by what won, and pushed again.
+reachable from its op heads. It looks before anything else reads the op heads, to merge or
+canonicalize them, since an op head read before may be one of jj's rewrites that musubi then
+replaces. What was dropped is each canonical operation it had that no reachable local operation
+now stands for. A realization stands for the canonical operation its `musubi.canonical` names,
+even with its parents changed; any other local operation for the one that is the same but for its
+parents. The machine records the dropped set as pending, writes the fix-up (below) on its head,
+and pushes it with the dropped set: a *supersede*. The hub takes it with the push, in the push's
+compare-and-swap, and computes the rewritten history itself, so the push carries only the
+machine's new operations. A supersede that loses the race, to another push or another supersede,
+is rewritten by what won, and pushed again.
 
 ### Taking the hub's
 

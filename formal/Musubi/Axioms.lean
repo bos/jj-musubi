@@ -15,6 +15,8 @@ import Musubi.Presence
 import Musubi.PresenceExec
 import Musubi.Copies
 import Musubi.Names
+import Musubi.Contract
+import Musubi.Supersede
 
 open Musubi
 
@@ -163,6 +165,8 @@ open Musubi
 #print axioms Presence.Hist.umax_work
 #print axioms Presence.Hist.umax_forget
 #print axioms Presence.Hist.umax_merge
+#print axioms Presence.Hist.fixup_present
+#print axioms Presence.Hist.pass_present
 #print axioms Presence.EHist.presentB_iff
 #print axioms Presence.EHist.mem_latestB
 -- Copies, duplicates and moves
@@ -180,3 +184,31 @@ open Musubi
 -- Names
 #print axioms Names.choose_free
 #print axioms Names.localName_injective
+
+-- Contracting abandoned operations out of a history
+#print axioms Contract.cpar_union
+#print axioms Contract.cid_union
+#print axioms Contract.cid_comm
+#print axioms Contract.cid_eq
+#print axioms Contract.superseded_ne
+#print axioms Contract.anc_cpar_iff
+
+-- Replicated op abandon
+#print axioms SReachable.base
+#print axioms SRReachable.base
+#print axioms noDuplicateMergeS
+#print axioms sinv_reachable
+#print axioms nodeD_grows
+#print axioms hubD_grows
+#print axioms superseded_never_returns
+#print axioms superseded_never_returns_hub
+#print axioms spstepR_reachable
+#print axioms smeasure_decreases
+#print axioms no_infinite_policy_runS
+#print axioms progressS
+#print axioms converged_quiescentS
+#print axioms terminal_iff_convergedS
+#print axioms eventually_convergesS
+#print axioms maximal_run_convergesS
+#print axioms converged_all_droppedS
+#print axioms converged_all_acceptedS

@@ -15,7 +15,7 @@ on the next run. *The search* is the generated end-to-end tests below, run with 
 | Layer | Where | Guards against | Cost |
 | --- | --- | --- | --- |
 | Formal model | `formal/` (Lean) | Protocol design errors: lost operations, dangling references, duplicate merges, livelock | Proof effort, no runtime |
-| Protocol property tests | `crates/musubi-core/tests` | The Rust state machines departing from the model | Milliseconds per case |
+| Protocol property tests | `crates/musubi-core/tests` | The Rust state machines departing from the model, or not recovering from a buggy hub | Milliseconds per case |
 | Presence conformance | `crates/musubi-jj/tests/it/presence.rs` | Which copies (machines' repositories) a hive shows departing from `formal/Musubi/Presence.lean` ([conformance.md, "Presence"](conformance.md#presence); [design.md, "Copies that go away"](design.md#copies-that-go-away)) | A millisecond per case |
 | Copies conformance | `crates/musubi/src/copy/conformance.rs` | Which repository musubi takes for the copy of a key, and the daemon's check before each sync, departing from `formal/Musubi/Copies.lean` ([conformance.md, "Copies"](conformance.md#copies); [copies.md](copies.md)) | Under a second for all 4212 cases |
 | Chunked blob conformance | `crates/musubi-sync/src/blobs.rs` | The blob receiver departing from the prefix receiver of `formal/Musubi/Chunks.lean` ([conformance.md, "Chunked blobs"](conformance.md#chunked-blobs)) | A few milliseconds per case |
@@ -24,7 +24,7 @@ on the next run. *The search* is the generated end-to-end tests below, run with 
 | Race catalogue | `crates/musubi-sync/tests/races` | Concurrent changes on different machines resolving differently from jj's local behavior ([races.md](races.md)) | ~0.3 s per test |
 | Unit tests | `#[cfg(test)]` modules | Pure logic: URL normalization and hive names across forges, matching joining repositories to hives | Microseconds |
 | Example tests | each crate's `tests/` | jj integration details: translation, git refs, objects, joins, transports, the hub's hives, the CLI | ~0.2–0.5 s per test |
-| Fault tests | `crates/musubi-sync/tests/it/faults.rs` | Malformed requests reaching the hub's decoders, malformed replies reaching a node's, and links that die or stall partway through a sync | ~0.2–1.5 s per test |
+| Fault tests | `crates/musubi-sync/tests/it/faults.rs`, `crates/musubi-sync/tests/it/lies.rs` | Malformed requests reaching the hub's decoders, malformed replies reaching a node's, well-formed but wrong replies reaching its protocol core and repository, and links that die or stall partway through a sync | ~0.2–1.5 s per test |
 | Fuzz targets | `fuzz/` | Bytes no honest peer sends reaching the decoders of frames, messages, bundles, and imported operations and views | Minutes to hours a run; opt-in |
 | Kani proofs | `#[cfg(kani)]` modules | Arithmetic on sizes and offsets a peer controls going wrong for any value, however unlikely | Under a second each; opt-in |
 | Generated end-to-end tests | `crates/musubi-sync/tests/e2e_search` | Everything interacting: real `jj` commands, real repositories, faults | Seconds per case; opt-in |
@@ -53,10 +53,11 @@ them on the disk.
 ## CI
 
 CI runs clippy and the default suite on Linux, macOS and Windows, since each compiles code the
-others don't; each first builds the Lean oracle (the executable model,
-[conformance.md](conformance.md)) for the tests that check the code against it. On Linux it also
-runs the rest of `just check`'s lints (formatting, rustdoc, cargo-deny, cargo-machete, typos),
-checks the Lean model's proofs, and runs each benchmark script once (`just bench-smoke`).
+others don't, with the tests too slow for `just test` (nextest's `ci` profile); each first builds
+the Lean oracle (the executable model, [conformance.md](conformance.md)) for the tests that check
+the code against it. On Linux it also runs the rest of `just check`'s lints (formatting, rustdoc,
+cargo-deny, cargo-machete, typos), checks the Lean model's proofs, and runs each benchmark script
+once (`just bench-smoke`).
 
 The Search workflow runs the search nightly on Linux, each shard on a runner of its own, with a
 seed that changes from run to run. A failing shard uploads its example database; its output
@@ -88,7 +89,10 @@ The rules, in the terms of [protocol.md](protocol.md):
   never delivered is lost.
 - **Misbehavior**: a node pushes without uploading; a hub replies with operations it never
   accepted; or a hub forgets everything outside `closure(head)` (the head's history and the
-  objects it needs), including uploads it never accepted.
+  objects it needs), including uploads it never accepted. In one test only, a node also takes
+  false replies (`false_reply`): any made of what the hub stores, about any head, with a
+  sequence number near the node's or the hub's, or the largest, as an answer to its own
+  request or a late one.
 - **Failure**: crash a node or the hub, keeping only persistent state, or crash a node partway
   through taking in a fetch. Send the hub back to an earlier head, as a power cut that loses
   the last heads it accepted would (`hubRegress` in the oracle), or make the hive again,
@@ -97,7 +101,8 @@ The rules, in the terms of [protocol.md](protocol.md):
   sequence number, starts over from that reply (`loseKnown`, then `learn`).
 
 Two tests run this machine: `protocol_invariants`, and `conformance`, which also checks every
-step against the Lean model.
+step against the Lean model. A third, `nodes_recover_from_false_replies`, adds false replies,
+which the model has no hub to send, so it runs without the oracle.
 
 After every rule the test checks the model's safety invariants ([protocol.md,
 "Properties"](protocol.md#properties)): HubClosed, HubMonotone, NodeClosed, Locality,
@@ -105,15 +110,18 @@ MergeOwnership, KnownIsHubHistory, and that a node stages only operations the hu
 (staged-is-accepted). Once the hub has gone back, Locality, staged-is-accepted and
 KnownIsHubHistory are checked against its history together with the heads it lost, and
 MergeOwnership no longer is: two nodes can then merge the same heads
-(`formal/Musubi/RegressScenario.lean`).
+(`formal/Musubi/RegressScenario.lean`). Once a node has taken a false reply, those four no
+longer hold of it: it may have operations the hub offered it but never accepted, and nothing
+else of other nodes', and its `known` may be anything. NodeClosed is still checked, with the
+fake repository refusing to realize an operation without its parents or objects.
 
 A final `quiesce` step stops environment actions, makes the network reliable, and runs every
 node's policy until nothing changes. The test then checks liveness: every node's heads are
-`{hub.head}`, and every operation created is in its ancestry. A bound on quiescence steps
-turns livelock into a failure. While quiescing, `conformance` also asks the Lean model for its
-liveness measures after each exchange, and requires them to fall whenever the exchange changes
-the node, and every push the policy sends to upload what the liveness proofs assume
-([conformance.md, "Liveness"](conformance.md#liveness)).
+`{hub.head}`, and every operation created is in its ancestry, after false replies too. A bound
+on quiescence steps turns livelock into a failure. While quiescing, `conformance` also asks the
+Lean model for its liveness measures after each exchange, and requires them to fall whenever
+the exchange changes the node, and every push the policy sends to upload what the liveness
+proofs assume ([conformance.md, "Liveness"](conformance.md#liveness)).
 
 ## Example tests
 
@@ -173,8 +181,9 @@ exercises.
 ## Faults
 
 The protocol tests lose, duplicate or delay whole messages but never corrupt one, as
-[protocol.md](protocol.md) assumes. `musubi-sync/tests/it/faults.rs` tests the implementation
-where that doesn't hold, and where a link fails partway through a call.
+[protocol.md](protocol.md) assumes. `musubi-sync/tests/it/faults.rs` and `lies.rs` test the
+implementation where that doesn't hold, and `faults.rs` where a link fails partway through a
+call.
 
 It records a real session over the in-memory transport: one machine pushes a commit, another
 fetches it and pushes its own, and the first fetches that. The payload limit is small enough that
@@ -216,6 +225,18 @@ as long as a new one (`blobs_prepared_again_last_as_long_as_new_ones`); uploadin
 content leaves a prepared blob alone (`uploads_leave_prepared_blobs_alone`); and a call that
 fails or is dropped partway leaves no uploads behind, and no downloads but a partial one, kept
 for a later call to resume (`calls_leave_no_uploads_behind`, `calls_leave_no_downloads_behind`).
+
+`musubi-sync/tests/it/lies.rs` goes past the code that reads replies off the wire. Its
+`nodes_recover_from_wrong_replies` gives a node, partway through a sync with real repositories,
+replies that decode but are wrong: a head of any kind, sequence number and operation; a fetch
+with its head another, its operations dropped, repeated, reordered or with other parents, or
+its bundles others from the sync; objects for other operations; or another request's reply.
+They are made of what the node has sent and been sent, and of its own head, which the hub
+doesn't have yet. The sync must end without panicking, and once the hub is honest again, both
+machines must show the same commits, everyone's among them, a node whose sync failed
+restarting as the daemon does. The hive runs in process (`Hive::sync_through`), without the
+transport or the daemon's driver, from a hive recorded once per build. It takes half a minute,
+so it runs on CI but not in `just test` (`cargo nextest run --profile ci` runs it locally).
 
 The truncated messages stand for a buggy or mismatched peer, not a dropped connection: the
 stream transport frames each message with its length and drops one whose connection ends

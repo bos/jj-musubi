@@ -3,6 +3,7 @@
 
 mod faults;
 mod gc;
+mod lies;
 mod network;
 mod serve;
 mod server;

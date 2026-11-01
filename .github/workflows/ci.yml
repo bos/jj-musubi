@@ -111,7 +111,7 @@ jobs:
           sudo systemctl start "user@$(id -u).service"
           echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
           echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
-      - run: cargo nextest run --workspace --locked
+      - run: cargo nextest run --workspace --locked --profile ci
         env:
           # Runners are thrown away, so tests may install login services for real.
           MUSUBI_TEST_LOGIN_SERVICE: "1"

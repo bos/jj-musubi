@@ -63,6 +63,13 @@ pub struct World {
     /// the properties that rest on its history only growing hold of its history together
     /// with them.
     lost: Vec<(u64, Op)>,
+    /// Whether each node has taken a false reply ([`Self::false_reply`]): the properties that
+    /// rest on the hub's honesty, Locality and KnownIsHubHistory among them, no longer hold
+    /// of it.
+    misled: Vec<bool>,
+    /// The operations false replies and a lying hub's replies have carried, which a node
+    /// misled may have, though the hub never accepted them.
+    offered: BTreeSet<Op>,
 }
 
 /// What of a node `World::quiesce` watches across an exchange.
@@ -106,6 +113,8 @@ impl World {
             last_staged: vec![None; nodes],
             went_back: false,
             lost: vec![],
+            misled: vec![false; nodes],
+            offered: BTreeSet::new(),
         };
         if let Some(oracle) = &mut world.oracle {
             oracle.reset(nodes);
@@ -582,7 +591,7 @@ impl World {
     /// accepted, delivered straight to the node. Either `op` is not reachable from `head`, or
     /// `head` is not the head the node knows (it is `op`, say). The node must ignore it
     /// (docs/internals/protocol.md, "Fetch"): staging operations the hub never accepted is how
-    /// Locality would break.
+    /// Locality would break. Unless a false reply told it of a head that reaches `op`.
     pub fn rogue_ops_reply(&mut self, node: usize, head: Op, op: Op) {
         let parents = self.univ.borrow().parents[op as usize].clone();
         // Not newer than what the node knows, or it would believe the head too.
@@ -593,14 +602,52 @@ impl World {
             ops_attachment: vec![],
             objects: vec![],
         };
+        self.offered.insert(op);
         let handled = self.cores[node]
             .handle(&mut self.repos[node], reply)
             .unwrap();
-        assert_eq!(
-            handled,
-            Handled::Ignored,
-            "node {node} accepted a lying hub's reply"
+        assert!(
+            self.misled[node] || handled == Handled::Ignored,
+            "node {node} accepted a lying hub's reply: {handled:?}"
         );
+    }
+
+    /// What the hub stores, accepted or not, for a buggy hub's replies to be made of.
+    pub fn hub_stored(&self) -> (Vec<Op>, Vec<Obj>) {
+        (
+            self.hub.ops.iter().copied().collect(),
+            self.hub.objs.iter().copied().collect(),
+        )
+    }
+
+    pub fn parents(&self, op: Op) -> Vec<Op> {
+        self.univ.borrow().parents[op as usize].clone()
+    }
+
+    pub fn known(&self, node: usize) -> (u64, Op) {
+        *self.cores[node].known()
+    }
+
+    /// A buggy hub: `node` takes `reply`, which the hub never sent, as an answer to its own
+    /// request if `own`, or else as one that arrived late. The model has no such hub, so
+    /// there is no oracle to check against.
+    pub fn false_reply(&mut self, node: usize, reply: Rep, own: bool) {
+        assert!(self.oracle.is_none(), "the Lean model has no hub that lies");
+        self.misled[node] = true;
+        match &reply {
+            Reply::Head { head, .. } => {
+                self.offered.insert(*head);
+            }
+            Reply::Fetched { head, ops, .. } => {
+                self.offered.insert(*head);
+                self.offered.extend(ops.iter().map(|entry| entry.id));
+            }
+            Reply::Objects { for_ops, .. } => self.offered.extend(for_ops.iter().copied()),
+        }
+        self.trace.push(
+            json!({"kind": "falseReply", "node": node, "own": own, "reply": format!("{reply:?}")}),
+        );
+        self.node_handle(node, reply, own);
     }
 
     /// The operations the hub has accepted, before going back or since.
@@ -628,7 +675,7 @@ impl World {
     // Properties (docs/internals/protocol.md, "Properties").
 
     fn check_merge_ownership(&self, node: usize, merge: Op, parents: &[Op]) {
-        if self.went_back {
+        if self.went_back || self.misled[node] {
             return;
         }
         let univ = self.univ.borrow();
@@ -646,9 +693,11 @@ impl World {
         assert!(self.hub.closed(self.hub.head), "HubClosed");
         let accepted = self.ever_accepted(&univ);
         for (n, repo) in self.repos.iter().enumerate() {
+            // A node misled has only what the hub offered it, accepted or not.
+            let offered = |x: &Op| self.misled[n] && self.offered.contains(x);
             for &x in &repo.lops {
                 assert!(
-                    univ.creator[x as usize] == Some(n) || accepted.contains(&x),
+                    univ.creator[x as usize] == Some(n) || accepted.contains(&x) || offered(&x),
                     "Locality: node {n} has {x}, neither its own nor accepted"
                 );
                 assert!(
@@ -668,7 +717,7 @@ impl World {
             );
             for op in repo.sops.keys() {
                 assert!(
-                    accepted.contains(op),
+                    accepted.contains(op) || offered(op),
                     "node {n} staged {op}, which the hub never accepted"
                 );
             }
@@ -679,7 +728,9 @@ impl World {
             );
             let (seq, head) = *self.cores[n].known();
             assert!(
-                self.hist.get(seq as usize) == Some(&head) || self.lost.contains(&(seq, head)),
+                self.misled[n]
+                    || self.hist.get(seq as usize) == Some(&head)
+                    || self.lost.contains(&(seq, head)),
                 "KnownIsHubHistory on node {n}"
             );
         }

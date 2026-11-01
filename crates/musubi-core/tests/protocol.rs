@@ -16,6 +16,8 @@ use std::rc::Rc;
 use hegel::TestCase;
 use hegel::generators as gs;
 use musubi_core::message::HeadKind;
+use musubi_core::message::OpEntry;
+use musubi_core::message::Reply;
 use serde_json::Value;
 use serde_json::json;
 use support::oracle::Oracle;
@@ -24,6 +26,8 @@ use support::world::World;
 struct Machine {
     world: Rc<RefCell<World>>,
     crashes: usize,
+    /// Whether nodes may take false replies ([`Machine::false_reply`]).
+    false_replies: bool,
 }
 
 fn pick(tc: &TestCase, len: usize) -> usize {
@@ -110,6 +114,72 @@ impl Machine {
         world.rogue_ops_reply(node, head, op);
     }
 
+    /// A buggy hub: any reply made of what it stores, about any head, with any sequence
+    /// number near the node's or the hub's, or the largest, to a request of the node's or
+    /// out of the blue. Only in `nodes_recover_from_false_replies`, since the safety
+    /// properties, and the Lean model, rest on the hub's honesty.
+    #[rule]
+    fn false_reply(&mut self, tc: TestCase) {
+        tc.assume(self.false_replies);
+        let mut world = self.world.borrow_mut();
+        let node = pick(&tc, world.nodes());
+        let (ops, objs) = world.hub_stored();
+        let some = |items: &[u64]| -> Vec<u64> {
+            if items.is_empty() {
+                return vec![];
+            }
+            (0..tc.draw(gs::integers::<usize>().max_value(3)))
+                .map(|_| items[pick(&tc, items.len())])
+                .collect()
+        };
+        let head = ops[pick(&tc, ops.len())];
+        let near = tc.draw(gs::sampled_from(vec![world.known(node).0, world.hub_seq()]));
+        let seq = match tc.draw(gs::integers::<u8>().max_value(3)) {
+            0 => near.saturating_sub(1),
+            1 => near,
+            2 => near.saturating_add(1),
+            _ => u64::MAX,
+        };
+        let reply = match tc.draw(gs::integers::<u8>().max_value(2)) {
+            0 => Reply::Head {
+                kind: tc.draw(gs::sampled_from(vec![
+                    HeadKind::Head,
+                    HeadKind::Accepted,
+                    HeadKind::Rejected,
+                    HeadKind::Incomplete,
+                    HeadKind::Notify,
+                ])),
+                seq,
+                head,
+            },
+            1 => Reply::Fetched {
+                seq,
+                head,
+                // Usually a chain down from the head, as a node stages only operations that
+                // all reach the head; sometimes any.
+                ops: if tc.draw(gs::booleans()) {
+                    chain(&tc, &world, head, &ops)
+                } else {
+                    some(&ops)
+                }
+                .into_iter()
+                .map(|id| OpEntry {
+                    id,
+                    parents: world.parents(id),
+                })
+                .collect(),
+                ops_attachment: vec![],
+                objects: some(&objs),
+            },
+            _ => Reply::Objects {
+                for_ops: some(&ops),
+                attachment: some(&objs),
+            },
+        };
+        let own = tc.draw(gs::booleans());
+        world.false_reply(node, reply, own);
+    }
+
     #[rule]
     fn hub_forgets(&mut self, tc: TestCase) {
         tc.assume(self.crashes < 3);
@@ -166,13 +236,32 @@ impl Machine {
     }
 }
 
+/// `head` and a few of its stored ancestors, each a parent of one before it: operations that
+/// all reach `head`.
+fn chain(tc: &TestCase, world: &World, head: u64, stored: &[u64]) -> Vec<u64> {
+    let mut chain = vec![head];
+    for _ in 0..tc.draw(gs::integers::<usize>().max_value(3)) {
+        let below = chain[pick(tc, chain.len())];
+        let parents: Vec<u64> = world
+            .parents(below)
+            .into_iter()
+            .filter(|parent| stored.contains(parent) && !chain.contains(parent))
+            .collect();
+        if !parents.is_empty() {
+            chain.push(parents[pick(tc, parents.len())]);
+        }
+    }
+    chain
+}
+
 /// Runs a case, returning its oracle, if it has one, for the next case once this one passes.
-fn run(tc: TestCase, oracle: Option<Oracle>) -> Option<Oracle> {
+fn run(tc: TestCase, oracle: Option<Oracle>, false_replies: bool) -> Option<Oracle> {
     let nodes = tc.draw(gs::integers::<usize>().min_value(2).max_value(3));
     let world = Rc::new(RefCell::new(World::new(nodes, oracle)));
     hegel::stateful::machine(Machine {
         world: world.clone(),
         crashes: 0,
+        false_replies,
     })
     .run(tc);
     let mut world = world.borrow_mut();
@@ -197,7 +286,18 @@ fn run(tc: TestCase, oracle: Option<Oracle>) -> Option<Oracle> {
 
 #[hegel::test(test_cases = 300)]
 fn protocol_invariants(tc: TestCase) {
-    run(tc, None);
+    run(tc, None, false);
+}
+
+/// Nodes that take false replies, as a buggy hub might send, made of what it stores, stay
+/// sound: a node realizes nothing without its parents and objects, its heads are local
+/// operations, an antichain, and it has only its own operations and those the hub accepted
+/// or offered it. A node never misled keeps every property. And once the hub is honest
+/// again, the hive converges, every operation accepted. The Lean model, which has no such
+/// hub, isn't consulted.
+#[hegel::test(test_cases = 300)]
+fn nodes_recover_from_false_replies(tc: TestCase) {
+    run(tc, None, true);
 }
 
 #[hegel::test(test_cases = conformance_cases())]
@@ -206,7 +306,7 @@ fn conformance(tc: TestCase) {
     // took longer than most cases. One whose case failed goes, in whatever state it was.
     thread_local!(static ORACLE: Cell<Option<Oracle>> = const { Cell::new(None) });
     let oracle = ORACLE.take().unwrap_or_else(Oracle::spawn);
-    ORACLE.set(run(tc, Some(oracle)));
+    ORACLE.set(run(tc, Some(oracle), false));
 }
 
 /// How many cases the conformance test makes: 150 on CI, where it runs as a job of its own,

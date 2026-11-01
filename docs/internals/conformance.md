@@ -164,7 +164,7 @@ saying it went back (`NodeCore::handle_reply`) and fill it again.
 ## Running it
 
 ```sh
-cargo nextest run -p musubi-core     # protocol_invariants and conformance
+cargo nextest run -p musubi-core     # the property, conformance and false-reply tests
 ```
 
 The conformance test runs `lake build oracle` first, so that the oracle matches the model;
@@ -191,6 +191,7 @@ Deliberately broken versions of the core, each caught:
 | Node learns a head whose `seq` equals the one it knows | conformance only: harmless, but not a model step |
 | Node's `Push` uploads every operation since the root, not since `known.head` | conformance only: not `upOps` |
 | Node with two heads pushes one of them before merging | conformance only: the push raises the other nodes' staleness, and the measure rises; the run still converges |
+| Node that believes a head at the largest sequence number doesn't start over when its own request's reply says otherwise | `nodes_recover_from_false_replies`, and rarely `nodes_recover_from_wrong_replies` with real repositories: no honest hub gets there, and the node never converges |
 
 "Invariants" is `protocol_invariants`, which checks the safety properties directly on the
 Rust state, without the oracle. `just mutants` runs cargo-mutants over `hub.rs` and

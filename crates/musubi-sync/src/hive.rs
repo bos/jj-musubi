@@ -17,6 +17,10 @@ use crate::OpId;
 use crate::hub::HubAdapter;
 use crate::node::NodeAdapter;
 
+/// What a node gets in place of each of the hub's replies to it.
+pub type Through<'a> =
+    dyn FnMut(&Request<OpId, Attachment>, Reply<OpId, Attachment>) -> Reply<OpId, Attachment> + 'a;
+
 pub struct Member {
     pub adapter: NodeAdapter,
     pub core: NodeCore<OpId>,
@@ -74,7 +78,12 @@ impl Hive {
         member.core.restart();
     }
 
-    fn request(&mut self, node: usize, request: Request<OpId, Attachment>) -> anyhow::Result<()> {
+    fn request(
+        &mut self,
+        node: usize,
+        request: Request<OpId, Attachment>,
+        through: &mut Through<'_>,
+    ) -> anyhow::Result<()> {
         if let Request::Push {
             ops_attachment,
             objects,
@@ -84,7 +93,7 @@ impl Hive {
             self.members[node].uploaded +=
                 attachment_size(ops_attachment)? + attachment_size(objects)?;
         }
-        let handled = hub::handle(&mut self.hub, request)?;
+        let handled = hub::handle(&mut self.hub, request.clone())?;
         match &handled.reply {
             Reply::Fetched {
                 ops_attachment,
@@ -102,7 +111,7 @@ impl Hive {
         let member = &mut self.members[node];
         member
             .core
-            .handle_reply(&mut member.adapter, handled.reply)?;
+            .handle_reply(&mut member.adapter, through(&request, handled.reply))?;
         if let Some((seq, head)) = handled.publish {
             for member in &mut self.members {
                 let notify = Reply::Head {
@@ -119,10 +128,21 @@ impl Hive {
     /// Polls the hub, then runs the node's policy until it has nothing left to do. Returns
     /// how many steps it took.
     pub fn sync(&mut self, node: usize) -> anyhow::Result<usize> {
+        self.sync_through(node, &mut |_, reply| reply)
+    }
+
+    /// As [`Self::sync`], with each of the hub's replies to the node passed through
+    /// `through`, with the request it answers, which may give the node another in its
+    /// place. The hub's notifications reach every node as they are.
+    pub fn sync_through(
+        &mut self,
+        node: usize,
+        through: &mut Through<'_>,
+    ) -> anyhow::Result<usize> {
         let member = &mut self.members[node];
         member.adapter.before_sync()?;
         let poll = member.core.poll(&member.adapter)?;
-        self.request(node, poll)?;
+        self.request(node, poll, through)?;
         for steps in 0..10_000 {
             let member = &mut self.members[node];
             match member.core.step(&mut member.adapter)? {
@@ -134,7 +154,7 @@ impl Hive {
                 }
                 Step::Send(requests) => {
                     for request in requests {
-                        self.request(node, request)?;
+                        self.request(node, request, through)?;
                     }
                 }
                 Step::Merged | Step::Realized(_) | Step::Advanced(_) => {}
@@ -149,7 +169,7 @@ impl Hive {
         let member = &mut self.members[node];
         member.adapter.before_sync()?;
         let poll = member.core.poll(&member.adapter)?;
-        self.request(node, poll)
+        self.request(node, poll, &mut |_, reply| reply)
     }
 
     /// Has the node record its settings changes, as a sync starts by doing, without reaching

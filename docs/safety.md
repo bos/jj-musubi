@@ -152,6 +152,10 @@ new seed.
   corrupted, spliced together, with made-up ids, or from another protocol version. It must
   answer every one without crashing, and its state may only move forward to states it has
   everything for.
+- **Buggy hubs.** A machine is sent replies no honest hub sends: cut short, corrupted, from
+  another version, or well formed but wrong, about history the hub doesn't have or with
+  another reply's contents. It must not crash, and once the hub answers honestly again, every
+  machine must come to show the same history, everyone's work in it.
 - **Fuzzing.** Coverage-guided fuzzers attack every decoder of what a peer sends: frames,
   messages, bundles of commits, and operations imported from them. Each checks more than that
   nothing crashes: a message that decodes must encode back to one that decodes the same, and

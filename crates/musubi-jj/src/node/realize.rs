@@ -590,25 +590,27 @@ impl NodeRepo {
     /// heads it descends from (heads := max(heads ∪ {op})). In a colocated
     /// repository the realization first exports its refs to `.git`, holding jj's colocated
     /// import/export lock, so that no `jj` command sees the operation before `.git` matches
-    /// it.
+    /// it. There, too, a realization beside this machine's own concurrent op heads is
+    /// published merged with them, as jj would merge them, and that merge exported first:
+    /// published apart, the heads would be merged by whichever `jj` command loaded them
+    /// first, which doesn't export, and whose import takes `.git` as the realization alone
+    /// left it. Returns the realization as exported, which `canonical` translates to, not the
+    /// merge.
     pub fn advance(&mut self, canonical: &OperationId) -> Result<OperationId, NodeError> {
         let realized = self.realize(canonical)?;
         // Views made ahead inherit what this changes, in a colocated repository.
         self.prepared = None;
         let (superseded, concurrent) = self.check_mergeable(canonical, &realized)?;
         let colocation = self.colocation();
+        let colocated = colocation.is_some();
         let _lock = colocation.map(Colocation::lock).transpose()?;
         let head = match colocation {
-            Some(colocation) => {
-                let exported = colocation.export_refs(
-                    &self.loader,
-                    &realized,
-                    &|op| self.is_join_point(op),
-                    &concurrent,
-                )?;
-                self.insert_map(exported.clone(), canonical.clone())?;
-                exported
-            }
+            Some(colocation) => colocation.export_refs(
+                &self.loader,
+                &realized,
+                &|op| self.is_join_point(op),
+                &concurrent,
+            )?,
             None => realized,
         };
         // The new head replaces those it descends from, as jj's own resolution of op heads
@@ -621,13 +623,64 @@ impl NodeRepo {
             .block_on()?
             .parents;
         replaced.extend(superseded);
+        let published = match colocation {
+            Some(colocation) if !concurrent.is_empty() => {
+                match self.merge_unpublished(&head, &concurrent) {
+                    Ok(merged) => {
+                        replaced.extend(concurrent.iter().map(|op| op.id().clone()));
+                        colocation.export_refs(
+                            &self.loader,
+                            &merged,
+                            &|op| self.is_join_point(op),
+                            &[],
+                        )?
+                    }
+                    // `check_mergeable` merged them already, so this is a store error or a jj
+                    // bug: the heads are published apart, for `replace_abandoned_working_copies`
+                    // to merge as it would any others.
+                    Err(reason) => {
+                        tracing::warn!("merging a realization with this machine's heads: {reason}");
+                        head.clone()
+                    }
+                }
+            }
+            _ => head.clone(),
+        };
+        if colocated {
+            self.insert_map(head.clone(), canonical.clone())?;
+        }
         self.loader
             .op_heads_store()
-            .update_op_heads(&replaced, &head)
+            .update_op_heads(&replaced, &published)
             .block_on()?;
         drop(_lock);
         self.replace_abandoned_working_copies()?;
         Ok(head)
+    }
+
+    /// The realization `head` merged with this machine's concurrent op heads `theirs`, as
+    /// jj merges op heads on loading them, in order of their end times, into an operation
+    /// written but not published.
+    fn merge_unpublished(
+        &self,
+        head: &OperationId,
+        theirs: &[Operation],
+    ) -> Result<OperationId, String> {
+        let mut operations = theirs.to_vec();
+        operations.push(
+            self.loader
+                .load_operation(head)
+                .block_on()
+                .map_err(|err| format!("{err:#}"))?,
+        );
+        operations.sort_by_key(|op| op.metadata().time.end.timestamp);
+        catch_jj_panic(|| {
+            self.loader
+                .merge_operations(operations, None, Some("reconcile divergent operations"), [])
+                .block_on()
+                .map(|(repo, _)| repo.op_id().clone())
+                .map_err(|err| format!("{err:#}"))
+        })
     }
 
     /// Refuses to publish a realization that jj cannot merge with this machine's own

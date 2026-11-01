@@ -194,7 +194,8 @@ Translation keeps per-machine fields per-machine:
     limitations"](races.md#known-jj-limitations)), and publishing them would leave every `jj`
     command here failing. So if the merge fails, musubi publishes nothing, and the sync fails,
     naming this machine's operations that the hive doesn't have yet, so that the user can revert
-    one.
+    one. Otherwise, in a colocated repository, musubi exports that merge too and publishes it in
+    place of the realization.
 - Canonicalizing a realization returns the canonical operation its attribute names. Realizing
   never creates new canonical operations, so updates can't loop between machines.
 
@@ -905,7 +906,10 @@ be exposed. A `--hub` that isn't an absolute path is an ssh destination, passed 
 - Loads and merges go through jj-lib's repo loader, which takes jj's op heads lock, so musubi
   merges concurrent heads exactly once per machine even while `jj` commands run.
 - In colocated repositories, realization holds `.jj/repo/git_import_export.lock`, the lock the jj
-  CLI holds around its own import and export, so the two never interleave.
+  CLI holds around its own import and export, so the two never interleave. A realization beside
+  the machine's own concurrent op heads is merged with them and exported under that lock, and
+  only the merge published: a `jj` command that merged them itself wouldn't export, and its
+  import would take `.git` as the realization alone left it.
 - Merges that musubi makes rebase commits, which needs the user's jj config (identity, and signing
   if enabled). musubi loads the same system, user, repo, and workspace config that `jj` does. The
   merge operation looks like one `jj` would write ("reconcile divergent operations"), with this

@@ -298,7 +298,7 @@ impl Colocation {
     /// records the result: the same operation if nothing changed, otherwise a copy with the
     /// updated per-machine fields. `is_join` says whether a local operation is a join point.
     /// `beside` are this machine's op heads concurrent with the realization, whose merge with
-    /// it musubi exports next.
+    /// it musubi exports next, and publishes in its place.
     pub fn export_refs(
         &self,
         loader: &RepoLoader,
@@ -370,8 +370,9 @@ impl Colocation {
 /// takes it, as it would without musubi. A ref that can't be read or written is left alone, as
 /// jj's export leaves a failed ref (Refs.lean, `exportConflicted`). Nor is a ref written where
 /// `.git` holds the value an op head `beside` the realization records and the realization
-/// doesn't: that head put it there, as by a fetch, and the merge of the two, exported next,
-/// can keep it, which a write for the realization alone would undo.
+/// doesn't: that head put it there, as by a fetch, and the merge of the two, exported next and
+/// published in the realization's place, can keep it, which a write for the realization alone
+/// would undo.
 /// Returns the expected values, by git ref.
 fn export_conflicted_remote_bookmarks(
     mut_repo: &mut MutableRepo,

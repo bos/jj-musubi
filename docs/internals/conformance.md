@@ -497,9 +497,9 @@ What the test relies on of jj, and what it leaves out:
   as the history before a join is only the joining machine's. A realization writes no
   conflicted remote bookmark where `.git` holds the value that one of the machine's own op
   heads concurrent with it records and the realization doesn't, since their merge, which
-  musubi exports next, may keep that head's value; the model has no concurrent heads of
-  remote bookmarks, so the test checks that through the other machine's `.git` and its next
-  command.
+  musubi exports and publishes in its place, may keep that head's value; the model has no
+  concurrent heads of remote bookmarks, so the test checks that through the other machine's
+  `.git` and its next command.
 - **Not covered.** The state machine makes no merges of more than two heads and no
   criss-cross merges. It locks no remote ref, since `CStep.advance` admits only exports that
   can succeed (a failed one ends as `remote_reset_without_export` says). The realization

@@ -710,7 +710,12 @@ impl NodeRepo {
             Some(base) => self.notice_abandon(base)?,
             None => false,
         };
-        self.abandon_checked = Some((self.local_heads()?, base));
+        // Only the op heads checked: a `jj op abandon` that moved them meanwhile, remembered as
+        // checked, would go unnoticed, and the sync would fail for good. Moved here, they're
+        // checked again next time.
+        if !noticed {
+            self.abandon_checked = Some((heads, base));
+        }
         Ok(noticed)
     }
 

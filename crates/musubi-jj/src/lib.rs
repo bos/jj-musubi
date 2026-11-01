@@ -10,6 +10,7 @@ pub mod git_command;
 pub mod hive_settings;
 pub mod node;
 pub mod objects;
+pub mod op_id;
 pub mod presence;
 mod protobuf;
 pub mod records;

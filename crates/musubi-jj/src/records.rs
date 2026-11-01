@@ -5,13 +5,14 @@
 
 use jj_lib::content_hash::blake2b_hash;
 use jj_lib::object_id::ObjectId as _;
-use jj_lib::op_store::OperationId;
+
+use crate::op_id::CanonicalOp;
 
 /// A canonical operation as the hub's history names it, with the hub's records dropped, and
 /// nothing else: what the protocol speaks of. A machine that dropped operations it has yet to
 /// publish names some of the history otherwise (`NodeOp`).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct HubOp(pub OperationId);
+pub struct HubOp(pub CanonicalOp);
 
 /// The operations a hive dropped at once, sorted, without duplicates.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
@@ -51,7 +52,7 @@ impl RecordDigest {
     /// The digest of the records this one digests, then `record`.
     pub fn then(&self, record: &Record) -> Self {
         let parts: Vec<Vec<u8>> = std::iter::once(self.0.clone())
-            .chain(record.ops().iter().map(|op| op.0.to_bytes()))
+            .chain(record.ops().iter().map(|op| op.0.0.to_bytes()))
             .collect();
         Self(blake2b_hash(&parts).to_vec())
     }
@@ -71,10 +72,12 @@ impl RecordDigest {
 
 #[cfg(test)]
 mod tests {
+    use jj_lib::op_store::OperationId;
+
     use super::*;
 
     fn op(byte: u8) -> HubOp {
-        HubOp(OperationId::from_bytes(&[byte; 64]))
+        HubOp(CanonicalOp(OperationId::from_bytes(&[byte; 64])))
     }
 
     /// A digest tells records apart by their operations and their order, and is the same

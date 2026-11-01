@@ -11,7 +11,6 @@ use hegel::TestCase;
 use hegel::generators as gs;
 use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
-use jj_lib::op_store::OperationId;
 use musubi_hub::store;
 use musubi_hub::store::HubStore;
 use musubi_hub::store::StoreError;
@@ -20,9 +19,10 @@ use musubi_jj::objects::Backend;
 use musubi_jj::objects::ObjectError;
 use musubi_jj::objects::bundle;
 use musubi_jj::objects::bundle::Record;
+use musubi_jj::op_id::CanonicalOp;
 use musubi_testutil::TestEnv;
 
-fn canonical_ancestry(node: &NodeRepo, head: &OperationId) -> Vec<OperationId> {
+fn canonical_ancestry(node: &NodeRepo, head: &CanonicalOp) -> Vec<CanonicalOp> {
     let store = node.canonical_store();
     let mut order = vec![];
     let mut seen = BTreeSet::new();
@@ -31,7 +31,7 @@ fn canonical_ancestry(node: &NodeRepo, head: &OperationId) -> Vec<OperationId> {
         if id == *store.root_operation_id() || !seen.insert(id.clone()) {
             continue;
         }
-        stack.extend(store.read_operation(&id).unwrap().parents);
+        stack.extend(CanonicalOp::parents_of(&store.read_operation(&id).unwrap()));
         order.push(id);
     }
     order
@@ -48,8 +48,8 @@ fn closure_and_head_persist() {
 
     let hub_dir = env.root().join("hub");
     let mut hub = HubStore::init(&hub_dir, Backend::Git).unwrap();
-    assert!(!hub.descends_from_head(&head).unwrap() || hub.head().1 == &head);
-    assert!(!hub.missing_closure(&head).unwrap().is_empty());
+    assert!(!hub.descends_from_head(&head.0).unwrap() || *hub.head().1 == head.0);
+    assert!(!hub.missing_closure(&head.0).unwrap().is_empty());
 
     // Operations alone are not enough: the commits are missing.
     let ops = canonical_ancestry(&node, &head);
@@ -62,8 +62,8 @@ fn closure_and_head_persist() {
         let op_bytes = node.canonical_store().operation_bytes(id).unwrap();
         hub.canonical().import_operation(id, &op_bytes).unwrap();
     }
-    assert!(hub.descends_from_head(&head).unwrap());
-    let missing = hub.missing_closure(&head).unwrap();
+    assert!(hub.descends_from_head(&head.0).unwrap());
+    let missing = hub.missing_closure(&head.0).unwrap();
     assert!(
         missing.iter().all(|m| m.starts_with("commit ")),
         "{missing:?}"
@@ -78,9 +78,9 @@ fn closure_and_head_persist() {
     hub.object_store()
         .import(bundle.path(), &wants, &[])
         .unwrap();
-    assert_eq!(hub.missing_closure(&head).unwrap(), Vec::<String>::new());
+    assert_eq!(hub.missing_closure(&head.0).unwrap(), Vec::<String>::new());
 
-    hub.set_head(1, &head, None).unwrap();
+    hub.set_head(1, &head.0, None).unwrap();
     // Refs name the head's visible heads, for git to index.
     let refs = Command::new("git")
         .arg("-C")
@@ -110,8 +110,8 @@ fn closure_and_head_persist() {
     assert_eq!(named, heads);
     drop(hub);
     let hub = HubStore::open(&hub_dir).unwrap();
-    assert_eq!(hub.head(), (1, &head));
-    assert!(ops.iter().all(|id| hub.is_accepted(id)));
+    assert_eq!(hub.head(), (1, &head.0));
+    assert!(ops.iter().all(|id| hub.is_accepted(&id.0)));
 }
 
 /// A heads file with a torn line, as a power cut can leave it, is corrupt: the hub is made
@@ -194,7 +194,7 @@ fn tampered_operation_is_rejected() {
 }
 
 /// Stores the operations in `anc*(head)` the hub lacks, with their views.
-fn upload_ops(node: &NodeRepo, hub: &HubStore, head: &OperationId) {
+fn upload_ops(node: &NodeRepo, hub: &HubStore, head: &CanonicalOp) {
     for id in canonical_ancestry(node, head) {
         if hub.canonical().has_operation(&id) {
             continue;
@@ -209,7 +209,7 @@ fn upload_ops(node: &NodeRepo, hub: &HubStore, head: &OperationId) {
     }
 }
 
-fn required(node: &NodeRepo, ops: &[OperationId]) -> Vec<CommitId> {
+fn required(node: &NodeRepo, ops: &[CanonicalOp]) -> Vec<CommitId> {
     node.required_commits(ops).unwrap().into_iter().collect()
 }
 
@@ -255,17 +255,17 @@ fn closure_check_skips_accepted_history() {
         .export(&required(&node, &first_ops), &[], bundle_file.path())
         .unwrap();
     unpack_loose(bundle_file.path(), &hub_dir.join("git"));
-    assert_eq!(hub.missing_closure(&first).unwrap(), Vec::<String>::new());
-    hub.set_head(1, &first, None).unwrap();
+    assert_eq!(hub.missing_closure(&first.0).unwrap(), Vec::<String>::new());
+    hub.set_head(1, &first.0, None).unwrap();
 
     repo.write_file("b", "two");
     repo.jj(&["commit", "-m", "two"]);
     let mut node = NodeRepo::open(&repo.repo_path(), &repo.settings()).unwrap();
     let second = node.canonical_heads().unwrap().pop().unwrap();
     upload_ops(&node, &hub, &second);
-    let new_ops: Vec<OperationId> = canonical_ancestry(&node, &second)
+    let new_ops: Vec<CanonicalOp> = canonical_ancestry(&node, &second)
         .into_iter()
-        .filter(|id| !hub.is_accepted(id))
+        .filter(|id| !hub.is_accepted(&id.0))
         .collect();
     let bundle_file = tempfile::NamedTempFile::new().unwrap();
     node.object_store()
@@ -291,7 +291,10 @@ fn closure_check_skips_accepted_history() {
             .join(&blob[2..]),
     )
     .unwrap();
-    assert_eq!(hub.missing_closure(&second).unwrap(), Vec::<String>::new());
+    assert_eq!(
+        hub.missing_closure(&second.0).unwrap(),
+        Vec::<String>::new()
+    );
 }
 
 /// With a bitmap index, git sends an object it stores no delta for whole, rather than as a
@@ -322,7 +325,7 @@ fn small_edits_stay_small_beside_a_bitmap() {
     hub.object_store()
         .import(bundle.path(), &old_wants, &[])
         .unwrap();
-    hub.set_head(1, &old, None).unwrap();
+    hub.set_head(1, &old.0, None).unwrap();
     // A bitmap index of what the head reaches, as the hub's gc writes once it's big.
     let git_dir = hub_dir.join("git");
     let repack = Command::new("git")

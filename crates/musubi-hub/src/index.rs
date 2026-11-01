@@ -13,6 +13,7 @@ use jj_lib::op_store::OperationId;
 use musubi_jj::files;
 use musubi_jj::hive_settings;
 use musubi_jj::hive_settings::HiveSettings;
+use musubi_jj::op_id::CanonicalOp;
 use musubi_jj::workspaces;
 use serde::Deserialize;
 use serde::Serialize;
@@ -45,7 +46,12 @@ impl HiveIndex {
     /// The index of everything `store` holds.
     pub fn rebuild(store: &HubStore) -> Result<Self, StoreError> {
         let mut index = Self::default();
-        let ops = store.canonical().operation_ids()?;
+        let ops: Vec<OperationId> = store
+            .canonical()
+            .operation_ids()?
+            .into_iter()
+            .map(|op| op.0)
+            .collect();
         index.add(store, &ops, &[])?;
         index.machines = head_machines(store)?;
         Ok(index)
@@ -70,7 +76,7 @@ impl HiveIndex {
         haves: &[CommitId],
     ) -> Result<(), StoreError> {
         for id in ops {
-            let operation = store.canonical().read_operation(id)?;
+            let operation = store.canonical().read_operation(&CanonicalOp(id.clone()))?;
             if let Some(settings) = operation.metadata.attributes.get(hive_settings::ATTRIBUTE) {
                 // A malformed record names no URLs; the nodes complain about it.
                 for remote in HiveSettings::parse(settings)
@@ -97,11 +103,11 @@ impl HiveIndex {
 }
 
 fn head_machines(store: &HubStore) -> Result<BTreeSet<String>, StoreError> {
-    let head = store.head().1;
-    if head == store.canonical().root_operation_id() {
+    let head = CanonicalOp(store.head().1.clone());
+    if head == *store.canonical().root_operation_id() {
         return Ok(BTreeSet::new());
     }
-    let operation = store.canonical().read_operation(head)?;
+    let operation = store.canonical().read_operation(&head)?;
     let view = store.canonical().read_view(&operation.view_id)?;
     Ok(view
         .wc_commit_ids

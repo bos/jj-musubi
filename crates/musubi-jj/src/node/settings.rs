@@ -26,6 +26,8 @@ use crate::hive_settings::Entry;
 use crate::hive_settings::HiveSettings;
 use crate::hive_settings::SettingValues;
 use crate::hive_settings::Stamp;
+use crate::op_id::CanonicalOp;
+use crate::op_id::LocalOp;
 
 /// The settings this machine and the hive agreed on when they were last reconciled.
 #[derive(Serialize, Deserialize)]
@@ -45,7 +47,7 @@ impl NodeRepo {
     /// setting winning, or `None` if no ancestor recorded any.
     pub(super) fn settings_at(
         &mut self,
-        op: &OperationId,
+        op: &CanonicalOp,
     ) -> Result<Option<HiveSettings>, NodeError> {
         let root = self.canonical.root_operation_id().clone();
         let mut stack = vec![op.clone()];
@@ -63,7 +65,7 @@ impl NodeRepo {
             if let Some(text) = operation.metadata.attributes.get(hive_settings::ATTRIBUTE) {
                 let mut settings =
                     HiveSettings::parse(text).map_err(|err| NodeError::Settings {
-                        op: id.hex(),
+                        op: id.0.hex(),
                         message: err.to_string(),
                     })?;
                 settings.date_untimed(operation.metadata.time.end.timestamp.0);
@@ -71,8 +73,8 @@ impl NodeRepo {
                 stack.pop();
                 continue;
             }
-            let missing: Vec<OperationId> = operation
-                .parents
+            let parents = CanonicalOp::parents_of(&operation);
+            let missing: Vec<CanonicalOp> = parents
                 .iter()
                 .filter(|parent| !self.settings.contains_key(*parent))
                 .cloned()
@@ -81,8 +83,7 @@ impl NodeRepo {
                 stack.extend(missing);
                 continue;
             }
-            let merged = operation
-                .parents
+            let merged = parents
                 .iter()
                 .filter_map(|parent| self.settings[parent].clone())
                 .reduce(|a, b| HiveSettings::merge(&a, &b));
@@ -175,7 +176,7 @@ impl NodeRepo {
             .is_some_and(|(_, hive, settings)| *hive == hive_now && *settings == merged);
         if !unchanged {
             self.write_settings_state(&SettingsState {
-                op: at.hex(),
+                op: at.0.hex(),
                 hive: hive_now,
                 settings: merged,
             })?;
@@ -289,14 +290,14 @@ impl NodeRepo {
     /// Writes an operation on top of `head` that changes nothing but records `settings`.
     fn record_settings(
         &self,
-        head: &OperationId,
+        head: &LocalOp,
         settings: &HiveSettings,
-    ) -> Result<OperationId, NodeError> {
+    ) -> Result<LocalOp, NodeError> {
         let repo = self.repo_at(head)?;
         let mut tx = repo.start_transaction();
         tx.set_attribute(hive_settings::ATTRIBUTE.to_owned(), settings.to_attribute());
         let repo = tx.commit("musubi: hive settings changed").block_on()?;
-        Ok(repo.op_id().clone())
+        Ok(LocalOp(repo.op_id().clone()))
     }
 
     fn settings_state_path(&self) -> PathBuf {
@@ -310,7 +311,7 @@ impl NodeRepo {
 
     fn read_settings_state(
         &self,
-    ) -> Result<Option<(OperationId, Option<HiveSettings>, HiveSettings)>, NodeError> {
+    ) -> Result<Option<(CanonicalOp, Option<HiveSettings>, HiveSettings)>, NodeError> {
         let path = self.settings_state_path();
         let text = match fs::read_to_string(&path) {
             Ok(text) => text,
@@ -322,10 +323,12 @@ impl NodeRepo {
                 op: path.display().to_string(),
                 message: err.to_string(),
             })?;
-        let op = OperationId::try_from_hex(&state.op).ok_or_else(|| NodeError::Settings {
-            op: state.op.clone(),
-            message: "not an operation id".to_owned(),
-        })?;
+        let op = OperationId::try_from_hex(&state.op)
+            .map(CanonicalOp)
+            .ok_or_else(|| NodeError::Settings {
+                op: state.op.clone(),
+                message: "not an operation id".to_owned(),
+            })?;
         Ok(Some((op, state.hive, state.settings)))
     }
 

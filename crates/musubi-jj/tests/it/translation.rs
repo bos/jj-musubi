@@ -8,8 +8,9 @@ use std::path::Path;
 use std::time::SystemTime;
 
 use jj_lib::object_id::ObjectId as _;
-use jj_lib::op_store::OperationId;
 use musubi_jj::node::NodeRepo;
+use musubi_jj::op_id::CanonicalOp;
+use musubi_jj::op_id::LocalOp;
 use musubi_jj::ref_locks;
 use musubi_testutil::TestEnv;
 use musubi_testutil::TestRepo;
@@ -20,7 +21,7 @@ fn open(repo: &TestRepo) -> NodeRepo {
 
 /// Ships the objects that the canonical operations reachable from `head` require and `to`
 /// lacks, as a pack plus extras entries.
-fn ship_objects(from: &NodeRepo, to: &NodeRepo, head: &OperationId) {
+fn ship_objects(from: &NodeRepo, to: &NodeRepo, head: &CanonicalOp) {
     let mut wants = BTreeSet::new();
     let mut stack = vec![head.clone()];
     let mut seen = BTreeSet::new();
@@ -29,7 +30,9 @@ fn ship_objects(from: &NodeRepo, to: &NodeRepo, head: &OperationId) {
             continue;
         }
         wants.extend(from.required_commits(std::slice::from_ref(&id)).unwrap());
-        stack.extend(from.canonical_store().read_operation(&id).unwrap().parents);
+        stack.extend(CanonicalOp::parents_of(
+            &from.canonical_store().read_operation(&id).unwrap(),
+        ));
     }
     let wants: Vec<_> = wants.into_iter().collect();
     let to_store = to.object_store().unwrap();
@@ -49,21 +52,21 @@ fn ship_objects(from: &NodeRepo, to: &NodeRepo, head: &OperationId) {
 }
 
 /// Ships objects and canonical operations, then makes `head` an op head of `to`.
-fn sync(from: &NodeRepo, to: &mut NodeRepo, head: &OperationId) {
+fn sync(from: &NodeRepo, to: &mut NodeRepo, head: &CanonicalOp) {
     ship_objects(from, to, head);
     ship_operations(from, to, head);
     to.advance(head).unwrap();
 }
 
 /// Copies the canonical operations reachable from `head` that `to` lacks, as a bundle.
-fn ship_operations(from: &NodeRepo, to: &NodeRepo, head: &OperationId) {
+fn ship_operations(from: &NodeRepo, to: &NodeRepo, head: &CanonicalOp) {
     let (src, dst) = (from.canonical_store(), to.canonical_store());
     let ops = src
         .ancestors_until(std::slice::from_ref(head), |id| dst.has_operation(id))
         .unwrap();
     let bundle = tempfile::NamedTempFile::new().unwrap();
     src.export_operations(&ops, bundle.path()).unwrap();
-    let imported: Vec<OperationId> = dst
+    let imported: Vec<CanonicalOp> = dst
         .import_operations(bundle.path())
         .unwrap()
         .into_iter()
@@ -72,7 +75,7 @@ fn ship_operations(from: &NodeRepo, to: &NodeRepo, head: &OperationId) {
     assert_eq!(imported, ops);
 }
 
-fn single_canonical_head(node: &mut NodeRepo) -> OperationId {
+fn single_canonical_head(node: &mut NodeRepo) -> CanonicalOp {
     node.merge_heads().unwrap();
     let heads = node.canonical_heads().unwrap();
     assert_eq!(heads.len(), 1, "expected one head, got {heads:?}");
@@ -156,8 +159,8 @@ fn canonicalizing_a_realization_returns_its_canonical_operation() {
     let mut fresh = open(&b);
     assert_eq!(fresh.canonicalize(&local).unwrap(), a_head);
     assert_ne!(
-        local.hex(),
-        a_head.hex(),
+        local.0.hex(),
+        a_head.0.hex(),
         "per-machine fields differ, so ids should too"
     );
 }
@@ -325,17 +328,15 @@ fn lost_cache_does_not_duplicate_realizations() {
     let mut seen = BTreeSet::new();
     let mut stack = vec![second_local];
     while let Some(id) = stack.pop() {
-        if !seen.insert(id.clone()) || id == *op_store.root_operation_id() {
+        if !seen.insert(id.clone()) || id.0 == *op_store.root_operation_id() {
             continue;
         }
         if b_node.canonicalize(&id).unwrap() == first {
             representing_first.insert(id.clone());
         }
-        stack.extend(
-            pollster::block_on(op_store.read_operation(&id))
-                .unwrap()
-                .parents,
-        );
+        stack.extend(LocalOp::parents_of(
+            &pollster::block_on(op_store.read_operation(&id.0)).unwrap(),
+        ));
     }
     assert_eq!(representing_first, BTreeSet::from([first_local]));
     b.jj(&["status"]);
@@ -363,18 +364,18 @@ fn crash_with_writes_in_flight() {
     // Every other one stopped between its view and itself.
     let operations = b.repo_path().join("op_store/operations");
     for local in in_flight.iter().step_by(2) {
-        std::fs::remove_file(operations.join(local.hex())).unwrap();
+        std::fs::remove_file(operations.join(local.0.hex())).unwrap();
     }
     drop(b_node);
 
     let mut b_node = open(&b);
     let head_local = b_node.advance(&head).unwrap();
     let op_store = b_node.loader().op_store().clone();
-    let mut realizations: BTreeMap<OperationId, BTreeSet<OperationId>> = BTreeMap::new();
+    let mut realizations: BTreeMap<CanonicalOp, BTreeSet<LocalOp>> = BTreeMap::new();
     let mut seen = BTreeSet::new();
     let mut stack = vec![head_local];
     while let Some(id) = stack.pop() {
-        if !seen.insert(id.clone()) || id == *op_store.root_operation_id() {
+        if !seen.insert(id.clone()) || id.0 == *op_store.root_operation_id() {
             continue;
         }
         let canonical = b_node.canonicalize(&id).unwrap();
@@ -382,11 +383,9 @@ fn crash_with_writes_in_flight() {
             .entry(canonical)
             .or_default()
             .insert(id.clone());
-        stack.extend(
-            pollster::block_on(op_store.read_operation(&id))
-                .unwrap()
-                .parents,
-        );
+        stack.extend(LocalOp::parents_of(
+            &pollster::block_on(op_store.read_operation(&id.0)).unwrap(),
+        ));
     }
     for local in &in_flight {
         let canonical = b_node.canonicalize(local).unwrap();

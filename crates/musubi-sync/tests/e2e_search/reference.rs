@@ -59,6 +59,8 @@ use jj_lib::repo::ReadonlyRepo;
 use jj_lib::repo::RepoLoader;
 use jj_lib::settings::UserSettings;
 use jj_lib::workspace::Workspace;
+use musubi_jj::op_id::CanonicalOp;
+use musubi_jj::op_id::LocalOp;
 use tempfile::TempDir;
 
 use crate::world::World;
@@ -98,13 +100,13 @@ pub struct Reference {
     pub deviations: Vec<String>,
     /// Every rewrite the hive's merges record: the merge, the new commit, and its
     /// predecessors.
-    rewrites: Vec<(OperationId, CommitId, Vec<CommitId>)>,
+    rewrites: Vec<(CanonicalOp, CommitId, Vec<CommitId>)>,
     /// Operations other than merges that made a change diverge or a bookmark or tag
     /// conflict, where nothing the operation did explains it (`explained`), and merges that
     /// did more of either than jj's merge of the same parents.
     pub unexplained: Vec<String>,
     /// The hive's history, but for the root.
-    history: Vec<OperationId>,
+    history: Vec<CanonicalOp>,
 }
 
 /// Settings for the reference's merges. The user is the tests' user; a seed of its own for
@@ -161,21 +163,21 @@ impl Reference {
         // The hub's history, parents first.
         let store = world.fx.hive.hub.store();
         let canonical = store.canonical();
-        let head = store.head().1.clone();
-        let mut ops: BTreeMap<OperationId, op_store::Operation> = BTreeMap::new();
+        let head = CanonicalOp(store.head().1.clone());
+        let mut ops: BTreeMap<CanonicalOp, op_store::Operation> = BTreeMap::new();
         let mut pending = vec![head.clone()];
         while let Some(id) = pending.pop() {
             if ops.contains_key(&id) || id == *canonical.root_operation_id() {
                 continue;
             }
             let op = canonical.read_operation(&id).unwrap();
-            pending.extend(op.parents.iter().cloned());
+            pending.extend(CanonicalOp::parents_of(&op));
             ops.insert(id, op);
         }
         // Concurrent operations of a generation in the order they ended, which is the same
         // on every run of a case, unlike their ids: jj records each command's arguments,
         // temporary paths and all.
-        let mut order: Vec<(u64, MillisSinceEpoch, String, OperationId)> = ops
+        let mut order: Vec<(u64, MillisSinceEpoch, String, CanonicalOp)> = ops
             .iter()
             .map(|(id, op)| {
                 (
@@ -204,35 +206,36 @@ impl Reference {
         let root_view = canonical
             .read_operation_view(canonical.root_operation_id())
             .unwrap();
-        let mut views: HashMap<OperationId, View> =
+        let mut views: HashMap<CanonicalOp, View> =
             HashMap::from([(canonical.root_operation_id().clone(), root_view)]);
         // The operations where the reference went its own way. It goes back to the hive's
         // only at an operation that every later operation descending from them descends
         // from too: otherwise some line of its history would keep commits of its own, and a
         // merge of that line with one that went back would take the hive's copies of them
         // for other commits.
-        let mut deviated: BTreeSet<OperationId> = BTreeSet::new();
-        let mut children: HashMap<OperationId, Vec<OperationId>> = HashMap::new();
+        let mut deviated: BTreeSet<CanonicalOp> = BTreeSet::new();
+        let mut children: HashMap<CanonicalOp, Vec<CanonicalOp>> = HashMap::new();
         for (id, op) in &ops {
-            for parent in &op.parents {
-                children.entry(parent.clone()).or_default().push(id.clone());
+            for parent in CanonicalOp::parents_of(op) {
+                children.entry(parent).or_default().push(id.clone());
             }
         }
-        let mut copies: HashMap<OperationId, Operation> = HashMap::new();
-        let mut replays: HashMap<OperationId, Operation> = HashMap::new();
+        let mut copies: HashMap<CanonicalOp, Operation> = HashMap::new();
+        let mut replays: HashMap<CanonicalOp, Operation> = HashMap::new();
         copies.insert(canonical.root_operation_id().clone(), root_op.clone());
         replays.insert(canonical.root_operation_id().clone(), root_op);
         for (.., id) in order {
             let op = &ops[&id];
+            let op_parents = CanonicalOp::parents_of(op);
             let view = canonical.read_view(&op.view_id).unwrap();
-            if op.parents.len() > 1 {
+            if op_parents.len() > 1 {
                 for (new, predecessors) in op.commit_predecessors.iter().flatten() {
                     reference
                         .rewrites
                         .push((id.clone(), new.clone(), predecessors.clone()));
                 }
             }
-            if let [parent] = op.parents.as_slice()
+            if let [parent] = op_parents.as_slice()
                 && !explained(op)
             {
                 let parent_view = views[parent].clone();
@@ -252,39 +255,39 @@ impl Reference {
             let op_store = reference.loader.op_store().clone();
             let copy = op_store::Operation {
                 view_id: block_on(op_store.write_view(&view)).unwrap(),
-                parents: op.parents.iter().map(|p| copies[p].id().clone()).collect(),
+                parents: op_parents.iter().map(|p| copies[p].id().clone()).collect(),
                 metadata: op.metadata.clone(),
                 commit_predecessors: op.commit_predecessors.clone(),
             };
             let copy_id = block_on(op_store.write_operation(&copy)).unwrap();
             let copy = block_on(reference.loader.load_operation(&copy_id)).unwrap();
-            let parents: Vec<&Operation> = op.parents.iter().map(|p| &replays[p]).collect();
-            let agreed = op.parents.iter().all(|p| replays[p].id() == copies[p].id());
-            let replay = if op.parents.len() < 2 && agreed {
+            let parents: Vec<&Operation> = op_parents.iter().map(|p| &replays[p]).collect();
+            let agreed = op_parents.iter().all(|p| replays[p].id() == copies[p].id());
+            let replay = if op_parents.len() < 2 && agreed {
                 copy.clone()
             } else {
-                let (replayed, how) = if op.parents.len() < 2 {
+                let (replayed, how) = if op_parents.len() < 2 {
                     (
-                        reference.apply(&copies[&op.parents[0]], &copy, parents[0]),
+                        reference.apply(&copies[&op_parents[0]], &copy, parents[0]),
                         "applied",
                     )
                 } else {
                     (reference.merge(parents), "merged")
                 };
                 let known =
-                    reference.changes_of(op.parents.iter().flat_map(|p| [&copies[p], &replays[p]]));
+                    reference.changes_of(op_parents.iter().flat_map(|p| [&copies[p], &replays[p]]));
                 let ours = reference.summary(&view, &known);
                 let theirs = reference.summary(&replayed.view, &known);
                 // The same parents on both sides, but a different merge: it may be jj's own,
                 // on the machine that made it, of the parents as that machine had them.
-                let as_made = if op.parents.len() > 1 && agreed && ours != theirs {
+                let as_made = if op_parents.len() > 1 && agreed && ours != theirs {
                     reference
-                        .merged_as_made(world, &id, &op.parents, &replayed.view, &copies, &views)
+                        .merged_as_made(world, &id, &op_parents, &replayed.view, &copies, &views)
                         .filter(|(merged, _)| reference.summary(merged, &known) == ours)
                 } else {
                     None
                 };
-                if op.parents.len() > 1 && agreed && ours != theirs && as_made.is_none() {
+                if op_parents.len() > 1 && agreed && ours != theirs && as_made.is_none() {
                     // What the hive's merge did beyond jj's is musubi's, whatever later
                     // operations make of it.
                     let beyond = reference.beyond(&view, &replayed.view, &known);
@@ -307,7 +310,7 @@ impl Reference {
                     } else {
                         // Its own, as where jj's merge agrees but other lines have parted.
                         deviated.insert(id.clone());
-                        let parents = op.parents.iter().map(|p| replays[p].id().clone());
+                        let parents = op_parents.iter().map(|p| replays[p].id().clone());
                         reference.write_like(&copy, &merged, parents.collect())
                     }
                 } else if ours == theirs && dominates(&ops, &children, &deviated, &id) {
@@ -396,13 +399,13 @@ impl Reference {
     /// a concurrent abandon of that parent do; neither is it.
     pub fn same_rebase_twice(&mut self, change: &str) -> bool {
         let rewrites = self.rewrites.clone();
-        let ours: Vec<(OperationId, CommitId, Vec<CommitId>)> = rewrites
+        let ours: Vec<(CanonicalOp, CommitId, Vec<CommitId>)> = rewrites
             .into_iter()
             .filter(|(_, new, _)| self.facts(new).change.reverse_hex() == change)
             .collect();
         let ids: Vec<CommitId> = ours.iter().map(|(_, new, _)| new.clone()).collect();
         let keys = self.keys(&ids, &|_| true);
-        let mut made: HashMap<(CommitId, u64), (OperationId, CommitId)> = HashMap::new();
+        let mut made: HashMap<(CommitId, u64), (CanonicalOp, CommitId)> = HashMap::new();
         for (op, new, predecessors) in ours {
             for predecessor in predecessors {
                 match made.get(&(predecessor.clone(), keys[&new])) {
@@ -436,11 +439,11 @@ impl Reference {
                     differ.push(format!(
                         "{} hasn't realized {}",
                         world.machine(m),
-                        &id.hex()[..12]
+                        &id.0.hex()[..12]
                     ));
                     continue;
                 };
-                let local_op = block_on(op_store.read_operation(&local)).unwrap();
+                let local_op = block_on(op_store.read_operation(&local.0)).unwrap();
                 let ours = block_on(op_store.read_view(&local_op.view_id)).unwrap();
                 let theirs = canonical.read_operation_view(&id).unwrap();
                 let realized = local_op
@@ -468,8 +471,8 @@ impl Reference {
                         "{}'s {} {} of {} \"{}\": {}",
                         world.machine(m),
                         if realized { "realization" } else { "operation" },
-                        &local.hex()[..12],
-                        &id.hex()[..12],
+                        &local.0.hex()[..12],
+                        &id.0.hex()[..12],
                         local_op
                             .metadata
                             .description
@@ -536,11 +539,11 @@ impl Reference {
     fn merged_as_made(
         &mut self,
         world: &World,
-        id: &OperationId,
-        parents: &[OperationId],
+        id: &CanonicalOp,
+        parents: &[CanonicalOp],
         canonical: &View,
-        copies: &HashMap<OperationId, Operation>,
-        views: &HashMap<OperationId, View>,
+        copies: &HashMap<CanonicalOp, Operation>,
+        views: &HashMap<CanonicalOp, View>,
     ) -> Option<(View, &'static str)> {
         // The machine that made the merge, rather than realized it, and the merge there.
         let (m, node, local_op) =
@@ -553,7 +556,7 @@ impl Reference {
                 .find_map(|(m, member)| {
                     let node = member.adapter.repo();
                     let local = node.local_of(id)?;
-                    let local_op = block_on(node.loader().load_operation(&local)).unwrap();
+                    let local_op = block_on(node.loader().load_operation(&local.0)).unwrap();
                     let made = !local_op
                         .metadata()
                         .attributes
@@ -565,9 +568,9 @@ impl Reference {
             return None;
         };
         // The same parents, in the same order.
-        let canonical_parents: Vec<Option<OperationId>> = local_parents
+        let canonical_parents: Vec<Option<CanonicalOp>> = local_parents
             .iter()
-            .map(|parent| node.canonical_of(parent.id()))
+            .map(|parent| node.canonical_of(&LocalOp(parent.id().clone())))
             .collect();
         if canonical_parents
             .iter()
@@ -588,7 +591,7 @@ impl Reference {
         let mut kept: HashSet<CommitId> = HashSet::new();
         let mut as_had = vec![];
         for local in [base, first, second] {
-            let canonical_id = node.canonical_of(local.id())?;
+            let canonical_id = node.canonical_of(&LocalOp(local.id().clone()))?;
             let local_view = block_on(local.view()).unwrap().store_view().clone();
             let mut view = views.get(&canonical_id)?.clone();
             let visible = self.visible(&view);
@@ -914,16 +917,16 @@ impl Reference {
 /// Whether every operation descending from one of `deviated` is an ancestor or a
 /// descendant of `id` (or `id`), in the history `ops` with `children`.
 fn dominates(
-    ops: &BTreeMap<OperationId, op_store::Operation>,
-    children: &HashMap<OperationId, Vec<OperationId>>,
-    deviated: &BTreeSet<OperationId>,
-    id: &OperationId,
+    ops: &BTreeMap<CanonicalOp, op_store::Operation>,
+    children: &HashMap<CanonicalOp, Vec<CanonicalOp>>,
+    deviated: &BTreeSet<CanonicalOp>,
+    id: &CanonicalOp,
 ) -> bool {
     if deviated.is_empty() {
         return true;
     }
-    let walk = |start: &OperationId, next: &dyn Fn(&OperationId) -> Vec<OperationId>| {
-        let mut found: HashSet<OperationId> = HashSet::new();
+    let walk = |start: &CanonicalOp, next: &dyn Fn(&CanonicalOp) -> Vec<CanonicalOp>| {
+        let mut found: HashSet<CanonicalOp> = HashSet::new();
         let mut pending = vec![start.clone()];
         while let Some(op) = pending.pop() {
             if found.insert(op.clone()) {
@@ -932,9 +935,9 @@ fn dominates(
         }
         found
     };
-    let parents = |op: &OperationId| ops.get(op).map_or(vec![], |op| op.parents.clone());
-    let kids = |op: &OperationId| children.get(op).cloned().unwrap_or_default();
-    let related: HashSet<OperationId> = walk(id, &parents)
+    let parents = |op: &CanonicalOp| ops.get(op).map_or(vec![], CanonicalOp::parents_of);
+    let kids = |op: &CanonicalOp| children.get(op).cloned().unwrap_or_default();
+    let related: HashSet<CanonicalOp> = walk(id, &parents)
         .into_iter()
         .chain(walk(id, &kids))
         .collect();
@@ -1054,11 +1057,11 @@ fn show_target(target: Option<&RefTarget>) -> String {
 }
 
 /// A canonical operation, for messages: its description, id and machine.
-fn describe(id: &OperationId, op: &op_store::Operation) -> String {
+fn describe(id: &CanonicalOp, op: &op_store::Operation) -> String {
     format!(
         "\"{}\" ({} on {})",
         op.metadata.description.lines().next().unwrap_or_default(),
-        &id.hex()[..12],
+        &id.0.hex()[..12],
         op.metadata.hostname
     )
 }

@@ -5,8 +5,8 @@
 use std::collections::BTreeSet;
 
 use jj_lib::object_id::ObjectId as _;
-use jj_lib::op_store::OperationId;
 use musubi_jj::node::NodeRepo;
+use musubi_jj::op_id::CanonicalOp;
 use musubi_testutil::TestEnv;
 use musubi_testutil::TestRepo;
 
@@ -14,7 +14,7 @@ fn open(repo: &TestRepo) -> NodeRepo {
     NodeRepo::open(&repo.repo_path(), &repo.settings()).unwrap()
 }
 
-fn canonical_ancestry(node: &NodeRepo, head: &OperationId) -> Vec<OperationId> {
+fn canonical_ancestry(node: &NodeRepo, head: &CanonicalOp) -> Vec<CanonicalOp> {
     let store = node.canonical_store();
     let mut seen = BTreeSet::new();
     let mut stack = vec![head.clone()];
@@ -23,13 +23,13 @@ fn canonical_ancestry(node: &NodeRepo, head: &OperationId) -> Vec<OperationId> {
         if id == *store.root_operation_id() || !seen.insert(id.clone()) {
             continue;
         }
-        stack.extend(store.read_operation(&id).unwrap().parents);
+        stack.extend(CanonicalOp::parents_of(&store.read_operation(&id).unwrap()));
         order.push(id);
     }
     order
 }
 
-fn sync(from: &NodeRepo, to: &mut NodeRepo, head: &OperationId) {
+fn sync(from: &NodeRepo, to: &mut NodeRepo, head: &CanonicalOp) {
     let ops = canonical_ancestry(from, head);
     let wants: Vec<_> = from.required_commits(&ops).unwrap().into_iter().collect();
     let to_store = to.object_store().unwrap();
@@ -151,7 +151,7 @@ fn a_torn_join_record_names_nothing() {
     // As if the join had been killed while it wrote its record, before it recorded anything
     // else.
     let musubi = repo.repo_path().join("musubi");
-    let torn = format!("{} {}", head.hex(), &first.hex()[..40]);
+    let torn = format!("{} {}", head.0.hex(), &first.0.hex()[..40]);
     std::fs::write(musubi.join("joins"), torn).unwrap();
     std::fs::remove_file(musubi.join("translation")).unwrap();
     let mut node = open(&repo);

@@ -8,25 +8,25 @@
 
 use std::collections::HashMap;
 use std::collections::HashSet;
-
-use jj_lib::op_store::OperationId;
+use std::hash::Hash;
 
 use super::CanonicalError;
 use super::CanonicalStore;
+use crate::op_id::CanonicalOp;
 
 /// The contraction of a store's history by a set of dropped operations, worked out as far as
 /// it has been asked about. Each call takes the store whose history it is.
 #[derive(Clone, Debug, Default)]
 pub struct Contraction {
-    dropped: HashSet<OperationId>,
+    dropped: HashSet<CanonicalOp>,
     /// The lowest generation of a stored dropped operation: an operation no higher keeps its
     /// id, having no dropped proper ancestor.
     floor: u64,
     /// What each operation met becomes, where that isn't just itself: its rewrite, or, for a
     /// dropped one, what its parents become (`Contract.exp`).
-    images: HashMap<OperationId, Vec<OperationId>>,
+    images: HashMap<CanonicalOp, Vec<CanonicalOp>>,
     /// The operations met that keep their ids.
-    same: HashSet<OperationId>,
+    same: HashSet<CanonicalOp>,
 }
 
 impl Contraction {
@@ -34,10 +34,10 @@ impl Contraction {
     /// dropped operation the store lacks changes nothing here.
     pub fn new(
         store: &CanonicalStore,
-        dropped: impl IntoIterator<Item = OperationId>,
+        dropped: impl IntoIterator<Item = CanonicalOp>,
     ) -> Result<Self, CanonicalError> {
         let root = store.root_operation_id();
-        let dropped: HashSet<OperationId> = dropped
+        let dropped: HashSet<CanonicalOp> = dropped
             .into_iter()
             .filter(|op| op != root && store.has_operation(op))
             .collect();
@@ -59,12 +59,12 @@ impl Contraction {
     }
 
     /// Whether `op` is dropped.
-    pub fn drops(&self, op: &OperationId) -> bool {
+    pub fn drops(&self, op: &CanonicalOp) -> bool {
         self.dropped.contains(op)
     }
 
     /// The dropped operations.
-    pub fn dropped(&self) -> &HashSet<OperationId> {
+    pub fn dropped(&self) -> &HashSet<CanonicalOp> {
         &self.dropped
     }
 
@@ -73,7 +73,7 @@ impl Contraction {
     pub fn may_change(
         &self,
         store: &CanonicalStore,
-        op: &OperationId,
+        op: &CanonicalOp,
     ) -> Result<bool, CanonicalError> {
         Ok(self.dropped.contains(op) || store.generation(op)? > self.floor)
     }
@@ -83,19 +83,19 @@ impl Contraction {
     pub fn images(
         &mut self,
         store: &CanonicalStore,
-        op: &OperationId,
-    ) -> Result<Vec<OperationId>, CanonicalError> {
+        op: &CanonicalOp,
+    ) -> Result<Vec<CanonicalOp>, CanonicalError> {
         self.work_out(store, op)?;
         Ok(self.image(op))
     }
 
     /// What the operations worked out so far become, where that isn't just themselves.
-    pub fn images_so_far(&self) -> &HashMap<OperationId, Vec<OperationId>> {
+    pub fn images_so_far(&self) -> &HashMap<CanonicalOp, Vec<CanonicalOp>> {
         &self.images
     }
 
     /// What `op` becomes, once worked out.
-    fn image(&self, op: &OperationId) -> Vec<OperationId> {
+    fn image(&self, op: &CanonicalOp) -> Vec<CanonicalOp> {
         match self.images.get(op) {
             Some(images) => images.clone(),
             None => {
@@ -106,7 +106,7 @@ impl Contraction {
     }
 
     /// Works out what `op` and everything it needs become, without recursing.
-    fn work_out(&mut self, store: &CanonicalStore, op: &OperationId) -> Result<(), CanonicalError> {
+    fn work_out(&mut self, store: &CanonicalStore, op: &CanonicalOp) -> Result<(), CanonicalError> {
         // (operation, whether its parents have been pushed)
         let mut stack = vec![(op.clone(), false)];
         while let Some((id, expanded)) = stack.pop() {
@@ -133,7 +133,7 @@ impl Contraction {
                 continue;
             }
             let parents = store.parents(&id)?;
-            let mut contracted: Vec<OperationId> = vec![];
+            let mut contracted: Vec<CanonicalOp> = vec![];
             let mut seen = HashSet::new();
             for parent in &parents {
                 for image in self.image(parent) {
@@ -148,9 +148,9 @@ impl Contraction {
                 self.same.insert(id);
             } else {
                 let mut operation = store.read_operation(&id)?;
-                operation.parents = contracted;
+                operation.parents = contracted.iter().map(|op| op.0.clone()).collect();
                 let rewritten = store.write_operation(&operation)?;
-                store.note_generation(&rewritten, &operation.parents);
+                store.note_generation(&rewritten, &contracted);
                 self.images.insert(id, vec![rewritten]);
             }
         }
@@ -158,7 +158,7 @@ impl Contraction {
     }
 
     /// What every operation worked out so far becomes, where that isn't just itself.
-    pub fn into_images(self) -> HashMap<OperationId, Vec<OperationId>> {
+    pub fn into_images(self) -> HashMap<CanonicalOp, Vec<CanonicalOp>> {
         self.images
     }
 }
@@ -168,15 +168,12 @@ impl Contraction {
 /// the first of each kept. Each contraction renames only what none before it superseded, so
 /// each has one entry, and composing them on lookup costs only the entries met, where
 /// composing each into every entry before it costs, over many, the square of their number.
-pub fn current(
-    superseded: &HashMap<OperationId, Vec<OperationId>>,
-    op: &OperationId,
-) -> Vec<OperationId> {
+pub fn current<Op: Clone + Eq + Hash>(superseded: &HashMap<Op, Vec<Op>>, op: &Op) -> Vec<Op> {
     if !superseded.contains_key(op) {
         return vec![op.clone()];
     }
     // What each one met is now, worked out once: histories merge, and so do renamings.
-    let mut now: HashMap<&OperationId, Vec<OperationId>> = HashMap::new();
+    let mut now: HashMap<&Op, Vec<Op>> = HashMap::new();
     let mut started = HashSet::new();
     let mut stack = vec![(op, false)];
     while let Some((id, expanded)) = stack.pop() {
@@ -223,14 +220,14 @@ mod tests {
 
     /// A history of `parents.len()` operations on the root, the `i`th with the given parents
     /// among those before it (`None` for the root), each told apart by its description.
-    fn history(store: &CanonicalStore, parents: &[Vec<usize>]) -> Vec<OperationId> {
+    fn history(store: &CanonicalStore, parents: &[Vec<usize>]) -> Vec<CanonicalOp> {
         let view = store
             .write_view(&View::make_root(CommitId::from_bytes(&[0; 20])))
             .unwrap();
         let mut ids = vec![store.root_operation_id().clone()];
         for (i, ps) in parents.iter().enumerate() {
             let mut op = Operation::make_root(view.clone());
-            op.parents = ps.iter().map(|&p| ids[p].clone()).collect();
+            op.parents = ps.iter().map(|&p| ids[p].0.clone()).collect();
             op.metadata.description = format!("op {i}");
             ids.push(store.write_operation(&op).unwrap());
         }
@@ -277,13 +274,13 @@ mod tests {
         }
         let mut shuffled =
             Contraction::new(&store, first.union(&second).map(|&i| ids[i].clone())).unwrap();
-        let in_order: HashMap<usize, Vec<OperationId>> = order
+        let in_order: HashMap<usize, Vec<CanonicalOp>> = order
             .iter()
             .map(|&i| (i, shuffled.images(&store, &ids[i]).unwrap()))
             .collect();
 
         let mut once = Contraction::new(&store, first.iter().map(|&i| ids[i].clone())).unwrap();
-        let after_first: Vec<Vec<OperationId>> = ids
+        let after_first: Vec<Vec<CanonicalOp>> = ids
             .iter()
             .map(|id| once.images(&store, id).unwrap())
             .collect();
@@ -311,7 +308,7 @@ mod tests {
             assert_eq!(in_order[&i], images, "op {i}, asked out of order");
             if dropped {
                 // What a dropped operation's parents became (`Contract.exp`).
-                let parents: Vec<OperationId> = contracted
+                let parents: Vec<CanonicalOp> = contracted
                     .iter()
                     .map(|&q| both.images(&store, &ids[q]).unwrap()[0].clone())
                     .collect();
@@ -322,7 +319,7 @@ mod tests {
             assert_eq!(id.len(), 1);
             let via_first = twice.images(&store, &after_first[i][0]).unwrap();
             assert_eq!(via_first, id, "op {i}");
-            let image_parents: Vec<OperationId> = contracted
+            let image_parents: Vec<CanonicalOp> = contracted
                 .iter()
                 .map(|&q| both.images(&store, &ids[q]).unwrap()[0].clone())
                 .collect();

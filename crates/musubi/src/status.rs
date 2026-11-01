@@ -21,6 +21,7 @@ use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::OperationId;
 use jj_lib::settings::UserSettings;
 use musubi_jj::node::NodeRepo;
+use musubi_jj::op_id::CanonicalOp;
 
 use crate::config::HiveConfig;
 use crate::config::UserState;
@@ -703,7 +704,7 @@ async fn statuses(socket: &Socket) -> anyhow::Result<Option<Vec<control::RepoSta
 /// can't be told.
 fn sent(node: &NodeRepo, sync: Option<&daemon::Status>) -> Option<bool> {
     let head = sync?.known_head.as_ref()?;
-    let head = OperationId::try_from_hex(head)?;
+    let head = CanonicalOp(OperationId::try_from_hex(head)?);
     let store = node.canonical_store();
     if !store.has_operation(&head) {
         return None;

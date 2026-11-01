@@ -11,7 +11,6 @@ use std::sync::PoisonError;
 
 use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
-use jj_lib::op_store::OperationId;
 use jj_lib::op_store::View;
 use jj_lib::ref_name::WorkspaceNameBuf;
 use jj_lib::repo::Repo as _;
@@ -20,6 +19,8 @@ use pollster::FutureExt as _;
 use super::NodeError;
 use super::NodeRepo;
 use super::index_err;
+use crate::op_id::CanonicalOp;
+use crate::op_id::LocalOp;
 use crate::presence::FORGET_ATTRIBUTE;
 use crate::presence::Kind;
 use crate::presence::Presence;
@@ -31,7 +32,7 @@ const REMEMBERED: usize = 256;
 
 /// This machine's own workspace names as of its latest work (`Presence::worked`), the last
 /// asked about.
-pub(super) type WorkedNames = Option<(BTreeSet<OperationId>, Arc<BTreeSet<WorkspaceNameBuf>>)>;
+pub(super) type WorkedNames = Option<(BTreeSet<CanonicalOp>, Arc<BTreeSet<WorkspaceNameBuf>>)>;
 
 /// The names of this machine's own workspaces in a canonical view.
 fn own_keys(node: &NodeRepo, view: &View) -> BTreeSet<WorkspaceNameBuf> {
@@ -45,16 +46,16 @@ fn own_keys(node: &NodeRepo, view: &View) -> BTreeSet<WorkspaceNameBuf> {
 /// Presence at canonical operations, for the last [`REMEMBERED`] computed.
 #[derive(Default)]
 pub(super) struct PresenceMemo {
-    presences: HashMap<OperationId, Arc<Presence<OperationId>>>,
-    order: VecDeque<OperationId>,
+    presences: HashMap<CanonicalOp, Arc<Presence<CanonicalOp>>>,
+    order: VecDeque<CanonicalOp>,
 }
 
 impl PresenceMemo {
-    fn get(&self, op: &OperationId) -> Option<Arc<Presence<OperationId>>> {
+    fn get(&self, op: &CanonicalOp) -> Option<Arc<Presence<CanonicalOp>>> {
         self.presences.get(op).cloned()
     }
 
-    fn insert(&mut self, op: OperationId, presence: Arc<Presence<OperationId>>) {
+    fn insert(&mut self, op: CanonicalOp, presence: Arc<Presence<CanonicalOp>>) {
         if self.presences.insert(op.clone(), presence).is_none() {
             self.order.push_back(op);
         }
@@ -69,13 +70,13 @@ impl PresenceMemo {
 impl NodeRepo {
     /// The copies present at canonical operation `op`. Unless an ancestor's presence is
     /// remembered, this reads the history below `op`, once.
-    pub fn presence(&self, op: &OperationId) -> Result<Arc<Presence<OperationId>>, NodeError> {
+    pub fn presence(&self, op: &CanonicalOp) -> Result<Arc<Presence<CanonicalOp>>, NodeError> {
         let root = self.canonical.root_operation_id();
         if op == root {
             return Ok(Arc::default());
         }
         if !self.canonical.has_operation(op) {
-            return Err(NodeError::NotRealizable(op.hex(), "operation not stored"));
+            return Err(NodeError::NotRealizable(op.0.hex(), "operation not stored"));
         }
         let memo = || {
             self.presences
@@ -88,23 +89,25 @@ impl NodeRepo {
         // The operations whose presence isn't known, ancestors first, each read once, then each
         // one's from its parents', keeping each only until the last of its children in the
         // walk needs it.
-        let mut ops: Vec<(OperationId, Vec<OperationId>, Kind)> = vec![];
-        let mut seen: HashSet<OperationId> = HashSet::new();
-        let mut stack: Vec<(OperationId, Option<jj_lib::op_store::Operation>)> =
+        let mut ops: Vec<(CanonicalOp, Vec<CanonicalOp>, Kind)> = vec![];
+        let mut seen: HashSet<CanonicalOp> = HashSet::new();
+        let mut stack: Vec<(CanonicalOp, Option<jj_lib::op_store::Operation>)> =
             vec![(op.clone(), None)];
         while let Some((id, stored)) = stack.pop() {
             match stored {
-                Some(stored) => ops.push((id, stored.parents, Kind::of(&stored.metadata))),
+                Some(stored) => ops.push((
+                    id,
+                    CanonicalOp::parents_of(&stored),
+                    Kind::of(&stored.metadata),
+                )),
                 None => {
                     if !seen.insert(id.clone()) || id == *root || memo().get(&id).is_some() {
                         continue;
                     }
                     let stored = self.canonical.read_operation(&id)?;
-                    let parents: Vec<OperationId> = stored
-                        .parents
-                        .iter()
-                        .filter(|parent| !seen.contains(*parent))
-                        .cloned()
+                    let parents: Vec<CanonicalOp> = CanonicalOp::parents_of(&stored)
+                        .into_iter()
+                        .filter(|parent| !seen.contains(parent))
                         .collect();
                     stack.push((id, Some(stored)));
                     stack.extend(parents.into_iter().map(|parent| (parent, None)));
@@ -116,13 +119,13 @@ impl NodeRepo {
             let remembered = memo().get(op);
             return remembered.map_or_else(|| self.presence(op), Ok);
         }
-        let mut children: HashMap<OperationId, usize> = HashMap::new();
+        let mut children: HashMap<CanonicalOp, usize> = HashMap::new();
         for (_, parents, _) in &ops {
             for parent in parents {
                 *children.entry(parent.clone()).or_default() += 1;
             }
         }
-        let mut walked: HashMap<OperationId, Arc<Presence<OperationId>>> = HashMap::new();
+        let mut walked: HashMap<CanonicalOp, Arc<Presence<CanonicalOp>>> = HashMap::new();
         let mut presence = Arc::default();
         for (id, parents, kind) in ops {
             self.canonical.note_generation(&id, &parents);
@@ -168,9 +171,9 @@ impl NodeRepo {
     /// Presence before an operation's own effect, from its parents'.
     pub(super) fn merge_presence(
         &self,
-        parents: &[(OperationId, Arc<Presence<OperationId>>)],
-    ) -> Result<Presence<OperationId>, NodeError> {
-        let parents: Vec<(OperationId, &Presence<OperationId>)> = parents
+        parents: &[(CanonicalOp, Arc<Presence<CanonicalOp>>)],
+    ) -> Result<Presence<CanonicalOp>, NodeError> {
+        let parents: Vec<(CanonicalOp, &Presence<CanonicalOp>)> = parents
             .iter()
             .map(|(op, presence)| (op.clone(), presence.as_ref()))
             .collect();
@@ -180,7 +183,7 @@ impl NodeRepo {
     }
 
     /// Remembers the presence at canonical operation `op`, just written.
-    pub(super) fn remember_presence(&self, op: OperationId, presence: Presence<OperationId>) {
+    pub(super) fn remember_presence(&self, op: CanonicalOp, presence: Presence<CanonicalOp>) {
         self.presences
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -191,7 +194,7 @@ impl NodeRepo {
     /// that head.
     pub fn present_copies(
         &mut self,
-    ) -> Result<(OperationId, Arc<Presence<OperationId>>), NodeError> {
+    ) -> Result<(CanonicalOp, Arc<Presence<CanonicalOp>>), NodeError> {
         let head = self.merge_heads()?;
         let canonical = self.canonicalize(&head)?;
         let presence = self.presence(&canonical)?;
@@ -252,7 +255,7 @@ impl NodeRepo {
     /// of the copy. Writes nothing, and returns false, if the copy isn't present.
     pub fn forget_copy(&mut self, copy: &str, display: &str) -> Result<bool, NodeError> {
         let repo = self.merged_repo()?;
-        let canonical = self.canonicalize(repo.op_id())?;
+        let canonical = self.canonicalize(&LocalOp(repo.op_id().clone()))?;
         if !self.presence(&canonical)?.is_present(copy) {
             return Ok(false);
         }
@@ -286,7 +289,7 @@ impl NodeRepo {
         keep: &BTreeSet<String>,
     ) -> Result<Vec<String>, NodeError> {
         let repo = self.merged_repo()?;
-        let canonical = self.canonicalize(repo.op_id())?;
+        let canonical = self.canonicalize(&LocalOp(repo.op_id().clone()))?;
         let own = self.machine.key().to_owned();
         let forgotten: Vec<String> = self
             .presence(&canonical)?
@@ -329,7 +332,7 @@ impl NodeRepo {
     /// hive has the forget, or `None`, writing nothing, if the copy isn't present.
     pub fn forget_self(&mut self) -> Result<Option<Vec<(WorkspaceNameBuf, CommitId)>>, NodeError> {
         let repo = self.merged_repo()?;
-        let canonical = self.canonicalize(repo.op_id())?;
+        let canonical = self.canonicalize(&LocalOp(repo.op_id().clone()))?;
         if !self.presence(&canonical)?.is_present(self.machine.key()) {
             return Ok(None);
         }
@@ -379,7 +382,7 @@ impl NodeRepo {
     pub(super) fn own_workspaces(
         &self,
         repo: &jj_lib::repo::ReadonlyRepo,
-        canonical: &OperationId,
+        canonical: &CanonicalOp,
     ) -> Result<BTreeMap<WorkspaceNameBuf, CommitId>, NodeError> {
         self.own_of_view(repo.view().wc_commit_ids().clone(), canonical)
     }
@@ -390,7 +393,7 @@ impl NodeRepo {
     pub(super) fn own_of_view(
         &self,
         workspaces: BTreeMap<WorkspaceNameBuf, CommitId>,
-        canonical: &OperationId,
+        canonical: &CanonicalOp,
     ) -> Result<BTreeMap<WorkspaceNameBuf, CommitId>, NodeError> {
         let others = self.other_names(canonical)?;
         let machines = self.known_machines(canonical)?;
@@ -409,7 +412,7 @@ impl NodeRepo {
     /// at its latest work, still its own here.
     pub(super) fn own_names(
         &self,
-        canonical: &OperationId,
+        canonical: &CanonicalOp,
     ) -> Result<BTreeSet<WorkspaceNameBuf>, NodeError> {
         if canonical == self.canonical.root_operation_id() {
             return Ok(BTreeSet::new());
@@ -428,7 +431,7 @@ impl NodeRepo {
     pub(super) fn own_names_in(
         &self,
         view: &View,
-        presence: &Presence<OperationId>,
+        presence: &Presence<CanonicalOp>,
     ) -> Result<BTreeSet<WorkspaceNameBuf>, NodeError> {
         let key = self.machine.key();
         let worked = match presence.worked(key) {
@@ -456,7 +459,7 @@ impl NodeRepo {
     /// Every machine a canonical operation's history has known (`machines_of`).
     pub(super) fn known_machines(
         &self,
-        canonical: &OperationId,
+        canonical: &CanonicalOp,
     ) -> Result<BTreeSet<String>, NodeError> {
         if canonical == self.canonical.root_operation_id() {
             return Ok(BTreeSet::new());
@@ -480,7 +483,7 @@ impl NodeRepo {
     /// their keys.
     pub(super) fn other_names(
         &self,
-        canonical: &OperationId,
+        canonical: &CanonicalOp,
     ) -> Result<BTreeMap<WorkspaceNameBuf, WorkspaceNameBuf>, NodeError> {
         if canonical == self.canonical.root_operation_id() {
             return Ok(BTreeMap::new());

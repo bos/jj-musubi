@@ -38,6 +38,7 @@ use musubi_jj::objects::GitStore;
 use musubi_jj::objects::ObjectError;
 use musubi_jj::objects::ObjectStore;
 use musubi_jj::objects::SimpleStore;
+use musubi_jj::op_id::CanonicalOp;
 use musubi_jj::records::HubOp;
 use musubi_jj::records::Record;
 use musubi_jj::records::RecordDigest;
@@ -139,7 +140,7 @@ impl HubStore {
         let path = dir.join("backend");
         fs::write(&path, backend.name()).map_err(io_err(&path))?;
         let canonical = CanonicalStore::open(&dir.join("canonical"), backend.root_commit())?;
-        let root = canonical.root_operation_id().clone();
+        let root = canonical.root_operation_id().0.clone();
         append_head(dir, 0, &root, &[])?;
         Self::open(dir)
     }
@@ -165,7 +166,7 @@ impl HubStore {
         };
         for (head, record) in history {
             if !record.is_empty() {
-                let record: Vec<HubOp> = record.into_iter().map(HubOp).collect();
+                let record: Vec<HubOp> = record.into_iter().map(hub_op).collect();
                 let contracted = store.contract(&record)?;
                 store.take(contracted);
             }
@@ -201,20 +202,26 @@ impl HubStore {
     pub fn contract(&self, dropped: &[HubOp]) -> Result<Contracted, StoreError> {
         let dropped: Vec<OperationId> = dropped
             .iter()
-            .map(|op| op.0.clone())
+            .map(|op| op.0.0.clone())
             .filter(|op| !self.is_superseded(op))
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
-        let mut contraction = Contraction::new(&self.canonical, dropped.iter().cloned())?;
+        let mut contraction =
+            Contraction::new(&self.canonical, dropped.iter().cloned().map(CanonicalOp))?;
         let head = self.head().1.clone();
         if !contraction.is_empty() {
-            contraction.images(&self.canonical, &head)?;
+            contraction.images(&self.canonical, &CanonicalOp(head.clone()))?;
         }
+        let images = contraction
+            .into_images()
+            .into_iter()
+            .map(|(old, new)| (old.0, new.into_iter().map(|op| op.0).collect()))
+            .collect();
         Ok(Contracted {
             head,
             dropped,
-            images: contraction.into_images(),
+            images,
         })
     }
 
@@ -250,7 +257,7 @@ impl HubStore {
         // size rather than its square.
         self.superseded.extend(images);
         self.named.extend(dropped.iter().cloned());
-        let record = Record::new(dropped.into_iter().map(HubOp));
+        let record = Record::new(dropped.into_iter().map(hub_op));
         let digest = self.digests.last().expect("the root digest").then(&record);
         self.digests.push(digest);
         self.records.push(record);
@@ -322,7 +329,9 @@ impl HubStore {
         if self.backend != Backend::Git {
             return Ok(());
         }
-        let view = self.canonical.read_operation_view(head)?;
+        let view = self
+            .canonical
+            .read_operation_view(&CanonicalOp(head.clone()))?;
         let heads: Vec<CommitId> = view.head_ids.into_iter().collect();
         Ok(self.object_store().mark_head(&heads)?)
     }
@@ -346,8 +355,8 @@ impl HubStore {
             if self.accepted.contains_key(&id) || !seen.insert(id.clone()) {
                 continue;
             }
-            if id != *self.canonical.root_operation_id() {
-                stack.extend(self.canonical.parents(&id)?);
+            if id != self.canonical.root_operation_id().0 {
+                stack.extend(self.parents(&id)?);
             }
             found.push(id);
         }
@@ -373,11 +382,11 @@ impl HubStore {
             // A base the records superseded, from a node behind them, stands for what it is
             // now: everything below it that is left.
             let bases = self.current(base);
-            let excluded = self.canonical.ancestors_until(&bases, |_| false)?;
-            let excluded: HashSet<OperationId> = excluded.into_iter().collect();
-            return Ok(self
-                .canonical
-                .ancestors_until(std::slice::from_ref(head), |id| excluded.contains(id))?);
+            let excluded: HashSet<OperationId> = self
+                .ancestors_until(&bases, |_| false)?
+                .into_iter()
+                .collect();
+            return self.ancestors_until(std::slice::from_ref(head), |id| excluded.contains(id));
         };
         let in_range = |id: &OperationId| {
             self.accepted
@@ -385,9 +394,24 @@ impl HubStore {
                 .is_some_and(|&seq| base_seq < seq && seq <= head_seq)
         };
         // Order ancestors first by walking from `head` through the range.
-        Ok(self
-            .canonical
-            .ancestors_until(std::slice::from_ref(head), |id| !in_range(id))?)
+        self.ancestors_until(std::slice::from_ref(head), |id| !in_range(id))
+    }
+
+    /// [`CanonicalStore::ancestors_until`], as the hub names operations.
+    fn ancestors_until(
+        &self,
+        heads: &[OperationId],
+        stop: impl Fn(&OperationId) -> bool,
+    ) -> Result<Vec<OperationId>, StoreError> {
+        let heads: Vec<CanonicalOp> = heads.iter().cloned().map(CanonicalOp).collect();
+        let ops = self.canonical.ancestors_until(&heads, |op| stop(&op.0))?;
+        Ok(ops.into_iter().map(|op| op.0).collect())
+    }
+
+    /// [`CanonicalStore::parents`], as the hub names operations.
+    fn parents(&self, id: &OperationId) -> Result<Vec<OperationId>, StoreError> {
+        let parents = self.canonical.parents(&CanonicalOp(id.clone()))?;
+        Ok(parents.into_iter().map(|op| op.0).collect())
     }
 
     /// Whether `head ∈ anc*(op)`, judged from stored operations; a missing operation counts
@@ -403,18 +427,19 @@ impl HubStore {
             }
             if self.accepted.contains_key(&id)
                 || !seen.insert(id.clone())
-                || !self.canonical.has_operation(&id)
+                || !self.canonical.has_operation(&CanonicalOp(id.clone()))
             {
                 continue;
             }
-            stack.extend(self.canonical.parents(&id)?);
+            stack.extend(self.parents(&id)?);
         }
         Ok(false)
     }
 
     /// The commits the stored operations `ops` require, excluding the root commit.
     pub fn required_commits(&self, ops: &[OperationId]) -> Result<BTreeSet<CommitId>, StoreError> {
-        Ok(self.canonical.required_commits(ops)?)
+        let ops: Vec<CanonicalOp> = ops.iter().cloned().map(CanonicalOp).collect();
+        Ok(self.canonical.required_commits(&ops)?)
     }
 
     /// Whether `closure(op)` is stored: every operation in `anc*(op)`, its view, and every
@@ -457,11 +482,12 @@ impl HubStore {
                 boundary.insert(id);
                 continue;
             }
-            if !self.canonical.has_operation(&id) {
+            let canonical = CanonicalOp(id.clone());
+            if !self.canonical.has_operation(&canonical) {
                 missing.push(format!("operation {}", id.hex()));
                 continue;
             }
-            let operation = self.canonical.read_operation(&id)?;
+            let operation = self.canonical.read_operation(&canonical)?;
             if !self.canonical.has_view(&operation.view_id) {
                 missing.push(format!("view {}", operation.view_id.hex()));
                 continue;
@@ -484,6 +510,11 @@ impl HubStore {
         }
         Ok(missing)
     }
+}
+
+/// `op`, a canonical operation the hub names, as the protocol names it.
+fn hub_op(op: OperationId) -> HubOp {
+    HubOp(CanonicalOp(op))
 }
 
 /// A head as the log has it, with the record it was accepted with, if any.

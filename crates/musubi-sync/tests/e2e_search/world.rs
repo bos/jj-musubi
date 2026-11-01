@@ -15,6 +15,7 @@ use musubi_core::message::Request;
 use musubi_core::node::Step;
 use musubi_jj::node::NodeError;
 use musubi_jj::node::NodeRepo;
+use musubi_jj::op_id::CanonicalOp;
 use musubi_sync::Attachment;
 use musubi_sync::OpId;
 use musubi_sync::node::NodeAdapter;
@@ -801,11 +802,11 @@ impl World {
         };
         let ops = self.op_summaries(m);
         let op = match culprit {
-            Some(op) => Some(op.hex()).filter(|op| !self.recovery_ops.contains(op)),
+            Some(op) => Some(op.0.hex()).filter(|op| !self.recovery_ops.contains(op)),
             // As `can_undo` does, skip merges, which jj refuses to revert, and workspace
             // operations, which rewrite no commits, so they can't be what jj fails to
             // merge, and which strand a working copy when reverted.
-            None => ours.iter().map(|op| op.hex()).find(|op| {
+            None => ours.iter().map(|op| op.0.hex()).find(|op| {
                 !self.recovery_ops.contains(op)
                     && ops.get(op).is_some_and(|(parents, description)| {
                         *parents == 1 && !description.to_lowercase().contains("workspace")
@@ -881,11 +882,11 @@ impl World {
 
     /// Whether node `m` has yet to realize the hub's head.
     pub fn behind_hub(&self, m: usize) -> bool {
-        let head = self.fx.hive.hub.store().head().1;
+        let head = CanonicalOp(self.fx.hive.hub.store().head().1.clone());
         self.fx.hive.members[m]
             .adapter
             .repo()
-            .local_of(head)
+            .local_of(&head)
             .is_none()
     }
 
@@ -1049,7 +1050,7 @@ impl World {
             let path = repo
                 .repo_path()
                 .join("op_store/operations")
-                .join(local.hex());
+                .join(local.0.hex());
             if path.exists() {
                 fs::remove_file(path).unwrap();
             }

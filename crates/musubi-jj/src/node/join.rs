@@ -29,6 +29,8 @@ use super::NodeRepo;
 use super::index_err;
 use crate::hive_settings;
 use crate::objects::Backend;
+use crate::op_id::CanonicalOp;
+use crate::op_id::LocalOp;
 use crate::presence;
 use crate::presence::Kind;
 use crate::translation_map::whole_id;
@@ -54,7 +56,7 @@ impl NodeRepo {
     /// live apart from the translation cache: each line holds the local join point, the
     /// canonical join operation, and the join point's fingerprint. A line a power cut tore,
     /// or a killed join left unfinished, names nothing.
-    pub(super) fn read_joins(&self) -> Result<Vec<(OperationId, OperationId, String)>, NodeError> {
+    pub(super) fn read_joins(&self) -> Result<Vec<(LocalOp, CanonicalOp, String)>, NodeError> {
         let path = self.joins_path();
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
@@ -66,9 +68,9 @@ impl NodeRepo {
 
     fn record_join(
         &mut self,
-        local: OperationId,
+        local: LocalOp,
         local_op: &StoreOperation,
-        canonical: OperationId,
+        canonical: CanonicalOp,
     ) -> Result<(), NodeError> {
         let path = self.joins_path();
         let io_err = |source| NodeError::Io {
@@ -86,8 +88,8 @@ impl NodeRepo {
         let line = format!(
             "{}{} {} {fingerprint}\n",
             if unended { "\n" } else { "" },
-            local.hex(),
-            canonical.hex()
+            local.0.hex(),
+            canonical.0.hex()
         );
         // In one write, not writeln!'s several, so that a kill seldom tears it.
         file.write_all(line.as_bytes()).map_err(io_err)?;
@@ -106,7 +108,7 @@ impl NodeRepo {
     /// Whether `head` descends from history this repository shared with a hive: an operation
     /// canonicalized already, a realization of another machine's, or a join point, as
     /// `canonicalize` knows them.
-    fn descends_from_canonical(&self, head: &OperationId) -> Result<bool, NodeError> {
+    fn descends_from_canonical(&self, head: &LocalOp) -> Result<bool, NodeError> {
         // A repository that never shared anything has none, and needn't walk its history.
         // The canonical store, unlike the translation cache, is never lost.
         if self.joins.is_empty() && !self.canonical.has_operations()? {
@@ -122,13 +124,13 @@ impl NodeRepo {
             if self.canonical_of(&id).is_some() {
                 return Ok(true);
             }
-            let op = op_store.read_operation(&id).block_on()?;
+            let op = op_store.read_operation(&id.0).block_on()?;
             if op.metadata.attributes.contains_key(CANONICAL_ATTRIBUTE)
                 || self.joins.contains_key(&fingerprint(&op))
             {
                 return Ok(true);
             }
-            stack.extend(op.parents);
+            stack.extend(LocalOp::parents_of(&op));
         }
         Ok(false)
     }
@@ -136,7 +138,7 @@ impl NodeRepo {
     /// Creates the canonical operation that replicates this repository's current state in
     /// place of its operation history, and records that the current op head canonicalizes
     /// to it. See "Joining" in docs/internals/design.md.
-    pub fn create_join_operation(&mut self, description: &str) -> Result<OperationId, NodeError> {
+    pub fn create_join_operation(&mut self, description: &str) -> Result<CanonicalOp, NodeError> {
         let head = self.merge_heads()?;
         // A repository that was part of a hive before, and left, has canonical history
         // already: if its head descends from it, carry on from it, as any operation does. A
@@ -151,7 +153,7 @@ impl NodeRepo {
         if carried.is_some() {
             return self.mark_joined(description);
         }
-        let op = self.loader.op_store().read_operation(&head).block_on()?;
+        let op = self.loader.op_store().read_operation(&head.0).block_on()?;
         self.check_format(&head, &op)?;
         let view = self.loader.op_store().read_view(&op.view_id).block_on()?;
         let root = self.canonical.root_operation_id().clone();
@@ -172,7 +174,7 @@ impl NodeRepo {
             .unwrap_or_else(Timestamp::now);
         let join = StoreOperation {
             view_id: self.canonical.write_view(&view)?,
-            parents: vec![self.canonical.root_operation_id().clone()],
+            parents: vec![root.0],
             metadata: OperationMetadata {
                 time: TimestampRange {
                     start: now,
@@ -196,7 +198,7 @@ impl NodeRepo {
     /// Makes joining this machine's work, as it is: if the hive would not show this machine
     /// as of its op head, as after it left or with its whole history joined, an operation
     /// that changes nothing else says so. Returns the canonical form of the op head.
-    pub fn mark_joined(&mut self, description: &str) -> Result<OperationId, NodeError> {
+    pub fn mark_joined(&mut self, description: &str) -> Result<CanonicalOp, NodeError> {
         let head = self.merge_heads()?;
         let canonical = self.canonicalize(&head)?;
         if self.presence(&canonical)?.is_present(self.machine.key()) {
@@ -209,7 +211,7 @@ impl NodeRepo {
             self.machine.key().to_owned(),
         );
         let joined = tx.commit(description).block_on()?;
-        self.canonicalize(joined.op_id())
+        self.canonicalize(&LocalOp(joined.op_id().clone()))
     }
 
     /// What a hub needs to know to decide which hive this repository belongs to.
@@ -255,7 +257,7 @@ impl NodeRepo {
 }
 
 /// The records of a joins file, one for each whole line.
-fn parse_joins(bytes: &[u8]) -> Vec<(OperationId, OperationId, String)> {
+fn parse_joins(bytes: &[u8]) -> Vec<(LocalOp, CanonicalOp, String)> {
     String::from_utf8_lossy(bytes)
         .lines()
         .filter_map(|line| {
@@ -264,8 +266,8 @@ fn parse_joins(bytes: &[u8]) -> Vec<(OperationId, OperationId, String)> {
             };
             whole_id(fingerprint)?;
             Some((
-                whole_id(local)?,
-                whole_id(canonical)?,
+                LocalOp(whole_id(local)?),
+                CanonicalOp(whole_id(canonical)?),
                 fingerprint.to_owned(),
             ))
         })
@@ -303,9 +305,9 @@ mod tests {
         let lines = tc.draw(gs::integers::<u8>().max_value(6));
         let (mut text, mut whole) = (String::new(), vec![]);
         for i in 0..lines {
-            let (local, canonical) = (id(3 * i), id(3 * i + 1));
+            let (local, canonical) = (LocalOp(id(3 * i)), CanonicalOp(id(3 * i + 1)));
             let fingerprint = id(3 * i + 2).hex();
-            let line = format!("{} {} {fingerprint}", local.hex(), canonical.hex());
+            let line = format!("{} {} {fingerprint}", local.0.hex(), canonical.0.hex());
             if tc.draw(gs::booleans()) {
                 let cut = tc.draw(gs::integers::<usize>().max_value(line.len() - 1));
                 text.push_str(&line[..cut]);

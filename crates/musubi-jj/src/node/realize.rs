@@ -32,6 +32,8 @@ use super::git::Colocation;
 use super::translate::target_of;
 use super::view::LocalView;
 use super::view::PerMachine;
+use crate::op_id::CanonicalOp;
+use crate::op_id::LocalOp;
 use crate::workspaces;
 
 /// How many realized operations may be written at once. jj's op store syncs each file it
@@ -46,13 +48,13 @@ pub const REALIZE_AT_ONCE: usize = MAX_UNWRITTEN;
 /// A realized operation being written, and the canonical operation it realizes.
 pub(super) struct Unwritten {
     write: thread::JoinHandle<Result<(), NodeError>>,
-    local: OperationId,
-    canonical: OperationId,
+    local: LocalOp,
+    canonical: CanonicalOp,
 }
 
 /// A realized operation, not yet written.
 struct Realization {
-    id: OperationId,
+    id: LocalOp,
     op: StoreOperation,
     view: View,
     per_machine: Arc<PerMachine>,
@@ -61,7 +63,7 @@ struct Realization {
 impl NodeRepo {
     /// Realizes a stored canonical operation, and any unrealized ancestors, without
     /// publishing it. Returns the local operation id.
-    pub fn realize(&mut self, canonical: &OperationId) -> Result<OperationId, NodeError> {
+    pub fn realize(&mut self, canonical: &CanonicalOp) -> Result<LocalOp, NodeError> {
         let local = self.realize_pending(canonical, &[])?;
         self.settle()?;
         Ok(local)
@@ -80,9 +82,9 @@ impl NodeRepo {
     /// kept until they are realized.
     pub fn realize_pending(
         &mut self,
-        canonical: &OperationId,
-        next: &[OperationId],
-    ) -> Result<OperationId, NodeError> {
+        canonical: &CanonicalOp,
+        next: &[CanonicalOp],
+    ) -> Result<LocalOp, NodeError> {
         // Map everything reachable from the op heads first. Otherwise, after losing the
         // translation cache, an operation that already has a reachable realization would be
         // realized again, and two reachable local operations would share a canonical form.
@@ -92,8 +94,7 @@ impl NodeRepo {
         }
         let order = self.unrealized(canonical)?;
         for (i, (id, op)) in order.iter().enumerate() {
-            let parents: Vec<OperationId> = op
-                .parents
+            let parents: Vec<LocalOp> = CanonicalOp::parents_of(op)
                 .iter()
                 .map(|parent| self.local_of(parent).expect("parents realized first"))
                 .collect();
@@ -147,10 +148,10 @@ impl NodeRepo {
     /// the one before as its only parent, up to [`REALIZE_AT_ONCE`] in all.
     fn run_after<'a>(
         &self,
-        first: &OperationId,
+        first: &CanonicalOp,
         op: &StoreOperation,
-        later: impl Iterator<Item = &'a OperationId>,
-    ) -> Result<Vec<(OperationId, StoreOperation)>, NodeError> {
+        later: impl Iterator<Item = &'a CanonicalOp>,
+    ) -> Result<Vec<(CanonicalOp, StoreOperation)>, NodeError> {
         let mut run = vec![(first.clone(), op.clone())];
         for id in later.take(REALIZE_AT_ONCE - 1) {
             if !self.canonical.has_operation(id) || self.local_of(id).is_some() {
@@ -158,7 +159,7 @@ impl NodeRepo {
             }
             let op = self.canonical.read_operation(id)?;
             let (last, _) = run.last().expect("a run is never empty");
-            if op.parents != std::slice::from_ref(last) {
+            if op.parents != std::slice::from_ref(&last.0) {
                 break;
             }
             run.push((id.clone(), op));
@@ -170,27 +171,25 @@ impl NodeRepo {
     /// parents first, each with its stored form.
     fn unrealized(
         &self,
-        canonical: &OperationId,
-    ) -> Result<Vec<(OperationId, StoreOperation)>, NodeError> {
+        canonical: &CanonicalOp,
+    ) -> Result<Vec<(CanonicalOp, StoreOperation)>, NodeError> {
         let mut order = vec![];
         let mut ordered = HashSet::new();
-        let mut stack: Vec<(OperationId, Option<StoreOperation>)> = vec![(canonical.clone(), None)];
+        let mut stack: Vec<(CanonicalOp, Option<StoreOperation>)> = vec![(canonical.clone(), None)];
         while let Some((id, loaded)) = stack.pop() {
             if self.local_of(&id).is_some() || ordered.contains(&id) {
                 continue;
             }
             if !self.canonical.has_operation(&id) {
-                return Err(NodeError::NotRealizable(id.hex(), "operation not stored"));
+                return Err(NodeError::NotRealizable(id.0.hex(), "operation not stored"));
             }
             let op = match loaded {
                 Some(op) => op,
                 None => self.canonical.read_operation(&id)?,
             };
-            let missing: Vec<_> = op
-                .parents
-                .iter()
-                .filter(|p| self.local_of(p).is_none() && !ordered.contains(*p))
-                .cloned()
+            let missing: Vec<_> = CanonicalOp::parents_of(&op)
+                .into_iter()
+                .filter(|p| self.local_of(p).is_none() && !ordered.contains(p))
                 .collect();
             if !missing.is_empty() {
                 stack.push((id, Some(op)));
@@ -206,10 +205,10 @@ impl NodeRepo {
     /// The local views of `ops`, which all inherit `per_machine`, made in parallel.
     fn local_views(
         &self,
-        ops: &[(OperationId, StoreOperation)],
+        ops: &[(CanonicalOp, StoreOperation)],
         per_machine: &PerMachine,
     ) -> Vec<Result<LocalView, NodeError>> {
-        let make = |part: &[(OperationId, StoreOperation)]| -> Vec<_> {
+        let make = |part: &[(CanonicalOp, StoreOperation)]| -> Vec<_> {
             part.iter()
                 .map(|(id, op)| self.local_view(id, op, per_machine))
                 .collect()
@@ -247,7 +246,7 @@ impl NodeRepo {
     fn write_later(
         &mut self,
         realization: Realization,
-        canonical: OperationId,
+        canonical: CanonicalOp,
     ) -> Result<(), NodeError> {
         if self.unwritten.len() >= MAX_UNWRITTEN {
             self.settle()?;
@@ -265,8 +264,8 @@ impl NodeRepo {
             .spawn(move || {
                 let view_id = store.write_view(&view).block_on()?;
                 let written = store.write_operation(&op).block_on()?;
-                if view_id != op.view_id || written != expected {
-                    return Err(NodeError::MisnamedWrite(expected.hex()));
+                if view_id != op.view_id || written != expected.0 {
+                    return Err(NodeError::MisnamedWrite(expected.0.hex()));
                 }
                 Ok(())
             })
@@ -341,7 +340,7 @@ impl NodeRepo {
     /// For tests of crashes: waits for the realizations being written, then, as a crash
     /// before [`Self::settle`] would, records none of them, and forgets them as if their
     /// writes had failed. Returns their local ids.
-    pub fn crash_before_settling(&mut self) -> Vec<OperationId> {
+    pub fn crash_before_settling(&mut self) -> Vec<LocalOp> {
         let mut locals = vec![];
         for Unwritten {
             write,
@@ -368,15 +367,15 @@ impl NodeRepo {
     /// without any, is left as it is.
     fn with_own_workspaces(
         &mut self,
-        canonical_id: &OperationId,
+        canonical_id: &CanonicalOp,
         op: &StoreOperation,
-        parents: &[OperationId],
+        parents: &[LocalOp],
         local: LocalView,
     ) -> Result<LocalView, NodeError> {
         if local.names.keys().any(|key| self.is_own_key(key)) {
             return Ok(local);
         }
-        let source = self.latest_work_parent(&op.parents)?;
+        let source = self.latest_work_parent(&CanonicalOp::parents_of(op))?;
         let mut own = match (parents.get(source), &self.last_own) {
             (None, _) => return Ok(local),
             (Some(parent), Some((last, own))) if parent == last => (**own).clone(),
@@ -385,7 +384,7 @@ impl NodeRepo {
                 self.settle()?;
                 let op_store = self.loader.op_store();
                 let parent_view = op_store
-                    .read_view(&op_store.read_operation(parent).block_on()?.view_id)
+                    .read_view(&op_store.read_operation(&parent.0).block_on()?.view_id)
                     .block_on()?;
                 let parent_canonical = self.canonical_of(parent).expect("parents realized first");
                 self.own_of_view(parent_view.wc_commit_ids, &parent_canonical)?
@@ -421,12 +420,12 @@ impl NodeRepo {
     /// one whose history has every other's (`Presence::worked`), so that a merge of a forget
     /// that saw the machine's latest work with an operation that saw only earlier work keeps
     /// the machine's workspaces as they are now. The first, if they agree or none has all.
-    fn latest_work_parent(&self, parents: &[OperationId]) -> Result<usize, NodeError> {
+    fn latest_work_parent(&self, parents: &[CanonicalOp]) -> Result<usize, NodeError> {
         if parents.len() < 2 {
             return Ok(0);
         }
         let key = self.machine.key();
-        let worked: Vec<BTreeSet<OperationId>> = parents
+        let worked: Vec<BTreeSet<CanonicalOp>> = parents
             .iter()
             .map(|parent| {
                 Ok(self
@@ -481,9 +480,9 @@ impl NodeRepo {
     /// writing it, from its local view.
     fn realize_one(
         &self,
-        canonical_id: &OperationId,
+        canonical_id: &CanonicalOp,
         op: &StoreOperation,
-        parents: Vec<OperationId>,
+        parents: Vec<LocalOp>,
         local: LocalView,
         per_machine: Arc<PerMachine>,
     ) -> Result<Realization, NodeError> {
@@ -492,26 +491,29 @@ impl NodeRepo {
         } = local;
         let mut metadata = op.metadata.clone();
         if let Some((prefix, target)) = target_of(&metadata.description)
-            && self.canonical.is_ancestor(&target, &op.parents)?
+            && let target = CanonicalOp(target)
+            && self
+                .canonical
+                .is_ancestor(&target, &CanonicalOp::parents_of(op))?
         {
             let local = self.local_of(&target).expect("ancestors realized first");
-            metadata.description = format!("{prefix}{}", local.hex());
+            metadata.description = format!("{prefix}{}", local.0.hex());
         }
         metadata.workspace_name = metadata
             .workspace_name
             .map(|key| self.realized_workspace_name(&key, &prefixes));
         metadata
             .attributes
-            .insert(CANONICAL_ATTRIBUTE.to_owned(), canonical_id.hex());
+            .insert(CANONICAL_ATTRIBUTE.to_owned(), canonical_id.0.hex());
         // The id the op store gives it, worked out as it does.
         let local_op = StoreOperation {
             view_id: id,
-            parents,
+            parents: parents.into_iter().map(|parent| parent.0).collect(),
             metadata,
             commit_predecessors: op.commit_predecessors.clone(),
         };
         Ok(Realization {
-            id: OperationId::new(blake2b_hash(&local_op).to_vec()),
+            id: LocalOp(OperationId::new(blake2b_hash(&local_op).to_vec())),
             op: local_op,
             per_machine,
             view,
@@ -537,14 +539,14 @@ impl NodeRepo {
     /// The per-machine fields a realization starts from: its parent's, or for a merge, the
     /// parents' merged three-way as jj merges them, as a local merge of the same operations
     /// would.
-    fn inherited_per_machine(&self, parents: &[OperationId]) -> Result<Arc<PerMachine>, NodeError> {
+    fn inherited_per_machine(&self, parents: &[LocalOp]) -> Result<Arc<PerMachine>, NodeError> {
         if let ([parent], Some((last, per_machine))) = (parents, &self.last_realized)
             && parent == last
         {
             return Ok(per_machine.clone());
         }
         let (first, rest) = parents.split_first().expect("operations have parents");
-        let first_op = self.loader.load_operation(first).block_on()?;
+        let first_op = self.loader.load_operation(&first.0).block_on()?;
         if rest.is_empty() {
             return Ok(Arc::new(fields_of(&first_op)?));
         }
@@ -566,12 +568,12 @@ impl NodeRepo {
     fn merged_trivially(
         &self,
         first_op: &Operation,
-        rest: &[OperationId],
+        rest: &[LocalOp],
     ) -> Result<Option<Arc<PerMachine>>, NodeError> {
         let mut merged = fields_of(first_op)?;
         let mut ops = vec![first_op.clone()];
         for other in rest {
-            let other_op = self.loader.load_operation(other).block_on()?;
+            let other_op = self.loader.load_operation(&other.0).block_on()?;
             // Several bases would need jj's merge of them, which costs what this saves.
             let Some(base) = single_base(&self.loader, &ops, &other_op)? else {
                 return Ok(None);
@@ -597,7 +599,7 @@ impl NodeRepo {
     /// left it. While records are being taken, the heads it is published beside are those
     /// moving the op heads where the records name the history leaves beside it. Returns the
     /// realization as exported, which `canonical` translates to, not the merge.
-    pub fn advance(&mut self, canonical: &OperationId) -> Result<OperationId, NodeError> {
+    pub fn advance(&mut self, canonical: &CanonicalOp) -> Result<LocalOp, NodeError> {
         let realized = self.realize(canonical)?;
         // Views made ahead inherit what this changes, in a colocated repository.
         self.prepared = None;
@@ -630,7 +632,7 @@ impl NodeRepo {
             concurrent = self
                 .taken_beside(&realized)?
                 .iter()
-                .map(|op| self.loader.load_operation(op).block_on())
+                .map(|op| self.loader.load_operation(&op.0).block_on())
                 .collect::<Result<_, _>>()?;
         }
         let colocation = self.colocation();
@@ -681,16 +683,16 @@ impl NodeRepo {
             let mut replaced = self
                 .loader
                 .op_store()
-                .read_operation(&head)
+                .read_operation(&head.0)
                 .block_on()?
                 .parents;
-            replaced.extend(superseded);
+            replaced.extend(superseded.into_iter().map(|op| op.0));
             if merged.is_some() {
                 replaced.extend(concurrent.iter().map(|op| op.id().clone()));
             }
             self.loader
                 .op_heads_store()
-                .update_op_heads(&replaced, merged.as_ref().unwrap_or(&head))
+                .update_op_heads(&replaced, &merged.as_ref().unwrap_or(&head).0)
                 .block_on()?;
         }
         drop(_lock);
@@ -702,15 +704,11 @@ impl NodeRepo {
     /// The realization `head` merged with this machine's concurrent op heads `theirs`, as
     /// jj merges op heads on loading them, in order of their end times, into an operation
     /// written but not published.
-    fn merge_unpublished(
-        &self,
-        head: &OperationId,
-        theirs: &[Operation],
-    ) -> Result<OperationId, String> {
+    fn merge_unpublished(&self, head: &LocalOp, theirs: &[Operation]) -> Result<LocalOp, String> {
         let mut operations = theirs.to_vec();
         operations.push(
             self.loader
-                .load_operation(head)
+                .load_operation(&head.0)
                 .block_on()
                 .map_err(|err| format!("{err:#}"))?,
         );
@@ -719,7 +717,7 @@ impl NodeRepo {
             self.loader
                 .merge_operations(operations, None, Some("reconcile divergent operations"), [])
                 .block_on()
-                .map(|(repo, _)| repo.op_id().clone())
+                .map(|(repo, _)| LocalOp(repo.op_id().clone()))
                 .map_err(|err| format!("{err:#}"))
         })
     }
@@ -733,20 +731,20 @@ impl NodeRepo {
     /// and those that are.
     fn check_mergeable(
         &self,
-        canonical: &OperationId,
-        realized: &OperationId,
-    ) -> Result<(Vec<OperationId>, Vec<Operation>), NodeError> {
-        let realized_op = self.loader.load_operation(realized).block_on()?;
+        canonical: &CanonicalOp,
+        realized: &LocalOp,
+    ) -> Result<(Vec<LocalOp>, Vec<Operation>), NodeError> {
+        let realized_op = self.loader.load_operation(&realized.0).block_on()?;
         let mut heads = self.local_heads()?;
-        let others: Vec<OperationId> = heads
+        let others: Vec<LocalOp> = heads
             .iter()
-            .filter(|head| *head != realized && !realized_op.parent_ids().contains(head))
+            .filter(|head| *head != realized && !realized_op.parent_ids().contains(&head.0))
             .cloned()
             .collect();
         let mut theirs = vec![];
         let mut superseded = vec![];
         for head in others {
-            let op = self.loader.load_operation(&head).block_on()?;
+            let op = self.loader.load_operation(&head.0).block_on()?;
             // Nothing of its own that the realization lacks: an ancestor.
             let beyond = std::pin::pin!(op_walk::walk_ancestors_range(
                 std::slice::from_ref(&op),
@@ -764,8 +762,8 @@ impl NodeRepo {
         }
         // This machine's operations that the hive doesn't have: one of them conflicts.
         let roots = realized_op.parents().block_on()?;
-        let ours: Vec<OperationId> = op_walk::walk_ancestors_range(&theirs, &roots)
-            .map_ok(|op| op.id().clone())
+        let ours: Vec<LocalOp> = op_walk::walk_ancestors_range(&theirs, &roots)
+            .map_ok(|op| LocalOp(op.id().clone()))
             .try_collect()
             .block_on()?;
         let mut operations = theirs.clone();
@@ -841,9 +839,9 @@ impl NodeRepo {
     fn op_to_revert(
         &self,
         heads: &[Operation],
-        ours: &[OperationId],
+        ours: &[LocalOp],
         realized: &Operation,
-    ) -> Result<Option<OperationId>, NodeError> {
+    ) -> Result<Option<LocalOp>, NodeError> {
         // Where `jj op revert` starts: jj's merge of the op heads, in jj's order, as any
         // command loads them.
         let mut heads = heads.to_vec();
@@ -859,7 +857,7 @@ impl NodeRepo {
         let head = head.0;
         let mut ops = vec![];
         for id in ours {
-            ops.push(self.loader.load_operation(id).block_on()?);
+            ops.push(self.loader.load_operation(&id.0).block_on()?);
         }
         let reverted = reverted_by(&ops);
         for op in &ops {
@@ -895,7 +893,7 @@ impl NodeRepo {
                 continue;
             };
             if self.try_merge(vec![revert_op, realized.clone()]).is_ok() {
-                return Ok(Some(op.id().clone()));
+                return Ok(Some(LocalOp(op.id().clone())));
             }
         }
         Ok(None)
@@ -912,12 +910,12 @@ impl NodeRepo {
     /// change panics alone, as when the loop needs several of them.
     fn first_unmergeable(
         &self,
-        ours: &[OperationId],
+        ours: &[LocalOp],
         realized: &Operation,
-    ) -> Result<Option<OperationId>, NodeError> {
+    ) -> Result<Option<LocalOp>, NodeError> {
         let mut ops = vec![];
         for id in ours.iter().rev() {
-            ops.push(self.loader.load_operation(id).block_on()?);
+            ops.push(self.loader.load_operation(&id.0).block_on()?);
         }
         let reverted = reverted_by(&ops);
         let at_realized = self.loader.load_at(realized).block_on()?;
@@ -952,7 +950,7 @@ impl NodeRepo {
                 other => other,
             };
             if panicked == Some(true) {
-                return Ok(Some(op.id().clone()));
+                return Ok(Some(LocalOp(op.id().clone())));
             }
         }
         Ok(None)
@@ -962,26 +960,26 @@ impl NodeRepo {
     /// merge with the hive's, `culprit` being the one to revert if known.
     pub(super) fn unmergeable(
         &self,
-        ours: &[OperationId],
-        culprit: Option<OperationId>,
+        ours: &[LocalOp],
+        culprit: Option<LocalOp>,
         reason: String,
     ) -> NodeError {
         const SHOWN: usize = 5;
-        let describe = |id: &OperationId| {
+        let describe = |id: &LocalOp| {
             let description = self
                 .loader
-                .load_operation(id)
+                .load_operation(&id.0)
                 .block_on()
                 .map(|op| op.metadata().description.clone())
                 .unwrap_or_default();
-            format!("{} ({description})", &id.hex()[..12])
+            format!("{} ({description})", &id.0.hex()[..12])
         };
         let advice = match &culprit {
             Some(op) => format!(
                 "To go on, revert this machine's operation {} with `jj op revert {}`: \
                  musubi then catches up, or names another to revert",
                 describe(op),
-                &op.hex()[..12]
+                &op.0.hex()[..12]
             ),
             None => {
                 let mut listed: Vec<String> = ours.iter().take(SHOWN).map(describe).collect();
@@ -1023,13 +1021,13 @@ fn fields_of(op: &Operation) -> Result<PerMachine, NodeError> {
 pub(super) fn merged_by_jj(
     loader: &RepoLoader,
     first_op: Operation,
-    rest: &[OperationId],
+    rest: &[LocalOp],
 ) -> Result<Arc<PerMachine>, NodeError> {
     let repo = loader.load_at(&first_op).block_on()?;
     let mut tx = repo.start_transaction();
     let mut merged = vec![first_op];
     for other in rest {
-        let other_op = loader.load_operation(other).block_on()?;
+        let other_op = loader.load_operation(&other.0).block_on()?;
         let base = merge_base(loader, &merged, &other_op)?;
         tx.merge_operation(&base, &other_op).block_on()?;
         merged.push(other_op);

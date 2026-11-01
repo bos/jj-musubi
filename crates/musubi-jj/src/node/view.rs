@@ -9,7 +9,6 @@ use jj_lib::backend::CommitId;
 use jj_lib::content_hash::blake2b_hash;
 use jj_lib::git::REMOTE_NAME_FOR_LOCAL_GIT_REPO;
 use jj_lib::op_store::Operation as StoreOperation;
-use jj_lib::op_store::OperationId;
 use jj_lib::op_store::RefTarget;
 use jj_lib::op_store::RemoteView;
 use jj_lib::op_store::View;
@@ -130,12 +129,12 @@ impl NodeRepo {
     /// parents give the operation too, before its own effect.
     pub(super) fn canonical_view(
         &self,
-        local_op: &OperationId,
+        local_op: &LocalOp,
         mut view: View,
-        canonical_parents: &[OperationId],
+        canonical_parents: &[CanonicalOp],
         predecessors: Option<&BTreeMap<CommitId, Vec<CommitId>>>,
         kind: &Kind,
-    ) -> Result<(View, Presence<OperationId>), NodeError> {
+    ) -> Result<(View, Presence<CanonicalOp>), NodeError> {
         let parent_presences = canonical_parents
             .iter()
             .map(|parent| Ok((parent.clone(), self.presence(parent)?)))
@@ -251,9 +250,13 @@ impl NodeRepo {
             .cloned()
             .collect();
         if !stale.is_empty() {
-            let op = self.loader.op_store().read_operation(local_op).block_on()?;
+            let op = self
+                .loader
+                .op_store()
+                .read_operation(&local_op.0)
+                .block_on()?;
             let restored = match target_of(&op.metadata.description) {
-                Some((_, target)) => Some(self.restored_own_names(&target)?),
+                Some((_, target)) => Some(self.restored_own_names(&LocalOp(target))?),
                 None => None,
             };
             let (names, _) = match &before {
@@ -288,7 +291,7 @@ impl NodeRepo {
     /// its workspaces because a forget saw its work, not because it removed them.
     fn present_workspaces(
         &self,
-        parents: &[(OperationId, Arc<Presence<OperationId>>)],
+        parents: &[(CanonicalOp, Arc<Presence<CanonicalOp>>)],
         present: &impl Fn(&str) -> bool,
     ) -> Result<BTreeMap<WorkspaceNameBuf, CommitId>, NodeError> {
         // Machines grouped by the parents where they are present, usually all of them.
@@ -304,7 +307,7 @@ impl NodeRepo {
         }
         let mut workspaces = BTreeMap::new();
         for (at, machines) in groups {
-            let ops: Vec<OperationId> = at.iter().map(|&i| parents[i].0.clone()).collect();
+            let ops: Vec<CanonicalOp> = at.iter().map(|&i| parents[i].0.clone()).collect();
             workspaces.extend(
                 self.merged_workspaces(&ops)?
                     .into_iter()
@@ -321,12 +324,12 @@ impl NodeRepo {
     /// parents, all together.
     fn parents_names_and_heads(
         &self,
-        local_op: &OperationId,
+        local_op: &LocalOp,
     ) -> Result<(BTreeSet<WorkspaceNameBuf>, BTreeSet<CommitId>), NodeError> {
         let op_store = self.loader.op_store();
         let mut names = BTreeSet::new();
         let mut heads = BTreeSet::new();
-        for parent in op_store.read_operation(local_op).block_on()?.parents {
+        for parent in op_store.read_operation(&local_op.0).block_on()?.parents {
             let parent = op_store.read_operation(&parent).block_on()?;
             let view = op_store.read_view(&parent.view_id).block_on()?;
             names.extend(view.wc_commit_ids.into_keys());
@@ -352,7 +355,7 @@ impl NodeRepo {
     pub(super) fn local_names(
         &self,
         canonical_view: &View,
-        presence: &Presence<OperationId>,
+        presence: &Presence<CanonicalOp>,
     ) -> Result<BTreeMap<WorkspaceNameBuf, WorkspaceNameBuf>, NodeError> {
         let prefixes = self.prefixes(canonical_view, presence)?;
         Ok(self.names_of(canonical_view, &prefixes))
@@ -365,7 +368,7 @@ impl NodeRepo {
     fn prefixes(
         &self,
         canonical_view: &View,
-        presence: &Presence<OperationId>,
+        presence: &Presence<CanonicalOp>,
     ) -> Result<BTreeMap<String, String>, NodeError> {
         let mut machines = self.machines_of(canonical_view, presence.known());
         machines.insert(self.machine.key().to_owned());
@@ -419,15 +422,18 @@ impl NodeRepo {
     /// one's canonical form (`own_names`), where it has one yet.
     fn restored_own_names(
         &self,
-        target: &OperationId,
+        target: &LocalOp,
     ) -> Result<BTreeSet<WorkspaceNameBuf>, NodeError> {
         let op_store = self.loader.op_store();
         let mut names = BTreeSet::new();
-        let Ok(op) = op_store.read_operation(target).block_on() else {
+        let Ok(op) = op_store.read_operation(&target.0).block_on() else {
             return Ok(names);
         };
         // Parents first: working out presence at the target then stops at theirs.
-        for local in op.parents.iter().chain(std::iter::once(target)) {
+        for local in LocalOp::parents_of(&op)
+            .iter()
+            .chain(std::iter::once(target))
+        {
             if let Some(canonical) = self.canonical_of(local) {
                 names.extend(self.own_names(&canonical)?);
             }
@@ -489,7 +495,7 @@ impl NodeRepo {
     /// The machine-qualified workspaces of a canonical view.
     pub(super) fn workspaces_of(
         &self,
-        op: &OperationId,
+        op: &CanonicalOp,
     ) -> Result<BTreeMap<WorkspaceNameBuf, CommitId>, NodeError> {
         if op == self.canonical.root_operation_id() {
             return Ok(BTreeMap::new());
@@ -504,7 +510,7 @@ impl NodeRepo {
     /// machine moving it meanwhile.
     fn merged_workspaces(
         &self,
-        parents: &[OperationId],
+        parents: &[CanonicalOp],
     ) -> Result<BTreeMap<WorkspaceNameBuf, CommitId>, NodeError> {
         let Some((first, rest)) = parents.split_first() else {
             return Ok(BTreeMap::new());
@@ -548,10 +554,10 @@ impl NodeRepo {
     /// base first; nothing, if they have none.
     fn base_of<T: Default>(
         &self,
-        ours: &[OperationId],
-        theirs: &OperationId,
-        of: impl Fn(&OperationId) -> Result<T, NodeError>,
-        merge: impl Fn(&[OperationId]) -> Result<T, NodeError>,
+        ours: &[CanonicalOp],
+        theirs: &CanonicalOp,
+        of: impl Fn(&CanonicalOp) -> Result<T, NodeError>,
+        merge: impl Fn(&[CanonicalOp]) -> Result<T, NodeError>,
     ) -> Result<T, NodeError> {
         let ancestors = self
             .canonical
@@ -564,7 +570,7 @@ impl NodeRepo {
     }
 
     /// The heads of a canonical operation's view.
-    fn heads_of(&self, op: &OperationId) -> Result<BTreeSet<CommitId>, NodeError> {
+    fn heads_of(&self, op: &CanonicalOp) -> Result<BTreeSet<CommitId>, NodeError> {
         if op == self.canonical.root_operation_id() {
             return Ok(BTreeSet::new());
         }
@@ -574,8 +580,8 @@ impl NodeRepo {
 
     /// The heads of canonical operations' views merged three-way, as jj merges views: a head
     /// that a parent dropped since their merge base is gone, and one a parent added is there.
-    fn merged_heads(&self, parents: &[OperationId]) -> Result<BTreeSet<CommitId>, NodeError> {
-        let heads_of = |op: &OperationId| self.heads_of(op);
+    fn merged_heads(&self, parents: &[CanonicalOp]) -> Result<BTreeSet<CommitId>, NodeError> {
+        let heads_of = |op: &CanonicalOp| self.heads_of(op);
         let Some((first, rest)) = parents.split_first() else {
             return Ok(BTreeSet::new());
         };
@@ -608,7 +614,7 @@ impl NodeRepo {
     /// A canonical operation's view, made local with `per_machine`.
     pub(super) fn local_view(
         &self,
-        id: &OperationId,
+        id: &CanonicalOp,
         op: &StoreOperation,
         per_machine: &PerMachine,
     ) -> Result<LocalView, NodeError> {
@@ -642,6 +648,8 @@ pub(super) fn key_workspace(key: &WorkspaceName) -> &str {
 }
 
 // The Lean oracle, and the model of one ref's slot it answers, for the tests.
+use crate::op_id::CanonicalOp;
+use crate::op_id::LocalOp;
 #[cfg(test)]
 use crate::oracle;
 #[cfg(test)]
@@ -1005,7 +1013,7 @@ mod tests {
                 let merged = super::super::realize::merged_by_jj(
                     repo.loader(),
                     ours,
-                    &[theirs.id().clone()],
+                    &[LocalOp(theirs.id().clone())],
                 )
                 .unwrap();
                 assert_eq!(*merged, jj);

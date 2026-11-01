@@ -11,6 +11,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use jj_lib::op_store::OperationId;
+use musubi_jj::op_id::CanonicalOp;
 use musubi_jj::workspaces;
 use serde::Deserialize;
 use serde::Serialize;
@@ -360,13 +361,13 @@ pub fn summarize(store: &HubStore, before: &OperationId) -> Result<Accepted, Sto
     let ops = store.ops_since(head, before)?;
     let mut commits = 0;
     for id in &ops {
-        let operation = canonical.read_operation(id)?;
+        let operation = canonical.read_operation(&CanonicalOp(id.clone()))?;
         commits += operation
             .commit_predecessors
             .as_ref()
             .map_or(0, |predecessors| predecessors.len() as u64);
     }
-    let newest = canonical.read_operation(head)?;
+    let newest = canonical.read_operation(&CanonicalOp(head.clone()))?;
     Ok(Accepted {
         age: 0,
         seq,

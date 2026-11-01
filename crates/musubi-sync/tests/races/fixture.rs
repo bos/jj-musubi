@@ -16,6 +16,7 @@ use jj_lib::repo::RepoLoader;
 use jj_lib::revset::RevsetExpression;
 use musubi_jj::node::NodeRepo;
 use musubi_jj::objects::Backend;
+use musubi_jj::op_id::CanonicalOp;
 use musubi_sync::hive::Hive;
 use musubi_sync::node::Clock;
 use musubi_testutil::TestEnv;
@@ -254,13 +255,13 @@ impl Fixture {
     /// The workspaces the hub's head has, by key: `<machine key>/<workspace>`.
     fn hub_workspaces(&self) -> BTreeSet<String> {
         let store = self.hive.hub.store();
-        let head = store.head().1;
-        if head == store.canonical().root_operation_id() {
+        let head = CanonicalOp(store.head().1.clone());
+        if head == *store.canonical().root_operation_id() {
             return BTreeSet::new();
         }
         store
             .canonical()
-            .read_operation_view(head)
+            .read_operation_view(&head)
             .unwrap()
             .wc_commit_ids
             .into_keys()

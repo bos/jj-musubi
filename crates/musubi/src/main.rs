@@ -45,6 +45,7 @@ use musubi_hub::hub_dir::JoinRequest;
 use musubi_hub::hub_dir::Joined;
 use musubi_jj::node::NodeRepo;
 use musubi_jj::objects::Backend;
+use musubi_jj::op_id::LocalOp;
 use musubi_sync::progress::Activity;
 use musubi_sync::progress::Progress;
 use musubi_sync::remote::HiveGone;
@@ -1885,12 +1886,13 @@ fn op_id(ui: &Ui, start: &Path, id: &str) -> anyhow::Result<()> {
             .resolve_operation_id_prefix(&prefix),
     )?;
     if let jj_lib::object_id::PrefixResolution::SingleMatch(local) = local {
+        let local = LocalOp(local);
         let canonical = node.canonicalize(&local)?;
         writeln!(
             ui.stdout(),
             "local {} = hive {}",
-            local.hex(),
-            canonical.hex()
+            local.0.hex(),
+            canonical.0.hex()
         )?;
         return Ok(());
     }
@@ -1899,13 +1901,13 @@ fn op_id(ui: &Ui, start: &Path, id: &str) -> anyhow::Result<()> {
             Some(local) => writeln!(
                 ui.stdout(),
                 "hive {} = local {}",
-                canonical.hex(),
-                local.hex()
+                canonical.0.hex(),
+                local.0.hex()
             )?,
             None => writeln!(
                 ui.stdout(),
                 "hive {} is not realized on this machine yet",
-                canonical.hex()
+                canonical.0.hex()
             )?,
         }
         return Ok(());

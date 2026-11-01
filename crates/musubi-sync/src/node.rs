@@ -19,6 +19,7 @@ use musubi_jj::node::NodeError;
 use musubi_jj::node::NodeOp;
 use musubi_jj::node::NodeRepo;
 use musubi_jj::node::REALIZE_AT_ONCE;
+use musubi_jj::op_id::CanonicalOp;
 use musubi_jj::records::HubOp;
 use musubi_jj::records::Record;
 
@@ -164,19 +165,22 @@ impl NodeAdapter {
     }
 
     pub fn root(&self) -> &OpId {
-        self.repo.canonical_store().root_operation_id()
+        &self.repo.canonical_store().root_operation_id().0
     }
 
     /// `ancestor ∈ anc*(op)` over the canonical graph.
     fn canonical_is_ancestor(&self, ancestor: &OpId, op: &OpId) -> anyhow::Result<bool> {
-        Ok(self.repo.canonical_store().is_ancestor_of(ancestor, op)?)
+        Ok(self
+            .repo
+            .canonical_store()
+            .is_ancestor_of(&canonical(ancestor), &canonical(op))?)
     }
 
     /// Makes `base_ancestry` hold `anc*(base)`, `base` a hub name, as this node names the
     /// history, extending what it held where `base` descends from that.
     fn cache_ancestry(&self, base: &OpId) -> anyhow::Result<()> {
         let store = self.repo.canonical_store();
-        let bases: Vec<OpId> = self
+        let bases: Vec<CanonicalOp> = self
             .repo
             .to_node(&hub(base))?
             .into_iter()
@@ -186,14 +190,15 @@ impl NodeAdapter {
         let set = match cache.take() {
             Some((cached, set)) if cached == *base => set,
             Some((cached, mut set))
-                if bases.len() == 1 && self.canonical_is_ancestor(&cached, &bases[0])? =>
+                if bases.len() == 1 && self.canonical_is_ancestor(&cached, &bases[0].0)? =>
             {
-                set.extend(store.ancestors_until(&bases, |id| set.contains(id))?);
+                set.extend(op_ids(
+                    store.ancestors_until(&bases, |id| set.contains(&id.0))?,
+                ));
                 set
             }
             _ => {
-                let mut set: HashSet<OpId> = store
-                    .ancestors_until(&bases, |_| false)?
+                let mut set: HashSet<OpId> = op_ids(store.ancestors_until(&bases, |_| false)?)
                     .into_iter()
                     .collect();
                 set.insert(self.root().clone());
@@ -205,7 +210,7 @@ impl NodeAdapter {
     }
 
     /// The one node name of `op`, a hub name for an operation this node doesn't drop.
-    fn node_name(&self, op: &OpId) -> anyhow::Result<OpId> {
+    fn node_name(&self, op: &OpId) -> anyhow::Result<CanonicalOp> {
         match self.repo.to_node(&hub(op))?.as_slice() {
             [NodeOp(node)] => Ok(node.clone()),
             _ => anyhow::bail!("operation {} is one this machine dropped", op.hex()),
@@ -213,7 +218,11 @@ impl NodeAdapter {
     }
 
     fn required_commits(&self, ops: &[OpId]) -> anyhow::Result<Vec<CommitId>> {
-        Ok(self.repo.required_commits(ops)?.into_iter().collect())
+        Ok(self
+            .repo
+            .required_commits(&canonicals(ops))?
+            .into_iter()
+            .collect())
     }
 
     /// The local operations nearest to `ops` among their ancestors: where a walk up from
@@ -227,10 +236,11 @@ impl NodeAdapter {
             if !seen.insert(op.clone()) {
                 continue;
             }
-            if self.repo.local_of(&op).is_some() {
+            let id = canonical(&op);
+            if self.repo.local_of(&id).is_some() {
                 frontier.push(op);
-            } else if store.has_operation(&op) {
-                stack.extend(store.parents(&op)?);
+            } else if store.has_operation(&id) {
+                stack.extend(op_ids(store.parents(&id)?));
             }
         }
         Ok(frontier)
@@ -254,7 +264,7 @@ impl NodeAdapter {
             .repo
             .local_heads()?
             .iter()
-            .filter_map(|head| self.repo.canonical_of(head))
+            .filter_map(|head| Some(self.repo.canonical_of(head)?.0))
             .collect())
     }
 
@@ -301,14 +311,28 @@ impl NodeAdapter {
 /// names (`musubi_jj::node::NodeOp`), which differ only while this machine has drops to
 /// publish: each method below says which it takes.
 fn hub(op: &OpId) -> HubOp {
-    HubOp(op.clone())
+    HubOp(canonical(op))
+}
+
+/// `op`, which the core names as the protocol does, as a canonical operation.
+fn canonical(op: &OpId) -> CanonicalOp {
+    CanonicalOp(op.clone())
+}
+
+fn canonicals(ops: &[OpId]) -> Vec<CanonicalOp> {
+    ops.iter().map(canonical).collect()
+}
+
+/// Canonical operations as the core names them.
+fn op_ids(ops: Vec<CanonicalOp>) -> Vec<OpId> {
+    ops.into_iter().map(|op| op.0).collect()
 }
 
 /// Records from the core, in hub names.
 fn records_of(records: &[Vec<OpId>]) -> Vec<Record> {
     records
         .iter()
-        .map(|record| Record::new(record.iter().cloned().map(HubOp)))
+        .map(|record| Record::new(record.iter().map(hub)))
         .collect()
 }
 
@@ -343,11 +367,11 @@ impl LocalRepo for NodeAdapter {
             self.staged_children.clear();
             *self.base_ancestry.borrow_mut() = None;
         }
-        let heads = self.repo.canonical_heads()?;
+        let heads = op_ids(self.repo.canonical_heads()?);
         let mut reachable = false;
         for NodeOp(base) in self.repo.to_node(&hub(&base))? {
             for head in &heads {
-                reachable |= self.canonical_is_ancestor(&base, head)?;
+                reachable |= self.canonical_is_ancestor(&base.0, head)?;
             }
         }
         if !reachable {
@@ -367,7 +391,7 @@ impl LocalRepo for NodeAdapter {
     fn is_ancestor(&self, ancestor: &OpId, op: &OpId) -> anyhow::Result<bool> {
         let ancestors = self.repo.to_node(&hub(ancestor))?;
         for NodeOp(ancestor) in &ancestors {
-            if !self.canonical_is_ancestor(ancestor, op)? {
+            if !self.canonical_is_ancestor(&ancestor.0, op)? {
                 return Ok(false);
             }
         }
@@ -386,14 +410,16 @@ impl LocalRepo for NodeAdapter {
         let cache = self.base_ancestry.borrow();
         let (_, excluded) = cache.as_ref().expect("cached above");
         let store = self.repo.canonical_store();
-        Ok(store.ancestors_until(std::slice::from_ref(head), |id| excluded.contains(id))?)
+        Ok(op_ids(store.ancestors_until(&[canonical(head)], |id| {
+            excluded.contains(&id.0)
+        })?))
     }
 
     fn ops_attachment(&self, ops: &[OpId]) -> anyhow::Result<Attachment> {
         let bundle = temp_bundle(&self.tmp)?;
         self.repo
             .canonical_store()
-            .export_operations(ops, &bundle)?;
+            .export_operations(&canonicals(ops), &bundle)?;
         Ok(Attachment::bundle(bundle))
     }
 
@@ -420,7 +446,7 @@ impl LocalRepo for NodeAdapter {
         let imported: HashMap<OpId, Vec<OpId>> = store
             .import_operations(attachment.bundle_path()?)?
             .into_iter()
-            .filter_map(|(id, parents)| Some((id, parents?)))
+            .filter_map(|(id, parents)| Some((id.0, op_ids(parents?))))
             .collect();
         for entry in ops {
             let parents = match imported.get(&entry.id) {
@@ -428,7 +454,7 @@ impl LocalRepo for NodeAdapter {
                 // Stored before, or not at all.
                 None => {
                     store
-                        .read_operation(&entry.id)
+                        .read_operation(&canonical(&entry.id))
                         .with_context(|| {
                             format!("operation {} missing from bundle", entry.id.hex())
                         })?
@@ -441,8 +467,13 @@ impl LocalRepo for NodeAdapter {
                     entry.id.hex()
                 );
             }
-            if self.repo.local_of(&entry.id).is_none() && !self.staged.contains_key(&entry.id) {
-                for parent in parents.iter().filter(|p| self.repo.local_of(p).is_none()) {
+            if self.repo.local_of(&canonical(&entry.id)).is_none()
+                && !self.staged.contains_key(&entry.id)
+            {
+                for parent in parents
+                    .iter()
+                    .filter(|p| self.repo.local_of(&canonical(p)).is_none())
+                {
                     self.staged_children
                         .entry(parent.clone())
                         .or_default()
@@ -478,10 +509,11 @@ impl LocalRepo for NodeAdapter {
             return Ok(Some(parents.clone()));
         }
         let store = self.repo.canonical_store();
-        if !store.has_operation(op) {
+        let op = canonical(op);
+        if !store.has_operation(&op) {
             return Ok(None);
         }
-        Ok(Some(store.parents(op)?))
+        Ok(Some(op_ids(store.parents(&op)?)))
     }
 
     fn objects_missing(&self, ops: &[OpId]) -> anyhow::Result<Vec<OpId>> {
@@ -511,7 +543,7 @@ impl LocalRepo for NodeAdapter {
         for op in ops {
             if self
                 .repo
-                .required_commits(std::slice::from_ref(op))?
+                .required_commits(&[canonical(op)])?
                 .iter()
                 .any(|commit| absent.contains(commit))
             {
@@ -583,7 +615,7 @@ impl LocalRepo for NodeAdapter {
             .repo
             .applied_records()
             .iter()
-            .map(|record| record.ops().iter().map(|op| op.0.clone()).collect())
+            .map(|record| record.ops().iter().map(|op| op.0.0.clone()).collect())
             .collect())
     }
 
@@ -601,12 +633,12 @@ impl LocalRepo for NodeAdapter {
             .pending_drops()
             .ops()
             .iter()
-            .map(|op| op.0.clone())
+            .map(|op| op.0.0.clone())
             .collect())
     }
 
     fn records_with(&self, record: &[OpId]) -> anyhow::Result<RecordState> {
-        let record = Record::new(record.iter().cloned().map(HubOp));
+        let record = Record::new(record.iter().map(hub));
         let (count, digest) = self.repo.record_state_with(&record);
         Ok(RecordState {
             count,
@@ -624,7 +656,7 @@ impl LocalRepo for NodeAdapter {
         // The base, as the hub names it now: what it became, or, if dropped, the first of
         // what was below it, also accepted.
         if let Some(HubOp(base)) = self.repo.adopt_records(&records_of(records))? {
-            self.set_accepted_base(&base)?;
+            self.set_accepted_base(&base.0)?;
         }
         // Staged operations, as the hub named them before, are stale.
         self.staged.clear();
@@ -639,6 +671,6 @@ impl LocalRepo for NodeAdapter {
 
     fn write_fixup(&mut self) -> anyhow::Result<Option<OpId>> {
         self.repo.settle()?;
-        Ok(self.repo.write_fixup()?.map(|NodeOp(op)| op))
+        Ok(self.repo.write_fixup()?.map(|NodeOp(op)| op.0))
     }
 }

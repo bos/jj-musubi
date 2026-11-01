@@ -22,6 +22,7 @@ use jj_lib::op_store::OperationId;
 use jj_lib::op_store::RefTarget;
 use jj_lib::op_store::View;
 use musubi_jj::canonical::CanonicalStore;
+use musubi_jj::op_id::CanonicalOp;
 
 fn commit(i: u64) -> CommitId {
     let mut bytes = [0u8; 20];
@@ -77,7 +78,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             view.wc_commit_ids.insert("default".into(), commit(400 + i));
             let view_id = store.write_view(&view)?;
             let mut op = Operation::make_root(view_id);
-            op.parents = vec![parent];
+            op.parents = vec![parent.0];
             op.metadata.description = format!("snapshot working copy {i}");
             op.metadata.hostname = "machine".into();
             op.metadata.username = "agent".into();
@@ -87,7 +88,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         // Whole or not at all, so that a build cut short while writing it is built again.
         let partial = dir.join("bench-head.partial");
-        fs::write(&partial, parent.hex())?;
+        fs::write(&partial, parent.0.hex())?;
         fs::rename(&partial, &head_file)?;
         println!("build {ops}: {:?}", t.elapsed());
         let view_id = store.read_operation(&parent)?.view_id;
@@ -95,6 +96,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     println!("log: {} bytes", fs::metadata(dir.join("log"))?.len());
     let head = OperationId::try_from_hex(fs::read_to_string(&head_file)?.trim())
+        .map(CanonicalOp)
         .ok_or("bench-head isn't an operation id")?;
 
     // What a hub does on opening a store: walks every operation's parents.

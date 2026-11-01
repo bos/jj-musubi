@@ -13,6 +13,7 @@ use super::NodeError;
 use super::NodeRepo;
 use super::index_err;
 use super::is_visible;
+use crate::op_id::LocalOp;
 
 impl NodeRepo {
     /// Shows other machines' workspaces in this machine's view again where they went
@@ -25,7 +26,7 @@ impl NodeRepo {
     /// needs uploading.
     pub fn show_other_workspaces(&mut self) -> Result<bool, NodeError> {
         let repo = self.merged_repo()?;
-        let canonical = self.canonicalize(repo.op_id())?;
+        let canonical = self.canonicalize(&LocalOp(repo.op_id().clone()))?;
         if canonical == *self.canonical.root_operation_id() {
             return Ok(false);
         }
@@ -115,7 +116,7 @@ impl NodeRepo {
         // Merge through `merged_repo`, which exports to `.git`: a bare `load_at_head` would
         // merge without exporting the bookmarks the merge moves.
         let repo = self.merged_repo()?;
-        let canonical = self.canonicalize(repo.op_id())?;
+        let canonical = self.canonicalize(&LocalOp(repo.op_id().clone()))?;
         let forgotten =
             !even_forgotten && !self.presence(&canonical)?.is_present(self.machine.key());
         let mut hidden = vec![];

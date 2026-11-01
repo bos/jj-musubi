@@ -13,6 +13,7 @@ use musubi_core::message::RecordState;
 use musubi_hub::store::Contracted;
 use musubi_hub::store::HubStore;
 use musubi_jj::objects::Backend;
+use musubi_jj::op_id::CanonicalOp;
 use musubi_jj::records::HubOp;
 
 use crate::Attachment;
@@ -65,7 +66,10 @@ impl HubAdapter {
                 || contracted.dropped.iter().collect::<BTreeSet<_>>() != wanted
         });
         if fresh {
-            let dropped: Vec<HubOp> = dropped.iter().cloned().map(HubOp).collect();
+            let dropped: Vec<HubOp> = dropped
+                .iter()
+                .map(|op| HubOp(CanonicalOp(op.clone())))
+                .collect();
             *cached = Some(self.store.contract(&dropped)?);
         }
         f(cached.as_ref().expect("contracted above"))
@@ -120,7 +124,7 @@ impl HubStorage for HubAdapter {
             .unwrap_or(0);
         let records = all[from..]
             .iter()
-            .map(|record| record.ops().iter().map(|op| op.0.clone()).collect())
+            .map(|record| record.ops().iter().map(|op| op.0.0.clone()).collect())
             .collect();
         Ok((from as u64, records))
     }
@@ -134,7 +138,7 @@ impl HubStorage for HubAdapter {
             .store
             .canonical()
             .import_operations(attachment.bundle_path()?)?;
-        let imported: BTreeSet<&OpId> = imported.iter().map(|(id, _)| id).collect();
+        let imported: BTreeSet<&OpId> = imported.iter().map(|(id, _)| &id.0).collect();
         if let Some(missing) = ops.iter().find(|op| !imported.contains(op)) {
             bail!("bundle lacks announced operation {missing:?}");
         }
@@ -161,10 +165,11 @@ impl HubStorage for HubAdapter {
         }
         let canonical = self.store.canonical();
         let mut entries = Vec::with_capacity(ids.len());
+        let ids: Vec<CanonicalOp> = ids.into_iter().map(CanonicalOp).collect();
         for id in &ids {
             entries.push(OpEntry {
-                id: id.clone(),
-                parents: canonical.parents(id)?,
+                id: id.0.clone(),
+                parents: canonical.parents(id)?.into_iter().map(|op| op.0).collect(),
             });
         }
         let bundle = temp_bundle(&self.tmp)?;
@@ -180,7 +185,11 @@ impl HubStorage for HubAdapter {
     ) -> anyhow::Result<Attachment> {
         let stored: Vec<OpId> = for_ops
             .iter()
-            .filter(|op| self.store.canonical().has_operation(op))
+            .filter(|op| {
+                self.store
+                    .canonical()
+                    .has_operation(&CanonicalOp((*op).clone()))
+            })
             .cloned()
             .collect();
         let wants = self.store.required_commits(&stored)?;
@@ -193,7 +202,11 @@ impl HubStorage for HubAdapter {
         let present: Vec<CommitId> = wants.into_iter().filter(|c| !absent.contains(c)).collect();
         // The node has `closure(base)`, and what it says it has.
         let mut haves: BTreeSet<CommitId> = haves.haves().iter().cloned().collect();
-        if self.store.canonical().has_operation(base) {
+        if self
+            .store
+            .canonical()
+            .has_operation(&CanonicalOp(base.clone()))
+        {
             haves.extend(self.store.required_commits(std::slice::from_ref(base))?);
         }
         let haves: Vec<CommitId> = haves.into_iter().collect();
@@ -230,8 +243,9 @@ impl HubStorage for HubAdapter {
             let images =
                 self.with_contracted(dropped, |contracted| Ok(contracted.image(ancestor)))?;
             let canonical = self.store.canonical();
+            let op = CanonicalOp(op.clone());
             for image in &images {
-                if !canonical.is_ancestor_of(image, op)? {
+                if !canonical.is_ancestor_of(&CanonicalOp(image.clone()), &op)? {
                     return Ok(false);
                 }
             }
@@ -241,10 +255,10 @@ impl HubStorage for HubAdapter {
             return Ok(self.store.descends_from_head(op)?);
         }
         let canonical = self.store.canonical();
-        if ancestor == canonical.root_operation_id() {
+        if *ancestor == canonical.root_operation_id().0 {
             return Ok(true);
         }
-        let ancestry = canonical.ancestors_until(std::slice::from_ref(op), |_| false)?;
-        Ok(ancestry.contains(ancestor))
+        let ancestry = canonical.ancestors_until(&[CanonicalOp(op.clone())], |_| false)?;
+        Ok(ancestry.contains(&CanonicalOp(ancestor.clone())))
     }
 }

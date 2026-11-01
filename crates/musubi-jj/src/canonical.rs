@@ -48,6 +48,7 @@ use crate::objects::ObjectError;
 use crate::objects::bundle;
 use crate::objects::bundle::BundleWriter;
 use crate::objects::bundle::Record;
+use crate::op_id::CanonicalOp;
 use crate::protobuf::next_field;
 
 #[derive(Debug, Error)]
@@ -259,14 +260,14 @@ fn io_err(path: &Path) -> impl FnOnce(io::Error) -> CanonicalError + '_ {
 
 /// An operation [`CanonicalStore::import_operations`] took in, with its parents if it stored
 /// it, or `None` if it was stored already.
-pub type Imported = (OperationId, Option<Vec<OperationId>>);
+pub type Imported = (CanonicalOp, Option<Vec<CanonicalOp>>);
 
 pub struct CanonicalStore {
     shared: Arc<Shared>,
     /// Generation numbers of stored operations (the root 0, otherwise one more than the
     /// largest parent's), which bound ancestry searches. A stored operation never changes,
     /// so neither does its entry.
-    generations: Mutex<HashMap<OperationId, u64>>,
+    generations: Mutex<HashMap<CanonicalOp, u64>>,
     /// In tests, what another process does between an import's checking a batch and its
     /// appending it.
     #[cfg(test)]
@@ -278,7 +279,7 @@ pub struct CanonicalStore {
 struct Shared {
     path: PathBuf,
     root_commit_id: CommitId,
-    root_operation_id: OperationId,
+    root_operation_id: CanonicalOp,
     root_view_id: ViewId,
     log: Log,
     views: ViewCodec,
@@ -324,11 +325,11 @@ impl Shared {
     }
 
     fn read_operation(&self, id: &OperationId) -> Result<Operation, CanonicalError> {
-        if *id == self.root_operation_id {
+        if *id == self.root_operation_id.0 {
             return Ok(Operation::make_root(self.root_view_id.clone()));
         }
         let bytes = self.operation_bytes(id)?;
-        let op = codec::decode_operation(&bytes, &self.root_operation_id)
+        let op = codec::decode_operation(&bytes, &self.root_operation_id.0)
             .map_err(|err| Self::read_error("operation", id.hex(), err))?;
         // A stored operation was checked as it arrived; this checks the decoding, which is
         // musubi's rather than jj's.
@@ -347,7 +348,7 @@ impl Shared {
     /// history needs only those, and decoding and hashing the whole operation at every step
     /// would take most of its time. Every stored operation was checked as it arrived.
     fn parents(&self, id: &OperationId) -> Result<Vec<OperationId>, CanonicalError> {
-        if *id == self.root_operation_id {
+        if *id == self.root_operation_id.0 {
             return Ok(vec![]);
         }
         let bytes = self.operation_bytes(id)?;
@@ -362,7 +363,7 @@ impl Shared {
         .ok_or_else(|| CanonicalError::MalformedOperation(id.hex()))?;
         // As jj reads an operation from before it had a root operation.
         if parents.is_empty() {
-            parents.push(self.root_operation_id.clone());
+            parents.push(self.root_operation_id.0.clone());
         }
         Ok(parents)
     }
@@ -406,7 +407,7 @@ impl OpStore for Shared {
     }
 
     fn root_operation_id(&self) -> &OperationId {
-        &self.root_operation_id
+        &self.root_operation_id.0
     }
 
     async fn read_view(&self, id: &ViewId) -> OpStoreResult<View> {
@@ -430,7 +431,7 @@ impl OpStore for Shared {
         prefix: &HexPrefix,
     ) -> OpStoreResult<PrefixResolution<OperationId>> {
         self.log
-            .resolve_prefix(prefix, &self.root_operation_id)
+            .resolve_prefix(prefix, &self.root_operation_id.0)
             .map_err(|err| OpStoreError::Other(err.into()))
     }
 
@@ -450,7 +451,7 @@ impl CanonicalStore {
         let shared = Shared {
             path: path.join("log"),
             root_commit_id,
-            root_operation_id: OperationId::from_bytes(&[0; log::ID_LEN]),
+            root_operation_id: CanonicalOp(OperationId::from_bytes(&[0; log::ID_LEN])),
             root_view_id: ViewId::from_bytes(&[0; log::ID_LEN]),
             log,
             views,
@@ -467,35 +468,38 @@ impl CanonicalStore {
     /// for merges.
     pub fn closest_common_ancestors(
         &self,
-        left: &[OperationId],
-        right: &[OperationId],
-    ) -> Result<Vec<OperationId>, CanonicalError> {
+        left: &[CanonicalOp],
+        right: &[CanonicalOp],
+    ) -> Result<Vec<CanonicalOp>, CanonicalError> {
         let to_ops =
-            |ids: &[OperationId]| -> Result<Vec<jj_lib::operation::Operation>, CanonicalError> {
+            |ids: &[CanonicalOp]| -> Result<Vec<jj_lib::operation::Operation>, CanonicalError> {
                 ids.iter().map(|id| self.load_operation(id)).collect()
             };
         let ancestors =
             jj_lib::op_walk::closest_common_ancestors(to_ops(left)?, to_ops(right)?).block_on()?;
-        Ok(ancestors.into_iter().map(|op| op.id().clone()).collect())
+        Ok(ancestors
+            .into_iter()
+            .map(|op| CanonicalOp(op.id().clone()))
+            .collect())
     }
 
-    pub fn root_operation_id(&self) -> &OperationId {
+    pub fn root_operation_id(&self) -> &CanonicalOp {
         &self.shared.root_operation_id
     }
 
-    pub fn read_operation(&self, id: &OperationId) -> Result<Operation, CanonicalError> {
-        self.shared.read_operation(id)
+    pub fn read_operation(&self, id: &CanonicalOp) -> Result<Operation, CanonicalError> {
+        self.shared.read_operation(&id.0)
     }
 
     /// A stored operation as jj's walks over operations take it.
     pub fn load_operation(
         &self,
-        id: &OperationId,
+        id: &CanonicalOp,
     ) -> Result<jj_lib::operation::Operation, CanonicalError> {
         let store: Arc<dyn OpStore> = self.shared.clone();
         Ok(jj_lib::operation::Operation::new(
             store,
-            id.clone(),
+            id.0.clone(),
             self.read_operation(id)?,
         ))
     }
@@ -505,17 +509,22 @@ impl CanonicalStore {
     }
 
     /// The parents of a stored operation, without reading the rest of it.
-    pub fn parents(&self, id: &OperationId) -> Result<Vec<OperationId>, CanonicalError> {
-        self.shared.parents(id)
+    pub fn parents(&self, id: &CanonicalOp) -> Result<Vec<CanonicalOp>, CanonicalError> {
+        Ok(self
+            .shared
+            .parents(&id.0)?
+            .into_iter()
+            .map(CanonicalOp)
+            .collect())
     }
 
     /// The view of the operation `id`.
-    pub fn read_operation_view(&self, id: &OperationId) -> Result<View, CanonicalError> {
+    pub fn read_operation_view(&self, id: &CanonicalOp) -> Result<View, CanonicalError> {
         self.read_view(&self.read_operation(id)?.view_id)
     }
 
-    pub fn write_operation(&self, op: &Operation) -> Result<OperationId, CanonicalError> {
-        self.shared.write_operation(op)
+    pub fn write_operation(&self, op: &Operation) -> Result<CanonicalOp, CanonicalError> {
+        Ok(CanonicalOp(self.shared.write_operation(op)?))
     }
 
     pub fn write_view(&self, view: &View) -> Result<ViewId, CanonicalError> {
@@ -523,17 +532,17 @@ impl CanonicalStore {
     }
 
     /// Resolves a hex prefix of a canonical operation id.
-    pub fn resolve_prefix(&self, prefix: &str) -> Result<Option<OperationId>, CanonicalError> {
+    pub fn resolve_prefix(&self, prefix: &str) -> Result<Option<CanonicalOp>, CanonicalError> {
         let Some(prefix) = HexPrefix::try_from_hex(prefix) else {
             return Ok(None);
         };
         let resolved = self
             .shared
             .log
-            .resolve_prefix(&prefix, self.root_operation_id())
+            .resolve_prefix(&prefix, &self.root_operation_id().0)
             .map_err(self.shared.log_err())?;
         match resolved {
-            PrefixResolution::SingleMatch(id) => Ok(Some(id)),
+            PrefixResolution::SingleMatch(id) => Ok(Some(CanonicalOp(id))),
             _ => Ok(None),
         }
     }
@@ -544,11 +553,13 @@ impl CanonicalStore {
     }
 
     /// Every stored operation except the root, in no particular order.
-    pub fn operation_ids(&self) -> Result<Vec<OperationId>, CanonicalError> {
-        self.shared
+    pub fn operation_ids(&self) -> Result<Vec<CanonicalOp>, CanonicalError> {
+        let ids = self
+            .shared
             .log
             .operation_ids()
-            .map_err(self.shared.log_err())
+            .map_err(self.shared.log_err())?;
+        Ok(ids.into_iter().map(CanonicalOp).collect())
     }
 
     /// What isn't what its id says it is, as a power cut can leave it: a stored operation
@@ -560,7 +571,7 @@ impl CanonicalStore {
         let mut torn = vec![];
         for id in self.operation_ids()? {
             let read = self.read_operation(&id).map(|op| blake2b_hash(&op));
-            judge(&mut torn, "operation", &id.hex(), id.as_bytes(), read)?;
+            judge(&mut torn, "operation", &id.0.hex(), id.0.as_bytes(), read)?;
         }
         let views = self.shared.log.view_ids().map_err(self.shared.log_err())?;
         for id in views {
@@ -580,8 +591,8 @@ impl CanonicalStore {
         Ok(torn)
     }
 
-    pub fn has_operation(&self, id: &OperationId) -> bool {
-        id == self.root_operation_id() || self.shared.log.has_operation(id).unwrap_or(false)
+    pub fn has_operation(&self, id: &CanonicalOp) -> bool {
+        id == self.root_operation_id() || self.shared.log.has_operation(&id.0).unwrap_or(false)
     }
 
     pub fn has_view(&self, id: &ViewId) -> bool {
@@ -590,8 +601,8 @@ impl CanonicalStore {
 
     /// The encoded operation, as sent to peers. Not defined for the root operation, which
     /// every store has implicitly.
-    pub fn operation_bytes(&self, id: &OperationId) -> Result<Vec<u8>, CanonicalError> {
-        self.shared.operation_bytes(id)
+    pub fn operation_bytes(&self, id: &CanonicalOp) -> Result<Vec<u8>, CanonicalError> {
+        self.shared.operation_bytes(&id.0)
     }
 
     /// The encoded view, in normal form (see `normal_view`). Not defined for the root
@@ -610,7 +621,7 @@ impl CanonicalStore {
     /// that cannot exist, makes the operation or view malformed.
     pub fn required_commits(
         &self,
-        ops: &[OperationId],
+        ops: &[CanonicalOp],
     ) -> Result<BTreeSet<CommitId>, CanonicalError> {
         let len = self.shared.root_commit_id.as_bytes().len();
         let mut named: HashSet<Vec<u8>> = HashSet::new();
@@ -626,7 +637,7 @@ impl CanonicalStore {
                 continue;
             }
             let op = self.operation_bytes(id)?;
-            let malformed = || CanonicalError::MalformedOperation(id.hex());
+            let malformed = || CanonicalError::MalformedOperation(id.0.hex());
             let view_id = ViewId::new(encoded_view_id(&op).ok_or_else(malformed)?.to_vec());
             encoded_op_commits(&op, &mut found).ok_or_else(malformed)?;
             // The root view's file is implicit, like the root operation's, and it refers
@@ -644,8 +655,8 @@ impl CanonicalStore {
 
     /// Verifies and stores an operation received from a peer. The operation's view must
     /// already be stored, so that a stored operation is always readable.
-    pub fn import_operation(&self, id: &OperationId, bytes: &[u8]) -> Result<(), CanonicalError> {
-        self.import_operation_parents(id, bytes)?;
+    pub fn import_operation(&self, id: &CanonicalOp, bytes: &[u8]) -> Result<(), CanonicalError> {
+        self.import_operation_parents(&id.0, bytes)?;
         Ok(())
     }
 
@@ -656,7 +667,7 @@ impl CanonicalStore {
         id: &OperationId,
         bytes: &[u8],
     ) -> Result<Option<Vec<OperationId>>, CanonicalError> {
-        if self.has_operation(id) {
+        if self.has_operation(&CanonicalOp(id.clone())) {
             return Ok(None);
         }
         let parents = self.verify_operation(id, bytes)?;
@@ -673,7 +684,7 @@ impl CanonicalStore {
         id: &OperationId,
         bytes: &[u8],
     ) -> Result<Vec<OperationId>, CanonicalError> {
-        let op = codec::decode_operation(bytes, self.root_operation_id())
+        let op = codec::decode_operation(bytes, &self.root_operation_id().0)
             .map_err(|err| Shared::read_error("operation", id.hex(), err))?;
         admit(Admitted {
             kind: "operation",
@@ -714,10 +725,10 @@ impl CanonicalStore {
     /// Whether `ancestor` is in `anc*(heads)`.
     pub fn is_ancestor(
         &self,
-        ancestor: &OperationId,
-        heads: &[OperationId],
+        ancestor: &CanonicalOp,
+        heads: &[CanonicalOp],
     ) -> Result<bool, CanonicalError> {
-        let mut seen: HashSet<OperationId> = HashSet::new();
+        let mut seen: HashSet<CanonicalOp> = HashSet::new();
         let mut stack = heads.to_vec();
         while let Some(id) = stack.pop() {
             if id == *ancestor {
@@ -733,7 +744,7 @@ impl CanonicalStore {
 
     /// The generation of stored operation `id`: the root's is 0, and any other's one more than
     /// its largest parent's. The first call reads the whole history below `id`.
-    pub fn generation(&self, id: &OperationId) -> Result<u64, CanonicalError> {
+    pub fn generation(&self, id: &CanonicalOp) -> Result<u64, CanonicalError> {
         let mut generations = self
             .generations
             .lock()
@@ -750,7 +761,7 @@ impl CanonicalStore {
                 continue;
             }
             let parents = self.parents(&op)?;
-            let missing: Vec<OperationId> = parents
+            let missing: Vec<CanonicalOp> = parents
                 .iter()
                 .filter(|p| !generations.contains_key(*p))
                 .cloned()
@@ -768,7 +779,7 @@ impl CanonicalStore {
 
     /// Records the generation of `id`, whose `parents` have theirs recorded, as a walk that
     /// reads it anyway can, so that [`Self::generation`] needn't read it again.
-    pub fn note_generation(&self, id: &OperationId, parents: &[OperationId]) {
+    pub fn note_generation(&self, id: &CanonicalOp, parents: &[CanonicalOp]) {
         let mut generations = self
             .generations
             .lock()
@@ -797,8 +808,8 @@ impl CanonicalStore {
     /// higher than `ancestor`'s cannot lead to it, so the search never enters them.
     pub fn is_ancestor_of(
         &self,
-        ancestor: &OperationId,
-        op: &OperationId,
+        ancestor: &CanonicalOp,
+        op: &CanonicalOp,
     ) -> Result<bool, CanonicalError> {
         if ancestor == op {
             return Ok(true);
@@ -823,13 +834,13 @@ impl CanonicalStore {
     /// this store lacks.
     pub fn ancestors_until(
         &self,
-        heads: &[OperationId],
-        stop: impl Fn(&OperationId) -> bool,
-    ) -> Result<Vec<OperationId>, CanonicalError> {
+        heads: &[CanonicalOp],
+        stop: impl Fn(&CanonicalOp) -> bool,
+    ) -> Result<Vec<CanonicalOp>, CanonicalError> {
         let mut order = vec![];
-        let mut done: HashSet<OperationId> = HashSet::new();
+        let mut done: HashSet<CanonicalOp> = HashSet::new();
         // (operation, whether its parents have been pushed)
-        let mut stack: Vec<(OperationId, bool)> =
+        let mut stack: Vec<(CanonicalOp, bool)> =
             heads.iter().map(|h| (h.clone(), false)).collect();
         while let Some((id, expanded)) = stack.pop() {
             if done.contains(&id) {
@@ -866,19 +877,19 @@ impl CanonicalStore {
     /// usually differ in a few bookmarks, however large they are. A delta is between the two
     /// views' normal forms (see `normal_view_bytes`), as the reader assumes when it
     /// takes the view one delta made as the base of the next.
-    pub fn export_operations(&self, ops: &[OperationId], out: &Path) -> Result<(), CanonicalError> {
+    pub fn export_operations(&self, ops: &[CanonicalOp], out: &Path) -> Result<(), CanonicalError> {
         let mut writer = BundleWriter::create(out)?;
         writer.begin_compressed()?;
         let mut sent = HashSet::new();
         // The views of the operations written so far, which are usually the next ones'
         // parents.
-        let mut views: HashMap<OperationId, ViewId> = HashMap::new();
+        let mut views: HashMap<CanonicalOp, ViewId> = HashMap::new();
         // The last view a delta went to, in normal form: usually the next delta's base.
         let mut last: Option<(ViewId, Vec<u8>)> = None;
         for id in ops {
             let encoded = self.operation_bytes(id)?;
             let view_id = encoded_view_id(&encoded)
-                .ok_or_else(|| CanonicalError::MalformedOperation(id.hex()))?;
+                .ok_or_else(|| CanonicalError::MalformedOperation(id.0.hex()))?;
             let view_id = ViewId::from_bytes(view_id);
             let mut parent_views = vec![];
             for parent in self.parents(id)? {
@@ -922,7 +933,7 @@ impl CanonicalStore {
                     None => writer.view(view.as_bytes(), &self.view_bytes(view)?)?,
                 }
             }
-            writer.operation(id.as_bytes(), &encoded)?;
+            writer.operation(id.0.as_bytes(), &encoded)?;
             views.insert(id.clone(), view_id);
         }
         Ok(writer.finish()?)
@@ -1021,7 +1032,9 @@ impl CanonicalStore {
                 Item::Operation(id, bytes) => Some((at, id, bytes.as_slice())),
                 Item::View(_) => None,
             })
-            .filter(|(_, id, _)| !self.has_operation(id) && seen.insert((*id).clone()))
+            .filter(|(_, id, _)| {
+                !self.has_operation(&CanonicalOp((*id).clone())) && seen.insert((*id).clone())
+            })
             .collect();
         let verified = in_parallel(&new, |_, (_, id, bytes)| self.verify_operation(id, bytes));
         let mut stored: Vec<Option<Vec<OperationId>>> = vec![None; batch.items.len()];
@@ -1083,7 +1096,8 @@ impl CanonicalStore {
             .map_err(self.shared.log_err())?;
         for (item, parents) in batch.items.into_iter().zip(stored) {
             if let Item::Operation(id, _) = item {
-                ops.push((id, parents));
+                let parents = parents.map(|parents| parents.into_iter().map(CanonicalOp).collect());
+                ops.push((CanonicalOp(id), parents));
             }
         }
         Ok(())
@@ -1643,7 +1657,7 @@ mod tests {
         let op_id = store.write_operation(&op).unwrap();
         assert!(matches!(
             store.required_commits(std::slice::from_ref(&op_id)),
-            Err(CanonicalError::MalformedOperation(ref hex)) if *hex == op_id.hex()
+            Err(CanonicalError::MalformedOperation(ref hex)) if *hex == op_id.0.hex()
         ));
     }
 
@@ -1687,7 +1701,7 @@ mod tests {
         let view_id = store.write_view(&view_with_heads(1)).unwrap();
         let op = proto::Operation {
             view_id: view_id.to_bytes(),
-            parents: vec![store.root_operation_id().to_bytes()],
+            parents: vec![store.root_operation_id().0.to_bytes()],
             metadata: Some(Default::default()),
             commit_predecessors: vec![proto::CommitPredecessors {
                 commit_id: vec![3; 20],
@@ -1696,9 +1710,9 @@ mod tests {
             stores_commit_predecessors: false,
         }
         .encode_to_vec();
-        let op_id = match store.import_operation(&OperationId::new(vec![1; 64]), &op) {
+        let op_id = match store.import_operation(&CanonicalOp(OperationId::new(vec![1; 64])), &op) {
             Err(CanonicalError::HashMismatch { actual, .. }) => {
-                OperationId::try_from_hex(&actual).unwrap()
+                CanonicalOp(OperationId::try_from_hex(&actual).unwrap())
             }
             other => panic!("{other:?}"),
         };
@@ -1726,7 +1740,7 @@ mod tests {
             .write_operation(&operation(&a, view_id.clone()))
             .unwrap();
         let mut merge = operation(&b, view_id.clone());
-        merge.parents.push(a.clone());
+        merge.parents.push(a.0.clone());
         let merge = store.write_operation(&merge).unwrap();
         let orphan = proto::Operation {
             view_id: view_id.to_bytes(),
@@ -1734,17 +1748,18 @@ mod tests {
             ..Default::default()
         }
         .encode_to_vec();
-        let orphan_id = match store.import_operation(&OperationId::new(vec![1; 64]), &orphan) {
-            Err(CanonicalError::HashMismatch { actual, .. }) => {
-                OperationId::try_from_hex(&actual).unwrap()
-            }
-            other => panic!("{other:?}"),
-        };
+        let orphan_id =
+            match store.import_operation(&CanonicalOp(OperationId::new(vec![1; 64])), &orphan) {
+                Err(CanonicalError::HashMismatch { actual, .. }) => {
+                    CanonicalOp(OperationId::try_from_hex(&actual).unwrap())
+                }
+                other => panic!("{other:?}"),
+            };
         store.import_operation(&orphan_id, &orphan).unwrap();
         for id in [&root, &a, &b, &merge, &orphan_id] {
             assert_eq!(
                 store.parents(id).unwrap(),
-                store.read_operation(id).unwrap().parents
+                CanonicalOp::parents_of(&store.read_operation(id).unwrap())
             );
         }
         assert_eq!(store.parents(&merge).unwrap(), [b, a]);
@@ -1782,13 +1797,13 @@ mod tests {
         let mut writer = BundleWriter::create(bundle_file.path()).unwrap();
         writer.view(base_view.as_bytes(), &reordered).unwrap();
         writer
-            .operation(base.as_bytes(), &sender.operation_bytes(&base).unwrap())
+            .operation(base.0.as_bytes(), &sender.operation_bytes(&base).unwrap())
             .unwrap();
         writer
             .view_delta_made(child_view.as_bytes(), base_view.as_bytes(), &delta)
             .unwrap();
         writer
-            .operation(child.as_bytes(), &sender.operation_bytes(&child).unwrap())
+            .operation(child.0.as_bytes(), &sender.operation_bytes(&child).unwrap())
             .unwrap();
         writer.finish().unwrap();
 
@@ -1820,7 +1835,7 @@ mod tests {
         let count = tc.draw(gs::integers::<usize>().min_value(1).max_value(10));
         // Each view's id and the sender's bytes for it, and the operation it is the view of.
         let mut views: Vec<(ViewId, Vec<u8>)> = vec![];
-        let mut ops: Vec<OperationId> = vec![];
+        let mut ops: Vec<CanonicalOp> = vec![];
         let mut parent = sender.root_operation_id().clone();
         for _ in 0..count {
             let heads = tc.draw(gs::integers::<u8>().min_value(1).max_value(12));
@@ -1910,7 +1925,10 @@ mod tests {
                     }
                 }
                 writer
-                    .operation(ops[i].as_bytes(), &sender.operation_bytes(&ops[i]).unwrap())
+                    .operation(
+                        ops[i].0.as_bytes(),
+                        &sender.operation_bytes(&ops[i]).unwrap(),
+                    )
                     .unwrap();
             }
             writer.finish().unwrap();
@@ -1963,13 +1981,13 @@ mod tests {
         let mut writer = BundleWriter::create(bundle_file.path()).unwrap();
         writer.view(base_view.as_bytes(), &other).unwrap();
         writer
-            .operation(base.as_bytes(), &sender.operation_bytes(&base).unwrap())
+            .operation(base.0.as_bytes(), &sender.operation_bytes(&base).unwrap())
             .unwrap();
         writer
             .view_delta_made(child_view.as_bytes(), base_view.as_bytes(), &delta)
             .unwrap();
         writer
-            .operation(child.as_bytes(), &sender.operation_bytes(&child).unwrap())
+            .operation(child.0.as_bytes(), &sender.operation_bytes(&child).unwrap())
             .unwrap();
         writer.finish().unwrap();
 
@@ -1996,9 +2014,9 @@ mod tests {
         view
     }
 
-    fn operation(parent: &OperationId, view_id: ViewId) -> Operation {
+    fn operation(parent: &CanonicalOp, view_id: ViewId) -> Operation {
         let mut op = Operation::make_root(view_id);
-        op.parents = vec![parent.clone()];
+        op.parents = vec![parent.0.clone()];
         op
     }
 

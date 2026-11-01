@@ -9,7 +9,6 @@ use jj_lib::git::GitExportError;
 use jj_lib::lock::FileLockError;
 use jj_lib::op_heads_store::OpHeadsStoreError;
 use jj_lib::op_store::OpStoreError;
-use jj_lib::op_store::OperationId;
 use jj_lib::repo::RepoLoaderError;
 use jj_lib::repo::StoreLoadError;
 use thiserror::Error;
@@ -19,6 +18,7 @@ use crate::format_guard::FormatError;
 use crate::git_command::GitError;
 use crate::objects::Incompleteness;
 use crate::objects::ObjectError;
+use crate::op_id::LocalOp;
 
 /// What a user sees once this repository lost history the hive has in a way musubi can't pass
 /// on, which no retry gets past, and the way on. docs/troubleshooting.md says the rest, such
@@ -83,13 +83,13 @@ pub enum NodeError {
     )]
     Unmergeable {
         /// This machine's operations the hive doesn't have, newest first.
-        ours: Vec<OperationId>,
+        ours: Vec<LocalOp>,
         /// The operation to revert: the newest of this machine's that the hive doesn't have
         /// whose revert lets jj merge the hive's operation, or failing one, the oldest whose
         /// own change jj panics merging with it. `None` where none is found, as when the
         /// failing merge is of this machine's own operations, or for a merge commit on the
         /// root. `advice` then lists them.
-        culprit: Option<OperationId>,
+        culprit: Option<LocalOp>,
         advice: String,
         reason: String,
     },

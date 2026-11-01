@@ -39,6 +39,7 @@ use crate::hive_settings::repository;
 use crate::hive_settings::same_repository;
 use crate::objects::GitObjects;
 use crate::objects::Incompleteness;
+use crate::op_id::LocalOp;
 use crate::ref_locks;
 use crate::remote_url::without_credentials;
 
@@ -64,7 +65,7 @@ pub(super) struct Colocation {
 }
 
 /// Expected values of conflicted remote bookmarks, by operation and git ref.
-pub(super) type Expected = HashMap<(OperationId, GitRefNameBuf), Option<RefTarget>>;
+pub(super) type Expected = HashMap<(LocalOp, GitRefNameBuf), Option<RefTarget>>;
 
 /// The attribute of a fix-up's first operation recording the expected value ([`expected`]) of
 /// each conflicted remote bookmark there as the history before the abandon had it, one line
@@ -317,12 +318,12 @@ impl Colocation {
     pub fn export_refs(
         &self,
         loader: &RepoLoader,
-        realized: &OperationId,
+        realized: &LocalOp,
         is_join: &dyn Fn(&Operation) -> bool,
         beside: &[Operation],
         pending: &Expected,
-    ) -> Result<OperationId, NodeError> {
-        let op = loader.load_operation(realized).block_on()?;
+    ) -> Result<LocalOp, NodeError> {
+        let op = loader.load_operation(&realized.0).block_on()?;
         let repo: Arc<ReadonlyRepo> = loader.load_at(&op).block_on()?;
         let mut tx = repo.start_transaction();
         // Refs that fail to export keep their recorded values, exactly as after a failed
@@ -376,7 +377,7 @@ impl Colocation {
         if !failed.is_empty() {
             ref_locks::remove_stale_of(&self.git_dir, failed.iter().map(String::as_str));
         }
-        let remember = |exported: &OperationId| {
+        let remember = |exported: &LocalOp| {
             let ids = [realized, exported];
             *self.expected.lock().expect("not poisoned") = ids
                 .into_iter()
@@ -395,12 +396,12 @@ impl Colocation {
         let mut store_op = op.store_operation().clone();
         store_op.view_id = loader.op_store().write_view(view).block_on()?;
         let op_store = loader.op_store();
-        let exported = op_store.write_operation(&store_op).block_on()?;
+        let exported = LocalOp(op_store.write_operation(&store_op).block_on()?);
         // It refers to the realization's commits, so the realization's index is its index
         // too. Without one, loading the repository there, as merging or the next `jj` command
         // does, would index again every operation since the last one with an index, or for a
         // clone, every commit: none it descends from has one.
-        let exported_op = Operation::new(op_store.clone(), exported.clone(), store_op);
+        let exported_op = Operation::new(op_store.clone(), exported.0.clone(), store_op);
         if let Err(err) = loader
             .index_store()
             .write_index(repo.readonly_index().start_modification(), &exported_op)
@@ -619,12 +620,14 @@ fn recorded_in(text: &str, name: &GitRefNameBuf) -> Option<Option<RefTarget>> {
 /// What [`expected`] knows of history beyond the op store.
 pub(super) struct History<'a> {
     /// Expected values already worked out: as the last export remembers them, and as a
-    /// fix-up not yet written will record them.
+    /// fix-up not yet written will record them. By local operation: a walk that `parents`
+    /// takes into the canonical store has none.
     pub known: &'a Expected,
     /// The root operations: the op store's, and the canonical store's where the walk goes
     /// there.
     pub roots: &'a [OperationId],
-    /// Whether a local operation is a join point.
+    /// Whether an operation is a join point: a local one, as a canonical one the walk reaches
+    /// never is (its join operation is on a root).
     pub is_join: &'a dyn Fn(&Operation) -> bool,
     /// An operation's parents as the walk takes them, where they aren't the op store's.
     pub parents: &'a Parents<'a>,
@@ -657,7 +660,9 @@ fn expected(
     let mut op = op.clone();
     let mut target = target.clone();
     loop {
-        if let Some(known) = history.known.get(&(op.id().clone(), name.clone())) {
+        // Taken for a local operation, which every one here is unless `parents` led the walk
+        // into the canonical store, where `known` is empty.
+        if let Some(known) = history.known.get(&(LocalOp(op.id().clone()), name.clone())) {
             return Ok(known.clone());
         }
         if let Some(recorded) = recorded(&op, name) {

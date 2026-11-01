@@ -100,7 +100,13 @@ fn hub_survives_malformed_requests(tc: TestCase) {
         }
     }
     // Nothing it stored on the way keeps it from reading everything up to its head.
-    let root = hub.hub().store().canonical().root_operation_id().to_bytes();
+    let root = hub
+        .hub()
+        .store()
+        .canonical()
+        .root_operation_id()
+        .0
+        .to_bytes();
     let fetch = encode(HubRequest::Protocol(Request::Fetch {
         base: root.clone(),
         haves: WireAttachment::None,
@@ -1344,7 +1350,7 @@ fn heads(hub: &HubService, session: &Session) -> Vec<Vec<u8>> {
     let canonical = hub.hub().store().canonical();
     vec![
         hub.hub().head().1.to_bytes(),
-        canonical.root_operation_id().to_bytes(),
+        canonical.root_operation_id().0.to_bytes(),
         session.head.clone(),
     ]
 }

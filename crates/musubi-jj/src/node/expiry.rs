@@ -8,11 +8,12 @@ use std::time::SystemTime;
 
 use jj_lib::config::ConfigNamePathBuf;
 use jj_lib::config::ConfigSource;
-use jj_lib::op_store::OperationId;
 use pollster::FutureExt as _;
 
 use super::NodeError;
 use super::NodeRepo;
+use crate::op_id::CanonicalOp;
+use crate::op_id::LocalOp;
 use crate::presence::FORGET_AFTER_ATTRIBUTE;
 use crate::presence::Presence;
 use crate::presence::WORK_ATTRIBUTE;
@@ -97,7 +98,7 @@ impl NodeRepo {
     pub fn record_forget_after(&mut self) -> Result<bool, NodeError> {
         let configured = self.configured_forget_after()?;
         let repo = self.merged_repo()?;
-        let canonical = self.canonicalize(repo.op_id())?;
+        let canonical = self.canonicalize(&LocalOp(repo.op_id().clone()))?;
         let presence = self.presence(&canonical)?;
         let key = self.machine.key().to_owned();
         if presence.forget_after(&key) == configured
@@ -193,7 +194,7 @@ impl NodeRepo {
     /// when a fix-up says that work was done.
     fn last_work(
         &self,
-        presence: &Presence<OperationId>,
+        presence: &Presence<CanonicalOp>,
         copy: &str,
     ) -> Result<SystemTime, NodeError> {
         let mut last = SystemTime::UNIX_EPOCH;
@@ -208,7 +209,7 @@ impl NodeRepo {
     /// The name each other machine's workspaces are shown under here, by machine key.
     pub(super) fn shown_names(
         &self,
-        canonical: &OperationId,
+        canonical: &CanonicalOp,
     ) -> Result<BTreeMap<String, String>, NodeError> {
         Ok(self
             .other_names(canonical)?

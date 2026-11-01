@@ -39,6 +39,8 @@ use crate::canonical::Contraction;
 use crate::canonical::current;
 use crate::files;
 use crate::hive_settings;
+use crate::op_id::CanonicalOp;
+use crate::op_id::LocalOp;
 use crate::presence::FORGET_AFTER_ATTRIBUTE;
 use crate::presence::FORGET_ATTRIBUTE;
 use crate::presence::Presence;
@@ -58,7 +60,7 @@ pub const WORKED_AT_ATTRIBUTE: &str = "musubi.worked-at";
 /// machine has yet to publish dropped too. Its local operations stand for these. Where it has
 /// nothing to publish, a hub name and a node name are the same id.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct NodeOp(pub OperationId);
+pub struct NodeOp(pub CanonicalOp);
 
 /// The attribute that marks an operation of a fix-up, whose canonical view is its parent's.
 pub(super) const FIXUP_ATTRIBUTE: &str = "musubi.fixup";
@@ -80,7 +82,7 @@ pub(super) struct Records {
     fixup_written: bool,
     /// The canonical operation the fix-up restores the state of: the head before the first
     /// abandon not yet published, as that history named it.
-    fixup_from: Option<OperationId>,
+    fixup_from: Option<CanonicalOp>,
     /// Whether this node is moving its op heads to the rewrites of a renaming it recorded,
     /// as a restart then resumes.
     moving: bool,
@@ -90,12 +92,12 @@ pub(super) struct Records {
     /// What each operation a renaming superseded became then. A renaming renames only what
     /// none before it superseded, so each has one entry, and what it became may have been
     /// superseded since ([`NodeRepo::current_ids`]).
-    superseded: HashMap<OperationId, Vec<OperationId>>,
+    superseded: HashMap<CanonicalOp, Vec<CanonicalOp>>,
     /// The operations a step dropped, rather than rewrote, as it named them.
-    dropped: HashSet<OperationId>,
+    dropped: HashSet<CanonicalOp>,
     /// How each record this node took renamed the hub's history below the base then, new name
     /// to old: to name what it drops as the hub does after the hub goes back and takes others.
-    hub_renamings: Vec<HashMap<OperationId, OperationId>>,
+    hub_renamings: Vec<HashMap<CanonicalOp, CanonicalOp>>,
     /// Hub space to node space: the hub's history with `pending` dropped too, as worked out.
     to_node: std::sync::Mutex<Option<Contraction>>,
     /// The hub's records this node is getting ready to take.
@@ -109,19 +111,19 @@ struct Taking {
     /// How many of them this node took already.
     common: usize,
     /// How each of the rest renames the hub's history below the base, new name to old.
-    hub_renamings: Vec<HashMap<OperationId, OperationId>>,
+    hub_renamings: Vec<HashMap<CanonicalOp, CanonicalOp>>,
     /// What they drop, in node names now.
-    dropped: HashSet<OperationId>,
+    dropped: HashSet<CanonicalOp>,
     /// Node space now to node space then.
-    renaming: HashMap<OperationId, Vec<OperationId>>,
+    renaming: HashMap<CanonicalOp, Vec<CanonicalOp>>,
     /// Whether the op heads moved there.
     switched: bool,
     /// `pending`, as the records name the history.
     pending: Record,
     /// The local operation each local one becomes.
-    locals: HashMap<OperationId, Vec<OperationId>>,
+    locals: HashMap<LocalOp, Vec<LocalOp>>,
     /// The op heads `locals` was worked out from, sorted.
-    heads: Vec<OperationId>,
+    heads: Vec<LocalOp>,
     /// The operation the hub accepted that this machine fetches from, as the records name
     /// it: what it became, or, if dropped, the first of what was below it.
     base: Option<HubOp>,
@@ -174,11 +176,15 @@ struct Work {
 }
 
 fn hex_ids(record: &Record) -> Vec<String> {
-    record.ops().iter().map(|op| op.0.hex()).collect()
+    record.ops().iter().map(|op| op.0.0.hex()).collect()
 }
 
 fn parse_record(path: &Path, hexes: &[String]) -> Result<Record, NodeError> {
-    Ok(Record::new(parse_ids(path, hexes)?.into_iter().map(HubOp)))
+    Ok(Record::new(
+        parse_ids(path, hexes)?
+            .into_iter()
+            .map(|op| HubOp(CanonicalOp(op))),
+    ))
 }
 
 fn parse_ids(path: &Path, hexes: &[String]) -> Result<Vec<OperationId>, NodeError> {
@@ -208,7 +214,7 @@ fn time_key(op: &StoreOperation) -> String {
 }
 
 /// `ops` without duplicates, the first of each kept.
-fn dedup(ops: impl IntoIterator<Item = OperationId>) -> Vec<OperationId> {
+fn dedup<Op: Clone + Eq + std::hash::Hash>(ops: impl IntoIterator<Item = Op>) -> Vec<Op> {
     let mut seen = HashSet::new();
     ops.into_iter()
         .filter(|op| seen.insert(op.clone()))
@@ -241,7 +247,8 @@ impl Records {
             fixup_from: file
                 .fixup_from
                 .as_deref()
-                .and_then(OperationId::try_from_hex),
+                .and_then(OperationId::try_from_hex)
+                .map(CanonicalOp),
             moving: file.moving,
             ..Self::default()
         };
@@ -275,7 +282,7 @@ impl Records {
 
     /// Adds a renaming to what the steps compose. Each lookup composes them, so that adding
     /// one costs only its own size, as reading them all does.
-    fn compose(&mut self, step: HashMap<OperationId, Vec<OperationId>>) {
+    fn compose(&mut self, step: HashMap<CanonicalOp, Vec<CanonicalOp>>) {
         debug_assert!(
             step.values()
                 .flatten()
@@ -287,7 +294,7 @@ impl Records {
     }
 
     /// What `op` is now ([`current`]).
-    fn current(&self, op: &OperationId) -> Vec<OperationId> {
+    fn current(&self, op: &CanonicalOp) -> Vec<CanonicalOp> {
         current(&self.superseded, op)
     }
 }
@@ -304,10 +311,7 @@ fn digests(records: &[Record]) -> Vec<RecordDigest> {
 
 /// The local operations a walk from the op heads met: those a canonical operation stands for,
 /// with it, and the rest, read, parents first.
-type LocalWalk = (
-    Vec<(OperationId, OperationId)>,
-    Vec<(OperationId, StoreOperation)>,
-);
+type LocalWalk = (Vec<(LocalOp, CanonicalOp)>, Vec<(LocalOp, StoreOperation)>);
 
 /// A digest in hex, as the renamings log names records by.
 fn digest_hex(digest: &RecordDigest) -> String {
@@ -382,7 +386,7 @@ impl<T> Block<T> {
 fn format_hub_renamings(
     records: &[Record],
     from: usize,
-    renamings: &[HashMap<OperationId, OperationId>],
+    renamings: &[HashMap<CanonicalOp, CanonicalOp>],
 ) -> String {
     let digests = digests(records);
     let mut text = String::from("\n");
@@ -391,7 +395,7 @@ fn format_hub_renamings(
         let lines = renaming.len();
         writeln!(text, "record {digest} {lines:0NUMBER_DIGITS$}").expect("writing to a String");
         for (new, old) in renaming {
-            writeln!(text, "{} {}", new.hex(), old.hex()).expect("writing to a String");
+            writeln!(text, "{} {}", new.0.hex(), old.0.hex()).expect("writing to a String");
         }
     }
     text
@@ -400,7 +404,7 @@ fn format_hub_renamings(
 /// Reads the renamings log ([`format_hub_renamings`]), by digest: a block counts only with the
 /// records it was written for, and the last block of a digest counts. Every line has one
 /// length, so one torn anywhere, as a crash leaves the end of an append, names nothing.
-fn parse_hub_renamings(text: &str) -> HashMap<String, Block<HashMap<OperationId, OperationId>>> {
+fn parse_hub_renamings(text: &str) -> HashMap<String, Block<HashMap<CanonicalOp, CanonicalOp>>> {
     let mut renamings = HashMap::new();
     let mut current: Option<String> = None;
     for line in text.lines() {
@@ -421,7 +425,7 @@ fn parse_hub_renamings(text: &str) -> HashMap<String, Block<HashMap<OperationId,
         if let (Some(block), Some((new, old))) = (block, line.split_once(' '))
             && let (Some(new), Some(old)) = (whole_id(new), whole_id(old))
         {
-            block.read.insert(new, old);
+            block.read.insert(CanonicalOp(new), CanonicalOp(old));
             block.seen += 1;
         }
     }
@@ -429,7 +433,7 @@ fn parse_hub_renamings(text: &str) -> HashMap<String, Block<HashMap<OperationId,
 }
 
 /// A renaming, and what it dropped.
-type Step = (HashMap<OperationId, Vec<OperationId>>, Vec<OperationId>);
+type Step = (HashMap<CanonicalOp, Vec<CanonicalOp>>, Vec<CanonicalOp>);
 
 /// Renaming `number`, which dropped `dropped`, as the steps log has it: a `step <number>
 /// <lines>` line, then an `old new` line for each operation it superseded and each it became,
@@ -437,18 +441,18 @@ type Step = (HashMap<OperationId, Vec<OperationId>>, Vec<OperationId>);
 /// starts a line, so that it stands apart from a line a crash tore before it.
 fn format_step(
     number: usize,
-    step: &HashMap<OperationId, Vec<OperationId>>,
-    dropped: &HashSet<OperationId>,
+    step: &HashMap<CanonicalOp, Vec<CanonicalOp>>,
+    dropped: &HashSet<CanonicalOp>,
 ) -> String {
     let lines: usize = step.values().map(|new| new.len().max(1)).sum();
     let mut text = format!("\nstep {number:0NUMBER_DIGITS$} {lines:0NUMBER_DIGITS$}\n");
     for (old, new) in step {
         let mark = if dropped.contains(old) { "-" } else { "" };
         if new.is_empty() {
-            writeln!(text, "{mark}{} -", old.hex()).expect("writing to a String");
+            writeln!(text, "{mark}{} -", old.0.hex()).expect("writing to a String");
         }
         for op in new {
-            writeln!(text, "{mark}{} {}", old.hex(), op.hex()).expect("writing to a String");
+            writeln!(text, "{mark}{} {}", old.0.hex(), op.0.hex()).expect("writing to a String");
         }
     }
     text
@@ -479,10 +483,10 @@ fn parse_steps(text: &str) -> std::collections::BTreeMap<usize, Block<Step>> {
         };
         let new = match new {
             "-" => Some(None),
-            hex => whole_id(hex).map(Some),
+            hex => whole_id(hex).map(|op| Some(CanonicalOp(op))),
         };
         let block: Option<&mut Block<Step>> = current.and_then(|number| steps.get_mut(&number));
-        if let (Some(block), Some(old), Some(new)) = (block, whole_id(old), new) {
+        if let (Some(block), Some(old), Some(new)) = (block, whole_id(old).map(CanonicalOp), new) {
             let (step, drops) = &mut block.read;
             let became = step.entry(old.clone()).or_insert_with(|| {
                 if dropped {
@@ -509,7 +513,7 @@ impl NodeRepo {
             pending: hex_ids(&records.pending),
             fixup: records.fixup.clone(),
             fixup_written: records.fixup_written,
-            fixup_from: records.fixup_from.as_ref().map(|op| op.hex()),
+            fixup_from: records.fixup_from.as_ref().map(|op| op.0.hex()),
             moving: records.moving,
             steps: records.steps,
         };
@@ -524,10 +528,10 @@ impl NodeRepo {
     /// Records a renaming, which dropped `dropped`: appends it, in one write, and composes it.
     fn add_step(
         &mut self,
-        step: HashMap<OperationId, Vec<OperationId>>,
-        dropped: &HashSet<OperationId>,
+        step: HashMap<CanonicalOp, Vec<CanonicalOp>>,
+        dropped: &HashSet<CanonicalOp>,
     ) -> Result<(), NodeError> {
-        let step: HashMap<OperationId, Vec<OperationId>> = step
+        let step: HashMap<CanonicalOp, Vec<CanonicalOp>> = step
             .into_iter()
             .filter(|(old, new)| new != std::slice::from_ref(old))
             .collect();
@@ -549,7 +553,7 @@ impl NodeRepo {
         &self,
         records: &[Record],
         from: usize,
-        renamings: &[HashMap<OperationId, OperationId>],
+        renamings: &[HashMap<CanonicalOp, CanonicalOp>],
     ) -> Result<(), NodeError> {
         if renamings.is_empty() {
             return Ok(());
@@ -584,11 +588,11 @@ impl NodeRepo {
     }
 
     /// What `op`, a name from before a renaming here, or none, is now in node space.
-    pub fn current(&self, op: &OperationId) -> Vec<NodeOp> {
+    pub fn current(&self, op: &CanonicalOp) -> Vec<NodeOp> {
         self.current_ids(op).into_iter().map(NodeOp).collect()
     }
 
-    pub(super) fn current_ids(&self, op: &OperationId) -> Vec<OperationId> {
+    pub(super) fn current_ids(&self, op: &CanonicalOp) -> Vec<CanonicalOp> {
         self.records.current(op)
     }
 
@@ -611,7 +615,7 @@ impl NodeRepo {
         Ok(self.to_node_ids(&op.0)?.into_iter().map(NodeOp).collect())
     }
 
-    fn to_node_ids(&self, op: &OperationId) -> Result<Vec<OperationId>, NodeError> {
+    fn to_node_ids(&self, op: &CanonicalOp) -> Result<Vec<CanonicalOp>, NodeError> {
         let pending = match &self.records.taking {
             Some(taking) => &taking.pending,
             None => &self.records.pending,
@@ -651,13 +655,13 @@ impl NodeRepo {
     /// The local operations reachable from `heads`: those the translation map, a join point
     /// or the history from before the join account for, where the walk stops, and the rest,
     /// parents first.
-    fn local_walk(&self, heads: &[OperationId]) -> Result<LocalWalk, NodeError> {
+    fn local_walk(&self, heads: &[LocalOp]) -> Result<LocalWalk, NodeError> {
         let op_store = self.loader.op_store();
         let mut mapped = vec![];
         let mut unmapped = vec![];
         let mut seen = HashSet::new();
         // (operation, read, whether its parents were pushed)
-        let mut stack: Vec<(OperationId, Option<StoreOperation>)> =
+        let mut stack: Vec<(LocalOp, Option<StoreOperation>)> =
             heads.iter().map(|h| (h.clone(), None)).collect();
         while let Some((id, read)) = stack.pop() {
             if let Some(op) = read {
@@ -671,14 +675,14 @@ impl NodeRepo {
                 mapped.push((id, canonical));
                 continue;
             }
-            let op = op_store.read_operation(&id).block_on()?;
+            let op = op_store.read_operation(&id.0).block_on()?;
             if !op.metadata.attributes.contains_key(CANONICAL_ATTRIBUTE)
                 && let Some(join) = self.joins.get(&fingerprint(&op))
             {
                 mapped.push((id, join.clone()));
                 continue;
             }
-            let parents = op.parents.clone();
+            let parents = LocalOp::parents_of(&op);
             stack.push((id, Some(op)));
             stack.extend(parents.into_iter().map(|p| (p, None)));
         }
@@ -689,7 +693,7 @@ impl NodeRepo {
     /// `accepted_base`), a hub name, if it has one.
     fn stored_base(&self) -> Option<HubOp> {
         let hex = fs::read_to_string(self.repo_path.join("musubi").join("accepted_base")).ok()?;
-        OperationId::try_from_hex(hex.trim()).map(HubOp)
+        OperationId::try_from_hex(hex.trim()).map(|op| HubOp(CanonicalOp(op)))
     }
 
     /// Notices a `jj op abandon` of operations the hub accepted, before anything is
@@ -713,7 +717,7 @@ impl NodeRepo {
     /// Moves each op head that stands for an operation a renaming superseded to the local
     /// operation of what it became, as a crash between recording the renaming and moving the
     /// op heads leaves them.
-    fn realign_heads(&mut self, heads: &[OperationId]) -> Result<(), NodeError> {
+    fn realign_heads(&mut self, heads: &[LocalOp]) -> Result<(), NodeError> {
         let mut moved = false;
         for head in heads {
             let Some(canonical) = self.canonical_of(head) else {
@@ -725,7 +729,7 @@ impl NodeRepo {
             {
                 self.loader
                     .op_heads_store()
-                    .update_op_heads(std::slice::from_ref(head), &local)
+                    .update_op_heads(std::slice::from_ref(&head.0), &local.0)
                     .block_on()?;
                 moved = true;
             }
@@ -743,7 +747,7 @@ impl NodeRepo {
     /// whether it noticed one.
     pub fn notice_abandon(&mut self, base: &HubOp) -> Result<bool, NodeError> {
         let root = self.canonical.root_operation_id().clone();
-        let bases: Vec<OperationId> = self
+        let bases: Vec<CanonicalOp> = self
             .to_node_ids(&base.0)?
             .into_iter()
             .filter(|op| *op != root)
@@ -753,7 +757,7 @@ impl NodeRepo {
         }
         let heads = self.local_heads()?;
         let (mapped, unmapped) = self.local_walk(&heads)?;
-        let frontier: Vec<OperationId> = mapped.iter().map(|(_, c)| c.clone()).collect();
+        let frontier: Vec<CanonicalOp> = mapped.iter().map(|(_, c)| c.clone()).collect();
         let mut reached = true;
         for base in &bases {
             let mut found = false;
@@ -770,7 +774,7 @@ impl NodeRepo {
         }
         // The history below what is intact stays; what was above it, and below the base, is
         // where the abandoned operations were, and what jj rewrote stands for.
-        let mut kept: HashSet<OperationId> = self
+        let mut kept: HashSet<CanonicalOp> = self
             .canonical
             .ancestors_until(&frontier, |_| false)?
             .into_iter()
@@ -784,7 +788,7 @@ impl NodeRepo {
         for c in &region {
             if let Some(local) = self.local_of(c) {
                 // `jj util gc` may have removed what nothing reaches any more.
-                match self.loader.op_store().read_operation(&local).block_on() {
+                match self.loader.op_store().read_operation(&local.0).block_on() {
                     Ok(op) => {
                         by_fingerprint.insert(fingerprint(&op), c.clone());
                     }
@@ -795,7 +799,7 @@ impl NodeRepo {
         }
         // Failing that, by when and by whom it was made, which canonicalizing keeps: where
         // `jj util gc` removed the old local operations.
-        let mut by_time: HashMap<String, Option<OperationId>> = HashMap::new();
+        let mut by_time: HashMap<String, Option<CanonicalOp>> = HashMap::new();
         for c in &region {
             let key = time_key(&self.canonical.read_operation(c)?);
             by_time
@@ -805,13 +809,14 @@ impl NodeRepo {
         }
         // What each rewritten local operation stands for: the canonical operation a
         // realization names, or the one its old self, jj's, was.
-        let mut counterparts: HashMap<OperationId, OperationId> = HashMap::new();
+        let mut counterparts: HashMap<LocalOp, CanonicalOp> = HashMap::new();
         for (id, op) in &unmapped {
             let named = op
                 .metadata
                 .attributes
                 .get(CANONICAL_ATTRIBUTE)
                 .and_then(OperationId::try_from_hex)
+                .map(CanonicalOp)
                 .filter(|c| self.canonical.has_operation(c))
                 .and_then(|c| match self.current_ids(&c).as_slice() {
                     [now] => Some(now.clone()),
@@ -843,10 +848,10 @@ impl NodeRepo {
         if unmapped.is_empty() {
             return Ok(false);
         }
-        let stands: HashSet<OperationId> = counterparts.values().cloned().collect();
-        let mut tops: Vec<OperationId> = bases.clone();
+        let stands: HashSet<CanonicalOp> = counterparts.values().cloned().collect();
+        let mut tops: Vec<CanonicalOp> = bases.clone();
         tops.extend(stands.iter().cloned());
-        let dropped: Vec<OperationId> = self
+        let dropped: Vec<CanonicalOp> = self
             .canonical
             .ancestors_until(&tops, |op| kept.contains(op))?
             .into_iter()
@@ -867,7 +872,7 @@ impl NodeRepo {
         };
         let locals = self.rewrite_locals(&mut contraction, &heads, &counterparts, &unmapped)?;
         // In hub names: what a drop of this node's own, not yet published, renamed.
-        let hub_names: HashMap<OperationId, OperationId> = self
+        let hub_names: HashMap<CanonicalOp, CanonicalOp> = self
             .records
             .to_node
             .get_mut()
@@ -898,9 +903,9 @@ impl NodeRepo {
             (Some(from), false) => {
                 let expected = self.records.fixup.as_ref().and_then(|f| f.expected.clone());
                 let expected = expected.and_then(|mut expected| {
-                    let at = OperationId::try_from_hex(&expected.at)?;
+                    let at = LocalOp(OperationId::try_from_hex(&expected.at)?);
                     let now = self.rekeyed(&at, contraction.dropped(), &unmapped, &locals)?;
-                    expected.at = now.hex();
+                    expected.at = now.0.hex();
                     Some(expected)
                 });
                 if let Some(fixup) = &mut self.records.fixup {
@@ -945,11 +950,11 @@ impl NodeRepo {
     /// op heads descended from the base.
     fn standing_for(
         &self,
-        heads: &[OperationId],
-        counterparts: &HashMap<OperationId, OperationId>,
-        bases: &[OperationId],
-    ) -> Result<Option<OperationId>, NodeError> {
-        let mut stack: Vec<OperationId> = heads.iter().take(1).cloned().collect();
+        heads: &[LocalOp],
+        counterparts: &HashMap<LocalOp, CanonicalOp>,
+        bases: &[CanonicalOp],
+    ) -> Result<Option<CanonicalOp>, NodeError> {
+        let mut stack: Vec<LocalOp> = heads.iter().take(1).cloned().collect();
         let mut seen = HashSet::new();
         while let Some(id) = stack.pop() {
             if !seen.insert(id.clone()) {
@@ -966,8 +971,8 @@ impl NodeRepo {
                 }
                 return Ok(Some(c));
             }
-            let op = self.loader.op_store().read_operation(&id).block_on()?;
-            stack.extend(op.parents);
+            let op = self.loader.op_store().read_operation(&id.0).block_on()?;
+            stack.extend(LocalOp::parents_of(&op));
         }
         Ok(None)
     }
@@ -979,34 +984,40 @@ impl NodeRepo {
     /// `unmapped`, to `old`, what the head stood for, rather than to what jj put under it.
     fn expectation(
         &self,
-        heads: &[OperationId],
-        old: &OperationId,
-        counterparts: &HashMap<OperationId, OperationId>,
-        unmapped: &[(OperationId, StoreOperation)],
-        locals: &HashMap<OperationId, Vec<OperationId>>,
+        heads: &[LocalOp],
+        old: &CanonicalOp,
+        counterparts: &HashMap<LocalOp, CanonicalOp>,
+        unmapped: &[(LocalOp, StoreOperation)],
+        locals: &HashMap<LocalOp, Vec<LocalOp>>,
     ) -> Result<Option<Expectation>, NodeError> {
         let Some(head) = heads.first() else {
             return Ok(None);
         };
-        let new: HashSet<&OperationId> = unmapped
+        let new: HashSet<&LocalOp> = unmapped
             .iter()
             .map(|(id, _)| id)
             .filter(|id| !counterparts.contains_key(*id))
             .collect();
         let old_op = self.canonical.load_operation(old)?;
+        // The walk starts among local operations and goes on among canonical ones, from a
+        // counterpart or through `old_op`, so an operation here may be either, and its id is
+        // taken for a local one: `counterparts` and `new` hold local ones only, which a
+        // canonical id matches only at the root, the same id in both stores, which neither
+        // holds.
+        let local = |op: &Operation| LocalOp(op.id().clone());
         let parents = |op: &Operation| -> Result<Option<Vec<Operation>>, NodeError> {
-            if let Some(c) = counterparts.get(op.id()) {
+            if let Some(c) = counterparts.get(&local(op)) {
                 return Ok(Some(
                     self.canonical.load_operation(c)?.parents().block_on()?,
                 ));
             }
-            if !new.contains(op.id()) {
+            if !new.contains(&local(op)) {
                 return Ok(None);
             }
             let mut parents = vec![];
             let mut to_old = true;
             for parent in op.parents().block_on()? {
-                if new.contains(parent.id()) || counterparts.contains_key(parent.id()) {
+                if new.contains(&local(&parent)) || counterparts.contains_key(&local(&parent)) {
                     parents.push(parent);
                 } else if std::mem::take(&mut to_old) {
                     parents.push(old_op.clone());
@@ -1015,8 +1026,8 @@ impl NodeRepo {
             Ok(Some(parents))
         };
         let roots = [
-            self.root_op_id().clone(),
-            self.canonical.root_operation_id().clone(),
+            self.root_op_id().0.clone(),
+            self.canonical.root_operation_id().0.clone(),
         ];
         let history = git::History {
             known: &git::Expected::new(),
@@ -1024,7 +1035,7 @@ impl NodeRepo {
             is_join: &|op| self.is_join_point(op),
             parents: &parents,
         };
-        let op = self.loader.load_operation(head).block_on()?;
+        let op = self.loader.load_operation(&head.0).block_on()?;
         let values = git::expected_values(self.loader.store(), &op, &history)?;
         if values.is_empty() {
             return Ok(None);
@@ -1035,7 +1046,7 @@ impl NodeRepo {
             None => head.clone(),
         };
         Ok(Some(Expectation {
-            at: at.hex(),
+            at: at.0.hex(),
             values: values
                 .into_iter()
                 .map(|(name, value)| {
@@ -1054,12 +1065,12 @@ impl NodeRepo {
     /// has the canonical operations, or made it several.
     fn rekeyed(
         &self,
-        at: &OperationId,
-        dropped: &HashSet<OperationId>,
-        unmapped: &[(OperationId, StoreOperation)],
-        locals: &HashMap<OperationId, Vec<OperationId>>,
-    ) -> Option<OperationId> {
-        let single = |id: &OperationId| match locals.get(id).map(Vec::as_slice) {
+        at: &LocalOp,
+        dropped: &HashSet<CanonicalOp>,
+        unmapped: &[(LocalOp, StoreOperation)],
+        locals: &HashMap<LocalOp, Vec<LocalOp>>,
+    ) -> Option<LocalOp> {
+        let single = |id: &LocalOp| match locals.get(id).map(Vec::as_slice) {
             Some([now]) => Some(now.clone()),
             Some(_) => None,
             None => Some(id.clone()),
@@ -1067,7 +1078,12 @@ impl NodeRepo {
         if locals.contains_key(at) {
             return single(at);
         }
-        let op = self.loader.op_store().read_operation(at).block_on().ok()?;
+        let op = self
+            .loader
+            .op_store()
+            .read_operation(&at.0)
+            .block_on()
+            .ok()?;
         let print = fingerprint(&op);
         let mut rewrites = unmapped.iter().filter(|(_, op)| fingerprint(op) == print);
         match (rewrites.next(), rewrites.next()) {
@@ -1090,19 +1106,19 @@ impl NodeRepo {
     fn rewrite_locals(
         &mut self,
         contraction: &mut Contraction,
-        heads: &[OperationId],
-        counterparts: &HashMap<OperationId, OperationId>,
-        unmapped: &[(OperationId, StoreOperation)],
-    ) -> Result<HashMap<OperationId, Vec<OperationId>>, NodeError> {
+        heads: &[LocalOp],
+        counterparts: &HashMap<LocalOp, CanonicalOp>,
+        unmapped: &[(LocalOp, StoreOperation)],
+    ) -> Result<HashMap<LocalOp, Vec<LocalOp>>, NodeError> {
         let op_store = self.loader.op_store().clone();
         let canonical = &self.canonical;
         // Every canonical operation of the history that may change, with the local one now
         // standing for it.
-        let mut standing: HashMap<OperationId, OperationId> = HashMap::new();
+        let mut standing: HashMap<CanonicalOp, LocalOp> = HashMap::new();
         // The local operations reachable from the heads that stand for canonical ones that may
         // change: more than one local operation can stand for a canonical one, as a
         // realization and its export do, and the translation map knows only the latest.
-        let mut stack: Vec<OperationId> = heads.to_vec();
+        let mut stack: Vec<LocalOp> = heads.to_vec();
         let mut seen = HashSet::new();
         while let Some(local) = stack.pop() {
             if !seen.insert(local.clone()) || self.before_join.contains(&local) {
@@ -1118,25 +1134,25 @@ impl NodeRepo {
                 None if counterparts.contains_key(&local) => {}
                 None => {}
             }
-            let op = op_store.read_operation(&local).block_on()?;
-            stack.extend(op.parents);
+            let op = op_store.read_operation(&local.0).block_on()?;
+            stack.extend(LocalOp::parents_of(&op));
         }
         for (local, c) in counterparts {
             standing.insert(c.clone(), local.clone());
         }
-        let mut tops: Vec<OperationId> = standing.keys().cloned().collect();
+        let mut tops: Vec<CanonicalOp> = standing.keys().cloned().collect();
         for head in heads {
             if let Some(c) = self.canonical_of(head) {
                 tops.push(c);
             }
         }
-        let mut affected: Vec<OperationId> = canonical.ancestors_until(&tops, |op| {
+        let mut affected: Vec<CanonicalOp> = canonical.ancestors_until(&tops, |op| {
             !standing.contains_key(op) && !contraction.may_change(canonical, op).unwrap_or(true)
         })?;
         affected.retain(|op| self.local_of(op).is_some() || standing.contains_key(op));
         // Parents first: `ancestors_until` puts them so.
-        let mut local_now: HashMap<OperationId, OperationId> = HashMap::new();
-        let mut locals: HashMap<OperationId, Vec<OperationId>> = HashMap::new();
+        let mut local_now: HashMap<CanonicalOp, LocalOp> = HashMap::new();
+        let mut locals: HashMap<LocalOp, Vec<LocalOp>> = HashMap::new();
         for c in &affected {
             let Some(template) = standing.get(c).cloned().or_else(|| self.local_of(c)) else {
                 continue;
@@ -1151,25 +1167,25 @@ impl NodeRepo {
                 continue;
             }
             let new = images[0].clone();
-            let mut op = op_store.read_operation(&template).block_on()?;
+            let mut op = op_store.read_operation(&template.0).block_on()?;
             let mut parents = vec![];
             for parent in self.canonical.parents(&new)? {
-                parents.push(self.local_for(&parent, &local_now)?);
+                parents.push(self.local_for(&parent, &local_now)?.0);
             }
             let changed = op.parents != parents
                 || op
                     .metadata
                     .attributes
                     .get(CANONICAL_ATTRIBUTE)
-                    .is_some_and(|hex| *hex != new.hex());
+                    .is_some_and(|hex| *hex != new.0.hex());
             let rewrite = if changed {
                 op.parents = parents;
                 if op.metadata.attributes.contains_key(CANONICAL_ATTRIBUTE) {
                     op.metadata
                         .attributes
-                        .insert(CANONICAL_ATTRIBUTE.to_owned(), new.hex());
+                        .insert(CANONICAL_ATTRIBUTE.to_owned(), new.0.hex());
                 }
-                op_store.write_operation(&op).block_on()?
+                LocalOp(op_store.write_operation(&op).block_on()?)
             } else {
                 template.clone()
             };
@@ -1182,17 +1198,18 @@ impl NodeRepo {
             if counterparts.contains_key(id) {
                 continue;
             }
+            let old_parents = LocalOp::parents_of(op);
             let parents = dedup(
-                op.parents
+                old_parents
                     .iter()
                     .flat_map(|p| locals.get(p).cloned().unwrap_or_else(|| vec![p.clone()])),
             );
-            let rewrite = if parents == op.parents {
+            let rewrite = if parents == old_parents {
                 id.clone()
             } else {
                 let mut op = op.clone();
-                op.parents = parents;
-                op_store.write_operation(&op).block_on()?
+                op.parents = parents.into_iter().map(|parent| parent.0).collect();
+                LocalOp(op_store.write_operation(&op).block_on()?)
             };
             locals.insert(id.clone(), vec![rewrite]);
         }
@@ -1203,15 +1220,15 @@ impl NodeRepo {
     /// the one the translation map has.
     fn local_for(
         &self,
-        canonical: &OperationId,
-        local_now: &HashMap<OperationId, OperationId>,
-    ) -> Result<OperationId, NodeError> {
+        canonical: &CanonicalOp,
+        local_now: &HashMap<CanonicalOp, LocalOp>,
+    ) -> Result<LocalOp, NodeError> {
         local_now
             .get(canonical)
             .cloned()
             .or_else(|| self.local_of(canonical))
             .ok_or_else(|| {
-                NodeError::NotRealizable(canonical.hex(), "its local operation is missing")
+                NodeError::NotRealizable(canonical.0.hex(), "its local operation is missing")
             })
     }
 
@@ -1220,31 +1237,36 @@ impl NodeRepo {
     /// in place of the ones it merges.
     fn move_heads(
         &mut self,
-        heads: &[OperationId],
-        locals: &HashMap<OperationId, Vec<OperationId>>,
-        head: Option<&OperationId>,
-        merged: Option<&OperationId>,
+        heads: &[LocalOp],
+        locals: &HashMap<LocalOp, Vec<LocalOp>>,
+        head: Option<&LocalOp>,
+        merged: Option<&LocalOp>,
     ) -> Result<(), NodeError> {
         let mut new = self.moved_heads(heads, locals, head)?;
         if let Some(merged) = merged {
-            let parents = self
-                .loader
-                .op_store()
-                .read_operation(merged)
-                .block_on()?
-                .parents;
+            let parents = LocalOp::parents_of(
+                &self
+                    .loader
+                    .op_store()
+                    .read_operation(&merged.0)
+                    .block_on()?,
+            );
             new.retain(|op| !parents.contains(op));
             new.push(merged.clone());
         }
-        let old: Vec<OperationId> = heads.iter().filter(|h| !new.contains(h)).cloned().collect();
+        let old: Vec<OperationId> = heads
+            .iter()
+            .filter(|h| !new.contains(h))
+            .map(|h| h.0.clone())
+            .collect();
         // The new heads go in before the old come out, the last with them: a crash in between
         // leaves extra heads, which jj merges, rather than losing any.
         let op_heads = self.loader.op_heads_store().clone();
         if let Some((last, rest)) = new.split_last() {
             for head in rest {
-                op_heads.update_op_heads(&[], head).block_on()?;
+                op_heads.update_op_heads(&[], &head.0).block_on()?;
             }
-            op_heads.update_op_heads(&old, last).block_on()?;
+            op_heads.update_op_heads(&old, &last.0).block_on()?;
         }
         Ok(())
     }
@@ -1253,18 +1275,18 @@ impl NodeRepo {
     /// ones: `max(images(heads) ∪ {head})`.
     fn moved_heads(
         &self,
-        heads: &[OperationId],
-        locals: &HashMap<OperationId, Vec<OperationId>>,
-        head: Option<&OperationId>,
-    ) -> Result<Vec<OperationId>, NodeError> {
-        let mut new: Vec<OperationId> = dedup(
+        heads: &[LocalOp],
+        locals: &HashMap<LocalOp, Vec<LocalOp>>,
+        head: Option<&LocalOp>,
+    ) -> Result<Vec<LocalOp>, NodeError> {
+        let mut new: Vec<LocalOp> = dedup(
             heads
                 .iter()
                 .flat_map(|h| locals.get(h).cloned().unwrap_or_else(|| vec![h.clone()]))
                 .chain(head.cloned()),
         );
         // Keep only the maximal ones, by the canonical operations they stand for.
-        let canonical: Vec<Option<OperationId>> =
+        let canonical: Vec<Option<CanonicalOp>> =
             new.iter().map(|local| self.canonical_of(local)).collect();
         let mut keep = vec![true; new.len()];
         for i in 0..new.len() {
@@ -1295,7 +1317,7 @@ impl NodeRepo {
     /// left, and jj's `jj workspace update-stale` moves it.
     pub(super) fn move_workspaces(
         &self,
-        locals: &HashMap<OperationId, Vec<OperationId>>,
+        locals: &HashMap<LocalOp, Vec<LocalOp>>,
     ) -> Result<(), NodeError> {
         let mut roots: BTreeSet<PathBuf> = BTreeSet::new();
         let mut names = BTreeSet::new();
@@ -1326,7 +1348,7 @@ impl NodeRepo {
     fn move_workspace(
         &self,
         root: &Path,
-        locals: &HashMap<OperationId, Vec<OperationId>>,
+        locals: &HashMap<LocalOp, Vec<LocalOp>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if !root.join(".jj").join("working_copy").is_dir() {
             return Ok(());
@@ -1349,7 +1371,7 @@ impl NodeRepo {
         // Read under the lock, so that a `jj` command that records another meanwhile isn't
         // moved back.
         let mut locked = workspace.start_working_copy_mutation().block_on()?;
-        let recorded = locked.locked_wc().old_operation_id().clone();
+        let recorded = LocalOp(locked.locked_wc().old_operation_id().clone());
         let rewrite = match locals.get(&recorded).map(Vec::as_slice) {
             Some([rewrite]) => Some(rewrite.clone()),
             _ => self.canonical_of(&recorded).and_then(|canonical| {
@@ -1362,7 +1384,7 @@ impl NodeRepo {
         let Some(rewrite) = rewrite.filter(|rewrite| *rewrite != recorded) else {
             return Ok(());
         };
-        locked.finish(rewrite).block_on()?;
+        locked.finish(rewrite.0).block_on()?;
         Ok(())
     }
 
@@ -1452,7 +1474,7 @@ impl NodeRepo {
         // record since renamed the hub's history. An operation made since has no such name,
         // and keeps its own.
         let hub_renamings = &self.records.hub_renamings;
-        let back = |op: &OperationId, from: usize| {
+        let back = |op: &CanonicalOp, from: usize| {
             (common..from).rev().fold(op.clone(), |op, k| {
                 match hub_renamings.get(k).and_then(|renaming| renaming.get(&op)) {
                     Some(old) => old.clone(),
@@ -1462,7 +1484,7 @@ impl NodeRepo {
         };
         // What this node dropped beyond the records they share: its own pending drops, and
         // its records the hub lacks (as after the hub went back), named so.
-        let mut mine: Vec<OperationId> = self
+        let mut mine: Vec<CanonicalOp> = self
             .records
             .pending
             .ops()
@@ -1482,11 +1504,11 @@ impl NodeRepo {
         // Then forward through the hub's records, one at a time, keeping how each renames
         // the hub's history below the base; and the node names of what they drop, but what
         // this node dropped already, whose node names are what is left below it.
-        let mut renamings: Vec<HashMap<OperationId, OperationId>> = vec![];
+        let mut renamings: Vec<HashMap<CanonicalOp, CanonicalOp>> = vec![];
         let mut to_drop = vec![];
         for record in &records[common..] {
-            let names: Vec<OperationId> = record.ops().iter().map(|op| op.0.clone()).collect();
-            let dropped_here: HashSet<OperationId> = mine.iter().cloned().collect();
+            let names: Vec<CanonicalOp> = record.ops().iter().map(|op| op.0.clone()).collect();
+            let dropped_here: HashSet<CanonicalOp> = mine.iter().cloned().collect();
             for op in &names {
                 let shared = renamings.iter().rev().fold(op.clone(), |op, renaming| {
                     renaming.get(&op).cloned().unwrap_or(op)
@@ -1504,7 +1526,7 @@ impl NodeRepo {
             // so its history names the record's operations as renamed since: it is named as
             // this machine's history names it, as any machine that has it pushes it.
             let mut ours = Contraction::new(store, to_drop.iter().cloned())?;
-            let theirs: HashSet<&OperationId> = names.iter().collect();
+            let theirs: HashSet<&CanonicalOp> = names.iter().collect();
             let mut renamed = vec![];
             for op in mine.iter().filter(|op| !theirs.contains(op)) {
                 if !store.has_operation(op) {
@@ -1570,10 +1592,7 @@ impl NodeRepo {
     /// The op heads that moving them where the records being taken name them leaves beside
     /// `head`, as they name them: `max(images(heads) ∪ {head}) \ {head}`. Empty if no records
     /// are being taken, or the op heads are there already.
-    pub(super) fn taken_beside(
-        &mut self,
-        head: &OperationId,
-    ) -> Result<Vec<OperationId>, NodeError> {
+    pub(super) fn taken_beside(&mut self, head: &LocalOp) -> Result<Vec<LocalOp>, NodeError> {
         self.prepare_again_if_moved()?;
         let Some(taking) = self
             .records
@@ -1597,8 +1616,8 @@ impl NodeRepo {
     /// a workspace's lock before its colocated git lock.
     pub(super) fn switch_to_taken(
         &mut self,
-        head: Option<&OperationId>,
-        merged: Option<&OperationId>,
+        head: Option<&LocalOp>,
+        merged: Option<&LocalOp>,
     ) -> Result<(), NodeError> {
         self.prepare_again_if_moved()?;
         let Some(mut taking) = self.records.taking.take() else {
@@ -1643,11 +1662,13 @@ impl NodeRepo {
         {
             // The op head the expected values were worked out at, as the records renamed it,
             // unless they dropped it or made it several.
-            let at = OperationId::try_from_hex(&expected.at).filter(|at| {
-                !self
-                    .canonical_of(at)
-                    .is_some_and(|c| taking.dropped.contains(&c))
-            });
+            let at = OperationId::try_from_hex(&expected.at)
+                .map(LocalOp)
+                .filter(|at| {
+                    !self
+                        .canonical_of(at)
+                        .is_some_and(|c| taking.dropped.contains(&c))
+                });
             let now = at.and_then(|at| match taking.locals.get(&at).map(Vec::as_slice) {
                 Some([now]) => Some(now.clone()),
                 Some(_) => None,
@@ -1655,7 +1676,7 @@ impl NodeRepo {
             });
             let fixup = self.records.fixup.as_mut().expect("matched above");
             match now {
-                Some(now) => fixup.expected.as_mut().expect("matched above").at = now.hex(),
+                Some(now) => fixup.expected.as_mut().expect("matched above").at = now.0.hex(),
                 None => fixup.expected = None,
             }
         }
@@ -1672,7 +1693,7 @@ impl NodeRepo {
 
     /// What the fix-up must write for the state at `new`, the node-space rewrite of `old`,
     /// to be as it was at `old`.
-    fn fixup_between(&mut self, old: &OperationId, new: &OperationId) -> Result<Fixup, NodeError> {
+    fn fixup_between(&mut self, old: &CanonicalOp, new: &CanonicalOp) -> Result<Fixup, NodeError> {
         let before = self.presence(old)?;
         let after = self.presence(new)?;
         let mut fixup = Fixup::default();
@@ -1689,7 +1710,7 @@ impl NodeRepo {
                 self.worked_at(&after, copy)?,
             );
             let forget_after =
-                |p: &Presence<OperationId>| (p.has_forget_after(copy), p.forget_after(copy));
+                |p: &Presence<CanonicalOp>| (p.has_forget_after(copy), p.forget_after(copy));
             let changed = was != is || forget_after(&before) != forget_after(&after);
             if present && (!after.is_present(copy) || changed) {
                 fixup.work.push(Work {
@@ -1729,7 +1750,7 @@ impl NodeRepo {
     /// operations, or what a fix-up recorded for them.
     fn worked_at(
         &self,
-        presence: &Presence<OperationId>,
+        presence: &Presence<CanonicalOp>,
         copy: &str,
     ) -> Result<Option<i64>, NodeError> {
         let mut last = None;
@@ -1742,7 +1763,7 @@ impl NodeRepo {
 
     /// When the work a canonical operation stands for was done, in milliseconds since the
     /// epoch: the end of the operation, or what a fix-up recorded.
-    pub(super) fn work_time(&self, op: &OperationId) -> Result<i64, NodeError> {
+    pub(super) fn work_time(&self, op: &CanonicalOp) -> Result<i64, NodeError> {
         let operation = self.canonical.read_operation(op)?;
         Ok(operation
             .metadata
@@ -1762,7 +1783,7 @@ impl NodeRepo {
         }
         let history = git::History {
             known: &known,
-            roots: std::slice::from_ref(self.root_op_id()),
+            roots: std::slice::from_ref(&self.root_op_id().0),
             is_join: &|op| self.is_join_point(op),
             parents: &|_| Ok(None),
         };
@@ -1780,7 +1801,7 @@ impl NodeRepo {
             _ => None,
         };
         let Some((expectation, at)) =
-            expectation.and_then(|e| Some((e, OperationId::try_from_hex(&e.at)?)))
+            expectation.and_then(|e| Some((e, LocalOp(OperationId::try_from_hex(&e.at)?))))
         else {
             return git::Expected::new();
         };
@@ -1814,7 +1835,7 @@ impl NodeRepo {
         let fixup = self.records.fixup.clone().unwrap_or_default();
         let mut after_work = fixup.forgets.clone();
         let head = self.merged_repo()?;
-        let canonical_head = self.canonicalize(head.op_id())?;
+        let canonical_head = self.canonicalize(&LocalOp(head.op_id().clone()))?;
         let shown = self.shown_names(&canonical_head)?;
         // The first operation restores them, so that no operation of the fix-up has them as
         // the rewritten history would.
@@ -1866,7 +1887,9 @@ impl NodeRepo {
         let op = tx.commit("musubi: pass on jj op abandon").block_on()?;
         self.records.fixup_written = true;
         self.save_records()?;
-        Ok(Some(NodeOp(self.canonicalize(op.operation().id())?)))
+        Ok(Some(NodeOp(
+            self.canonicalize(&LocalOp(op.operation().id().clone()))?,
+        )))
     }
 }
 
@@ -1882,8 +1905,8 @@ mod tests {
 
     use super::*;
 
-    fn id(byte: u8) -> OperationId {
-        OperationId::new(vec![byte; 64])
+    fn id(byte: u8) -> CanonicalOp {
+        CanonicalOp(OperationId::new(vec![byte; 64]))
     }
 
     /// The logs' ids and digests are whole at the length jj's operation ids and record digests
@@ -1942,7 +1965,7 @@ mod tests {
             }
             let formatted = format_step(number, &step, &dropped);
             // The empty line that starts the append, the number, then each operation's.
-            let mut lines: Vec<Option<(&OperationId, Option<&OperationId>)>> = vec![None, None];
+            let mut lines: Vec<Option<(&CanonicalOp, Option<&CanonicalOp>)>> = vec![None, None];
             for (old, new) in &step {
                 if new.is_empty() {
                     lines.push(Some((old, None)));
@@ -1975,7 +1998,7 @@ mod tests {
 
     /// A line of the renamings log: its record's digest, then its pair, or for the record's
     /// line, how many pairs follow.
-    type RenamingLine<'a> = (String, Result<(&'a OperationId, &'a OperationId), usize>);
+    type RenamingLine<'a> = (String, Result<(&'a CanonicalOp, &'a CanonicalOp), usize>);
 
     /// How records renamed the hub's history, appended, each whole or cut anywhere as a crash
     /// leaves the end of an append, with more appended after: a line torn names nothing, the
@@ -1990,7 +2013,7 @@ mod tests {
         let (mut text, mut expected) = (String::new(), HashMap::new());
         for a in 0..tc.draw(gs::integers::<u8>().max_value(4)) {
             let from = tc.draw(gs::integers::<usize>().max_value(records.len()));
-            let renamings: Vec<HashMap<OperationId, OperationId>> = (from..records.len())
+            let renamings: Vec<HashMap<CanonicalOp, CanonicalOp>> = (from..records.len())
                 .map(|r| {
                     (0..tc.draw(gs::integers::<u8>().max_value(2)))
                         .map(|n| (id(16 * a + 4 * r as u8 + n), id(200 + n)))
@@ -2020,12 +2043,12 @@ mod tests {
             }
             text.push_str(&formatted[..written]);
         }
-        let read: HashMap<String, Option<HashMap<OperationId, OperationId>>> =
+        let read: HashMap<String, Option<HashMap<CanonicalOp, CanonicalOp>>> =
             parse_hub_renamings(&text)
                 .into_iter()
                 .map(|(digest, block)| (digest, block.whole()))
                 .collect();
-        let expected: HashMap<String, Option<HashMap<OperationId, OperationId>>> = expected
+        let expected: HashMap<String, Option<HashMap<CanonicalOp, CanonicalOp>>> = expected
             .into_iter()
             .map(|(digest, (block, count))| (digest, (block.len() == count).then_some(block)))
             .collect();
@@ -2037,7 +2060,7 @@ mod tests {
     #[hegel::test(test_cases = 200)]
     fn renamings_compose_on_lookup(tc: TestCase) {
         let mut records = Records::default();
-        let mut eager: HashMap<OperationId, Vec<OperationId>> = HashMap::new();
+        let mut eager: HashMap<CanonicalOp, Vec<CanonicalOp>> = HashMap::new();
         let mut current: Vec<u8> = (0..4).collect();
         let mut fresh = 4;
         for _ in 0..tc.draw(gs::integers::<u8>().max_value(4)) {

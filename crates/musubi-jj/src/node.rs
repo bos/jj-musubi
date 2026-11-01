@@ -22,7 +22,6 @@ use std::thread;
 use jj_lib::backend::CommitId;
 use jj_lib::default_backend_factories::default_backend_factories;
 use jj_lib::git::GitSubprocessOptions;
-use jj_lib::op_store::OperationId;
 use jj_lib::repo::ReadonlyRepo;
 use jj_lib::repo::Repo as _;
 use jj_lib::repo::RepoLoader;
@@ -36,6 +35,8 @@ use crate::objects::Backend;
 use crate::objects::GitStore;
 use crate::objects::ObjectStore;
 use crate::objects::SimpleStore;
+use crate::op_id::CanonicalOp;
+use crate::op_id::LocalOp;
 use crate::translation_map::TranslationMap;
 use crate::workspaces::Machine;
 
@@ -72,6 +73,8 @@ pub const CANONICAL_ATTRIBUTE: &str = "musubi.canonical";
 pub struct NodeRepo {
     repo_path: PathBuf,
     loader: RepoLoader,
+    /// The root of the local op store.
+    local_root: LocalOp,
     canonical: CanonicalStore,
     map: TranslationMap,
     /// The repository's git repository, if its backend is git; otherwise it is simple.
@@ -81,31 +84,31 @@ pub struct NodeRepo {
     machine: Machine,
     /// The canonical join operation each join point maps to, by the join point's
     /// fingerprint, so that a copy of it that `jj op abandon` rewrote maps there too.
-    joins: BTreeMap<String, OperationId>,
+    joins: BTreeMap<String, CanonicalOp>,
     /// The local join points, as recorded.
-    join_points: Vec<OperationId>,
+    join_points: Vec<LocalOp>,
     /// The ancestors of the join points, once needed: the history from before the joins.
-    join_ancestors: Option<Arc<HashSet<OperationId>>>,
+    join_ancestors: Option<Arc<HashSet<LocalOp>>>,
     /// Local operations found to come from before this repository joined: ancestors of a
     /// join point, and operations all of whose parents are (see [`Self::canonicalize`]).
-    before_join: BTreeSet<OperationId>,
+    before_join: BTreeSet<LocalOp>,
     /// The hive's settings as of canonical operations, as computed so far.
-    settings: HashMap<OperationId, Option<HiveSettings>>,
+    settings: HashMap<CanonicalOp, Option<HiveSettings>>,
     /// jj's repo config file for this repository, which holds the config the hive shares.
     repo_config: Option<PathBuf>,
     /// The last operation realized here, with its per-machine fields: usually the next
     /// one's parent, which then needn't be read back.
-    last_realized: Option<(OperationId, Arc<PerMachine>)>,
+    last_realized: Option<(LocalOp, Arc<PerMachine>)>,
     /// Realized operations still being written (see [`Self::realize_pending`]).
     unwritten: Vec<Unwritten>,
     /// Local views made ahead of their operations' realization, by canonical operation, with
     /// the per-machine fields they were made with: used only while those are what the
     /// operations inherit (see [`Self::realize_pending`]).
-    prepared: Option<(Arc<PerMachine>, HashMap<OperationId, LocalView>)>,
+    prepared: Option<(Arc<PerMachine>, HashMap<CanonicalOp, LocalView>)>,
     /// The last operation realized here, with this machine's own workspaces in its view:
     /// what the next one keeps where the hive has forgotten this machine.
     last_own: Option<(
-        OperationId,
+        LocalOp,
         Arc<BTreeMap<jj_lib::ref_name::WorkspaceNameBuf, CommitId>>,
     )>,
     /// Presence at the canonical operations asked about lately (see [`Self::presence`]).
@@ -123,9 +126,9 @@ pub struct NodeRepo {
     /// Local operations canonicalized on operations a renaming superseded, as a `jj` command
     /// writes that loaded the repository before it, parents first: to reparent onto the
     /// rewrites.
-    late: Vec<OperationId>,
+    late: Vec<LocalOp>,
     /// The op heads and base `check_abandon` last checked.
-    abandon_checked: Option<(Vec<OperationId>, Option<crate::records::HubOp>)>,
+    abandon_checked: Option<(Vec<LocalOp>, Option<crate::records::HubOp>)>,
 }
 
 /// The last search for the operation to revert, and how many searches have run.
@@ -139,10 +142,10 @@ struct UnmergeableMemo {
 #[derive(Clone)]
 struct UnmergeableSearch {
     /// This machine's op heads, sorted.
-    heads: Vec<OperationId>,
+    heads: Vec<LocalOp>,
     /// The hive's operation, canonical, that jj can't merge with them.
-    theirs: OperationId,
-    culprit: Option<OperationId>,
+    theirs: CanonicalOp,
+    culprit: Option<LocalOp>,
 }
 
 impl Drop for NodeRepo {
@@ -192,6 +195,7 @@ impl NodeRepo {
         })?;
         let mut node = Self {
             repo_path: repo_path.to_owned(),
+            local_root: LocalOp(loader.op_store().root_operation_id().clone()),
             loader,
             canonical,
             map,
@@ -309,7 +313,7 @@ impl NodeRepo {
     /// The commits the stored canonical operations `ops` require, excluding the root commit.
     pub fn required_commits(
         &self,
-        canonical: &[OperationId],
+        canonical: &[CanonicalOp],
     ) -> Result<BTreeSet<CommitId>, NodeError> {
         Ok(self.canonical.required_commits(canonical)?)
     }
@@ -363,8 +367,9 @@ impl NodeRepo {
             .searches
     }
 
-    pub fn local_heads(&self) -> Result<Vec<OperationId>, NodeError> {
-        Ok(self.loader.op_heads_store().get_op_heads().block_on()?)
+    pub fn local_heads(&self) -> Result<Vec<LocalOp>, NodeError> {
+        let heads = self.loader.op_heads_store().get_op_heads().block_on()?;
+        Ok(heads.into_iter().map(LocalOp).collect())
     }
 
     /// Lets jj merge the op heads if there are several, as any `jj` command would. Returns
@@ -374,8 +379,8 @@ impl NodeRepo {
     /// bookmarks with them), so in a colocated repository it is exported to `.git` before
     /// becoming the op head, under jj's import/export lock, like every other op head musubi
     /// publishes. The exported copy has the same canonical form as the merge.
-    pub fn merge_heads(&self) -> Result<OperationId, NodeError> {
-        Ok(self.merged_repo()?.op_id().clone())
+    pub fn merge_heads(&self) -> Result<LocalOp, NodeError> {
+        Ok(LocalOp(self.merged_repo()?.op_id().clone()))
     }
 
     /// The repository at the single head [`Self::merge_heads`] leaves.
@@ -388,24 +393,24 @@ impl NodeRepo {
         let merged = self.load_at_head()?;
         let exported = colocation.export_refs(
             &self.loader,
-            merged.op_id(),
+            &LocalOp(merged.op_id().clone()),
             &|op| self.is_join_point(op),
             &[],
             &self.pending_expected(),
         )?;
-        if exported == *merged.op_id() {
+        if exported.0 == *merged.op_id() {
             return Ok(merged);
         }
         self.loader
             .op_heads_store()
-            .update_op_heads(std::slice::from_ref(merged.op_id()), &exported)
+            .update_op_heads(std::slice::from_ref(merged.op_id()), &exported.0)
             .block_on()?;
         self.repo_at(&exported)
     }
 
     /// The repository as of its local operation `id`.
-    fn repo_at(&self, id: &OperationId) -> Result<Arc<ReadonlyRepo>, NodeError> {
-        let op = self.loader.load_operation(id).block_on()?;
+    fn repo_at(&self, id: &LocalOp) -> Result<Arc<ReadonlyRepo>, NodeError> {
+        let op = self.loader.load_operation(&id.0).block_on()?;
         Ok(self.loader.load_at(&op).block_on()?)
     }
 
@@ -422,7 +427,7 @@ impl NodeRepo {
         }
     }
 
-    fn insert_map(&mut self, local: OperationId, canonical: OperationId) -> Result<(), NodeError> {
+    fn insert_map(&mut self, local: LocalOp, canonical: CanonicalOp) -> Result<(), NodeError> {
         self.map
             .insert(local, canonical)
             .map_err(|source| NodeError::Io {

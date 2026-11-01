@@ -11,6 +11,7 @@ use std::time::SystemTime;
 
 use musubi_jj::node::NodeRepo;
 use musubi_jj::objects::Backend;
+use musubi_jj::op_id::CanonicalOp;
 use musubi_sync::hive::Hive;
 use musubi_sync::hub::HubAdapter;
 use musubi_testutil::TestEnv;
@@ -313,7 +314,9 @@ fn views_travel_as_deltas() {
     let b = join(&mut hive, &beta);
     hive.sync_all().unwrap();
     let canonical = hive.hub.store().canonical();
-    let head = canonical.read_operation(&hive.hub_head()).unwrap();
+    let head = canonical
+        .read_operation(&CanonicalOp(hive.hub_head()))
+        .unwrap();
     let view = canonical.view_bytes(&head.view_id).unwrap().len() as u64;
 
     alpha.write_file("small", "small");

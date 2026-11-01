@@ -17,6 +17,8 @@ use super::join::fingerprint;
 use super::supersede::FIXUP_ATTRIBUTE;
 use crate::format_guard;
 use crate::format_guard::FormatError;
+use crate::op_id::CanonicalOp;
+use crate::op_id::LocalOp;
 use crate::presence::Kind;
 use crate::remote_url::without_credentials;
 use crate::workspaces;
@@ -24,7 +26,7 @@ use crate::workspaces;
 impl NodeRepo {
     /// The canonical form of each local op head, but for one from before this repository
     /// joined, which has none until a merge takes it in (see [`Self::canonicalize`]).
-    pub fn canonical_heads(&mut self) -> Result<Vec<OperationId>, NodeError> {
+    pub fn canonical_heads(&mut self) -> Result<Vec<CanonicalOp>, NodeError> {
         let heads = self.local_heads()?;
         let mut canonical = vec![];
         for head in &heads {
@@ -47,23 +49,23 @@ impl NodeRepo {
     fn reparent_late(&mut self) -> Result<(), NodeError> {
         let late = self.late.clone();
         let op_store = self.loader.op_store().clone();
-        let mut rewrites: std::collections::HashMap<OperationId, OperationId> =
+        let mut rewrites: std::collections::HashMap<LocalOp, LocalOp> =
             std::collections::HashMap::new();
         for local in &late {
             let Some(canonical) = self.canonical_of(local) else {
                 continue;
             };
-            let mut op = op_store.read_operation(local).block_on()?;
+            let mut op = op_store.read_operation(&local.0).block_on()?;
             let parents: Option<Vec<OperationId>> = self
                 .canonical
                 .parents(&canonical)?
                 .iter()
-                .map(|parent| self.local_of(parent))
+                .map(|parent| Some(self.local_of(parent)?.0))
                 .collect();
             let Some(parents) = parents else {
                 tracing::info!(
                     "operation {} stays on the history it was written on",
-                    local.hex()
+                    local.0.hex()
                 );
                 continue;
             };
@@ -71,7 +73,7 @@ impl NodeRepo {
                 continue;
             }
             op.parents = parents;
-            let rewrite = op_store.write_operation(&op).block_on()?;
+            let rewrite = LocalOp(op_store.write_operation(&op).block_on()?);
             self.insert_map(rewrite.clone(), canonical)?;
             rewrites.insert(local.clone(), rewrite);
         }
@@ -80,7 +82,7 @@ impl NodeRepo {
             if let Some(rewrite) = rewrites.get(head) {
                 self.loader
                     .op_heads_store()
-                    .update_op_heads(std::slice::from_ref(head), rewrite)
+                    .update_op_heads(std::slice::from_ref(&head.0), &rewrite.0)
                     .block_on()?;
             }
         }
@@ -94,7 +96,7 @@ impl NodeRepo {
 
     /// The canonical parents of a local operation, as they are now: what renamings
     /// superseded, renamed. Also whether any was.
-    fn current_parents(&self, parents: &[OperationId]) -> (Vec<OperationId>, bool) {
+    fn current_parents(&self, parents: &[LocalOp]) -> (Vec<CanonicalOp>, bool) {
         let mut renamed = false;
         let mut current = vec![];
         for parent in parents {
@@ -115,14 +117,14 @@ impl NodeRepo {
         (current, renamed)
     }
 
-    pub fn canonical_of(&self, local: &OperationId) -> Option<OperationId> {
+    pub fn canonical_of(&self, local: &LocalOp) -> Option<CanonicalOp> {
         if local == self.root_op_id() {
             return Some(self.canonical.root_operation_id().clone());
         }
         self.map.canonical_of(local).cloned()
     }
 
-    pub fn local_of(&self, canonical: &OperationId) -> Option<OperationId> {
+    pub fn local_of(&self, canonical: &CanonicalOp) -> Option<LocalOp> {
         if canonical == self.canonical.root_operation_id() {
             return Some(self.root_op_id().clone());
         }
@@ -139,20 +141,20 @@ impl NodeRepo {
     /// [`NodeError::BeforeJoin`] for it. A merge of it with this machine's later history,
     /// which jj makes, has the merged view, so it leaves the parents from before the join
     /// out of its canonical form.
-    pub fn canonicalize(&mut self, local: &OperationId) -> Result<OperationId, NodeError> {
+    pub fn canonicalize(&mut self, local: &LocalOp) -> Result<CanonicalOp, NodeError> {
         if self.canonical_of(local).is_none() {
             self.check_abandon()?;
         }
         let op_store = self.loader.op_store().clone();
         // Post-order walk: an operation is canonicalized once all its parents are.
-        let mut stack: Vec<(OperationId, Option<StoreOperation>)> = vec![(local.clone(), None)];
+        let mut stack: Vec<(LocalOp, Option<StoreOperation>)> = vec![(local.clone(), None)];
         while let Some((id, loaded)) = stack.pop() {
             if self.canonical_of(&id).is_some() || self.before_join.contains(&id) {
                 continue;
             }
             let op = match loaded {
                 Some(op) => op,
-                None => op_store.read_operation(&id).block_on()?,
+                None => op_store.read_operation(&id.0).block_on()?,
             };
             // A join point that `jj op abandon` rewrote, abandoning history from before the
             // join, which no other machine has: its parents are from before the join.
@@ -163,8 +165,8 @@ impl NodeRepo {
                 self.insert_map(id, join)?;
                 continue;
             }
-            let missing: Vec<_> = op
-                .parents
+            let parents = LocalOp::parents_of(&op);
+            let missing: Vec<_> = parents
                 .iter()
                 .filter(|parent| {
                     self.canonical_of(parent).is_none() && !self.before_join.contains(*parent)
@@ -176,7 +178,7 @@ impl NodeRepo {
                 stack.extend(missing.into_iter().map(|parent| (parent, None)));
                 continue;
             }
-            let late = op.parents.iter().any(|parent| self.late.contains(parent));
+            let late = parents.iter().any(|parent| self.late.contains(parent));
             let canonical_id =
                 if let Some(canonical) = op.metadata.attributes.get(CANONICAL_ATTRIBUTE) {
                     self.realized_canonical(&id, &op, canonical)?
@@ -184,7 +186,7 @@ impl NodeRepo {
                     self.before_join.insert(id);
                     continue;
                 } else {
-                    let (parents, renamed) = self.current_parents(&op.parents);
+                    let (parents, renamed) = self.current_parents(&parents);
                     if renamed || late {
                         self.late.push(id.clone());
                     }
@@ -194,7 +196,7 @@ impl NodeRepo {
         }
         match self.canonical_of(local) {
             Some(canonical) => Ok(canonical),
-            None => Err(NodeError::BeforeJoin(local.hex())),
+            None => Err(NodeError::BeforeJoin(local.0.hex())),
         }
     }
 
@@ -203,16 +205,15 @@ impl NodeRepo {
     /// parents are, or it is the first of the history before a join, on the root. Another
     /// operation on the root, as `jj op abandon` leaves when it abandons everything below
     /// one, is the hive's, which then finds the history it had abandoned.
-    fn is_before_join(&mut self, id: &OperationId, op: &StoreOperation) -> Result<bool, NodeError> {
-        if op
-            .parents
+    fn is_before_join(&mut self, id: &LocalOp, op: &StoreOperation) -> Result<bool, NodeError> {
+        let parents = LocalOp::parents_of(op);
+        if parents
             .iter()
             .all(|parent| self.before_join.contains(parent))
         {
-            return Ok(!op.parents.is_empty());
+            return Ok(!parents.is_empty());
         }
-        if op.parents.as_slice() != std::slice::from_ref(self.root_op_id()) || self.joins.is_empty()
-        {
+        if parents.as_slice() != std::slice::from_ref(self.root_op_id()) || self.joins.is_empty() {
             return Ok(false);
         }
         Ok(self.join_ancestors()?.contains(id))
@@ -221,7 +222,7 @@ impl NodeRepo {
     /// The ancestors of the join points reachable from the op heads, but for the root: the
     /// history before the joins. A join point `jj op abandon` rewrote is one by its
     /// fingerprint, as `canonicalize` takes it, with the rewritten history below it.
-    fn join_ancestors(&mut self) -> Result<Arc<HashSet<OperationId>>, NodeError> {
+    fn join_ancestors(&mut self) -> Result<Arc<HashSet<LocalOp>>, NodeError> {
         if let Some(ancestors) = &self.join_ancestors {
             return Ok(ancestors.clone());
         }
@@ -229,19 +230,19 @@ impl NodeRepo {
         let root = self.root_op_id().clone();
         let mut seen = HashSet::new();
         let mut stack = self.local_heads()?;
-        let mut below_joins: Vec<OperationId> = vec![];
+        let mut below_joins: Vec<LocalOp> = vec![];
         while let Some(id) = stack.pop() {
             if id == root || !seen.insert(id.clone()) {
                 continue;
             }
-            let op = op_store.read_operation(&id).block_on()?;
+            let op = op_store.read_operation(&id.0).block_on()?;
             if self.join_points.contains(&id)
                 || (!op.metadata.attributes.contains_key(CANONICAL_ATTRIBUTE)
                     && self.joins.contains_key(&fingerprint(&op)))
             {
-                below_joins.extend(op.parents);
+                below_joins.extend(LocalOp::parents_of(&op));
             } else {
-                stack.extend(op.parents);
+                stack.extend(LocalOp::parents_of(&op));
             }
         }
         let mut ancestors = HashSet::new();
@@ -250,7 +251,9 @@ impl NodeRepo {
             if id == *self.root_op_id() || !ancestors.insert(id.clone()) {
                 continue;
             }
-            stack.extend(op_store.read_operation(&id).block_on()?.parents);
+            stack.extend(LocalOp::parents_of(
+                &op_store.read_operation(&id.0).block_on()?,
+            ));
         }
         let ancestors = Arc::new(ancestors);
         self.join_ancestors = Some(ancestors.clone());
@@ -265,30 +268,36 @@ impl NodeRepo {
     /// be canonicalized.
     fn realized_canonical(
         &mut self,
-        id: &OperationId,
+        id: &LocalOp,
         op: &StoreOperation,
         canonical: &str,
-    ) -> Result<OperationId, NodeError> {
+    ) -> Result<CanonicalOp, NodeError> {
         let named = OperationId::try_from_hex(canonical)
+            .map(CanonicalOp)
             .filter(|c| self.canonical.has_operation(c))
             .ok_or_else(|| NodeError::DanglingAttribute {
-                op: id.hex(),
+                op: id.0.hex(),
                 canonical: canonical.to_owned(),
             })?;
         let canonical_id = match self.current_ids(&named).as_slice() {
             [now] => now.clone(),
             _ => named,
         };
-        let (parents, renamed) = self.current_parents(&op.parents);
-        if renamed || op.parents.iter().any(|parent| self.late.contains(parent)) {
+        let local_parents = LocalOp::parents_of(op);
+        let (parents, renamed) = self.current_parents(&local_parents);
+        if renamed
+            || local_parents
+                .iter()
+                .any(|parent| self.late.contains(parent))
+        {
             self.late.push(id.clone());
         }
         if parents != self.canonical.parents(&canonical_id)? {
             // For the daemon's log: the error says what a user needs.
             tracing::info!(
                 "operation {} realizes canonical operation {} but no longer has its parents",
-                id.hex(),
-                canonical_id.hex()
+                id.0.hex(),
+                canonical_id.0.hex()
             );
             return Err(NodeError::RewrittenRealization);
         }
@@ -297,18 +306,18 @@ impl NodeRepo {
 
     fn write_canonical(
         &self,
-        id: &OperationId,
+        id: &LocalOp,
         op: &StoreOperation,
-        parents: Vec<OperationId>,
-    ) -> Result<OperationId, NodeError> {
+        parents: Vec<CanonicalOp>,
+    ) -> Result<CanonicalOp, NodeError> {
         self.check_format(id, op)?;
         let view = self.loader.op_store().read_view(&op.view_id).block_on()?;
         let mut metadata = op.metadata.clone();
         if let Some((prefix, target)) = target_of(&metadata.description)
-            && let Some(canonical) = self.canonical_of(&target)
+            && let Some(canonical) = self.canonical_of(&LocalOp(target))
             && self.canonical.is_ancestor(&canonical, &parents)?
         {
-            metadata.description = format!("{prefix}{}", canonical.hex());
+            metadata.description = format!("{prefix}{}", canonical.0.hex());
         }
         // jj records the command that made an operation, which may name an http(s) URL with
         // a token meant for this machine only.
@@ -343,7 +352,7 @@ impl NodeRepo {
         };
         let canonical_op = StoreOperation {
             view_id,
-            parents,
+            parents: parents.into_iter().map(|parent| parent.0).collect(),
             metadata,
             commit_predecessors: op.commit_predecessors.clone(),
         };
@@ -353,16 +362,12 @@ impl NodeRepo {
     }
 
     /// Refuses operations whose files contain fields this jj-lib would drop.
-    pub(super) fn check_format(
-        &self,
-        id: &OperationId,
-        op: &StoreOperation,
-    ) -> Result<(), NodeError> {
+    pub(super) fn check_format(&self, id: &LocalOp, op: &StoreOperation) -> Result<(), NodeError> {
         let op_store_dir = self.repo_path.join("op_store");
         type Check = fn(&[u8]) -> Result<(), FormatError>;
         let checks: [(PathBuf, Check); 2] = [
             (
-                op_store_dir.join("operations").join(id.hex()),
+                op_store_dir.join("operations").join(id.0.hex()),
                 format_guard::check_operation,
             ),
             (
@@ -376,15 +381,15 @@ impl NodeRepo {
             }
             let bytes = fs::read(&path).map_err(|source| NodeError::Io { path, source })?;
             check(&bytes).map_err(|source| NodeError::Format {
-                op: id.hex(),
+                op: id.0.hex(),
                 source,
             })?;
         }
         Ok(())
     }
 
-    pub(super) fn root_op_id(&self) -> &OperationId {
-        self.loader.op_store().root_operation_id()
+    pub(super) fn root_op_id(&self) -> &LocalOp {
+        &self.local_root
     }
 }
 

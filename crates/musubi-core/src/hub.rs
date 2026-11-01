@@ -32,17 +32,32 @@ pub trait HubStorage {
     /// The hub's records as of its head.
     fn records(&self) -> RecordState;
 
+    /// How many of its first records the hub has pruned, keeping of them only this, and their
+    /// digest.
+    fn pruned(&self) -> RecordState;
+
     /// The hub's records that a party with `records` lacks: those from the returned index on.
     /// That is `records.count` where the party's records are the hub's first ones, and
-    /// otherwise 0, all of them.
+    /// otherwise how many it has pruned, all those it remembers.
     #[expect(clippy::type_complexity)]
     fn records_since(
         &self,
         records: &RecordState,
     ) -> Result<(u64, Vec<Vec<Self::Op>>), Self::Error>;
 
-    /// Whether `op` is dropped, by the hub's records or by `dropped`.
+    /// Whether `op` is dropped, by the records the hub remembers or by `dropped`.
     fn is_dropped(&self, op: &Self::Op, dropped: &[Self::Op]) -> Result<bool, Self::Error>;
+
+    /// Remembers that `machine` said it took `records`, in a request. Kept only in memory: a
+    /// hub that restarts waits to hear from every machine again.
+    fn report(&mut self, machine: &str, records: &RecordState);
+
+    /// What `machine` last said it took, since the hub started.
+    fn reported(&self, machine: &str) -> Option<RecordState>;
+
+    /// Prunes the first `count` records, which the hub has, and at least as many as it has
+    /// pruned: forgets their ids, and the ids they superseded, keeping their count and digest.
+    fn prune(&mut self, count: u64) -> Result<(), Self::Error>;
 
     fn store_ops(
         &mut self,
@@ -124,10 +139,12 @@ pub fn handle<S: HubStorage>(
     };
     match request {
         Request::Fetch {
+            machine,
             base,
             haves,
             records,
         } => {
+            storage.report(&machine, &records);
             let (seq, head) = storage.head();
             let (ops, ops_attachment) = storage.ops_since(&head, &base)?;
             let ids: Vec<S::Op> = ops.iter().map(|entry| entry.id.clone()).collect();
@@ -142,6 +159,7 @@ pub fn handle<S: HubStorage>(
                 records: storage.records(),
                 records_from,
                 new_records,
+                pruned: storage.pruned(),
             })
         }
         Request::GetObjects {
@@ -156,6 +174,7 @@ pub fn handle<S: HubStorage>(
             })
         }
         Request::Push {
+            machine,
             ops,
             ops_attachment,
             objects,
@@ -165,6 +184,7 @@ pub fn handle<S: HubStorage>(
             dropped,
         } => {
             let push = Push {
+                machine: &machine,
                 ops: &ops,
                 ops_attachment: &ops_attachment,
                 objects: &objects,
@@ -178,8 +198,31 @@ pub fn handle<S: HubStorage>(
     }
 }
 
+/// Prunes all of the hub's records once every machine in `waited` has said it took every
+/// one, and it remembers any (docs/internals/design.md, "What an abandon costs the hub"):
+/// pruning only what every machine has taken keeps every machine converging
+/// (`Exec.sexec_allPruned`). The caller says which machines to wait for: every copy the hive
+/// hasn't forgotten. Returns how many records the hub has pruned, if it pruned any now.
+pub fn prune<S: HubStorage>(
+    storage: &mut S,
+    waited: impl IntoIterator<Item = impl AsRef<str>>,
+) -> Result<Option<u64>, S::Error> {
+    let records = storage.records();
+    if storage.pruned().count == records.count {
+        return Ok(None);
+    }
+    for machine in waited {
+        if storage.reported(machine.as_ref()).as_ref() != Some(&records) {
+            return Ok(None);
+        }
+    }
+    storage.prune(records.count)?;
+    Ok(Some(records.count))
+}
+
 /// A `Push`, borrowed.
 pub struct Push<'a, O, A> {
+    pub machine: &'a str,
     pub ops: &'a [O],
     pub ops_attachment: &'a A,
     pub objects: &'a A,
@@ -191,7 +234,9 @@ pub struct Push<'a, O, A> {
 
 impl<O: Clone + Eq, A> Push<'_, O, A> {
     /// Answers the push. It is refused, storing nothing, unless its records are the hub's and
-    /// `new` isn't dropped, by them or by the push: its ids aren't the hub's. Otherwise it
+    /// `new` isn't dropped, by the records the hub remembers or by the push: its ids aren't
+    /// the hub's. Once the hub has pruned a record, only the push's records keep out a head
+    /// it dropped: a node never pushes one that a record it took drops. Otherwise it
     /// stores the operations and objects, then is idempotent if `new` is already the head,
     /// and otherwise accepted exactly when `head = expected`, `closure(new)` is stored, and
     /// `expected ∈ anc*(new)`, all once the history drops what the push drops. Where `head =
@@ -201,6 +246,7 @@ impl<O: Clone + Eq, A> Push<'_, O, A> {
     where
         S: HubStorage<Op = O, Attachment = A>,
     {
+        storage.report(self.machine, self.records);
         let records = storage.records();
         if *self.records != records || storage.is_dropped(self.new, self.dropped)? {
             return Ok((

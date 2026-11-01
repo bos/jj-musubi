@@ -113,6 +113,10 @@ pub enum NodeError {
         "cannot tell which operations jj abandoned\nHint: run `jj op integrate {0}` to restore the missing history before syncing"
     )]
     AmbiguousAbandon(String),
+    /// The hub pruned records of dropped operations that this machine never took, as when
+    /// the hive forgot this copy: it can't tell which of its operations they drop.
+    #[error("{HISTORY_GONE}")]
+    PrunedRecords,
     /// The hub accepts an operation only with everything it requires, which a shallow or
     /// partial clone can't send.
     #[error(

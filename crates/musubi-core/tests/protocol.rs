@@ -49,7 +49,7 @@ impl Machine {
     }
 
     /// `jj op abandon` of some of the operations below a node's heads.
-    #[rule]
+    #[rule(weight = 2)]
     fn op_abandon(&mut self, tc: TestCase) {
         let mut world = self.world.borrow_mut();
         let node = pick(&tc, world.nodes());
@@ -141,7 +141,7 @@ impl Machine {
         let node = pick(&tc, world.nodes());
         let (ops, objs) = world.hub_stored();
         // The node's own records, so that the reply is judged on its operations alone.
-        let (records, records_from) = world.node_records(node);
+        let (records, records_from, pruned) = world.node_records(node);
         let some = |items: &[u64]| -> Vec<u64> {
             if items.is_empty() {
                 return vec![];
@@ -192,6 +192,7 @@ impl Machine {
                 records,
                 records_from,
                 new_records: vec![],
+                pruned,
             },
             _ => Reply::Objects {
                 for_ops: some(&ops),
@@ -200,6 +201,18 @@ impl Machine {
         };
         let own = tc.draw(gs::booleans());
         world.false_reply(node, reply, own);
+    }
+
+    /// The hub prunes its records, once every node has said it took them all: sometimes
+    /// once the hive has converged, every node having fetched last, telling the hub it took
+    /// them, so that what follows meets a hub that has pruned.
+    #[rule]
+    fn prune(&mut self, tc: TestCase) {
+        let mut world = self.world.borrow_mut();
+        if tc.draw(gs::booleans()) {
+            world.quiesce();
+        }
+        world.prune();
     }
 
     #[rule]
@@ -287,6 +300,12 @@ fn run(tc: TestCase, oracle: Option<Oracle>, false_replies: bool) -> Option<Orac
     })
     .run(tc);
     let mut world = world.borrow_mut();
+    world.quiesce();
+    world.check_invariants();
+    // Every node has said, fetching last, that it took every record: the hub prunes them, and
+    // the hive still converges.
+    world.prune();
+    assert_eq!(world.hub_pruned(), world.hub_records().len());
     world.quiesce();
     world.check_invariants();
     if let Some(path) = std::env::var_os("MUSUBI_TRACE_STATS") {
@@ -672,6 +691,46 @@ fn a_push_without_the_hubs_records_is_refused() {
     let new = *world.local_ops(0).last().unwrap();
     assert_eq!(world.answer_push(head, new, &[], &[]), CasOutcome::Refused);
     assert_eq!(world.hub_head(), head);
+}
+
+/// The hub prunes its records once every node has said it took them all, and not before: then
+/// it no longer refuses a push by a pruned id, but still by its records. More abandons after
+/// it are taken, and pruned too. Through the core and the oracle.
+#[test]
+fn prune_conformance() {
+    let mut world = World::new(2, Some(Oracle::spawn()));
+    world.user_op(0, 0, 0);
+    world.user_op(0, 1, 0);
+    world.quiesce();
+    world.op_abandon(0, vec![1]);
+    // Node 0 publishes the abandon; node 1, which hasn't taken it, holds pruning back.
+    while world.hub_records().is_empty() {
+        world.exchange(0, 0);
+    }
+    world.poll_now(0);
+    world.prune();
+    assert_eq!(world.hub_pruned(), 0);
+    world.quiesce();
+    world.prune();
+    assert_eq!(world.hub_pruned(), 1);
+    let head = world.hub_head();
+    // Not refused by its id, which the hub no longer knows, but by its records.
+    assert_eq!(
+        world.answer_push(head, 1, &[vec![1]], &[]),
+        CasOutcome::Rejected
+    );
+    assert_eq!(world.answer_push(head, 1, &[], &[]), CasOutcome::Refused);
+    world.user_op(1, head, 0);
+    let new = *world.local_ops(1).last().unwrap();
+    world.op_abandon(1, vec![head]);
+    world.quiesce();
+    world.check_invariants();
+    assert_eq!(world.hub_records().len(), 2, "{:#?}", world.trace);
+    world.prune();
+    assert_eq!(world.hub_pruned(), 2);
+    assert!(world.local_ops(0).contains(&new));
+    world.quiesce();
+    world.check_invariants();
 }
 
 /// A push with the hub's records is refused if its new head is one the hub dropped, or one

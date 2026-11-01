@@ -32,14 +32,32 @@ pub struct RecordState {
     pub digest: Vec<u8>,
 }
 
+/// The hub's records as a party holds them: the first ones known only by their count and
+/// digest, `base`, as a machine that joined after the hub pruned them holds them, then the
+/// rest, oldest first, each sorted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Records<O> {
+    pub base: RecordState,
+    pub records: Vec<Vec<O>>,
+}
+
+impl<O> Records<O> {
+    /// How many records these are, `base` included.
+    pub fn count(&self) -> u64 {
+        self.base.count + self.records.len() as u64
+    }
+}
+
 /// A request. Each takes one round trip.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Request<O, A> {
     /// The hub's head, with the stored operations in `anc*(head) \ anc*(base)` and the
     /// stored objects they require. `base` is an operation the hub accepted that the node
     /// has, so the hub leaves out `closure(base)`; `haves` says what else the node has. The
-    /// hub sends the records the node lacks, of its own, with them.
+    /// hub sends the records the node lacks, of its own, with them. `machine` is the node's
+    /// key: the hub prunes its records once every machine it waits for has said it took them.
     Fetch {
+        machine: String,
         base: O,
         haves: A,
         records: RecordState,
@@ -50,8 +68,10 @@ pub enum Request<O, A> {
     /// Store these operations and objects, then `Cas(expected, new)`, in one critical
     /// section. The attachments carry the operations and the objects they require. The hub
     /// refuses it unless `records` are its own. A supersede drops `dropped` too, which the
-    /// hub then takes as its next record; an ordinary push drops nothing.
+    /// hub then takes as its next record; an ordinary push drops nothing. `machine` is the
+    /// node's key, as in `Fetch`.
     Push {
+        machine: String,
         ops: Vec<O>,
         ops_attachment: A,
         objects: A,
@@ -82,8 +102,9 @@ pub enum Reply<O, A> {
     },
     /// Answer to `Fetch`: the hub's `(seq, head)`, and the operations since the base,
     /// ancestors first, with their objects. With the hub's records: `new_records` are those
-    /// from the `records_from`th on, the ones the node lacks, or all of them if the node's
-    /// aren't the first of the hub's.
+    /// from the `records_from`th on: the ones the node lacks, or, if the node's aren't the
+    /// first of the hub's, all those the hub hasn't pruned. `pruned` is the count and digest
+    /// of those it has: a node whose records don't start with them can never take the hub's.
     Fetched {
         seq: u64,
         head: O,
@@ -93,6 +114,7 @@ pub enum Reply<O, A> {
         records: RecordState,
         records_from: u64,
         new_records: Vec<Vec<O>>,
+        pruned: RecordState,
     },
     /// Answer to a `Push` whose records aren't the hub's, so that its ids aren't either, or
     /// whose new head is dropped: the hub took nothing of it.

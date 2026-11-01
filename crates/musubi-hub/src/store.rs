@@ -11,7 +11,9 @@
 //!   before any reply that depends on it. Its last line is the current head. A head accepted
 //!   with a record, a supersede's, has the record's operation ids after it on its line, so
 //!   that a log cut short loses heads and records together (docs/internals/design.md,
-//!   "Abandoning operations").
+//!   "Abandoning operations"). Once the hub has pruned its records, the log starts with a
+//!   `pruned <count> <digest>` line, and names every head as the records left the history
+//!   then; it is written again whole at each prune.
 //!
 //! None of it is synced to disk: a hub only gathers what its machines' repositories hold,
 //! so one that loses its state is made again, empty, and they fill it (see "Replacing the
@@ -20,11 +22,13 @@
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::io::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
@@ -32,6 +36,7 @@ use jj_lib::op_store::OperationId;
 use musubi_jj::canonical::CanonicalError;
 use musubi_jj::canonical::CanonicalStore;
 use musubi_jj::canonical::Contraction;
+use musubi_jj::canonical::PresenceMemo;
 use musubi_jj::objects::Backend;
 use musubi_jj::objects::GitObjects;
 use musubi_jj::objects::GitStore;
@@ -39,6 +44,7 @@ use musubi_jj::objects::ObjectError;
 use musubi_jj::objects::ObjectStore;
 use musubi_jj::objects::SimpleStore;
 use musubi_jj::op_id::CanonicalOp;
+use musubi_jj::presence::Presence;
 use musubi_jj::records::HubOp;
 use musubi_jj::records::Record;
 use musubi_jj::records::RecordDigest;
@@ -96,16 +102,23 @@ pub struct HubStore {
     /// `hist`: the head accepted at each sequence number, the root operation at 0 and the
     /// head now last. Each as the records now name it, or as it was, if they dropped it.
     history: Vec<OperationId>,
-    /// The records, in the order they were taken, and the digest of each first so many.
+    /// How many of its first records the hub has pruned, keeping of them only this, and
+    /// their digest, `digests[0]`.
+    pruned: usize,
+    /// The records after those, in the order they were taken, and the digest of the pruned
+    /// ones and of each first so many after them.
     records: Vec<Record>,
     digests: Vec<RecordDigest>,
     /// What each operation the records superseded became when one did: its rewrite, or for a
     /// dropped one, what its parents were then, which later records may have superseded
-    /// ([`HubStore::current`] composes them).
+    /// ([`HubStore::current`] composes them). None that a pruned record superseded.
     superseded: HashMap<OperationId, Vec<OperationId>>,
-    /// Every operation a record named.
+    /// Every operation a record named, but a pruned one.
     named: HashSet<OperationId>,
+    /// The original identity of every operation a record dropped, but a pruned one.
     named_origins: HashSet<OperationId>,
+    /// Which copies are present at the head, as worked out last.
+    presences: PresenceMemo,
 }
 
 /// What the history becomes with more dropped: what [`HubStore::contract`] works out.
@@ -156,7 +169,8 @@ impl HubStore {
         let backend =
             Backend::parse(&name).ok_or_else(|| StoreError::UnknownBackend(name.into_owned()))?;
         let canonical = CanonicalStore::open(&dir.join("canonical"), backend.root_commit())?;
-        let history = read_heads(dir)?;
+        let (pruned, history) = read_heads(dir)?;
+        let (pruned, digest) = pruned.unwrap_or((0, RecordDigest::root()));
         let mut store = Self {
             dir: dir.to_owned(),
             backend,
@@ -164,11 +178,13 @@ impl HubStore {
             accepted: HashMap::new(),
             accepted_origins: HashMap::new(),
             history: vec![],
+            pruned,
             records: vec![],
-            digests: vec![RecordDigest::root()],
+            digests: vec![digest],
             superseded: HashMap::new(),
             named: HashSet::new(),
             named_origins: HashSet::new(),
+            presences: PresenceMemo::default(),
         };
         for (head, record) in history {
             if !record.is_empty() {
@@ -181,14 +197,74 @@ impl HubStore {
         Ok(store)
     }
 
-    /// The records, oldest first.
+    /// The records the hub remembers, those after the ones it pruned, oldest first.
     pub fn records(&self) -> &[Record] {
         &self.records
     }
 
-    /// The digest of the first `count` records, if there are as many.
+    /// How many records the hub has taken, pruned or not.
+    pub fn record_count(&self) -> usize {
+        self.pruned + self.records.len()
+    }
+
+    /// How many of its first records the hub has pruned.
+    pub fn pruned(&self) -> usize {
+        self.pruned
+    }
+
+    /// The digest of the first `count` records, if there are as many and the hub hasn't
+    /// pruned more.
     pub fn digest(&self, count: usize) -> Option<&RecordDigest> {
-        self.digests.get(count)
+        self.digests.get(count.checked_sub(self.pruned)?)
+    }
+
+    /// Which copies are present at the head, those whose work it has but for work a forget
+    /// of theirs saw, and which the history has known (docs/internals/design.md, "Presence").
+    pub fn presence(&self) -> Result<Arc<Presence<CanonicalOp>>, StoreError> {
+        let head = CanonicalOp(self.head().1.clone());
+        Ok(self.presences.presence(&self.canonical, &head)?)
+    }
+
+    /// Prunes every record the hub has: forgets their ids, the ids they superseded and the
+    /// original identities they dropped, keeping their count and digest, and writes the `heads` log again, so that opening the
+    /// store takes none of them again. A head they dropped stays in the history as the first
+    /// accepted operation of what it became, or the root (docs/internals/design.md, "What an
+    /// abandon costs the hub").
+    pub fn prune(&mut self) -> Result<(), StoreError> {
+        if self.records.is_empty() {
+            return Ok(());
+        }
+        let root = self.canonical.root_operation_id().0.clone();
+        let renamed: Vec<OperationId> = self
+            .history
+            .iter()
+            .map(|head| {
+                if self.accepted.contains_key(head) {
+                    return head.clone();
+                }
+                self.current(head)
+                    .into_iter()
+                    .find(|op| self.accepted.contains_key(op))
+                    .unwrap_or_else(|| root.clone())
+            })
+            .collect();
+        let digest = self.digests.last().expect("the pruned digest").clone();
+        let pruned = self.record_count();
+        write_heads(&self.dir, (pruned, &digest), &renamed)?;
+        self.history = renamed;
+        self.pruned = pruned;
+        self.records.clear();
+        self.digests = vec![digest];
+        self.superseded = HashMap::new();
+        self.named = HashSet::new();
+        self.named_origins = HashSet::new();
+        Ok(())
+    }
+
+    /// How many ids of the history before the records' renamings the hub keeps in memory:
+    /// what the records dropped and superseded, and the original identities they dropped.
+    pub fn remembered_ids(&self) -> usize {
+        self.named.len() + self.superseded.len() + self.named_origins.len()
     }
 
     /// Whether the records dropped or superseded `op`: it was, or is, no operation of the
@@ -578,16 +654,38 @@ fn hub_op(op: OperationId) -> HubOp {
 /// A head as the log has it, with the record it was accepted with, if any.
 type LoggedHead = (OperationId, Vec<OperationId>);
 
+/// How many records the hub pruned, and their digest, as the log has them.
+type LoggedPruned = Option<(usize, RecordDigest)>;
+
+/// The first line of a log of a hub that pruned its records.
+const PRUNED_PREFIX: &str = "pruned ";
+
 /// Reads the log of accepted heads. A line torn by a power cut makes it corrupt: the hive
 /// is made again rather than recovered (see "Replacing the hub" in docs/internals/design.md).
-fn read_heads(dir: &Path) -> Result<Vec<LoggedHead>, StoreError> {
+fn read_heads(dir: &Path) -> Result<(LoggedPruned, Vec<LoggedHead>), StoreError> {
     let path = dir.join("heads");
     let bytes = fs::read(&path).map_err(io_err(&path))?;
     let Ok(text) = String::from_utf8(bytes) else {
         return Err(StoreError::CorruptHead(path));
     };
     let mut heads = vec![];
-    for line in text.split_terminator('\n') {
+    let mut lines = text.split_terminator('\n').peekable();
+    let mut pruned = None;
+    if let Some(line) = lines.next_if(|line| line.starts_with(PRUNED_PREFIX)) {
+        let mut words = line[PRUNED_PREFIX.len()..].split(' ');
+        let count = words.next().and_then(|count| count.parse::<usize>().ok());
+        let digest = words
+            .next()
+            .filter(|hex| hex.len() == RecordDigest::root().bytes().len() * 2)
+            .and_then(jj_lib::hex_util::decode_hex);
+        match (count, digest, words.next()) {
+            (Some(count), Some(digest), None) => {
+                pruned = Some((count, RecordDigest::from_bytes(&digest)));
+            }
+            _ => return Err(StoreError::CorruptHead(path)),
+        }
+    }
+    for line in lines {
         // Whole ids only: a line torn and another appended after it can read as a short one.
         let id = |hex: &str| OperationId::try_from_hex(hex).filter(|id| id.as_bytes().len() == 64);
         let mut words = line.split(' ');
@@ -604,7 +702,25 @@ fn read_heads(dir: &Path) -> Result<Vec<LoggedHead>, StoreError> {
     if heads.is_empty() || !text.ends_with('\n') {
         return Err(StoreError::CorruptHead(path));
     }
-    Ok(heads)
+    Ok((pruned, heads))
+}
+
+/// Writes the log of accepted heads again, whole: `pruned`, how many records the hub pruned
+/// and their digest, then each head, with no record.
+fn write_heads(
+    dir: &Path,
+    (count, digest): (usize, &RecordDigest),
+    heads: &[OperationId],
+) -> Result<(), StoreError> {
+    let mut text = format!(
+        "{PRUNED_PREFIX}{count} {}\n",
+        jj_lib::hex_util::encode_hex(digest.bytes())
+    );
+    for (seq, head) in heads.iter().enumerate() {
+        writeln!(text, "{seq} {}", head.hex()).expect("writing to a String");
+    }
+    let path = dir.join("heads");
+    musubi_jj::files::replace(&path, text.as_bytes()).map_err(io_err(&path))
 }
 
 /// Whether `err`, opening a store, means it is corrupt, as a power cut can leave one, rather
@@ -645,12 +761,32 @@ fn append_head(
 mod tests {
     #![allow(clippy::unwrap_used)]
 
-    use std::fmt::Write as _;
-
     use hegel::TestCase;
     use hegel::generators as gs;
 
     use super::*;
+
+    /// A log written again, pruned, reads back as written, its count and digest first; with
+    /// its first line torn, it is corrupt.
+    #[test]
+    fn a_pruned_log_reads_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let heads: Vec<OperationId> = (0..3).map(|i| OperationId::new(vec![i; 64])).collect();
+        let digest = RecordDigest::root().then(&Record::new([hub_op(heads[1].clone())]));
+        write_heads(dir.path(), (1, &digest), &heads).unwrap();
+        let (pruned, read) = read_heads(dir.path()).unwrap();
+        assert_eq!(pruned, Some((1, digest)));
+        let read: Vec<OperationId> = read.into_iter().map(|(head, _)| head).collect();
+        assert_eq!(read, heads);
+        let path = dir.path().join("heads");
+        let text = fs::read_to_string(&path).unwrap();
+        let first = text.find('\n').unwrap();
+        fs::write(&path, format!("{}{}", &text[..first - 1], &text[first..])).unwrap();
+        assert!(matches!(
+            read_heads(dir.path()),
+            Err(StoreError::CorruptHead(_))
+        ));
+    }
 
     /// A log cut where a line ends, keeping one, reads as the heads before the cut; cut
     /// anywhere else, or to nothing, it is corrupt.
@@ -659,8 +795,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let count = tc.draw(gs::integers::<u8>().min_value(1).max_value(12));
         let heads: Vec<OperationId> = (0..count).map(|i| OperationId::new(vec![i; 64])).collect();
+        // Sometimes the log of a hub that pruned its records, which starts with their count
+        // and digest: a cut that keeps only that line keeps no head.
+        let pruned = tc
+            .draw(gs::booleans())
+            .then(|| (3, RecordDigest::root().then(&Record::new([]))));
         let mut text = String::new();
-        let mut ends = vec![0];
+        if let Some((count, digest)) = &pruned {
+            writeln!(
+                text,
+                "{PRUNED_PREFIX}{count} {}",
+                jj_lib::hex_util::encode_hex(digest.bytes())
+            )
+            .unwrap();
+        }
+        let mut ends = vec![text.len()];
         for (seq, head) in heads.iter().enumerate() {
             writeln!(text, "{seq} {}", head.hex()).unwrap();
             ends.push(text.len());
@@ -673,11 +822,9 @@ mod tests {
         fs::write(dir.path().join("heads"), &text[..cut]).unwrap();
         match ends.iter().position(|&end| end == cut) {
             Some(lines) if lines > 0 => {
-                let read: Vec<OperationId> = read_heads(dir.path())
-                    .unwrap()
-                    .into_iter()
-                    .map(|(head, _)| head)
-                    .collect();
+                let (read_pruned, read) = read_heads(dir.path()).unwrap();
+                assert_eq!(read_pruned, pruned);
+                let read: Vec<OperationId> = read.into_iter().map(|(head, _)| head).collect();
                 assert_eq!(read, heads[..lines]);
             }
             _ => assert!(matches!(

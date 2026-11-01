@@ -220,6 +220,14 @@ the repository stays as it was at each operation that's left, and the operations
 abandoned ones get new ids: ids you noted from `jj op log` on any machine no longer work.
 musubi adds an operation to the log saying so, `musubi: pass on jj op abandon`.
 
+The hub remembers an abandon until every machine still in the hive has taken it, so a machine
+that's offline delays this until it syncs. Then the hub forgets it, so trimming old history
+with `jj op abandon ..<operation>` doesn't leave the hub remembering every abandoned operation,
+though it keeps them on its disk. A copy that was away when the abandon happened, forgotten with
+`musubi forget` or by its `musubi.forget-after`, or out with `musubi leave`, can't sync again when
+it comes back: it stops with "this repository's history no longer matches the hive's" ([what to
+do](../troubleshooting.md#this-repositorys-history-no-longer-matches-the-hives-so-it-cant-sync-again)).
+
 A `jj` command that was already running on another machine when the abandon reached it,
 such as a long `jj git fetch`, still syncs its work. If a second command there merges that
 work before musubi has seen it, bookmarks the first one changed can come out conflicted, as

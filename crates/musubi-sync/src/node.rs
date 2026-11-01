@@ -14,6 +14,7 @@ use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
 use musubi_core::message::OpEntry;
 use musubi_core::message::RecordState;
+use musubi_core::message::Records;
 use musubi_core::node::LocalRepo;
 use musubi_jj::node::NodeError;
 use musubi_jj::node::NodeOp;
@@ -22,6 +23,8 @@ use musubi_jj::node::REALIZE_AT_ONCE;
 use musubi_jj::op_id::CanonicalOp;
 use musubi_jj::records::HubOp;
 use musubi_jj::records::Record;
+use musubi_jj::records::RecordDigest;
+use musubi_jj::records::RecordPrefix;
 
 use crate::Attachment;
 use crate::OpId;
@@ -336,6 +339,22 @@ fn records_of(records: &[Vec<OpId>]) -> Vec<Record> {
         .collect()
 }
 
+/// The records the core's `base` stands for.
+fn prefix_of(base: &RecordState) -> RecordPrefix {
+    RecordPrefix {
+        count: base.count,
+        digest: RecordDigest::from_bytes(&base.digest),
+    }
+}
+
+/// The state of records whose digest is `digest`, as the protocol carries it.
+fn state_of(count: u64, digest: &RecordDigest) -> RecordState {
+    RecordState {
+        count,
+        digest: digest.bytes().to_vec(),
+    }
+}
+
 /// Whether `err` is that this repository lost history the hive has, which no `jj op abandon`
 /// explains and no retry gets past.
 pub fn history_lost(err: &anyhow::Error) -> bool {
@@ -346,6 +365,7 @@ pub fn history_lost(err: &anyhow::Error) -> bool {
                 NodeError::UnreachableHistory
                     | NodeError::RewrittenRealization
                     | NodeError::DamagedLog
+                    | NodeError::PrunedRecords
             )
         )
     })
@@ -355,6 +375,10 @@ impl LocalRepo for NodeAdapter {
     type Op = OpId;
     type Attachment = Attachment;
     type Error = anyhow::Error;
+
+    fn machine(&self) -> String {
+        self.repo.machine().key().to_owned()
+    }
 
     fn heads(&mut self) -> anyhow::Result<Vec<OpId>> {
         // jj never makes an operation the hub accepted unreachable from the op heads except
@@ -611,21 +635,31 @@ impl LocalRepo for NodeAdapter {
         Ok(())
     }
 
-    fn applied_records(&self) -> anyhow::Result<Vec<Vec<OpId>>> {
-        Ok(self
-            .repo
-            .applied_records()
-            .iter()
-            .map(|record| record.ops().iter().map(|op| op.0.0.clone()).collect())
-            .collect())
+    fn applied_records(&self) -> anyhow::Result<Records<OpId>> {
+        let prefix = self.repo.record_prefix();
+        Ok(Records {
+            base: state_of(prefix.count, &prefix.digest),
+            records: self
+                .repo
+                .applied_records()
+                .iter()
+                .map(|record| record.ops().iter().map(|op| op.0.0.clone()).collect())
+                .collect(),
+        })
     }
 
     fn records(&self) -> anyhow::Result<RecordState> {
         let (count, digest) = self.repo.record_state();
-        Ok(RecordState {
-            count,
-            digest: digest.bytes().to_vec(),
-        })
+        Ok(state_of(count, &digest))
+    }
+
+    fn records_state(&self, records: &Records<OpId>) -> anyhow::Result<RecordState> {
+        let digest = records_of(&records.records)
+            .iter()
+            .fold(prefix_of(&records.base).digest, |digest, record| {
+                digest.then(record)
+            });
+        Ok(state_of(records.count(), &digest))
     }
 
     fn pending(&self) -> anyhow::Result<Vec<OpId>> {
@@ -638,25 +672,22 @@ impl LocalRepo for NodeAdapter {
             .collect())
     }
 
-    fn records_with(&self, record: &[OpId]) -> anyhow::Result<RecordState> {
-        let record = Record::new(record.iter().map(hub));
-        let (count, digest) = self.repo.record_state_with(&record);
-        Ok(RecordState {
-            count,
-            digest: digest.bytes().to_vec(),
-        })
-    }
-
-    fn prepare_records(&mut self, records: &[Vec<OpId>]) -> anyhow::Result<bool> {
+    fn prepare_records(&mut self, records: &Records<OpId>) -> anyhow::Result<bool> {
         self.repo.settle()?;
-        Ok(self.repo.prepare_records(&records_of(records))?)
+        Ok(self
+            .repo
+            .prepare_records(&prefix_of(&records.base), &records_of(&records.records))?)
     }
 
-    fn adopt(&mut self, records: &[Vec<OpId>]) -> anyhow::Result<()> {
+    fn adopt(&mut self, records: &Records<OpId>) -> anyhow::Result<()> {
         self.repo.settle()?;
         // The base, as the hub names it now: what it became, or, if dropped, the first of
         // what was below it, also accepted.
-        if let Some(HubOp(base)) = self.repo.adopt_records(&records_of(records))? {
+        let prefix = prefix_of(&records.base);
+        if let Some(HubOp(base)) = self
+            .repo
+            .adopt_records(&prefix, &records_of(&records.records))?
+        {
             self.set_accepted_base(&base.0)?;
         }
         // Staged operations, as the hub named them before, are stale.
@@ -664,6 +695,18 @@ impl LocalRepo for NodeAdapter {
         self.staged_children.clear();
         *self.base_ancestry.borrow_mut() = None;
         Ok(())
+    }
+
+    fn fresh(&self) -> anyhow::Result<bool> {
+        Ok(self.repo.is_fresh())
+    }
+
+    fn share(&mut self) -> anyhow::Result<()> {
+        Ok(self.repo.share()?)
+    }
+
+    fn lacks_pruned(&self) -> anyhow::Error {
+        NodeError::PrunedRecords.into()
     }
 
     fn is_dropped(&self, op: &OpId) -> anyhow::Result<bool> {

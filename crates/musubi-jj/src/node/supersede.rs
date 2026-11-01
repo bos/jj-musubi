@@ -49,6 +49,7 @@ use crate::presence::format_forget_after;
 use crate::records::HubOp;
 use crate::records::Record;
 use crate::records::RecordDigest;
+use crate::records::RecordPrefix;
 use crate::translation_map::ID_HEX_LEN;
 use crate::translation_map::whole_id;
 
@@ -72,9 +73,17 @@ const HUB_RENAMINGS_FILE: &str = "hub-renamings";
 /// What a node keeps about the hive's records.
 #[derive(Default)]
 pub(super) struct Records {
-    /// The hub's records this node took, oldest first.
+    /// The first of the hub's records this node took, known only by their count and digest:
+    /// none, unless it joined after the hub pruned them.
+    prefix: RecordPrefix,
+    /// The hub's records this node took after `prefix`, oldest first.
     applied: Vec<Record>,
+    /// The digest of `prefix` and each first so many of `applied`.
     digests: Vec<RecordDigest>,
+    /// Whether this node has nothing of the hive's, so that it may take the hub's records
+    /// from those the hub pruned (`musubi_core::node::LocalRepo::fresh`): it joined on the
+    /// root, and has taken no records, pushed nothing and realized nothing since.
+    fresh: bool,
     /// What this node dropped beyond them.
     pending: Record,
     /// What to write before publishing `pending`, and whether it has been.
@@ -110,6 +119,8 @@ pub(super) struct Records {
 /// Records of the hub's being taken: the node's history renamed as they name it, written
 /// beside its own, until its op heads move there.
 struct Taking {
+    /// The first of them, known only by their count and digest.
+    prefix: RecordPrefix,
     records: Vec<Record>,
     /// How many of them this node took already.
     common: usize,
@@ -134,6 +145,9 @@ struct Taking {
 
 #[derive(Default, Serialize, Deserialize)]
 struct RecordsFile {
+    /// The count and hex digest of `Records::prefix`, if it has any.
+    #[serde(default)]
+    prefix: Option<(u64, String)>,
     applied: Vec<Vec<String>>,
     pending: Vec<String>,
     fixup: Option<Fixup>,
@@ -145,6 +159,8 @@ struct RecordsFile {
     /// How many renamings of the steps log count: one appended after is from a run cut short.
     #[serde(default)]
     steps: usize,
+    #[serde(default)]
+    fresh: bool,
 }
 
 /// What a fix-up writes: work by each copy whose presence, latest work or forget-after an
@@ -227,9 +243,23 @@ impl Records {
             .iter()
             .map(|record| parse_record(&path, record))
             .collect::<Result<Vec<_>, _>>()?;
+        let prefix = match &file.prefix {
+            None => RecordPrefix::none(),
+            Some((count, hex)) => RecordPrefix {
+                count: *count,
+                digest: jj_lib::hex_util::decode_hex(hex)
+                    .map(|bytes| RecordDigest::from_bytes(&bytes))
+                    .ok_or_else(|| NodeError::Io {
+                        path: path.clone(),
+                        source: std::io::Error::other(format!("bad record digest {hex}")),
+                    })?,
+            },
+        };
         let mut records = Self {
-            digests: digests(&applied),
+            digests: digests(&prefix.digest, &applied),
+            prefix,
             applied,
+            fresh: file.fresh,
             pending: parse_record(&path, &file.pending)?,
             fixup: file.fixup,
             fixup_written: file.fixup_written,
@@ -294,9 +324,9 @@ impl Records {
     }
 }
 
-/// The digest of each first so many of `records`.
-fn digests(records: &[Record]) -> Vec<RecordDigest> {
-    let mut digests = vec![RecordDigest::root()];
+/// The digest of each first so many of `records`, after the records `start` is the digest of.
+fn digests(start: &RecordDigest, records: &[Record]) -> Vec<RecordDigest> {
+    let mut digests = vec![start.clone()];
     for record in records {
         let digest = digests.last().expect("the root digest").then(record);
         digests.push(digest);
@@ -374,16 +404,18 @@ impl<T> Block<T> {
     }
 }
 
-/// How the records after the first `from` of `records` renamed the hub's history, as the
-/// renamings log has them: each a `record <digest> <lines>` line, the digest being of the
-/// records up to it, then a `new old` line for each operation. It starts a line, so that it
-/// stands apart from a line a crash tore before it.
+/// How the records after the first `from` of `records`, which come after the records `start`
+/// is the digest of, renamed the hub's history, as the renamings log has them: each a `record
+/// <digest> <lines>` line, the digest being of the records up to it, then a `new old` line for
+/// each operation. It starts a line, so that it stands apart from a line a crash tore before
+/// it.
 fn format_hub_renamings(
+    start: &RecordDigest,
     records: &[Record],
     from: usize,
     renamings: &[HashMap<CanonicalOp, CanonicalOp>],
 ) -> String {
-    let digests = digests(records);
+    let digests = digests(start, records);
     let mut text = String::from("\n");
     for (k, renaming) in renamings.iter().enumerate() {
         let digest = digest_hex(&digests[from + k + 1]);
@@ -522,7 +554,10 @@ impl NodeRepo {
 
     fn save_records(&self) -> Result<(), NodeError> {
         let records = &self.records;
+        let prefix = &records.prefix;
         let file = RecordsFile {
+            prefix: (prefix.count > 0).then(|| (prefix.count, digest_hex(&prefix.digest))),
+            fresh: records.fresh,
             applied: records.applied.iter().map(hex_ids).collect(),
             pending: hex_ids(&records.pending),
             fixup: records.fixup.clone(),
@@ -579,10 +614,11 @@ impl NodeRepo {
         Ok(())
     }
 
-    /// Appends how the records of `records` from the `from`th on renamed the hub's history, in
-    /// one write.
+    /// Appends how the records of `records`, after the records `start` is the digest of,
+    /// from the `from`th on renamed the hub's history, in one write.
     fn write_hub_renamings(
         &self,
+        start: &RecordDigest,
         records: &[Record],
         from: usize,
         renamings: &[HashMap<CanonicalOp, CanonicalOp>],
@@ -591,10 +627,18 @@ impl NodeRepo {
             return Ok(());
         }
         let path = self.repo_path.join("musubi").join(HUB_RENAMINGS_FILE);
-        append_log(&path, &format_hub_renamings(records, from, renamings))
+        append_log(
+            &path,
+            &format_hub_renamings(start, records, from, renamings),
+        )
     }
 
-    /// The hub's records this node took, oldest first.
+    /// The first of the hub's records this node took, known only by their count and digest.
+    pub fn record_prefix(&self) -> &RecordPrefix {
+        &self.records.prefix
+    }
+
+    /// The hub's records this node took after [`Self::record_prefix`], oldest first.
     pub fn applied_records(&self) -> &[Record] {
         &self.records.applied
     }
@@ -603,9 +647,38 @@ impl NodeRepo {
     pub fn record_state(&self) -> (u64, RecordDigest) {
         let records = &self.records;
         (
-            records.applied.len() as u64,
-            records.digests.last().expect("the root digest").clone(),
+            records.prefix.count + records.applied.len() as u64,
+            records.digests.last().expect("the prefix's digest").clone(),
         )
+    }
+
+    /// Whether this node has nothing of the hive's: it joined on the root, and has taken no
+    /// records, pushed nothing and realized nothing since. Only such a node may take the hub's
+    /// records from those it pruned.
+    pub fn is_fresh(&self) -> bool {
+        let records = &self.records;
+        records.fresh && records.prefix.count == 0 && records.applied.is_empty()
+    }
+
+    /// Says this node is about to push to the hub, or to realize one of its operations: it
+    /// is no longer [fresh](Self::is_fresh).
+    pub fn share(&mut self) -> Result<(), NodeError> {
+        if !self.records.fresh {
+            return Ok(());
+        }
+        self.records.fresh = false;
+        self.save_records()
+    }
+
+    /// Says this node, joining on the root, has nothing of the hive's yet, if it has taken
+    /// no records.
+    pub(super) fn mark_fresh(&mut self) -> Result<(), NodeError> {
+        let records = &self.records;
+        if records.fresh || records.prefix.count > 0 || !records.applied.is_empty() {
+            return Ok(());
+        }
+        self.records.fresh = true;
+        self.save_records()
     }
 
     /// The record state once the hub takes `record` after this node's records.
@@ -1592,17 +1665,22 @@ impl NodeRepo {
         self.join_ancestors = None;
     }
 
-    /// Gets ready to take `records`, the hub's: renames this node's history as they name it,
-    /// writing the rewrites of its local operations beside them, without moving its op heads.
-    /// Returns whether they drop an op head.
-    pub fn prepare_records(&mut self, records: &[Record]) -> Result<bool, NodeError> {
+    /// Gets ready to take `records`, the hub's, after the first ones `prefix` stands for:
+    /// renames this node's history as they name it, writing the rewrites of its local
+    /// operations beside them, without moving its op heads. Returns whether they drop an op
+    /// head. `prefix` is this node's, or none, or this node is [fresh](Self::is_fresh).
+    pub fn prepare_records(
+        &mut self,
+        prefix: &RecordPrefix,
+        records: &[Record],
+    ) -> Result<bool, NodeError> {
         if self
             .records
             .taking
             .as_ref()
-            .is_none_or(|taking| taking.records != records)
+            .is_none_or(|taking| taking.prefix != *prefix || taking.records != records)
         {
-            self.prepare(records)?;
+            self.prepare(prefix, records)?;
         } else {
             self.prepare_again_if_moved()?;
         }
@@ -1619,12 +1697,12 @@ impl NodeRepo {
 
     /// Renames this node's history as `records` name it, writing the rewrites of its local
     /// operations, from scratch.
-    fn prepare(&mut self, records: &[Record]) -> Result<(), NodeError> {
+    fn prepare(&mut self, prefix: &RecordPrefix, records: &[Record]) -> Result<(), NodeError> {
         self.records.taking = None;
         // The hub-to-node translation as it is with no records being taken, which
         // `rename_for` uses.
         self.forget_to_node();
-        let taking = self.rename_for(records)?;
+        let taking = self.rename_for(prefix, records)?;
         self.records.taking = Some(taking);
         self.forget_to_node();
         Ok(())
@@ -1650,19 +1728,34 @@ impl NodeRepo {
         if heads == taking.heads {
             return Ok(());
         }
-        let records = taking.records.clone();
-        self.prepare(&records)
+        let (prefix, records) = (taking.prefix.clone(), taking.records.clone());
+        self.prepare(&prefix, &records)
     }
 
-    /// The renaming that taking `records` makes, its local rewrites written.
-    fn rename_for(&mut self, records: &[Record]) -> Result<Taking, NodeError> {
+    /// The renaming that taking `records`, after those `prefix` stands for, makes, its local
+    /// rewrites written.
+    fn rename_for(
+        &mut self,
+        prefix: &RecordPrefix,
+        records: &[Record],
+    ) -> Result<Taking, NodeError> {
+        // Only a node with nothing of the hive's takes records it knows only by their count
+        // and digest: it has nothing they drop. Any node may take records all whole in place
+        // of those it knew so: whichever of them drops what it has, it drops by name.
+        if *prefix != self.records.prefix && prefix.count > 0 && !self.is_fresh() {
+            return Err(NodeError::PrunedRecords);
+        }
         let store = &self.canonical;
         let applied = self.records.applied.clone();
-        let common = applied
-            .iter()
-            .zip(records)
-            .take_while(|(a, b)| a == b)
-            .count();
+        let common = if *prefix == self.records.prefix {
+            applied
+                .iter()
+                .zip(records)
+                .take_while(|(a, b)| a == b)
+                .count()
+        } else {
+            0
+        };
         // A hub name from after the `from`th record this node took, as the history named the
         // operation after the records the hub and this node share: back through how each
         // record since renamed the hub's history. An operation made since has no such name,
@@ -1762,6 +1855,7 @@ impl NodeRepo {
         let mut heads = heads;
         heads.sort();
         Ok(Taking {
+            prefix: prefix.clone(),
             records: records.to_vec(),
             common,
             hub_renamings: renamings,
@@ -1839,10 +1933,15 @@ impl NodeRepo {
         }
     }
 
-    /// Takes the hub's records, none of which drops an op head. Returns the operation the
-    /// hub accepted that this machine fetches from, as they name it.
-    pub fn adopt_records(&mut self, records: &[Record]) -> Result<Option<HubOp>, NodeError> {
-        self.prepare_records(records)?;
+    /// Takes the hub's records, after the first ones `prefix` stands for, none of which drops
+    /// an op head. Returns the operation the hub accepted that this machine fetches from, as
+    /// they name it.
+    pub fn adopt_records(
+        &mut self,
+        prefix: &RecordPrefix,
+        records: &[Record],
+    ) -> Result<Option<HubOp>, NodeError> {
+        self.prepare_records(prefix, records)?;
         self.switch_to_taken(None, None)?;
         self.move_taken_workspaces()?;
         let taking = self.records.taking.take().expect("prepared above");
@@ -1874,11 +1973,18 @@ impl NodeRepo {
                 None => fixup.expected = None,
             }
         }
-        self.write_hub_renamings(&taking.records, taking.common, &taking.hub_renamings)?;
+        self.write_hub_renamings(
+            &taking.prefix.digest,
+            &taking.records,
+            taking.common,
+            &taking.hub_renamings,
+        )?;
         self.records.hub_renamings.truncate(taking.common);
         self.records.hub_renamings.extend(taking.hub_renamings);
+        self.records.digests = digests(&taking.prefix.digest, &taking.records);
+        self.records.prefix = taking.prefix;
         self.records.applied = taking.records;
-        self.records.digests = digests(&self.records.applied);
+        self.records.fresh = false;
         self.records.pending = taking.pending;
         self.forget_to_node();
         self.save_records()?;
@@ -2221,7 +2327,7 @@ mod tests {
         let records: Vec<Record> = (0..tc.draw(gs::integers::<u8>().max_value(3)))
             .map(|r| Record::new([HubOp(id(100 + r))]))
             .collect();
-        let digests = digests(&records);
+        let digests = digests(&RecordDigest::root(), &records);
         let (mut text, mut expected) = (String::new(), HashMap::new());
         for a in 0..tc.draw(gs::integers::<u8>().max_value(4)) {
             let from = tc.draw(gs::integers::<usize>().max_value(records.len()));
@@ -2232,7 +2338,7 @@ mod tests {
                         .collect()
                 })
                 .collect();
-            let formatted = format_hub_renamings(&records, from, &renamings);
+            let formatted = format_hub_renamings(&RecordDigest::root(), &records, from, &renamings);
             // The empty line that starts the append, then each record's digest, with how many
             // pairs follow, and its pairs.
             let mut lines: Vec<RenamingLine> = vec![(String::new(), Err(0))];

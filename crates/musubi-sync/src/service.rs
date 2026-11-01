@@ -95,6 +95,12 @@ impl HubService {
         &self.hub
     }
 
+    /// Prunes the hive's records, once every machine it waits for has taken them
+    /// ([`HubAdapter::prune`]). Returns how many it has pruned, if it pruned any now.
+    pub fn prune(&mut self) -> anyhow::Result<Option<u64>> {
+        self.hub.prune()
+    }
+
     /// What the latest request did, for the hub's activity.
     pub fn outcome(&self) -> Outcome {
         self.outcome

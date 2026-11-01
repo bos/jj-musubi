@@ -68,6 +68,35 @@ impl RecordDigest {
     pub fn bytes(&self) -> &[u8] {
         &self.0
     }
+
+    /// A digest as the protocol carries it.
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        Self(bytes.to_vec())
+    }
+}
+
+/// The first of a list of records, known only by how many they are and their digest: all a
+/// machine that joined after its hub pruned them gets of them.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RecordPrefix {
+    pub count: u64,
+    pub digest: RecordDigest,
+}
+
+impl RecordPrefix {
+    /// No records.
+    pub fn none() -> Self {
+        Self {
+            count: 0,
+            digest: RecordDigest::root(),
+        }
+    }
+}
+
+impl Default for RecordPrefix {
+    fn default() -> Self {
+        Self::none()
+    }
 }
 
 #[cfg(test)]

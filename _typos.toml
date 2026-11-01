@@ -9,3 +9,5 @@ Anc = "Anc"
 nd = "nd"
 hed = "hed"
 hax = "hax"
+# GitHub's anchor for a heading that says "repository's".
+repositorys = "repositorys"

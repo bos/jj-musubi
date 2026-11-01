@@ -127,8 +127,9 @@ doing](guides/working-across-machines.md#see-what-other-machines-are-doing).
 
 A machine's name defaults to jj's `operation.hostname`; choose another with `--machine` when
 you join. A machine that leaves with `musubi leave`, or that another machine forgets with
-`musubi forget`, stops showing, and comes back if it's used again. See [Take a repository or
-machine out](guides/manage.md#take-a-repository-or-machine-out).
+`musubi forget`, stops showing, and comes back if it's used again, unless other machines have
+abandoned operations meanwhile (`jj op abandon`). See [Take a repository or machine
+out](guides/manage.md#take-a-repository-or-machine-out).
 
 ## When machines change the same thing
 

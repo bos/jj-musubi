@@ -11,6 +11,7 @@ use std::rc::Rc;
 use musubi_core::hub::HubStorage;
 use musubi_core::message::OpEntry;
 use musubi_core::message::RecordState;
+use musubi_core::message::Records;
 use musubi_core::node::LocalRepo;
 
 pub type Op = u64;
@@ -53,6 +54,20 @@ impl Univ {
             count: records.len() as u64,
             digest: digest.to_le_bytes().to_vec(),
         }
+    }
+
+    /// The state of `records` after the records `base` is the state of.
+    pub fn record_state_after(&mut self, base: &RecordState, records: &[Vec<Op>]) -> RecordState {
+        let index = usize::from_le_bytes(
+            base.digest
+                .as_slice()
+                .try_into()
+                .expect("a digest made by record_state"),
+        );
+        let mut all = self.record_lists[index].clone();
+        assert_eq!(all.len() as u64, base.count, "a base's count is its list's");
+        all.extend(records.iter().cloned());
+        self.record_state(&all)
     }
 
     pub fn next(&self) -> Op {
@@ -130,10 +145,17 @@ pub struct FakeHub {
     pub objs: BTreeSet<Obj>,
     pub head: Op,
     pub seq: u64,
-    /// The records, oldest first.
+    /// The records, oldest first. The model keeps them all, the ones the hub pruned standing
+    /// for their count and digest, which is all the real hub keeps of them.
     pub records: Vec<Vec<Op>>,
     /// The records as of the head accepted at each sequence number.
     pub record_hist: Vec<Vec<Vec<Op>>>,
+    /// How many of its first records the hub has pruned.
+    pub pruned: usize,
+    /// How many it had pruned as of the head accepted at each sequence number.
+    pub pruned_hist: Vec<usize>,
+    /// What each machine last said it took, in memory.
+    pub reports: BTreeMap<String, RecordState>,
 }
 
 impl FakeHub {
@@ -146,12 +168,25 @@ impl FakeHub {
             seq: 0,
             records: vec![],
             record_hist: vec![vec![]],
+            pruned: 0,
+            pruned_hist: vec![0],
+            reports: BTreeMap::new(),
         }
     }
 
     /// What the records drop.
     pub fn dropped(&self) -> BTreeSet<Op> {
         flat(&self.records)
+    }
+
+    /// What the records the hub remembers drop.
+    pub fn remembered(&self) -> BTreeSet<Op> {
+        flat(&self.records[self.pruned..])
+    }
+
+    /// The hub restarts, forgetting what it keeps only in memory.
+    pub fn restart(&mut self) {
+        self.reports.clear();
     }
 
     pub fn closed(&self, op: Op) -> bool {
@@ -188,6 +223,7 @@ impl HubStorage for FakeHub {
         self.head = *head;
         assert_eq!(seq as usize, self.record_hist.len());
         self.record_hist.push(self.records.clone());
+        self.pruned_hist.push(self.pruned);
         Ok(())
     }
 
@@ -195,16 +231,43 @@ impl HubStorage for FakeHub {
         self.univ.borrow_mut().record_state(&self.records)
     }
 
+    fn pruned(&self) -> RecordState {
+        self.univ
+            .borrow_mut()
+            .record_state(&self.records[..self.pruned])
+    }
+
     fn records_since(&self, records: &RecordState) -> Result<(u64, Vec<Vec<Op>>), Infallible> {
         let count = records.count as usize;
-        let prefix = count <= self.records.len()
+        let prefix = (self.pruned..=self.records.len()).contains(&count)
             && self.univ.borrow_mut().record_state(&self.records[..count]) == *records;
-        let from = if prefix { count } else { 0 };
+        let from = if prefix { count } else { self.pruned };
         Ok((from as u64, self.records[from..].to_vec()))
     }
 
     fn is_dropped(&self, op: &Op, dropped: &[Op]) -> Result<bool, Infallible> {
-        Ok(self.dropped().contains(op) || dropped.contains(op))
+        Ok(self.remembered().contains(op) || dropped.contains(op))
+    }
+
+    fn report(&mut self, machine: &str, records: &RecordState) {
+        self.reports.insert(machine.to_owned(), records.clone());
+    }
+
+    fn reported(&self, machine: &str) -> Option<RecordState> {
+        self.reports.get(machine).cloned()
+    }
+
+    fn prune(&mut self, count: u64) -> Result<(), Infallible> {
+        let count = count as usize;
+        assert!(
+            (self.pruned..=self.records.len()).contains(&count),
+            "prune {count} of {} records, {} pruned",
+            self.records.len(),
+            self.pruned
+        );
+        self.pruned = count;
+        self.pruned_hist[self.seq as usize] = count;
+        Ok(())
     }
 
     fn store_ops(&mut self, ops: &[Op], _: &Vec<Obj>) -> Result<(), Infallible> {
@@ -351,6 +414,10 @@ impl LocalRepo for FakeRepo {
     type Attachment = Vec<Obj>;
     type Error = Infallible;
 
+    fn machine(&self) -> String {
+        self.index.to_string()
+    }
+
     fn heads(&mut self) -> Result<Vec<Op>, Infallible> {
         Ok(self.heads.iter().copied().collect())
     }
@@ -474,12 +541,24 @@ impl LocalRepo for FakeRepo {
         Ok(())
     }
 
-    fn applied_records(&self) -> Result<Vec<Vec<Op>>, Infallible> {
-        Ok(self.applied.clone())
+    /// Every record, none by its count and digest alone: the model's machines are fixed, so
+    /// none joins after the hub prunes.
+    fn applied_records(&self) -> Result<Records<Op>, Infallible> {
+        Ok(Records {
+            base: self.univ.borrow_mut().record_state(&[]),
+            records: self.applied.clone(),
+        })
     }
 
     fn records(&self) -> Result<RecordState, Infallible> {
         Ok(self.univ.borrow_mut().record_state(&self.applied))
+    }
+
+    fn records_state(&self, records: &Records<Op>) -> Result<RecordState, Infallible> {
+        Ok(self
+            .univ
+            .borrow_mut()
+            .record_state_after(&records.base, &records.records))
     }
 
     fn pending(&self) -> Result<Vec<Op>, Infallible> {
@@ -487,25 +566,36 @@ impl LocalRepo for FakeRepo {
         Ok(self.dropped.difference(&applied).copied().collect())
     }
 
-    fn records_with(&self, record: &[Op]) -> Result<RecordState, Infallible> {
-        let mut records = self.applied.clone();
-        records.push(record.to_vec());
-        Ok(self.univ.borrow_mut().record_state(&records))
-    }
-
-    fn prepare_records(&mut self, records: &[Vec<Op>]) -> Result<bool, Infallible> {
-        let dropped = flat(records);
+    fn prepare_records(&mut self, records: &Records<Op>) -> Result<bool, Infallible> {
+        assert_eq!(
+            records.base.count, 0,
+            "records with a base, for a node not fresh"
+        );
+        let dropped = flat(&records.records);
         Ok(self.heads.iter().any(|head| dropped.contains(head)))
     }
 
-    fn adopt(&mut self, records: &[Vec<Op>]) -> Result<(), Infallible> {
+    fn adopt(&mut self, records: &Records<Op>) -> Result<(), Infallible> {
         assert!(
             !self.prepare_records(records)?,
             "adopt: records drop a head"
         );
-        self.dropped.extend(flat(records));
-        self.applied = records.to_vec();
+        self.dropped.extend(flat(&records.records));
+        self.applied = records.records.clone();
         Ok(())
+    }
+
+    fn fresh(&self) -> Result<bool, Infallible> {
+        Ok(false)
+    }
+
+    fn share(&mut self) -> Result<(), Infallible> {
+        Ok(())
+    }
+
+    /// Never: the hub prunes only what every node has taken.
+    fn lacks_pruned(&self) -> Infallible {
+        panic!("node {} lacks records the hub pruned", self.index)
     }
 
     fn is_dropped(&self, op: &Op) -> Result<bool, Infallible> {

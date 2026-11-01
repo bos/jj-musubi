@@ -140,7 +140,7 @@ fn repeated_restores_keep_distinct_identities_when_contracted() {
 #[test]
 fn taking_an_abandon_preserves_original_identity_after_cache_loss() {
     use musubi_jj::canonical::Contraction;
-    use musubi_jj::records::{HubOp, Record};
+    use musubi_jj::records::{HubOp, Record, RecordPrefix};
 
     let env = TestEnv::new();
     let repo = env.init_repo("alpha");
@@ -152,8 +152,11 @@ fn taking_an_abandon_preserves_original_identity_after_cache_loss() {
     let mut contraction =
         Contraction::new(node.canonical_store(), [a.clone(), between.clone()]).unwrap();
     let expected = contraction.images(node.canonical_store(), &x).unwrap()[0].clone();
-    node.adopt_records(&[Record::new([HubOp(a), HubOp(between)])])
-        .unwrap();
+    node.adopt_records(
+        &RecordPrefix::none(),
+        &[Record::new([HubOp(a), HubOp(between)])],
+    )
+    .unwrap();
     let head = repo.jj(&[
         "--ignore-working-copy",
         "op",

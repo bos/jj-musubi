@@ -63,6 +63,7 @@ These keep exactly the model's state:
 | Hub `ops`, `objs`, `head`, `seq` | `FakeHub` |
 | Node `lops`, `lobj`, `heads`, `known`, `sops`, `sobj` | `FakeRepo` (`lops`…`sobj`) and `NodeCore` (`known`) |
 | Hub records, node `nodeD` and the records it took last | `FakeHub::records`, `FakeRepo::dropped` and `applied` |
+| Hub `pruned` | `FakeHub::pruned`, which keeps every record, as the model's `recs` does, those pruned standing for their count and digest |
 | `net`, the set of every message sent | the test's network: a set, so any message can be delivered any number of times, or never |
 
 `lops` and `lobj` are a node's local operations and objects, and `sops` and `sobj` what it
@@ -99,8 +100,9 @@ core does.
 | `NodeCore` takes in a `Refused` reply | nothing |
 | A node restarts | `loseKnown` (its staged files survive; `known` does not) |
 | A node restarts while taking in a `Fetched` reply, after staging its operations and before staging its objects (test rule) | `learn` if its head is newer, `recvOps`, then `loseKnown` |
-| The hub restarts | `crashHub` |
-| The hub goes back (test rule) | `hubRegress` |
+| The hub restarts | `crashHub`; the hub forgets what each node said it took |
+| The hub goes back (test rule) | `hubRegress`; the hub forgets what each node said it took, as a restart does, and how many records it had pruned goes back too |
+| The hub prunes (test rule, half the time after a `quiesce`, and once after each case's final one): `hub::prune`, which prunes every record once every node's last `Fetch` or `Push` said it took them all | `prune` with the count, if it pruned any |
 | The hub forgets every operation and object outside `closure(head)` (test rule) | `hubForget` with what it keeps |
 | The hive is made again, empty, as `HubDir::remake` makes one whose store is corrupt (test rule) | `hubRegress` to 0, then `hubForget` keeping only the root: `State.remake` (`exec_remake`), a run of the extended model (`remake_reachable`) |
 | A reply to the node's own request that says the hub went back (`NodeCore::handle_reply`) | `loseKnown`, then `learn` if the reply's `seq` is above 0 (at 0, the restarted node already knows `(0, root)`) |
@@ -113,10 +115,14 @@ is a supersede in the model, which adds a record only for what the push drops th
 hadn't; the hub refuses, storing nothing, one whose records aren't its own, or whose new head
 is among the records it remembers or the push's pending drops. The reply to an accepted push
 carries the hub's records as a state, from which, with the records it took and what it
-dropped, the node knows them all, so the model's hub announces them with it (`sendD`). The
-Rust core sends only the merged requests (`Push`, `Fetch`); the finer-grained actions remain in
-the model and the oracle. The Rust hub prunes no records yet, so no event maps to `prune`, and
-the test's states have `"pruned": 0`.
+dropped, the node knows them all, so the model's hub announces them with it (`sendD`). A
+notification carries them too, but the node doesn't take them from it: another node may have
+dropped what it did, and the model announces nothing with a notification. The Rust core sends
+only the merged requests (`Push`, `Fetch`); the finer-grained actions remain in the model and
+the oracle. The hub prunes only when every node has said, in a request, that it took every
+record, and the oracle checks each node's records start with them when it does. The model's
+nodes are fixed, so none joins after a prune: `FakeRepo` holds every record whole, and a node
+that lacked records the hub pruned would panic.
 
 The test's objects have no structure, so the test's hub ignores `closure(base)` and leaves
 out exactly what the haves name, as the model's `hubFetch` does; a node's haves there are

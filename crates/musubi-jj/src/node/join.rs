@@ -154,6 +154,9 @@ impl NodeRepo {
         if carried.is_some() {
             return self.mark_joined(description);
         }
+        // A join on the root brings nothing of the hive's: so far, this node may take the
+        // hub's records from those it pruned.
+        self.mark_fresh()?;
         let op = self.loader.op_store().read_operation(&head.0).block_on()?;
         self.check_format(&head, &op)?;
         let view = self.loader.op_store().read_view(&op.view_id).block_on()?;

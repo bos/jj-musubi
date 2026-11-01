@@ -33,6 +33,10 @@ pub struct Hive {
     pub hub: HubAdapter,
     pub members: Vec<Member>,
     hub_dir: std::path::PathBuf,
+    /// Whether the hub prunes its records after each request, once every member that is a
+    /// copy the hive hasn't forgotten has taken them, as a hub does. On unless a test turns
+    /// it off.
+    pub pruning: bool,
 }
 
 impl Hive {
@@ -41,6 +45,7 @@ impl Hive {
             hub: HubAdapter::init(hub_dir, backend)?,
             members: vec![],
             hub_dir: hub_dir.to_owned(),
+            pruning: true,
         })
     }
 
@@ -51,6 +56,7 @@ impl Hive {
             hub: HubAdapter::open(hub_dir)?,
             members: vec![],
             hub_dir: hub_dir.to_owned(),
+            pruning: true,
         })
     }
 
@@ -61,13 +67,15 @@ impl Hive {
     }
 
     /// Restarts the hub having lost every head it accepted after the `seq`th, and the records
-    /// with them, as a power cut can make it.
+    /// with them, as a power cut can make it. A hub that has pruned its records keeps the
+    /// line saying so, which comes first.
     pub fn hub_goes_back(&mut self, seq: u64) -> anyhow::Result<()> {
         let path = self.hub_dir.join("heads");
         let text = std::fs::read_to_string(&path)?;
+        let pruned = usize::from(text.starts_with("pruned "));
         let kept: String = text
             .split_inclusive('\n')
-            .take(usize::try_from(seq)? + 1)
+            .take(usize::try_from(seq)? + 1 + pruned)
             .collect();
         std::fs::write(&path, kept)?;
         self.restart_hub()
@@ -115,6 +123,9 @@ impl Hive {
                 attachment_size(ops_attachment)? + attachment_size(objects)?;
         }
         let handled = hub::handle(&mut self.hub, request.clone())?;
+        if self.pruning {
+            self.hub.prune()?;
+        }
         match &handled.reply {
             Reply::Fetched {
                 ops_attachment,

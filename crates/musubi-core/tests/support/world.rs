@@ -366,6 +366,7 @@ impl World {
         use musubi_core::node::LocalRepo as _;
         let repo = &self.repos[node];
         let request = Request::Push {
+            machine: repo.machine(),
             ops: vec![],
             ops_attachment: vec![],
             objects: vec![],
@@ -462,6 +463,7 @@ impl World {
                 vec![json!({"kind": "hubGetObjs", "node": node, "objs": objs})]
             }
             Request::Push {
+                machine,
                 ops,
                 ops_attachment,
                 objects,
@@ -471,6 +473,7 @@ impl World {
                 dropped,
             } => {
                 let push = hub::Push {
+                    machine,
                     ops,
                     ops_attachment,
                     objects,
@@ -661,6 +664,10 @@ impl World {
         self.hub.seq = seq;
         self.hub.record_hist.truncate(seq as usize + 1);
         self.hub.records = self.hub.record_hist[seq as usize].clone();
+        self.hub.pruned_hist.truncate(seq as usize + 1);
+        self.hub.pruned = self.hub.pruned_hist[seq as usize];
+        // A hub goes back by restarting.
+        self.hub.restart();
         self.act(json!({"kind": "hubRegress", "seq": seq}));
     }
 
@@ -687,6 +694,7 @@ impl World {
     ) -> CasOutcome {
         let records = self.univ.borrow_mut().record_state(records);
         let push = hub::Push {
+            machine: "outside",
             ops: &[],
             ops_attachment: &vec![],
             objects: &vec![],
@@ -707,7 +715,21 @@ impl World {
     }
 
     pub fn crash_hub(&mut self) {
+        self.hub.restart();
         self.act(json!({"kind": "crashHub"}));
+    }
+
+    /// The hub prunes its records, if every node has said it took them all (`prune`).
+    pub fn prune(&mut self) {
+        let nodes: Vec<String> = (0..self.nodes()).map(|n| n.to_string()).collect();
+        if let Some(count) = hub::prune(&mut self.hub, nodes).unwrap() {
+            self.act(json!({"kind": "prune", "count": count}));
+        }
+    }
+
+    /// How many of its records the hub has pruned.
+    pub fn hub_pruned(&self) -> usize {
+        self.hub.pruned
     }
 
     pub fn take_oracle(&mut self) -> Option<Oracle> {
@@ -760,6 +782,7 @@ impl World {
             records: repo.records().unwrap(),
             records_from: repo.applied.len() as u64,
             new_records: vec![],
+            pruned: self.hub.univ.borrow_mut().record_state(&[]),
         };
         self.offered.insert(op);
         let handled = self.cores[node]
@@ -771,12 +794,13 @@ impl World {
         );
     }
 
-    /// The records `node` has taken, and how many, for a buggy hub's replies to agree with it
-    /// on.
-    pub fn node_records(&self, node: usize) -> (RecordState, u64) {
+    /// The records `node` has taken, how many, and the state of none, which it starts with,
+    /// for a buggy hub's replies to agree with it on.
+    pub fn node_records(&self, node: usize) -> (RecordState, u64, RecordState) {
         use musubi_core::node::LocalRepo as _;
         let repo = &self.repos[node];
-        (repo.records().unwrap(), repo.applied.len() as u64)
+        let none = self.univ.borrow_mut().record_state(&[]);
+        (repo.records().unwrap(), repo.applied.len() as u64, none)
     }
 
     /// What the hub stores, accepted or not, for a buggy hub's replies to be made of.
@@ -1111,9 +1135,8 @@ impl World {
         json!({
             "next": univ.next(),
             "ops": ops,
-            // The Rust hub prunes no records yet.
             "hub": {"ops": self.hub.ops, "objs": self.hub.objs, "head": self.hub.head, "seq": self.hub.seq,
-                "records": records_json(&self.hub.records), "pruned": 0},
+                "records": records_json(&self.hub.records), "pruned": self.hub.pruned},
             "nodes": nodes,
             "net": net.into_iter().map(|m| serde_json::from_str::<Value>(&m).unwrap()).collect::<Vec<_>>(),
         })

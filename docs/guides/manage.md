@@ -111,7 +111,11 @@ musubi forget laptop
 
 The other machines stop showing `laptop/default@` as they sync, and the hub stops counting
 it. If the copy still exists after all, it comes back as soon as a `jj` command in it records
-an operation: one that changes something or snapshots a change to the working copy.
+an operation: one that changes something or snapshots a change to the working copy. But if
+another machine runs `jj op abandon` while the copy is away, and every machine still in the
+hive has taken it, the copy can't sync again: it stops with "this repository's history no
+longer matches the hive's" ([what to
+do](../troubleshooting.md#this-repositorys-history-no-longer-matches-the-hives-so-it-cant-sync-again)).
 
 A copy can also be forgotten by itself once unused for long enough, as set by
 `musubi.forget-after` in its repository's config. `musubi join`, `create` and `clone` set it,
@@ -126,15 +130,19 @@ jj config set --repo musubi.forget-after '2 days'   # or 30m, '1h 30m', 1week, n
 
 Any operation recorded in the copy counts as using it, as does changing this setting. Once a
 copy goes unused for longer than its setting, the first daemon to notice forgets it, as
-`musubi forget` would, within a few minutes; the copy comes back as soon as it's used again.
-In a repository, `musubi status` shows each copy, when it was last used, and when it will be
-forgotten.
+`musubi forget` would, within a few minutes; the copy comes back as soon as it's used again,
+with the same exception. In a repository, `musubi status` shows each copy, when it was last
+used, and when it will be forgotten.
 
 ### Rejoin, or stop using musubi
 
 To sync a copy again after it has left, run `musubi join` in it. It carries on from the
 history it shared, so a copy that joins a different hive brings its old hive's history along,
-and the new hive's machines show the old hive's working copies too.
+and the new hive's machines show the old hive's working copies too. If another machine ran
+`jj op abandon` while the copy was away, and every machine still in the hive has taken it, the
+copy can't sync again: it stops with "this repository's history no longer matches the hive's"
+([what to
+do](../troubleshooting.md#this-repositorys-history-no-longer-matches-the-hives-so-it-cant-sync-again)).
 
 To stop using musubi on a machine altogether:
 
@@ -158,9 +166,9 @@ To stop using musubi on a machine altogether:
 
 ## Upgrade musubi
 
-### Recreate hives when upgrading to 0.3.0
+### Recreate hives when upgrading to 0.4.0
 
-Release 0.3.0 changes operation ids to preserve identity when history is abandoned. Its hub
+Release 0.4.0 changes operation ids to preserve identity when history is abandoned. Its hub
 state and each copy's musubi state must be made afresh; the jj repositories and their work stay.
 
 1. Before upgrading, sync every copy with the old release. In each copy run `musubi leave`,
@@ -177,7 +185,7 @@ state and each copy's musubi state must be made afresh; the jj repositories and 
    `.jj/repo/musubi`) to a separate archive. Keep that archive; it includes the old hive
    membership and translation records. For linked workspaces, use the repository directory
    they share, once for that repository.
-4. Stop the old hub and archive its state directory. Install 0.3.0 on the hub and every
+4. Stop the old hub and archive its state directory. Install 0.4.0 on the hub and every
    machine, then start the hub with an empty state directory, as in the setup guide.
 5. In one preserved repository run `musubi create`, then in each other copy run
    `musubi join`. Joining starts its daemon. Use the usual join, which shares the present

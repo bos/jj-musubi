@@ -138,6 +138,7 @@ impl Seen {
                 self.op(base);
             }
             Request::Push {
+                machine: _,
                 ops,
                 ops_attachment,
                 objects,
@@ -251,6 +252,7 @@ fn fetched(tc: &TestCase, seen: &Seen) -> Reply<OpId, Attachment> {
         mut records,
         records_from,
         new_records,
+        pruned,
     } = (if fetches.is_empty() {
         Reply::Fetched {
             seq: 0,
@@ -261,6 +263,7 @@ fn fetched(tc: &TestCase, seen: &Seen) -> Reply<OpId, Attachment> {
             records: seen.records[0].clone(),
             records_from: 0,
             new_records: vec![],
+            pruned: seen.records[0].clone(),
         }
     } else {
         (*pick(tc, &fetches)).clone()
@@ -304,6 +307,7 @@ fn fetched(tc: &TestCase, seen: &Seen) -> Reply<OpId, Attachment> {
         records,
         records_from,
         new_records,
+        pruned,
     }
 }
 

@@ -319,7 +319,7 @@ fn concurrent_op_abandons_on_two_machines() {
     hive.repo(1).jj(&["op", "abandon", &second.0]);
     hive.sync();
     hive.assert_converged();
-    assert_eq!(hive.hive.hub.store().records().len(), 2);
+    assert_eq!(hive.hive.hub.store().record_count(), 2);
     for machine in 0..2 {
         assert!(
             !has_operation(hive.repo(machine), &first.1),
@@ -447,7 +447,7 @@ fn hub_restarts_during_and_after_a_rewrite() {
         hive.hive.restart_hub().unwrap();
         hive.sync();
         hive.assert_converged();
-        assert_eq!(hive.hive.hub.store().records().len(), 1, "after: {after}");
+        assert_eq!(hive.hive.hub.store().record_count(), 1, "after: {after}");
         for machine in 0..2 {
             assert!(
                 !has_operation(hive.repo(machine), &abandoned.1),
@@ -464,6 +464,9 @@ fn hub_restarts_during_and_after_a_rewrite() {
 fn hub_goes_back_or_is_remade_after_a_rewrite() {
     for remade in [false, true] {
         let mut hive = Fixture::new(&["alpha", "beta"]);
+        // Its records not pruned, as they would be once both machines took them: here the
+        // hub loses them.
+        hive.hive.pruning = false;
         hive.commit(0, "a", "first");
         hive.commit(0, "b", "second");
         hive.sync();
@@ -480,7 +483,7 @@ fn hub_goes_back_or_is_remade_after_a_rewrite() {
         hive.commit(1, "c", "after");
         hive.sync();
         hive.assert_converged();
-        assert_eq!(hive.hive.hub.store().records().len(), 1, "remade: {remade}");
+        assert_eq!(hive.hive.hub.store().record_count(), 1, "remade: {remade}");
         for machine in 0..2 {
             assert!(
                 !has_operation(hive.repo(machine), &abandoned.1),
@@ -668,7 +671,7 @@ fn an_unexplained_lost_base_pauses_without_dropping() {
     hive.hive.restart(1);
     let err = hive.hive.sync(1).unwrap_err();
     assert!(history_lost(&err), "{err:#}");
-    assert!(hive.hive.hub.store().records().is_empty());
+    assert_eq!(hive.hive.hub.store().record_count(), 0);
 }
 
 /// The operation `repo`'s op log shows described as `description`: its id.
@@ -708,13 +711,13 @@ fn records_published_again_after_the_hub_took_others() {
             hive.hive.sync(1).unwrap();
         }
     }
-    assert_eq!(hive.hive.hub.store().records().len(), 2);
+    assert_eq!(hive.hive.hub.store().record_count(), 2);
     // The hub loses both; gamma, which saw neither, abandons another and publishes first.
     hive.hive.hub_goes_back(seq).unwrap();
     let op = op_described(hive.repo(2), theirs);
     hive.repo(2).jj(&["op", "abandon", &op]);
     hive.hive.sync(2).unwrap();
-    assert_eq!(hive.hive.hub.store().records().len(), 1);
+    assert_eq!(hive.hive.hub.store().record_count(), 1);
     hive.sync();
     hive.assert_converged();
     for machine in 0..3 {
@@ -1047,4 +1050,355 @@ fn root_parent_merge_bug_is_explained() {
     for machine in [0, 1] {
         hive.repo(machine).jj(&["status"]);
     }
+}
+
+/// The size of the hub's `heads` log, in bytes.
+fn heads_log_len(hive: &Fixture) -> u64 {
+    std::fs::metadata(hive.env.root().join("hub").join("heads"))
+        .unwrap()
+        .len()
+}
+
+/// Trims `repo`'s history, `jj op abandon ..X` of all but its two newest operations.
+fn trim(repo: &musubi_testutil::TestRepo) {
+    let ops = op_log(repo);
+    repo.jj(&["op", "abandon", &format!("..{}", ops[2].0)]);
+}
+
+/// Once every machine has taken a trim, the hub prunes its record: it remembers none of the
+/// ids it dropped or renamed, keeping only how many records it took and their digest, and its
+/// `heads` log no longer names them, so that the trim makes the hub smaller, and opening it
+/// takes none of them again. The hive goes on as before, and a later abandon is taken and
+/// pruned in turn.
+#[test]
+fn a_trim_makes_the_hub_smaller() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    for i in 0..4 {
+        hive.commit(0, &format!("a{i}"), &format!("alpha {i}"));
+    }
+    hive.sync();
+    hive.hive.pruning = false;
+    trim(hive.repo(0));
+    hive.sync();
+    hive.assert_converged();
+    let store = hive.hive.hub.store();
+    assert_eq!((store.record_count(), store.pruned()), (1, 0));
+    let (remembered, log) = (store.remembered_ids(), heads_log_len(&hive));
+    assert!(remembered > 0);
+
+    hive.hive.pruning = true;
+    hive.sync();
+    let store = hive.hive.hub.store();
+    assert_eq!((store.record_count(), store.pruned()), (1, 1));
+    assert_eq!(store.remembered_ids(), 0);
+    assert!(store.records().is_empty());
+    assert!(
+        heads_log_len(&hive) < log,
+        "{} < {log}",
+        heads_log_len(&hive)
+    );
+    hive.hive.restart_hub().unwrap();
+    let store = hive.hive.hub.store();
+    assert_eq!((store.record_count(), store.pruned()), (1, 1));
+    assert_eq!(store.remembered_ids(), 0);
+
+    hive.commit(1, "b", "beta after the trim");
+    hive.sync();
+    hive.assert_converged();
+    assert!(
+        hive.visible(0)
+            .iter()
+            .any(|c| c.ends_with("beta after the trim"))
+    );
+    let abandoned = commit_op(hive.repo(1));
+    hive.repo(1).jj(&["op", "abandon", &abandoned.0]);
+    hive.sync();
+    hive.sync();
+    hive.assert_converged();
+    let store = hive.hive.hub.store();
+    assert_eq!((store.record_count(), store.pruned()), (2, 2));
+    for machine in 0..2 {
+        assert!(
+            !has_operation(hive.repo(machine), &abandoned.1),
+            "{machine}"
+        );
+    }
+}
+
+/// A machine that is offline, and that the hive hasn't forgotten, holds pruning back until it
+/// syncs and has taken the record.
+#[test]
+fn an_offline_machine_holds_pruning_back() {
+    let mut hive = Fixture::new(&["alpha", "beta", "gamma"]);
+    hive.commit(0, "a", "first");
+    hive.commit(0, "b", "second");
+    hive.sync();
+    let abandoned = commit_op(hive.repo(0));
+    hive.repo(0).jj(&["op", "abandon", &abandoned.0]);
+    for _ in 0..3 {
+        hive.hive.sync(0).unwrap();
+        hive.hive.sync(1).unwrap();
+    }
+    let store = hive.hive.hub.store();
+    assert_eq!((store.record_count(), store.pruned()), (1, 0));
+    hive.sync();
+    hive.sync();
+    hive.assert_converged();
+    assert_eq!(hive.hive.hub.store().pruned(), 1);
+    assert!(!has_operation(hive.repo(2), &abandoned.1));
+}
+
+/// The hub doesn't wait for a copy the hive has forgotten. One that comes back from behind
+/// the records the hub pruned can't take them, and could hold operations they drop: it stops
+/// syncing, with the message for a history that no longer matches the hive's, and the
+/// abandoned operation doesn't come back.
+#[test]
+fn a_forgotten_copy_behind_pruned_records_stops() {
+    let mut hive = Fixture::new(&["alpha", "beta", "gamma"]);
+    hive.commit(0, "a", "first");
+    hive.commit(0, "b", "second");
+    hive.sync();
+    hive.commit(2, "g", "gamma's last work");
+    let gamma = hive.machine_key(2);
+    assert!(hive.node(0).forget_copy(&gamma, "gamma").unwrap());
+    let abandoned = commit_op(hive.repo(0));
+    hive.repo(0).jj(&["op", "abandon", &abandoned.0]);
+    for _ in 0..3 {
+        hive.hive.sync(0).unwrap();
+        hive.hive.sync(1).unwrap();
+    }
+    assert_eq!(hive.hive.hub.store().pruned(), 1);
+    let head = hive.hive.hub_head();
+    let err = hive.hive.sync(2).unwrap_err();
+    assert!(
+        matches!(
+            err.downcast_ref::<musubi_jj::node::NodeError>(),
+            Some(musubi_jj::node::NodeError::PrunedRecords)
+        ),
+        "{err:#}"
+    );
+    assert!(history_lost(&err));
+    assert!(
+        format!("{err:#}").contains("history no longer matches the hive's"),
+        "{err:#}"
+    );
+    assert_eq!(hive.hive.hub_head(), head);
+    for machine in 0..2 {
+        hive.hive.sync(machine).unwrap();
+        assert!(
+            !hive
+                .visible(machine)
+                .iter()
+                .any(|c| c.ends_with("gamma's last work")),
+            "{machine}"
+        );
+    }
+}
+
+/// A copy the hive forgot that had taken the record the hub then pruned comes back with its
+/// next work as any forgotten copy does: its records start with the pruned ones.
+#[test]
+fn a_forgotten_copy_that_took_the_pruned_records_comes_back() {
+    let mut hive = Fixture::new(&["alpha", "beta", "gamma"]);
+    hive.commit(0, "a", "first");
+    hive.commit(0, "b", "second");
+    hive.sync();
+    let abandoned = commit_op(hive.repo(0));
+    hive.repo(0).jj(&["op", "abandon", &abandoned.0]);
+    hive.sync();
+    let gamma = hive.machine_key(2);
+    assert!(hive.node(0).forget_copy(&gamma, "gamma").unwrap());
+    for _ in 0..2 {
+        hive.hive.sync(0).unwrap();
+        hive.hive.sync(1).unwrap();
+    }
+    assert_eq!(hive.hive.hub.store().pruned(), 1);
+    hive.commit(2, "g", "gamma back");
+    hive.sync();
+    hive.assert_converged();
+    assert!(hive.shown_machines().contains(&gamma));
+    assert!(hive.visible(0).iter().any(|c| c.ends_with("gamma back")));
+}
+
+/// A machine that joins after the hub pruned its records starts from them as the hub keeps
+/// them, knowing only how many there are and their digest: it syncs, the hub waits for it
+/// once it is in the hive, and it takes a later abandon like any machine.
+#[test]
+fn a_machine_joins_after_a_prune() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    for i in 0..3 {
+        hive.commit(0, &format!("a{i}"), &format!("alpha {i}"));
+    }
+    hive.sync();
+    trim(hive.repo(0));
+    hive.sync();
+    hive.sync();
+    assert_eq!(hive.hive.hub.store().pruned(), 1);
+    let gamma = hive.env.init_repo("gamma");
+    hive.add(gamma);
+    hive.sync();
+    hive.assert_converged();
+    assert!(hive.visible(2).iter().any(|c| c.ends_with("alpha 2")));
+    hive.commit(2, "g", "gamma's work");
+    hive.sync();
+    hive.assert_converged();
+    assert!(hive.visible(0).iter().any(|c| c.ends_with("gamma's work")));
+    hive.commit(1, "b1", "beta 1");
+    let abandoned = op_log(hive.repo(1))[0].clone();
+    assert!(abandoned.1.starts_with("commit "), "{abandoned:?}");
+    hive.commit(1, "b2", "beta 2");
+    hive.hive.sync(1).unwrap();
+
+    // beta abandons the first of those operations of its own, which gamma doesn't take.
+    hive.repo(1).jj(&["op", "abandon", &abandoned.0]);
+    for _ in 0..3 {
+        hive.hive.sync(1).unwrap();
+        hive.hive.sync(0).unwrap();
+    }
+    assert_eq!(hive.hive.hub.store().pruned(), 1);
+    hive.sync();
+    hive.sync();
+    hive.assert_converged();
+    assert_eq!(hive.hive.hub.store().pruned(), 2);
+    for machine in 0..3 {
+        assert!(
+            !has_operation(hive.repo(machine), &abandoned.1),
+            "{machine}"
+        );
+    }
+}
+
+/// A hub that restarts after a prune opens with the records pruned, and replays none of
+/// them. It has forgotten what each machine said it took, so it prunes a later record only
+/// once every machine has said so again.
+#[test]
+fn hub_restarts_after_a_prune() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(0, "a", "first");
+    hive.commit(0, "b", "second");
+    hive.sync();
+    let abandoned = commit_op(hive.repo(0));
+    hive.repo(0).jj(&["op", "abandon", &abandoned.0]);
+    hive.sync();
+    hive.sync();
+    assert_eq!(hive.hive.hub.store().pruned(), 1);
+    hive.hive.restart_hub().unwrap();
+    hive.commit(1, "c", "after the restart");
+    hive.sync();
+    hive.assert_converged();
+    assert!(
+        hive.visible(0)
+            .iter()
+            .any(|c| c.ends_with("after the restart"))
+    );
+    // Both machines take a later record and say so, then the hub restarts: only the machine
+    // that says so again counts.
+    hive.hive.pruning = false;
+    let later = commit_op(hive.repo(1));
+    hive.repo(1).jj(&["op", "abandon", &later.0]);
+    hive.sync();
+    hive.sync();
+    hive.hive.restart_hub().unwrap();
+    hive.hive.pruning = true;
+    hive.hive.sync(1).unwrap();
+    assert_eq!(hive.hive.hub.store().pruned(), 1);
+    hive.hive.sync(0).unwrap();
+    assert_eq!(hive.hive.hub.store().pruned(), 2);
+    hive.assert_converged();
+}
+
+/// A hub that loses the `heads` log it wrote pruning, as a power cut can make it, goes back
+/// to the one before, which names the records again. The machines that took them, and one
+/// that joined after the prune, whose records the hub's still start with, carry on, and the
+/// hub prunes again.
+#[test]
+fn hub_goes_back_across_a_prune() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(0, "a", "first");
+    hive.commit(0, "b", "second");
+    hive.sync();
+    hive.hive.pruning = false;
+    let abandoned = commit_op(hive.repo(0));
+    hive.repo(0).jj(&["op", "abandon", &abandoned.0]);
+    hive.sync();
+    hive.sync();
+    let heads = hive.env.root().join("hub").join("heads");
+    let before = std::fs::read(&heads).unwrap();
+    hive.hive.pruning = true;
+    hive.sync();
+    assert_eq!(hive.hive.hub.store().pruned(), 1);
+    let gamma = hive.env.init_repo("gamma");
+    hive.add(gamma);
+    hive.sync();
+    hive.assert_converged();
+
+    std::fs::write(&heads, before).unwrap();
+    hive.hive.restart_hub().unwrap();
+    let store = hive.hive.hub.store();
+    assert_eq!((store.record_count(), store.pruned()), (1, 0));
+    hive.commit(2, "g", "gamma after the hub went back");
+    hive.sync();
+    hive.sync();
+    hive.assert_converged();
+    assert_eq!(hive.hive.hub.store().pruned(), 1);
+    for machine in 0..3 {
+        assert!(
+            !has_operation(hive.repo(machine), &abandoned.1),
+            "{machine}"
+        );
+        assert!(
+            hive.visible(machine)
+                .iter()
+                .any(|c| c.ends_with("gamma after the hub went back")),
+            "{machine}"
+        );
+    }
+}
+
+/// A hive made again, empty, after its hub pruned its records, has none of them. A machine
+/// that joined after the prune, knowing them only by their count and digest, can't publish
+/// them again, and the machines that took them whole publish them again as one record, which
+/// it can't match: holding nothing they drop, it takes the hub's records whole in their place,
+/// and carries on.
+#[test]
+fn a_machine_that_joined_after_a_prune_carries_on_when_the_hive_is_made_again() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    for i in 0..3 {
+        hive.commit(0, &format!("a{i}"), &format!("alpha {i}"));
+    }
+    hive.sync();
+    // Two records, which the machines that took them publish again as one.
+    hive.hive.pruning = false;
+    let mut abandoned = vec![];
+    for _ in 0..2 {
+        let op = commit_op(hive.repo(0));
+        hive.repo(0).jj(&["op", "abandon", &op.0]);
+        hive.sync();
+        abandoned.push(op.1);
+    }
+    hive.hive.pruning = true;
+    hive.sync();
+    assert_eq!(hive.hive.hub.store().pruned(), 2);
+    let gamma = hive.env.init_repo("gamma");
+    hive.add(gamma);
+    hive.sync();
+    hive.hive.remake_hub().unwrap();
+    hive.commit(2, "g", "gamma after the hive was made again");
+    hive.hive.sync(2).unwrap();
+    assert_eq!(hive.hive.hub.store().record_count(), 0);
+    hive.sync();
+    hive.sync();
+    hive.assert_converged();
+    for machine in 0..3 {
+        for op in &abandoned {
+            assert!(!has_operation(hive.repo(machine), op), "{machine}: {op}");
+        }
+        assert!(
+            hive.visible(machine)
+                .iter()
+                .any(|c| c.ends_with("gamma after the hive was made again")),
+            "{machine}"
+        );
+    }
+    assert_eq!(hive.hive.hub.store().record_count(), 1);
 }

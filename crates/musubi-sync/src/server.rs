@@ -401,6 +401,11 @@ fn serve_one(
     };
     let before = service.hub().store().head().1.clone();
     let (reply, notice) = service.handle_bytes(&message.payload, max_payload)?;
+    // Whatever the request was, it may have been the last a machine had to make: one saying
+    // it took every record, or the push that made a copy no longer present.
+    if let Err(err) = service.prune() {
+        tracing::warn!("could not prune the records: {err:#}");
+    }
     let head = service.hub().store().head().0;
     let received = message.payload.len();
     lock_activity(activity).served(

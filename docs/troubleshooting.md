@@ -329,13 +329,19 @@ copy with `musubi clone`, bring this one's work across to it, then run `musubi l
 here
 ```
 
-Operations the hive has went missing from this repository in a way musubi couldn't work out,
-as when a power cut loses jj's latest update to its op heads. musubi passes `jj op abandon` on
-to the other machines, so unless something like that happened, this is a bug: please report it
-at <https://github.com/bos/jj-musubi/issues>, with the daemon's log (`daemon.log`, in the
-[state directory](reference/configuration.md#on-every-machine)). Rather than bring the
-operations back, musubi stops syncing this copy: `musubi status` says retrying won't get past
-it.
+This copy's operation history and the hive's have parted in a way musubi can't reconcile, so
+musubi stops syncing it rather than bring back operations the hive no longer has: `musubi
+status` says retrying won't get past it.
+
+That's expected if the hive forgot this copy, with `musubi forget` or after its
+`musubi.forget-after`, or it left with `musubi leave` and joined again, and since then another
+machine has run `jj op abandon`, which every machine still in the hive has taken. The hub no
+longer remembers that abandon, so it can't pass it on to this copy.
+
+Otherwise, something removed operations from this repository that musubi couldn't account
+for, as when a power cut loses jj's latest update to its op heads. That's a bug: please report
+it at <https://github.com/bos/jj-musubi/issues>, with the daemon's log (`daemon.log`, in the
+[state directory](reference/configuration.md#on-every-machine)).
 
 To carry on here, make a new copy with `musubi clone`, bring across any work this copy made
 since its last sync, then run `musubi leave --force` in this one, which keeps all it has. If

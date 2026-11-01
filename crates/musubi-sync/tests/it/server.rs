@@ -366,6 +366,7 @@ async fn a_request_that_panics_the_hub_gets_an_error() {
     writer.view(&[1; 64], &view).unwrap();
     writer.finish().unwrap();
     let push = Request::Push {
+        machine: "laptop".to_owned(),
         ops: vec![vec![2; 64]],
         ops_attachment: WireAttachment::Inline(std::fs::read(&bundle).unwrap()),
         objects: WireAttachment::None,
@@ -382,6 +383,7 @@ async fn a_request_that_panics_the_hub_gets_an_error() {
         other => panic!("unexpected reply {other:?}"),
     }
     let fetch = Request::Fetch {
+        machine: "laptop".to_owned(),
         base: vec![0; 64],
         haves: WireAttachment::Haves(vec![]),
         records: RecordState {

@@ -2,8 +2,11 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::bail;
 use jj_lib::backend::CommitId;
@@ -23,12 +26,19 @@ use crate::open_bundle_dir;
 use crate::short;
 use crate::temp_bundle;
 
+/// How long the hub waits, before pruning its records, for a machine its history doesn't know
+/// to take them, after it last said what it took: a machine joining says so with its first
+/// fetch, and may take that long to realize the hive's history before its first push.
+pub const JOINING_LIFETIME: Duration = Duration::from_secs(24 * 3600);
+
 pub struct HubAdapter {
     store: HubStore,
     tmp: PathBuf,
     /// The history with a supersede's drops dropped too, as a push asks about it: the same
     /// for each of its questions, and for taking it.
     contracted: RefCell<Option<Contracted>>,
+    /// What each machine last said it took, since the hub started, and when.
+    reports: HashMap<String, (RecordState, Instant)>,
 }
 
 impl HubAdapter {
@@ -47,6 +57,7 @@ impl HubAdapter {
             store,
             tmp,
             contracted: RefCell::new(None),
+            reports: HashMap::new(),
         })
     }
 
@@ -79,6 +90,46 @@ impl HubAdapter {
     pub fn store(&self) -> &HubStore {
         &self.store
     }
+
+    /// Prunes the hub's records once every copy the hive hasn't forgotten has said it took
+    /// them all (`musubi_core::hub::prune`): every copy present at the head, and every machine
+    /// the history doesn't know that has said what it took in the last [`JOINING_LIFETIME`],
+    /// as one joining does before the hub accepts its first push. Returns how many it has
+    /// pruned, if it pruned any now.
+    pub fn prune(&mut self) -> anyhow::Result<Option<u64>> {
+        let records = HubStorage::records(self);
+        // Nothing to prune, or no machine has taken it all yet, as after the push that took
+        // a record, which renamed the history: the walk for presence can wait.
+        if self.store.records().is_empty()
+            || !self.reports.values().any(|(taken, _)| *taken == records)
+        {
+            return Ok(None);
+        }
+        let presence = self.store.presence()?;
+        let now = Instant::now();
+        // What the others said no longer counts: a copy the hive forgot, or a machine it
+        // doesn't know that hasn't said anything for a day.
+        self.reports.retain(|machine, (_, when)| {
+            presence.is_present(machine)
+                || (!presence.known().contains(machine)
+                    && now.duration_since(*when) < JOINING_LIFETIME)
+        });
+        let mut waited: BTreeSet<String> = presence.copies().map(str::to_owned).collect();
+        waited.extend(self.reports.keys().cloned());
+        let pruned = musubi_core::hub::prune(self, &waited)?;
+        if let Some(count) = pruned {
+            tracing::info!("pruned the first {count} records, which every machine has taken");
+        }
+        Ok(pruned)
+    }
+}
+
+/// The state of `count` records whose digest is `digest`.
+fn record_state(count: usize, digest: &musubi_jj::records::RecordDigest) -> RecordState {
+    RecordState {
+        count: count as u64,
+        digest: digest.bytes().to_vec(),
+    }
 }
 
 impl HubStorage for HubAdapter {
@@ -103,31 +154,57 @@ impl HubStorage for HubAdapter {
     }
 
     fn records(&self) -> RecordState {
-        let count = self.store.records().len();
-        RecordState {
-            count: count as u64,
-            digest: self
-                .store
-                .digest(count)
-                .expect("a digest per prefix")
-                .bytes()
-                .to_vec(),
-        }
+        let count = self.store.record_count();
+        record_state(
+            count,
+            self.store.digest(count).expect("a digest per prefix"),
+        )
+    }
+
+    fn pruned(&self) -> RecordState {
+        let count = self.store.pruned();
+        record_state(count, self.store.digest(count).expect("the pruned digest"))
     }
 
     fn records_since(&self, records: &RecordState) -> anyhow::Result<(u64, Vec<Vec<OpId>>)> {
-        let all = self.store.records();
+        let pruned = self.store.pruned();
         let from = usize::try_from(records.count)
             .ok()
             .filter(|&count| {
                 self.store.digest(count).map(|digest| digest.bytes()) == Some(&records.digest[..])
             })
-            .unwrap_or(0);
-        let records = all[from..]
+            .unwrap_or(pruned);
+        let records = self.store.records()[from - pruned..]
             .iter()
             .map(|record| record.ops().iter().map(|op| op.0.0.clone()).collect())
             .collect();
         Ok((from as u64, records))
+    }
+
+    fn report(&mut self, machine: &str, records: &RecordState) {
+        let now = Instant::now();
+        match self.reports.get_mut(machine) {
+            Some((taken, when)) if taken == records => *when = now,
+            _ => {
+                self.reports
+                    .insert(machine.to_owned(), (records.clone(), now));
+            }
+        }
+    }
+
+    fn reported(&self, machine: &str) -> Option<RecordState> {
+        self.reports.get(machine).map(|(taken, _)| taken.clone())
+    }
+
+    fn prune(&mut self, count: u64) -> anyhow::Result<()> {
+        // All of them at once: only then is nothing left to replay on opening.
+        anyhow::ensure!(
+            count == self.store.record_count() as u64,
+            "the hub prunes all its records at once, not {count} of {}",
+            self.store.record_count()
+        );
+        self.contracted.take();
+        Ok(self.store.prune()?)
     }
 
     fn is_dropped(&self, op: &OpId, dropped: &[OpId]) -> anyhow::Result<bool> {

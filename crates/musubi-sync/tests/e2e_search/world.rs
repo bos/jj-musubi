@@ -180,7 +180,11 @@ impl World {
                 workspaces
             })
             .collect();
-        let fx = Fixture::join(env, repos);
+        let mut fx = Fixture::join(env, repos);
+        // The search doesn't generate pruning yet: a copy the hive forgot that comes back
+        // behind pruned records stops, which its checks would take for a failure. The race
+        // catalogue covers pruning (docs/internals/races.md, "Operation history").
+        fx.hive.pruning = false;
         let mut world = Self {
             fx,
             origin,

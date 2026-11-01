@@ -108,6 +108,7 @@ fn hub_survives_malformed_requests(tc: TestCase) {
         .0
         .to_bytes();
     let fetch = encode(HubRequest::Protocol(Request::Fetch {
+        machine: "laptop".to_owned(),
         base: root.clone(),
         haves: WireAttachment::None,
         records: RecordState {
@@ -1169,6 +1170,7 @@ fn protocol(tc: &TestCase, seen: &Seen, heads: &[Vec<u8>]) -> WireRequest {
     };
     match tc.draw(gs::integers::<u8>().max_value(2)) {
         0 => Request::Fetch {
+            machine: "laptop".to_owned(),
             base: id(tc, seen, heads),
             haves: attachment(tc, seen, heads),
             records: records(tc),
@@ -1179,6 +1181,7 @@ fn protocol(tc: &TestCase, seen: &Seen, heads: &[Vec<u8>]) -> WireRequest {
             haves: attachment(tc, seen, heads),
         },
         _ => Request::Push {
+            machine: "laptop".to_owned(),
             ops: ids(tc),
             ops_attachment: attachment(tc, seen, heads),
             objects: attachment(tc, seen, heads),

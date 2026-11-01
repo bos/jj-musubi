@@ -296,9 +296,10 @@ Steps:
 
 - `Abandon(D)`, on a node through `jj op abandon`: `D` is below the node's heads, holds none of
   them and not the root. `D_node := D_node ∪ D`.
-- Every `Push` carries the records its node took, as a count and a digest, and the hub refuses
-  one whose records aren't its own: its ids aren't the hub's. Nor does it take a new head it
-  remembers dropping. A node never pushes a head that a record it took drops.
+- Every `Push` and `Fetch` carries the records its node took, as a count and a digest, and
+  names the node's machine. The hub refuses a push whose records aren't its own: its ids aren't
+  the hub's. Nor does it take a new head it remembers dropping. A node never pushes a head that
+  a record it took drops.
 - `Supersede`: a `Push` that also carries `pending`, from a node that has every record of the
   hub and pending drops. The node first writes the fix-up on its single head and pushes that.
   The hub answers it as any `Push`, checking the compare-and-swap against `contract(D_hub)`,
@@ -309,7 +310,17 @@ Steps:
   pending drops the hub's history no longer has under those ids, after the hub went back or took
   another record, renames them to the hub's history first.
 - `Prune(k)`, on the hub, once every node's records start with the hub's first `k`: `pruned :=
-  k`. It no longer knows their ids, nor can it send those records. The hub doesn't prune yet.
+  k`. It no longer knows their ids, nor can it send those records. The Rust hub remembers what
+  each machine's last request said it took, and prunes all its records, `k = |dropped|`, once
+  every copy the hive hasn't forgotten, and every machine joining it, has said it took them
+  ([design.md, "What an abandon costs the hub"](design.md#what-an-abandon-costs-the-hub)).
+- A `Fetched` reply carries the hub's records the node lacks, or, if the node's records aren't
+  its first ones, all it remembers, with `pruned`'s count and digest. A node whose records don't
+  start with those can never take the hub's, and may hold operations they drop: it stops.
+  Except a node with nothing of the hive's, as one that has just joined, which takes the hub's
+  records from there, holding the first `pruned` by their count and digest alone; and one that
+  holds records so, which, from a hub that went back or was made again and has pruned nothing,
+  takes the hub's records, all whole, in their place.
 
 Policy, before the steps above: if a record the node lacks drops none of its heads, adopt; if
 it has pending drops and the hub's records, supersede, instead of an ordinary push.

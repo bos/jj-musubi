@@ -14,6 +14,7 @@ use std::hash::Hash;
 use crate::message::HeadKind;
 use crate::message::OpEntry;
 use crate::message::RecordState;
+use crate::message::Records;
 use crate::message::Reply;
 use crate::message::Request;
 
@@ -22,6 +23,9 @@ pub trait LocalRepo {
     type Op: Clone + Ord + Hash + Debug;
     type Attachment;
     type Error;
+
+    /// This node's machine key, which names it to the hub.
+    fn machine(&self) -> String;
 
     /// The canonical forms of the local op heads (canonicalizing any new local operations).
     fn heads(&mut self) -> Result<Vec<Self::Op>, Self::Error>;
@@ -94,27 +98,43 @@ pub trait LocalRepo {
 
     fn set_accepted_base(&mut self, op: &Self::Op) -> Result<(), Self::Error>;
 
-    /// The hub's records this node took last, oldest first, each sorted.
-    fn applied_records(&self) -> Result<Vec<Vec<Self::Op>>, Self::Error>;
+    /// The hub's records this node took last.
+    fn applied_records(&self) -> Result<Records<Self::Op>, Self::Error>;
 
     /// The state of [`Self::applied_records`].
     fn records(&self) -> Result<RecordState, Self::Error>;
+
+    /// The state of `records`: their count, and their digest, which this node computes as the
+    /// hub does.
+    fn records_state(&self, records: &Records<Self::Op>) -> Result<RecordState, Self::Error>;
 
     /// What this node dropped that the records it took don't drop: what it has yet to
     /// publish, sorted. Empty if nothing.
     fn pending(&self) -> Result<Vec<Self::Op>, Self::Error>;
 
-    /// The state of this node's records once the hub takes `record` after them.
-    fn records_with(&self, record: &[Self::Op]) -> Result<RecordState, Self::Error>;
-
     /// Gets ready to take `records`, the hub's: names what this node has as the hub does,
     /// beside what it has, without changing its op heads, so that it can realize and advance
     /// to the hub's head first. Returns whether they drop one of the op heads.
-    fn prepare_records(&mut self, records: &[Vec<Self::Op>]) -> Result<bool, Self::Error>;
+    fn prepare_records(&mut self, records: &Records<Self::Op>) -> Result<bool, Self::Error>;
 
     /// Takes the hub's records, none of which drops an op head: drops what they drop, and
     /// names what this node has as the hub does. What else this node dropped stays pending.
-    fn adopt(&mut self, records: &[Vec<Self::Op>]) -> Result<(), Self::Error>;
+    /// Their base is this node's, or none, or this node is [fresh](Self::fresh).
+    fn adopt(&mut self, records: &Records<Self::Op>) -> Result<(), Self::Error>;
+
+    /// Whether this node has nothing of the hive's: it joined on the root, has taken no
+    /// records, and has neither pushed nor realized anything since. Only such a node may take
+    /// the hub's records from those the hub pruned, knowing only their count and digest: it
+    /// holds no operation they drop.
+    fn fresh(&self) -> Result<bool, Self::Error>;
+
+    /// This node is about to push to the hub, or to realize one of the hub's operations: from
+    /// now on it is no longer [fresh](Self::fresh).
+    fn share(&mut self) -> Result<(), Self::Error>;
+
+    /// The error that says this node lacks records the hub pruned, so that it can never take
+    /// the hub's, nor sync again.
+    fn lacks_pruned(&self) -> Self::Error;
 
     /// Whether this node dropped `op`, an operation the hub named.
     fn is_dropped(&self, op: &Self::Op) -> Result<bool, Self::Error>;
@@ -175,7 +195,7 @@ pub struct NodeCore<O> {
     hub_records: Option<RecordState>,
     /// The hub's records, all of them, where they aren't this node's: to take once none of
     /// them drops an op head.
-    announced: Option<Vec<Vec<O>>>,
+    announced: Option<Records<O>>,
 }
 
 /// What [`NodeCore::survey`] found below `known.head`.
@@ -211,6 +231,7 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
         R: LocalRepo<Op = O>,
     {
         Ok(Request::Fetch {
+            machine: repo.machine(),
             base: repo.accepted_base()?,
             haves: repo.fetch_haves()?,
             records: repo.records()?,
@@ -248,6 +269,7 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
                 self.plan = survey.plan;
             }
             let op = self.plan.pop_front().expect("planned above");
+            repo.share()?;
             repo.realize(&op)?;
             return Ok(Step::Realized(op));
         }
@@ -310,7 +332,7 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
     /// A `Push` of `head`, which descends from `known.head`, uploading what the hub lacks.
     fn push<R>(
         &self,
-        repo: &R,
+        repo: &mut R,
         head: &O,
         records: RecordState,
         dropped: Vec<O>,
@@ -318,9 +340,18 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
     where
         R: LocalRepo<Op = O>,
     {
+        // Once the hub has pruned the record that dropped it, nothing but this keeps it from
+        // taking back what this node pushes (docs/internals/design.md, "What an abandon costs
+        // the hub"): a bug here must be loud.
+        assert!(
+            !repo.is_dropped(head)?,
+            "pushing {head:?}, which this node dropped"
+        );
+        repo.share()?;
         let known = self.known.1.clone();
         let ops = repo.ops_between(head, &known)?;
         Ok(Request::Push {
+            machine: repo.machine(),
             ops_attachment: repo.ops_attachment(&ops)?,
             objects: repo.objects_attachment(&ops, &known)?,
             ops,
@@ -438,11 +469,11 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
             } => {
                 if seq > self.known.0 {
                     self.learn(seq, head.clone());
-                    self.note_records(repo, records)?;
+                    self.note_records(repo, kind, records)?;
                     Ok(Handled::Learned { kind, seq, head })
                 } else {
                     if seq == self.known.0 && head == self.known.1 {
-                        self.note_records(repo, records)?;
+                        self.note_records(repo, kind, records)?;
                     }
                     Ok(Handled::Ignored)
                 }
@@ -456,13 +487,14 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
                 records,
                 records_from,
                 new_records,
+                pruned,
             } => {
                 let learned = (seq > self.known.0).then(|| {
                     self.learn(seq, head.clone());
                     (seq, head.clone())
                 });
                 if seq == self.known.0 && head == self.known.1 {
-                    self.note_announced(repo, records, records_from, new_records)?;
+                    self.note_announced(repo, records, records_from, new_records, pruned)?;
                 }
                 // Stage only operations in `anc*(known.head)`: the guard Locality, and so
                 // MergeOwnership, depend on (docs/internals/protocol.md, "Fetch").
@@ -495,44 +527,103 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
         }
     }
 
-    /// Takes in the hub's records as of the head this node knows. Where the hub took this
-    /// node's pending drops as its next record, this node takes that record too.
-    fn note_records<R>(&mut self, repo: &R, records: RecordState) -> Result<(), R::Error>
+    /// Takes in the hub's records as of the head this node knows, from a reply of `kind`.
+    /// Where the hub accepted this node's own push, taking its pending drops as the next
+    /// record, this node takes that record too. Not from a notification: another node may have
+    /// dropped the same, and this node takes the hub's records as the hub announces them, in
+    /// a reply to its own request, which a notification isn't.
+    fn note_records<R>(
+        &mut self,
+        repo: &R,
+        kind: HeadKind,
+        records: RecordState,
+    ) -> Result<(), R::Error>
     where
         R: LocalRepo<Op = O>,
     {
-        if records != repo.records()? {
+        if kind == HeadKind::Accepted && records != repo.records()? {
             let dropped = repo.pending()?;
-            if !dropped.is_empty() && records == repo.records_with(&dropped)? {
+            if !dropped.is_empty() {
                 let mut all = repo.applied_records()?;
-                all.push(dropped);
-                self.announced = Some(all);
+                all.records.push(dropped);
+                if records == repo.records_state(&all)? {
+                    self.announced = Some(all);
+                }
             }
         }
         self.hub_records = Some(records);
         Ok(())
     }
 
-    /// Takes in the hub's records from a `Fetched` reply about the head this node knows.
+    /// Takes in the hub's records from a `Fetched` reply about the head this node knows:
+    /// `new_records`, from the `from`th on, and `pruned`, the count and digest of the first
+    /// ones, which the hub no longer has. Fails if this node's records don't start with those,
+    /// unless it is fresh, and then starts from them.
     fn note_announced<R>(
         &mut self,
         repo: &R,
         records: RecordState,
         from: u64,
         new_records: Vec<Vec<O>>,
+        pruned: RecordState,
     ) -> Result<(), R::Error>
     where
         R: LocalRepo<Op = O>,
     {
-        let mut all = repo.applied_records()?;
-        match usize::try_from(from) {
-            Ok(from) if from <= all.len() => all.truncate(from),
-            // Not records this node can have asked about: not the hub's, as an honest one
-            // sends them.
-            _ => return Ok(()),
+        let mine = repo.applied_records()?;
+        // This node's first `count` records, if it knows them: not those it knows only by
+        // their count and digest, nor more than it has.
+        let first = |count: u64| {
+            let kept = count.checked_sub(mine.base.count)?;
+            let kept = usize::try_from(kept).ok()?;
+            (kept <= mine.records.len()).then(|| Records {
+                base: mine.base.clone(),
+                records: mine.records[..kept].to_vec(),
+            })
+        };
+        let mut all = match first(from) {
+            Some(mut all) => {
+                all.records.extend(new_records.iter().cloned());
+                Some(all)
+            }
+            None => None,
+        };
+        if let Some(candidate) = &all
+            && repo.records_state(candidate)? != records
+        {
+            all = None;
         }
-        all.extend(new_records);
-        self.announced = (all != repo.applied_records()?).then_some(all);
+        let Some(all) = all else {
+            let starts_with_pruned = match first(pruned.count) {
+                Some(prefix) => repo.records_state(&prefix)? == pruned,
+                None => false,
+            };
+            if starts_with_pruned {
+                // Not records this node can have asked about: from a request sent before it
+                // took others.
+                return Ok(());
+            }
+            // A fresh node, which has nothing of the hive's, starts from the hub's records
+            // where it pruned them. A node with records it knows only by their count and
+            // digest, as one that joined after a prune, holds nothing they drop: where a hub
+            // that went back or was made again lacks them, and has pruned nothing, it takes
+            // the hub's records, all of them whole, in their place.
+            let rebase = mine.base.count > 0 && pruned.count == 0;
+            let base = Records {
+                base: pruned.clone(),
+                records: new_records,
+            };
+            if from == pruned.count
+                && (rebase || repo.fresh()?)
+                && repo.records_state(&base)? == records
+            {
+                self.announced = Some(base);
+                self.hub_records = Some(records);
+                return Ok(());
+            }
+            return Err(repo.lacks_pruned());
+        };
+        self.announced = (all != mine).then_some(all);
         self.hub_records = Some(records);
         Ok(())
     }
@@ -651,6 +742,7 @@ mod tests {
             records: NO_RECORDS,
             records_from: 0,
             new_records: vec![],
+            pruned: NO_RECORDS,
         };
         assert!(core.hub_went_back(&fetched(0, 0)));
         assert!(!core.hub_went_back(&fetched(4, 40)));

@@ -296,6 +296,21 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
     ),
     // The search runs no `jj util gc`.
     ("op_abandon_then_gc", None),
+    // The search's hub doesn't prune, and no machine joins later.
+    ("a_trim_makes_the_hub_smaller", None),
+    ("an_offline_machine_holds_pruning_back", None),
+    ("a_forgotten_copy_behind_pruned_records_stops", None),
+    (
+        "a_forgotten_copy_that_took_the_pruned_records_comes_back",
+        None,
+    ),
+    ("a_machine_joins_after_a_prune", None),
+    ("hub_restarts_after_a_prune", None),
+    ("hub_goes_back_across_a_prune", None),
+    (
+        "a_machine_that_joined_after_a_prune_carries_on_when_the_hive_is_made_again",
+        None,
+    ),
     ("restart_with_lost_cache", Some(&["lose_cache"])),
     (
         "lost_cache_does_not_duplicate_realizations",

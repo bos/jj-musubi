@@ -35,7 +35,7 @@ use crate::Attachment;
 use crate::blobs::BlobId;
 use crate::blobs::BlobStore;
 
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 pub const JJ_LIB_VERSION: &str = "0.46.0";
 /// This release of musubi, as every message says, and `musubi --version`: for a build deployed
 /// from source, followed by when it was deployed and its commit (`build.rs`).
@@ -125,6 +125,11 @@ pub enum HubRequest {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one reply at a time, decoded and taken apart at once: boxing it would only make \
+              every match on it longer"
+)]
 pub enum HubReply {
     Protocol(WireReply),
     /// The real reply is the content of this blob; fetch it with `GetChunk`.
@@ -313,10 +318,12 @@ pub fn map_request<O, A, P, B>(
 ) -> anyhow::Result<Request<P, B>> {
     Ok(match request {
         Request::Fetch {
+            machine,
             base,
             haves,
             records,
         } => Request::Fetch {
+            machine,
             base: id(base),
             haves: attachment(haves)?,
             records,
@@ -331,6 +338,7 @@ pub fn map_request<O, A, P, B>(
             haves: attachment(haves)?,
         },
         Request::Push {
+            machine,
             ops,
             ops_attachment,
             objects,
@@ -339,6 +347,7 @@ pub fn map_request<O, A, P, B>(
             records,
             dropped,
         } => Request::Push {
+            machine,
             ops: ops.into_iter().map(&mut id).collect(),
             ops_attachment: attachment(ops_attachment)?,
             objects: attachment(objects)?,
@@ -377,6 +386,7 @@ pub fn map_reply<O, A, P, B>(
             records,
             records_from,
             new_records,
+            pruned,
         } => Reply::Fetched {
             seq,
             head: id(head),
@@ -395,6 +405,7 @@ pub fn map_reply<O, A, P, B>(
                 .into_iter()
                 .map(|record| record.into_iter().map(&mut id).collect())
                 .collect(),
+            pruned,
         },
         Reply::Refused { records } => Reply::Refused { records },
         Reply::Objects {

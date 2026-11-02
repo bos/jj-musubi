@@ -13,7 +13,9 @@ other terms are those of [design.md, "Vocabulary"](../docs/internals/design.md#v
   "Per-machine state in a replicated
   view"](../docs/internals/design.md#per-machine-state-in-a-replicated-view)).
 - Which copies a hive shows, one copy being one machine's repository (`Musubi/Presence.lean`;
-  [design.md, "Copies that go away"](../docs/internals/design.md#copies-that-go-away)).
+  [design.md, "Copies that go away"](../docs/internals/design.md#copies-that-go-away)), and
+  how a contraction keeps it (`Musubi/PresenceContract.lean`; [design.md, "Presence through an
+  abandon"](../docs/internals/design.md#presence-through-an-abandon)).
 - Which repository on a machine is the copy of a key, and which a duplicate made of its files
   (`Musubi/Copies.lean`; [copies.md](../docs/internals/copies.md)).
 - The names a machine shows other machines' workspaces under (`Musubi/Names.lean`; [design.md,
@@ -84,6 +86,7 @@ is `formal/.lake/build/bin/oracle`.
 | `Musubi/ExpectedExec.lean` | Finite operation DAGs and commit-side selection for the history oracle. |
 | `Musubi/Presence.lean` | Which copies a hive shows. |
 | `Musubi/PresenceExec.lean` | The presence rule on a finite history, executable, for the oracle. |
+| `Musubi/PresenceContract.lean` | Presence through a contraction: stamps, presence at what survives, and ids with stamps (`sid`) composing in either order. |
 | `Musubi/RefsExec.lean` | `Refs.lean`'s slot functions on targets a test numbers, with jj's merges as a table, for the oracle. |
 | `Musubi/Copies.lean` | Which repository is the copy of a key: musubi's decisions, jj's config-id rule, and a machine's repositories moved, copied, deleted and replaced. |
 | `Musubi/Names.lean` | The names a machine shows other machines' workspaces under, and `#guard` tests of them. |
@@ -346,8 +349,39 @@ node can wait on another: with a head the hub dropped, or on a hub head it dropp
 past. `progressS` shows the node with the newest head above the hub's head can always act, since
 every dropped operation is below a newer head of a node that dropped it.
 
-`Presence.lean`'s `fixup_present` and `pass_present` cover the fix-up chain that restores
-which copies are present after a rewrite.
+`Presence.lean`'s `fixup_present` and `pass_present` say what the fix-up chain does to which
+copies are present; `PresenceContract.lean` that the rewrite itself changes nothing there.
+
+### Presence through a contraction (`PresenceContract.lean`)
+
+Presence is worked out from the history below an operation, and a contraction changes that
+history while keeping every surviving operation's view. The model is abstract in the presence
+values and the rule that works them out (`step`), so that it covers `Presence::merge` and
+`apply` as they are: `val x` is presence at `x` before anything is dropped, and `step` asks
+`seen c p` whether work `c` is below parent `p`. A history is the original parents and what is
+gone; `seen` counts gone work as seen below every parent. A contraction stamps an operation
+with `val x` where `step` on its new parents would give another value (`stamp`), and presence
+at a stamped operation is its stamp (`pres`).
+
+- `pres_eq`: presence at every surviving operation is what it was. It holds of any rule, as
+  the stamp is defined to make it so; what it shows is that presence worked out from parents
+  that are themselves stamped where needed is the original's.
+- `stamp_union`, `sid_union`, `sid_comm`: stamps, and so ids, which hash them, are the same
+  whichever order two dropped sets go in. Given the definitions, this is `cpar_union`: whether
+  an operation is stamped, and with what, depends only on its contracted parents and on what
+  is gone. `stamp_none`: a history nothing was dropped from has none.
+- `sid_eq`, `sid_superseded_ne`: as `cid_eq` and `superseded_ne`, with stamps.
+
+What the model leaves to tests: that the Rust's stamp is this definition, computed on the
+history as it is after the drops before; and that the Rust, reading a stamp, finds the
+operation standing for each work it names among its parents' presence. Presence values name
+work by its original identity, which is what lets them stay as they are; the model numbers
+operations by it. That `step` is `Presence::merge` then `Presence::apply`, and that these
+compute `UMax` on a history nothing was dropped from, is `Presence.lean`'s (`umax_merge`,
+`umax_work`, `umax_forget`). `presence::contraction_keeps_presence` compares each copy's latest
+work at what every kept operation becomes with `PresenceExec.lean`'s at the operation, and
+`dropping_twice_is_dropping_both` all of presence with presence worked out before the drops
+([conformance.md, "Presence"](../docs/internals/conformance.md#presence)).
 
 ### Chunked blobs (`Chunks.lean`)
 

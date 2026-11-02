@@ -20,6 +20,7 @@ import Musubi.PresenceExec
 import Musubi.Copies
 import Musubi.Names
 import Musubi.Contract
+import Musubi.PresenceContract
 import Musubi.Supersede
 
 open Musubi
@@ -220,6 +221,15 @@ open Musubi
 #print axioms Contract.cid_eq
 #print axioms Contract.superseded_ne
 #print axioms Contract.anc_cpar_iff
+
+-- Presence through a contraction
+#print axioms PresenceContract.pres_eq
+#print axioms PresenceContract.stamp_union
+#print axioms PresenceContract.sid_union
+#print axioms PresenceContract.sid_comm
+#print axioms PresenceContract.stamp_none
+#print axioms PresenceContract.sid_eq
+#print axioms PresenceContract.sid_superseded_ne
 
 -- Replicated op abandon
 #print axioms SReachable.base

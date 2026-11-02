@@ -23,6 +23,7 @@ use super::NodeError;
 use super::NodeRepo;
 use super::is_visible;
 use super::translate::target_of;
+use crate::canonical::Work;
 use crate::presence::Kind;
 use crate::presence::Presence;
 use crate::workspaces;
@@ -134,7 +135,7 @@ impl NodeRepo {
         canonical_parents: &[CanonicalOp],
         predecessors: Option<&BTreeMap<CommitId, Vec<CommitId>>>,
         kind: &Kind,
-    ) -> Result<(View, Presence<CanonicalOp>), NodeError> {
+    ) -> Result<(View, Presence<Work>), NodeError> {
         let parent_presences = canonical_parents
             .iter()
             .map(|parent| Ok((parent.clone(), self.presence(parent)?)))
@@ -291,7 +292,7 @@ impl NodeRepo {
     /// its workspaces because a forget saw its work, not because it removed them.
     fn present_workspaces(
         &self,
-        parents: &[(CanonicalOp, Arc<Presence<CanonicalOp>>)],
+        parents: &[(CanonicalOp, Arc<Presence<Work>>)],
         present: &impl Fn(&str) -> bool,
     ) -> Result<BTreeMap<WorkspaceNameBuf, CommitId>, NodeError> {
         // Machines grouped by the parents where they are present, usually all of them.
@@ -355,7 +356,7 @@ impl NodeRepo {
     pub(super) fn local_names(
         &self,
         canonical_view: &View,
-        presence: &Presence<CanonicalOp>,
+        presence: &Presence<Work>,
     ) -> Result<BTreeMap<WorkspaceNameBuf, WorkspaceNameBuf>, NodeError> {
         let prefixes = self.prefixes(canonical_view, presence)?;
         Ok(self.names_of(canonical_view, &prefixes))
@@ -368,7 +369,7 @@ impl NodeRepo {
     fn prefixes(
         &self,
         canonical_view: &View,
-        presence: &Presence<CanonicalOp>,
+        presence: &Presence<Work>,
     ) -> Result<BTreeMap<String, String>, NodeError> {
         let mut machines = self.machines_of(canonical_view, presence.known());
         machines.insert(self.machine.key().to_owned());

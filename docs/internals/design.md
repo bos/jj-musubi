@@ -244,7 +244,9 @@ forget saw its work, not because the machine removed them. The hub counts the ma
 workspaces in its head's view, which are therefore the present ones.
 
 Each machine keeps, for each copy present at a canonical operation, the copy's latest work there
-that no forget saw, and computes an operation's from its parents' (`Presence::merge` and `apply`,
+that no forget saw, named by its original identity ([Presence through an
+abandon](#presence-through-an-abandon)), and computes an operation's from its parents'
+(`Presence::merge` and `apply`,
 whose rules the model proves in `umax_merge`, `umax_work` and `umax_forget`): a copy's work
 becomes its latest; a forget leaves the copies it forgets nothing; a merge keeps each latest work
 its parents keep, unless a parent whose history has that work doesn't keep it. Only merges need an
@@ -796,6 +798,35 @@ Where the two differ, as for a branch of the operation log that forks inside the
 merges after it, musubi rewrites the abandoning machine's local operations again to match
 contraction.
 
+### Presence through an abandon
+
+Contraction keeps every surviving operation's view, but presence ([Presence](#presence)) is
+worked out from the history below an operation, which contraction changes. Dropping a copy's
+work below an operation would leave the copy absent there, though the view has its workspaces;
+dropping a forget would bring the copy back there, though the view lacks them. A machine would
+then realize the operation, or another machine's operation on it, as presence there has it,
+and make a view jj never makes: one with a machine's HEAD but none of its workspaces, or one
+without the workspace a forgotten copy keeps for itself.
+
+So presence at every operation that survives is what it was. Presence names work by its
+original identity, which contraction keeps, not by its id. Contraction stamps an operation it
+rewrites with its presence, in `musubi.presence`, where the presence worked out from its new
+parents would be another, and only there; at a stamped operation presence is the stamp, and at
+any other it is worked out as before. Work that no operation stands for any more, as the
+abandon dropped it, counts as seen below every operation that doesn't keep it: a merge keeps it
+only where every parent does, so a copy that left stays gone when a line of history from before
+the abandon is merged. Whether an operation is stamped, and with what, depends only on its new
+parents and what is gone, so dropping one set and then another stamps, and so names, every
+operation as dropping both at once does. `formal/Musubi/PresenceContract.lean` models the rule,
+and proves that and that presence at every surviving operation is as it was
+([formal/README.md](../../formal/README.md), "Presence through a contraction"); the
+conformance tests check the Rust against it. The stamp is no part of an operation's original
+identity, and a fresh operation never has one. A copy is named in it by its machine key, which
+has no whitespace (an operation naming a copy by anything else is no copy's work), and a work
+by its original identity, so every presence can be written as a stamp; a machine or hub
+refuses an operation received with a stamp that doesn't read, as presence there and after it
+couldn't be worked out. Of two works an abandon dropped, neither counts as before the other.
+
 ### Publishing an abandon
 
 jj's own reparenting can also recreate an earlier local id. Where a surviving local operation
@@ -881,25 +912,26 @@ and publishes nothing: what jj brought back stays, as it does on one machine.
 musubi works some state out from the history rather than from views: which copies are present,
 each copy's latest work and forget-after, the machines the hive has known (and so the names other
 machines' workspaces show under), the hive's settings, and the expected value of a conflicted
-remote bookmark. Dropping operations would change it. So the machine that publishes a dropped
-set first writes, on its head, a fix-up that puts it back as it was at its head before the
-abandon:
+remote bookmark. Presence, and with it the machines known, is as it was ([Presence through an
+abandon](#presence-through-an-abandon)), but a copy's latest work may be work the abandon
+dropped, whose time can no longer be read, and the rest would change. So the machine
+that publishes a dropped set first writes, on its head, a fix-up that puts it back as it was at
+its head before the abandon:
 
-- a forget of every copy the rewrite would bring back, and of every machine it would drop from
-  those known;
-- work by every copy it would leave absent, or whose latest work or forget-after it dropped, one
-  operation each, recording that work's time and forget-after;
+- work by every copy whose latest work or forget-after the abandon dropped, one operation each,
+  recording that work's time and forget-after, then a forget of it again if it was forgotten;
 - in the first operation, the hive's settings and the conflicted remote bookmarks' expected
   values as they were. These are worked out when the machine notices the abandon, and until
   the fix-up is written, every export of the machine's refs takes them as known at the op head
   they were worked out at.
 
 Each operation is work by one copy or a forget, as presence requires, and `Presence.lean` proves
-that such a chain leaves each copy present exactly as it was (`fixup_present`, `pass_present`).
-The state is then as it was at the head and from there on. An operation from before the abandon
-keeps the rewritten history's own state, so `jj op restore` to one can resolve a conflicted
-remote bookmark to the other side. A machine the hive has forgotten, whose work the abandon
-dropped, keeps its own workspaces as they are.
+what each does to which copies are present (`fixup_present`, `pass_present`): each copy ends as
+it was.
+The state is then as it was at the head and from there on, and a copy whose latest work was
+dropped has work again that merges keep. An operation from before the abandon keeps presence as
+it was, but the rest of the rewritten history's own state, so `jj op restore` to one can
+resolve a conflicted remote bookmark to the other side.
 
 `jj util gc` removes only data that is no longer reachable locally, so it needs no special
 handling. Neither the hub nor the nodes ever delete an object, and the daemon's own cleanup on a

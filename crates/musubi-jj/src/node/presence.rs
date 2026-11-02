@@ -16,6 +16,7 @@ use pollster::FutureExt as _;
 use super::NodeError;
 use super::NodeRepo;
 use super::index_err;
+use crate::canonical::Work;
 use crate::op_id::CanonicalOp;
 use crate::op_id::LocalOp;
 use crate::presence::FORGET_ATTRIBUTE;
@@ -24,7 +25,7 @@ use crate::workspaces;
 
 /// This machine's own workspace names as of its latest work (`Presence::worked`), the last
 /// asked about.
-pub(super) type WorkedNames = Option<(BTreeSet<CanonicalOp>, Arc<BTreeSet<WorkspaceNameBuf>>)>;
+pub(super) type WorkedNames = Option<(Vec<Option<CanonicalOp>>, Arc<BTreeSet<WorkspaceNameBuf>>)>;
 
 /// The names of this machine's own workspaces in a canonical view.
 fn own_keys(node: &NodeRepo, view: &View) -> BTreeSet<WorkspaceNameBuf> {
@@ -38,7 +39,7 @@ fn own_keys(node: &NodeRepo, view: &View) -> BTreeSet<WorkspaceNameBuf> {
 impl NodeRepo {
     /// The copies present at canonical operation `op`. Unless an ancestor's presence is
     /// remembered, this reads the history below `op`, once.
-    pub fn presence(&self, op: &CanonicalOp) -> Result<Arc<Presence<CanonicalOp>>, NodeError> {
+    pub fn presence(&self, op: &CanonicalOp) -> Result<Arc<Presence<Work>>, NodeError> {
         if op != self.canonical.root_operation_id() && !self.canonical.has_operation(op) {
             return Err(NodeError::NotRealizable(op.0.hex(), "operation not stored"));
         }
@@ -48,21 +49,19 @@ impl NodeRepo {
     /// Presence before an operation's own effect, from its parents'.
     pub(super) fn merge_presence(
         &self,
-        parents: &[(CanonicalOp, Arc<Presence<CanonicalOp>>)],
-    ) -> Result<Presence<CanonicalOp>, NodeError> {
+        parents: &[(CanonicalOp, Arc<Presence<Work>>)],
+    ) -> Result<Presence<Work>, NodeError> {
         Ok(crate::canonical::merge_presence(&self.canonical, parents)?)
     }
 
     /// Remembers the presence at canonical operation `op`, just written.
-    pub(super) fn remember_presence(&self, op: CanonicalOp, presence: Presence<CanonicalOp>) {
+    pub(super) fn remember_presence(&self, op: CanonicalOp, presence: Presence<Work>) {
         self.presences.remember(op, presence);
     }
 
     /// The copies present as of this machine's (merged) op head, and the canonical form of
     /// that head.
-    pub fn present_copies(
-        &mut self,
-    ) -> Result<(CanonicalOp, Arc<Presence<CanonicalOp>>), NodeError> {
+    pub fn present_copies(&mut self) -> Result<(CanonicalOp, Arc<Presence<Work>>), NodeError> {
         let head = self.merge_heads()?;
         let canonical = self.canonicalize(&head)?;
         let presence = self.presence(&canonical)?;
@@ -299,7 +298,7 @@ impl NodeRepo {
     pub(super) fn own_names_in(
         &self,
         view: &View,
-        presence: &Presence<CanonicalOp>,
+        presence: &Presence<Work>,
     ) -> Result<BTreeSet<WorkspaceNameBuf>, NodeError> {
         let key = self.machine.key();
         let worked = match presence.worked(key) {
@@ -311,16 +310,19 @@ impl NodeRepo {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
         };
-        if let Some((ops, names)) = &*memo()
-            && ops == worked
+        // By the operations that stand for the work: work an abandon dropped has none here, and
+        // no view, so its names went with it.
+        let ops: Vec<Option<CanonicalOp>> = worked.iter().map(|work| work.op.clone()).collect();
+        if let Some((remembered, names)) = &*memo()
+            && *remembered == ops
         {
             return Ok((**names).clone());
         }
         let mut names = BTreeSet::new();
-        for op in worked {
+        for op in ops.iter().flatten() {
             names.extend(own_keys(self, &self.canonical.read_operation_view(op)?));
         }
-        *memo() = Some((worked.clone(), Arc::new(names.clone())));
+        *memo() = Some((ops, Arc::new(names.clone())));
         Ok(names)
     }
 

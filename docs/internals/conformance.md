@@ -11,7 +11,7 @@ program the tests send JSON requests to.
 | Model | Code | Test | Section |
 | --- | --- | --- | --- |
 | The sync protocol ([protocol.md](protocol.md)), with supersedes | `crates/musubi-core` | `conformance`, through the oracle | [The claim](#the-claim) to [Wire format](#wire-format) |
-| `Presence.lean`: which copies a hive shows | `Presence` | `presence::conformance`, through the oracle | [Presence](#presence) |
+| `Presence.lean`: which copies a hive shows, and `PresenceContract.lean`: how a contraction keeps it | `Presence`, and the stamps of `Contraction` | `presence::conformance` and `presence::contraction_keeps_presence`, through the oracle | [Presence](#presence) |
 | `Refs.lean`: per-machine refs | jj's import and export, and musubi's realization | `ref_laws` (the laws the model assumes), and `refs` and `view::tests`, through the oracle | [Per-machine refs](#per-machine-refs) |
 | `AbandonRefs.lean`: survivor graph and one ref | record adoption, fix-ups and publication in `NodeRepo` | `realization_beside_a_fetch_keeps_the_fetch_while_taking_an_abandon`, through the oracle | [Abandonment and refs](#abandonment-and-refs) |
 | `Expected.lean`: conflicted-ref history | `node/git.rs::expected` | `expected_history_conforms_to_model`, through the oracle | [Expected values from history](#expected-values-from-history) |
@@ -523,6 +523,11 @@ three links:
    copies, each operation work by one copy or a forget of some, never both, as musubi makes
    them. It computes every operation's presence with `Presence::merge` and `apply`, and
    requires it to equal the oracle's, copy by copy, latest work included.
+   `presence::contraction_keeps_presence` writes such a history to a canonical store, drops a
+   random set of its operations by contraction, and requires each copy's latest work that a
+   store works out at what each operation it keeps becomes, from the stamps and the rest of
+   the history, to be the oracle's at the operation: `formal/Musubi/PresenceContract.lean`
+   proves that a contraction keeps presence (`pres_eq`).
 
 The test checks the rule, not where it is applied: that `canonical_view` publishes exactly
 the present copies' workspaces, and that realizing keeps a forgotten copy's own, is for the

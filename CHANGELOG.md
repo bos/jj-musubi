@@ -15,11 +15,12 @@ change the protocol, so run the same release on the hub and every machine (see
   [Deploy a build from source](docs/guides/manage.md#deploy-a-build-from-source).
 - Contracting operation history now keeps each operation's original identity even when two
   operations have identical views and metadata. This changes the canonical encoding and ids
-  (protocol 8, release 0.4.0): upgrade the hub and every machine together. Existing hives and
-  their local musubi state must be recreated from preserved jj repositories: follow
-  [Recreate hives when upgrading to 0.4.0](docs/guides/manage.md#recreate-hives-when-upgrading-to-040).
-  If jj itself coalesces two operation ids while
-  abandoning history, syncing stops with a command to restore the missing history.
+  (protocol 9, release 0.5.0, the first since 0.1.0): upgrade the hub and every machine
+  together. Existing hives and their local musubi state must be recreated from preserved jj
+  repositories: follow
+  [Recreate hives when upgrading to 0.5.0](docs/guides/manage.md#recreate-hives-when-upgrading-to-050).
+  If jj itself coalesces two operation ids while abandoning history, syncing stops with a
+  command to restore the missing history.
 - The hub forgets a `jj op abandon` once every machine still in the hive has taken it, so trimming
   history with `jj op abandon ..<operation>` no longer leaves the hub remembering every abandoned
   operation, though it keeps them on its disk. A machine that's offline delays this until it

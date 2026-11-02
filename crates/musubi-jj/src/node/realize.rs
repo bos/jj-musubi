@@ -428,7 +428,7 @@ impl NodeRepo {
             return Ok(0);
         }
         let key = self.machine.key();
-        let worked: Vec<BTreeSet<CanonicalOp>> = parents
+        let worked: Vec<BTreeSet<crate::canonical::Work>> = parents
             .iter()
             .map(|parent| {
                 Ok(self
@@ -444,9 +444,13 @@ impl NodeRepo {
         'parents: for (index, mine) in worked.iter().enumerate() {
             for theirs in &worked {
                 for op in theirs.difference(mine) {
+                    // Work an abandon dropped can't be placed: no parent is later for it.
+                    if op.op.is_none() {
+                        continue 'parents;
+                    }
                     let mut seen = false;
                     for later in mine {
-                        if self.canonical.is_ancestor_of(op, later)? {
+                        if op.below(&self.canonical, later)? {
                             seen = true;
                             break;
                         }

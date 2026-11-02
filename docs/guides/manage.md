@@ -166,10 +166,11 @@ To stop using musubi on a machine altogether:
 
 ## Upgrade musubi
 
-### Recreate hives when upgrading to 0.4.0
+### Recreate hives when upgrading to 0.5.0
 
-Release 0.4.0 changes operation ids to preserve identity when history is abandoned. Its hub
-state and each copy's musubi state must be made afresh; the jj repositories and their work stay.
+Release 0.5.0, the first since 0.1.0, changes operation ids to preserve identity when history
+is abandoned. Its hub state and each copy's musubi state must be made afresh; the jj
+repositories and their work stay.
 
 1. Before upgrading, sync every copy with the old release. In each copy run `musubi leave`,
    or `musubi leave --force` if its hub is gone, then stop its daemon with
@@ -185,7 +186,7 @@ state and each copy's musubi state must be made afresh; the jj repositories and 
    `.jj/repo/musubi`) to a separate archive. Keep that archive; it includes the old hive
    membership and translation records. For linked workspaces, use the repository directory
    they share, once for that repository.
-4. Stop the old hub and archive its state directory. Install 0.4.0 on the hub and every
+4. Stop the old hub and archive its state directory. Install 0.5.0 on the hub and every
    machine, then start the hub with an empty state directory, as in the setup guide.
 5. In one preserved repository run `musubi create`, then in each other copy run
    `musubi join`. Joining starts its daemon. Use the usual join, which shares the present
@@ -208,7 +209,7 @@ jj config set --user musubi.upgrade-command ~/bin/upgrade-musubi
 ```
 
 Whenever the daemon finds a hub running a newer release than its own, it runs the command
-once for that release, with `MUSUBI_UPGRADE_TO` set to it, such as `0.3.0`, or for a build
+once for that release, with `MUSUBI_UPGRADE_TO` set to it, such as `0.5.0`, or for a build
 [deployed from source](#deploy-a-build-from-source), its name. Once the `musubi`
 the daemon started from says it is that release (`musubi --version`), the daemon starts again
 from it. A machine that was asleep or away does this when it next reaches the hub.
@@ -249,7 +250,7 @@ repository's working copy, or your edits in progress there. It needs `jj`, `git`
 on the daemon's `PATH`. To try it, name a release; this installs it:
 
 ```sh
-MUSUBI_UPGRADE_TO=0.4.0 ~/bin/upgrade-from-source ~/dev/jj-musubi
+MUSUBI_UPGRADE_TO=0.5.0 ~/bin/upgrade-from-source ~/dev/jj-musubi
 ```
 
 If the command fails, or installs another release, the daemon carries on as it was, and

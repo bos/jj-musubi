@@ -12,6 +12,7 @@ use pollster::FutureExt as _;
 
 use super::NodeError;
 use super::NodeRepo;
+use crate::canonical::Work;
 use crate::op_id::CanonicalOp;
 use crate::op_id::LocalOp;
 use crate::presence::FORGET_AFTER_ATTRIBUTE;
@@ -191,16 +192,18 @@ impl NodeRepo {
     }
 
     /// When a present copy last worked: the latest end of its latest work's operations, or
-    /// when a fix-up says that work was done.
-    fn last_work(
-        &self,
-        presence: &Presence<CanonicalOp>,
-        copy: &str,
-    ) -> Result<SystemTime, NodeError> {
+    /// when a fix-up says that work was done. Work an abandon dropped, which the fix-up
+    /// replaces, counts as just done: it is never a reason to forget a copy.
+    fn last_work(&self, presence: &Presence<Work>, copy: &str) -> Result<SystemTime, NodeError> {
         let mut last = SystemTime::UNIX_EPOCH;
-        for op in presence.latest(copy).into_iter().flatten() {
-            let millis = self.work_time(op)?;
-            let time = SystemTime::UNIX_EPOCH + Duration::from_millis(millis.max(0).unsigned_abs());
+        for work in presence.latest(copy).into_iter().flatten() {
+            let time = match &work.op {
+                Some(op) => {
+                    let millis = self.work_time(op)?;
+                    SystemTime::UNIX_EPOCH + Duration::from_millis(millis.max(0).unsigned_abs())
+                }
+                None => SystemTime::now(),
+            };
             last = last.max(time);
         }
         Ok(last)

@@ -532,6 +532,46 @@ fn a_push_to_a_hive_made_again_is_rejected() {
     assert_eq!(hive.hive.hub_head(), root);
 }
 
+/// `jj op abandon` of a forget keeps every view above it, and so the views that leave the
+/// forgotten copy out, but drops the forget from the history presence is worked out from. Work
+/// another machine did on one of those views before the abandon reached it is realized, after,
+/// as presence at the view has it: were that worked out from the history left, the forgotten
+/// copy would be present there, and realizing it on that copy would drop the copy's own
+/// workspace from its view, which the view lacks, as though it were present. The contraction
+/// keeps presence there as it was, so the copy stays forgotten and keeps its workspace.
+#[test]
+fn abandoning_a_forget_under_other_work_keeps_the_copy_forgotten() {
+    let mut hive = Fixture::new(&["alpha", "beta", "gamma"]);
+    hive.commit(0, "a", "from alpha");
+    hive.sync();
+    let alpha = hive.machine_key(0);
+    assert!(hive.node(2).forget_copy(&alpha, "alpha").unwrap());
+    let forget = op_log(hive.repo(2))
+        .into_iter()
+        .find(|(_, description)| description == "musubi: forget alpha")
+        .unwrap();
+    for machine in [2, 1, 0] {
+        hive.hive.sync(machine).unwrap();
+    }
+    hive.commit(2, "g", "gamma after the forget");
+    hive.hive.sync(2).unwrap();
+    hive.hive.sync(1).unwrap();
+    // Beta works on gamma's work, before it hears of the abandon.
+    hive.commit(1, "b", "beta before the abandon");
+    hive.repo(2).jj(&["op", "abandon", &forget.0]);
+    hive.sync();
+    hive.assert_converged();
+    assert!(!hive.shown_machines().contains(&alpha));
+    assert!(
+        hive.workspace_names(0).contains("alpha"),
+        "{:?}",
+        hive.workspace_names(0)
+    );
+    for machine in 0..3 {
+        assert!(!has_operation(hive.repo(machine), "musubi: forget alpha"));
+    }
+}
+
 /// With `snapshot.auto-update-stale`, a command in a workspace whose working copy recorded an
 /// operation `jj op abandon` rewrote brings back what jj abandoned, as on one machine
 /// (races.md, "Known jj limitations"). A later `jj op abandon` below that then moves what came

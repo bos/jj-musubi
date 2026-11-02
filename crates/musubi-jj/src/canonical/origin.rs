@@ -1,5 +1,7 @@
 //! An operation's original parents distinguish originals even when all their other fields
 //! agree. Contraction preserves them; a fresh operation replaces any supplied attribute.
+//! Contraction may stamp an operation with its presence ([`PRESENCE`]), which is no part of
+//! its identity either.
 
 use jj_lib::content_hash::blake2b_hash;
 use jj_lib::object_id::ObjectId as _;
@@ -11,8 +13,14 @@ use super::log::ID_LEN;
 
 pub(crate) const ORIGINAL_PARENTS: &str = "musubi.original-parents";
 
+/// The presence a contraction keeps at an operation it rewrites, where the presence worked out
+/// from its new parents would differ (docs/internals/design.md, "Presence through an
+/// abandon"). Only a contraction writes it.
+pub(crate) const PRESENCE: &str = "musubi.presence";
+
 pub(super) fn fresh(op: &Operation) -> Operation {
     let mut op = op.clone();
+    op.metadata.attributes.remove(PRESENCE);
     if op.parents.is_empty() {
         op.parents.push(OperationId::from_bytes(&[0; ID_LEN]));
     }
@@ -33,6 +41,7 @@ pub(super) fn fresh(op: &Operation) -> Operation {
 pub(super) fn identity(op: &Operation) -> Result<OperationId, CanonicalError> {
     let malformed = || CanonicalError::MalformedOperation("original parents".to_owned());
     let mut original = op.clone();
+    original.metadata.attributes.remove(PRESENCE);
     let parents = original
         .metadata
         .attributes
@@ -69,8 +78,21 @@ mod tests {
         op.metadata
             .attributes
             .insert(ORIGINAL_PARENTS.to_owned(), "forged".to_owned());
+        op.metadata
+            .attributes
+            .insert(PRESENCE.to_owned(), "known forged".to_owned());
         let written = fresh(&op);
         assert_eq!(identity(&written).unwrap(), original);
+        let mut stamped = written.clone();
+        stamped
+            .metadata
+            .attributes
+            .insert(PRESENCE.to_owned(), "known c".to_owned());
+        assert_eq!(
+            identity(&stamped).unwrap(),
+            original,
+            "a stamp is no part of identity"
+        );
         let encoded = super::super::codec::encode_operation(&written);
         assert_eq!(
             encoded,

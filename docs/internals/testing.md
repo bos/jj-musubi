@@ -16,7 +16,7 @@ on the next run. *The search* is the generated end-to-end tests below, run with 
 | --- | --- | --- | --- |
 | Formal model | `formal/` (Lean) | Protocol design errors: lost operations, dangling references, duplicate merges, livelock | Proof effort, no runtime |
 | Protocol property tests | `crates/musubi-core/tests` | The Rust state machines departing from the model, or not recovering from a buggy hub | Milliseconds per case |
-| Presence conformance | `crates/musubi-jj/tests/it/presence.rs` | Which copies (machines' repositories) a hive shows departing from `formal/Musubi/Presence.lean` ([conformance.md, "Presence"](conformance.md#presence); [design.md, "Copies that go away"](design.md#copies-that-go-away)) | A millisecond per case |
+| Presence conformance | `crates/musubi-jj/tests/it/presence.rs` | Which copies (machines' repositories) a hive shows departing from `formal/Musubi/Presence.lean`, or changing where a contraction keeps an operation (`PresenceContract.lean`) ([conformance.md, "Presence"](conformance.md#presence); [design.md, "Copies that go away"](design.md#copies-that-go-away)) | Milliseconds per case |
 | Copies conformance | `crates/musubi/src/copy/conformance.rs` | Which repository musubi takes for the copy of a key, and the daemon's check before each sync, departing from `formal/Musubi/Copies.lean` ([conformance.md, "Copies"](conformance.md#copies); [copies.md](copies.md)) | Under a second for all 4212 cases |
 | Chunked blob conformance | `crates/musubi-sync/src/blobs.rs` | The blob receiver departing from the prefix receiver of `formal/Musubi/Chunks.lean` ([conformance.md, "Chunked blobs"](conformance.md#chunked-blobs)) | A few milliseconds per case |
 | Workspace names conformance | `crates/musubi-jj/src/workspaces.rs` | The names under which a machine shows other machines' workspaces departing from `formal/Musubi/Names.lean` ([conformance.md, "Workspace names"](conformance.md#workspace-names)) | A millisecond per case |
@@ -397,11 +397,12 @@ Every sync step must succeed, but for two stops a user recovers from as the erro
 failing to merge a machine's operations with the hive's ([races.md, "Known jj
 limitations"](races.md#known-jj-limitations)), which the test gets past by reverting the operation
 named. The other is a copy behind records the hub pruned, which is expected only of a copy the
-hive forgot, whose forget the hub's history has and whose work its head no longer shows, and that
-has taken fewer records than the hub pruned; anywhere else it fails the case. The user then makes
-a new copy with `musubi clone`, bringing nothing across, and runs `musubi leave --force` in the
-old one, which tells the hive nothing: the new copy takes the old one's place in the rest of the
-sequence, and the old one, out of the hive, is out of the checks.
+hive forgot, whose work the hub's head no longer shows, whose forget the hub's history has, or a
+machine made and the copy hasn't worked since (an abandon can drop a forget, not its effect), and
+that has taken fewer records than the hub pruned; anywhere else it fails the case. The user then
+makes a new copy with `musubi clone`, bringing nothing across, and runs `musubi leave --force` in
+the old one, which tells the hive nothing: the new copy takes the old one's place in the rest of
+the sequence, and the old one, out of the hive, is out of the checks.
 
 After each rule, every repository must still load, and no import of git refs or of git's HEAD
 may revert anything (`e2e_search/imports.rs`; for refs, `noSpuriousRevert` in

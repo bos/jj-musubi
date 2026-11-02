@@ -115,7 +115,7 @@ pub struct NodeRepo {
         Arc<BTreeMap<jj_lib::ref_name::WorkspaceNameBuf, CommitId>>,
     )>,
     /// Presence at the canonical operations asked about lately (see [`Self::presence`]).
-    presences: crate::canonical::PresenceMemo,
+    presences: Arc<crate::canonical::PresenceMemo>,
     /// This machine's own workspace names as of its latest work, while the hive has forgotten
     /// it (`own_names_in`): the same for every operation until its next work.
     worked_names: Mutex<presence::WorkedNames>,
@@ -216,7 +216,7 @@ impl NodeRepo {
             last_realized: None,
             last_own: None,
             prepared: None,
-            presences: crate::canonical::PresenceMemo::default(),
+            presences: Arc::default(),
             worked_names: Mutex::default(),
             unmergeable: Mutex::default(),
             unwritten: vec![],

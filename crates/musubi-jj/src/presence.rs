@@ -67,14 +67,18 @@ pub struct Kind {
 
 impl Kind {
     /// The kind of a canonical operation: work by the copy whose workspace made it, or that
-    /// [`WORK_ATTRIBUTE`] names, and a forget of the copies [`FORGET_ATTRIBUTE`] names.
+    /// [`WORK_ATTRIBUTE`] names, and a forget of the copies [`FORGET_ATTRIBUTE`] names. A
+    /// copy is named by a machine key, which is never empty and has no whitespace: a name
+    /// that isn't one names no copy, so that presence can always be written down as a stamp.
     pub fn of(metadata: &OperationMetadata) -> Self {
+        let is_key = |key: &String| !key.is_empty() && !key.contains(char::is_whitespace);
         let work = metadata
             .workspace_name
             .as_ref()
             .and_then(|key| workspaces::split_key(key.as_str()))
             .map(|(machine, _)| machine.to_owned())
-            .or_else(|| metadata.attributes.get(WORK_ATTRIBUTE).cloned());
+            .or_else(|| metadata.attributes.get(WORK_ATTRIBUTE).cloned())
+            .filter(is_key);
         let forgets = metadata
             .attributes
             .get(FORGET_ATTRIBUTE)
@@ -256,6 +260,143 @@ impl<Op: Clone + Ord> Presence<Op> {
         })
     }
 
+    /// This presence as a contraction stamps an operation with it (docs/internals/design.md,
+    /// "Presence through an abandon"), each operation as `name` writes it: a line for each
+    /// copy known, each copy's latest work that no forget saw, its latest work whether or not
+    /// one did, and the `musubi.forget-after` it last recorded, in order.
+    pub fn to_stamp(&self, name: impl Fn(&Op) -> String) -> String {
+        let mut lines = vec![];
+        for copy in self.known.iter() {
+            lines.push(format!("known {copy}"));
+        }
+        for (copy, ops) in &self.latest {
+            lines.extend(ops.iter().map(|op| format!("latest {copy} {}", name(op))));
+        }
+        for (copy, ops) in self.worked.iter() {
+            lines.extend(ops.iter().map(|op| format!("worked {copy} {}", name(op))));
+        }
+        for (copy, records) in self.forget_after.iter() {
+            for (op, after) in records {
+                let after = match after {
+                    Some(after) => format!("{}.{:09}", after.as_secs(), after.subsec_nanos()),
+                    None => "never".to_owned(),
+                };
+                lines.push(format!("forget-after {copy} {} {after}", name(op)));
+            }
+        }
+        lines.join("\n")
+    }
+
+    /// The presence a stamp [`Self::to_stamp`] wrote has, each operation as `parse` reads one.
+    /// None if it isn't such a stamp, or not as [`Self::to_stamp`] would write it.
+    pub fn from_stamp(
+        text: &str,
+        name: impl Fn(&Op) -> String,
+        parse: impl Fn(&str) -> Option<Op>,
+    ) -> Option<Self> {
+        let mut presence = Self::default();
+        let mut known = BTreeSet::new();
+        let mut worked: BTreeMap<String, BTreeSet<Op>> = BTreeMap::new();
+        let mut forget_after: BTreeMap<String, BTreeMap<Op, Option<Duration>>> = BTreeMap::new();
+        for line in text.split('\n') {
+            let words: Vec<&str> = line.split(' ').collect();
+            if words.iter().any(|word| word.is_empty()) {
+                return None;
+            }
+            match words.as_slice() {
+                ["known", copy] => {
+                    known.insert((*copy).to_owned());
+                }
+                ["latest", copy, op] => {
+                    presence
+                        .latest
+                        .entry((*copy).to_owned())
+                        .or_default()
+                        .insert(parse(op)?);
+                }
+                ["worked", copy, op] => {
+                    worked
+                        .entry((*copy).to_owned())
+                        .or_default()
+                        .insert(parse(op)?);
+                }
+                ["forget-after", copy, op, after] => {
+                    let after = match *after {
+                        "never" => None,
+                        after => {
+                            let (secs, nanos) = after.split_once('.')?;
+                            if nanos.len() != 9 {
+                                return None;
+                            }
+                            Some(Duration::new(secs.parse().ok()?, nanos.parse().ok()?))
+                        }
+                    };
+                    forget_after
+                        .entry((*copy).to_owned())
+                        .or_default()
+                        .insert(parse(op)?, after);
+                }
+                _ => return None,
+            }
+        }
+        presence.known = Arc::new(known);
+        presence.worked = Arc::new(worked);
+        presence.forget_after = Arc::new(forget_after);
+        // One encoding for each presence, so that equal presences stamp equal operations.
+        (presence.to_stamp(name) == text).then_some(presence)
+    }
+
+    /// The same presence, each operation as `f` maps it, which must keep their order.
+    pub fn map_ops<O: Clone + Ord>(&self, f: impl Fn(&Op) -> O) -> Presence<O> {
+        Presence {
+            latest: self
+                .latest
+                .iter()
+                .map(|(copy, ops)| (copy.clone(), ops.iter().map(&f).collect()))
+                .collect(),
+            known: self.known.clone(),
+            worked: Arc::new(
+                self.worked
+                    .iter()
+                    .map(|(copy, ops)| (copy.clone(), ops.iter().map(&f).collect()))
+                    .collect(),
+            ),
+            forget_after: Arc::new(
+                self.forget_after
+                    .iter()
+                    .map(|(copy, records)| {
+                        let records = records.iter().map(|(op, after)| (f(op), *after));
+                        (copy.clone(), records.collect())
+                    })
+                    .collect(),
+            ),
+        }
+    }
+
+    /// Every operation this presence names for `copy`.
+    pub fn ops_of<'a>(&'a self, copy: &'a str) -> impl Iterator<Item = &'a Op> {
+        self.latest
+            .get(copy)
+            .into_iter()
+            .flatten()
+            .chain(self.worked.get(copy).into_iter().flatten())
+            .chain(
+                self.forget_after
+                    .get(copy)
+                    .into_iter()
+                    .flat_map(BTreeMap::keys),
+            )
+    }
+
+    /// Every operation this presence names.
+    pub fn ops(&self) -> impl Iterator<Item = &Op> {
+        self.latest
+            .values()
+            .flatten()
+            .chain(self.worked.values().flatten())
+            .chain(self.forget_after.values().flat_map(BTreeMap::keys))
+    }
+
     /// Presence at operation `op` of `kind`, from [`Self::merge`] of its parents': its work is
     /// its copy's latest (`umax_work`), and the copies it forgets are absent (`umax_forget`).
     pub fn apply(mut self, op: &Op, kind: &Kind) -> Self {
@@ -313,6 +454,52 @@ mod tests {
     use std::convert::Infallible;
 
     use super::*;
+
+    /// A stamp reads back as the presence it was written from, and only the one way of writing
+    /// each presence reads at all, so that equal presences stamp equal operations.
+    #[test]
+    fn stamps_read_back_and_only_as_written() {
+        let work = |copy: &str| Kind {
+            work: Some(copy.to_owned()),
+            ..Kind::default()
+        };
+        let forget = |copy: &str| Kind {
+            forgets: BTreeSet::from([copy.to_owned()]),
+            ..Kind::default()
+        };
+        let mut presence = Presence::<usize>::default().apply(&1, &work("a"));
+        let mut recorded = work("b");
+        recorded.forget_after = Some(Some(Duration::new(3600, 5)));
+        presence = presence.apply(&2, &recorded).apply(&3, &forget("a"));
+        let mut never = work("c");
+        never.forget_after = Some(None);
+        presence = presence.apply(&4, &never);
+        let name = |op: &usize| op.to_string();
+        let parse = |text: &str| text.parse().ok();
+        let stamp = presence.to_stamp(name);
+        assert_eq!(
+            stamp,
+            "known a\nknown b\nknown c\nlatest b 2\nlatest c 4\nworked a 1\nworked b 2\n\
+             worked c 4\nforget-after b 2 3600.000000005\nforget-after c 4 never"
+        );
+        assert_eq!(Presence::from_stamp(&stamp, name, parse), Some(presence));
+        for other in [
+            "known b\nknown a",
+            "known a\n",
+            "known  a",
+            "known a b",
+            "latest a x",
+            "forget-after a 1 3600",
+            "forget-after a 1 3600.5",
+            "present a",
+        ] {
+            assert_eq!(
+                Presence::<usize>::from_stamp(other, name, parse),
+                None,
+                "{other:?}"
+            );
+        }
+    }
 
     /// `parents[x]` are `x`'s parents, all smaller.
     fn ancestor(parents: &[Vec<usize>]) -> impl Fn(&usize, &usize) -> Result<bool, Infallible> {

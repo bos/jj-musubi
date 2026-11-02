@@ -37,6 +37,7 @@ use musubi_jj::canonical::CanonicalError;
 use musubi_jj::canonical::CanonicalStore;
 use musubi_jj::canonical::Contraction;
 use musubi_jj::canonical::PresenceMemo;
+use musubi_jj::canonical::Work;
 use musubi_jj::objects::Backend;
 use musubi_jj::objects::GitObjects;
 use musubi_jj::objects::GitStore;
@@ -118,7 +119,7 @@ pub struct HubStore {
     /// The original identity of every operation a record dropped, but a pruned one.
     named_origins: HashSet<OperationId>,
     /// Which copies are present at the head, as worked out last.
-    presences: PresenceMemo,
+    presences: Arc<PresenceMemo>,
 }
 
 /// What the history becomes with more dropped: what [`HubStore::contract`] works out.
@@ -184,7 +185,7 @@ impl HubStore {
             superseded: HashMap::new(),
             named: HashSet::new(),
             named_origins: HashSet::new(),
-            presences: PresenceMemo::default(),
+            presences: Arc::default(),
         };
         for (head, record) in history {
             if !record.is_empty() {
@@ -220,7 +221,7 @@ impl HubStore {
 
     /// Which copies are present at the head, those whose work it has but for work a forget
     /// of theirs saw, and which the history has known (docs/internals/design.md, "Presence").
-    pub fn presence(&self) -> Result<Arc<Presence<CanonicalOp>>, StoreError> {
+    pub fn presence(&self) -> Result<Arc<Presence<Work>>, StoreError> {
         let head = CanonicalOp(self.head().1.clone());
         Ok(self.presences.presence(&self.canonical, &head)?)
     }
@@ -290,7 +291,8 @@ impl HubStore {
             .into_iter()
             .collect();
         let mut contraction =
-            Contraction::new(&self.canonical, dropped.iter().cloned().map(CanonicalOp))?;
+            Contraction::new(&self.canonical, dropped.iter().cloned().map(CanonicalOp))?
+                .sharing(self.presences.clone());
         let head = self.head().1.clone();
         if !contraction.is_empty() {
             contraction.images(&self.canonical, &CanonicalOp(head.clone()))?;

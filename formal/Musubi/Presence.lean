@@ -224,15 +224,13 @@ theorem forget_absent {f k : Nat} (hF : h.forget f k) : ¬ h.Present f k :=
 
 /-! ## The fix-up after a replicated abandon
 
-Dropping operations from the history can change which copies are present at the hive's head:
-dropping a copy's latest work leaves it absent, and dropping a forget brings back the copies it
-forgot. So the machine that abandons writes, on the rewritten head, a fix-up: a forget of each
-copy the rewrite brings back, and work by each copy it leaves absent, one operation each, so that
-every one is well formed (docs/internals/design.md, "Abandoning operations"). These two lemmas
-are all it rests on: an operation on one parent that is work by `k` where `k` is absent, or a
-forget of `k` where it is present, gives `k` the presence it was meant to restore, and one that
-is neither leaves `k` as its parent has it. Whatever the rewrite did below, the chain ends with
-each copy present exactly as it was at the head before the abandon. -/
+A contraction keeps presence at every operation it keeps (`PresenceContract.lean`), but the
+work it names may be work the abandon dropped. So the machine that abandons writes, on the
+rewritten head, a fix-up: work again by each copy whose latest work was dropped, then a forget
+of it if it was forgotten, one operation each, so that every one is well formed
+(docs/internals/design.md, "The fix-up"). These two lemmas say what such a chain does: an
+operation on one parent that is work by `k`, or a forget of `k`, gives `k` the presence meant
+(`T`), and one that is neither leaves `k` as its parent has it. -/
 
 /-- An operation on one parent, made to restore `T` for copy `k` (work by `k` where `k` is
 absent and `T` holds, a forget of `k` where it is present and `T` doesn't, neither otherwise),

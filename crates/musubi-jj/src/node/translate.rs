@@ -19,6 +19,7 @@ use super::join::fingerprint;
 use super::supersede::FIXUP_ATTRIBUTE;
 use crate::canonical::CanonicalError;
 use crate::canonical::CanonicalStore;
+use crate::canonical::Work;
 use crate::format_guard;
 use crate::format_guard::FormatError;
 use crate::op_id::CanonicalOp;
@@ -327,7 +328,8 @@ impl NodeRepo {
             self.canonical_form(id, op, parents, |view| self.canonical.write_view(view))?;
         let canonical = self.canonical.write_operation(&canonical_op)?;
         self.remember_original(&canonical, op)?;
-        self.remember_presence(canonical.clone(), presence.apply(&canonical, &kind));
+        let work = Work::of(&self.canonical, &canonical)?;
+        self.remember_presence(canonical.clone(), presence.apply(&work, &kind));
         Ok(canonical)
     }
 
@@ -392,7 +394,7 @@ impl NodeRepo {
         op: &StoreOperation,
         parents: Vec<CanonicalOp>,
         view_id: impl FnOnce(&View) -> Result<ViewId, CanonicalError>,
-    ) -> Result<(StoreOperation, Presence<CanonicalOp>, Kind), NodeError> {
+    ) -> Result<(StoreOperation, Presence<Work>, Kind), NodeError> {
         self.check_format(id, op)?;
         let view = self.loader.op_store().read_view(&op.view_id).block_on()?;
         let mut metadata = op.metadata.clone();

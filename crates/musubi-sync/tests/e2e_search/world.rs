@@ -157,6 +157,11 @@ pub struct World {
     /// The key of each operation a `jj op abandon` dropped, with the machine that ran it and
     /// its `merge_key`: none comes back, unless jj brings it back there.
     pub abandoned: Vec<(usize, String, String)>,
+    /// The key of every copy a machine forgot, with the forget's `merge_key`, until the hub's
+    /// history has the forget and shows the copy again, by work it did since: an abandon can
+    /// drop the forget from the history, but not its effect (docs/internals/design.md,
+    /// "Presence through an abandon").
+    forgot: BTreeMap<String, String>,
     /// Merges a `jj op abandon` rewrote, by `merge_key`, with the view of the merge each
     /// replaced, which jj keeps as it keeps every operation's, and whether that was a
     /// realization: no longer, perhaps, jj's merge of their parents, or a merge at all.
@@ -252,6 +257,7 @@ impl World {
             baseline_keys: vec![],
             hive_baseline: BTreeSet::new(),
             abandoned: vec![],
+            forgot: BTreeMap::new(),
             kept_merges: BTreeMap::new(),
             seen: vec![None; setup.nodes],
             ledger: Ledger::default(),
@@ -473,11 +479,16 @@ impl World {
         let key = self.fx.machine_key(o);
         let name = self.machine(o);
         self.record(format!("{}: musubi forget {name}", self.machine(m)));
-        if let Err(err) = self.fx.node(m).forget_copy(&key, name) {
-            self.fail(&format!(
+        match self.fx.node(m).forget_copy(&key, name) {
+            Ok(true) => {
+                let forget = self.newest_key(m);
+                self.forgot.insert(key, forget);
+            }
+            Ok(false) => {}
+            Err(err) => self.fail(&format!(
                 "musubi forget {name} failed on {}: {err}",
                 self.machine(m)
-            ));
+            )),
         }
         let after = self.seen(m);
         let what = self.trace.last().cloned().unwrap_or_default();
@@ -516,6 +527,16 @@ impl World {
             self.machine(m)
         ));
         let later = self.fx.env.clock().now() + std::time::Duration::from_secs(2 * 3600);
+        let present = |world: &mut Self| -> BTreeSet<String> {
+            match world.fx.node(m).activity() {
+                Ok(active) => active.into_iter().map(|activity| activity.key).collect(),
+                Err(err) => world.fail(&format!(
+                    "listing copies' activity failed on {}: {err}",
+                    world.machine(m)
+                )),
+            }
+        };
+        let active = present(self);
         if let Err(err) = self
             .fx
             .node(m)
@@ -525,6 +546,13 @@ impl World {
                 "forgetting unused copies failed on {}: {err}",
                 self.machine(m)
             ));
+        }
+        let gone: Vec<String> = active.difference(&present(self)).cloned().collect();
+        if !gone.is_empty() {
+            let forget = self.newest_key(m);
+            for key in gone {
+                self.forgot.insert(key, forget.clone());
+            }
         }
         let after = self.seen(m);
         let what = self.trace.last().cloned().unwrap_or_default();
@@ -904,7 +932,37 @@ impl World {
         };
         self.note_pruning(pruned);
         self.record_merges(m);
+        self.note_shown_again();
         steps
+    }
+
+    /// The `merge_key` of machine `m`'s newest operation.
+    fn newest_key(&self, m: usize) -> String {
+        let args = [
+            "--ignore-working-copy",
+            "op",
+            "log",
+            "--no-graph",
+            "-n",
+            "1",
+        ];
+        let args: Vec<&str> = args.into_iter().chain(["-T", MERGE_KEY_TEMPLATE]).collect();
+        self.raw_jj(m, &args)
+    }
+
+    /// Drops from `forgot` each copy the hub's head shows again although its history has the
+    /// forget: the copy worked since.
+    fn note_shown_again(&mut self) {
+        if self.forgot.is_empty() {
+            return;
+        }
+        let shown = self.fx.shown_machines();
+        if !self.forgot.keys().any(|key| shown.contains(key)) {
+            return;
+        }
+        let history = self.hub_merge_keys();
+        self.forgot
+            .retain(|key, forget| !(shown.contains(key) && history.contains(forget)));
     }
 
     /// Recovers from a sync of node `m` that failed, as a user would from what it says: from
@@ -1288,11 +1346,16 @@ impl World {
     }
 
     /// Whether the hive has forgotten machine `m`'s copy: the hub's head doesn't show it, and
-    /// its history has a forget of it, by `musubi forget` or once it went unused.
+    /// a machine forgot it, by `musubi forget` or once it went unused: the hub's history has
+    /// the forget, or a machine made one and the copy hasn't worked since (`forgot`), as where
+    /// an abandon dropped the forget, which keeps the copy forgotten.
     fn forgotten(&self, m: usize) -> bool {
         let key = self.fx.machine_key(m);
         if self.fx.shown_machines().contains(&key) {
             return false;
+        }
+        if self.forgot.contains_key(&key) {
+            return true;
         }
         let store = self.fx.hive.hub.store();
         let canonical = store.canonical();

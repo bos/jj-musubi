@@ -47,6 +47,7 @@ pub use self::contract::Contraction;
 pub use self::contract::current;
 use self::log::Log;
 pub use self::presence::PresenceMemo;
+pub use self::presence::Work;
 pub use self::presence::merge as merge_presence;
 use crate::objects::ObjectError;
 use crate::objects::bundle;
@@ -731,6 +732,7 @@ impl CanonicalStore {
             names_its_commits: names_decoded_commits(bytes, encoded_op_commits, op_commit_ids(&op)),
         })?;
         origin::identity(&op)?;
+        presence::check_stamp(&op).map_err(|_| CanonicalError::MalformedOperation(id.hex()))?;
         Ok(op.parents)
     }
 

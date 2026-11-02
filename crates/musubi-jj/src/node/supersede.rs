@@ -35,6 +35,7 @@ use super::NodeError;
 use super::NodeRepo;
 use super::git;
 use super::join::fingerprint;
+use crate::canonical;
 use crate::canonical::Contraction;
 use crate::canonical::current;
 use crate::files;
@@ -163,14 +164,12 @@ struct RecordsFile {
     fresh: bool,
 }
 
-/// What a fix-up writes: work by each copy whose presence, latest work or forget-after an
-/// abandon changed, then the hive's settings as they were and a forget of every copy it
-/// brought back or dropped from those known (docs/internals/design.md, "The fix-up").
+/// What a fix-up writes: work by each copy whose latest work or forget-after an abandon
+/// dropped, then the hive's settings as they were (docs/internals/design.md, "The fix-up").
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Fixup {
     work: Vec<Work>,
     settings: Option<String>,
-    forgets: Vec<String>,
     #[serde(default)]
     expected: Option<Expectation>,
 }
@@ -735,10 +734,10 @@ impl NodeRepo {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if to_node.is_none() {
-            *to_node = Some(Contraction::new(
-                &self.canonical,
-                pending.ops().iter().map(|op| op.0.clone()),
-            )?);
+            *to_node = Some(
+                Contraction::new(&self.canonical, pending.ops().iter().map(|op| op.0.clone()))?
+                    .sharing(self.presences.clone()),
+            );
         }
         let contraction = to_node.as_mut().expect("made above");
         let mut images = vec![];
@@ -1114,7 +1113,8 @@ impl NodeRepo {
             dropped.len()
         );
         let old_head = self.standing_for(&heads, &counterparts, &bases)?;
-        let mut contraction = Contraction::new(&self.canonical, dropped.iter().cloned())?;
+        let mut contraction = Contraction::new(&self.canonical, dropped.iter().cloned())?
+            .sharing(self.presences.clone());
         let new_head = match &old_head {
             Some(old) => contraction.images(&self.canonical, old)?.first().cloned(),
             None => None,
@@ -1808,11 +1808,13 @@ impl NodeRepo {
                 }
                 to_drop.extend(self.to_node_ids(&shared)?);
             }
-            let mut contraction = Contraction::new(store, names.iter().cloned())?;
+            let mut contraction =
+                Contraction::new(store, names.iter().cloned())?.sharing(self.presences.clone());
             // An operation made after the records they share has no name from before them,
             // so its history names the record's operations as renamed since: it is named as
             // this machine's history names it, as any machine that has it pushes it.
-            let mut ours = Contraction::new(store, to_drop.iter().cloned())?;
+            let mut ours =
+                Contraction::new(store, to_drop.iter().cloned())?.sharing(self.presences.clone());
             let theirs: HashSet<&CanonicalOp> = names.iter().collect();
             let mut renamed = vec![];
             for op in mine.iter().filter(|op| !theirs.contains(op)) {
@@ -1848,7 +1850,7 @@ impl NodeRepo {
                     .collect(),
             );
         }
-        let mut contraction = Contraction::new(store, to_drop)?;
+        let mut contraction = Contraction::new(store, to_drop)?.sharing(self.presences.clone());
         let heads = self.local_heads()?;
         let (_, unmapped) = self.local_walk(&heads)?;
         let locals = self.rewrite_locals(&mut contraction, &heads, &HashMap::new(), &unmapped)?;
@@ -1992,50 +1994,27 @@ impl NodeRepo {
     }
 
     /// What the fix-up must write for the state at `new`, the node-space rewrite of `old`,
-    /// to be as it was at `old`.
+    /// to be as it was at `old`. Presence is as it was (docs/internals/design.md, "Presence
+    /// through an abandon"), but where a copy's latest work, or the `musubi.forget-after` it
+    /// last recorded, is work the abandon dropped, the fix-up does it again, with when it was
+    /// done and what it recorded, so that what comes after has it; then forgets the copy
+    /// again if it was forgotten.
     fn fixup_between(&mut self, old: &CanonicalOp, new: &CanonicalOp) -> Result<Fixup, NodeError> {
         let before = self.presence(old)?;
         let after = self.presence(new)?;
         let mut fixup = Fixup::default();
-        let copies: BTreeSet<String> = before
-            .known()
-            .iter()
-            .chain(after.known().iter())
-            .cloned()
-            .collect();
-        for copy in &copies {
-            let present = before.is_present(copy);
-            let (was, is) = (
-                self.worked_at(&before, copy)?,
-                self.worked_at(&after, copy)?,
-            );
-            let forget_after =
-                |p: &Presence<CanonicalOp>| (p.has_forget_after(copy), p.forget_after(copy));
-            let changed = was != is || forget_after(&before) != forget_after(&after);
-            if present && (!after.is_present(copy) || changed) {
-                fixup.work.push(Work {
-                    copy: copy.clone(),
-                    forget_after: before
-                        .has_forget_after(copy)
-                        .then(|| format_forget_after(before.forget_after(copy))),
-                    worked_at: was,
-                    forgotten: false,
-                });
-            } else if !present && before.worked(copy).is_some() && changed {
-                fixup.work.push(Work {
-                    copy: copy.clone(),
-                    forget_after: before
-                        .has_forget_after(copy)
-                        .then(|| format_forget_after(before.forget_after(copy))),
-                    worked_at: was,
-                    forgotten: true,
-                });
-            } else if !present
-                && (after.is_present(copy)
-                    || (before.known().contains(copy) && !after.known().contains(copy)))
-            {
-                fixup.forgets.push(copy.clone());
+        for copy in after.known() {
+            if !after.ops_of(copy).any(|work| work.op.is_none()) {
+                continue;
             }
+            fixup.work.push(Work {
+                copy: copy.clone(),
+                forget_after: before
+                    .has_forget_after(copy)
+                    .then(|| format_forget_after(before.forget_after(copy))),
+                worked_at: self.worked_at(&before, copy)?,
+                forgotten: !after.is_present(copy),
+            });
         }
         let (was, is) = (self.settings_at(old)?, self.settings_at(new)?);
         if was != is
@@ -2050,11 +2029,16 @@ impl NodeRepo {
     /// operations, or what a fix-up recorded for them.
     fn worked_at(
         &self,
-        presence: &Presence<CanonicalOp>,
+        presence: &Presence<canonical::Work>,
         copy: &str,
     ) -> Result<Option<i64>, NodeError> {
         let mut last = None;
-        for op in presence.worked(copy).into_iter().flatten() {
+        for op in presence
+            .worked(copy)
+            .into_iter()
+            .flatten()
+            .filter_map(|work| work.op.as_ref())
+        {
             let millis = self.work_time(op)?;
             last = Some(last.map_or(millis, |l: i64| l.max(millis)));
         }
@@ -2136,7 +2120,7 @@ impl NodeRepo {
             return Ok(None);
         }
         let fixup = self.records.fixup.clone().unwrap_or_default();
-        let mut after_work = fixup.forgets.clone();
+        let mut after_work: Vec<String> = vec![];
         let head = self.merged_repo_unchecked()?;
         let canonical_head = self.canonicalize(&LocalOp(head.op_id().clone()))?;
         let shown = self.shown_names(&canonical_head)?;

@@ -3,19 +3,30 @@
 //! parents have every dropped parent replaced, where it stands, by that parent's own parents,
 //! themselves so replaced, and then each duplicate after the first removed. A survivor whose
 //! parents change is written again with the new ones, its view and metadata as they were, and
-//! so gets a new id; the others keep theirs. Every party that drops the same operations from
-//! the same history writes the same operations, with the same ids.
+//! so gets a new id; the others keep theirs. It is stamped with the presence it had, where the
+//! presence worked out from its new parents would differ (`formal/Musubi/PresenceContract.lean`;
+//! docs/internals/design.md, "Presence through an abandon"). Every party that drops the same
+//! operations from the same history writes the same operations, with the same ids.
 
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::hash::Hash;
+use std::sync::Arc;
 
 use jj_lib::object_id::ObjectId as _;
+use jj_lib::op_store::Operation;
 use jj_lib::op_store::OperationId;
 
 use super::CanonicalError;
 use super::CanonicalStore;
+use super::origin;
+use super::presence::PresenceMemo;
+use super::presence::Work;
+use super::presence::merge;
+use super::presence::stamp_name;
 use crate::op_id::CanonicalOp;
+use crate::presence::Kind;
+use crate::presence::Presence;
 
 /// The contraction of a store's history by a set of dropped operations, worked out as far as
 /// it has been asked about. Each call takes the store whose history it is.
@@ -33,6 +44,8 @@ pub struct Contraction {
     /// Each original may occur only once in the input history, even when it came from a
     /// peer. A store can hold many historical versions; one history cannot contain two.
     checked: HashSet<CanonicalOp>,
+    /// Presence at the operations met and their rewrites, to stamp the rewrites with.
+    presences: Arc<PresenceMemo>,
 }
 
 impl Contraction {
@@ -57,7 +70,16 @@ impl Contraction {
             images: HashMap::new(),
             same: HashSet::new(),
             checked: HashSet::new(),
+            presences: Arc::default(),
         })
+    }
+
+    /// This contraction, working out presence with `presences`, the store's: presence at an
+    /// operation is the same whoever works it out, and one that remembers the history's spares
+    /// a walk of all of it.
+    pub fn sharing(mut self, presences: Arc<PresenceMemo>) -> Self {
+        self.presences = presences;
+        self
     }
 
     /// Whether this contraction drops nothing the store has.
@@ -124,7 +146,7 @@ impl Contraction {
                 continue;
             }
             let op = store.read_operation(&id)?;
-            let origin = super::origin::identity(&op)?;
+            let origin = origin::identity(&op)?;
             if let Some(other) = origins.get(&origin) {
                 if *other != id {
                     return Err(CanonicalError::MalformedOperation(id.0.hex()));
@@ -199,11 +221,52 @@ impl Contraction {
                 self.same.insert(id);
             } else {
                 let mut operation = store.read_operation(&id)?;
+                let was = self.presences.presence(store, &id)?;
                 operation.parents = contracted.iter().map(|op| op.0.clone()).collect();
+                self.stamp(store, &mut operation, &contracted, &was)?;
                 let rewritten = CanonicalOp(store.shared.write_original(&operation)?);
                 store.note_generation(&rewritten, &contracted);
                 self.images.insert(id, vec![rewritten]);
             }
+        }
+        Ok(())
+    }
+
+    /// Stamps `operation`, rewritten onto `parents`, with `was`, the presence it had, where
+    /// working it out from its new parents would give another, and only there.
+    fn stamp(
+        &self,
+        store: &CanonicalStore,
+        operation: &mut Operation,
+        parents: &[CanonicalOp],
+        was: &Presence<Work>,
+    ) -> Result<(), CanonicalError> {
+        operation.metadata.attributes.remove(origin::PRESENCE);
+        let mut of_parents = Vec::with_capacity(parents.len());
+        for parent in parents {
+            of_parents.push((parent.clone(), self.presences.presence(store, parent)?));
+        }
+        let work = Work {
+            original: origin::identity(operation)?,
+            op: None,
+        };
+        let worked_out = merge(store, &of_parents)?.apply(&work, &Kind::of(&operation.metadata));
+        if worked_out != *was {
+            let stamp = was.to_stamp(stamp_name);
+            // Copies are named by keys without whitespace (`Kind::of`), and works by ids, so
+            // every presence reads back.
+            debug_assert!(
+                Presence::from_stamp(&stamp, stamp_name, |hex| Some(Work {
+                    original: crate::translation_map::whole_id(hex)?,
+                    op: None,
+                }))
+                .is_some(),
+                "unreadable stamp {stamp:?}"
+            );
+            operation
+                .metadata
+                .attributes
+                .insert(origin::PRESENCE.to_owned(), stamp);
         }
         Ok(())
     }
@@ -264,7 +327,6 @@ mod tests {
     use hegel::TestCase;
     use hegel::generators as gs;
     use jj_lib::backend::CommitId;
-    use jj_lib::op_store::Operation;
     use jj_lib::op_store::View;
 
     use super::*;
@@ -326,9 +388,35 @@ mod tests {
         );
     }
 
+    /// An operation received with a stamp that isn't one is refused: presence at it, and at
+    /// everything after it, could not be read. One that reads is taken.
+    #[test]
+    fn a_received_stamp_must_read() {
+        let dir = musubi_testutil::tempdir();
+        let store = CanonicalStore::open(dir.path(), CommitId::from_bytes(&[0; 20])).unwrap();
+        let ids = history(&store, &[vec![0]], &[0]);
+        for (stamp, taken) in [
+            ("known a b", false),
+            ("latest a xyz", false),
+            ("known a", true),
+        ] {
+            let mut op = store.read_operation(&ids[1]).unwrap();
+            op.metadata
+                .attributes
+                .insert(origin::PRESENCE.to_owned(), stamp.to_owned());
+            let id = CanonicalOp(OperationId::new(
+                jj_lib::content_hash::blake2b_hash(&op).to_vec(),
+            ));
+            let imported = store.import_operation(&id, &super::super::codec::encode_operation(&op));
+            assert_eq!(imported.is_ok(), taken, "{stamp:?}");
+        }
+    }
+
     /// A history of `parents.len()` operations on the root, the `i`th with the given parents
     /// among those before it, allowing equal nonparent content. Identical initial operations
-    /// are one original, so only those are given distinct descriptions.
+    /// are one original, so only those are given distinct descriptions. Content 3 or 4 makes
+    /// an operation work by copy `c3` or `c4`, 4 recording its forget-after too; 5 or 6 a
+    /// forget of `c3` or `c4`.
     fn history(
         store: &CanonicalStore,
         parents: &[Vec<usize>],
@@ -342,6 +430,27 @@ mod tests {
             let mut op = Operation::make_root(view.clone());
             op.parents = ps.iter().map(|&p| ids[p].0.clone()).collect();
             op.metadata.description = format!("content {}", contents[i]);
+            match contents[i] {
+                3 | 4 => {
+                    op.metadata.attributes.insert(
+                        crate::presence::WORK_ATTRIBUTE.to_owned(),
+                        format!("c{}", contents[i]),
+                    );
+                    if contents[i] == 4 {
+                        op.metadata.attributes.insert(
+                            crate::presence::FORGET_AFTER_ATTRIBUTE.to_owned(),
+                            format!("{}h", i + 1),
+                        );
+                    }
+                }
+                5 | 6 => {
+                    op.metadata.attributes.insert(
+                        crate::presence::FORGET_ATTRIBUTE.to_owned(),
+                        format!("c{}", contents[i] - 2),
+                    );
+                }
+                _ => {}
+            }
             let mut id = store.write_operation(&op).unwrap();
             if ids.contains(&id) {
                 op.metadata.description = format!("distinct op {i}");
@@ -353,9 +462,11 @@ mod tests {
     }
 
     /// Dropping one set and then another, named as the first left them, gives the ids that
-    /// dropping both at once gives (`Contract.cid_union`), and a survivor's parents are its
-    /// parents with each dropped one replaced by its own, recursively, duplicates removed
-    /// (`Contract.cpar`).
+    /// dropping both at once gives (`Contract.cid_union`, and with stamps,
+    /// `PresenceContract.sid_union`), and a survivor's parents are its parents with each
+    /// dropped one replaced by its own, recursively, duplicates removed (`Contract.cpar`).
+    /// Presence at every survivor is what it was (`PresenceContract.pres_eq`), worked out
+    /// afresh.
     #[hegel::test(test_cases = 200)]
     fn dropping_twice_is_dropping_both(tc: TestCase) {
         let count = tc.draw(gs::integers::<usize>().min_value(1).max_value(10));
@@ -385,7 +496,7 @@ mod tests {
         let dir = musubi_testutil::tempdir();
         let store = CanonicalStore::open(dir.path(), CommitId::from_bytes(&[0; 20])).unwrap();
         let contents: Vec<u8> = (0..count)
-            .map(|_| tc.draw(gs::integers::<u8>().max_value(2)))
+            .map(|_| tc.draw(gs::integers::<u8>().max_value(6)))
             .collect();
         let ids = history(&store, &parents, &contents);
         // Asked about in any order, as a machine's translation is.
@@ -456,6 +567,12 @@ mod tests {
             );
             let via_first = twice.images(&store, &after_first[i][0]).unwrap();
             assert_eq!(via_first, id, "op {i}");
+            let fresh = || PresenceMemo::default();
+            assert_eq!(
+                fresh().presence(&store, &id[0]).unwrap(),
+                fresh().presence(&store, &ids[i]).unwrap(),
+                "presence at op {i}"
+            );
             let image_parents: Vec<CanonicalOp> = contracted
                 .iter()
                 .map(|&q| both.images(&store, &ids[q]).unwrap()[0].clone())

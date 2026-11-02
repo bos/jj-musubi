@@ -194,7 +194,8 @@ impl NodeRepo {
             commit_predecessors: Some(BTreeMap::new()),
         };
         let canonical = self.canonical.write_operation(&join)?;
-        self.remember_presence(canonical.clone(), presence.apply(&canonical, &kind));
+        let work = crate::canonical::Work::of(&self.canonical, &canonical)?;
+        self.remember_presence(canonical.clone(), presence.apply(&work, &kind));
         self.record_join(head, &op, canonical.clone())?;
         Ok(canonical)
     }

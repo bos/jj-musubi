@@ -12,6 +12,7 @@ use musubi_core::message::OpEntry;
 use musubi_core::message::RecordState;
 use musubi_hub::store::Contracted;
 use musubi_hub::store::HubStore;
+use musubi_jj::canonical::CanonicalError;
 use musubi_jj::objects::Backend;
 use musubi_jj::op_id::CanonicalOp;
 use musubi_jj::records::HubOp;
@@ -134,10 +135,22 @@ impl HubStorage for HubAdapter {
     }
 
     fn store_ops(&mut self, ops: &[OpId], attachment: &Attachment) -> anyhow::Result<()> {
-        let imported = self
+        let imported = match self
             .store
             .canonical()
-            .import_operations(attachment.bundle_path()?)?;
+            .import_operations(attachment.bundle_path()?)
+        {
+            Ok(imported) => imported,
+            // Views sent as deltas against views this hub lacks, by a node that doesn't yet
+            // know the hub went back or made the hive again, which its push expects at a head
+            // the hub lacks: the push stores no more, so it can't be accepted, and its answer
+            // gives the node the hub's head.
+            Err(err @ CanonicalError::MissingDeltaBase { .. }) => {
+                tracing::info!("not storing a push's operations: {err}");
+                return Ok(());
+            }
+            Err(err) => return Err(err.into()),
+        };
         let imported: BTreeSet<&OpId> = imported.iter().map(|(id, _)| &id.0).collect();
         if let Some(missing) = ops.iter().find(|op| !imported.contains(op)) {
             bail!("bundle lacks announced operation {missing:?}");

@@ -2,6 +2,9 @@
 
 use std::collections::BTreeMap;
 
+use musubi_core::message::HeadKind;
+use musubi_core::message::Reply;
+use musubi_core::message::Request;
 use musubi_sync::node::history_lost;
 use musubi_testutil::TestEnv;
 
@@ -485,6 +488,44 @@ fn hub_goes_back_or_is_remade_after_a_rewrite() {
         }
         assert!(hive.visible(0).iter().any(|c| c.ends_with("after")));
     }
+}
+
+/// A machine that hasn't heard that the hive was made again, as when the reply to its poll is
+/// lost, pushes what it would have pushed before: its first view as a delta against its
+/// parent's, which the new store lacks. The hub stores none of it, and rejects the push with
+/// its head, which tells the machine where the hub is, rather than failing the request.
+#[test]
+fn a_push_to_a_hive_made_again_is_rejected() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(0, "a", "first");
+    hive.sync();
+    hive.commit(0, "b", "second");
+    let mut pushes = vec![];
+    hive.hive
+        .sync_through(0, &mut |request, reply| {
+            if matches!(request, Request::Push { .. }) {
+                pushes.push(request.clone());
+            }
+            reply
+        })
+        .unwrap();
+    let push = pushes.pop().expect("alpha pushed");
+    assert!(
+        matches!(&push, Request::Push { ops, .. } if !ops.is_empty()),
+        "{push:?}"
+    );
+    hive.hive.remake_hub().unwrap();
+    let root = hive.hive.hub_head();
+    let handled = musubi_core::hub::handle(&mut hive.hive.hub, push).unwrap();
+    assert!(
+        matches!(
+            &handled.reply,
+            Reply::Head { kind: HeadKind::Rejected, seq: 0, head, .. } if *head == root
+        ),
+        "{:?}",
+        handled.reply
+    );
+    assert_eq!(hive.hive.hub_head(), root);
 }
 
 /// A machine abandons twice before it syncs: both abandons reach every machine.

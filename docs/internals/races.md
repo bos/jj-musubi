@@ -141,6 +141,7 @@ Not races: kinds of repository and history a hive carries.
 | A command based at an older operation (`--at-op`, or a long-running command) | A concurrent local operation; jj merges it locally and the merge replicates. | `concurrent_operation_on_one_machine` |
 | A machine misses many updates while working | Catches up with one merge. | `long_offline_machine_catches_up` |
 | The hub restarts between one machine's push and another's fetch | Nothing lost: the head log and stores are on disk. | `hub_restart_between_push_and_fetch` |
+| A machine that hasn't heard that the hive was made again, empty, as when the reply to its poll is lost, pushes to it | Its views go as deltas against views the new store lacks: the hub stores no more of the push and rejects it with its head, from which the machine starts over. | `a_push_to_a_hive_made_again_is_rejected` |
 | A repository joins with its whole operation history | Other machines' op logs include that history. | `joining_with_full_history` |
 | A `jj` command loads the repository before it joins and writes after, or runs with `--at-op` at an operation from before the join | Its work syncs once jj merges it with the history since, and none of the history from before the join goes with it, even once `jj op abandon` has rewritten that history. | `an_operation_from_before_the_join_doesnt_bring_its_history`, `an_operation_on_rewritten_history_from_before_the_join_doesnt_bring_it` |
 | Two fresh, empty repositories form a hive | Works like any other join. | `empty_repositories_make_a_hive` |

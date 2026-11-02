@@ -1250,9 +1250,15 @@ fn blob(tc: &TestCase, seen: &Seen) -> BlobId {
 }
 
 fn id(tc: &TestCase, seen: &Seen, heads: &[Vec<u8>]) -> Vec<u8> {
-    match tc.draw(gs::integers::<u8>().max_value(2)) {
+    match tc.draw(gs::integers::<u8>().max_value(3)) {
         0 if !heads.is_empty() => pick(tc, heads).clone(),
         1 if !seen.ids.is_empty() => pick(tc, &seen.ids).clone(),
+        // As long as an id of some kind, so that it gets past checks of length: a commit's
+        // (SHA-1), a SHA-256 hash, which gix also reads as a commit's, or an operation's.
+        2 => {
+            let len = tc.draw(gs::sampled_from(vec![20, 32, 64]));
+            tc.draw(gs::binary().min_size(len).max_size(len))
+        }
         _ => tc.draw(gs::binary().max_size(70)),
     }
 }

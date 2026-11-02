@@ -155,7 +155,7 @@ impl GitObjects {
         let repo = self.gix()?;
         Ok(ids
             .iter()
-            .filter(|id| !object_id(id).is_ok_and(|id| repo.has_object(id)))
+            .filter(|id| !object_id(&repo, id).is_ok_and(|id| repo.has_object(id)))
             .cloned()
             .collect())
     }
@@ -171,8 +171,10 @@ impl GitObjects {
             return Ok(vec![]);
         }
         let repo = self.gix()?;
-        let wants: Vec<gix::ObjectId> = wants.iter().map(object_id).collect::<Result<_, _>>()?;
-        let haves: Vec<gix::ObjectId> = haves.iter().map(object_id).collect::<Result<_, _>>()?;
+        let ids = |ids: &[CommitId]| -> Result<Vec<gix::ObjectId>, ObjectError> {
+            ids.iter().map(|id| object_id(&repo, id)).collect()
+        };
+        let (wants, haves) = (ids(wants)?, ids(haves)?);
         repo.rev_walk(wants)
             .with_hidden(haves)
             .all()
@@ -659,11 +661,17 @@ fn hex_lines<'a>(ids: impl Iterator<Item = &'a CommitId>, prefix: &str) -> Vec<u
     lines.into_bytes()
 }
 
-fn object_id(id: &CommitId) -> Result<gix::ObjectId, ObjectError> {
-    gix::ObjectId::try_from(id.as_bytes()).map_err(|_| ObjectError::MalformedObject {
-        kind: "commit",
-        id: id.hex(),
-    })
+/// `id` as gix names an object of `repo`. gix takes an id of any length it knows for a hash
+/// of that kind, but must be asked only for ids of `repo`'s kind, and asserts so in debug
+/// builds; a peer's request can name an id of any length.
+fn object_id(repo: &gix::Repository, id: &CommitId) -> Result<gix::ObjectId, ObjectError> {
+    match gix::ObjectId::try_from(id.as_bytes()) {
+        Ok(oid) if oid.kind() == repo.object_hash() => Ok(oid),
+        _ => Err(ObjectError::MalformedObject {
+            kind: "commit",
+            id: id.hex(),
+        }),
+    }
 }
 
 fn gix_err(err: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> ObjectError {
@@ -1094,6 +1102,14 @@ mod tests {
                 .unwrap(),
             [absent, CommitId::from_bytes(&[0; 20])]
         );
+        // An id of a SHA-256 hash's length, as a peer's request can carry, names nothing in
+        // a SHA-1 repository, though gix takes it for a SHA-256 id.
+        let long = CommitId::from_bytes(&[0; 32]);
+        let long = std::slice::from_ref(&long);
+        assert_eq!(objects.missing(long).unwrap(), long);
+        let malformed = |walked| matches!(walked, Err(ObjectError::MalformedObject { .. }));
+        assert!(malformed(objects.roots(&ids(&[&a]), long)));
+        assert!(malformed(objects.roots(long, &[])));
     }
 
     /// Commits that the haves reach are connected without starting git, which would walk

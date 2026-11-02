@@ -196,10 +196,10 @@ build"](efficient-tests.md#make-an-expensive-fixture-once-per-build)).
 
 - `hub_survives_malformed_requests` sends the hub requests no honest node sends: the session's
   requests and bundles cut short, corrupted or spliced; chunks at extreme offsets; malformed
-  requests sent as blobs; made-up ids and attachments; and envelopes from another protocol
-  version. The hub must answer each without panicking; its head must move only forward, to
-  operations whose closure it has (HubMonotone and HubClosed); and afterwards it must still
-  answer a fetch from the root.
+  requests sent as blobs; made-up ids, some as long as a commit's, an operation's or a SHA-256
+  hash, and attachments; and envelopes from another protocol version. The hub must answer each
+  without panicking; its head must move only forward, to operations whose closure it has
+  (HubMonotone and HubClosed); and afterwards it must still answer a fetch from the root.
 - `calls_survive_malformed_replies` gives a node, partway through one of the session's calls,
   replies no honest hub sends in place of the hub's. Half are the real reply with its numbers
   wrong: acknowledgements of any amount, chunks of any total or with the wrong data, indirect

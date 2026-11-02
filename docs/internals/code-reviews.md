@@ -7,7 +7,8 @@ What a review of a change to musubi looks for, and how to run one.
 
 Split a change's risks among a few reviewers, two to four, working at once, each with one or
 two of the lenses below, reporting at most six findings in a few sentences each. A reviewer
-reads the diff and the code around it, and runs no checks: the author ran them.
+reads the diff and the code around it, and doesn't repeat the author's checks. Run one targeted
+test only when establishing a specific finding depends on it, and say which one and why.
 
 Choose the lenses by what the change touches:
 
@@ -35,6 +36,20 @@ Above all, look for:
 - a refusal or a failure that leaves a repository in a state no command in the guide gets
   it out of;
 - a check that the model assumes of the code and that the code no longer does.
+
+Challenge the dependencies and test doubles along that path: which error, panic, changing answer
+between calls, or partial effect does a double make impossible? Trace the supported contract
+through the real dependency's documentation and implementation, including what can already have
+changed when a call fails. Show how the production path can reach the suspected failure; an
+arbitrary violation of a trait's contract isn't evidence of a supported state. Keep faults within
+[testing-philosophy.md, "What is in scope"](testing-philosophy.md#what-is-in-scope).
+
+For a suspected correctness bug, provide or ask for a small failing reproducer or a concrete
+trace where feasible: the starting state, calls and effects, and the guarantee broken. For the
+resulting fix, the author shows that the reproducer fails before it and passes after it. When
+execution is impractical, say why and give a precise analytical argument. Use the narrowest
+existing test layer that exposes the bug; a review comment doesn't by itself require a new
+expensive test. Follow [testing-philosophy.md](testing-philosophy.md) for any test added.
 
 ## What users see
 

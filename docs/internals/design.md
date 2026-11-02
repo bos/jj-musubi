@@ -848,9 +848,12 @@ an operation that a crash never publishes is harmless: detection considers only 
 in the history below the established published base.
 
 A machine notices an abandon as before: canonical operations it had published are no longer
-reachable from its op heads. It looks before anything else reads the op heads, to merge or
-canonicalize them, since an op head read before may be one of jj's rewrites that musubi then
-replaces. What was dropped is each canonical operation it had that no reachable local operation
+reachable from its op heads. It watches the operation it fetches from, and its own last push
+from the moment it learns that the hub took it, from a reply that names it or among what it
+fetches: it moves the base to the push only at its next step, which a sync cut short or a
+lost reply delays. A sync polls the hub before it reads the op heads, so that it knows by
+then. It looks before anything else reads the op heads, to merge or canonicalize them, since
+an op head read before may be one of jj's rewrites that musubi then replaces. What was dropped is each canonical operation it had that no reachable local operation
 now stands for. A realization stands for the canonical operation its `musubi.canonical` names,
 even with its parents changed; any other local operation for the one that is the same but for its
 parents. The machine records the dropped set as pending, writes the fix-up (below) on its head,

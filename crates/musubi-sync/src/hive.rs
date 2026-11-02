@@ -236,10 +236,11 @@ impl Hive {
         node: usize,
         through: &mut Through<'_>,
     ) -> anyhow::Result<usize> {
+        // Polled first, as the daemon does (`Driver::sync`).
         let member = &mut self.members[node];
-        member.adapter.before_sync()?;
         let poll = member.core.poll(&member.adapter)?;
         self.request(node, poll, through)?;
+        self.members[node].adapter.before_sync()?;
         for steps in 0..10_000 {
             let member = &mut self.members[node];
             match member.core.step(&mut member.adapter)? {
@@ -261,13 +262,43 @@ impl Hive {
         anyhow::bail!("node {node} did not settle")
     }
 
+    /// Polls the hub and runs at most `steps` of the node's policy steps, as a sync cut short
+    /// does, with each reply passed through `through`, as in [`Self::sync_through`]. Returns
+    /// how many it took.
+    pub fn sync_steps(
+        &mut self,
+        node: usize,
+        steps: usize,
+        through: &mut Through<'_>,
+    ) -> anyhow::Result<usize> {
+        // Polled first, as the daemon does (`Driver::sync`).
+        let member = &mut self.members[node];
+        let poll = member.core.poll(&member.adapter)?;
+        self.request(node, poll, through)?;
+        self.members[node].adapter.before_sync()?;
+        for taken in 0..steps {
+            let member = &mut self.members[node];
+            match member.core.step(&mut member.adapter)? {
+                Step::Idle => return Ok(taken),
+                Step::Send(requests) => {
+                    for request in requests {
+                        self.request(node, request, through)?;
+                    }
+                }
+                Step::Superseded { push, .. } => self.request(node, push, through)?,
+                Step::Merged | Step::Realized(_) | Step::Advanced(_) | Step::Adopted => {}
+            }
+        }
+        Ok(steps)
+    }
+
     /// Polls the hub, as a sync starts by doing, and takes in what it sends, staging the
     /// operations and objects it fetches, without realizing them.
     pub fn fetch(&mut self, node: usize) -> anyhow::Result<()> {
         let member = &mut self.members[node];
-        member.adapter.before_sync()?;
         let poll = member.core.poll(&member.adapter)?;
-        self.request(node, poll, &mut |_, reply| reply)
+        self.request(node, poll, &mut |_, reply| reply)?;
+        self.members[node].adapter.before_sync()
     }
 
     /// Has the node record its settings changes, as a sync starts by doing, without reaching

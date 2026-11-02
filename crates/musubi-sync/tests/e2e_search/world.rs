@@ -1119,12 +1119,13 @@ impl World {
             sent += 1;
             world.deliver(m, request, lost)
         };
+        // Polled first, as the daemon does (`Driver::sync`).
         let poll = {
             let member = &mut self.fx.hive.members[m];
-            member.adapter.before_sync()?;
             member.core.poll(&member.adapter)?
         };
         deliver(self, poll)?;
+        self.fx.hive.members[m].adapter.before_sync()?;
         let mut realized = 0;
         for _ in 0..steps {
             let member = &mut self.fx.hive.members[m];

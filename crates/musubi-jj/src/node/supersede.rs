@@ -217,6 +217,10 @@ fn parse_ids(path: &Path, hexes: &[String]) -> Result<Vec<OperationId>, NodeErro
         .collect()
 }
 
+/// The file in the musubi directory where the sync adapter keeps the head this machine
+/// pushed last, once it has learned that the hub took it.
+pub const ACCEPTED_PUSH: &str = "accepted_push";
+
 /// `ops` without duplicates, the first of each kept.
 fn dedup<Op: Clone + Eq + std::hash::Hash>(ops: impl IntoIterator<Item = Op>) -> Vec<Op> {
     let mut seen = HashSet::new();
@@ -851,7 +855,12 @@ impl NodeRepo {
     /// The operation the hub accepted that this machine fetches from (the sync adapter's
     /// `accepted_base`), a hub name, if it has one.
     fn stored_base(&self) -> Option<HubOp> {
-        let hex = fs::read_to_string(self.repo_path.join("musubi").join("accepted_base")).ok()?;
+        self.stored_op("accepted_base")
+    }
+
+    /// A hub name the sync adapter keeps in `name` in the musubi directory, if it keeps one.
+    fn stored_op(&self, name: &str) -> Option<HubOp> {
+        let hex = fs::read_to_string(self.repo_path.join("musubi").join(name)).ok()?;
         OperationId::try_from_hex(hex.trim()).map(|op| HubOp(CanonicalOp(op)))
     }
 
@@ -863,22 +872,33 @@ impl NodeRepo {
     /// back, so an op head read before is one it no longer reaches.
     pub fn check_abandon(&mut self) -> Result<bool, NodeError> {
         let base = self.stored_base();
+        // This machine's push the hub took, which the base may not have moved to yet, as where
+        // a sync stopped right after the reply, or lost it: an abandon of it is one of an
+        // operation the hub accepted all the same.
+        let pushed = self
+            .stored_op(ACCEPTED_PUSH)
+            .filter(|pushed| Some(pushed) != base.as_ref());
         let heads = self.local_heads()?;
-        if self.abandon_checked.as_ref() == Some(&(heads.clone(), base.clone())) {
+        let checked = (heads, base, pushed);
+        if self.abandon_checked.as_ref() == Some(&checked) {
             return Ok(false);
         }
+        let (heads, base, pushed) = checked;
         self.realign_heads(&heads)?;
-        let noticed = match &base {
-            Some(base) => self.notice_abandon(base)?,
-            None => false,
-        };
+        let mut noticed = false;
+        for base in base.iter().chain(pushed.iter()) {
+            if self.notice_abandon(base)? {
+                noticed = true;
+                break;
+            }
+        }
         // Only the op heads checked: a `jj op abandon` that moved them meanwhile, remembered as
         // checked, would go unnoticed, and the sync would fail for good. Moved here, they're
         // checked again next time.
         if noticed {
             self.abandon_noticed = true;
         } else {
-            self.abandon_checked = Some((heads, base));
+            self.abandon_checked = Some((heads, base, pushed));
         }
         Ok(noticed)
     }

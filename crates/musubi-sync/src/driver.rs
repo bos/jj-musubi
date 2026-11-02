@@ -47,10 +47,12 @@ impl NodeDriver {
     /// Asks the hub for its head and anything new, then runs the policy until there is
     /// nothing left to do. Returns how many steps that took.
     pub async fn sync(&mut self) -> anyhow::Result<usize> {
-        self.adapter.before_sync()?;
         self.tally = Tally::default();
+        // Polled first: what the hub sends says whether it took this node's last push, which
+        // reading the op heads must know, to notice an abandon of it.
         let poll = self.core.poll(&self.adapter)?;
         self.deliver(poll).await?;
+        self.adapter.before_sync()?;
         let mut steps = 0;
         loop {
             match self.core.step(&mut self.adapter)? {

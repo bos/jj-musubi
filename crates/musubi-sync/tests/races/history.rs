@@ -532,6 +532,165 @@ fn a_push_to_a_hive_made_again_is_rejected() {
     assert_eq!(hive.hive.hub_head(), root);
 }
 
+/// A sync stops just after the hub accepts a machine's push, before the machine moves its
+/// base to it, as one cut short does; then `jj op abandon` drops what it pushed. The machine
+/// notices the abandon and publishes it: it watches its push, once it learns that the hub took
+/// it, as it watches its base. Watching only its base, which it still reached, it took the
+/// hub's head for one it didn't have yet, and took back what it abandoned.
+#[test]
+fn abandoning_a_push_the_hub_just_accepted_drops_it() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(1, "a", "first");
+    hive.sync();
+    hive.commit(1, "b", "pushed");
+    let pushed = op_log(hive.repo(1)).swap_remove(0);
+    assert!(pushed.1.starts_with("commit "), "{pushed:?}");
+    let before = hive.hive.hub_head();
+    hive.hive.sync_steps(1, 1, &mut |_, reply| reply).unwrap();
+    assert_ne!(hive.hive.hub_head(), before, "the hub took the push");
+    hive.repo(1)
+        .jj(&["bookmark", "create", "after", "-r", "@-"]);
+    hive.repo(1).jj(&["op", "abandon", &pushed.0]);
+    hive.sync();
+    hive.assert_converged();
+    for machine in 0..2 {
+        assert!(!has_operation(hive.repo(machine), &pushed.1), "{machine}");
+    }
+}
+
+/// As above, where the machine never hears that the hub took its push, as when it crashes
+/// before the reply: it learns it from its next poll, which comes before it reads its op heads,
+/// and notices the abandon then. So too where another machine has pushed on top meanwhile, and
+/// the push comes back among what it fetches.
+#[test]
+fn abandoning_a_push_whose_acceptance_was_lost_drops_it() {
+    for others_on_top in [false, true] {
+        let mut hive = Fixture::new(&["alpha", "beta"]);
+        hive.commit(1, "a", "first");
+        hive.sync();
+        hive.commit(1, "b", "pushed");
+        let pushed = op_log(hive.repo(1)).swap_remove(0);
+        assert!(pushed.1.starts_with("commit "), "{pushed:?}");
+        let before = hive.hive.hub_head();
+        hive.hive.sync_steps(1, 1, &mut |_, reply| reply).unwrap();
+        assert_ne!(hive.hive.hub_head(), before, "the hub took the push");
+        // Lost: the machine restarts knowing only that it pushed.
+        std::fs::remove_file(
+            hive.repo(1)
+                .repo_path()
+                .join("musubi")
+                .join(musubi_jj::node::ACCEPTED_PUSH),
+        )
+        .unwrap();
+        hive.reopen(1);
+        if others_on_top {
+            hive.hive.sync(0).unwrap();
+            hive.commit(0, "c", "alpha's, on the push");
+            hive.hive.sync(0).unwrap();
+        }
+        hive.repo(1)
+            .jj(&["bookmark", "create", "after", "-r", "@-"]);
+        hive.repo(1).jj(&["op", "abandon", &pushed.0]);
+        hive.sync();
+        hive.assert_converged();
+        for machine in 0..2 {
+            assert!(
+                !has_operation(hive.repo(machine), &pushed.1),
+                "{others_on_top}: {machine}"
+            );
+        }
+    }
+}
+
+/// As above, where what is abandoned is below the last push, which it carried with it: only
+/// that goes, and what jj rewrote above it stays, once, on every machine.
+#[test]
+fn abandoning_below_a_push_whose_acceptance_was_lost_drops_only_that() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(1, "a", "first");
+    hive.sync();
+    hive.commit(1, "y", "abandoned");
+    let abandoned = op_log(hive.repo(1)).swap_remove(0);
+    hive.commit(1, "m", "kept");
+    hive.commit(1, "p", "pushed last");
+    hive.hive.sync_steps(1, 1, &mut |_, reply| reply).unwrap();
+    std::fs::remove_file(
+        hive.repo(1)
+            .repo_path()
+            .join("musubi")
+            .join(musubi_jj::node::ACCEPTED_PUSH),
+    )
+    .unwrap();
+    hive.reopen(1);
+    hive.repo(1)
+        .jj(&["bookmark", "create", "after", "-r", "@-"]);
+    hive.repo(1).jj(&["op", "abandon", &abandoned.0]);
+    hive.sync();
+    hive.assert_converged();
+    for machine in 0..2 {
+        assert!(
+            !has_operation(hive.repo(machine), &abandoned.1),
+            "{machine}"
+        );
+        let visible = hive.visible(machine);
+        for work in [" kept", " pushed last"] {
+            let count = visible.iter().filter(|c| c.ends_with(work)).count();
+            assert_eq!(count, 1, "{machine}: {work}: {visible:?}");
+        }
+    }
+}
+
+/// As above, where what the hub accepted publishes an abandon: its head is the fix-up, on
+/// history the record the reply names renames. A `jj op abandon` of the fix-up before the
+/// machine takes that in is noticed and published, and the fix-up stays dropped.
+#[test]
+fn abandoning_a_fix_up_the_hub_just_accepted_drops_it() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(0, "a", "first");
+    hive.commit(0, "b", "second");
+    hive.sync();
+    let first = op_described(hive.repo(0), &commit_op(hive.repo(0)).1);
+    hive.repo(0).jj(&["op", "abandon", &first]);
+    // One step at a time, stopping as soon as the hub has taken the abandon.
+    let records = hive.hive.hub.store().record_count();
+    while hive.hive.hub.store().record_count() == records {
+        assert_eq!(
+            hive.hive.sync_steps(0, 1, &mut |_, reply| reply).unwrap(),
+            1,
+            "the abandon was published"
+        );
+    }
+    let timed = |hive: &Fixture, index: usize| -> Vec<String> {
+        hive.repo(index)
+            .jj(&[
+                "op",
+                "log",
+                "--no-graph",
+                "-T",
+                r#"self.time().start() ++ " " ++ description.first_line() ++ "\n""#,
+            ])
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    };
+    let fixup = timed(&hive, 0).swap_remove(0);
+    assert!(fixup.ends_with("musubi: pass on jj op abandon"), "{fixup}");
+    hive.repo(0)
+        .jj(&["bookmark", "create", "after", "-r", "@-"]);
+    let head = op_log(hive.repo(0)).swap_remove(0).0;
+    let fixup_id = op_log(hive.repo(0))[1].0.clone();
+    assert_ne!(head, fixup_id);
+    hive.repo(0).jj(&["op", "abandon", &fixup_id]);
+    hive.sync();
+    hive.assert_converged();
+    for machine in 0..2 {
+        assert!(
+            !timed(&hive, machine).contains(&fixup),
+            "{machine}: {fixup}"
+        );
+    }
+}
+
 /// `jj op abandon` rewrites an operation a working copy records, but doesn't move the working
 /// copy where another operation came after it, as one musubi writes can. musubi moves it to
 /// the rewrite, as it moves every working copy an abandon leaves behind, even where the

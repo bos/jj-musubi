@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
 use std::io::Write as _;
+use std::path::Path;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -64,6 +65,10 @@ pub struct NodeAdapter {
     clock: Box<dyn Clock>,
     tmp: PathBuf,
     base_path: PathBuf,
+    /// The head this node pushed last, and that head once it learns that the hub took it,
+    /// which `NodeRepo::check_abandon` watches as it watches the base.
+    pushed_path: PathBuf,
+    accepted_push_path: PathBuf,
     /// `anc*(base)` for the most recent `base` asked about.
     base_ancestry: RefCell<Option<(OpId, HashSet<OpId>)>>,
     /// The parents of operations a fetch staged that were not local, until they are
@@ -84,6 +89,8 @@ impl NodeAdapter {
         open_bundle_dir(&tmp)?;
         Ok(Self {
             base_path: musubi_dir.join("accepted_base"),
+            pushed_path: musubi_dir.join("pushed"),
+            accepted_push_path: musubi_dir.join(musubi_jj::node::ACCEPTED_PUSH),
             repo,
             clock: Box::new(SystemClock),
             tmp,
@@ -177,6 +184,22 @@ impl NodeAdapter {
             .repo
             .canonical_store()
             .is_ancestor_of(&canonical(ancestor), &canonical(op))?)
+    }
+
+    /// Notes that the hub took the head this node pushed last, if it is one of `accepted`, so
+    /// that `NodeRepo::check_abandon` watches it as it watches the base.
+    fn note_accepted(&mut self, accepted: &[OpId]) -> anyhow::Result<()> {
+        let pushed = match fs::read_to_string(&self.pushed_path) {
+            Ok(hex) => OpId::try_from_hex(hex.trim()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+            Err(err) => return Err(err.into()),
+        };
+        if let Some(pushed) = pushed
+            && accepted.contains(&pushed)
+        {
+            write_op(&self.accepted_push_path, &pushed)?;
+        }
+        Ok(())
     }
 
     /// Makes `base_ancestry` hold `anc*(base)`, `base` a hub name, as this node names the
@@ -467,6 +490,9 @@ impl LocalRepo for NodeAdapter {
     }
 
     fn stage_ops(&mut self, ops: &[OpEntry<OpId>], attachment: &Attachment) -> anyhow::Result<()> {
+        // What the hub sends, it accepted: this node's own push among them too.
+        let ids: Vec<OpId> = ops.iter().map(|entry| entry.id.clone()).collect();
+        self.note_accepted(&ids)?;
         let store = self.repo.canonical_store();
         let imported: HashMap<OpId, Vec<OpId>> = store
             .import_operations(attachment.bundle_path()?)?
@@ -621,18 +647,7 @@ impl LocalRepo for NodeAdapter {
     }
 
     fn set_accepted_base(&mut self, op: &OpId) -> anyhow::Result<()> {
-        // Overwritten in place: it changes at every advance, and ext4 writes out at once a
-        // file renamed over another, or truncated to nothing. Operation ids are all one
-        // length, so `set_len` only cuts off what isn't one.
-        let hex = op.hex();
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&self.base_path)?;
-        file.write_all(hex.as_bytes())?;
-        file.set_len(hex.len() as u64)?;
-        Ok(())
+        write_op(&self.base_path, op)
     }
 
     fn applied_records(&self) -> anyhow::Result<Records<OpId>> {
@@ -713,8 +728,31 @@ impl LocalRepo for NodeAdapter {
         Ok(self.repo.is_dropped(&hub(op)))
     }
 
+    fn pushing(&mut self, head: &OpId) -> anyhow::Result<()> {
+        write_op(&self.pushed_path, head)
+    }
+
+    fn learned(&mut self, head: &OpId) -> anyhow::Result<()> {
+        self.note_accepted(std::slice::from_ref(head))
+    }
+
     fn write_fixup(&mut self) -> anyhow::Result<Option<OpId>> {
         self.repo.settle()?;
         Ok(self.repo.write_fixup()?.map(|NodeOp(op)| op.0))
     }
+}
+
+/// Writes `op` to `path`, overwritten in place: it changes at every advance and push, and ext4
+/// writes out at once a file renamed over another, or truncated to nothing. Operation ids are
+/// all one length, so `set_len` only cuts off what isn't one.
+fn write_op(path: &Path, op: &OpId) -> anyhow::Result<()> {
+    let hex = op.hex();
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    file.write_all(hex.as_bytes())?;
+    file.set_len(hex.len() as u64)?;
+    Ok(())
 }

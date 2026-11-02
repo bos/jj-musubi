@@ -63,6 +63,7 @@ pub use join::JoinSummary;
 use originals::Originals;
 pub use realize::REALIZE_AT_ONCE;
 use realize::Unwritten;
+pub use supersede::ACCEPTED_PUSH;
 pub use supersede::NodeOp;
 use supersede::Records;
 pub use supersede::WORKED_AT_ATTRIBUTE;
@@ -71,6 +72,13 @@ use view::PerMachine;
 
 /// The operation attribute naming the canonical operation a realization represents.
 pub const CANONICAL_ATTRIBUTE: &str = "musubi.canonical";
+
+/// The op heads, base and accepted push an abandon was last looked for at, and not found.
+type AbandonChecked = Option<(
+    Vec<LocalOp>,
+    Option<crate::records::HubOp>,
+    Option<crate::records::HubOp>,
+)>;
 
 pub struct NodeRepo {
     repo_path: PathBuf,
@@ -130,8 +138,8 @@ pub struct NodeRepo {
     /// writes that loaded the repository before it, parents first: to reparent onto the
     /// rewrites.
     late: Vec<LocalOp>,
-    /// The op heads and base `check_abandon` last checked.
-    abandon_checked: Option<(Vec<LocalOp>, Option<crate::records::HubOp>)>,
+    /// The op heads, base and accepted push `check_abandon` last checked.
+    abandon_checked: AbandonChecked,
     /// Whether `check_abandon` noticed a `jj op abandon` since [`Self::take_abandon_noticed`]
     /// last said so.
     abandon_noticed: bool,

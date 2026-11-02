@@ -139,6 +139,18 @@ pub trait LocalRepo {
     /// Whether this node dropped `op`, an operation the hub named.
     fn is_dropped(&self, op: &Self::Op) -> Result<bool, Self::Error>;
 
+    /// This node is about to push `head`.
+    fn pushing(&mut self, _head: &Self::Op) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    /// This node learned that the hub's head is `head`, from a reply to its own request: if
+    /// that is what it pushed last, the hub took it, though the base may not have moved to
+    /// it yet, so that a `jj op abandon` of it must be noticed as one of the base would be.
+    fn learned(&mut self, _head: &Self::Op) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
     /// Writes the fix-up on the single op head, before a supersede, and returns it
     /// (docs/internals/design.md, "The fix-up"); or `None` if the head already descends
     /// from the one for what this node has yet to publish.
@@ -348,6 +360,7 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
             "pushing {head:?}, which this node dropped"
         );
         repo.share()?;
+        repo.pushing(head)?;
         let known = self.known.1.clone();
         let ops = repo.ops_between(head, &known)?;
         Ok(Request::Push {
@@ -468,6 +481,8 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
                 records,
             } => {
                 if seq > self.known.0 {
+                    // First, so that a failure leaves the reply to be taken again.
+                    repo.learned(&head)?;
                     self.learn(seq, head.clone());
                     self.note_records(repo, kind, records)?;
                     Ok(Handled::Learned { kind, seq, head })
@@ -489,6 +504,9 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
                 new_records,
                 pruned,
             } => {
+                if seq > self.known.0 {
+                    repo.learned(&head)?;
+                }
                 let learned = (seq > self.known.0).then(|| {
                     self.learn(seq, head.clone());
                     (seq, head.clone())

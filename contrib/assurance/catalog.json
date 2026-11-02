@@ -1,0 +1,1979 @@
+{
+  "schema": 1,
+  "mechanisms": [
+    {
+      "id": "conformance",
+      "name": "Lean + conformance",
+      "kind": "Model ↔ code",
+      "series": 1,
+      "shape": "diamond",
+      "description": "Lean proofs → Rust tests against the executable model → measured Rust coverage. Tests are identified by actual oracle requests.",
+      "pattern": "solid"
+    },
+    {
+      "id": "kani",
+      "name": "Kani",
+      "kind": "Rust proofs",
+      "series": 2,
+      "shape": "square",
+      "description": "Properties of actual Rust computations within the proof harness.",
+      "pattern": "solid"
+    },
+    {
+      "id": "unit",
+      "name": "Unit tests",
+      "series": 2,
+      "shape": "square",
+      "pattern": "stripes",
+      "kind": "Recorded test technique",
+      "description": "Small, concrete checks of individual functions and protocol rules."
+    },
+    {
+      "id": "hegel",
+      "name": "Hegel",
+      "kind": "Properties & search",
+      "series": 3,
+      "shape": "circle",
+      "description": "Generated inputs and histories, including real-repository end-to-end search.",
+      "pattern": "solid"
+    },
+    {
+      "id": "races",
+      "name": "Race scenarios",
+      "series": 3,
+      "shape": "triangle",
+      "pattern": "stripes",
+      "kind": "Recorded test technique",
+      "description": "Deliberately interleaved operations on several repository copies."
+    },
+    {
+      "id": "smoke",
+      "name": "End-to-end smoke",
+      "series": 3,
+      "shape": "triangle",
+      "pattern": "backstripes",
+      "kind": "Recorded test technique",
+      "description": "The short end-to-end search run in the default test profile."
+    },
+    {
+      "id": "fuzz",
+      "name": "Fuzzing",
+      "kind": "Hostile bytes",
+      "series": 4,
+      "shape": "triangle",
+      "description": "Coverage-guided inputs with decoder and store-integrity checks.",
+      "pattern": "solid"
+    },
+    {
+      "id": "faults",
+      "name": "Fault injection",
+      "series": 4,
+      "shape": "square",
+      "pattern": "stripes",
+      "kind": "Recorded test technique",
+      "description": "Broken links, lost or malformed replies, interrupted processes, and fault-suite regressions."
+    },
+    {
+      "id": "mutation",
+      "name": "Mutation checks",
+      "kind": "Tests of the tests",
+      "series": 4,
+      "shape": "triangle",
+      "description": "Change the protocol core’s code and run its tests to see whether they fail. Counts describe code changes, not line coverage.",
+      "pattern": "backstripes"
+    },
+    {
+      "id": "integration",
+      "name": "Integration tests",
+      "series": 6,
+      "shape": "diamond",
+      "pattern": "solid",
+      "kind": "Recorded test technique",
+      "description": "Real repositories and services exercised together, including storage and translation."
+    },
+    {
+      "id": "contracts",
+      "name": "Transport contracts",
+      "series": 6,
+      "shape": "square",
+      "pattern": "stripes",
+      "kind": "Recorded test technique",
+      "description": "The same behavioural contract checked against the transport implementations."
+    },
+    {
+      "id": "cli",
+      "name": "CLI tests",
+      "series": 5,
+      "shape": "circle",
+      "pattern": "solid",
+      "kind": "Recorded test technique",
+      "description": "The real command-line program, daemons and hubs exercised as separate processes."
+    },
+    {
+      "id": "snapshots",
+      "name": "Snapshot checks",
+      "series": 5,
+      "shape": "ring",
+      "pattern": "stripes",
+      "kind": "Recorded test technique",
+      "description": "Recorded tests containing an insta snapshot assertion, directly or through a helper in the same file."
+    }
+  ],
+  "claims": [
+    {
+      "id": "closure",
+      "area": "protocol",
+      "title": "Published history is complete",
+      "detail": "A hub publishes a head only with its ancestor operations and objects present.",
+      "code": [
+        "crates/musubi-core/src/hub.rs"
+      ],
+      "evidence": [
+        "e0",
+        "e1",
+        "e2",
+        "e3"
+      ]
+    },
+    {
+      "id": "converge",
+      "area": "protocol",
+      "title": "Machines eventually agree",
+      "detail": "After users stop and communication recovers, the policy makes progress to agreement.",
+      "code": [
+        "crates/musubi-core/src/node.rs",
+        "crates/musubi-sync/src/driver.rs"
+      ],
+      "evidence": [
+        "e4",
+        "e5",
+        "e6"
+      ]
+    },
+    {
+      "id": "noecho",
+      "area": "protocol",
+      "title": "Sync does not echo endlessly",
+      "detail": "Modeled realization does not invent operations; legitimate merges are accounted for separately.",
+      "code": [
+        "crates/musubi-core/src/node.rs"
+      ],
+      "evidence": [
+        "e7",
+        "e8",
+        "e9"
+      ]
+    },
+    {
+      "id": "drops",
+      "area": "protocol",
+      "title": "Dropped operations stay dropped",
+      "detail": "Replicated abandonment and reconciliation must not revive a dropped head.",
+      "code": [
+        "crates/musubi-core/src/hub.rs",
+        "crates/musubi-core/src/node.rs"
+      ],
+      "evidence": [
+        "e10",
+        "e11",
+        "e12"
+      ]
+    },
+    {
+      "id": "remake",
+      "area": "protocol",
+      "title": "A remade hub can rejoin agreement",
+      "detail": "The extended model covers a hub returning to an older head or being recreated empty.",
+      "code": [
+        "crates/musubi-core/src/node.rs",
+        "crates/musubi-sync/src/hive.rs"
+      ],
+      "evidence": [
+        "e13",
+        "e14",
+        "e15"
+      ]
+    },
+    {
+      "id": "roundtrip",
+      "area": "history",
+      "title": "History survives translation",
+      "detail": "Local and canonical operations retain their meaning through translation and realization.",
+      "code": [
+        "crates/musubi-jj/src/node/translate.rs",
+        "crates/musubi-jj/src/node/realize.rs",
+        "crates/musubi-jj/src/canonical.rs",
+        "crates/musubi-jj/src/canonical/validate.rs",
+        "crates/musubi-jj/src/canonical/transfer.rs"
+      ],
+      "evidence": [
+        "e16",
+        "e17"
+      ]
+    },
+    {
+      "id": "parents",
+      "area": "history",
+      "title": "Concurrent merge parents are retained",
+      "detail": "An advance beside concurrent local heads retains the exact maximal parent set.",
+      "code": [
+        "crates/musubi-jj/src/node/realize.rs"
+      ],
+      "evidence": [
+        "e18",
+        "e19"
+      ]
+    },
+    {
+      "id": "abandonfetch",
+      "area": "history",
+      "title": "Abandonment preserves a concurrent fetch",
+      "detail": "The contracted survivor graph and saved expected ref values meet at realization.",
+      "code": [
+        "crates/musubi-jj/src/node/supersede.rs",
+        "crates/musubi-jj/src/node/realize.rs",
+        "crates/musubi-jj/src/node/supersede/abandon.rs",
+        "crates/musubi-jj/src/node/supersede/receive.rs",
+        "crates/musubi-jj/src/node/supersede/rewrite.rs",
+        "crates/musubi-jj/src/node/supersede/fixup.rs",
+        "crates/musubi-jj/src/node/supersede/normalize.rs",
+        "crates/musubi-jj/src/node/supersede/storage.rs"
+      ],
+      "evidence": [
+        "e20",
+        "e21"
+      ]
+    },
+    {
+      "id": "revert",
+      "area": "refs",
+      "title": "Imports do not spuriously revert work",
+      "detail": "Replicated git bookkeeping must not look like a new git edit that undoes a bookmark.",
+      "code": [
+        "crates/musubi-jj/src/node/git.rs",
+        "crates/musubi-jj/src/node/view.rs"
+      ],
+      "evidence": [
+        "e22",
+        "e23",
+        "e24",
+        "e25"
+      ]
+    },
+    {
+      "id": "expected",
+      "area": "refs",
+      "title": "Conflicted refs use the right history",
+      "detail": "History walking chooses an expected ref value consistently under operation renaming.",
+      "code": [
+        "crates/musubi-jj/src/node/git.rs"
+      ],
+      "evidence": [
+        "e26",
+        "e27"
+      ]
+    },
+    {
+      "id": "jjmerge",
+      "area": "refs",
+      "title": "Distributed conflicts match jj",
+      "detail": "A conflict or divergence should be explained by jj merging the same operations.",
+      "code": [
+        "crates/musubi-jj/src/node/view.rs",
+        "crates/musubi-jj/src/node/git.rs"
+      ],
+      "evidence": [
+        "e28",
+        "e29"
+      ]
+    },
+    {
+      "id": "prefix",
+      "area": "transfer",
+      "title": "Chunk retries preserve the blob",
+      "detail": "The receiver keeps a contiguous prefix, ignores overlaps, and verifies completed content.",
+      "code": [
+        "crates/musubi-sync/src/blobs.rs"
+      ],
+      "evidence": [
+        "e30",
+        "e31",
+        "e32"
+      ]
+    },
+    {
+      "id": "offset",
+      "area": "transfer",
+      "title": "Hostile chunk offsets cannot overflow",
+      "detail": "Any prefix, offset and chunk length must give the correct extension boundary.",
+      "code": [
+        "crates/musubi-sync/src/blobs.rs"
+      ],
+      "evidence": [
+        "e33"
+      ]
+    },
+    {
+      "id": "windows",
+      "area": "transfer",
+      "title": "Chunk windows advance correctly",
+      "detail": "Each window begins at the requested offset and ends at the blob end or window limit.",
+      "code": [
+        "crates/musubi-sync/src/remote.rs",
+        "crates/musubi-sync/src/service.rs"
+      ],
+      "evidence": [
+        "e34",
+        "e35",
+        "e65"
+      ]
+    },
+    {
+      "id": "budget",
+      "area": "transfer",
+      "title": "Payload budgets leave envelope room",
+      "detail": "The size allowance must remain sufficient across payload limits offered by a hub.",
+      "code": [
+        "crates/musubi-sync/src/wire.rs"
+      ],
+      "evidence": [
+        "e36",
+        "e37"
+      ]
+    },
+    {
+      "id": "decoders",
+      "area": "transfer",
+      "title": "Malformed peer bytes are checked",
+      "detail": "Frames, envelopes and bundles must decode or refuse safely under their stated properties.",
+      "code": [
+        "crates/musubi-sync/src/wire.rs",
+        "crates/musubi-transport/src/stream.rs",
+        "crates/musubi-jj/src/objects/bundle.rs",
+        "crates/musubi-transport/src/stream/frame.rs",
+        "crates/musubi-transport/src/stream/greeting.rs",
+        "crates/musubi-jj/src/canonical/validate.rs",
+        "crates/musubi-jj/src/canonical/transfer.rs"
+      ],
+      "evidence": [
+        "e38",
+        "e39",
+        "e40",
+        "e41"
+      ]
+    },
+    {
+      "id": "content",
+      "area": "transfer",
+      "title": "Imported content matches its identity",
+      "detail": "Import must not leave operations or views stored under an identity their contents do not have.",
+      "code": [
+        "crates/musubi-jj/src/canonical.rs",
+        "crates/musubi-jj/src/canonical/codec.rs",
+        "crates/musubi-jj/src/objects/bundle.rs",
+        "crates/musubi-jj/src/canonical/validate.rs",
+        "crates/musubi-jj/src/canonical/transfer.rs"
+      ],
+      "evidence": [
+        "e42",
+        "e43"
+      ]
+    },
+    {
+      "id": "presence",
+      "area": "identity",
+      "title": "A forgotten copy returns only with work",
+      "detail": "Forgetting a copy hides its workspaces without destroying its work.",
+      "code": [
+        "crates/musubi-jj/src/presence.rs",
+        "crates/musubi-jj/src/node/presence.rs"
+      ],
+      "evidence": [
+        "e44",
+        "e45",
+        "e46",
+        "e47"
+      ]
+    },
+    {
+      "id": "names",
+      "area": "identity",
+      "title": "Workspace names remain distinct",
+      "detail": "Machine prefixes avoid each other and this machine’s own workspace names.",
+      "code": [
+        "crates/musubi-jj/src/workspaces.rs"
+      ],
+      "evidence": [
+        "e48",
+        "e49",
+        "e50"
+      ]
+    },
+    {
+      "id": "copy",
+      "area": "identity",
+      "title": "A duplicate is not mistaken for the copy",
+      "detail": "A repository’s key and identity decide which moved or copied directory the daemon accepts.",
+      "code": [
+        "crates/musubi/src/copy.rs"
+      ],
+      "evidence": [
+        "e51",
+        "e52"
+      ]
+    },
+    {
+      "id": "damage",
+      "area": "storage",
+      "title": "Torn append logs do not invent records",
+      "detail": "Damaged tails must read whole records correctly or detect damage.",
+      "code": [
+        "crates/musubi-jj/src/canonical/log.rs",
+        "crates/musubi-jj/src/translation_map.rs",
+        "crates/musubi-jj/src/records.rs"
+      ],
+      "evidence": [
+        "e53",
+        "e54"
+      ]
+    },
+    {
+      "id": "hubdamage",
+      "area": "storage",
+      "title": "A damaged hub is detected and remade",
+      "detail": "A damaged store opens correctly or is identified as corrupt, allowing it to be recreated.",
+      "code": [
+        "crates/musubi-hub/src/store.rs",
+        "crates/musubi-hub/src/hub_dir.rs"
+      ],
+      "evidence": [
+        "e55",
+        "e56"
+      ]
+    },
+    {
+      "id": "lies",
+      "area": "storage",
+      "title": "Nodes recover from wrong replies",
+      "detail": "Well-formed but false hub replies must not trap a node permanently.",
+      "code": [
+        "crates/musubi-core/src/node.rs"
+      ],
+      "evidence": [
+        "e57",
+        "e58"
+      ]
+    },
+    {
+      "id": "interrupt",
+      "area": "daemon",
+      "title": "Interrupted syncs recover",
+      "detail": "Crashes and partial network exchanges should allow subsequent convergence.",
+      "code": [
+        "crates/musubi/src/daemon.rs",
+        "crates/musubi/src/agent.rs"
+      ],
+      "evidence": [
+        "e59",
+        "e60"
+      ]
+    },
+    {
+      "id": "watch",
+      "area": "daemon",
+      "title": "The daemon discovers new repositories",
+      "detail": "The running daemon must notice and serve repositories that become available.",
+      "code": [
+        "crates/musubi/src/daemon.rs",
+        "crates/musubi/src/watch.rs"
+      ],
+      "evidence": [
+        "e61"
+      ]
+    },
+    {
+      "id": "quickstart",
+      "area": "commands",
+      "title": "The quick start works as written",
+      "detail": "The first-use guide is exercised through commands and real daemons.",
+      "code": [
+        "crates/musubi/src/main.rs",
+        "crates/musubi/src/hub.rs",
+        "crates/musubi/src/cli.rs",
+        "crates/musubi/src/join.rs",
+        "crates/musubi/src/sync.rs",
+        "crates/musubi/src/leave.rs"
+      ],
+      "evidence": [
+        "e62"
+      ]
+    },
+    {
+      "id": "output",
+      "area": "commands",
+      "title": "Messages remain reviewable",
+      "detail": "Inline output snapshots make user-visible changes explicit in review.",
+      "code": [
+        "crates/musubi/src/ui.rs",
+        "crates/musubi/src/status.rs",
+        "crates/musubi/src/list/template.rs",
+        "crates/musubi/src/list.rs"
+      ],
+      "evidence": [
+        "e63"
+      ]
+    },
+    {
+      "id": "upstream",
+      "area": "commands",
+      "title": "Changes in jj are noticed early",
+      "detail": "The nightly jj-main job builds and runs the suite against jj’s development branch.",
+      "code": [
+        "crates/musubi-jj/src/lib.rs"
+      ],
+      "evidence": [
+        "e64"
+      ]
+    }
+  ],
+  "evidence": [
+    {
+      "id": "e0",
+      "claim": "closure",
+      "mechanism": "conformance",
+      "source": "formal/Musubi/Safety.lean#hubClosed",
+      "detail": "Closure is proved for reachable model states.",
+      "needs": [],
+      "provenance": "documented",
+      "kind": "proof"
+    },
+    {
+      "id": "e1",
+      "claim": "closure",
+      "mechanism": "conformance",
+      "source": "crates/musubi-core/tests/protocol.rs#conformance",
+      "detail": "Rust steps and state are compared with the executable model.",
+      "needs": [
+        "lean"
+      ],
+      "provenance": "documented"
+    },
+    {
+      "id": "e2",
+      "claim": "closure",
+      "mechanism": "hegel",
+      "source": "crates/musubi-core/tests/protocol.rs#protocol_invariants",
+      "detail": "Checks safety directly on the Rust state, independently of the oracle.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e3",
+      "claim": "closure",
+      "mechanism": "mutation",
+      "source": "docs/internals/conformance.md",
+      "detail": "Removing the closure guard is documented as caught by invariants and conformance.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e4",
+      "claim": "converge",
+      "mechanism": "conformance",
+      "source": "formal/Musubi/Liveness.lean",
+      "detail": "A well-founded progress measure establishes policy termination.",
+      "needs": [],
+      "provenance": "documented",
+      "kind": "proof"
+    },
+    {
+      "id": "e5",
+      "claim": "converge",
+      "mechanism": "conformance",
+      "source": "docs/internals/conformance.md",
+      "detail": "Policy, uploads and progress measures are compared with the oracle.",
+      "needs": [
+        "lean"
+      ],
+      "provenance": "documented"
+    },
+    {
+      "id": "e6",
+      "claim": "converge",
+      "mechanism": "hegel",
+      "source": "crates/musubi-sync/tests/e2e_search/checks.rs",
+      "detail": "Real-repository histories are driven to a fixed point and checked for agreement.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e7",
+      "claim": "noecho",
+      "mechanism": "conformance",
+      "source": "formal/Musubi/Safety.lean#noFeedback",
+      "detail": "Sync steps preserve the operation universe.",
+      "needs": [],
+      "provenance": "documented",
+      "kind": "proof"
+    },
+    {
+      "id": "e8",
+      "claim": "noecho",
+      "mechanism": "conformance",
+      "source": "docs/internals/conformance.md",
+      "detail": "The protocol harness checks steps against the model.",
+      "needs": [
+        "lean"
+      ],
+      "provenance": "documented"
+    },
+    {
+      "id": "e9",
+      "claim": "noecho",
+      "mechanism": "hegel",
+      "source": "crates/musubi-sync/tests/e2e_search/checks.rs",
+      "detail": "Retranslation makes no extra canonical operation at convergence.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e10",
+      "claim": "drops",
+      "mechanism": "conformance",
+      "source": "formal/Musubi/Supersede.lean",
+      "detail": "Invariant and convergence proofs include dropped sets and supersedes.",
+      "needs": [],
+      "provenance": "documented",
+      "kind": "proof"
+    },
+    {
+      "id": "e11",
+      "claim": "drops",
+      "mechanism": "conformance",
+      "source": "crates/musubi-core/tests/protocol.rs",
+      "detail": "The executable supersede model checks adoption, publication and dropped heads.",
+      "needs": [
+        "lean"
+      ],
+      "provenance": "documented"
+    },
+    {
+      "id": "e12",
+      "claim": "drops",
+      "mechanism": "mutation",
+      "source": "docs/internals/conformance.md",
+      "detail": "A node advancing to a dropped head is documented as detected through HeadsOK.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e13",
+      "claim": "remake",
+      "mechanism": "conformance",
+      "source": "formal/Musubi/Regress.lean",
+      "detail": "An extended invariant and convergence result cover hub regression.",
+      "needs": [],
+      "provenance": "documented",
+      "kind": "proof"
+    },
+    {
+      "id": "e14",
+      "claim": "remake",
+      "mechanism": "conformance",
+      "source": "docs/internals/conformance.md",
+      "detail": "The remake rule maps to regression to root and forgetting unstored history.",
+      "needs": [
+        "lean"
+      ],
+      "provenance": "documented"
+    },
+    {
+      "id": "e15",
+      "claim": "remake",
+      "mechanism": "hegel",
+      "source": "crates/musubi-sync/tests/e2e_search/world.rs",
+      "detail": "The real-repository search can restart the hub after dropping head-log entries.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e16",
+      "claim": "roundtrip",
+      "mechanism": "integration",
+      "source": "crates/musubi-jj/tests/it/translation.rs",
+      "detail": "Real-repository translation examples exercise the integration boundary.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e17",
+      "claim": "roundtrip",
+      "mechanism": "hegel",
+      "source": "crates/musubi-sync/tests/e2e_search/checks.rs",
+      "detail": "Retranslates without caches and checks parent forms and realization round trips.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e18",
+      "claim": "parents",
+      "mechanism": "conformance",
+      "source": "formal/Musubi/Safety.lean#advance_merge_refines",
+      "detail": "Advancing then merging the exact concurrent set is a reachable model run.",
+      "needs": [],
+      "provenance": "documented",
+      "kind": "proof"
+    },
+    {
+      "id": "e19",
+      "claim": "parents",
+      "mechanism": "integration",
+      "source": "crates/musubi-jj/tests/it/translation.rs#advance_with_concurrent_heads_refines_advance_then_merge",
+      "detail": "Observes published canonical heads in real repositories and compares them with the oracle.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e20",
+      "claim": "abandonfetch",
+      "mechanism": "conformance",
+      "source": "formal/Musubi/AbandonRefs.lean",
+      "detail": "A boundary theorem connects contracted heads and one-ref realization.",
+      "needs": [],
+      "provenance": "documented",
+      "kind": "proof"
+    },
+    {
+      "id": "e21",
+      "claim": "abandonfetch",
+      "mechanism": "races",
+      "source": "crates/musubi-sync/tests/races/refs.rs#realization_beside_a_fetch_keeps_the_fetch_while_taking_an_abandon",
+      "detail": "Checks exact merge parents, no dropped ancestor, the fetched ref and subsequent convergence.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e22",
+      "claim": "revert",
+      "mechanism": "conformance",
+      "source": "formal/Musubi/Refs.lean#noSpuriousRevert",
+      "detail": "The per-machine ref model states the no-spurious-revert property.",
+      "needs": [],
+      "provenance": "documented",
+      "kind": "proof"
+    },
+    {
+      "id": "e23",
+      "claim": "revert",
+      "mechanism": "conformance",
+      "source": "crates/musubi-jj/tests/it/ref_laws.rs",
+      "detail": "Pins laws of jj import/export on which the model relies.",
+      "needs": [
+        "lean"
+      ],
+      "provenance": "documented"
+    },
+    {
+      "id": "e24",
+      "claim": "revert",
+      "mechanism": "races",
+      "source": "crates/musubi-sync/tests/races/refs.rs",
+      "detail": "Concrete fetch, restore and realization races pin regressions.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e25",
+      "claim": "revert",
+      "mechanism": "hegel",
+      "source": "crates/musubi-sync/tests/e2e_search/imports.rs",
+      "detail": "Audits each ref import against the git moves and jj exceptions that explain it.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e26",
+      "claim": "expected",
+      "mechanism": "conformance",
+      "source": "formal/Musubi/Expected.lean",
+      "detail": "Agreement, termination and import-agreement boundary are modeled.",
+      "needs": [],
+      "provenance": "documented",
+      "kind": "proof"
+    },
+    {
+      "id": "e27",
+      "claim": "expected",
+      "mechanism": "conformance",
+      "source": "crates/musubi-jj/src/node/git_expected_tests.rs#expected_history_conforms_to_model",
+      "detail": "Generated finite operation histories are compared with the oracle.",
+      "needs": [
+        "lean"
+      ],
+      "provenance": "documented"
+    },
+    {
+      "id": "e28",
+      "claim": "jjmerge",
+      "mechanism": "conformance",
+      "source": "crates/musubi-sync/tests/races/refs.rs",
+      "detail": "Per-machine ref behavior is checked against the model and jj laws.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e29",
+      "claim": "jjmerge",
+      "mechanism": "hegel",
+      "source": "crates/musubi-sync/tests/e2e_search/reference.rs",
+      "detail": "An independent jj repository replays the hub history and compares merge outcomes.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e30",
+      "claim": "prefix",
+      "mechanism": "conformance",
+      "source": "formal/Musubi/Chunks.lean",
+      "detail": "The prefix receiver refines the chunk model, with safety and liveness results.",
+      "needs": [],
+      "provenance": "documented",
+      "kind": "proof"
+    },
+    {
+      "id": "e31",
+      "claim": "prefix",
+      "mechanism": "conformance",
+      "source": "crates/musubi-sync/src/blobs.rs#receive_follows_the_prefix_model",
+      "detail": "Real receiver steps are checked against the Lean oracle.",
+      "needs": [
+        "lean"
+      ],
+      "provenance": "documented"
+    },
+    {
+      "id": "e32",
+      "claim": "prefix",
+      "mechanism": "faults",
+      "source": "crates/musubi-sync/tests/it/faults.rs",
+      "detail": "Faulted transfers exercise real multi-window blobs.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e33",
+      "claim": "offset",
+      "mechanism": "kani",
+      "source": "crates/musubi-sync/src/blobs.rs#a_chunk_extends_the_prefix_where_it_ends",
+      "detail": "Symbolic Rust inputs include offsets near u64::MAX.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e34",
+      "claim": "windows",
+      "mechanism": "kani",
+      "source": "crates/musubi-sync/src/remote.rs#a_window_goes_on_from_its_offset",
+      "detail": "Checks Rust window arithmetic with a positive-chunk precondition and explicit unwind limit.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e35",
+      "claim": "windows",
+      "mechanism": "integration",
+      "source": "crates/musubi-sync/tests/it/transfer.rs",
+      "detail": "Concrete transfer examples check the integration path.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e36",
+      "claim": "budget",
+      "mechanism": "kani",
+      "source": "crates/musubi-sync/src/wire.rs#a_chunk_leaves_room_for_the_envelope",
+      "detail": "The Kani harness proves the allowance bound; a unit example pins that it fits.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e37",
+      "claim": "budget",
+      "mechanism": "unit",
+      "source": "crates/musubi-sync/src/wire.rs#a_full_chunk_fits",
+      "detail": "A full chunk fits at the minimum payload limit.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e38",
+      "claim": "decoders",
+      "mechanism": "fuzz",
+      "source": "fuzz/fuzz_targets/frames.rs",
+      "detail": "Admitted frames round-trip byte for byte.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e39",
+      "claim": "decoders",
+      "mechanism": "fuzz",
+      "source": "fuzz/fuzz_targets/envelope.rs",
+      "detail": "Admitted messages round-trip and trailing bytes are refused.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e40",
+      "claim": "decoders",
+      "mechanism": "fuzz",
+      "source": "fuzz/fuzz_targets/bundle.rs",
+      "detail": "Admitted bundle records round-trip with and without compression.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e41",
+      "claim": "decoders",
+      "mechanism": "faults",
+      "source": "crates/musubi-sync/tests/it/faults.rs",
+      "detail": "Malformed requests and replies are injected into real sessions.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e42",
+      "claim": "content",
+      "mechanism": "fuzz",
+      "source": "fuzz/fuzz_targets/canonical.rs",
+      "detail": "Correct and incorrect hashes reach import validation and store-integrity checks.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e43",
+      "claim": "content",
+      "mechanism": "fuzz",
+      "source": "fuzz/fuzz_targets/import.rs",
+      "detail": "Whole records, deltas, duplicate and changed bytes exercise canonical import.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e44",
+      "claim": "presence",
+      "mechanism": "conformance",
+      "source": "formal/Musubi/Presence.lean#only_work_returns",
+      "detail": "Presence is specified over operation histories.",
+      "needs": [],
+      "provenance": "documented",
+      "kind": "proof"
+    },
+    {
+      "id": "e45",
+      "claim": "presence",
+      "mechanism": "conformance",
+      "source": "crates/musubi-jj/tests/it/presence.rs",
+      "detail": "Generated histories compare the implementation with the presence oracle.",
+      "needs": [
+        "lean"
+      ],
+      "provenance": "documented"
+    },
+    {
+      "id": "e46",
+      "claim": "presence",
+      "mechanism": "races",
+      "source": "crates/musubi-sync/tests/races/forget.rs",
+      "detail": "Real-repository races check forgetting and return through fresh work.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e47",
+      "claim": "presence",
+      "mechanism": "hegel",
+      "source": "crates/musubi-sync/tests/e2e_search/machine.rs",
+      "detail": "Rules forget copies, expire idle copies and create fresh work.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e48",
+      "claim": "names",
+      "mechanism": "conformance",
+      "source": "formal/Musubi/Names.lean#localName_injective",
+      "detail": "The naming rule is injective under its stated inputs.",
+      "needs": [],
+      "provenance": "documented",
+      "kind": "proof"
+    },
+    {
+      "id": "e49",
+      "claim": "names",
+      "mechanism": "conformance",
+      "source": "crates/musubi-jj/src/workspaces.rs#names_conform",
+      "detail": "Generated clashes are checked against the names oracle.",
+      "needs": [
+        "lean"
+      ],
+      "provenance": "documented"
+    },
+    {
+      "id": "e50",
+      "claim": "names",
+      "mechanism": "races",
+      "source": "crates/musubi-sync/tests/races/workspaces.rs",
+      "detail": "Shared names and machine identities are exercised in real repositories.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e51",
+      "claim": "copy",
+      "mechanism": "conformance",
+      "source": "formal/Musubi/Copies.lean",
+      "detail": "Moved, copied, deleted and replaced repositories are modeled.",
+      "needs": [],
+      "provenance": "documented",
+      "kind": "proof"
+    },
+    {
+      "id": "e52",
+      "claim": "copy",
+      "mechanism": "conformance",
+      "source": "crates/musubi/src/copy/conformance.rs",
+      "detail": "The decisions and daemon pre-sync check are compared with the copies oracle.",
+      "needs": [
+        "lean"
+      ],
+      "provenance": "documented"
+    },
+    {
+      "id": "e53",
+      "claim": "damage",
+      "mechanism": "hegel",
+      "source": "crates/musubi-jj/src/canonical/log.rs",
+      "detail": "Generated damage includes truncation, zeros, garbling and concurrent appends.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e54",
+      "claim": "damage",
+      "mechanism": "hegel",
+      "source": "crates/musubi-jj/src/translation_map.rs",
+      "detail": "Parser properties check whole lines and damaged tails.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e55",
+      "claim": "hubdamage",
+      "mechanism": "hegel",
+      "source": "crates/musubi-hub/src/store.rs",
+      "detail": "Generated damage checks heads and backend recognition.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e56",
+      "claim": "hubdamage",
+      "mechanism": "integration",
+      "source": "crates/musubi-hub/tests/store.rs",
+      "detail": "Store integration examples check concrete behavior.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e57",
+      "claim": "lies",
+      "mechanism": "hegel",
+      "source": "crates/musubi-core/tests/protocol.rs#nodes_recover_from_false_replies",
+      "detail": "The core state machine explores false replies and recovery.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e58",
+      "claim": "lies",
+      "mechanism": "faults",
+      "source": "crates/musubi-sync/tests/it/lies.rs#nodes_recover_from_wrong_replies",
+      "detail": "Real-repository recovery cases run in the CI profile.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e59",
+      "claim": "interrupt",
+      "mechanism": "faults",
+      "source": "crates/musubi-sync/tests/it/faults.rs",
+      "detail": "A scripted link can die or stall partway through a session.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e60",
+      "claim": "interrupt",
+      "mechanism": "hegel",
+      "source": "crates/musubi-sync/tests/e2e_search/world.rs",
+      "detail": "The search can crash while realizations are being written, lose caches or lose a reply.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e61",
+      "claim": "watch",
+      "mechanism": "cli",
+      "source": "crates/musubi/tests/cli.rs#the_daemon_picks_up_new_repositories",
+      "detail": "A command-level test checks discovery through real services.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e62",
+      "claim": "quickstart",
+      "mechanism": "cli",
+      "source": "crates/musubi/tests/cli.rs#the_quick_start_works_as_written",
+      "detail": "The documented first-use sequence is an executable scenario.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e63",
+      "claim": "output",
+      "mechanism": "cli",
+      "source": "crates/musubi/tests/cli.rs#hub_join_sync_clone_and_list",
+      "detail": "Command output is pinned with inline snapshots during a real lifecycle.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e65",
+      "claim": "windows",
+      "mechanism": "kani",
+      "source": "crates/musubi-sync/src/service.rs#a_download_ends_where_the_blob_does",
+      "detail": "Checks that download bounds cannot overflow and that completion agrees with the blob size.",
+      "needs": [],
+      "provenance": "documented"
+    }
+  ],
+  "sources": {
+    "crates/musubi/src/agent.rs": {
+      "path": "crates/musubi/src/agent.rs",
+      "symbol": null
+    },
+    "crates/musubi/src/completion.rs": {
+      "path": "crates/musubi/src/completion.rs",
+      "symbol": null
+    },
+    "crates/musubi/src/config.rs": {
+      "path": "crates/musubi/src/config.rs",
+      "symbol": null
+    },
+    "crates/musubi/src/control.rs": {
+      "path": "crates/musubi/src/control.rs",
+      "symbol": null
+    },
+    "crates/musubi/src/copy.rs": {
+      "path": "crates/musubi/src/copy.rs",
+      "symbol": null
+    },
+    "crates/musubi/src/daemon.rs": {
+      "path": "crates/musubi/src/daemon.rs",
+      "symbol": null
+    },
+    "crates/musubi/src/hub.rs": {
+      "path": "crates/musubi/src/hub.rs",
+      "symbol": null
+    },
+    "crates/musubi/src/list/template.rs": {
+      "path": "crates/musubi/src/list/template.rs",
+      "symbol": null
+    },
+    "crates/musubi/src/lock.rs": {
+      "path": "crates/musubi/src/lock.rs",
+      "symbol": null
+    },
+    "crates/musubi/src/login.rs": {
+      "path": "crates/musubi/src/login.rs",
+      "symbol": null
+    },
+    "crates/musubi/src/main.rs": {
+      "path": "crates/musubi/src/main.rs",
+      "symbol": null
+    },
+    "crates/musubi/src/open_files.rs": {
+      "path": "crates/musubi/src/open_files.rs",
+      "symbol": null
+    },
+    "crates/musubi/src/repo.rs": {
+      "path": "crates/musubi/src/repo.rs",
+      "symbol": null
+    },
+    "crates/musubi/src/settings.rs": {
+      "path": "crates/musubi/src/settings.rs",
+      "symbol": null
+    },
+    "crates/musubi/src/socket.rs": {
+      "path": "crates/musubi/src/socket.rs",
+      "symbol": null
+    },
+    "crates/musubi/src/ssh.rs": {
+      "path": "crates/musubi/src/ssh.rs",
+      "symbol": null
+    },
+    "crates/musubi/src/status.rs": {
+      "path": "crates/musubi/src/status.rs",
+      "symbol": null
+    },
+    "crates/musubi/src/top.rs": {
+      "path": "crates/musubi/src/top.rs",
+      "symbol": null
+    },
+    "crates/musubi/src/ui.rs": {
+      "path": "crates/musubi/src/ui.rs",
+      "symbol": null
+    },
+    "crates/musubi/src/upgrade.rs": {
+      "path": "crates/musubi/src/upgrade.rs",
+      "symbol": null
+    },
+    "crates/musubi/src/watch.rs": {
+      "path": "crates/musubi/src/watch.rs",
+      "symbol": null
+    },
+    "crates/musubi-core/src/hub.rs": {
+      "path": "crates/musubi-core/src/hub.rs",
+      "symbol": null
+    },
+    "crates/musubi-core/src/lib.rs": {
+      "path": "crates/musubi-core/src/lib.rs",
+      "symbol": null
+    },
+    "crates/musubi-core/src/message.rs": {
+      "path": "crates/musubi-core/src/message.rs",
+      "symbol": null
+    },
+    "crates/musubi-core/src/node.rs": {
+      "path": "crates/musubi-core/src/node.rs",
+      "symbol": null
+    },
+    "crates/musubi-hub/src/activity.rs": {
+      "path": "crates/musubi-hub/src/activity.rs",
+      "symbol": null
+    },
+    "crates/musubi-hub/src/hub_dir.rs": {
+      "path": "crates/musubi-hub/src/hub_dir.rs",
+      "symbol": null
+    },
+    "crates/musubi-hub/src/index.rs": {
+      "path": "crates/musubi-hub/src/index.rs",
+      "symbol": null
+    },
+    "crates/musubi-hub/src/lib.rs": {
+      "path": "crates/musubi-hub/src/lib.rs",
+      "symbol": null
+    },
+    "crates/musubi-hub/src/matching.rs": {
+      "path": "crates/musubi-hub/src/matching.rs",
+      "symbol": null
+    },
+    "crates/musubi-hub/src/names.rs": {
+      "path": "crates/musubi-hub/src/names.rs",
+      "symbol": null
+    },
+    "crates/musubi-hub/src/store.rs": {
+      "path": "crates/musubi-hub/src/store.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/canonical/codec.rs": {
+      "path": "crates/musubi-jj/src/canonical/codec.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/canonical/contract.rs": {
+      "path": "crates/musubi-jj/src/canonical/contract.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/canonical/log.rs": {
+      "path": "crates/musubi-jj/src/canonical/log.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/canonical/origin.rs": {
+      "path": "crates/musubi-jj/src/canonical/origin.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/canonical/presence.rs": {
+      "path": "crates/musubi-jj/src/canonical/presence.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/canonical.rs": {
+      "path": "crates/musubi-jj/src/canonical.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/files.rs": {
+      "path": "crates/musubi-jj/src/files.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/format_guard.rs": {
+      "path": "crates/musubi-jj/src/format_guard.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/gc.rs": {
+      "path": "crates/musubi-jj/src/gc.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/git_command.rs": {
+      "path": "crates/musubi-jj/src/git_command.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/hive_settings.rs": {
+      "path": "crates/musubi-jj/src/hive_settings.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/lib.rs": {
+      "path": "crates/musubi-jj/src/lib.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/node/error.rs": {
+      "path": "crates/musubi-jj/src/node/error.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/node/expiry.rs": {
+      "path": "crates/musubi-jj/src/node/expiry.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/node/git.rs": {
+      "path": "crates/musubi-jj/src/node/git.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/node/git_config.rs": {
+      "path": "crates/musubi-jj/src/node/git_config.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/node/join.rs": {
+      "path": "crates/musubi-jj/src/node/join.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/node/originals.rs": {
+      "path": "crates/musubi-jj/src/node/originals.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/node/presence.rs": {
+      "path": "crates/musubi-jj/src/node/presence.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/node/realize.rs": {
+      "path": "crates/musubi-jj/src/node/realize.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/node/settings.rs": {
+      "path": "crates/musubi-jj/src/node/settings.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/node/supersede.rs": {
+      "path": "crates/musubi-jj/src/node/supersede.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/node/translate.rs": {
+      "path": "crates/musubi-jj/src/node/translate.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/node/view.rs": {
+      "path": "crates/musubi-jj/src/node/view.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/node/working_copies.rs": {
+      "path": "crates/musubi-jj/src/node/working_copies.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/node.rs": {
+      "path": "crates/musubi-jj/src/node.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/objects/bundle.rs": {
+      "path": "crates/musubi-jj/src/objects/bundle.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/objects/git.rs": {
+      "path": "crates/musubi-jj/src/objects/git.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/objects/mod.rs": {
+      "path": "crates/musubi-jj/src/objects/mod.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/objects/power.rs": {
+      "path": "crates/musubi-jj/src/objects/power.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/objects/simple.rs": {
+      "path": "crates/musubi-jj/src/objects/simple.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/op_id.rs": {
+      "path": "crates/musubi-jj/src/op_id.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/presence.rs": {
+      "path": "crates/musubi-jj/src/presence.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/protobuf.rs": {
+      "path": "crates/musubi-jj/src/protobuf.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/records.rs": {
+      "path": "crates/musubi-jj/src/records.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/ref_locks.rs": {
+      "path": "crates/musubi-jj/src/ref_locks.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/remote_url.rs": {
+      "path": "crates/musubi-jj/src/remote_url.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/translation_map.rs": {
+      "path": "crates/musubi-jj/src/translation_map.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/workspaces.rs": {
+      "path": "crates/musubi-jj/src/workspaces.rs",
+      "symbol": null
+    },
+    "crates/musubi-sync/src/blobs.rs": {
+      "path": "crates/musubi-sync/src/blobs.rs",
+      "symbol": null
+    },
+    "crates/musubi-sync/src/driver.rs": {
+      "path": "crates/musubi-sync/src/driver.rs",
+      "symbol": null
+    },
+    "crates/musubi-sync/src/hive.rs": {
+      "path": "crates/musubi-sync/src/hive.rs",
+      "symbol": null
+    },
+    "crates/musubi-sync/src/hub.rs": {
+      "path": "crates/musubi-sync/src/hub.rs",
+      "symbol": null
+    },
+    "crates/musubi-sync/src/lib.rs": {
+      "path": "crates/musubi-sync/src/lib.rs",
+      "symbol": null
+    },
+    "crates/musubi-sync/src/node.rs": {
+      "path": "crates/musubi-sync/src/node.rs",
+      "symbol": null
+    },
+    "crates/musubi-sync/src/progress.rs": {
+      "path": "crates/musubi-sync/src/progress.rs",
+      "symbol": null
+    },
+    "crates/musubi-sync/src/remote.rs": {
+      "path": "crates/musubi-sync/src/remote.rs",
+      "symbol": null
+    },
+    "crates/musubi-sync/src/server.rs": {
+      "path": "crates/musubi-sync/src/server.rs",
+      "symbol": null
+    },
+    "crates/musubi-sync/src/service.rs": {
+      "path": "crates/musubi-sync/src/service.rs",
+      "symbol": null
+    },
+    "crates/musubi-sync/src/wire.rs": {
+      "path": "crates/musubi-sync/src/wire.rs",
+      "symbol": null
+    },
+    "crates/musubi-transport/src/lib.rs": {
+      "path": "crates/musubi-transport/src/lib.rs",
+      "symbol": null
+    },
+    "crates/musubi-transport/src/memory.rs": {
+      "path": "crates/musubi-transport/src/memory.rs",
+      "symbol": null
+    },
+    "crates/musubi-transport/src/stream.rs": {
+      "path": "crates/musubi-transport/src/stream.rs",
+      "symbol": null
+    },
+    "formal/Musubi/Safety.lean#hubClosed": {
+      "path": "formal/Musubi/Safety.lean",
+      "symbol": "hubClosed"
+    },
+    "crates/musubi-core/tests/protocol.rs#conformance": {
+      "path": "crates/musubi-core/tests/protocol.rs",
+      "symbol": "conformance"
+    },
+    "crates/musubi-core/tests/protocol.rs#protocol_invariants": {
+      "path": "crates/musubi-core/tests/protocol.rs",
+      "symbol": "protocol_invariants"
+    },
+    "docs/internals/conformance.md": {
+      "path": "docs/internals/conformance.md",
+      "symbol": null
+    },
+    "formal/Musubi/Liveness.lean": {
+      "path": "formal/Musubi/Liveness.lean",
+      "symbol": null
+    },
+    "crates/musubi-sync/tests/e2e_search/checks.rs": {
+      "path": "crates/musubi-sync/tests/e2e_search/checks.rs",
+      "symbol": null
+    },
+    "formal/Musubi/Safety.lean#noFeedback": {
+      "path": "formal/Musubi/Safety.lean",
+      "symbol": "noFeedback"
+    },
+    "formal/Musubi/Supersede.lean": {
+      "path": "formal/Musubi/Supersede.lean",
+      "symbol": null
+    },
+    "crates/musubi-core/tests/protocol.rs": {
+      "path": "crates/musubi-core/tests/protocol.rs",
+      "symbol": null
+    },
+    "formal/Musubi/Regress.lean": {
+      "path": "formal/Musubi/Regress.lean",
+      "symbol": null
+    },
+    "crates/musubi-sync/tests/e2e_search/world.rs": {
+      "path": "crates/musubi-sync/tests/e2e_search/world.rs",
+      "symbol": null
+    },
+    "crates/musubi-jj/tests/it/translation.rs": {
+      "path": "crates/musubi-jj/tests/it/translation.rs",
+      "symbol": null
+    },
+    "formal/Musubi/Safety.lean#advance_merge_refines": {
+      "path": "formal/Musubi/Safety.lean",
+      "symbol": "advance_merge_refines"
+    },
+    "crates/musubi-jj/tests/it/translation.rs#advance_with_concurrent_heads_refines_advance_then_merge": {
+      "path": "crates/musubi-jj/tests/it/translation.rs",
+      "symbol": "advance_with_concurrent_heads_refines_advance_then_merge"
+    },
+    "formal/Musubi/AbandonRefs.lean": {
+      "path": "formal/Musubi/AbandonRefs.lean",
+      "symbol": null
+    },
+    "crates/musubi-sync/tests/races/refs.rs#realization_beside_a_fetch_keeps_the_fetch_while_taking_an_abandon": {
+      "path": "crates/musubi-sync/tests/races/refs.rs",
+      "symbol": "realization_beside_a_fetch_keeps_the_fetch_while_taking_an_abandon"
+    },
+    "formal/Musubi/Refs.lean#noSpuriousRevert": {
+      "path": "formal/Musubi/Refs.lean",
+      "symbol": "noSpuriousRevert"
+    },
+    "crates/musubi-jj/tests/it/ref_laws.rs": {
+      "path": "crates/musubi-jj/tests/it/ref_laws.rs",
+      "symbol": null
+    },
+    "crates/musubi-sync/tests/races/refs.rs": {
+      "path": "crates/musubi-sync/tests/races/refs.rs",
+      "symbol": null
+    },
+    "crates/musubi-sync/tests/e2e_search/imports.rs": {
+      "path": "crates/musubi-sync/tests/e2e_search/imports.rs",
+      "symbol": null
+    },
+    "formal/Musubi/Expected.lean": {
+      "path": "formal/Musubi/Expected.lean",
+      "symbol": null
+    },
+    "crates/musubi-jj/src/node/git_expected_tests.rs#expected_history_conforms_to_model": {
+      "path": "crates/musubi-jj/src/node/git_expected_tests.rs",
+      "symbol": "expected_history_conforms_to_model"
+    },
+    "crates/musubi-sync/tests/e2e_search/reference.rs": {
+      "path": "crates/musubi-sync/tests/e2e_search/reference.rs",
+      "symbol": null
+    },
+    "formal/Musubi/Chunks.lean": {
+      "path": "formal/Musubi/Chunks.lean",
+      "symbol": null
+    },
+    "crates/musubi-sync/src/blobs.rs#receive_follows_the_prefix_model": {
+      "path": "crates/musubi-sync/src/blobs.rs",
+      "symbol": "receive_follows_the_prefix_model"
+    },
+    "crates/musubi-sync/tests/it/faults.rs": {
+      "path": "crates/musubi-sync/tests/it/faults.rs",
+      "symbol": null
+    },
+    "crates/musubi-sync/src/blobs.rs#a_chunk_extends_the_prefix_where_it_ends": {
+      "path": "crates/musubi-sync/src/blobs.rs",
+      "symbol": "a_chunk_extends_the_prefix_where_it_ends"
+    },
+    "crates/musubi-sync/src/remote.rs#a_window_goes_on_from_its_offset": {
+      "path": "crates/musubi-sync/src/remote.rs",
+      "symbol": "a_window_goes_on_from_its_offset"
+    },
+    "crates/musubi-sync/tests/it/transfer.rs": {
+      "path": "crates/musubi-sync/tests/it/transfer.rs",
+      "symbol": null
+    },
+    "crates/musubi-sync/src/wire.rs#a_full_chunk_fits": {
+      "path": "crates/musubi-sync/src/wire.rs",
+      "symbol": "a_full_chunk_fits"
+    },
+    "fuzz/fuzz_targets/frames.rs": {
+      "path": "fuzz/fuzz_targets/frames.rs",
+      "symbol": null
+    },
+    "fuzz/fuzz_targets/envelope.rs": {
+      "path": "fuzz/fuzz_targets/envelope.rs",
+      "symbol": null
+    },
+    "fuzz/fuzz_targets/bundle.rs": {
+      "path": "fuzz/fuzz_targets/bundle.rs",
+      "symbol": null
+    },
+    "fuzz/fuzz_targets/canonical.rs": {
+      "path": "fuzz/fuzz_targets/canonical.rs",
+      "symbol": null
+    },
+    "fuzz/fuzz_targets/import.rs": {
+      "path": "fuzz/fuzz_targets/import.rs",
+      "symbol": null
+    },
+    "formal/Musubi/Presence.lean#only_work_returns": {
+      "path": "formal/Musubi/Presence.lean",
+      "symbol": "only_work_returns"
+    },
+    "crates/musubi-jj/tests/it/presence.rs": {
+      "path": "crates/musubi-jj/tests/it/presence.rs",
+      "symbol": null
+    },
+    "crates/musubi-sync/tests/races/forget.rs": {
+      "path": "crates/musubi-sync/tests/races/forget.rs",
+      "symbol": null
+    },
+    "crates/musubi-sync/tests/e2e_search/machine.rs": {
+      "path": "crates/musubi-sync/tests/e2e_search/machine.rs",
+      "symbol": null
+    },
+    "formal/Musubi/Names.lean#localName_injective": {
+      "path": "formal/Musubi/Names.lean",
+      "symbol": "localName_injective"
+    },
+    "crates/musubi-jj/src/workspaces.rs#names_conform": {
+      "path": "crates/musubi-jj/src/workspaces.rs",
+      "symbol": "names_conform"
+    },
+    "crates/musubi-sync/tests/races/workspaces.rs": {
+      "path": "crates/musubi-sync/tests/races/workspaces.rs",
+      "symbol": null
+    },
+    "formal/Musubi/Copies.lean": {
+      "path": "formal/Musubi/Copies.lean",
+      "symbol": null
+    },
+    "crates/musubi/src/copy/conformance.rs": {
+      "path": "crates/musubi/src/copy/conformance.rs",
+      "symbol": null
+    },
+    "crates/musubi-hub/tests/store.rs": {
+      "path": "crates/musubi-hub/tests/store.rs",
+      "symbol": null
+    },
+    "crates/musubi-core/tests/protocol.rs#nodes_recover_from_false_replies": {
+      "path": "crates/musubi-core/tests/protocol.rs",
+      "symbol": "nodes_recover_from_false_replies"
+    },
+    "crates/musubi-sync/tests/it/lies.rs#nodes_recover_from_wrong_replies": {
+      "path": "crates/musubi-sync/tests/it/lies.rs",
+      "symbol": "nodes_recover_from_wrong_replies"
+    },
+    "crates/musubi/tests/cli.rs#the_daemon_picks_up_new_repositories": {
+      "path": "crates/musubi/tests/cli.rs",
+      "symbol": "the_daemon_picks_up_new_repositories"
+    },
+    "crates/musubi/tests/cli.rs#the_quick_start_works_as_written": {
+      "path": "crates/musubi/tests/cli.rs",
+      "symbol": "the_quick_start_works_as_written"
+    },
+    "crates/musubi/tests/cli.rs#hub_join_sync_clone_and_list": {
+      "path": "crates/musubi/tests/cli.rs",
+      "symbol": "hub_join_sync_clone_and_list"
+    },
+    ".github/workflows/jj-main.yml": {
+      "path": ".github/workflows/jj-main.yml",
+      "symbol": null
+    },
+    "docs/internals/conformance.md#text:not a proof combining": {
+      "path": "docs/internals/conformance.md",
+      "symbol": null
+    },
+    "docs/internals/conformance.md#text:Intermediate publication": {
+      "path": "docs/internals/conformance.md",
+      "symbol": null
+    },
+    "docs/internals/conformance.md#text:store-error branch": {
+      "path": "docs/internals/conformance.md",
+      "symbol": null
+    },
+    "AGENTS.md#text:surviving a power cut": {
+      "path": "AGENTS.md",
+      "symbol": null
+    },
+    "formal/README.md#text:once users": {
+      "path": "formal/README.md",
+      "symbol": null
+    },
+    "formal/Musubi/Chunks.lean#text:hinj": {
+      "path": "formal/Musubi/Chunks.lean",
+      "symbol": null
+    },
+    "docs/internals/testing.md#text:panic in them counts": {
+      "path": "docs/internals/testing.md",
+      "symbol": null
+    },
+    "docs/internals/testing-philosophy.md#text:test it against jj": {
+      "path": "docs/internals/testing-philosophy.md",
+      "symbol": null
+    },
+    "docs/internals/testing-philosophy.md#text:login service": {
+      "path": "docs/internals/testing-philosophy.md",
+      "symbol": null
+    },
+    "docs/internals/conformance.md#text:not where musubi applies it": {
+      "path": "docs/internals/conformance.md",
+      "symbol": null
+    },
+    "crates/musubi-sync/src/service.rs#a_download_ends_where_the_blob_does": {
+      "path": "crates/musubi-sync/src/service.rs",
+      "symbol": "a_download_ends_where_the_blob_does"
+    },
+    "crates/musubi-sync/src/wire.rs#a_chunk_leaves_room_for_the_envelope": {
+      "path": "crates/musubi-sync/src/wire.rs",
+      "symbol": "a_chunk_leaves_room_for_the_envelope"
+    }
+  },
+  "roles": [
+    {
+      "id": "protocol",
+      "name": "Messages & encoding",
+      "series": 1
+    },
+    {
+      "id": "history",
+      "name": "History & translation",
+      "series": 2
+    },
+    {
+      "id": "storage",
+      "name": "Storage & objects",
+      "series": 3
+    },
+    {
+      "id": "coordination",
+      "name": "Coordination & lifecycle",
+      "series": 4
+    },
+    {
+      "id": "transport",
+      "name": "Transport & I/O",
+      "series": 5
+    },
+    {
+      "id": "interface",
+      "name": "Commands & settings",
+      "series": 6
+    }
+  ],
+  "nodeRoles": {
+    "crates/musubi/src/agent.rs": "transport",
+    "crates/musubi/src/completion.rs": "interface",
+    "crates/musubi/src/config.rs": "interface",
+    "crates/musubi/src/control.rs": "transport",
+    "crates/musubi/src/copy.rs": "coordination",
+    "crates/musubi/src/daemon.rs": "coordination",
+    "crates/musubi/src/hub.rs": "transport",
+    "crates/musubi/src/list/template.rs": "interface",
+    "crates/musubi/src/lock.rs": "coordination",
+    "crates/musubi/src/login.rs": "coordination",
+    "crates/musubi/src/main.rs": "interface",
+    "crates/musubi/src/open_files.rs": "coordination",
+    "crates/musubi/src/repo.rs": "interface",
+    "crates/musubi/src/settings.rs": "interface",
+    "crates/musubi/src/socket.rs": "transport",
+    "crates/musubi/src/ssh.rs": "transport",
+    "crates/musubi/src/status.rs": "interface",
+    "crates/musubi/src/top.rs": "interface",
+    "crates/musubi/src/ui.rs": "interface",
+    "crates/musubi/src/upgrade.rs": "coordination",
+    "crates/musubi/src/watch.rs": "coordination",
+    "crates/musubi-core/src/hub.rs": "protocol",
+    "crates/musubi-core/src/lib.rs": "declarations",
+    "crates/musubi-core/src/message.rs": "protocol",
+    "crates/musubi-core/src/node.rs": "protocol",
+    "crates/musubi-hub/src/activity.rs": "interface",
+    "crates/musubi-hub/src/hub_dir.rs": "storage",
+    "crates/musubi-hub/src/index.rs": "storage",
+    "crates/musubi-hub/src/lib.rs": "declarations",
+    "crates/musubi-hub/src/matching.rs": "coordination",
+    "crates/musubi-hub/src/names.rs": "protocol",
+    "crates/musubi-hub/src/store.rs": "storage",
+    "crates/musubi-jj/src/canonical/codec.rs": "protocol",
+    "crates/musubi-jj/src/canonical/contract.rs": "history",
+    "crates/musubi-jj/src/canonical/log.rs": "storage",
+    "crates/musubi-jj/src/canonical/origin.rs": "history",
+    "crates/musubi-jj/src/canonical/presence.rs": "history",
+    "crates/musubi-jj/src/canonical.rs": "storage",
+    "crates/musubi-jj/src/files.rs": "storage",
+    "crates/musubi-jj/src/format_guard.rs": "protocol",
+    "crates/musubi-jj/src/gc.rs": "coordination",
+    "crates/musubi-jj/src/git_command.rs": "transport",
+    "crates/musubi-jj/src/hive_settings.rs": "interface",
+    "crates/musubi-jj/src/lib.rs": "declarations",
+    "crates/musubi-jj/src/node/error.rs": "declarations",
+    "crates/musubi-jj/src/node/expiry.rs": "coordination",
+    "crates/musubi-jj/src/node/git.rs": "transport",
+    "crates/musubi-jj/src/node/git_config.rs": "interface",
+    "crates/musubi-jj/src/node/join.rs": "history",
+    "crates/musubi-jj/src/node/originals.rs": "storage",
+    "crates/musubi-jj/src/node/presence.rs": "history",
+    "crates/musubi-jj/src/node/realize.rs": "history",
+    "crates/musubi-jj/src/node/settings.rs": "interface",
+    "crates/musubi-jj/src/node/supersede.rs": "history",
+    "crates/musubi-jj/src/node/translate.rs": "history",
+    "crates/musubi-jj/src/node/view.rs": "history",
+    "crates/musubi-jj/src/node/working_copies.rs": "history",
+    "crates/musubi-jj/src/node.rs": "history",
+    "crates/musubi-jj/src/objects/bundle.rs": "protocol",
+    "crates/musubi-jj/src/objects/git.rs": "storage",
+    "crates/musubi-jj/src/objects/mod.rs": "storage",
+    "crates/musubi-jj/src/objects/power.rs": "coordination",
+    "crates/musubi-jj/src/objects/simple.rs": "storage",
+    "crates/musubi-jj/src/op_id.rs": "history",
+    "crates/musubi-jj/src/presence.rs": "history",
+    "crates/musubi-jj/src/protobuf.rs": "protocol",
+    "crates/musubi-jj/src/records.rs": "history",
+    "crates/musubi-jj/src/ref_locks.rs": "coordination",
+    "crates/musubi-jj/src/remote_url.rs": "protocol",
+    "crates/musubi-jj/src/translation_map.rs": "storage",
+    "crates/musubi-jj/src/workspaces.rs": "history",
+    "crates/musubi-sync/src/blobs.rs": "transport",
+    "crates/musubi-sync/src/driver.rs": "coordination",
+    "crates/musubi-sync/src/hive.rs": "coordination",
+    "crates/musubi-sync/src/hub.rs": "storage",
+    "crates/musubi-sync/src/lib.rs": "coordination",
+    "crates/musubi-sync/src/node.rs": "storage",
+    "crates/musubi-sync/src/progress.rs": "interface",
+    "crates/musubi-sync/src/remote.rs": "transport",
+    "crates/musubi-sync/src/server.rs": "coordination",
+    "crates/musubi-sync/src/service.rs": "coordination",
+    "crates/musubi-sync/src/wire.rs": "protocol",
+    "crates/musubi-transport/src/lib.rs": "transport",
+    "crates/musubi-transport/src/memory.rs": "transport",
+    "crates/musubi-transport/src/stream.rs": "transport",
+    "crate:musubi": "interface",
+    "crate:musubi-core": "protocol",
+    "crate:musubi-hub": "storage",
+    "crate:musubi-jj": "history",
+    "crate:musubi-sync": "coordination",
+    "crate:musubi-transport": "transport",
+    "crates/musubi-jj/src/canonical/transfer.rs": "storage",
+    "crates/musubi-jj/src/canonical/validate.rs": "protocol",
+    "crates/musubi-jj/src/node/supersede/abandon.rs": "history",
+    "crates/musubi-jj/src/node/supersede/fixup.rs": "history",
+    "crates/musubi-jj/src/node/supersede/normalize.rs": "history",
+    "crates/musubi-jj/src/node/supersede/receive.rs": "history",
+    "crates/musubi-jj/src/node/supersede/rewrite.rs": "history",
+    "crates/musubi-jj/src/node/supersede/storage.rs": "history",
+    "crates/musubi-transport/src/stream/frame.rs": "protocol",
+    "crates/musubi-transport/src/stream/greeting.rs": "protocol",
+    "crates/musubi/src/cli.rs": "interface",
+    "crates/musubi/src/diagnostics.rs": "interface",
+    "crates/musubi/src/join.rs": "coordination",
+    "crates/musubi/src/leave.rs": "coordination",
+    "crates/musubi/src/list.rs": "interface",
+    "crates/musubi/src/sync.rs": "coordination"
+  },
+  "oracleModels": {
+    "step": [
+      "Safety",
+      "Liveness",
+      "Supersede",
+      "Regress"
+    ],
+    "reset": [
+      "Safety",
+      "Liveness",
+      "Supersede",
+      "Regress"
+    ],
+    "measure": [
+      "Liveness",
+      "Supersede"
+    ],
+    "upload": [
+      "Liveness"
+    ],
+    "presence": [
+      "Presence",
+      "PresenceContract"
+    ],
+    "refs": [
+      "Refs",
+      "AbandonRefs"
+    ],
+    "names": [
+      "Names"
+    ],
+    "copies": [
+      "Copies"
+    ],
+    "expected": [
+      "Expected"
+    ],
+    "chunks": [
+      "Chunks"
+    ],
+    "retryFixup": [
+      "RetryControl"
+    ],
+    "retryInbox": [
+      "RetryControl"
+    ],
+    "retryPublication": [
+      "RetryControl"
+    ],
+    "contractedAncestry": [
+      "ContractOrder"
+    ],
+    "recordEpoch": [
+      "RecordEpoch"
+    ],
+    "survivorAdvance": [
+      "SurvivorAdvance"
+    ],
+    "pushSnapshot": [
+      "PacketCoupling"
+    ],
+    "headControl": [
+      "SerialReply"
+    ],
+    "hubRead": [
+      "SysAcceptance/Events"
+    ],
+    "nodeGrow": [
+      "NodeSysExec"
+    ],
+    "localBurst": [
+      "EarlyEntry/Burst"
+    ],
+    "rawBurst": [
+      "EarlyEntry/Burst"
+    ],
+    "rawControl": [
+      "EarlyEntry/Control"
+    ],
+    "rawPush": [
+      "PacketAcceptance"
+    ]
+  }
+}

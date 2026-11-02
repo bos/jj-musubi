@@ -1,0 +1,319 @@
+<div id="musubi-code-network">
+  <style>
+    #musubi-code-network {
+      position: relative;
+      color: var(--foreground);
+    }
+    #musubi-code-network [hidden] {
+      display: none !important;
+    }
+    #musubi-code-network .section {
+      margin-top: calc(var(--font-size-base) * 1);
+    }
+    #musubi-code-network .heading {
+      padding-right: 90px;
+    }
+    #musubi-code-network .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem 1rem;
+    }
+    #musubi-code-network .method {
+      display: flex;
+      align-items: center;
+      gap: 0.3rem;
+    }
+    #musubi-code-network .role-legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.35rem 0.8rem;
+    }
+    #musubi-code-network .role-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
+    }
+    #musubi-code-network .role-key {
+      display: inline-block;
+      width: 0.65em;
+      height: 0.65em;
+      border-radius: 50%;
+    }
+    #musubi-code-network .symbol {
+      width: 1em;
+      text-align: center;
+    }
+    #musubi-code-network .pie-key {
+      display: inline-block;
+      flex: none;
+      width: 0.8em;
+      height: 0.8em;
+      background-size: 6px 6px;
+    }
+    #musubi-code-network .key,
+    #musubi-code-network .caption {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem 1rem;
+      justify-content: space-between;
+    }
+    #musubi-code-network .board {
+      position: relative;
+      width: 100%;
+    }
+    #musubi-code-network #ng-inspectors {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      z-index: 5;
+    }
+    #musubi-code-network .inspection {
+      position: absolute;
+      width: min(300px, 100%);
+      pointer-events: auto;
+      z-index: 4;
+      display: grid;
+      gap: 0.5rem;
+      overflow-wrap: anywhere;
+      background: color-mix(
+        in srgb,
+        color-mix(in srgb, var(--background) 92%, var(--foreground) 8%) 94%,
+        transparent
+      );
+      border: 1px solid color-mix(in srgb, var(--foreground) 18%, transparent);
+      color: var(--foreground);
+    }
+    #musubi-code-network .inspection-title {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: start;
+      gap: 0.5rem;
+      cursor: grab;
+      touch-action: none;
+    }
+    #musubi-code-network #ng-hover {
+      pointer-events: auto;
+    }
+    #musubi-code-network #ng-hover .inspection-title {
+      pointer-events: auto;
+    }
+    #musubi-code-network .chart-name {
+      min-width: 0;
+    }
+    #musubi-code-network .chart-actions {
+      display: flex;
+      flex-wrap: nowrap;
+      align-items: center;
+      justify-content: flex-end;
+      align-self: start;
+    }
+    #musubi-code-network .chart-bars {
+      display: grid;
+      gap: 0.25rem;
+    }
+    #musubi-code-network .technique-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1.8fr) minmax(32px, 1fr) 2.7em;
+      gap: 0.35rem;
+      align-items: center;
+    }
+    #musubi-code-network .technique-track {
+      height: 6px;
+      background: var(--muted);
+    }
+    #musubi-code-network .technique-bar {
+      display: block;
+      height: 100%;
+    }
+    #musubi-code-network canvas {
+      display: block;
+      width: 100%;
+      touch-action: none;
+    }
+    #musubi-code-network .selection {
+      display: grid;
+      gap: 0.3rem;
+    }
+    #musubi-code-network .actions {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.4rem;
+    }
+    #musubi-code-network .replay {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0.5rem 0.75rem;
+    }
+    #musubi-code-network .slider {
+      flex: 1;
+      min-width: 120px;
+    }
+    #musubi-code-network .field {
+      display: grid;
+      gap: 0.25rem;
+      min-width: 0;
+    }
+    #musubi-code-network .tooltip {
+      position: absolute;
+      pointer-events: none;
+      max-width: 300px;
+      padding: 0.6rem 0.75rem;
+      background: var(--popover);
+      color: var(--popover-foreground);
+      border-radius: 0.4rem;
+      box-shadow: 0 2px 14px
+        color-mix(in srgb, var(--foreground) 12%, transparent);
+      z-index: 3;
+      overflow-wrap: anywhere;
+      white-space: pre-line;
+    }
+    @media (max-width: 520px) {
+      #musubi-code-network .heading {
+        padding-right: 0;
+      }
+      #musubi-code-network .slider {
+        flex-basis: 100%;
+      }
+    }
+  </style>
+  <div class="heading"><h2>Proofs and tests across the code</h2></div>
+  <div class="viz-row section" role="group" aria-label="Select techniques">
+    <span class="text-small">Techniques</span>
+    <button
+      type="button"
+      class="btn btn-ghost"
+      id="ng-techniques-all"
+      aria-label="Select all techniques"
+    >
+      All
+    </button>
+    <button
+      type="button"
+      class="btn btn-ghost"
+      id="ng-techniques-none"
+      aria-label="Deselect all techniques"
+    >
+      None
+    </button>
+  </div>
+  <div
+    class="legend section"
+    id="ng-mechanisms"
+    role="group"
+    aria-label="Proofs and tests"
+  ></div>
+  <div class="key section text-small">
+    <span>Symbols: related proofs and targets</span
+    ><span id="ng-coverage-key"
+      >Pie slices: Rust coverage · empty slice: not reached</span
+    >
+  </div>
+  <div class="board section">
+    <canvas
+      role="img"
+      aria-label="Musubi's code network. Fixed-size symbols above each part identify related proofs and targets. Pie slices divide measured Rust line coverage among the selected techniques, sharing overlapping lines equally. Unfilled pie areas are not reached; Modules without executable line mappings are omitted. Rims and arrows identify module responsibilities, listed below the graph. Scroll or drag to pan; pinch to zoom. Hover for a coverage bar chart in the stack on the right. During hover or selection, corner marks identify the focused node, coloured nodes are its direct neighbours, and grey outlines are unrelated nodes whose coverage is temporarily hidden. Click to select and pin connections; shift-click to compare several nodes. Hover an arrow to highlight its endpoints; click it to select both and compare their charts. Click empty space to deselect. Pin a chart to keep it after deselection, unpin it to return to following the selection, and close it to dismiss. Drag its header to move it. Double-click a circle to focus, again to expand a collapsed component. Double-click empty polygon space to collapse a group."
+    ></canvas>
+    <div
+      id="ng-hover"
+      class="card inspection"
+      role="group"
+      aria-label="Coverage preview"
+      hidden
+    ></div>
+    <div id="ng-inspectors" aria-label="Pinned coverage charts"></div>
+  </div>
+  <div class="tooltip text-small" role="tooltip" hidden></div>
+  <div
+    id="ng-roles"
+    class="role-legend text-small section"
+    aria-label="Module roles"
+  ></div>
+  <div class="caption text-small text-muted">
+    <span id="ng-counts"></span
+    ><span id="ng-interaction" aria-live="polite"
+      >Double-click to focus · scroll to pan · pinch to zoom</span
+    >
+  </div>
+  <div class="selection section" aria-live="polite">
+    <h3 id="ng-name"></h3>
+    <div id="ng-related" class="text-small"></div>
+    <div id="ng-execution-detail"></div>
+  </div>
+  <div class="actions section">
+    <button type="button" class="btn" id="ng-toggle-component"></button
+    ><button type="button" class="btn btn-ghost" id="ng-center">Focus</button
+    ><button
+      type="button"
+      class="btn btn-ghost"
+      id="ng-pin"
+      aria-label="Pin chart"
+      data-tooltip="Pin chart"
+    >
+      <i data-lucide="pin" aria-hidden="true"></i></button
+    ><button type="button" class="btn btn-ghost" id="ng-whole">Overview</button>
+    <button type="button" class="btn btn-ghost" id="ng-expand-all">
+      Expand all
+    </button>
+    <button type="button" class="btn btn-ghost" id="ng-collapse-all">
+      Collapse all
+    </button>
+  </div>
+  <div class="replay section">
+    <button type="button" class="btn" id="ng-play">Replay</button>
+    <div class="slider">
+      <label
+        class="form-label text-small tabular-nums"
+        for="ng-time"
+        id="ng-time-label"
+      ></label
+      ><input
+        type="range"
+        class="form-range"
+        id="ng-time"
+        min="0"
+        max="600"
+        value="600"
+        step="0.001"
+        aria-label="Test run playhead"
+      />
+    </div>
+    <label class="field form-label"
+      ><span class="sr-only">Time measure</span
+      ><select class="form-select" id="ng-clock" aria-label="Time measure">
+        <option value="wall">Elapsed time</option>
+        <option value="effort">Worker time</option>
+      </select></label
+    >
+  </div>
+  <div class="section text-small" id="ng-summary" aria-live="polite"></div>
+  <div class="text-small text-muted section" id="ng-measurement-note"></div>
+  <details class="section">
+    <summary class="cursor-interaction">Explore the code</summary>
+    <div class="viz-row section">
+      <label class="field form-label"
+        >Select a part<select class="form-select" id="ng-node"></select
+      ></label>
+    </div>
+    <div
+      class="viz-row section"
+      id="ng-expansions"
+      role="group"
+      aria-label="Expand components"
+    ></div>
+  </details>
+  <div class="caption text-small text-muted section">
+    <span
+      >Lines show imports; thicker lines mean more imports. Arrow colour matches
+      the importing module’s rim. Modules without executable line mappings
+      omitted.</span
+    ><span id="ng-snapshot"></span>
+  </div>
+  <script type="application/json" id="ng-data">
+    <!-- NETWORK_DATA -->
+  </script>
+  <script>
+    <!-- NETWORK_LOGIC -->
+  </script>
+</div>

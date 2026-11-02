@@ -458,6 +458,7 @@ impl TestRepo {
         command
             .current_dir(dir)
             .env_clear()
+            .envs(std::env::vars_os().filter(|(key, _)| key == "LLVM_PROFILE_FILE"))
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("JJ_RANDOMNESS_SEED", seed.to_string())
             // Windows's equivalents of `HOME`, where jj keeps each repository's config:

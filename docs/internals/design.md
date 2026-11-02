@@ -867,6 +867,14 @@ publish them again, renamed to the hub's history, and the hive converges with ev
 drops on every machine. [formal/README.md](../../formal/README.md), "Abandoned operations",
 lists the theorems.
 
+jj can bring back what `jj op abandon` dropped before musubi notices the abandon: a command in a
+working copy the abandon left at an operation it rewrote integrates that operation, with
+`snapshot.auto-update-stale` ([races.md, "Known jj limitations"](races.md#known-jj-limitations)).
+A later abandon below can then move what came back onto other parents, so that operations
+standing for the hive's are elsewhere than the hive has them, though none is dropped. musubi
+then puts its history back as the hive has it, as after a restart partway through a rewrite,
+and publishes nothing: what jj brought back stays, as it does on one machine.
+
 ### The fix-up
 
 musubi works some state out from the history rather than from views: which copies are present,

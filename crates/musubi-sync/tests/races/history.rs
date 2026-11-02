@@ -1,6 +1,7 @@
 //! Operation-log level races: undo, op abandon, offline machines, restarts.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use musubi_core::message::HeadKind;
 use musubi_core::message::Reply;
@@ -528,6 +529,55 @@ fn a_push_to_a_hive_made_again_is_rejected() {
     assert_eq!(hive.hive.hub_head(), root);
 }
 
+/// With `snapshot.auto-update-stale`, a command in a workspace whose working copy recorded an
+/// operation `jj op abandon` rewrote brings back what jj abandoned, as on one machine
+/// (races.md, "Known jj limitations"). A later `jj op abandon` below that then moves what came
+/// back onto other parents, so that two of the machine's operations stand for each of the
+/// hive's, neither where the hive has it, and nothing is dropped: musubi puts its history back
+/// as the hive has it, rather than stopping as if the history the hub accepted were gone, and
+/// the operation jj brought back stays everywhere.
+#[test]
+fn an_abandon_a_stale_workspace_brought_back_stays() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    let second = hive.repo(0).path().with_file_name("alpha-second");
+    let second = second.to_str().unwrap();
+    hive.repo(0).jj(&["workspace", "add", second]);
+    hive.commit(0, "a", "first");
+    hive.commit(0, "b", "second");
+    hive.sync();
+    // The second working copy records an operation above the one alpha abandons.
+    hive.repo(0).jj(&["-R", second, "status"]);
+    let abandoned = commit_op(hive.repo(0));
+    hive.repo(0).jj(&["op", "abandon", &abandoned.0]);
+    hive.commit(0, "z", "z");
+    let below = op_log(hive.repo(0))[0].clone();
+    assert!(below.1.starts_with("commit "), "{below:?}");
+    hive.commit(0, "w", "w");
+    std::fs::write(Path::new(second).join("s"), "edit").unwrap();
+    hive.repo(0).jj(&["-R", second, "status"]);
+    assert!(has_operation(hive.repo(0), &abandoned.1));
+    hive.repo(0).jj(&["op", "abandon", &below.0]);
+    hive.sync();
+    hive.assert_converged();
+    // Settled: a `jj` command everywhere and another sync change nothing.
+    hive.assert_converged();
+    for machine in 0..2 {
+        assert!(has_operation(hive.repo(machine), &abandoned.1), "{machine}");
+        assert!(!has_operation(hive.repo(machine), &below.1), "{machine}");
+        let visible = hive.visible(machine);
+        for work in [" first", " second", " z", " w"] {
+            assert!(
+                visible.iter().any(|c| c.ends_with(work)),
+                "{machine}: {work}"
+            );
+        }
+    }
+    assert_eq!(
+        std::fs::read_to_string(Path::new(second).join("s")).unwrap(),
+        "edit"
+    );
+}
+
 /// A machine abandons twice before it syncs: both abandons reach every machine.
 #[test]
 fn two_op_abandons_before_a_sync() {
@@ -734,7 +784,7 @@ fn a_later_operation_published_again_after_the_hub_took_others() {
 }
 
 /// The operation the working copy at `path` last recorded, read without updating it.
-fn recorded_op(repo: &musubi_testutil::TestRepo, path: &std::path::Path) -> String {
+fn recorded_op(repo: &musubi_testutil::TestRepo, path: &Path) -> String {
     use jj_lib::workspace::WorkspaceLoaderFactory as _;
     let workspace = jj_lib::workspace::DefaultWorkspaceLoaderFactory
         .create(path)

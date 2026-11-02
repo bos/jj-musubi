@@ -811,6 +811,44 @@ impl NodeRepo {
         Ok(noticed)
     }
 
+    /// Whether a local operation that stands for a canonical one, as `counterparts` say, is
+    /// on parents that don't stand for that operation's parents.
+    fn out_of_place(
+        &self,
+        counterparts: &HashMap<LocalOp, CanonicalOp>,
+        unmapped: &[(LocalOp, StoreOperation)],
+    ) -> Result<bool, NodeError> {
+        for (id, op) in unmapped {
+            let Some(c) = counterparts.get(id) else {
+                continue;
+            };
+            let mut parents = vec![];
+            for parent in LocalOp::parents_of(op) {
+                if self.before_join.contains(&parent) {
+                    continue;
+                }
+                // As the records name it now, as counterparts are named, and as canonicalizing
+                // names a parent (`current_parents`).
+                let now = match counterparts.get(&parent) {
+                    Some(c) => vec![c.clone()],
+                    None => match self.canonical_of(&parent) {
+                        Some(c) => self.current_ids(&c),
+                        None => return Ok(true),
+                    },
+                };
+                for p in now {
+                    if !parents.contains(&p) {
+                        parents.push(p);
+                    }
+                }
+            }
+            if parents != self.canonical.parents(c)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Whether [`Self::check_abandon`] noticed a `jj op abandon` since this last said so, by
     /// whatever ran it: what was staged in the history before is stale.
     pub fn take_abandon_noticed(&mut self) -> bool {
@@ -974,6 +1012,27 @@ impl NodeRepo {
             .into_iter()
             .filter(|op| !stands.contains(op))
             .collect();
+        // Nothing dropped, though the base is out of reach: whatever jj abandoned came back,
+        // as a command in a workspace whose working copy recorded an operation the abandon
+        // rewrote brings it back with `snapshot.auto-update-stale`, and a later abandon moved
+        // it, so that operations jj rewrote stand for the hive's elsewhere than the hive has
+        // them. Put them back where the hive has them, publishing nothing, as jj keeps what
+        // came back on one machine.
+        if dropped.is_empty() && self.out_of_place(&counterparts, &unmapped)? {
+            let mut nothing = Contraction::new(&self.canonical, std::iter::empty())?;
+            let locals = self.rewrite_locals(&mut nothing, &heads, &counterparts, &unmapped)?;
+            // As below: a restart partway resumes the move, and jj's rewrites keep the
+            // identities established here.
+            self.add_step(HashMap::new(), &HashSet::new(), &counterparts)?;
+            self.records.moving = true;
+            self.save_records()?;
+            self.move_heads(&heads, &locals, None, None)?;
+            self.move_workspaces(&locals)?;
+            self.records.moving = false;
+            self.save_records()?;
+            self.forget_local_caches();
+            return Ok(true);
+        }
         if dropped.is_empty() {
             return Ok(false);
         }
@@ -1318,6 +1377,15 @@ impl NodeRepo {
             self.insert_map(rewrite.clone(), new.clone())?;
             local_now.insert(new, rewrite.clone());
             locals.insert(template, vec![rewrite]);
+        }
+        // Another local operation standing for the same canonical one, as jj's rewrite of an
+        // operation and a copy of it a stale workspace brought back do, becomes the same.
+        for (local, c) in counterparts {
+            if !locals.contains_key(local)
+                && let Some(rewritten) = standing.get(c).and_then(|winner| locals.get(winner))
+            {
+                locals.insert(local.clone(), rewritten.clone());
+            }
         }
         // Operations written since that stand for nothing yet, on their parents' rewrites.
         for (id, op) in unmapped {

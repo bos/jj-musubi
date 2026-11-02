@@ -367,6 +367,12 @@ def decodeCall (j : Json) : Except String Refs.Exec.Call := do
     return .cinv (← slot "s") (← getNat j "g") (← j.getObjValAs? Bool "moved") (← getNat j "e")
   | "restorable" => return .restorable (← slot "o") (← slot "s")
   | "restorableRemote" => return .restorableRemote (← slot "o") (← slot "s")
+  | "abandonBeside" =>
+    let refs ← (← j.getObjValAs? (List Json) "refs").mapM fun r => do
+      pure (← getNat r "op", ← r.getObjVal? "slot" >>= decodeSlot, ← getNat r "expected")
+    return .abandonBeside (← j.getObjValAs? (List (List Nat)) "par")
+      (← getNats j "drops") (← getNats j "heads") (← getNat j "incoming")
+      (← j.getObjValAs? Bool "first") refs (← getNat j "g") (← getNat j "eAfter")
   | f => throw s!"unknown fn {f}"
 
 def encodeSlot (s : Refs.TSlot Nat) : Json :=
@@ -379,6 +385,10 @@ def refsReply : Refs.Exec.Answer → Json
   | .imported s sets =>
     Json.mkObj [("ok", Json.bool true), ("slot", encodeSlot s), ("sets", Json.bool sets)]
   | .holds b => Json.mkObj [("ok", Json.bool true), ("holds", Json.bool b)]
+  | .abandoned s g parents contracted bases valid =>
+    Json.mkObj [("ok", Json.bool true), ("slot", encodeSlot s), ("g", toJson g),
+      ("parents", toJson parents), ("contracted", toJson contracted), ("bases", toJson bases),
+      ("valid", Json.bool valid)]
 
 /-! ## Liveness (`Exec.lean`, "The liveness measure") -/
 

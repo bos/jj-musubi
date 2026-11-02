@@ -22,6 +22,7 @@ import Musubi.RecordLiveness
 import Musubi.SupersedeExecTest
 import Musubi.RegressScenario
 import Musubi.Refs
+import Musubi.AbandonRefs
 import Musubi.Presence
 import Musubi.PresenceExec
 import Musubi.RefsExec

@@ -37,7 +37,9 @@ published operation heads and replays their canonical graphs through the Lean or
 advance plus merge with multiple concurrent heads in colocated and non-colocated repositories;
 the core harness's fake advance cannot reach that composite behavior. The abandonment race
 `realization_beside_a_fetch_keeps_the_fetch_while_taking_an_abandon` also checks the exact merge
-parents after contraction, and `root_parent_merge_bug_is_explained` checks that refusing a merge
+parents after contraction, saved expected values, unpublished realization and immediate
+translation against the combined `AbandonRefs` boundary. `root_parent_merge_bug_is_explained`
+checks that refusing a merge
 leaves the affected machine's published heads alone. [Conformance and
 limits](conformance.md#a-repository-advance-that-also-merges) explains what these observations
 connect to the proofs.

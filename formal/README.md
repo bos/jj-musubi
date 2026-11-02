@@ -66,6 +66,7 @@ is `formal/.lake/build/bin/oracle`.
 | `Musubi/Liveness.lean` | The policy model `PStep`, its simulation in the asynchronous model, the measure, progress, termination and convergence. |
 | `Musubi/Merged.lean` | The merged `Push` and `Fetch` exchanges reach states that agree with policy steps on everything the measure and convergence read, with a hub that may have gone back too. |
 | `Musubi/Regress.lean` | A hub that goes back to an earlier accepted head, as after a power cut or a remade hive: the extended system `RStep`, the invariant that survives, and convergence once the hub stops going back. |
+| `Musubi/AbandonRefs.lean` | The boundary from contracted survivor heads and saved expected values to one-ref realization and merged publication. |
 | `Musubi/Supersede.lean` | Replicated `jj op abandon`: the protocol over original operations with each party's dropped set (`SStep`, `SRStep`), its invariant, superseded ids never coming back, and liveness with supersedes (`SPStepR`). |
 | `Musubi/Scenario.lean` | A concrete reachable run (a lost Cas race, then fetch, advance, merge, and the merge accepted), showing the model is not vacuous. |
 | `Musubi/RegressScenario.lean` | A run of the executable model in which the hub goes back and two nodes then merge the same heads. |
@@ -283,6 +284,25 @@ remains an assumption. These proofs do not authenticate a peer's claimed rewrite
 infer which operation jj meant to retain when jj itself coalesces local ids; that ambiguous
 case is refused. See the contraction correspondence in
 [conformance.md](../docs/internals/conformance.md).
+
+`AbandonRefs.lean` connects the survivor graph to a successful colocated publication with one
+remote ref. Slots and expected-value snapshots are indexed by original operation identity.
+`takeHeads` expands the current heads under the dropped set, adds the incoming
+head, and takes the maximal survivors. `History.publish` contracts the graph and publishes one fresh
+merge together with `Refs.cbeside`'s ref state. `publish_refines` proves surviving ancestry
+and `CInv` together, and that the ref action is a `CStep.beside`. `fixup_retains` states the
+fresh child/saved-expectation boundary: the new operation receives its parent's slot and the
+saved expectation,
+rather than inferred again from contracted ancestry. `abstraction_unique` uses the enforced
+immutable identity premise above; `adoption_composes` connects sequential record contraction
+to the union of dropped originals.
+
+The oracle executes those definitions directly for the abandonment/ref race, checking every
+survivor's parents, the normalized merge base, the published merge and its ref state before
+convergence. It also checks the fix-up's saved expectation and translation immediately after
+publication. [Conformance and limits](../docs/internals/conformance.md#abandonment-and-refs)
+describes the observation points and premises. This boundary does not replace the network
+model, derive expected values from all jj histories, or prove publication's lock discipline.
 
 `Supersede.lean` models the protocol over each operation's original, so the states of
 `Model.lean` stay as they are, and adds the hub's and each node's dropped sets (`SState`).
@@ -506,7 +526,8 @@ and 4 are theorems; 2 and 3 are argued here, not proved; 5 is checked by a test.
   layer"](../docs/internals/protocol.md#translation-layer) requires: `canon` is injective on
   reachable local operations, `canon(realize(C)) = C`, and realization never creates a canonical
   operation. Under those assumptions, the properties over canonical ids carry over to each node's
-  local op log. The generated end-to-end tests check them at every full convergence
+  local op log. The abandonment/ref boundary test checks selected properties before and immediately after
+  publication; the generated end-to-end tests check all of them at every full convergence
   ([testing.md](../docs/internals/testing.md#generated-end-to-end-tests)).
 
 ## What the proofs assume of the implementation

@@ -13,6 +13,7 @@ import Musubi.SupersedeExecSound
 import Musubi.RecordLiveness
 import Musubi.RegressScenario
 import Musubi.Refs
+import Musubi.AbandonRefs
 import Musubi.Presence
 import Musubi.PresenceExec
 import Musubi.Copies
@@ -21,6 +22,12 @@ import Musubi.Contract
 import Musubi.Supersede
 
 open Musubi
+
+#print axioms AbandonRefs.abstraction_unique
+#print axioms AbandonRefs.adoption_composes
+#print axioms AbandonRefs.publish_current
+#print axioms AbandonRefs.publish_refines
+#print axioms AbandonRefs.fixup_retains
 
 -- Safety
 #print axioms inv_reachable

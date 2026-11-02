@@ -28,6 +28,8 @@
 
 use std::cell::RefCell;
 use std::cell::RefMut;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -47,6 +49,10 @@ use jj_lib::ref_name::RefName;
 use jj_lib::ref_name::RemoteName;
 use jj_lib::repo::ReadonlyRepo;
 use jj_lib::repo::Repo as _;
+use musubi_jj::node::NodeRepo;
+use musubi_jj::op_id::CanonicalOp;
+use musubi_jj::op_id::LocalOp;
+use serde_json::json;
 
 use crate::fixture::Fixture;
 use crate::refs_model::RefsModel;
@@ -1364,20 +1370,59 @@ fn realization_beside_a_fetch_keeps_the_fetch_while_taking_an_abandon() {
     let dropped = f.load(HERE).op_id().hex();
     let dropped_canonical = f
         .node(HERE)
-        .canonicalize(&musubi_jj::op_id::LocalOp(
-            OperationId::try_from_hex(&dropped).unwrap(),
-        ))
+        .canonicalize(&LocalOp(OperationId::try_from_hex(&dropped).unwrap()))
         .unwrap();
     f.sync();
     jj(&f, &["new", "-m", "kept"]);
     jj(&f, &["op", "abandon", &dropped]);
     f.hive.sync(HERE).unwrap();
-    let (slot, _) = read(&f.load(HERE), Ref::Origin);
-    assert!(!slot.r.is_resolved(), "{slot:?}");
+    let (head_slot, _) = read(&f.load(HERE), Ref::Origin);
+    assert!(!head_slot.r.is_resolved(), "{head_slot:?}");
+    // A fix-up keeps the pre-abandon expectation explicitly, rather than inferring it
+    // from the shortened history. Its canonical shared view is its parent's.
+    let mut fixups = 0;
+    let node = f.node(HERE);
+    let heads = node.canonical_heads().unwrap();
+    let history = node
+        .canonical_store()
+        .ancestors_until(&heads, |_| false)
+        .unwrap();
+    for op in history {
+        let raw = node.canonical_store().read_operation(&op).unwrap();
+        if let Some(expected) = raw.metadata.attributes.get("musubi.expected") {
+            assert!(
+                expected
+                    .lines()
+                    .any(|line| line == format!("refs/remotes/origin/y {three}"))
+            );
+            let parent = node.canonical_store().parents(&op).unwrap();
+            assert_eq!(parent.len(), 1);
+            assert_eq!(
+                raw.view_id,
+                node.canonical_store()
+                    .read_operation(&parent[0])
+                    .unwrap()
+                    .view_id
+            );
+            fixups += 1;
+        }
+    }
+    assert!(
+        fixups > 0,
+        "the expected-value snapshot is carried across the drop"
+    );
 
     // The sync's steps up to the realization, the first of which prepares to take the
     // abandon.
     f.hive.fetch(THERE).unwrap();
+    let unpublished_heads = f.node(THERE).local_heads().unwrap();
+    let canonical_before: BTreeSet<_> = f
+        .node(THERE)
+        .canonical_store()
+        .operation_ids()
+        .unwrap()
+        .into_iter()
+        .collect();
     let known = loop {
         let member = &mut f.hive.members[THERE];
         let known = member.core.known().1.clone();
@@ -1387,6 +1432,17 @@ fn realization_beside_a_fetch_keeps_the_fetch_while_taking_an_abandon() {
         let step = member.core.step(&mut member.adapter).unwrap();
         assert!(matches!(step, Step::Realized(_)), "{step:?}");
     };
+    assert_eq!(f.node(THERE).local_heads().unwrap(), unpublished_heads);
+    assert_eq!(git_y(&f), three, "unpublished realization exports nothing");
+    assert_eq!(
+        f.node(THERE)
+            .canonical_store()
+            .operation_ids()
+            .unwrap()
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        canonical_before
+    );
     upstream(&f, &two);
     f.repo(THERE).jj(&["git", "fetch"]);
     // As `realize` does on a node opened since the records were prepared, which gives the
@@ -1394,7 +1450,7 @@ fn realization_beside_a_fetch_keeps_the_fetch_while_taking_an_abandon() {
     let old_heads = f.node(THERE).canonical_heads().unwrap();
     let incoming = f
         .node(THERE)
-        .to_node(&musubi_jj::records::HubOp(musubi_jj::op_id::CanonicalOp(
+        .to_node(&musubi_jj::records::HubOp(CanonicalOp(
             OperationId::try_from_hex(known.hex()).unwrap(),
         )))
         .unwrap()[0]
@@ -1410,7 +1466,7 @@ fn realization_beside_a_fetch_keeps_the_fetch_while_taking_an_abandon() {
     for head in &old_heads {
         candidates.extend(contraction.images(store, head).unwrap());
     }
-    let expected_parents: std::collections::BTreeSet<_> = candidates
+    let expected_parents: BTreeSet<_> = candidates
         .iter()
         .filter(|a| {
             !candidates
@@ -1425,19 +1481,100 @@ fn realization_beside_a_fetch_keeps_the_fetch_while_taking_an_abandon() {
         "the renamed fetch and the incoming head"
     );
 
+    let graph = OriginalGraph::observe(node, &old_heads, &incoming);
+    let bases = store
+        .closest_common_ancestors(
+            std::slice::from_ref(&incoming),
+            &expected_parents
+                .iter()
+                .filter(|op| **op != incoming)
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+    assert_eq!(bases.len(), 1);
+    let at = |local: &LocalOp| {
+        let op = block_on(node.loader().load_operation(&local.0)).unwrap();
+        slot(block_on(op.view()).unwrap().store_view(), Ref::Origin)
+    };
+    let base_slot = at(&node.local_of(&bases[0]).unwrap());
+    let local = node.local_heads().unwrap();
+    assert_eq!(local.len(), 1);
+    let local_slot = at(&local[0]);
+    let incoming_local = node.local_of(&incoming).unwrap();
+    assert_eq!(
+        node.canonical_of(&incoming_local).unwrap(),
+        incoming,
+        "realize/canon inverse before publication"
+    );
+    let realized_slot = at(&incoming_local);
+    let incoming_slot = slot(&store.read_operation_view(&incoming).unwrap(), Ref::Origin);
+    assert_eq!(
+        (&realized_slot.l, &realized_slot.r, realized_slot.tr),
+        (&incoming_slot.l, &incoming_slot.r, incoming_slot.tr),
+        "the realization preserves the canonical input's shared ref fields"
+    );
+    let time = |local: &LocalOp| {
+        block_on(node.loader().op_store().read_operation(&local.0))
+            .unwrap()
+            .metadata
+            .time
+            .end
+            .timestamp
+    };
+    let first = time(&incoming_local) <= time(&local[0]);
+    let three_target = RefTarget::normal(CommitId::try_from_hex(&three).unwrap());
+    let two_target = RefTarget::normal(CommitId::try_from_hex(&two).unwrap());
+    let op = block_on(node.loader().load_operation(&local[0].0)).unwrap();
+    let mut model = RefsModel::new(block_on(node.loader().load_at(&op)).unwrap());
+    let (boundary, expected_slot, expected_git) = model.abandon_beside(
+        &json!({"par": graph.parents, "drops": [graph.id(node, &dropped_canonical)],
+            "heads": old_heads.iter().map(|h| graph.id(node, h)).collect::<Vec<_>>(),
+            "incoming": graph.id(node, &incoming), "base": graph.id(node, &bases[0]), "first": first}),
+        &[
+            (graph.id(node, &bases[0]), base_slot, three_target.clone()),
+            (graph.id(node, &old_heads[0]), local_slot, two_target.clone()),
+            (graph.id(node, &incoming), incoming_slot, three_target.clone()),
+        ],
+        [&two_target, &two_target],
+    );
+    assert_eq!(expected_git, two_target);
+    assert_eq!(boundary["bases"], json!([graph.id(node, &bases[0])]));
+    let expected_model_parents: BTreeSet<usize> =
+        serde_json::from_value(boundary["parents"].clone()).unwrap();
+    assert_eq!(
+        expected_parents
+            .iter()
+            .map(|p| graph.id(node, p))
+            .collect::<BTreeSet<_>>(),
+        expected_model_parents
+    );
+    // The Lean contraction is checked against every actual survivor, not just final heads.
+    for (i, op) in graph.operations.iter().enumerate() {
+        if op == &dropped_canonical {
+            continue;
+        }
+        let image = contraction.images(store, op).unwrap();
+        assert_eq!(image.len(), 1);
+        let actual: Vec<_> = store
+            .parents(&image[0])
+            .unwrap()
+            .iter()
+            .map(|p| graph.id(node, p))
+            .collect();
+        assert_eq!(json!(actual), boundary["contracted"][i], "survivor {i}");
+    }
+
     f.hive.members[THERE].adapter.advance(&known).unwrap();
     // Observe the returned raw heads before any subsequent jj command merges them.
     let node = f.node(THERE);
     let heads = node.local_heads().unwrap();
     assert_eq!(heads.len(), 1);
     let merged = block_on(node.loader().op_store().read_operation(&heads[0].0)).unwrap();
-    let parents: std::collections::BTreeSet<_> = merged
+    let parents: BTreeSet<_> = merged
         .parents
         .iter()
-        .map(|p| {
-            node.canonicalize(&musubi_jj::op_id::LocalOp(p.clone()))
-                .unwrap()
-        })
+        .map(|p| node.canonicalize(&LocalOp(p.clone())).unwrap())
         .collect();
     assert_eq!(parents, expected_parents);
     let canonical = node.canonicalize(&heads[0]).unwrap();
@@ -1447,6 +1584,15 @@ fn realization_beside_a_fetch_keeps_the_fetch_while_taking_an_abandon() {
             .is_ancestor_of(&dropped_canonical, &canonical)
             .unwrap()
     );
+    let published = block_on(node.loader().load_operation(&heads[0].0)).unwrap();
+    assert_eq!(
+        slot(
+            block_on(published.view()).unwrap().store_view(),
+            Ref::Origin
+        ),
+        expected_slot
+    );
+    graph.check_translation(node, &heads[0], &canonical);
     assert_eq!(git_y(&f), two, "the fetch in .git");
     let ops = |f: &Fixture, index: usize| {
         let template = "description ++ \"\\n\"";
@@ -1473,6 +1619,101 @@ fn realization_beside_a_fetch_keeps_the_fetch_while_taking_an_abandon() {
         assert_eq!((&slot.r, &git), (&two, &two), "y@origin on {index}");
         let log = ops(&f, index);
         assert!(!log.contains("create bookmark dropped"), "{log}");
+    }
+}
+
+/// Project observed histories into original-operation names. Prefer the old local history
+/// when an incoming contracted version has the same original: its old parents are precisely
+/// the ghost ancestry the contraction model retains. Fresh fix-up operations are originals
+/// too; realization must not allocate any. This does not infer identity from descriptions.
+struct OriginalGraph {
+    ids: BTreeMap<OperationId, usize>,
+    operations: Vec<CanonicalOp>,
+    parents: Vec<Vec<usize>>,
+    stored: BTreeSet<CanonicalOp>,
+}
+
+impl OriginalGraph {
+    fn observe(node: &NodeRepo, old: &[CanonicalOp], incoming: &CanonicalOp) -> Self {
+        let mut graph = Self {
+            ids: BTreeMap::new(),
+            operations: vec![],
+            parents: vec![],
+            stored: node
+                .canonical_store()
+                .operation_ids()
+                .unwrap()
+                .into_iter()
+                .collect(),
+        };
+        let root = node.canonical_store().root_operation_id();
+        graph.add(node, root);
+        for head in old.iter().chain([incoming]) {
+            graph.add(node, head);
+        }
+        graph
+    }
+
+    fn add(&mut self, node: &NodeRepo, op: &CanonicalOp) -> usize {
+        let store = node.canonical_store();
+        let origin = store.original_id(op).unwrap();
+        if let Some(&id) = self.ids.get(&origin) {
+            return id;
+        }
+        let parents = store
+            .parents(op)
+            .unwrap()
+            .iter()
+            .map(|p| self.add(node, p))
+            .collect();
+        let id = self.operations.len();
+        self.ids.insert(origin, id);
+        self.operations.push(op.clone());
+        self.parents.push(parents);
+        id
+    }
+
+    fn id(&self, node: &NodeRepo, op: &CanonicalOp) -> usize {
+        self.ids[&node.canonical_store().original_id(op).unwrap()]
+    }
+
+    /// Translation's inverse, parent preservation, reachable injectivity and no new IDs
+    /// immediately after publication, before another command or full convergence.
+    fn check_translation(&self, node: &mut NodeRepo, head: &LocalOp, merged: &CanonicalOp) {
+        let mut stack = vec![head.clone()];
+        let mut seen = BTreeSet::new();
+        let mut forms = BTreeSet::new();
+        while let Some(local) = stack.pop() {
+            if !seen.insert(local.clone())
+                || local.0 == *node.loader().op_store().root_operation_id()
+            {
+                continue;
+            }
+            let canonical = node.canonicalize(&local).unwrap();
+            assert!(
+                forms.insert(canonical.clone()),
+                "two reachable realizations of {canonical:?}"
+            );
+            let raw = block_on(node.loader().op_store().read_operation(&local.0)).unwrap();
+            let parents = node.canonical_store().parents(&canonical).unwrap();
+            if parents == [node.canonical_store().root_operation_id().clone()] {
+                continue; // The joining machine's earlier operations aren't hive history.
+            }
+            let locals: Vec<_> = raw.parents.into_iter().map(LocalOp).collect();
+            let translated: Vec<_> = locals
+                .iter()
+                .map(|p| node.canonicalize(p).unwrap())
+                .collect();
+            assert_eq!(translated, parents);
+            stack.extend(locals);
+        }
+        let after: BTreeSet<_> = node
+            .canonical_store()
+            .operation_ids()
+            .unwrap()
+            .into_iter()
+            .collect();
+        assert_eq!(after.difference(&self.stored).collect::<Vec<_>>(), [merged]);
     }
 }
 

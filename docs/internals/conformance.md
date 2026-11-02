@@ -13,6 +13,7 @@ program the tests send JSON requests to.
 | The sync protocol ([protocol.md](protocol.md)), with supersedes | `crates/musubi-core` | `conformance`, through the oracle | [The claim](#the-claim) to [Wire format](#wire-format) |
 | `Presence.lean`: which copies a hive shows | `Presence` | `presence::conformance`, through the oracle | [Presence](#presence) |
 | `Refs.lean`: per-machine refs | jj's import and export, and musubi's realization | `ref_laws` (the laws the model assumes), and `refs` and `view::tests`, through the oracle | [Per-machine refs](#per-machine-refs) |
+| `AbandonRefs.lean`: survivor graph and one ref | record adoption, fix-ups and publication in `NodeRepo` | `realization_beside_a_fetch_keeps_the_fetch_while_taking_an_abandon`, through the oracle | [Abandonment and refs](#abandonment-and-refs) |
 | `Chunks.lean`: chunked blobs | `BlobStore::receive` | `receive_follows_the_prefix_model`, through the oracle | [Chunked blobs](#chunked-blobs) |
 | `Names.lean`: the names other machines' workspaces show under | `workspaces::display_names` | `workspaces::tests::names_conform`, through the oracle | [Workspace names](#workspace-names) |
 
@@ -700,9 +701,10 @@ What the test relies on of jj, and what it leaves out:
   `beside_published_apart_disagrees` shows what a `jj` command did there. The state machine
   locks no remote ref, since `CStep.advance` admits only exports that can succeed (a failed
   one ends as `remote_reset_without_export` says). Nor does it take an abandon: `Refs.lean`
-  knows nothing of supersedes, nor `Supersede.lean` of refs, so a realization beside a `jj`
-  command's operation while a machine takes an abandon is checked only by
-  `realization_beside_a_fetch_keeps_the_fetch_while_taking_an_abandon`. The realization
+  knows nothing of supersedes, nor `Supersede.lean` of refs. The separate combined boundary
+  in `AbandonRefs.lean` now covers that successful publication and is checked by
+  `realization_beside_a_fetch_keeps_the_fetch_while_taking_an_abandon`
+  ([Abandonment and refs](#abandonment-and-refs)). The realization
   keeps a tracked absent `x@git` that jj would drop when the canonical operation deletes `x`
   (`realize_not_WF`); the test's model does the same, so the test checks the code as it is.
 
@@ -731,6 +733,70 @@ The state machine makes 12 cases of up to 10 actions, about 4 seconds on 32 core
 `MUSUBI_CONFORMANCE_CASES` sets the number. Each case runs real `jj`, `git` and syncs, so
 shrinking a failure takes minutes; `.config/nextest.toml` gives the test time for it, and
 starts it early, as the longest test after the protocol's conformance test.
+
+## Abandonment and refs
+
+`AbandonRefs.lean` is a small combined boundary model, not a model of jj or another network
+protocol. Its graph uses original-operation names, the union of dropped originals and the current
+published heads. Its payload map, indexed by original operation, holds one remote bookmark, the
+local bookmark tracking it, the per-machine ref record and saved expected value; `.git` is machine
+state. The real current names are `Contract.cid content par D`; `abstraction_unique` makes their
+inverse unambiguous under #73's immutable identity invariant. The graph keeps dropped originals as
+ghost state; the actual store's reachable graph contains their contracted survivors.
+
+The boundary is:
+
+1. `prepare_records`/`rename_for` prepares rewrites without publishing them. Realization can write
+   local operations, but changes neither published heads nor `.git` and creates no canonical
+   identity. The incoming realization must canonicalize back to its input.
+2. If a command published since preparation, `prepare_again_if_moved` works out the rewrites
+   again. `takeHeads` computes `max(exp(current heads) ∪ {incoming})` in the contracted graph, not
+   the obsolete prepared graph. `adoption_composes` justifies contracting an already contracted
+   prefix by the union of drops; it says nothing about delivery liveness.
+3. `History.publish` adds a fresh merge with those normalized parents and performs the ref action
+   `cbeside`: export beside the renamed head, merge against the normalized common base, then
+   export and publish the merge, retaining both the realized payload and the merge payload under
+   their operation identities and recording the exported `.git` value. `publish_refines` proves
+   that every surviving ancestor of every current head remains reachable and that `CInv` holds,
+   with the ref projection a `CStep.beside`. This complements #74's ordinary advance/merge
+   correspondence rather than pretending that its ordinary reachable-state premise covers record
+   adoption.
+4. A fix-up is a fresh child whose shared view is its parent's and whose expected value is the
+   pre-abandon snapshot. `fixup_retains` preserves ancestry and that ref state. The implementation
+   records the snapshot in `musubi.expected`; `pending_expected` supplies it before the fix-up is
+   written, under both old and renamed keys during record adoption. Treating a fix-up or merge as
+   realization would incorrectly claim no new canonical IDs.
+
+The existing real-repository race now checks these boundaries, rather than only its eventual ref
+result. It verifies the fix-up attribute and unchanged shared view; unchanged heads, `.git` and
+canonical ID set after unpublished realization; and the realization/canonical inverse before
+publication. It numbers the old local history first and identifies incoming contracted versions by
+immutable original ID, retaining the old parents as ghost ancestry. Fresh fix-up originals are
+numbered too. The `refs/abandonBeside` oracle call executes `takeHeads`, `Contract.cpar` and
+`publish` directly with jj's ref algebra table. It checks the unique normalized merge base against
+the base whose local slot the test reads, all survivors' contracted parents, the merge's exact
+parents, and the published ref slot and `.git` value. The incoming payload comes from the
+canonical shared view, compared independently with the local realization; slots and expectations
+are keyed by original identity, and the model selects the base slot through its own graph
+calculation rather than accepting an unkeyed base argument. Immediately after publication, before
+a command or convergence, it checks reachable translation injectivity, parent correspondence, and
+that the only added canonical ID is the merge. Join points stop the walk into pre-hive history.
+Losing `musubi.expected` makes the snapshot assertion fail; using old parents or losing the
+fetched branch fails the graph comparison; incorrect ref export fails the slot/`.git` comparison.
+
+Limits and premises are explicit. The graph retention theorem permits any finite head list; the
+executable ref case requires one surviving concurrent local head and a unique maximal common base,
+so it does not cover several concurrent heads or criss-cross ref merges. The expected values are
+supplied snapshots, with `CStep.beside`'s resolved-target and writable export premises checked by
+the oracle; their derivation from arbitrary histories remains #76. Tracking is kept as in the
+existing ref test and is not part of `CInv`. Hash collision freedom and jj's merge laws remain
+assumptions, pinned by the existing encoding and ref-law tests. The lock preventing a colocated
+command between export and publication remains a code argument; the test observes after
+`advance`'s internal working-copy cleanup. Concurrent git writes, other-workspace publication
+during the lock, later store-error fallback, crashes, and ordered record liveness are outside this
+boundary. The convergence search still checks translation after cache loss; this trace adds
+immediate checks, not a proof of the complete translation implementation or a new intermediate
+cache-loss check.
 
 ## Chunked blobs
 

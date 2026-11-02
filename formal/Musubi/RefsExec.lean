@@ -12,6 +12,7 @@ arguments' targets, so a test that sends the merges of every triple of them send
 request needs; one it didn't send gives `unknown`, which the test refuses.
 -/
 import Musubi.Refs
+import Musubi.AbandonRefs
 
 namespace Musubi.Refs.Exec
 
@@ -84,6 +85,9 @@ inductive Call where
   /-- `Restorable o`, and `CStep.restore`'s condition for a remote bookmark. -/
   | restorable (o s : TSlot Nat)
   | restorableRemote (o s : TSlot Nat)
+  /-- One-ref publication with operation-indexed payloads and a numbered graph. -/
+  | abandonBeside (par : List (List Nat)) (drops heads : List Nat) (incoming : Nat)
+      (first : Bool) (refs : List (Nat × TSlot Nat × Nat)) (g e' : Nat)
 
 /-- An answer: a slot and `.git`'s value, a slot after an import and whether the import set
 the bookmark (`TSlot.importSets`), or whether a proposition holds. -/
@@ -91,6 +95,8 @@ inductive Answer where
   | slot (s : TSlot Nat) (g : Option Nat)
   | imported (s : TSlot Nat) (sets : Bool)
   | holds (b : Bool)
+  | abandoned (s : TSlot Nat) (g : Nat) (parents : List Nat)
+      (contracted : List (List Nat)) (bases : List Nat) (valid : Bool)
 
 /-- The machine with slot `s` and `.git` at `g`, its tracking state aside. -/
 def machine (s : TSlot Nat) (g : Nat) (moved : Bool) : Machine Nat := ⟨s.toSlot, g, moved⟩
@@ -131,5 +137,31 @@ def run (tb : Table) : Call → Answer
   | .restorableRemote o s =>
     letI := tableAlg tb
     .holds (decide (RefAlg.resolved o.R = true → RestorableRemote o.toSlot (machine s 0 false)))
+  | .abandonBeside ps drops heads incoming first refs g e' =>
+    letI := tableAlg tb
+    letI := tableSides tb
+    let h : AbandonRefs.History Nat :=
+      { next := ps.length, par := fun x => ps[x]?.getD [],
+        dropped := fun x => drops.contains x, heads, incoming, git := g,
+        refs := fun x => match refs.find? (fun (i, _, _) => i == x) with
+          | some (_, s, e) => ⟨s.toSlot, e⟩
+          | none => ⟨⟨unknown, unknown, unknown⟩, unknown⟩ }
+    let merged := h.merged first
+    let valid := ps.zipIdx.all (fun (pp, x) => pp.all (· < x)) &&
+      incoming < ps.length && heads.all (· < ps.length) &&
+      drops.all (fun x => x != 0 && x < ps.length) &&
+      heads.length == 1 && !h.dropped h.own && !h.dropped incoming &&
+      h.bases.length == 1 &&
+      (h.parents == [incoming, h.own] || h.parents == [h.own, incoming]) &&
+      [h.own, incoming, h.bases.headD 0].all (fun x => refs.any (fun r => r.1 == x)) &&
+      (Contract.dd (refs.map (·.1))).length == refs.length &&
+      decide (CInv h.current) &&
+      decide (RefAlg.resolved merged.v.R = true → e' = merged.v.R) &&
+      decide (e' = merged.G ∨ RefAlg.writable e' = true)
+    let (out, _) := h.publish first e'
+    let m := out.current
+    let tr := ((refs.find? (fun r => r.1 == h.own)).map (fun r => r.2.1.tr)).getD false
+    .abandoned ⟨m.v, tr⟩ m.G (out.par h.next)
+      ((List.range ps.length).map (Contract.cpar h.par h.dropped)) h.bases valid
 
 end Musubi.Refs.Exec

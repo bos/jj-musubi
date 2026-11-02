@@ -104,7 +104,23 @@ impl RefsModel {
         targets: &[(&str, &RefTarget)],
         flags: &[(&str, bool)],
     ) -> Value {
+        self.call_with(function, slots, targets, flags, &json!({}), &[])
+    }
+
+    fn call_with(
+        &mut self,
+        function: &str,
+        slots: &[(&str, &Slot)],
+        targets: &[(&str, &RefTarget)],
+        flags: &[(&str, bool)],
+        extra: &Value,
+        payloads: &[(usize, Slot, RefTarget)],
+    ) -> Value {
         let mut request = json!({"op": "refs", "fn": function});
+        request
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
         let mut ids = BTreeSet::from([0]);
         for (key, slot) in slots {
             request[key] = self.slot_json(slot, &mut ids);
@@ -113,6 +129,19 @@ impl RefsModel {
             let id = self.id(target);
             ids.insert(id);
             request[key] = json!(id);
+        }
+        if !payloads.is_empty() {
+            request["refs"] = json!(
+                payloads
+                    .iter()
+                    .map(|(op, slot, expected)| {
+                        let slot = self.slot_json(slot, &mut ids);
+                        let expected = self.id(expected);
+                        ids.insert(expected);
+                        json!({"op": op, "slot": slot, "expected": expected})
+                    })
+                    .collect::<Vec<_>>()
+            );
         }
         for (key, flag) in flags {
             request[key] = json!(flag);
@@ -162,6 +191,31 @@ impl RefsModel {
         });
         assert_eq!(reply["ok"], true, "the oracle refused {function}: {reply}");
         reply
+    }
+
+    /// The combined abandonment boundary: normalize the graph, choose its common base,
+    /// and export/merge/export one remote ref before publishing the merge. Payloads are keyed by
+    /// original operation: the base, concurrent head and canonical incoming operation.
+    /// Targets are `.git` and the merge's expected value.
+    #[allow(dead_code)] // Used by the races binary, which shares this support module.
+    pub fn abandon_beside(
+        &mut self,
+        graph: &Value,
+        payloads: &[(usize, Slot, RefTarget)],
+        [g, after]: [&RefTarget; 2],
+    ) -> (Value, Slot, RefTarget) {
+        let reply = self.call_with(
+            "abandonBeside",
+            &[],
+            &[("g", g), ("eAfter", after)],
+            &[],
+            graph,
+            payloads,
+        );
+        assert_eq!(reply["valid"], true, "outside the combined model: {reply}");
+        let slot = self.slot_of(&reply["slot"]);
+        let git = self.target(&reply["g"]);
+        (reply, slot, git)
     }
 
     fn slot_reply(&mut self, function: &str, slots: &[(&str, &Slot)]) -> Slot {

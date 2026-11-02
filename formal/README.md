@@ -559,14 +559,22 @@ establishes convergence under arbitrary asynchronous delivery and retries.
   duplicates. It assumes ids are never reused; production uses `u64`, so the correspondence
   excludes exhausting that counter. It does not bound queued notifications or prove that a
   still-live pre-cut call is eventually retired.
-- `fixup_writes_le_one` and `fixups_eventually_stop`: at most one completed fix-up write
+- `fixup_writes_le_one` and `fixups_eventually_stop`: at most one completed restoring write
   per node in an epoch with no new abandonment discovery, obsolete-prefix adoption or
   interrupted write. The first current-epoch adoption may replace pending drops; later
   adoptions must only remove them, in immutable original-operation names. Clearing the cache
   after alignment requires empty pending, which cannot then grow. A write produces a finite
   saved work list and final operation. No bound on network retries is assumed. The
   real-repository check pins cached reuse and reopening, but does not prove entry into this
-  epoch or the monotonicity premise for all production adoptions.
+  epoch or the monotonicity premise for all production adoptions. Neutral publication tips
+  are additional work, outside this cached restoring-payload bound.
+
+`Retry.Publication` distinguishes that cached restoring work from a neutral publication tip.
+If pending is nonempty and the head equals the known head, `publication_progress` requires a
+new child even when the restoring work is cached. `publication_retry` proves that another
+write without intervening head-equality or cache changes emits neither kind of work.
+`publication_tip_cached` proves the tip leaves the restoring cache untouched. These are local
+write-boundary results, not a bound on tips across arbitrary later replies or adoptions.
 
 `RecordStability.lean` derives part of the epoch argument. After rollback stops, every
 changed full modeled record list appends a nonempty difference, spending a previously unseen
@@ -600,20 +608,26 @@ argument: a trace of surviving hub heads compared under each resulting dropped s
 eventual original-ancestry chain. It takes the immutable graph and contracted comparisons
 as premises; it does not derive their physical-store projection or strict head changes.
 
-Another reachable boundary prevents a per-node shortcut:
-`a_cached_fixup_can_idle_with_a_pending_drop_until_another_machine_syncs` reaches matching
-node/hub records and an idle node whose written fix-up still has a pending original. The
-whole hive converges when another machine syncs. An invariant forbidding that local state
-would be false; the missing argument must account for the other machines.
+Cached restoring work alone does not imply that its drops are published. The real regression
+`pending_drops_get_a_new_tip_when_the_hub_already_has_the_cached_fixup` reaches equal heads
+and ordered records while an abandonment is still pending, after an orphan realization is
+published without its lost record. Before the fix, both cores and idle maintenance stopped
+there, violating dropped-set convergence. The core now requests a neutral child on the
+current head; it preserves current state and gives the pending push a distinct id.
+The test checks that acceptance publishes the drop, and that an unsubmitted request and a
+restart reuse that child. `a_cached_fixup_publishes_pending_drops_even_when_its_head_is_known`
+also requires the affected node to publish, without waiting for another node.
 
 Establishing that the implementation eventually enters the settling suffix is still part
 of [#78](https://github.com/bos/jj-musubi/issues/78). A failed sync can leave an accepted hub
 head, partially received data, or a newly written fix-up. `supFix` combines fix-up creation
 with acceptance; a failed push leaves the creation without its compensating decrease.
-The production cache may then return no new operation, whereas that policy step always
-creates one. Also, the policy compares original-operation identities while the core compares
-their contracted ids. A causal invariant connecting cached fix-ups, pending drops and
-accepted history is still needed; the retry bounds do not supply it. Adopting an obsolete
+The production cache may then return no new restoring operation. A neutral publication tip
+now prevents that cache from causing an aligned node to idle with pending drops, but
+mapping its separate creation and acceptance to the policy remains necessary. Also, the
+policy compares original-operation identities while the core compares their contracted ids.
+The epoch and accepted-history correspondence is still needed; the retry bounds do not
+supply it. Adopting an obsolete
 ordered-record list can increase `recordLagE` even when no dropped set changes. The
 record-aware theorem covers taking current hub records, not arbitrary old announcements.
 

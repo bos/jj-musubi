@@ -468,6 +468,253 @@ fn lost_acceptance_and_delayed_fetch_make_progress() {
     world.check_invariants();
 }
 
+/// The trait endpoint recorded by the real-repository orphan-realization regression:
+/// equal head and records, a cached restoring payload, and a pending collateral drop.
+/// This is a local write-boundary test, not a full-state original-ancestry projection.
+#[test]
+fn cached_restoration_still_publishes_a_pending_drop_at_the_known_head() {
+    use musubi_core::message::Request;
+    use musubi_core::node::{NodeCore, Step};
+    use support::model::{FakeRepo, ROOT, Univ};
+
+    let univ = Rc::new(RefCell::new(Univ::new()));
+    let mut repo = FakeRepo::new(univ.clone(), 0);
+    let (dropped, _) = repo.user_op(ROOT, 0);
+    let (head, _) = repo.user_op(ROOT, 0);
+    repo.heads = [head].into();
+    repo.abandon(&[dropped]);
+    repo.fixup_cached = true;
+    let records = univ.borrow_mut().record_state(&[]);
+    let mut core = NodeCore::new(ROOT);
+    let learn = |core: &mut NodeCore<u64>, repo: &mut FakeRepo| {
+        core.handle_reply(
+            repo,
+            Reply::Head {
+                kind: HeadKind::Head,
+                seq: 1,
+                head,
+                records: records.clone(),
+            },
+        )
+        .unwrap();
+    };
+    learn(&mut core, &mut repo);
+    let answer = Oracle::spawn().call(&json!({"op": "retryPublication",
+        "pending": [dropped], "written": true, "aligned": false, "headKnown": true}));
+    assert_eq!(answer["restoring"], false);
+    assert_eq!(answer["tip"], true);
+    let Step::Superseded {
+        fixup: Some(tip),
+        push,
+    } = core.step(&mut repo).unwrap()
+    else {
+        panic!("cached state must not strand the pending drop");
+    };
+    let Request::Push {
+        new,
+        expected,
+        dropped: payload,
+        ..
+    } = push
+    else {
+        panic!("not a push");
+    };
+    assert_eq!((expected, new, payload), (head, tip, vec![dropped]));
+    assert_ne!(tip, head);
+    assert_eq!(univ.borrow().parents[tip as usize], [head]);
+    // The first request is lost before delivery. Core restart keeps repository state.
+    core.restart();
+    learn(&mut core, &mut repo);
+    let Step::Superseded { fixup: None, push } = core.step(&mut repo).unwrap() else {
+        panic!("retry must reuse the existing tip");
+    };
+    let Request::Push { new, .. } = push else {
+        panic!("not a push");
+    };
+    assert_eq!(new, tip);
+}
+
+/// A stale head must not change the records that gate a pending supersede. Only an
+/// acceptance can supply the missing record without fetching its actual grouping.
+/// This checks `handle`; `handle_reply` may restart first when its own call detects rollback.
+#[test]
+fn head_replies_update_records_only_for_the_known_pair() {
+    use musubi_core::message::Request;
+    use musubi_core::node::{Handled, NodeCore, Step};
+    use support::model::{FakeRepo, ROOT, Univ};
+
+    // Newer pairs are learned; an equal sequence about another head is an old history.
+    for (seq, same_head, takes_records) in [
+        (1, true, false),
+        (1, false, false),
+        (2, true, true),
+        (2, false, false),
+        (3, true, true),
+        (3, false, true),
+    ] {
+        for kind in [HeadKind::Head, HeadKind::Notify, HeadKind::Accepted] {
+            let univ = Rc::new(RefCell::new(Univ::new()));
+            let mut repo = FakeRepo::new(univ.clone(), 0);
+            let (dropped, _) = repo.user_op(ROOT, 0);
+            let (head, _) = repo.user_op(dropped, 0);
+            let empty = univ.borrow_mut().record_state(&[]);
+            let next = univ.borrow_mut().record_state(&[vec![dropped]]);
+            let mut core = NodeCore::new(ROOT);
+            core.handle(
+                &mut repo,
+                Reply::Head {
+                    kind: HeadKind::Head,
+                    seq: 2,
+                    head,
+                    records: empty,
+                },
+            )
+            .unwrap();
+            repo.abandon(&[dropped]);
+            let named = if same_head { head } else { ROOT };
+            let handled = core
+                .handle(
+                    &mut repo,
+                    Reply::Head {
+                        kind,
+                        seq,
+                        head: named,
+                        records: next,
+                    },
+                )
+                .unwrap();
+            if seq == 3 {
+                assert_eq!(
+                    handled,
+                    Handled::Learned {
+                        kind,
+                        seq,
+                        head: named
+                    }
+                );
+                assert_eq!(core.known(), &(seq, named));
+            } else {
+                assert_eq!(handled, Handled::Ignored);
+                assert_eq!(core.known(), &(2, head));
+            }
+            let step = core.step(&mut repo).unwrap();
+            if !takes_records {
+                // The old announcement must not block publication of the local drop.
+                let Step::Superseded { push, .. } = step else {
+                    panic!("old pair changed record bookkeeping: {seq}, {same_head}, {kind:?}");
+                };
+                assert!(matches!(push, Request::Push { dropped: d, .. } if d == [dropped]));
+            } else if kind == HeadKind::Accepted {
+                assert_eq!(step, Step::Adopted);
+                assert_eq!(repo.applied, [vec![dropped]]);
+            } else {
+                let Step::Send(requests) = step else {
+                    panic!("a notification cannot acknowledge our drop: {step:?}");
+                };
+                assert!(matches!(&requests[..], [Request::Fetch { .. }]));
+                assert!(repo.applied.is_empty());
+            }
+        }
+    }
+}
+
+/// A fetch marks a newly learned head accepted before changing knowledge. Old fetches
+/// can still carry data, but must not mark another head accepted or replace current records.
+/// This checks filtering in `handle`, before `handle_reply`'s separate rollback recovery.
+#[test]
+fn fetched_replies_mark_only_new_heads_and_take_only_current_records() {
+    use musubi_core::node::{Handled, NodeCore, Step};
+    use support::model::{FakeRepo, ROOT, Univ};
+    use support::storage::{Fallible, Faults};
+
+    for (seq, same_head, takes_records, learns) in [
+        (1, true, false, false),
+        (1, false, false, false),
+        (2, true, true, false),
+        (2, false, false, false),
+        (3, true, true, true),
+        (3, false, true, true),
+    ] {
+        let univ = Rc::new(RefCell::new(Univ::new()));
+        let mut repo = FakeRepo::new(univ.clone(), 0);
+        let (dropped, _) = repo.user_op(ROOT, 0);
+        let (head, _) = repo.user_op(dropped, 0);
+        let empty = univ.borrow_mut().record_state(&[]);
+        let next = univ.borrow_mut().record_state(&[vec![dropped]]);
+        let mut core = NodeCore::new(ROOT);
+        core.handle(
+            &mut repo,
+            Reply::Head {
+                kind: HeadKind::Head,
+                seq: 2,
+                head,
+                records: empty.clone(),
+            },
+        )
+        .unwrap();
+        let faults = Rc::new(RefCell::new(Faults::default()));
+        // Count storage effects without injecting a failure.
+        faults.borrow_mut().arm(usize::MAX, Timing::Before);
+        let mut repo = Fallible::new(repo, faults.clone());
+        let named = if same_head { head } else { ROOT };
+        let handled = core
+            .handle(
+                &mut repo,
+                Reply::Fetched {
+                    seq,
+                    head: named,
+                    ops: vec![],
+                    ops_attachment: vec![],
+                    objects: vec![],
+                    records: next,
+                    records_from: 0,
+                    new_records: vec![vec![dropped]],
+                    pruned: empty,
+                },
+            )
+            .unwrap();
+        let marks = faults
+            .borrow()
+            .calls
+            .iter()
+            .filter(|&&call| call == "node.learned")
+            .count();
+        assert_eq!(marks, usize::from(learns), "{seq}, {same_head}");
+        if learns {
+            assert_eq!(
+                handled,
+                Handled::Learned {
+                    kind: HeadKind::Head,
+                    seq,
+                    head: named
+                }
+            );
+            assert_eq!(core.known(), &(seq, named));
+        } else {
+            assert_eq!(handled, Handled::Ignored);
+            assert_eq!(core.known(), &(2, head));
+        }
+        let step = core.step(&mut repo).unwrap();
+        assert_eq!(
+            step,
+            if takes_records {
+                Step::Adopted
+            } else {
+                Step::Idle
+            },
+            "{seq}, {same_head}"
+        );
+        assert_eq!(
+            repo.applied,
+            if takes_records {
+                vec![vec![dropped]]
+            } else {
+                vec![]
+            }
+        );
+    }
+}
+
 /// A push from the hub's head whose closure the hub still lacks is `Incomplete`, not
 /// `Rejected`: a node takes `Rejected` for a lost race, and would fetch and push the same
 /// again forever, though it can't send what it lacks.

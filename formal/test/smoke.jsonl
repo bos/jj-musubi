@@ -89,3 +89,7 @@
 {"op":"contractedAncestry","parents":[[],[0],[0]],"dropped":[],"expected":1,"head":2}
 {"op":"contractedAncestry","parents":[[],[0],[0],[1,2],[1]],"dropped":[3],"expected":3,"head":4}
 {"op":"contractedAncestry","parents":[[]],"dropped":[0],"expected":0,"head":0}
+{"op":"retryPublication","pending":[1],"written":false,"aligned":false,"headKnown":true}
+{"op":"retryPublication","pending":[1],"written":true,"aligned":false,"headKnown":true}
+{"op":"retryPublication","pending":[1],"written":true,"aligned":false,"headKnown":false}
+{"op":"retryPublication","pending":[],"written":false,"aligned":true,"headKnown":true}

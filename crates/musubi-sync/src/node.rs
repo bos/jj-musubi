@@ -761,9 +761,14 @@ impl LocalRepo for NodeAdapter {
         self.note_accepted(std::slice::from_ref(head))
     }
 
-    fn write_fixup(&mut self) -> anyhow::Result<Option<OpId>> {
+    fn write_fixup(&mut self, publish_from: Option<&OpId>) -> anyhow::Result<Option<OpId>> {
         self.repo.settle()?;
-        Ok(self.repo.write_fixup()?.map(|NodeOp(op)| op.0))
+        let fixup = self.repo.write_fixup()?;
+        let fixup = match (fixup, publish_from) {
+            (None, Some(head)) => self.repo.write_drop_tip(&hub(head))?,
+            (fixup, _) => fixup,
+        };
+        Ok(fixup.map(|NodeOp(op)| op.0))
     }
 }
 

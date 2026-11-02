@@ -357,6 +357,9 @@ pub struct FakeRepo {
     pub held: Vec<Vec<Vec<Op>>>,
     /// The fix-up the last `write_fixup` wrote: `(id, parent)`.
     pub last_fixup: Option<(Op, Op)>,
+    /// The recorded receipt/rollback endpoint has already restored its payload. The
+    /// stateful model tests leave this false, using their eager restoring abstraction.
+    pub fixup_cached: bool,
 }
 
 impl FakeRepo {
@@ -380,6 +383,7 @@ impl FakeRepo {
             applied: vec![],
             held: vec![vec![]],
             last_fixup: None,
+            fixup_cached: false,
         }
     }
 
@@ -627,9 +631,13 @@ impl LocalRepo for FakeRepo {
         Ok(self.dropped.contains(op))
     }
 
-    fn write_fixup(&mut self) -> Result<Option<Op>, Infallible> {
+    fn write_fixup(&mut self, publish_from: Option<&Op>) -> Result<Option<Op>, Infallible> {
         assert_eq!(self.heads.len(), 1, "fix-up on more than one head");
         let parent = *self.heads.first().expect("one head");
+        self.last_fixup = None;
+        if self.fixup_cached && publish_from != Some(&parent) {
+            return Ok(None);
+        }
         let (op, _) = self.user_op(parent, 0);
         self.last_fixup = Some((op, parent));
         Ok(Some(op))

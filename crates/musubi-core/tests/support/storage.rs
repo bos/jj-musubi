@@ -397,9 +397,9 @@ impl LocalRepo for Fallible<FakeRepo> {
         self.faults.borrow().finish(hit)
     }
 
-    fn write_fixup(&mut self) -> Result<Option<Op>, StorageError> {
+    fn write_fixup(&mut self, publish_from: Option<&Op>) -> Result<Option<Op>, StorageError> {
         let hit = self.enter("node.write_fixup", true, false)?;
-        let result = infallible(self.inner.write_fixup());
+        let result = infallible(self.inner.write_fixup(publish_from));
         if let Some((_, parent)) = self.inner.last_fixup {
             self.effect(|| json!({"kind": "userOp", "node": self.inner.index, "parent": parent, "objs": []}));
         }

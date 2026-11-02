@@ -52,6 +52,23 @@ published heads and workspace
 records before resuming bounded syncs. These tests cover repository effects the core fake
 makes atomic; they do not prove the full asynchronous convergence bridge.
 
+`pending_drops_get_a_new_tip_when_the_hub_already_has_the_cached_fixup` drives receipt without
+adoption, restart, ordinary jj commands and hub rollback to equal heads and ordered records
+with a pending drop the hub lacks. It requires a fresh publication child, cached reuse after
+a lost request and restart, then convergence including the dropped sets and driver idle work.
+`cached_restoration_still_publishes_a_pending_drop_at_the_known_head` pins that recorded trait
+endpoint in the core package, against `Retry.Publication`. The generated core model otherwise
+uses eager restoring writes; it does not generate the real prefix or model the production
+cache. The existing conflicted-ref abandonment test checks that creating a neutral child keeps
+the current refs and presence, then checks ref/Git values and settings after sync and reopening.
+
+The core's `head_replies_update_records_only_for_the_known_pair` and
+`fetched_replies_mark_only_new_heads_and_take_only_current_records` check how older replies and
+equal sequences from another history affect publication and record adoption, including whether
+a fetch marks a head accepted in storage. They call `handle` directly, before the separate
+`handle_reply` path that can restart on rollback and learn the older pair. They distinguish
+effects the generated projection does not observe.
+
 ## Running the tests
 
 `just test` runs the default suite and `just property` the search. `just check` runs formatting,

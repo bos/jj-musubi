@@ -160,8 +160,14 @@ pub trait LocalRepo {
 
     /// Writes the fix-up on the single op head, before a supersede, and returns it
     /// (docs/internals/design.md, "The fix-up"); or `None` if the head already descends
-    /// from the one for what this node has yet to publish.
-    fn write_fixup(&mut self) -> Result<Option<Self::Op>, Self::Error>;
+    /// from the one for what this node has yet to publish. With `publish_from`, if that
+    /// restoring work is cached and the current head still equals the given known head,
+    /// writes a neutral child so the pending drops have a distinct head to publish. That
+    /// child preserves current state rather than replaying the cached restoring work.
+    fn write_fixup(
+        &mut self,
+        publish_from: Option<&Self::Op>,
+    ) -> Result<Option<Self::Op>, Self::Error>;
 }
 
 /// What [`NodeCore::step`] did.
@@ -339,10 +345,12 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
             return Ok(Step::Send(vec![self.push(repo, &head, records, vec![])?]));
         }
         // A supersede: the fix-up, pushed with what this node dropped.
-        let fixup = repo.write_fixup()?;
+        let fixup = repo.write_fixup((head == known).then_some(&known))?;
         let new = fixup.clone().unwrap_or(head);
         if new == known {
-            return Ok(Step::Idle);
+            // A concurrent local change can make the backend's recheck decline a marker.
+            // Refresh, rather than report idle while these drops still need publishing.
+            return Ok(Step::Send(vec![self.poll(repo)?]));
         }
         let push = self.push(repo, &new, records, dropped)?;
         Ok(Step::Superseded { fixup, push })

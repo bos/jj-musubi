@@ -20,15 +20,18 @@ program the tests send JSON requests to.
 
 ## The claim
 
-With successful storage calls, every behavior of the Rust protocol core, at the level of
-abstraction of the model, is a behavior of the Lean model. [Storage errors](#storage-errors)
-add representable prefixes and explicit limits to that correspondence. The Lean safety theorems
-hold for every reachable model state, so
-they hold for every state the Rust core reaches. A run in which the hub goes back, or the hive
-is made again, is a behavior of the extended model of `formal/Musubi/Regress.lean`, and the
-weaker invariant proved there holds in it. Every run, with `jj op abandon` and the supersedes
-that publish it, is a behavior of the system with supersedes of
-`formal/Musubi/Supersede.lean`, over each operation's original, and `SInv` holds in it.
+The generated core tests check that each transition of the Rust protocol core, using the
+repository abstraction below, is a behavior of the Lean model. [Storage errors](#storage-errors)
+add representable prefixes and explicit limits to that correspondence. `Regress.lean` covers hub
+rollback and remaking a hive; `Supersede.lean` adds abandonment and its publication, over each
+operation's original. Their safety theorems hold for every reachable model state. Applying them
+to a real execution requires its states and transitions to have the stated projection.
+
+That projection does not yet cover every real repository transition. In particular, a valid
+contracted-head acceptance cannot always be represented by the original-ancestry model, and a
+cached restoring write and a separate publication tip are not its atomic `supFix`. The focused
+real-repository checks and local models below pin those boundaries; they do not establish a
+complete safety refinement or the [asynchronous convergence bridge](#liveness).
 
 The chain has three links:
 
@@ -345,7 +348,8 @@ The first call creates an operation; both retries keep the same heads and pendin
 After the existing sync converges, adoption clears the modeled pending drops. Disabling the
 `fixup_written` guard makes the first retry create another operation and fails this check;
 omitting the marker when saving records fails the retry after reopening.
-The model bounds writes by one within an epoch whose pending originals shrink after its
+The model bounds restoring-payload writes by one within an epoch whose pending originals
+shrink after its
 first current adoption. This test pins cached reuse and reopening, not that monotonicity
 premise or eventual entry into such an epoch. Raw hub ids can change during adoption and
 cannot serve as the immutable names in that premise. The causal connection from a cached
@@ -364,11 +368,45 @@ monotone bounded node drop sets; it does not prove every runtime adoption is an 
 birth-parent graph to recover an eventual reflexive ancestry chain. Its surviving-head and
 contracted-comparison premises still need the physical-store projection described above.
 
-`history::a_cached_fixup_can_idle_with_a_pending_drop_until_another_machine_syncs` reaches
-truthful known/head equality and matching node/hub records with a cached fix-up and a pending
-original. The core returns `Idle` there; the whole hive converges when another machine
-syncs. This rules out a proposed per-node exclusion invariant, not global convergence. A
-complete bridge still needs to account for the other machines' outstanding work.
+The stronger real trace
+`history::pending_drops_get_a_new_tip_when_the_hub_already_has_the_cached_fixup` receives a
+realization without advancing, installs it with `jj op integrate`, then receives and realizes
+a fix-up before its records are held. Restart loses the record announcement; valid `jj`
+commands remove the old branch, and after hub rollback the receiver publishes that fix-up
+without the drop. Before the fix both cores returned `Idle` and `when_idle` returned false,
+with equal heads and ordered records but a producer's pending original absent from the hub.
+
+The core now asks for a neutral publication child when the restoring write is cached and
+the head is known. The adapter rechecks exact current ids and writes only the fix-up marker,
+preserving the current view, presence, settings and expected values instead of replaying the
+old payload. The regression compares this choice with `Retry.Publication` through
+`retryPublication`; it drops a request before delivery and checks the same tip on retry and
+after reopening, then requires acceptance to publish the drop and clear pending. It also
+checks the child's parent, view and absence of restoring instructions. The existing
+`realization_beside_a_fetch_keeps_the_fetch_while_taking_an_abandon` appends the same primitive
+at its observed conflicted-ref boundary and checks current ref/Git values and presence
+before import, and after sync/reopening.
+`cached_restoration_still_publishes_a_pending_drop_at_the_known_head` uses an opt-in cached
+`FakeRepo` endpoint to check the core's request for a new tip and its reuse, against the same
+oracle. The generated core runs retain eager restoring writes; they do not generate the
+real prefix or exercise the production cache.
+
+`history::a_cached_fixup_publishes_pending_drops_even_when_its_head_is_known` retains the
+earlier interrupted-adoption scenario, requiring the affected node to publish on its own.
+These fixes and local write proofs do not establish the full asynchronous refinement.
+
+`head_replies_update_records_only_for_the_known_pair` checks `NodeCore::handle`'s record
+bookkeeping through its effect on pending publication: an old pair must not block the push,
+a current ordinary head
+or notification must fetch the actual records, and an acceptance can acknowledge the pending
+drop. `fetched_replies_mark_only_new_heads_and_take_only_current_records` also counts the
+storage callback that marks a learned head accepted: an old fetch cannot mark one, even when
+its head equals the current one. An equal sequence about a different head belongs to another
+history and cannot replace the records through this entry point. These tables call `handle`
+directly. The shipping driver's own-call replies go through `handle_reply`, which may restart
+first on such a pair, then learn it and take its records as rollback recovery. The tables
+cover filtering before that recovery, including storage effects and bookkeeping that the
+generated core projection did not distinguish in the mutation run.
 
 `formal/Musubi/Liveness.lean` proves that once users stop, nodes following the policy
 (`PStep`) converge: a lexicographic measure falls on every policy step, and some step is
@@ -546,6 +584,9 @@ Deliberately broken versions of the core, each caught:
 | Hub accepts a `Push` when `head ≠ expected` | invariants and conformance |
 | Node ignores fetched record regrouping when dropped unions agree | `regrouped_records_conformance`: the expected record-only adoption becomes a realization |
 | Repository rewrites an already written fix-up on retry | `history::op_abandon_replicates`, against `Retry.Fixup.write` |
+| Node omits the publication request when its cached head equals the hub's | `cached_restoration_still_publishes_a_pending_drop_at_the_known_head`, against `Retry.Publication.write`; the real orphan-realization regression also fails before the fix |
+| An old head reply changes current record bookkeeping, or a notification acknowledges a pending drop | `head_replies_update_records_only_for_the_known_pair`, checking publication, fetching and adoption |
+| An old fetch marks its head accepted, or replaces the current records | `fetched_replies_mark_only_new_heads_and_take_only_current_records`, checking the storage callback and adoption |
 | Node realizes an operation before its parents | invariants and conformance |
 | Node realizes an operation before its objects arrive | invariants and conformance |
 | Node learns a head whose `seq` equals the one it knows | conformance only: harmless, but not a model step |
@@ -726,6 +767,12 @@ current-epoch adoption has occurred. A later adoption that grows pending is refu
 guard is the epoch premise, not a proof about arbitrary production adoption. The model's
 empty-pending `write` is a core-level no-op: `NodeCore` does not call the backend's
 `write_fixup` when pending is empty.
+
+`retryPublication` takes the same `pending`, `written` and `aligned` cache fields plus
+`headKnown`, equality at the local write boundary. It returns those fields after the write,
+and separate `restoring` and neutral `tip` booleans. A created child makes `headKnown=false`.
+Retrying that state emits neither kind; arbitrary new learning or adoption is outside that
+local result. The restoring-write bound does not count these additional neutral tips.
 
 ### Contracted ancestry
 

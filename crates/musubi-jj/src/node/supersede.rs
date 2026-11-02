@@ -2797,6 +2797,26 @@ impl NodeRepo {
         self.write_fixup_until(None)
     }
 
+    /// Gives pending drops a fresh publication id when the hub already has this head.
+    /// The cached fix-up has restored its saved state; this child preserves the state now,
+    /// with no work, settings or expected-value instructions to replay. A concurrent command
+    /// that already changed the head makes a new marker unnecessary.
+    /// The comparison uses exact ids, as the core does, without translating `expected`.
+    pub fn write_drop_tip(&mut self, expected: &HubOp) -> Result<Option<NodeOp>, NodeError> {
+        self.check_abandon()?;
+        let repo = self.merged_repo_unchecked()?;
+        let head = self.canonicalize(&LocalOp(repo.op_id().clone()))?;
+        if head != expected.0 {
+            return Ok(None);
+        }
+        let mut tx = repo.start_transaction();
+        tx.set_attribute(FIXUP_ATTRIBUTE.to_owned(), "1".to_owned());
+        let op = tx.commit("musubi: pass on jj op abandon").block_on()?;
+        Ok(Some(NodeOp(
+            self.canonicalize(&LocalOp(op.operation().id().clone()))?,
+        )))
+    }
+
     /// For tests of crashes: writes the fix-up's work by its first `written` copies, then
     /// stops, as a crash would, with the fix-up not yet written. It writes the rest of the
     /// work, and the forget after it, only when written again.

@@ -978,6 +978,16 @@ dropped has work again that merges keep. An operation from before the abandon ke
 it was, but the rest of the rewritten history's own state, so `jj op restore` to one can
 resolve a conflicted remote bookmark to the other side.
 
+The machine remembers that it wrote this restoring work, so a failed push or restart reuses
+it. The hub can nevertheless acquire the same head without its dropped set: another machine
+may have received the operation before holding its records, then published it after a hub
+rollback. If the machine still has pending drops and its single head equals the hub's, it
+writes a fresh child to publish them. This child keeps its parent's view and records only the
+fix-up marker: it replays no saved work, forget, settings or expected values, and is not work
+by a copy. A lost request reuses that child too. Before writing it the machine checks that its
+current head still equals the head the core observed; a concurrent change makes the core
+poll and reconsider instead.
+
 `jj util gc` removes only data that is no longer reachable locally, so it needs no special
 handling. Neither the hub nor the nodes ever delete an object, and the daemon's own cleanup on a
 machine ([git backend](#git-backend)) deletes only operations that no op head reaches.

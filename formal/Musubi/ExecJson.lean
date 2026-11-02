@@ -466,6 +466,19 @@ def retryInboxReply (j : Json) : Except String Json := do
   pure (Json.mkObj [("ok", toJson true), ("next", toJson t.next),
     ("pending", toJson t.pending), ("matched", toJson matched), ("old", toJson (t.old cut))])
 
+def retryPublicationReply (j : Json) : Except String Json := do
+  let cache : Retry.Fixup := {
+    pending := ← getNats j "pending"
+    written := ← j.getObjValAs? Bool "written"
+    aligned := ← j.getObjValAs? Bool "aligned" }
+  let s : Retry.Publication := {
+    cache := cache
+    headKnown := ← j.getObjValAs? Bool "headKnown" }
+  let (t, restoring, tip) := s.write
+  pure (Json.mkObj [("ok", toJson true), ("pending", toJson t.cache.pending),
+    ("written", toJson t.cache.written), ("aligned", toJson t.cache.aligned),
+    ("headKnown", toJson t.headKnown), ("restoring", toJson restoring), ("tip", toJson tip)])
+
 /-- The session state's measures, and whether it has converged. -/
 def measureReply (N : Nat) (ses : SEState) : Json :=
   let es := ses.es
@@ -557,6 +570,10 @@ def handle (sess : Session) (line : String) : Json × Session :=
       | .ok reply => (reply, sess)
     | .ok "retryInbox" =>
       match retryInboxReply j with
+      | .error e => (errReply s!"bad request: {e}", sess)
+      | .ok reply => (reply, sess)
+    | .ok "retryPublication" =>
+      match retryPublicationReply j with
       | .error e => (errReply s!"bad request: {e}", sess)
       | .ok reply => (reply, sess)
     | .ok "refs" =>

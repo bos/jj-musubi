@@ -150,6 +150,9 @@ open Musubi
 #print axioms Retry.fixup_step_credit
 #print axioms Retry.fixup_writes_le_one
 #print axioms Retry.fixups_eventually_stop
+#print axioms Retry.publication_progress
+#print axioms Retry.publication_retry
+#print axioms Retry.publication_tip_cached
 -- Stabilization of records, without assuming head stabilization
 #print axioms Exec.sexec_record_control
 #print axioms Exec.takeRecs_eq_iff

@@ -89,3 +89,7 @@
 {"descends":false,"images":[1],"ok":true,"original":false}
 {"descends":false,"images":[1,2],"ok":true,"original":false}
 {"descends":false,"images":[],"ok":true,"original":true}
+{"aligned":false,"headKnown":false,"ok":true,"pending":[1],"restoring":true,"tip":false,"written":true}
+{"aligned":false,"headKnown":false,"ok":true,"pending":[1],"restoring":false,"tip":true,"written":true}
+{"aligned":false,"headKnown":false,"ok":true,"pending":[1],"restoring":false,"tip":false,"written":true}
+{"aligned":true,"headKnown":true,"ok":true,"pending":[],"restoring":false,"tip":false,"written":false}

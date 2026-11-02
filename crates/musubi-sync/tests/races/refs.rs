@@ -1610,9 +1610,49 @@ fn realization_beside_a_fetch_keeps_the_fetch_while_taking_an_abandon() {
     let log = ops(&f, THERE);
     assert!(!log.contains("create bookmark dropped"), "{log}");
 
+    // A neutral publication tip inherits this current fetch/expectation, rather than
+    // replaying the fix-up's earlier `three` snapshot. Exercise the primitive on this
+    // observed parent before any jj command can import or reconcile the fetch.
+    let before = read(&f.load(THERE), Ref::Origin);
+    let before_url = f.repo(THERE).git(&["remote", "get-url", "origin"]);
+    let node = f.node(THERE);
+    let parent = node.canonical_heads().unwrap().swap_remove(0);
+    let before_presence = node.presence(&parent).unwrap();
+    let before_view = node
+        .canonical_store()
+        .read_operation(&parent)
+        .unwrap()
+        .view_id;
+    let tip = node
+        .write_drop_tip(&musubi_jj::records::HubOp(parent.clone()))
+        .unwrap()
+        .unwrap();
+    let raw = node.canonical_store().read_operation(&tip.0).unwrap();
+    assert_eq!(raw.parents, [parent.0]);
+    assert_eq!(raw.view_id, before_view);
+    assert_eq!(node.presence(&tip.0).unwrap(), before_presence);
+    assert!(raw.metadata.workspace_name.is_none());
+    for key in [
+        "musubi.work",
+        "musubi.forget",
+        "musubi.forget-after",
+        "musubi.settings",
+        "musubi.expected",
+    ] {
+        assert!(!raw.metadata.attributes.contains_key(key), "replayed {key}");
+    }
+    assert_eq!(read(&f.load(THERE), Ref::Origin), before);
+    assert_eq!(git_y(&f), two);
+
     f.repo(THERE).jj(&["status"]);
     f.sync();
     f.assert_converged();
+    f.reopen(THERE);
+    f.sync();
+    assert_eq!(
+        f.repo(THERE).git(&["remote", "get-url", "origin"]),
+        before_url
+    );
     let two = RefTarget::normal(CommitId::try_from_hex(&two).unwrap());
     for index in [HERE, THERE] {
         let (slot, git) = read(&f.load(index), Ref::Origin);

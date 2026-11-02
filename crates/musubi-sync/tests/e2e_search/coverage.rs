@@ -292,6 +292,11 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         None,
     ),
     ("taking_an_abandon_resumes_where_it_stopped", None),
+    // This also needs explicit integration and work on an unpublished realization.
+    (
+        "pending_drops_get_a_new_tip_when_the_hub_already_has_the_cached_fixup",
+        None,
+    ),
     // These need a specific interrupted adoption across two record histories, not merely
     // the op_abandon and hub_goes_back rules occurring in the same generated sequence.
     (
@@ -299,7 +304,7 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         None,
     ),
     (
-        "a_cached_fixup_can_idle_with_a_pending_drop_until_another_machine_syncs",
+        "a_cached_fixup_publishes_pending_drops_even_when_its_head_is_known",
         None,
     ),
     (

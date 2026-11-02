@@ -198,8 +198,8 @@ theorem fixup_writes_le_one (run : Nat → Fixup) (emits : Nat → Bool)
   have := fixup_credit_le (run 0)
   omega
 
-/-- At most one completed fix-up invocation per node in such an epoch. Clearing the cache
-requires empty pending after alignment, which later adoptions cannot recharge. The
+/-- At most one completed restoring-payload invocation per node in such an epoch. Clearing
+the cache requires empty pending after alignment, which later adoptions cannot recharge. The
 invocation writes its finite saved work list and final operation. Retries are unbounded. -/
 theorem fixups_eventually_stop (run : Nat → Fixup) (emits : Nat → Bool)
     (hs : ∀ i, FixupStep (run i) (run (i + 1)) (emits i)) :
@@ -213,5 +213,53 @@ theorem fixups_eventually_stop (run : Nat → Fixup) (emits : Nat → Bool)
   have hstep := fixup_step_credit (hs i)
   rw [hk i hi, hk (i + 1) (by omega)] at hstep
   cases he : emits i <;> simp_all <;> omega
+
+/-- Restoring saved state and giving pending drops a new publication id are separate work.
+The cached restoring write is still bounded above; a neutral tip is needed when the hub
+already has the current head without its pending drops. `headKnown` is the equality checked
+at this write boundary, not a promise that future replies cannot change it. -/
+structure Publication where
+  cache : Fixup
+  headKnown : Bool
+  deriving Repr, DecidableEq
+
+/-- The second and third results distinguish restoring work from a neutral publication tip.
+Either creates a new child, so the resulting head differs from the previously known head. -/
+def Publication.write (s : Publication) : Publication × Bool × Bool :=
+  let (cache, restoring) := s.cache.write
+  let tip := !restoring && !cache.pending.isEmpty && s.headKnown
+  (⟨cache, s.headKnown && !(restoring || tip)⟩, restoring, tip)
+
+theorem publication_progress (s : Publication) (hp : s.cache.pending ≠ [])
+    (hk : s.headKnown = true) : s.write.2.1 || s.write.2.2 = true := by
+  cases s with
+  | mk cache headKnown =>
+    cases cache with
+    | mk pending written aligned =>
+      cases pending with
+      | nil => contradiction
+      | cons x xs =>
+        cases written <;> simp_all [Publication.write, Fixup.write]
+
+/-- Retrying the same state without a new learned head or adoption repeats neither work.
+This is not a bound on tips across arbitrarily many changes of knowledge. -/
+theorem publication_retry (s : Publication) :
+    s.write.1.write.2 = (false, false) := by
+  cases s with
+  | mk cache headKnown =>
+    cases cache with
+    | mk pending written aligned =>
+      cases pending <;> cases written <;> cases headKnown <;>
+        simp [Publication.write, Fixup.write]
+
+/-- A neutral tip does not clear the cache or replay its restoring work. -/
+theorem publication_tip_cached (s : Publication) (ht : s.write.2.2 = true) :
+    s.cache.written = true ∧ s.write.1.cache = s.cache := by
+  cases s with
+  | mk cache headKnown =>
+    cases cache with
+    | mk pending written aligned =>
+      cases pending <;> cases written <;>
+        simp_all [Publication.write, Fixup.write]
 
 end Musubi.Retry

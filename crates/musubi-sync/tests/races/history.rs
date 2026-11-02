@@ -249,7 +249,7 @@ fn op_abandon_replicates() {
 }
 
 #[test]
-fn a_cached_fixup_can_idle_with_a_pending_drop_until_another_machine_syncs() {
+fn a_cached_fixup_publishes_pending_drops_even_when_its_head_is_known() {
     use musubi_core::hub::HubStorage as _;
     use musubi_core::node::LocalRepo as _;
 
@@ -285,15 +285,31 @@ fn a_cached_fixup_can_idle_with_a_pending_drop_until_another_machine_syncs() {
     // The hub loses Q; gamma restores only P, on top of alpha's old fix-up.
     hive.hive.hub_goes_back(base).unwrap();
     hive.hive.sync(2).unwrap();
-    hive.hive.sync(0).unwrap();
-    let pending = hive.node(0).pending_drops().clone();
+    let mut accepted = 0;
+    hive.hive
+        .sync_through(0, &mut |request, reply| {
+            if let Reply::Head {
+                kind: HeadKind::Accepted,
+                ..
+            } = &reply
+            {
+                let Request::Push { dropped, .. } = request else {
+                    panic!("not a push");
+                };
+                assert!(!dropped.is_empty());
+                accepted += 1;
+            }
+            reply
+        })
+        .unwrap();
+    assert_eq!(accepted, 1);
     let heads = hive.node(0).canonical_heads().unwrap();
     let known = hive.hive.members[0].core.known().clone();
     assert_eq!(
         hive.hive.members[0].adapter.records().unwrap(),
         hive.hive.hub.records()
     );
-    assert!(!pending.is_empty());
+    assert!(hive.node(0).pending_drops().is_empty());
     assert_eq!(heads.len(), 1);
     assert_eq!(heads[0].0, known.1);
     let member = &mut hive.hive.members[0];
@@ -484,6 +500,274 @@ fn a_push_can_drop_its_expected_head_and_reuse_a_cached_fixup() {
     assert_eq!(hive.hive.hub_head(), fixup);
     hive.sync();
     hive.assert_converged();
+}
+
+#[test]
+fn pending_drops_get_a_new_tip_when_the_hub_already_has_the_cached_fixup() {
+    use crate::oracle::Oracle;
+    use jj_lib::object_id::ObjectId as _;
+    use musubi_core::hub::HubStorage as _;
+    use musubi_core::node::LocalRepo as _;
+    use musubi_core::node::Step;
+    use musubi_jj::op_id::CanonicalOp;
+    use serde_json::json;
+
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(0, "q", "shared base");
+    hive.sync();
+    let q_alpha = op_log(hive.repo(0))[0].0.clone();
+    let (q_seq, q) = hive.hive.hub.store().head();
+    let q = q.clone();
+    let q_beta = hive.node(1).local_of(&CanonicalOp(q.clone())).unwrap();
+    hive.commit(0, "x", "drop this work");
+    let p_alpha = op_log(hive.repo(0))[0].0.clone();
+    hive.hive.sync(0).unwrap();
+    let p = hive.hive.hub_head();
+    hive.hive.fetch(1).unwrap();
+    for _ in 0..16 {
+        let member = &mut hive.hive.members[1];
+        if member.adapter.is_local(&p).unwrap() {
+            break;
+        }
+        assert!(matches!(
+            member.core.step(&mut member.adapter).unwrap(),
+            Step::Realized(_)
+        ));
+    }
+    hive.node(1).settle().unwrap();
+    let p_beta = hive.node(1).local_of(&CanonicalOp(p.clone())).unwrap();
+    hive.repo(1)
+        .jj(&["--ignore-working-copy", "op", "integrate", &p_beta.0.hex()]);
+    assert_eq!(hive.hive.members[1].adapter.accepted_base().unwrap(), q);
+    assert_eq!(
+        hive.node(1).canonical_heads().unwrap(),
+        [CanonicalOp(p.clone())]
+    );
+
+    hive.commit(0, "y", "keep this work");
+    hive.repo(0)
+        .jj(&["op", "abandon", &format!("{q_alpha}..{p_alpha}")]);
+    let mut first_accepted = false;
+    hive.hive
+        .sync_steps(0, 1, &mut |request, reply| {
+            if let (Request::Push { dropped, .. }, Reply::Head { kind, .. }) = (request, &reply) {
+                assert_eq!(*kind, HeadKind::Accepted);
+                assert!(dropped.contains(&p));
+                first_accepted = true;
+            }
+            reply
+        })
+        .unwrap();
+    assert!(first_accepted);
+    let f = hive.hive.hub_head();
+    assert!(!hive.node(0).pending_drops().is_empty());
+    let saved: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(hive.repo(0).repo_path().join("musubi/records.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(saved["fixup_written"], true);
+    assert_eq!(hive.hive.members[0].adapter.records().unwrap().count, 0);
+
+    hive.hive.fetch(1).unwrap();
+    for _ in 0..16 {
+        let member = &mut hive.hive.members[1];
+        if member.adapter.is_local(&f).unwrap() {
+            break;
+        }
+        assert!(matches!(
+            member.core.step(&mut member.adapter).unwrap(),
+            Step::Realized(_)
+        ));
+    }
+    hive.node(1).settle().unwrap();
+    let f_beta = hive.node(1).local_of(&CanonicalOp(f)).unwrap();
+    assert_eq!(hive.hive.members[1].adapter.records().unwrap().count, 0);
+    hive.reopen(1);
+    hive.repo(1).jj(&[
+        "--ignore-working-copy",
+        "--at-op",
+        &f_beta.0.hex(),
+        "describe",
+        "-m",
+        "blind child of fix-up",
+    ]);
+    hive.repo(1).jj(&[
+        "--ignore-working-copy",
+        "--at-op",
+        &p_beta.0.hex(),
+        "describe",
+        "-m",
+        "child of the old head",
+    ]);
+    hive.repo(1).jj(&[
+        "--ignore-working-copy",
+        "op",
+        "abandon",
+        &format!("{}..{}", q_beta.0.hex(), p_beta.0.hex()),
+    ]);
+    assert!(!hive.node(1).check_abandon().unwrap());
+    assert!(hive.node(1).pending_drops().is_empty());
+    assert_eq!(hive.hive.members[1].adapter.records().unwrap().count, 0);
+
+    hive.hive.hub_goes_back(q_seq).unwrap();
+    let taken = hive
+        .hive
+        .sync_steps(1, 24, &mut |request, reply| {
+            if let Request::Push { dropped, .. } = request {
+                assert!(dropped.is_empty(), "blind sender: {dropped:?}");
+            }
+            reply
+        })
+        .unwrap();
+    assert!(taken < 24);
+    let stable = hive.hive.hub.store().head().0;
+    assert_eq!(hive.hive.hub.store().record_count(), 0);
+    let parent = hive.hive.hub_head();
+    hive.hive.fetch(0).unwrap();
+    let mut advanced = false;
+    for _ in 0..16 {
+        let member = &mut hive.hive.members[0];
+        match member.core.step(&mut member.adapter).unwrap() {
+            Step::Realized(_) => {}
+            Step::Advanced(head) => {
+                assert_eq!(head, parent);
+                advanced = true;
+                break;
+            }
+            step => panic!("before publication: {step:?}"),
+        }
+    }
+    assert!(advanced);
+    let mut oracle = Oracle::spawn();
+    let mut model = json!({"op": "retryPublication", "pending":
+        (0..hive.node(0).pending_drops().ops().len()).collect::<Vec<_>>(),
+        "written": true, "aligned": false, "headKnown": true});
+    let next = oracle.call(&model);
+    assert_eq!(next["ok"], true, "{next}");
+    assert_eq!(next["restoring"], false);
+    assert_eq!(next["tip"], true);
+    assert_eq!(next["headKnown"], false);
+    model["headKnown"] = next["headKnown"].clone();
+    let member = &mut hive.hive.members[0];
+    let Step::Superseded {
+        fixup: Some(tip),
+        push,
+    } = member.core.step(&mut member.adapter).unwrap()
+    else {
+        panic!("pending drops need a new publication head");
+    };
+    let Request::Push { new, dropped, .. } = &push else {
+        panic!("not a push");
+    };
+    assert_eq!(new, &tip);
+    assert!(dropped.contains(&p));
+    // A lost request publishes nothing. Its retry, including after a restart, reuses the tip.
+    drop(push);
+    let store = hive.node(0).canonical_store();
+    let original = store.read_operation(&CanonicalOp(parent.clone())).unwrap();
+    let marked = store.read_operation(&CanonicalOp(tip.clone())).unwrap();
+    assert_eq!(marked.parents, std::slice::from_ref(&parent));
+    assert_eq!(marked.view_id, original.view_id);
+    assert!(marked.metadata.workspace_name.is_none());
+    assert_eq!(
+        marked
+            .metadata
+            .attributes
+            .get("musubi.fixup")
+            .map(String::as_str),
+        Some("1")
+    );
+    for key in [
+        "musubi.work",
+        "musubi.forget",
+        "musubi.forget-after",
+        "musubi.settings",
+        "musubi.expected",
+    ] {
+        assert!(
+            !marked.metadata.attributes.contains_key(key),
+            "replayed {key}"
+        );
+    }
+    for reopen in [false, true] {
+        if reopen {
+            hive.reopen(0);
+            hive.hive.fetch(0).unwrap();
+        }
+        let member = &mut hive.hive.members[0];
+        let Step::Superseded { fixup: None, push } = member.core.step(&mut member.adapter).unwrap()
+        else {
+            panic!("retry must reuse the publication tip");
+        };
+        let Request::Push { new, .. } = push else {
+            panic!("not a push");
+        };
+        assert_eq!(new, tip);
+        assert_eq!(
+            hive.node(0).canonical_heads().unwrap(),
+            [CanonicalOp(tip.clone())]
+        );
+        let next = oracle.call(&model);
+        assert_eq!(next["restoring"], false);
+        assert_eq!(next["tip"], false);
+    }
+    let mut accepted = false;
+    hive.hive
+        .sync_through(0, &mut |request, reply| {
+            if let Reply::Head {
+                kind: HeadKind::Accepted,
+                ..
+            } = &reply
+            {
+                let Request::Push { new, dropped, .. } = request else {
+                    panic!("not a push");
+                };
+                assert_eq!(new, &tip);
+                assert!(dropped.contains(&p));
+                accepted = true;
+            }
+            reply
+        })
+        .unwrap();
+    assert!(accepted);
+    assert!(hive.node(0).pending_drops().is_empty());
+    assert!(hive.hive.hub.is_dropped(&p, &[]).unwrap());
+    for round in 0..3 {
+        for node in 0..2 {
+            let taken = hive
+                .hive
+                .sync_steps(node, 24, &mut |_, reply| reply)
+                .unwrap();
+            assert!(taken < 24, "round {round}, node {node}");
+        }
+        assert_eq!(hive.hive.hub.store().head().0, stable + 1, "round {round}");
+        assert_eq!(hive.hive.hub.store().record_count(), 1);
+        assert!(hive.node(0).pending_drops().is_empty());
+        for node in 0..2 {
+            assert!(
+                hive.node(node)
+                    .is_dropped(&musubi_jj::records::HubOp(CanonicalOp(p.clone())))
+            );
+        }
+        let head = hive.hive.hub_head();
+        let records = hive.hive.hub.records();
+        for node in 0..2 {
+            assert_eq!(hive.hive.members[node].adapter.records().unwrap(), records);
+            assert_eq!(
+                hive.node(node).canonical_heads().unwrap(),
+                [CanonicalOp(head.clone())]
+            );
+            let member = &mut hive.hive.members[node];
+            assert!(matches!(
+                member.core.step(&mut member.adapter).unwrap(),
+                Step::Idle
+            ));
+            assert!(
+                !member.adapter.when_idle().unwrap(),
+                "round {round}, node {node}: maintenance wrote"
+            );
+        }
+    }
 }
 
 /// The same when this machine's latest operation is a realization of another machine's:

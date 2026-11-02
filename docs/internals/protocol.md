@@ -301,7 +301,10 @@ Steps:
   the hub's. Nor does it take a new head it remembers dropping. A node never pushes a head that
   a record it took drops.
 - `Supersede`: a `Push` that also carries `pending`, from a node that has every record of the
-  hub and pending drops. The node first writes the fix-up on its single head and pushes that.
+  hub and pending drops. The node first writes the fix-up on its single head and pushes that,
+  reusing restoring work already written. If its head is already the hub's, it writes a
+  neutral child so that accepting the push can publish the pending drops. The child keeps
+  the current view and adds no work or saved settings; retries reuse it.
   The hub answers it as any `Push`, checking the compare-and-swap against `contract(D_hub)`,
   and also requires the new head not to be among `pending`; on accepting, it appends `pending`
   as a record, needing no id it pruned.

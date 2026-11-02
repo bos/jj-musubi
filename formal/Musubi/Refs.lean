@@ -137,10 +137,13 @@ What the model still leaves out, as testing it against jj showed
   publishes the realization alone, to merge them as the next step of its sync. Each is a
   realization published apart from a head (`beside_published_apart_disagrees`), which isn't
   modeled.
-- The expected value is a ghost: the model takes it as given with each realized operation,
-  and doesn't model the history it is computed from. A `jj` command that merges op heads
-  itself imports at once, so its machine resolves a conflict the merge makes to its own
-  `.git` value, not the expected value.
+- The slot model takes the expected value as given with each realized operation.
+  `Expected.lean` models its history computation and discharges the equality assumption of
+  `conflicted_import_agrees` given corresponding relevant history observations and bindings
+  to each machine's computed value. It does not prove that translation and contraction
+  establish those hypotheses. A `jj` command that merges op heads itself imports at once,
+  so its machine resolves a conflict the merge makes to its own `.git` value, not the
+  expected value.
 -/
 
 namespace Musubi.Refs

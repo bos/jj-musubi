@@ -67,3 +67,6 @@
 {"converged":false,"measure":[0,0,0,0,0],"ok":true,"recordLag":1,"rmeasure":[0,0,0,0,0,0],"smeasure":[0,0,0,0,0,0,0,0]}
 {"bases":[0],"contracted":[[],[0],[0],[0]],"g":3,"ok":true,"parents":[3,2],"slot":{"K":3,"L":3,"R":3,"tr":true},"valid":true}
 {"bases":[0],"contracted":[[],[0],[0],[0]],"g":2,"ok":true,"parents":[3,2],"slot":{"K":2,"L":4,"R":4,"tr":true},"valid":true}
+{"ok":true,"value":0}
+{"ok":true,"value":null}
+{"error":"bad request: invalid or unfinished expected-value history","ok":false}

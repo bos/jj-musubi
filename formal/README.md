@@ -80,13 +80,15 @@ is `formal/.lake/build/bin/oracle`.
 | `Musubi/RecordLiveness.lean` | Record agreement and finite reconciliation after convergence. |
 | `Musubi/SupersedeExecTest.lean` | `#guard` smoke tests of `sexecStep`, checked at build time. |
 | `Musubi/Refs.lean` | Per-machine refs, for one git ref: imports, exports, merges, conflicted remote bookmarks, and `jj undo` and `jj op restore`. |
+| `Musubi/Expected.lean` | The conflicted-ref history walk, agreement under operation renaming, termination and the import-agreement boundary. |
+| `Musubi/ExpectedExec.lean` | Finite operation DAGs and commit-side selection for the history oracle. |
 | `Musubi/Presence.lean` | Which copies a hive shows. |
 | `Musubi/PresenceExec.lean` | The presence rule on a finite history, executable, for the oracle. |
 | `Musubi/RefsExec.lean` | `Refs.lean`'s slot functions on targets a test numbers, with jj's merges as a table, for the oracle. |
 | `Musubi/Copies.lean` | Which repository is the copy of a key: musubi's decisions, jj's config-id rule, and a machine's repositories moved, copied, deleted and replaced. |
 | `Musubi/Names.lean` | The names a machine shows other machines' workspaces under, and `#guard` tests of them. |
 | `Musubi/Axioms.lean` | `#print axioms` for every main theorem. |
-| `Oracle.lean` | The `oracle` executable: a stdin/stdout loop around `ExecJson.handle`, which also answers measure, upload, presence, copies, chunks, names and refs requests. |
+| `Oracle.lean` | The `oracle` executable: a stdin/stdout loop around `ExecJson.handle`, which also answers measure, upload, presence, copies, chunks, names, refs and expected-value requests. |
 | `test/smoke.jsonl`, `test/smoke.expected`, `test/run_smoke.sh` | The oracle smoke test. |
 
 
@@ -397,8 +399,46 @@ Commit graphs, rebases and jj's conflict algebra are not modeled. The file's hea
 what else it leaves out: tracking in the linear steps; the tracking state of an absent
 `x@git`, which musubi's realization keeps and jj would drop (`realize_not_WF`); as runs,
 merges of more than two heads, criss-cross merges, and a remote bookmark's concurrent heads
-that `jj` commands alone make; and the history the expected value of a conflicted remote
-bookmark is computed from, which the model takes as given with each operation.
+that `jj` commands alone make; and the establishment of the history hypotheses below. The slot
+model takes the expected value as given with each operation.
+
+### Expected values from history (`Expected.lean`)
+
+`Expected.decide` models the ordered history rule in `node/git.rs`: a cached value before a
+recorded fix-up value; a deterministic side at a join; the first parent with the same target;
+otherwise a single parent's resolved value or its own expectation; otherwise a deterministic
+side. `ExpectedExec.latest` selects the latest committer time, then greatest commit id, among
+positive present terms. The history walk does not choose merge bases: jj has already used
+them to construct each operation's target.
+
+- `eval_congr_on`: corresponding relevant observations under an operation renaming give
+  equal expectations. Its domain need only contain the start and the parents the walk follows;
+  history behind a join or checkpoint is not inspected. Parent order, target equality, join
+  classification and effective checkpoint values must agree there.
+- `eval_terminates`, `eval_stable`: a decreasing operation rank makes the walk finish, and
+  extra fuel cannot change a successful answer. No expected value (`some none`) differs from
+  fuel exhaustion (`none`).
+- `eval_without_known_agrees`: removing correct memoized answers leaves successful walks
+  equal, even with different fuel. It assumes each memoized answer is the uncached walk's
+  result; pending pre-contraction values instead need authoritative history checkpoints.
+- `conflicted_import_agrees_of_history`: two reachable slot states bound to the present results
+  of those computations satisfy `conflicted_import_agrees`, without taking equality of `E`
+  as an independent hypothesis. Matching bookmark targets, no external git move and successful
+  exports remain the slot model's conditions.
+
+`expected_history_conforms_to_model` runs the shipping history walk on operation DAGs in a
+real jj store and compares it with the oracle, including joins, restored conflicts, effective
+parents during contraction recognition, checkpoints, three parents and minimal criss-cross
+ancestry. The finite oracle calls the same `eval` the theorems prove properties of, rather
+than an unproved executable copy. jj's ref algebra remains tested laws in `ref_laws`.
+
+This is a conditional history-computation theorem, not a proof that every translation or
+fix-up supplies corresponding observations. In particular, the producer and persistence of
+pre-contraction checkpoint values, and correspondence of merged targets and ordered parents,
+remain obligations of the abandonment/realization bridge. Three-parent and criss-cross DAGs
+are covered as inputs to this computation; their complete import/export runs and jj's
+recursive merge-base construction remain outside the slot state machine. See
+[conformance.md](../docs/internals/conformance.md#expected-values-from-history).
 
 ### Presence (`Presence.lean`)
 

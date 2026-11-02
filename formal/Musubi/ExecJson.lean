@@ -10,6 +10,7 @@ import Musubi.Copies
 import Musubi.Chunks
 import Musubi.Names
 import Musubi.RefsExec
+import Musubi.ExpectedExec
 
 namespace Musubi.Exec.Json
 
@@ -390,6 +391,33 @@ def refsReply : Refs.Exec.Answer → Json
       ("parents", toJson parents), ("contracted", toJson contracted), ("bases", toJson bases),
       ("valid", Json.bool valid)]
 
+/-! ## Expected values from operation history (`Expected.lean`) -/
+
+/-- `[]` means no checkpoint; `[null]` means a checkpoint with no expected value. -/
+def decodeCheckpoint (j : Json) (key : String) : Except String (Option (Option Nat)) := do
+  match (← j.getObjValAs? (Array Json) key).toList with
+  | [] => pure none
+  | [.null] => pure (some none)
+  | [value] => pure (some (some (← Lean.fromJson? value)))
+  | _ => throw s!"{key} must have at most one value"
+
+def expectedReply (j : Json) : Except String Json := do
+  let nodes ← (← j.getObjValAs? (Array Json) "nodes").toList.mapM fun n => do
+    let target ← getNat n "target"
+    let known ← decodeCheckpoint n "known"
+    let recorded ← decodeCheckpoint n "recorded"
+    let boundary ← n.getObjValAs? Bool "boundary"
+    let parents ← getNats n "parents"
+    pure ({ target, known, recorded, boundary, parents } : Refs.Expected.Exec.Node)
+  let sides ← (← j.getObjValAs? (Array Json) "sides").toList.mapM fun s => do
+    let candidates ← s.getObjValAs? (List (Int × Nat)) "candidates"
+    pure ((← getNat s "target"), candidates)
+  let tb : Refs.Expected.Exec.Table := { resolved := ← getNats j "resolved", sides }
+  let head ← getNat j "head"
+  match Refs.Expected.Exec.run tb nodes head with
+  | none => throw "invalid or unfinished expected-value history"
+  | some value => pure (Json.mkObj [("ok", Json.bool true), ("value", toJson value)])
+
 /-! ## Liveness (`Exec.lean`, "The liveness measure") -/
 
 /-- The session state's measures, and whether it has converged. -/
@@ -469,6 +497,10 @@ def handle (sess : Session) (line : String) : Json × Session :=
       match j.getObjValAs? (Array Json) "cases" >>= fun cs => cs.toList.mapM decodeCase with
       | .error e => (errReply s!"bad request: {e}", sess)
       | .ok cases => (copiesReply cases, sess)
+    | .ok "expected" =>
+      match expectedReply j with
+      | .error e => (errReply s!"bad request: {e}", sess)
+      | .ok reply => (reply, sess)
     | .ok "refs" =>
       match j.getObjVal? "table" >>= decodeTable, decodeCall j with
       | .error e, _ | _, .error e => (errReply s!"bad request: {e}", sess)

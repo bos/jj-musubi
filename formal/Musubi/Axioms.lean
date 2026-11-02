@@ -14,6 +14,7 @@ import Musubi.RecordLiveness
 import Musubi.RegressScenario
 import Musubi.Refs
 import Musubi.AbandonRefs
+import Musubi.Expected
 import Musubi.Presence
 import Musubi.PresenceExec
 import Musubi.Copies
@@ -237,3 +238,13 @@ open Musubi
 #print axioms maximal_run_convergesS
 #print axioms converged_all_droppedS
 #print axioms converged_all_acceptedS
+
+-- Expected values derived from history
+#print axioms Refs.Expected.eval_congr_on
+#print axioms Refs.Expected.eval_congr
+#print axioms Refs.Expected.eval_terminates
+#print axioms Refs.Expected.eval_stable
+#print axioms Refs.Expected.eval_computes
+#print axioms Refs.Expected.eval_without_known_agrees
+#print axioms Refs.Expected.checkpoint
+#print axioms Refs.Expected.conflicted_import_agrees_of_history

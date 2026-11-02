@@ -26,6 +26,8 @@ import Musubi.AbandonRefs
 import Musubi.Presence
 import Musubi.PresenceExec
 import Musubi.RefsExec
+import Musubi.Expected
+import Musubi.ExpectedExec
 import Musubi.Copies
 import Musubi.Names
 import Musubi.Axioms

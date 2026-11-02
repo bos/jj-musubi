@@ -902,3 +902,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "git_expected_tests.rs"]
+mod expected_tests;

@@ -14,6 +14,7 @@ program the tests send JSON requests to.
 | `Presence.lean`: which copies a hive shows | `Presence` | `presence::conformance`, through the oracle | [Presence](#presence) |
 | `Refs.lean`: per-machine refs | jj's import and export, and musubi's realization | `ref_laws` (the laws the model assumes), and `refs` and `view::tests`, through the oracle | [Per-machine refs](#per-machine-refs) |
 | `AbandonRefs.lean`: survivor graph and one ref | record adoption, fix-ups and publication in `NodeRepo` | `realization_beside_a_fetch_keeps_the_fetch_while_taking_an_abandon`, through the oracle | [Abandonment and refs](#abandonment-and-refs) |
+| `Expected.lean`: conflicted-ref history | `node/git.rs::expected` | `expected_history_conforms_to_model`, through the oracle | [Expected values from history](#expected-values-from-history) |
 | `Chunks.lean`: chunked blobs | `BlobStore::receive` | `receive_follows_the_prefix_model`, through the oracle | [Chunked blobs](#chunked-blobs) |
 | `Names.lean`: the names other machines' workspaces show under | `workspaces::display_names` | `workspaces::tests::names_conform`, through the oracle | [Workspace names](#workspace-names) |
 
@@ -682,10 +683,10 @@ What the test relies on of jj, and what it leaves out:
   resolves it to that side, as every other machine's does. A restore that brings such a
   conflict back writes nothing, so the restoring machine's `.git` keeps the value from before
   it, which is the restore's expected value, and every other machine keeps or writes that
-  instead of the side. The model takes the expected value as given with each operation; the
-  test computes it from the parents' as `export_conflicted_remote_bookmarks` does, and checks
-  that both machines' `.git`s have it, but makes no joins, where musubi takes the side too,
-  as the history before a join is only the joining machine's.
+  instead of the side. The slot model takes the expected value as given with each operation;
+  this test computes it from the parents' as `export_conflicted_remote_bookmarks` does, and
+  checks that both machines' `.git`s have it, but makes no joins. The separate history
+  conformance below checks the shipping computation, including its join boundaries.
 - **Not covered.** The state machine makes no merges of more than two heads and no
   criss-cross merges. It runs a command beside a realization only while every local
   bookmark's record agrees with itself, as `LStep.beside` assumes of the operation the
@@ -797,6 +798,86 @@ during the lock, later store-error fallback, crashes, and ordered record livenes
 boundary. The convergence search still checks translation after cache loss; this trace adds
 immediate checks, not a proof of the complete translation implementation or a new intermediate
 cache-loss check.
+
+## Expected values from history
+
+`formal/Musubi/Expected.lean` models `expected` in `crates/musubi-jj/src/node/git.rs` for one
+conflicted remote bookmark. This is separate from `Refs.lean`'s slot transitions and uses no
+model of jj's ref algebra. An operation supplies its remote target, cached and recorded
+checkpoints, join classification and ordered parent targets.
+
+The rule, in priority order, is:
+
+| Observation | Result |
+| --- | --- |
+| An entry in `History.known` | That value, including no expectation; it overrides a recorded attribute. |
+| `musubi.expected` records this ref | That value, including absence or no expectation. |
+| A local join point, or an operation whose only effective parent is a root | Choose a side of its target. Private history before the join is not shared. |
+| One or more parents have this operation's target | Follow the first such parent, retaining the target. |
+| No parent has that target, and there is exactly one parent | Return its resolved target, absence included, or follow its conflicted target. This covers restored conflicts. |
+| Otherwise | Choose a side of this operation's target. |
+
+A side is a positive, present conflict term: the greatest committer timestamp, then the
+lexicographically greatest commit id. A removal is never a candidate. No present side means
+no expectation, not an expectation that the ref is absent. Parent order is significant: two
+restores can have identical conflicted targets but different expectations.
+
+The walk reads direct parents, not merge bases. `History.parents` can supply effective
+pre-contraction parents while an abandon is recognized; otherwise it reads the operation
+store. A pending fix-up supplies known values, and its first written operation records them,
+so a later walk can stop without the dropped history. The computation preserves what those
+checkpoints say; proving that their producer captured the right pre-contraction value, that
+renaming preserves their association, and that they survive publication/restart is part of
+the composite abandonment correspondence, not an assumption discharged by this file.
+
+`eval_congr_on` proves equality under operation renaming when the observations agree on the
+followed path: the target and effective checkpoint, or the join boundary, or the ordered
+parents and their targets. Its domain contains the start and is closed under the parent the
+rule follows; it need not include history hidden by a checkpoint or a join. Shared target
+and commit metadata give the same side function. `eval_terminates` needs a decreasing rank
+on followed parent edges; `eval_stable` makes the result independent of excess fuel.
+`eval_without_known_agrees` removes correct memoized answers: their correctness means that
+an uncached `Computes` derivation gives that value. Thus differently populated export caches
+need not be assumed equal. This is conditional on cache correctness; pending pre-contraction
+values are authoritative checkpoints, not memoization justified by this lemma.
+`conflicted_import_agrees_of_history` binds the two successful, present results to the slot
+states and derives the old theorem's `hE`. It still needs reachable slot states, equal `L`
+and `R`, and no external ref move. No-side results are computed and tested but do not bind a
+slot state's `E` or claim that a skipped export establishes its invariant.
+
+`node::git::expected_tests::expected_history_conforms_to_model` writes small operation DAGs
+through jj's op store and calls the shipping `expected`. The oracle runs the proof's `eval`
+on the same target observations. Commit target numbers are ordered by commit id, and side
+candidates carry their real committer timestamps; the Rust test does not choose the model's
+side. Cases distinguish:
+
+- inheriting the first matching parent from always choosing a side or using the last parent,
+  including a matching third parent;
+- a single-parent restore from a newly merged conflict, including a changed conflicted parent
+  and a resolved absent parent;
+- join cuts from following private ancestors, and a logical pre-contraction parent callback
+  from following rewritten store parents;
+- absent expectations, absent refs, recorded values and higher-priority known values;
+- commit-time order from commit-id order, ties by commit id, and positive terms from removals;
+- a three-parent conflict and two merges of concurrent fetches followed by their merge (the
+  minimal criss-cross shape).
+
+These fixtures cover those shapes **as history-walk inputs**. They do not extend `refs`'s
+state-machine runs: constructing the merged targets, merging all closest common ancestor
+views, and interleaving imports/exports at each intermediate merge require run semantics
+beyond the binary slot laws. `merge3_synced` and `firstBase_reverts` constrain slot merges,
+but alone prove neither that recursive merge-base construction nor multihead runs preserve
+the history observations. No production mismatch is established by this refinement.
+
+### Request and reply
+
+`op: "expected"` supplies `nodes` in topological order and a `head` index. Each node has
+`target`, `parents`, `boundary`, `known` and `recorded`. Checkpoints are `[]` when missing,
+`[null]` for no expectation, or `[target]` for a resolved value; target `0` denotes absence.
+`resolved` lists resolved target numbers. `sides` lists each target's `candidates`, pairs of
+signed timestamp and commit-id-ordered resolved target number. The reply is
+`{"ok": true, "value": target}` or `{"ok": true, "value": null}`. Invalid indices or parents
+that do not precede their child are refused. Requests do not change the protocol session.
 
 ## Chunked blobs
 

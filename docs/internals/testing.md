@@ -15,7 +15,7 @@ on the next run. *The search* is the generated end-to-end tests below, run with 
 | Layer | Where | Guards against | Cost |
 | --- | --- | --- | --- |
 | Formal model | `formal/` (Lean) | Protocol design errors: lost operations, dangling references, duplicate merges, livelock | Proof effort, no runtime |
-| Protocol property tests | `crates/musubi-core/tests` | The Rust state machines departing from the model, or not recovering from a buggy hub | Milliseconds per case |
+| Protocol property tests | `crates/musubi-core/tests` | The Rust state machines departing from the model, or not recovering from storage errors or a buggy hub | Milliseconds per case |
 | Presence conformance | `crates/musubi-jj/tests/it/presence.rs` | Which copies (machines' repositories) a hive shows departing from `formal/Musubi/Presence.lean`, or changing where a contraction keeps an operation (`PresenceContract.lean`) ([conformance.md, "Presence"](conformance.md#presence); [design.md, "Copies that go away"](design.md#copies-that-go-away)) | Milliseconds per case |
 | Copies conformance | `crates/musubi/src/copy/conformance.rs` | Which repository musubi takes for the copy of a key, and the daemon's check before each sync, departing from `formal/Musubi/Copies.lean` ([conformance.md, "Copies"](conformance.md#copies); [copies.md](copies.md)) | Under a second for all 4212 cases |
 | Chunked blob conformance | `crates/musubi-sync/src/blobs.rs` | The blob receiver departing from the prefix receiver of `formal/Musubi/Chunks.lean` ([conformance.md, "Chunked blobs"](conformance.md#chunked-blobs)) | A few milliseconds per case |
@@ -121,6 +121,28 @@ The rules, in the terms of [protocol.md](protocol.md):
 Two tests run this machine: `protocol_invariants`, and `conformance`, which also checks every
 step against the Lean model. A third, `nodes_recover_from_false_replies`, adds false replies,
 which the model has no hub to send, so it runs without the oracle.
+
+`storage_failures_preserve_operations` adds a deterministic countdown over actual fallible
+`HubStorage` and `LocalRepo` calls to the generated protocol sequences. It fails before a
+call, after selected complete logical effects, or after a nonempty proper prefix of an
+operation/object import. The countdown, timing and surrounding actions are Hegel draws, so
+failures shrink and replay. Immediately after an error, before recovery, the harness checks
+closure, retained operations and objects, and reachability of the previously published heads.
+It then follows the daemon: reopen the node's logical store and restart its core; a request
+handling error keeps the hub adapter and reaches the requesting node as a failed sync.
+Pruning upkeep errors keep the hub adapter without failing a node. Every case finishes with
+faults disabled and the usual convergence/retention checks.
+
+`storage_boundaries::every_storage_boundary_recovers` sweeps every countdown in a fixed
+schedule of concurrent work, fetching, missing-object recovery, pruning and held-record
+adoption. Its coverage assertion requires 39 reachable fallible trait methods, nine complete-effect
+error
+boundaries and four proper import-prefix boundaries; none needs a real repository fixture.
+The sweep takes about a second on macOS. Both generated oracle tests use
+`MUSUBI_CONFORMANCE_CASES`. The oracle checks prefixes it can represent; partial
+merged uploads or partial bundle receipt explicitly retire it for that case while the Rust
+checks continue. [Conformance and limits](conformance.md#storage-errors) lists the adapter
+assumptions, recovery projection and error effects this abstraction cannot represent.
 
 After every rule the test checks the model's safety invariants ([protocol.md,
 "Properties"](protocol.md#properties)): HubClosed, HubMonotone, NodeClosed, Locality,

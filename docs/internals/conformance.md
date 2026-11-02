@@ -20,8 +20,10 @@ program the tests send JSON requests to.
 
 ## The claim
 
-Every behavior of the Rust protocol core, at the level of abstraction of the model, is a
-behavior of the Lean model. The Lean safety theorems hold for every reachable model state, so
+With successful storage calls, every behavior of the Rust protocol core, at the level of
+abstraction of the model, is a behavior of the Lean model. [Storage errors](#storage-errors)
+add representable prefixes and explicit limits to that correspondence. The Lean safety theorems
+hold for every reachable model state, so
 they hold for every state the Rust core reaches. A run in which the hub goes back, or the hive
 is made again, is a behavior of the extended model of `formal/Musubi/Regress.lean`, and the
 weaker invariant proved there holds in it. Every run, with `jj op abandon` and the supersedes
@@ -74,6 +76,76 @@ and ancestry over all of them. A record state's digest is the index of its recor
 table of every list of records seen, so equal digests are equal records. The jj-specific parts of a real node (canonicalization, realization, bundles) are
 not covered by this link; the jj example tests and the generated end-to-end tests cover them
 ([testing.md](testing.md)).
+
+## Storage errors
+
+`storage_failures_preserve_operations` runs the same generated protocol sequences through
+`support/storage.rs`'s fallible wrappers around `FakeHub` and `FakeRepo`. One shared countdown
+counts actual trait calls, including reads through `&self`, without counting helper calls
+inside a fake. A call can fail before its effect. Selected writes can fail after a logical
+effect; imports can retain a nonempty proper prefix, parents first for operations. The
+fixed `storage_boundaries::every_storage_boundary_recovers` schedule sweeps every countdown
+and asserts the boundary catalogue is complete. A countdown beyond the event's calls leaves
+it successful; the harness never invents an error to reach a quota.
+
+| Injected effect before returning an error | Production basis |
+| --- | --- |
+| None, at 39 reachable fallible trait methods | The core must propagate the trait's errors. Some adapter methods currently always return `Ok`; these test their fallible contract, not a physical I/O failure there. |
+| All or a proper prefix of `store_ops` / `stage_ops` | `CanonicalStore::import_operations` can retain earlier batches before a later failure. `NodeAdapter` can also fail after import while checking announced parents. |
+| All or a proper prefix of `store_objects` / `stage_objects` | Simple-backend import stores objects individually; a later error can leave earlier objects present. The abstract objects have no internal structure. |
+| A merge, advance, adoption or fix-up | jj can publish before later ref export, working-copy repair, record persistence or canonicalization fails (`merged_repo_unchecked`, `advance`, `adopt_records`, `write_fixup`). This projects the complete logical effect, not each intermediate translation. |
+| A complete accepted-base write | `write_all` may finish before `set_len` fails. Partial or invalid bytes are outside this logical-id abstraction. |
+
+The fixed-node harness reaches 39 of the traits' 40 fallible methods, including record
+pruning, held-prefix lookup, sharing and push/acceptance bookkeeping. The `fresh` method is
+wrapped too, but is unreachable here: all modeled nodes already belong to the hive, and
+pruning waits for all of them. Errors while a new node joins after pruning remain outside
+this layer. Pruning is server upkeep: its error is logged and the same hub adapter is kept,
+without failing the request or restarting a node. Only pre-effect pruning errors are injected;
+partial writes of its records or indexes need real-adapter coverage.
+
+The harness requires every injected error to reach the caller before another entry point
+or the end of injection; selecting a fault alone does not count as coverage. For each
+failed entry point the wrappers journal the actual completed logical effects.
+Where they fit, the harness checks them against the oracle **before recovery**: a stuttering
+read error, `learn`, complete `recvOps` / `recvObjs`, `advance`, `merge`, `adopt`,
+or a fix-up's `userOp`. It checks the unchanged state too when no action occurred. The
+adapter's accepted base, the core's realization plan and its announced-record cache are not
+model state. The error return and their intermediate changes are not themselves proved
+transitions.
+
+An errored merged push can store operations without objects, or only some of either, without
+sending a reply. The oracle's merged push actions combine storage and reply; its separate
+upload actions would require fictitious messages. A partly received bundle likewise need
+not match an entire message in `net`. These transitions explicitly retire the oracle for the
+rest of that case; no model reachability claim is made from there. Imports of content
+already stored are stutters and keep the oracle, checked explicitly by
+`duplicate_upload_errors_stutter_in_the_model`. Rust closure, ownership,
+retention and final convergence checks still run, as do checks that successful hub replies
+and publications describe the actual store. The next case resets and reuses the oracle.
+
+After an error, before any restart, the harness checks every published head's required data,
+all existing safety invariants, and that previously retained operations, objects and heads
+remain present or reachable. The daemon's failed-sync path attempts `NodeDriver::reopen`
+and falls back to `restart` if reopening fails. Here reopening preserves the fake's persisted
+operations, objects, staging and accepted base, and restarts `NodeCore`; there are no jj/gix
+handles or translation caches to reopen. A hub's ordinary error keeps the same adapter,
+as `HubService` does, and fails the requesting node's sync. The error reply's bytes are
+abstracted away. Recovery is not a claim that retrying the same node core is sufficient.
+Once faults stop, ordinary honest exchanges must converge with every created operation
+retained; representable cases also keep the oracle's liveness checks during that suffix.
+
+Limits: this tests errors between logical storage effects, not real storage implementations.
+The abstract attachments contain complete operations; view-delta imports whose base is
+missing (which `HubAdapter::store_ops` can leave incomplete without returning an error) are
+outside this projection, as are partial pushed/accepted bookkeeping files.
+It does not model a torn head log, a partial accepted-base id, `set_head`'s append/contraction
+or accepted-index side effects before an error, partially renamed histories in
+`prepare_records`/`adopt`, batched/asynchronous realization writes, ref export or
+working-copy repair inside a composite advance. `set_head` is injected only before any
+such effect; no atomic rollback or successful full head change on error is invented. Real
+adapter fault injection is still needed for those boundaries. It adds no hub durability or
+power-cut recovery guarantee.
 
 ## How Rust events map to model actions
 
@@ -372,6 +444,23 @@ Deliberately broken versions of the core, each caught:
 | Hub accepts a `Push` whose records aren't its own | `a_push_without_the_hubs_records_is_refused` |
 | Hub accepts a `Push` with its records to a head it dropped, or that the push drops | `a_push_to_a_dropped_head_is_refused`; rarely conformance, for the second, through `rogue_push` |
 | Node advances to a head it dropped | `a_node_never_advances_to_a_head_it_dropped`, through the oracle (`HeadsOK`) |
+| Hub ignores a `set_head` error and reports acceptance | `storage_boundaries::every_storage_boundary_recovers`: a successful reply/publication must match the actual store; the infallible tests cannot enter this boundary |
+
+The storage-error experiment on 2026-11-02 changed only `hub::Push::answer` in a scratch
+copy: replace `storage.set_head(...)?` with `let _ = storage.set_head(...)`. The countdown
+sweep failed immediately. The first 50 generated cases missed it; a 500-case search found
+and shrank it to six actions: make and push an operation, take a step, make a concurrent
+operation on the root, merge, then exchange with a pre-effect failure at call 15. The hub
+reported acceptance without installing that head, disagreeing with the oracle. Hegel's
+stored failure replay failed again in 0.19 seconds; restoring the shipping handler made
+the same six-action scenario pass. The catalogue sweep makes this boundary independent of random frequency.
+The shared checkout was never mutated. This historical replay belongs to the original
+`7b4ababc` snapshot (Hegel 0.50.2); later protocol/generator changes need that snapshot to
+replay its draws. Its attribute is:
+
+```rust
+#[hegel::reproduce_failure("AXichYwxDgAgCAM54uTCJ/z/GyVBFmMjA9fk0i7Lm+TzgkGHIy60HwjhSvwWZTHexSiwAY98AWg=")]
+```
 
 "Invariants" is `protocol_invariants`, which checks the safety properties directly on the Rust
 state, without the oracle. The random cases rarely reach the last three, which need a node behind

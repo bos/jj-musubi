@@ -22,6 +22,7 @@ use musubi_core::message::Reply;
 use serde_json::Value;
 use serde_json::json;
 use support::oracle::Oracle;
+use support::storage::Timing;
 use support::world::World;
 
 struct Machine {
@@ -29,6 +30,7 @@ struct Machine {
     crashes: usize,
     /// Whether nodes may take false replies ([`Machine::false_reply`]).
     false_replies: bool,
+    storage_failures: bool,
 }
 
 fn pick(tc: &TestCase, len: usize) -> usize {
@@ -265,6 +267,35 @@ impl Machine {
         self.world.borrow_mut().crash_hub();
     }
 
+    /// An error in a policy step, poll, request or reply, counted from actual storage
+    /// calls. Timing and countdown are Hegel draws, so both shrink and replay with the
+    /// surrounding protocol sequence.
+    #[rule(weight = 3)]
+    fn storage_failure(&mut self, tc: TestCase) {
+        tc.assume(self.storage_failures);
+        let mut world = self.world.borrow_mut();
+        let node = pick(&tc, world.nodes());
+        let timing = tc.draw(gs::sampled_from(vec![
+            Timing::Before,
+            Timing::After,
+            Timing::Prefix,
+        ]));
+        let at = tc.draw(gs::integers::<usize>().min_value(1).max_value(24));
+        world.arm_storage(at, timing);
+        match tc.draw(gs::integers::<u8>().max_value(3)) {
+            0 => world.poll_now(node),
+            1 => world.exchange(node, 1),
+            2 => world.prune(),
+            _ => {
+                let pending = world.undelivered();
+                if !pending.is_empty() {
+                    world.deliver(pending[pick(&tc, pending.len())]);
+                }
+            }
+        }
+        world.stop_storage();
+    }
+
     #[invariant(always_run)]
     fn safety(&mut self, _: TestCase) {
         self.world.borrow().check_invariants();
@@ -290,13 +321,19 @@ fn chain(tc: &TestCase, world: &World, head: u64, stored: &[u64]) -> Vec<u64> {
 }
 
 /// Runs a case, returning its oracle, if it has one, for the next case once this one passes.
-fn run(tc: TestCase, oracle: Option<Oracle>, false_replies: bool) -> Option<Oracle> {
+fn run(
+    tc: TestCase,
+    oracle: Option<Oracle>,
+    false_replies: bool,
+    storage_failures: bool,
+) -> Option<Oracle> {
     let nodes = tc.draw(gs::integers::<usize>().min_value(2).max_value(3));
     let world = Rc::new(RefCell::new(World::new(nodes, oracle)));
     hegel::stateful::machine(Machine {
         world: world.clone(),
         crashes: 0,
         false_replies,
+        storage_failures,
     })
     .run(tc);
     let mut world = world.borrow_mut();
@@ -327,7 +364,7 @@ fn run(tc: TestCase, oracle: Option<Oracle>, false_replies: bool) -> Option<Orac
 
 #[hegel::test(test_cases = 300)]
 fn protocol_invariants(tc: TestCase) {
-    run(tc, None, false);
+    run(tc, None, false, false);
 }
 
 /// Nodes that take false replies, as a buggy hub might send, made of what it stores, stay
@@ -338,7 +375,7 @@ fn protocol_invariants(tc: TestCase) {
 /// hub, isn't consulted.
 #[hegel::test(test_cases = 300)]
 fn nodes_recover_from_false_replies(tc: TestCase) {
-    run(tc, None, true);
+    run(tc, None, true, false);
 }
 
 #[hegel::test(test_cases = conformance_cases())]
@@ -347,8 +384,22 @@ fn conformance(tc: TestCase) {
     // took longer than most cases. One whose case failed goes, in whatever state it was.
     thread_local!(static ORACLE: Cell<Option<Oracle>> = const { Cell::new(None) });
     let oracle = ORACLE.take().unwrap_or_else(Oracle::spawn);
-    ORACLE.set(run(tc, Some(oracle), false));
+    ORACLE.set(run(tc, Some(oracle), false, false));
 }
+
+/// Storage errors are observed before recovery, then the daemon's reopen/restart is
+/// applied. The oracle checks representable prefixes; a partial merged upload or received
+/// bundle explicitly retires it for that case. Rust safety, retention and convergence
+/// checks continue through every fault and recovery.
+#[hegel::test(test_cases = conformance_cases())]
+fn storage_failures_preserve_operations(tc: TestCase) {
+    thread_local!(static ORACLE: Cell<Option<Oracle>> = const { Cell::new(None) });
+    let oracle = ORACLE.take().unwrap_or_else(Oracle::spawn);
+    ORACLE.set(run(tc, Some(oracle), false, true));
+}
+
+#[path = "protocol/storage_boundaries.rs"]
+mod storage_boundaries;
 
 /// How many cases the conformance test makes: 150 on CI, where it runs as a job of its own,
 /// and 50 elsewhere, where it would otherwise take most of `just test`'s time.

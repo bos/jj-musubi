@@ -64,9 +64,10 @@ impl Oracle {
         serde_json::from_str(&line).unwrap_or_else(|err| panic!("bad oracle reply {line:?}: {err}"))
     }
 
-    pub fn reset(&mut self, nodes: usize) {
+    pub fn reset(&mut self, nodes: usize) -> Value {
         let reply = self.call(&json!({"op": "reset", "nodes": nodes}));
         assert_eq!(reply["ok"], true, "oracle reset failed: {reply}");
+        reply["state"].clone()
     }
 
     /// Applies an action; the model's new state, or why the model rejects the action.

@@ -4,4 +4,5 @@
 
 pub mod model;
 pub mod oracle;
+pub mod storage;
 pub mod world;

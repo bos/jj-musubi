@@ -26,6 +26,9 @@ use super::model::Univ;
 use super::model::flat;
 use super::oracle::Measure;
 use super::oracle::Oracle;
+use super::storage::{Fallible, Faults, SharedFaults, StorageError, Timing};
+
+mod storage_failures;
 
 type Req = Request<Op, Vec<Obj>>;
 type Rep = Reply<Op, Vec<Obj>>;
@@ -52,14 +55,18 @@ struct InFlight {
 
 pub struct World {
     univ: SharedUniv,
-    hub: FakeHub,
+    hub: Fallible<FakeHub>,
     /// `hist[i]`: the head accepted at sequence number `i`.
     hist: Vec<Op>,
-    repos: Vec<FakeRepo>,
+    repos: Vec<Fallible<FakeRepo>>,
     cores: Vec<NodeCore<Op>>,
     /// Every message ever sent. Any can be delivered again, so this is the model's `net`.
     net: Vec<InFlight>,
     oracle: Option<Oracle>,
+    /// Reused by the next case after a storage prefix leaves the oracle's abstraction.
+    retired_oracle: Option<Oracle>,
+    oracle_state: Value,
+    faults: SharedFaults,
     pub trace: Vec<Value>,
     /// The operations each node last staged from a `Fetched` reply.
     last_staged: Vec<Option<Vec<Op>>>,
@@ -113,14 +120,20 @@ fn sorted(items: impl IntoIterator<Item = u64>) -> Vec<u64> {
 impl World {
     pub fn new(nodes: usize, oracle: Option<Oracle>) -> Self {
         let univ = SharedUniv::new(std::cell::RefCell::new(Univ::new()));
+        let faults = SharedFaults::new(std::cell::RefCell::new(Faults::default()));
         let mut world = Self {
-            hub: FakeHub::new(univ.clone()),
+            hub: Fallible::new(FakeHub::new(univ.clone()), faults.clone()),
             hist: vec![ROOT],
-            repos: (0..nodes).map(|n| FakeRepo::new(univ.clone(), n)).collect(),
+            repos: (0..nodes)
+                .map(|n| Fallible::new(FakeRepo::new(univ.clone(), n), faults.clone()))
+                .collect(),
             cores: (0..nodes).map(|_| NodeCore::new(ROOT)).collect(),
             net: vec![],
             univ,
             oracle,
+            retired_oracle: None,
+            oracle_state: Value::Null,
+            faults,
             trace: vec![],
             last_staged: vec![None; nodes],
             went_back: false,
@@ -130,7 +143,7 @@ impl World {
             dropped_any: false,
         };
         if let Some(oracle) = &mut world.oracle {
-            oracle.reset(nodes);
+            world.oracle_state = oracle.reset(nodes);
         }
         world
     }
@@ -189,7 +202,7 @@ impl World {
             return;
         };
         let expected = self.state_json();
-        let mut state = Value::Null;
+        let mut state = std::mem::take(&mut self.oracle_state);
         for action in &actions {
             state = oracle.step(action).unwrap_or_else(|error| {
                 panic!(
@@ -203,6 +216,7 @@ impl World {
             got, want,
             "state differs from the Lean model after {actions:?}"
         );
+        self.oracle_state = state;
         self.oracle = Some(oracle);
     }
 
@@ -237,15 +251,25 @@ impl World {
 
     /// The poll timer: send a `Fetch`.
     pub fn poll(&mut self, node: usize) {
-        let request = self.cores[node].poll(&self.repos[node]).unwrap();
-        self.send_request(node, request);
+        let before = self.storage_begin();
+        match self.cores[node].poll(&self.repos[node]) {
+            Ok(request) => self.send_request(node, request),
+            Err(error) => self.storage_failed(Some(node), before, error, vec![]),
+        }
     }
 
     /// One policy step. Returns whether anything happened.
     pub fn node_step(&mut self, node: usize, merge_objs: usize) -> bool {
+        let before = self.storage_begin();
         self.repos[node].merge_objs = merge_objs;
         let heads_before: Vec<Op> = self.repos[node].heads.iter().copied().collect();
-        let step = self.cores[node].step(&mut self.repos[node]).unwrap();
+        let step = match self.cores[node].step(&mut self.repos[node]) {
+            Ok(step) => step,
+            Err(error) => {
+                self.storage_failed(Some(node), before, error, vec![]);
+                return false;
+            }
+        };
         match step {
             Step::Idle => return false,
             Step::Merged => {
@@ -446,6 +470,7 @@ impl World {
     }
 
     fn hub_handle(&mut self, node: usize, request: Req, sup: Option<Sup>) {
+        let before = self.storage_begin();
         let actions = match &request {
             Request::Fetch { base, haves, .. } => vec![
                 json!({"kind": "hubFetch", "node": node, "base": base,
@@ -482,7 +507,13 @@ impl World {
                     records,
                     dropped,
                 };
-                let (outcome, handled) = push.answer(&mut self.hub).unwrap();
+                let (outcome, handled) = match push.answer(&mut self.hub) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        self.storage_failed(Some(node), before, error, vec![]);
+                        return;
+                    }
+                };
                 let (applied, all_dropped) = sup.expect("a push carries a supersede");
                 let action = |kind: &str| {
                     json!({"kind": kind, "node": node,
@@ -510,7 +541,13 @@ impl World {
                 return;
             }
         };
-        let handled = hub::handle(&mut self.hub, request).unwrap();
+        let handled = match hub::handle(&mut self.hub, request) {
+            Ok(handled) => handled,
+            Err(error) => {
+                self.storage_failed(Some(node), before, error, vec![]);
+                return;
+            }
+        };
         self.reply_and_act(node, handled.reply, actions, handled.publish, false);
     }
 
@@ -526,6 +563,29 @@ impl World {
         publish: Option<(u64, Op, RecordState)>,
         announced: bool,
     ) {
+        // A storage error must never be reported as a successful publication. Check the
+        // actual adapter, even when a prior partial import retired this case's oracle.
+        match &reply {
+            Reply::Head { seq, head, .. } | Reply::Fetched { seq, head, .. } => {
+                assert_eq!(
+                    (*seq, *head),
+                    (self.hub.seq, self.hub.head),
+                    "hub reply differs from storage"
+                );
+            }
+            _ => {}
+        }
+        if let Some((seq, head, _)) = &publish {
+            assert_eq!(
+                (*seq, *head),
+                (self.hub.seq, self.hub.head),
+                "hub publication differs from storage"
+            );
+            assert!(
+                self.hub.closed(*head),
+                "hub published a head without its required data"
+            );
+        }
         let records =
             json!({"msg": "dropped", "node": node, "records": records_json(&self.hub.records)});
         let model = match &reply {
@@ -580,6 +640,12 @@ impl World {
     /// Has `node` take `reply`: `own` if it answers the request the node just sent, which
     /// the node takes as saying where the hub is now (`NodeCore::handle_reply`).
     fn node_handle(&mut self, node: usize, reply: Rep, own: bool) {
+        let before = self.storage_begin();
+        let known_before = *self.cores[node].known();
+        let head_kind = match &reply {
+            Reply::Head { kind, .. } => *kind,
+            _ => HeadKind::Head,
+        };
         let objects = match &reply {
             Reply::Objects { attachment, .. } => sorted(attachment.iter().copied()),
             Reply::Fetched { objects, .. } => sorted(objects.iter().copied()),
@@ -594,7 +660,19 @@ impl World {
         } else {
             self.cores[node].handle(&mut self.repos[node], reply)
         };
-        match handled.unwrap() {
+        let handled = match handled {
+            Ok(handled) => handled,
+            Err(error) => {
+                let (seq, head) = *self.cores[node].known();
+                if (seq, head) != known_before && seq > 0 {
+                    actions.push(json!({"kind": "learn", "node": node,
+                        "headKind": kind_name(head_kind), "seq": seq, "head": head}));
+                }
+                self.storage_failed(Some(node), before, error, actions);
+                return;
+            }
+        };
+        match handled {
             Handled::Learned { kind, seq, head } => {
                 actions.push(json!({"kind": "learn", "node": node, "headKind": kind_name(kind), "seq": seq, "head": head}));
                 self.act_all(actions);
@@ -726,9 +804,13 @@ impl World {
 
     /// The hub prunes its records, if every node has said it took them all (`prune`).
     pub fn prune(&mut self) {
+        let before = self.storage_begin();
         let nodes: Vec<String> = (0..self.nodes()).map(|n| n.to_string()).collect();
-        if let Some(count) = hub::prune(&mut self.hub, nodes).unwrap() {
-            self.act(json!({"kind": "prune", "count": count}));
+        match hub::prune(&mut self.hub, nodes) {
+            Ok(Some(count)) => self.act(json!({"kind": "prune", "count": count})),
+            Ok(None) => {}
+            // Server upkeep logs the error and keeps the adapter; the request succeeds.
+            Err(error) => self.storage_failed(None, before, error, vec![]),
         }
     }
 
@@ -738,7 +820,7 @@ impl World {
     }
 
     pub fn take_oracle(&mut self) -> Option<Oracle> {
-        self.oracle.take()
+        self.oracle.take().or_else(|| self.retired_oracle.take())
     }
 
     pub fn has_oracle(&self) -> bool {

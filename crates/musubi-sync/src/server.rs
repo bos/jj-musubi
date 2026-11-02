@@ -124,6 +124,8 @@ impl HubServer {
                     self.hubs.clone(),
                     self.activity.clone(),
                     transport.clone(),
+                    #[cfg(test)]
+                    None,
                 )
             };
             let worker = self.workers.entry(token.clone()).or_insert_with(spawn);
@@ -232,6 +234,7 @@ fn spawn_worker(
     hubs: Arc<Mutex<HubDir>>,
     activity: Arc<Mutex<Activity>>,
     transport: Arc<dyn Transport>,
+    #[cfg(test)] recovery: Option<Arc<tests::PanicAfterAccept>>,
 ) -> Worker {
     let (requests, receiver) = mpsc::channel();
     let runtime = tokio::runtime::Handle::current();
@@ -254,6 +257,8 @@ fn spawn_worker(
                     dir: &dir,
                     hubs: &hubs,
                     activity: &activity,
+                    #[cfg(test)]
+                    recovery: recovery.as_deref(),
                 };
                 let served = std::panic::catch_unwind(AssertUnwindSafe(|| {
                     serve_one(&hive, &mut service, &message, limit, &mut counted)
@@ -358,6 +363,8 @@ struct Hive<'a> {
     dir: &'a Path,
     hubs: &'a Mutex<HubDir>,
     activity: &'a Mutex<Activity>,
+    #[cfg(test)]
+    recovery: Option<&'a tests::PanicAfterAccept>,
 }
 
 /// Answers one request for a hive, opening its store first if need be, and updates the
@@ -375,6 +382,8 @@ fn serve_one(
         dir,
         hubs,
         activity,
+        #[cfg(test)]
+        recovery,
     } = *hive;
     let service = match service {
         Some(service) => service,
@@ -396,11 +405,20 @@ fn serve_one(
                 }
             };
             tracing::info!("opened");
-            service.insert(HubService::new(HubAdapter::new(store, dir)?, dir)?)
+            let opened = service.insert(HubService::new(HubAdapter::new(store, dir)?, dir)?);
+            #[cfg(test)]
+            if let Some(recovery) = recovery {
+                recovery.opened();
+            }
+            opened
         }
     };
     let before = service.hub().store().head().1.clone();
     let (reply, notice) = service.handle_bytes(&message.payload, max_payload)?;
+    #[cfg(test)]
+    if let Some(recovery) = recovery {
+        recovery.handled(service, notice.as_ref());
+    }
     // Whatever the request was, it may have been the last a machine had to make: one saying
     // it took every record, or the push that made a copy no longer present.
     if let Err(err) = service.prune() {
@@ -443,3 +461,6 @@ fn serve_one(
         since: Some(before),
     })
 }
+
+#[cfg(test)]
+mod tests;

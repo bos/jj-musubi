@@ -277,6 +277,21 @@ build"](efficient-tests.md#make-an-expensive-fixture-once-per-build)).
   repositories and the node's driver, retrying as the daemon does, while another machine
   syncs. Afterwards both machines must see the same commits. It is slow, so it runs few cases.
 
+`server::tests::a_worker_reopens_its_service_after_a_panic` runs the production hive worker
+with real jj repositories and storage. Its per-worker, test-only hook panics once after a push
+has accepted a head, before the server prunes records, counts the request, updates the hive index,
+or sends the reply and notice. The error leaves the accepted head in place: a fetch to the same
+thread must reopen its service and find that head with its closure intact. Counting successful
+service opens makes removing the panic path's reset fail even if retaining the service happens to
+work. Honest
+syncs then copy both earlier and later work to another repository, all subsequent published heads
+have their closure, and another hive sharing the hub directory and activity still syncs. This
+boundary does not interrupt an import or a write, poison a lock held inside jj, or exercise the
+separate catch around activity summarization. It promises neither rollback nor power-cut
+durability.
+The existing `a_request_that_panics_the_hub_gets_an_error` separately reaches a real jj decoder
+panic from malformed peer input; the protocol storage-call fault tests cover their own boundaries.
+
 Smaller tests cover how long blobs live: a blob the hub prepares again for a second fetch lasts
 as long as a new one (`blobs_prepared_again_last_as_long_as_new_ones`); uploading the same
 content leaves a prepared blob alone (`uploads_leave_prepared_blobs_alone`); and a call that

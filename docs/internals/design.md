@@ -314,12 +314,15 @@ A machine the hive has forgotten keeps its own working copies. When it realizes 
 canonical view leaves it out, it keeps its workspaces as the realization of the parent with its
 latest work had them (`Presence::worked`), following the operation's rewrites
 (`with_own_workspaces`). So at a merge of a forget that saw its latest work with an operation that
-saw only earlier work, it keeps the workspaces the forget's realization had. Where another machine
-rewrote its working-copy commit, as one can while no other machine sees it as a working copy, it
-follows the rewrite (`replace_abandoned_working_copies`). Where the forget abandoned an empty
-working-copy commit, it stays on the hidden commit, since a new one would be an empty commit of no
-one's on every other machine. jj's next snapshot, or any command that rewrites `@`, makes a new
-visible commit of it, and that work publishes the machine's workspaces again.
+saw only earlier work, it keeps the workspaces the forget's realization had. It keeps them so too
+at work by it that another machine wrote, a [fix-up](#the-fix-up)'s, where it is present: a
+machine that had forgotten it wrote that view without its workspaces, and only its own operations
+remove them. Where another machine rewrote its working-copy commit, as one can while no other
+machine sees it as a working copy, it follows the rewrite (`replace_abandoned_working_copies`).
+Where the forget abandoned an empty working-copy commit, it stays on the hidden commit, since a
+new one would be an empty commit of no one's on every other machine. jj's next snapshot, or any
+command that rewrites `@`, makes a new visible commit of it, and that work publishes the machine's
+workspaces again.
 
 ### Leaving
 

@@ -34,6 +34,7 @@ use super::view::LocalView;
 use super::view::PerMachine;
 use crate::op_id::CanonicalOp;
 use crate::op_id::LocalOp;
+use crate::presence::Kind;
 use crate::workspaces;
 
 /// How many realized operations may be written at once. jj's op store syncs each file it
@@ -363,11 +364,15 @@ impl NodeRepo {
     }
 
     /// `local`, the local view of canonical operation `canonical_id`, with this machine's own
-    /// workspaces if the hive has forgotten this machine there: as the realization of its
-    /// parent with the machine's latest work has them (`latest_work_parent`), following the
-    /// operation's rewrites. They are still its working copies, and the hive shows them again
-    /// with its next work. A view that has this machine's workspaces, or where it is present
-    /// without any, is left as it is.
+    /// workspaces if it has none of them and the hive has forgotten this machine there: as the
+    /// realization of its parent with the machine's latest work has them
+    /// (`latest_work_parent`), following the operation's rewrites. They are still its working
+    /// copies, and the hive shows them again with its next work. So too at work by this
+    /// machine, where it is present: such an operation, realized here, is one another machine
+    /// wrote for it, as a fix-up's (`write_fixup`), maybe where it had forgotten this machine
+    /// and so without its workspaces; only this machine's own operations remove them. A view
+    /// that has this machine's workspaces, or where it is otherwise present without any, is
+    /// left as it is.
     fn with_own_workspaces(
         &mut self,
         canonical_id: &CanonicalOp,
@@ -393,7 +398,10 @@ impl NodeRepo {
                 self.own_of_view(parent_view.wc_commit_ids, &parent_canonical)?
             }
         };
-        if own.is_empty() || self.presence(canonical_id)?.is_present(self.machine.key()) {
+        let own_work = Kind::of(&op.metadata).work.as_deref() == Some(self.machine.key());
+        if own.is_empty()
+            || !own_work && self.presence(canonical_id)?.is_present(self.machine.key())
+        {
             return Ok(local);
         }
         workspaces::follow_rewrites(&mut own, op.commit_predecessors.as_ref());

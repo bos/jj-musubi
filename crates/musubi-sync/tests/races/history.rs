@@ -296,6 +296,19 @@ fn commit_op(repo: &musubi_testutil::TestRepo) -> (String, String) {
         .expect("an operation that made a commit")
 }
 
+/// The newest operation in `repo`'s op log that a workspace of `machine`'s made: that
+/// machine's latest work, as `repo` has it.
+fn newest_of(repo: &musubi_testutil::TestRepo, machine: &str) -> String {
+    let template = "id ++ \" \" ++ workspace_name ++ \"\\n\"";
+    repo.jj(&["op", "log", "--no-graph", "-T", template])
+        .lines()
+        .find_map(|line| {
+            let (id, workspace) = line.split_once(' ')?;
+            workspace.starts_with(machine).then(|| id.to_owned())
+        })
+        .unwrap()
+}
+
 /// Whether `repo`'s op log has an operation described as `description`.
 fn has_operation(repo: &musubi_testutil::TestRepo, description: &str) -> bool {
     op_log(repo).iter().any(|(_, d)| d == description)
@@ -765,6 +778,46 @@ fn abandoning_a_forget_under_other_work_keeps_the_copy_forgotten() {
     for machine in 0..3 {
         assert!(!has_operation(hive.repo(machine), "musubi: forget alpha"));
     }
+}
+
+/// `jj op abandon` of a copy's latest work, on a machine that has forgotten the copy: the
+/// fix-up does that work again, then forgets the copy again, so the copy is present at the
+/// work, whose view, written where the copy was forgotten, has none of its workspaces. The copy
+/// keeps its workspaces there, and so at the forget after it, whose realization takes them from
+/// the work's, rather than losing them at both.
+#[test]
+fn abandoning_the_latest_work_of_a_forgotten_copy_keeps_its_workspaces() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(1, "b", "from beta");
+    hive.sync();
+    let work = newest_of(hive.repo(0), "beta");
+    let beta = hive.machine_key(1);
+    assert!(hive.node(0).forget_copy(&beta, "beta").unwrap());
+    hive.hive.sync(0).unwrap();
+    hive.repo(0).jj(&["op", "abandon", &work]);
+    hive.sync();
+    let fixup: Vec<(String, String)> = op_log(hive.repo(1))
+        .into_iter()
+        .filter(|(_, d)| d.starts_with("musubi: keep ") || d == "musubi: pass on jj op abandon")
+        .collect();
+    assert_eq!(fixup.len(), 2, "{fixup:?}");
+    for (id, description) in fixup {
+        let names = hive.repo(1).jj(&[
+            "--at-op",
+            &id,
+            "--ignore-working-copy",
+            "workspace",
+            "list",
+            "-T",
+            "name ++ \"\\n\"",
+        ]);
+        assert!(
+            names.lines().any(|name| name == "beta"),
+            "{description}: {names}"
+        );
+    }
+    assert!(!hive.shown_machines().contains(&beta));
+    hive.assert_converged();
 }
 
 /// With `snapshot.auto-update-stale`, a command in a workspace whose working copy recorded an

@@ -31,3 +31,9 @@ priority = 100
 filter = "test(=refs::bookmarks_conform_to_refs_model)"
 priority = 90
 slow-timeout = { period = "60s", terminate-after = 6 }
+
+# Keep every wrong-reply case on slower CI runners, and allow Hegel to finish shrinking a
+# failure (up to five minutes) instead of killing it before it can report the counterexample.
+[[profile.ci.overrides]]
+filter = "test(=lies::nodes_recover_from_wrong_replies)"
+slow-timeout = { period = "60s", terminate-after = 10 }

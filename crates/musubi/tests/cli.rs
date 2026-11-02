@@ -2184,11 +2184,11 @@ fn recreating_hives_keeps_work_without_inheriting_remote_workspaces() {
             );
         }
     }
+    // jj displays Windows paths without the verbatim prefix canonicalize adds.
+    let displayed = alpha.jj(&["workspace", "root", "--name", "local/linked"]);
     assert_eq!(
-        alpha
-            .jj(&["workspace", "root", "--name", "local/linked"])
-            .trim(),
-        linked.canonicalize().unwrap().to_str().unwrap()
+        Path::new(displayed.trim()).canonicalize().unwrap(),
+        linked.canonicalize().unwrap()
     );
 }
 

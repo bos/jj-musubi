@@ -137,7 +137,21 @@ impl Drop for Oracle {
 }
 
 /// Runs `lake build oracle` in `formal`, which does nothing if the oracle is up to date.
+/// nextest runs each test in a process of its own, and two builds at once break each other's
+/// files, so a build holds a lock on a file in `formal/.lake` throughout: the others wait, then
+/// find the oracle up to date.
 fn build(formal: &Path) {
+    let lake = formal.join(".lake");
+    std::fs::create_dir_all(&lake)
+        .unwrap_or_else(|err| panic!("cannot make {lake:?} for the oracle ({err})"));
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(lake.join("oracle-build.lock"))
+        .unwrap_or_else(|err| panic!("cannot make the oracle's build lock in {lake:?} ({err})"));
+    lock.lock()
+        .unwrap_or_else(|err| panic!("cannot lock the oracle's build ({err})"));
     let output = Command::new("lake")
         .args(["build", "oracle"])
         .current_dir(formal)

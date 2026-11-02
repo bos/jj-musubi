@@ -82,7 +82,9 @@ pub trait LocalRepo {
     /// Realizes a staged operation whose parents are local and whose objects are available.
     fn realize(&mut self, op: &Self::Op) -> Result<(), Self::Error>;
 
-    /// Makes a local operation an op head (`heads := max(heads ∪ {op})`).
+    /// Makes a local operation an op head (`heads := max(heads ∪ {op})`). A real repository
+    /// may also merge that head set, as `merge_heads` would: model this as advance followed
+    /// by an environment merge, not as a sync step that creates a canonical operation.
     fn advance(&mut self, op: &Self::Op) -> Result<(), Self::Error>;
 
     /// A local operation the hub has accepted, reachable from the op heads, used as the

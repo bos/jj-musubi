@@ -211,9 +211,12 @@ Liveness. If environment actions stop and every node keeps following the policy 
 network that eventually delivers, every node reaches `heads = {hub.head}`, and every operation
 any node created is in `anc*(hub.head)`.
 
-No feedback loop. Realizing an operation never creates a canonical operation. So once
-environment actions stop and the system converges, no further messages are sent apart from
-polls.
+No feedback loop. Realizing an operation never creates a canonical operation. Loading or
+advancing a repository can also invoke jj's merge of concurrent heads; that is the model's
+`Merge`, an operation-creating environment action even when musubi calls it, and its result
+is published normally. The correspondence is advance followed by merge, not a sync step that
+creates an operation ([conformance](conformance.md#a-repository-advance-that-also-merges)). Once
+user changes stop and the system converges, no further messages are sent apart from polls.
 
 ## Chunked blobs
 

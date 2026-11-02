@@ -216,10 +216,52 @@ theorem advance_result {s : State} (h : Reachable N s) {n : Nat}
       · exact absurd ⟨y, hy, hny⟩ hex
     · exact Or.inl
 
+/-! ## An advance that merges concurrent heads -/
+
+/-- The parents used by an advance's merge are exactly the incoming head and the old heads
+not below it. In particular, taking only some of the concurrent heads is not a model step. -/
+theorem advance_merge_parents {s : State} (h : Reachable N s) {n : Nat} {L : List Nat}
+    (hna : ¬ ∃ g, (s.node n).heads g ∧ Anc s.U.par (s.node n).known.2 g)
+    (hL : ∀ x, x ∈ L ↔ (s.node n).heads x ∧ ¬ Anc s.U.par x (s.node n).known.2) :
+    ∀ x, x ∈ (s.node n).known.2 :: L ↔ ((s.advance n).node n).heads x := by
+  intro x
+  have hp := advance_heads_iff (inv_reachable h) hna (y := x)
+  simpa [State.advance, hL x] using hp.symm
+
+/-- A colocated advance may publish a merge without publishing its intermediate head set.
+At the canonical graph boundary this refines a sync advance followed by an environment merge,
+provided `L` enumerates every concurrent head. This is a two-step run, not a `SyncStep`:
+`noFeedback` applies to its advance component only. The merge retains all local operations,
+creates exactly one fresh operation and does not change the hub or the messages. -/
+theorem advance_merge_refines {s : State} (h : Reachable N s) {n : Nat} {L O : List Nat}
+    (hn : n < N) (hk : (s.node n).lops (s.node n).known.2)
+    (hna : ¬ ∃ g, (s.node n).heads g ∧ Anc s.U.par (s.node n).known.2 g)
+    (hL : ∀ x, x ∈ L ↔ (s.node n).heads x ∧ ¬ Anc s.U.par x (s.node n).known.2)
+    (hne : ∃ x, x ∈ L) :
+    let t := (s.advance n).mergeOp n ((s.node n).known.2 :: L) O
+    SyncStep N s (s.advance n) ∧ EnvStep N (s.advance n) t ∧ Reachable N t ∧
+      t.U.next = s.U.next + 1 ∧ t.hub = s.hub ∧ t.net = s.net ∧
+      (∀ x, (s.node n).lops x → (t.node n).lops x) := by
+  dsimp only
+  have ha := SyncStep.advance s n hn hk hna
+  have hp := advance_merge_parents h hna hL
+  obtain ⟨x, hx⟩ := hne
+  have hne' : x ≠ (s.node n).known.2 := by
+    intro heq
+    exact ((hL x).1 hx).2 (heq ▸ Anc.refl)
+  have hm := EnvStep.merge (s.advance n) n ((s.node n).known.2 :: L) O hn hp
+    ⟨x, (s.node n).known.2, List.mem_cons_of_mem _ hx, List.mem_cons_self, hne'⟩
+  refine ⟨ha, hm, .step (.step h (Or.inr ha)) (Or.inl hm), rfl, rfl, rfl, ?_⟩
+  intro y hy
+  simpa [State.mergeOp, State.createOp, State.advance] using
+    (show (s.node n).lops y ∨ y = s.U.next from Or.inl hy)
+
 /-! ## No feedback -/
 
 /-- **No feedback**: sync actions (including realization, hub request handling, and crashes)
-never create canonical operations; the universe of operations is unchanged. -/
+never create canonical operations; the universe of operations is unchanged. A real repository
+advance that also invokes jj's merge is a composite with an `EnvStep`, as
+`advance_merge_refines` states, so this theorem does not apply to that whole call. -/
 theorem noFeedback {s s' : State} (hs : SyncStep N s s') : s'.U = s.U := by
   cases hs <;> rfl
 

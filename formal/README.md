@@ -146,7 +146,14 @@ the full asynchronous system with `N` nodes. The properties are stated in
 ### No feedback
 
 - `noFeedback` (`Safety.lean`): every `SyncStep`, including `Realize`, hub handling and
-  crashes, leaves the operation universe unchanged.
+  crashes, leaves the operation universe unchanged. This is about the modeled step, not an
+  entire repository call that also invokes jj's merge.
+- `advance_merge_parents` and `advance_merge_refines` (`Safety.lean`): an advance that merges
+  every concurrent head refines advance followed by `EnvStep.merge`; it retains the local
+  operations, creates one merge, and leaves the hub and messages unchanged. The real-repository
+  test `translation::advance_with_concurrent_heads_refines_advance_then_merge` checks the
+  observed graph against those same oracle steps ([correspondence and
+  limits](../docs/internals/conformance.md#a-repository-advance-that-also-merges)).
 - `envCreatesOne` (`Safety.lean`): each environment step creates exactly one operation.
 - `converged_quiescent` (`Liveness.lean`): a converged state enables no policy step.
 

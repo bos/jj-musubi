@@ -37,6 +37,8 @@ open Musubi
 #print axioms noDuplicateMerge
 #print axioms mergeNeverRepeats
 #print axioms advance_result
+#print axioms advance_merge_parents
+#print axioms advance_merge_refines
 -- No feedback
 #print axioms noFeedback
 #print axioms envCreatesOne

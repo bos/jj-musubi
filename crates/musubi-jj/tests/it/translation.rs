@@ -22,6 +22,9 @@ use musubi_jj::ref_locks;
 use musubi_testutil::TestEnv;
 use musubi_testutil::TestRepo;
 use prost::Message as _;
+use serde_json::json;
+
+use crate::oracle;
 
 fn repeated_restore_ops(repo: &TestRepo) -> (LocalOp, LocalOp, LocalOp) {
     let target = repo.jj(&[
@@ -559,6 +562,204 @@ fn canonicalizing_a_realization_returns_its_canonical_operation() {
         a_head.0.hex(),
         "per-machine fields differ, so ids should too"
     );
+}
+
+/// Feed histories observed in the canonical store to the executable Lean model. Only
+/// identity, parents and local operation membership are projected here: commit objects and
+/// ref values have their own conformance tests.
+fn model_history(
+    oracle: &mut oracle::Oracle,
+    node: &NodeRepo,
+    machine: usize,
+    heads: &[CanonicalOp],
+    ids: &mut BTreeMap<CanonicalOp, u64>,
+) -> Vec<u64> {
+    let ops = node
+        .canonical_store()
+        .ancestors_until(heads, |op| ids.contains_key(op))
+        .unwrap();
+    ops.into_iter()
+        .map(|op| {
+            let parents: Vec<_> = node
+                .canonical_store()
+                .parents(&op)
+                .unwrap()
+                .iter()
+                .map(|p| ids[p])
+                .collect();
+            let action = match parents.as_slice() {
+                [parent] => {
+                    json!({"kind": "userOp", "node": machine, "parent": parent, "objs": []})
+                }
+                _ => json!({"kind": "merge", "node": machine, "parents": parents, "objs": []}),
+            };
+            let state = oracle.step(&action).unwrap();
+            let id = state["next"].as_u64().unwrap() - 1;
+            ids.insert(op, id);
+            id
+        })
+        .collect()
+}
+
+/// Unlike the core's fake, this observes the real op-head store before any jj command can
+/// merge it after advance returns. Dropping a concurrent parent or losing an old operation
+/// must disagree with the oracle's advance followed by merge. This observes the final graph,
+/// not the interval between advance's own publication and working-copy cleanup.
+#[test]
+fn advance_with_concurrent_heads_refines_advance_then_merge() {
+    use pollster::FutureExt as _;
+
+    let mut oracle = oracle::Oracle::spawn();
+    for colocated in [true, false] {
+        oracle.reset(2);
+        let env = TestEnv::new();
+        let a = env.init_repo("alpha");
+        let b = if colocated {
+            env.init_repo("beta")
+        } else {
+            env.init_non_colocated_repo("beta")
+        };
+        a.jj(&["bookmark", "create", "incoming", "-r", "@"]);
+        let incoming_ref = a.git(&["rev-parse", "refs/heads/incoming"]);
+        let mut a_node = open(&a);
+        let mut b_node = open(&b);
+        let base = b_node.local_heads().unwrap().pop().unwrap();
+        for name in ["left", "right"] {
+            b.jj(&[
+                "--ignore-working-copy",
+                "--at-op",
+                &base.0.hex(),
+                "bookmark",
+                "create",
+                name,
+                "-r",
+                "@",
+            ]);
+        }
+        let old_heads = b_node.canonical_heads().unwrap();
+        assert_eq!(old_heads.len(), 2);
+        let incoming = single_canonical_head(&mut a_node);
+        let mut ids = BTreeMap::from([(a_node.canonical_store().root_operation_id().clone(), 0)]);
+        let incoming_ops = model_history(
+            &mut oracle,
+            &a_node,
+            0,
+            std::slice::from_ref(&incoming),
+            &mut ids,
+        );
+        model_history(&mut oracle, &b_node, 1, &old_heads, &mut ids);
+        let remote = ids[&incoming];
+        oracle
+            .step(&json!({"kind": "pushAll", "node": 0, "ops": incoming_ops,
+            "objs": [], "expected": 0, "new": remote}))
+            .unwrap();
+        oracle
+            .step(
+                &json!({"kind": "hubPushAccept", "node": 0, "ops": incoming_ops,
+            "objs": [], "expected": 0, "new": remote}),
+            )
+            .unwrap();
+        oracle
+            .step(&json!({"kind": "learn", "node": 1, "headKind": "notify",
+            "seq": 1, "head": remote}))
+            .unwrap();
+        oracle
+            .step(&json!({"kind": "fetchOps", "node": 1, "ops": incoming_ops}))
+            .unwrap();
+        oracle
+            .step(&json!({"kind": "hubGetOps", "node": 1, "ops": incoming_ops}))
+            .unwrap();
+        oracle
+            .step(&json!({"kind": "recvOps", "node": 1, "ops": incoming_ops}))
+            .unwrap();
+        ship_objects(&a_node, &b_node, &incoming);
+        ship_operations(&a_node, &b_node, &incoming);
+        b_node.realize(&incoming).unwrap();
+        for op in &incoming_ops {
+            oracle
+                .step(&json!({"kind": "realize", "node": 1, "opId": op}))
+                .unwrap();
+        }
+        let advanced = oracle.step(&json!({"kind": "advance", "node": 1})).unwrap();
+        let before = ids.len();
+        let realization = b_node.advance(&incoming).unwrap();
+        // Read raw heads and their parents before canonical_heads, merge_heads or a
+        // subsequent jj command gets a chance to repair the returned state. The method's own
+        // working-copy cleanup has already run; this is not an intermediate observer.
+        let raw_heads = b_node.local_heads().unwrap();
+        assert_eq!(raw_heads.len(), 1);
+        assert_ne!(raw_heads[0], realization);
+        assert_eq!(b_node.canonicalize(&realization).unwrap(), incoming);
+        let raw = b_node
+            .loader()
+            .op_store()
+            .read_operation(&raw_heads[0].0)
+            .block_on()
+            .unwrap();
+        let actual_parents: BTreeSet<_> = raw
+            .parents
+            .into_iter()
+            .map(|p| ids[&b_node.canonicalize(&LocalOp(p)).unwrap()])
+            .collect();
+        let expected_parents: BTreeSet<u64> =
+            serde_json::from_value(advanced["nodes"][1]["heads"].clone()).unwrap();
+        assert_eq!(actual_parents, expected_parents);
+        let final_head = b_node.canonicalize(&raw_heads[0]).unwrap();
+        let parents: Vec<_> = b_node
+            .canonical_store()
+            .parents(&final_head)
+            .unwrap()
+            .iter()
+            .map(|op| ids[op])
+            .collect();
+        let state = oracle
+            .step(&json!({"kind": "merge", "node": 1,
+            "parents": parents, "objs": []}))
+            .unwrap();
+        let fresh = state["next"].as_u64().unwrap() - 1;
+        ids.insert(final_head.clone(), fresh);
+        assert_eq!(state["nodes"][1]["heads"], json!([fresh]));
+        assert_eq!(ids.len(), before + 1);
+        let retained: BTreeSet<_> = b_node
+            .canonical_store()
+            .ancestors_until(std::slice::from_ref(&final_head), |_| false)
+            .unwrap()
+            .iter()
+            .map(|op| ids[op])
+            .chain([0])
+            .collect();
+        let local: BTreeSet<u64> =
+            serde_json::from_value(state["nodes"][1]["lops"].clone()).unwrap();
+        assert_eq!(retained, local);
+        assert_eq!(
+            retained.len(),
+            before + 1,
+            "one merge, no realization feedback"
+        );
+        if colocated {
+            assert_eq!(b.git(&["rev-parse", "refs/heads/incoming"]), incoming_ref);
+            let merged = b_node
+                .loader()
+                .load_at(
+                    &b_node
+                        .loader()
+                        .load_operation(&raw_heads[0].0)
+                        .block_on()
+                        .unwrap(),
+                )
+                .block_on()
+                .unwrap();
+            for name in ["left", "right"] {
+                let target = merged
+                    .view()
+                    .get_local_bookmark(jj_lib::ref_name::RefName::new(name));
+                assert_eq!(
+                    b.git(&["rev-parse", &format!("refs/heads/{name}")]).trim(),
+                    target.as_normal().unwrap().hex()
+                );
+            }
+        }
+    }
 }
 
 #[test]

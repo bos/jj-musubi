@@ -872,11 +872,17 @@ fn root_parent_merge_bug_is_explained() {
     let (x, y) = (hive.commit_id(0, "x"), hive.commit_id(0, "y"));
     hive.repo(0).jj(&["abandon", &x]);
     hive.repo(1).jj(&["new", &x, &y, "-m", "merge"]);
+    let before = hive.node(1).local_heads().unwrap();
     let err = hive.try_sync().unwrap_err();
     let message = format!("{err:#}");
     assert!(
         message.contains("root commit as one of the parents") && message.contains("op revert"),
         "{message}"
+    );
+    assert_eq!(
+        hive.node(1).local_heads().unwrap(),
+        before,
+        "an unmergeable realization must not replace or join the published heads"
     );
     for machine in [0, 1] {
         hive.repo(machine).jj(&["status"]);

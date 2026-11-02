@@ -23,8 +23,9 @@ docs](internals/README.md) have the full detail.
   so the hive never ends up with two copies of the same rebase. The one exception is a hub
   that a power cut sets back, after which two machines can merge the same work; nothing is
   lost, and at worst a change is left divergent.
-- **A quiet hive stays quiet.** Taking in another machine's work never creates new work to send
-  back, so machines don't echo changes at each other.
+- **A quiet hive stays quiet.** Taking in another machine's work creates no copy to send back.
+  If it meets this machine's concurrent work, jj merges them and that merge syncs too. Once
+  everyone has the same history, machines don't echo changes at each other.
 - **Your files are never touched.** musubi writes only what jj keeps, never your working copy.
 - **Losing the hub loses nothing.** Every machine has everything it has seen, so a hub that
   dies is replaced, and fills again from the machines.
@@ -68,12 +69,13 @@ every state that can be reached, Lean checks proofs that:
 - the hub has everything its latest state needs, and so does each machine;
 - work the hub hasn't accepted is seen only on the machine that made it;
 - no two machines ever make the same merge;
-- taking in another machine's work never creates new work;
+- taking in another machine's operation creates no new operation on its own; merging
+  concurrent work is a separate step, even when a sync invokes it;
 - and once people stop changing things, and the machines' requests and replies get through,
   every machine reaches the hub's history, with every change anyone made in it.
 
 A further model lets the hub go back to an earlier state, as a power cut makes it do. There,
-the hub and each machine still have everything their state needs, nothing creates new work,
+the hub and each machine still have everything their state needs, taking in work creates no echo,
 and once the hub stops going back, the machines fill it in again and reach the same history.
 What no longer holds is the rule against duplicate merges, which is why a power cut can leave
 a change divergent. That lost or late messages only delay the sync, rather than stop it, is

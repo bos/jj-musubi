@@ -89,7 +89,8 @@ core does.
 | `NodeCore` accepts a head-carrying reply | `learn`; a stale one it ignores maps to nothing |
 | `NodeCore` takes in a `Fetched` reply | `learn` if its head is newer, then `recvOps` and `recvObjs` if it stages the operations; the states are compared after the last |
 | `NodeCore` stages an `Objects` reply | `recvObjs` |
-| `NodeCore` realizes or advances | `realize` / `advance` |
+| `NodeCore` realizes | `realize` |
+| `NodeCore` advances through the fake repo | `advance`; a real repo may also merge ([below](#a-repository-advance-that-also-merges)) |
 | The hub handles `Fetch` | `hubFetch`, then `sendD`: its reply carries the hub's records |
 | The hub handles `GetObjects { for_ops: S, haves: H, .. }` | `hubGetObjs` with `objs(S) \ H` |
 | The hub handles `Push` | `hubPushIdem`, `hubSupAccept` then `sendD`, `hubPushReject`, `hubPushIncomplete`, or `hubPushRefuse` |
@@ -116,6 +117,60 @@ requests (`Push`, `Fetch`); the finer-grained actions remain in the model and th
 The test's objects have no structure, so the test's hub ignores `closure(base)` and leaves
 out exactly what the haves name, as the model's `hubFetch` does; a node's haves there are
 every object it holds.
+
+## A repository advance that also merges
+
+The core harness's `FakeRepo::advance` updates heads only. `NodeRepo::advance` can also call
+jj's merge: a colocated repository exports and publishes the merge beside concurrent heads;
+a non-colocated repository merges when the working-copy cleanup loads the repository. This
+is a composite transition, not a single `SyncStep.advance`. The core harness alone does not
+check this correspondence.
+
+`Safety.lean`'s `advance_merge_parents` identifies the intermediate heads as the incoming
+`known.head` plus every old head not below it. `advance_merge_refines` proves that when this
+concurrent set is nonempty, advancing then merging that exact set is a reachable two-step run:
+`SyncStep.advance` then `EnvStep.merge`. It retains every local operation, adds exactly one
+canonical operation and leaves the hub and network unchanged. The intermediate head set need
+not be physically published: in a colocated repository the git lock excludes a jj command's
+publication while the realization and merge are exported and the merge alone is published.
+The returned local id still represents the incoming operation, not the merge.
+
+`translation::advance_with_concurrent_heads_refines_advance_then_merge`, in
+`crates/musubi-jj/tests/it/translation.rs`, supplies the independent observation. It creates two
+local heads beside an incoming history in real colocated and non-colocated repositories,
+replays their observed canonical parent graphs through the Lean oracle, and compares the raw
+published head and its parents with the oracle's advance followed by merge. It reads those
+heads after `advance` returns, before any subsequent jj command or head-merging helper. It
+checks the returned realization's identity, the retained history and the exported local bookmarks
+too. The graph projection omits commit objects and ref semantics, which the object tests and
+refs conformance cover. Removing a concurrent parent fails the exact-parent comparison. The observation is of
+the final graph: cleanup inside `advance` can merge heads before it returns, so this test cannot
+detect a realization temporarily published apart and then merged there. Intermediate publication
+visibility relies on the lock/export code argument above, not on an observer at that boundary.
+
+When taking abandonment records, the comparison is over the renamed history:
+`max(images(old heads) ∪ {incoming})`, not the old local names. The existing race
+`realization_beside_a_fetch_keeps_the_fetch_while_taking_an_abandon` now independently contracts
+the old canonical heads, computes this maximal set, and requires the raw published merge to
+have exactly those parents and no dropped ancestor, before any subsequent command can merge it.
+It also checks the fetched ref in git and subsequent convergence. This is a concrete check of the
+normalization boundary, not a proof combining contraction, refs and the protocol; that remains
+[#77](https://github.com/bos/jj-musubi/issues/77).
+
+`check_mergeable` refuses an unsafe merge before publishing the realization. The race
+`root_parent_merge_bug_is_explained` checks both the refusal and that the affected machine's
+raw heads stay unchanged. If the later unpublished merge fails (a store error, a jj bug, or
+record-taking changing the merge base), `advance` publishes the advanced head set instead,
+and its working-copy cleanup tries the normal merge path. That path may fail and return an
+error after the advance; it must not be described as an atomic rollback. The fallback's
+store-error branch is not fault-injected by these tests. A later working-copy repair, when
+needed, is another operation-creating action, not part of this two-step lemma.
+
+`noFeedback` says that a modeled sync step, realization included, leaves the operation universe
+unchanged. It does not say that every call made during a sync is such a step. jj's legitimate
+merge of concurrent work is an `EnvStep.merge`, whether a jj command or musubi invokes it;
+that merge is published to the hub normally. Once the hive has converged, there is no
+concurrent head set to merge (`converged_quiescent`), so realization does not cause an echo.
 
 ## Liveness
 

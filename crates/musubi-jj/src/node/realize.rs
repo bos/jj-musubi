@@ -602,6 +602,12 @@ impl NodeRepo {
     /// left it. While records are being taken, the heads it is published beside are those
     /// moving the op heads where the records name the history leaves beside it. Returns the
     /// realization as exported, which `canonical` translates to, not the merge.
+    ///
+    /// In the protocol model the head update and jj's merge are separate steps:
+    /// `SyncStep.advance` followed by `EnvStep.merge` (`advance_merge_refines` in
+    /// `formal/Musubi/Safety.lean`). The merge creates a canonical operation; realization
+    /// alone does not. Working-copy cleanup below can load and merge the heads too, even
+    /// in a non-colocated repository, and may write a separate working-copy repair.
     pub fn advance(&mut self, canonical: &CanonicalOp) -> Result<LocalOp, NodeError> {
         let realized = self.realize(canonical)?;
         // Views made ahead inherit what this changes, in a colocated repository.

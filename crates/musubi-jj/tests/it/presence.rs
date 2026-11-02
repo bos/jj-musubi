@@ -18,11 +18,7 @@ use musubi_jj::presence::Presence;
 use serde_json::Value;
 use serde_json::json;
 
-#[path = "../../../musubi-core/tests/support/oracle.rs"]
-#[allow(dead_code, clippy::unwrap_used)]
-mod oracle;
-
-use oracle::Oracle;
+use crate::oracle::Oracle;
 
 /// How many copies and operations a history has at most: enough for a copy's work to race
 /// forgets of it from two sides, and for merges of merges.

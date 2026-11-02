@@ -1362,6 +1362,12 @@ fn realization_beside_a_fetch_keeps_the_fetch_while_taking_an_abandon() {
     };
     jj(&f, &["bookmark", "create", "dropped", "-r", "@"]);
     let dropped = f.load(HERE).op_id().hex();
+    let dropped_canonical = f
+        .node(HERE)
+        .canonicalize(&musubi_jj::op_id::LocalOp(
+            OperationId::try_from_hex(&dropped).unwrap(),
+        ))
+        .unwrap();
     f.sync();
     jj(&f, &["new", "-m", "kept"]);
     jj(&f, &["op", "abandon", &dropped]);
@@ -1385,8 +1391,62 @@ fn realization_beside_a_fetch_keeps_the_fetch_while_taking_an_abandon() {
     f.repo(THERE).jj(&["git", "fetch"]);
     // As `realize` does on a node opened since the records were prepared, which gives the
     // fetch a canonical form on the abandoned operation.
-    f.node(THERE).canonical_heads().unwrap();
+    let old_heads = f.node(THERE).canonical_heads().unwrap();
+    let incoming = f
+        .node(THERE)
+        .to_node(&musubi_jj::records::HubOp(musubi_jj::op_id::CanonicalOp(
+            OperationId::try_from_hex(known.hex()).unwrap(),
+        )))
+        .unwrap()[0]
+        .0
+        .clone();
+    // Independently contract the old heads, then take max(images(heads) ∪ {incoming}).
+    // Using the old names as parents would revive the dropped operation.
+    let node = f.node(THERE);
+    let store = node.canonical_store();
+    let mut contraction =
+        musubi_jj::canonical::Contraction::new(store, [dropped_canonical.clone()]).unwrap();
+    let mut candidates = vec![incoming.clone()];
+    for head in &old_heads {
+        candidates.extend(contraction.images(store, head).unwrap());
+    }
+    let expected_parents: std::collections::BTreeSet<_> = candidates
+        .iter()
+        .filter(|a| {
+            !candidates
+                .iter()
+                .any(|b| a != &b && store.is_ancestor_of(a, b).unwrap())
+        })
+        .cloned()
+        .collect();
+    assert_eq!(
+        expected_parents.len(),
+        2,
+        "the renamed fetch and the incoming head"
+    );
+
     f.hive.members[THERE].adapter.advance(&known).unwrap();
+    // Observe the returned raw heads before any subsequent jj command merges them.
+    let node = f.node(THERE);
+    let heads = node.local_heads().unwrap();
+    assert_eq!(heads.len(), 1);
+    let merged = block_on(node.loader().op_store().read_operation(&heads[0].0)).unwrap();
+    let parents: std::collections::BTreeSet<_> = merged
+        .parents
+        .iter()
+        .map(|p| {
+            node.canonicalize(&musubi_jj::op_id::LocalOp(p.clone()))
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(parents, expected_parents);
+    let canonical = node.canonicalize(&heads[0]).unwrap();
+    assert!(
+        !node
+            .canonical_store()
+            .is_ancestor_of(&dropped_canonical, &canonical)
+            .unwrap()
+    );
     assert_eq!(git_y(&f), two, "the fetch in .git");
     let ops = |f: &Fixture, index: usize| {
         let template = "description ++ \"\\n\"";

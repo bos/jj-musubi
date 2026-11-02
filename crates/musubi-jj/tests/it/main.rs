@@ -4,6 +4,10 @@
 mod format_guard_props;
 mod git_executable;
 mod join;
+#[path = "../../../musubi-core/tests/support/oracle.rs"]
+#[allow(dead_code, clippy::unwrap_used)]
+mod oracle;
+
 mod presence;
 mod ref_laws;
 mod translation;

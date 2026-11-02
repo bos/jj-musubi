@@ -210,8 +210,9 @@ end State
 
 /-! ## Steps -/
 
-/-- Environment actions (outside musubi, through `jj`). These are the only actions that
-create canonical operations. -/
+/-- Operation-creating actions with jj's semantics. A command may cause them, or musubi may
+invoke jj's merge while loading or advancing a repository. These are the only actions that
+create canonical operations; the classification is by effect, not by caller. -/
 inductive EnvStep (N : Nat) : State → State → Prop
   | userOp (s : State) (n p : Nat) (O : List Nat) (hn : n < N) (hp : (s.node n).lops p) :
       EnvStep N s (s.userOp n p O)

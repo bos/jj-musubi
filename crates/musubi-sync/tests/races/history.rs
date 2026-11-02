@@ -820,6 +820,54 @@ fn abandoning_the_latest_work_of_a_forgotten_copy_keeps_its_workspaces() {
     hive.assert_converged();
 }
 
+/// …where the machine forgot the copy before the abandon, and hasn't published the forget: the
+/// fix-up, written above the forget, does the copy's work again and then forgets it again, as
+/// it is forgotten there. Below the forget, where the abandon's rewrite leaves the hive's head,
+/// the copy is present: going by that, the fix-up would leave it present, with none of its
+/// workspaces in the hive's view, and the copy would lose its own.
+#[test]
+fn abandoning_the_latest_work_of_a_copy_just_forgotten_keeps_it_forgotten() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(1, "b", "from beta");
+    hive.sync();
+    let work = newest_of(hive.repo(0), "beta");
+    // Alpha's work above beta's, published: the abandon keeps it, with presence as it was,
+    // naming beta's work, which it drops, so the fix-up does that work again. The forget is
+    // then alpha's only operation the hub lacks.
+    hive.commit(0, "a", "from alpha");
+    hive.hive.sync(0).unwrap();
+    let beta = hive.machine_key(1);
+    assert!(hive.node(0).forget_copy(&beta, "beta").unwrap());
+    hive.repo(0).jj(&["op", "abandon", &work]);
+    hive.sync();
+    let (pass_on, _) = op_log(hive.repo(0))
+        .into_iter()
+        .find(|(_, d)| d == "musubi: pass on jj op abandon")
+        .unwrap();
+    let attributes = hive.repo(0).jj(&[
+        "--at-op",
+        &pass_on,
+        "--ignore-working-copy",
+        "op",
+        "log",
+        "--no-graph",
+        "-n",
+        "1",
+        "-T",
+        "attributes",
+    ]);
+    assert!(
+        attributes.contains(&format!("musubi.forget: {beta}")),
+        "{attributes}"
+    );
+    assert!(
+        hive.workspace_names(1).contains("beta"),
+        "{:?}",
+        hive.workspace_names(1)
+    );
+    hive.assert_converged();
+}
+
 /// With `snapshot.auto-update-stale`, a command in a workspace whose working copy recorded an
 /// operation `jj op abandon` rewrote brings back what jj abandoned, as on one machine
 /// (races.md, "Known jj limitations"). A later `jj op abandon` below that then moves what came

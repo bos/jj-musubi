@@ -189,8 +189,12 @@ struct Work {
     copy: String,
     forget_after: Option<String>,
     worked_at: Option<i64>,
-    /// Whether the copy was forgotten after this work: a forget follows.
-    forgotten: bool,
+    /// Whether a forget follows: whether the copy is forgotten at the op head the fix-up is
+    /// written on. Decided as it starts, and kept, as by a fix-up that replaces it, since the
+    /// fix-up's own work would make the copy present at the op head if it is written again
+    /// after a crash.
+    #[serde(default)]
+    forgotten: Option<bool>,
 }
 
 fn hex_ids(record: &Record) -> Vec<String> {
@@ -1195,6 +1199,19 @@ impl NodeRepo {
         if let (Some(old), Some(new)) = (from, new_head) {
             let mut fixup = self.fixup_between(&old, &new)?;
             fixup.expected = expected;
+            // A fix-up this one replaces may have been written in part, before a crash: the
+            // op head then has its work, so decide as it did.
+            if let Some(replaced) = &self.records.fixup
+                && !self.records.fixup_written
+            {
+                for work in &mut fixup.work {
+                    work.forgotten = replaced
+                        .work
+                        .iter()
+                        .find(|was| was.copy == work.copy)
+                        .and_then(|was| was.forgotten);
+                }
+            }
             self.records.fixup = Some(fixup);
             self.records.fixup_written = false;
             self.records.fixup_from = Some(old);
@@ -2097,7 +2114,7 @@ impl NodeRepo {
     /// through an abandon"), but where a copy's latest work, or the `musubi.forget-after` it
     /// last recorded, is work the abandon dropped, the fix-up does it again, with when it was
     /// done and what it recorded, so that what comes after has it; then forgets the copy
-    /// again if it was forgotten.
+    /// again if it is forgotten where the fix-up is written ([`Self::write_fixup`]).
     fn fixup_between(&mut self, old: &CanonicalOp, new: &CanonicalOp) -> Result<Fixup, NodeError> {
         let before = self.presence(old)?;
         let after = self.presence(new)?;
@@ -2112,7 +2129,7 @@ impl NodeRepo {
                     .has_forget_after(copy)
                     .then(|| format_forget_after(before.forget_after(copy))),
                 worked_at: self.worked_at(&before, copy)?,
-                forgotten: !after.is_present(copy),
+                forgotten: None,
             });
         }
         let (was, is) = (self.settings_at(old)?, self.settings_at(new)?);
@@ -2218,10 +2235,22 @@ impl NodeRepo {
         if self.records.fixup_written {
             return Ok(None);
         }
-        let fixup = self.records.fixup.clone().unwrap_or_default();
         let mut after_work: Vec<String> = vec![];
         let head = self.merged_repo_unchecked()?;
         let canonical_head = self.canonicalize(&LocalOp(head.op_id().clone()))?;
+        // Which copies are forgotten at the op head, which may have operations above the
+        // fix-up's `new`, as a forget not yet published: the fix-up leaves each so.
+        if let Some(fixup) = &self.records.fixup
+            && fixup.work.iter().any(|work| work.forgotten.is_none())
+        {
+            let presence = self.presence(&canonical_head)?;
+            for work in &mut self.records.fixup.as_mut().expect("matched above").work {
+                work.forgotten
+                    .get_or_insert_with(|| !presence.is_present(&work.copy));
+            }
+            self.save_records()?;
+        }
+        let fixup = self.records.fixup.clone().unwrap_or_default();
         let shown = self.shown_names(&canonical_head)?;
         // The first operation restores them, so that no operation of the fix-up has them as
         // the rewritten history would.
@@ -2261,7 +2290,7 @@ impl NodeRepo {
                 "musubi: keep {display}'s last use after jj op abandon"
             ))
             .block_on()?;
-            if work.forgotten {
+            if work.forgotten == Some(true) {
                 after_work.push(work.copy.clone());
             }
         }

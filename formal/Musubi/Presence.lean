@@ -227,10 +227,10 @@ theorem forget_absent {f k : Nat} (hF : h.forget f k) : ¬ h.Present f k :=
 A contraction keeps presence at every operation it keeps (`PresenceContract.lean`), but the
 work it names may be work the abandon dropped. So the machine that abandons writes, on the
 rewritten head, a fix-up: work again by each copy whose latest work was dropped, then a forget
-of it if it was forgotten, one operation each, so that every one is well formed
-(docs/internals/design.md, "The fix-up"). These two lemmas say what such a chain does: an
-operation on one parent that is work by `k`, or a forget of `k`, gives `k` the presence meant
-(`T`), and one that is neither leaves `k` as its parent has it. -/
+of it if the op head it is written on has it forgotten, one operation each, so that every one
+is well formed (docs/internals/design.md, "The fix-up"). These two lemmas say what such a chain
+does: an operation on one parent that is work by `k`, or a forget of `k`, gives `k` the presence
+meant (`T`), and one that is neither leaves `k` as its parent has it. -/
 
 /-- An operation on one parent, made to restore `T` for copy `k` (work by `k` where `k` is
 absent and `T` holds, a forget of `k` where it is present and `T` doesn't, neither otherwise),

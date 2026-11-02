@@ -928,7 +928,11 @@ that publishes a dropped set first writes, on its head, a fix-up that puts it ba
 its head before the abandon:
 
 - work by every copy whose latest work or forget-after the abandon dropped, one operation each,
-  recording that work's time and forget-after, then a forget of it again if it was forgotten;
+  recording that work's time and forget-after, then a forget of it again if it is forgotten at
+  the op head the fix-up is written on, which may have operations the rewritten history lacks,
+  as a forget not yet published. The machine decides that as the fix-up starts, and saves it
+  before writing anything, keeping it through a fix-up that replaces this one: written again
+  after a crash, the fix-up would find its own work at the op head, and the copy present;
 - in the first operation, the hive's settings and the conflicted remote bookmarks' expected
   values as they were. These are worked out when the machine notices the abandon, and until
   the fix-up is written, every export of the machine's refs takes them as known at the op head

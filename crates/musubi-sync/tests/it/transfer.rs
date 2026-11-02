@@ -14,6 +14,7 @@ use musubi_jj::objects::Backend;
 use musubi_jj::op_id::CanonicalOp;
 use musubi_sync::hive::Hive;
 use musubi_sync::hub::HubAdapter;
+use musubi_sync::node::NodeAdapter;
 use musubi_testutil::TestEnv;
 use musubi_testutil::TestRepo;
 
@@ -56,12 +57,12 @@ fn bundles_left_by_a_killed_process_are_removed() {
     let env = TestEnv::new();
     let alpha = env.init_repo("alpha");
     let hub_dir = env.root().join("hub");
-    let mut hive = Hive::new(&hub_dir, Backend::Git).unwrap();
-    let a = join(&mut hive, &alpha);
-    hive.sync(a).unwrap();
+    let hub = HubAdapter::init(&hub_dir, Backend::Git).unwrap();
+    let node = NodeRepo::open(&alpha.repo_path(), &alpha.settings()).unwrap();
     let dirs = [hub_dir.join("tmp"), alpha.repo_path().join("musubi/tmp")];
     let day_old = SystemTime::now() - Duration::from_secs(25 * 3600);
     for dir in &dirs {
+        std::fs::create_dir_all(dir).unwrap();
         File::create(dir.join("left"))
             .unwrap()
             .set_modified(day_old)
@@ -69,9 +70,9 @@ fn bundles_left_by_a_killed_process_are_removed() {
         // Perhaps another process's, still in use.
         File::create(dir.join("new")).unwrap();
     }
-    hive.restart_hub().unwrap();
-    let node = NodeRepo::open(&alpha.repo_path(), &alpha.settings()).unwrap();
-    hive.add(node).unwrap();
+    drop(hub);
+    let _hub = HubAdapter::open(&hub_dir).unwrap();
+    let _node = NodeAdapter::new(node).unwrap();
     for dir in &dirs {
         assert!(!dir.join("left").exists(), "{} kept it", dir.display());
         assert!(dir.join("new").exists(), "{} lost a new one", dir.display());

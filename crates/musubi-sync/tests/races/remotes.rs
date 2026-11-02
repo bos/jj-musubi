@@ -125,42 +125,6 @@ fn remote_changed_on_two_machines_at_once() {
     assert_eq!(remotes(&hive, 1), expected);
 }
 
-/// A machine upgrading from before writes were timed, which last applied a remote that the
-/// hive has since removed (leaving no record of the removal, as the untimed version
-/// didn't), removes it too, rather than bringing it back, and keeps its own new ones.
-#[test]
-fn an_upgraded_machine_takes_removals_made_before_times() {
-    let mut hive = Fixture::new(&["alpha", "beta"]);
-    hive.sync();
-    let beta = hive.repo(1);
-    beta.jj(&[
-        "git",
-        "remote",
-        "add",
-        "gone",
-        "https://example.com/gone.git",
-    ]);
-    // beta's settings state as the untimed version left it, having applied `gone`.
-    let state = beta.repo_path().join("musubi/settings.json");
-    let mut json: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&state).unwrap()).unwrap();
-    json["settings"]["remotes"] =
-        serde_json::json!({"gone": {"url": "https://example.com/gone.git"}});
-    std::fs::write(&state, serde_json::to_vec(&json).unwrap()).unwrap();
-    beta.jj(&[
-        "git",
-        "remote",
-        "add",
-        "mine",
-        "https://example.com/mine.git",
-    ]);
-    hive.sync();
-    hive.assert_converged();
-    let expected = "mine https://example.com/mine.git\n";
-    assert_eq!(remotes(&hive, 0), expected);
-    assert_eq!(remotes(&hive, 1), expected);
-}
-
 /// A joining machine keeps its own remotes, even one by a name the hive once removed.
 #[test]
 fn a_joining_machine_keeps_a_remote_the_hive_removed() {

@@ -74,6 +74,12 @@ workspace:
 3. Run the tests with the workflow's filter.
 4. Afterwards, `jj restore` the files the script rewrote, and `Cargo.lock`.
 
+Tests of policy helpers, such as gc's thresholds or the refs test's expected-value choice,
+need no repository. Tests of construction, such as the adapters' abandoned-bundle cleanup,
+need no sync. Checks that do need joined repositories share an existing test's setup where
+possible, as fresh-copy gc eligibility does. Old musubi-format upgrade scenarios are outside
+the pre-1.0 compatibility promise; the encoding checks stay.
+
 ## Protocol property tests
 
 A Hegel state machine owns a hub and several nodes, all of them `musubi-core`'s sans-IO state

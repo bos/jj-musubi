@@ -427,10 +427,13 @@ links:
 
 1. **The laws.** `ref_laws::merge_ref_targets_obeys_ref_alg`, in
    `crates/musubi-jj/tests/it/ref_laws.rs`, checks `merge a b b = a`, `merge b b c = c` and
-   `merge a b a = a` for jj-lib's `merge_ref_targets` on 300 triples of targets from a small
-   real repository: absent, one commit (the root among them), or a conflict of three or five
-   terms, any of them absent. jj resolves these before looking at commits
-   (`trivial_merge`), so a failure means a jj upgrade changed that.
+   `merge a b a = a` for jj-lib's `merge_ref_targets` on 300 triples of synthetic targets:
+   absent, one commit id (the root among them), or a conflict of three or five terms, any of
+   them absent. jj resolves these before looking at commits (`trivial_merge`), so the test
+   needs only an empty repository's index, with no commit graph to build. A failure means a
+   jj upgrade changed that. `ref_laws::a_fetch_can_resolve_a_conflict_to_neither_side` pins a
+   merge a run Hegel found: `base - one + absent`, merged with `one` against `base`, resolves
+   to absence, which neither side had.
 2. **The steps.** `refs::bookmarks_conform_to_refs_model`, in
    `crates/musubi-sync/tests/races/refs.rs`, is a Hegel state machine over two colocated
    repositories synced through an in-process hub, as in the race catalogue. It follows a
@@ -477,10 +480,9 @@ links:
    `realization_beside_a_fetch_here_keeps_the_fetch` is the same on this machine, against the
    model (`beside_keeps_fetch`): the other machine merges its own operation with this one's
    restore of a conflict, keeping it, while this machine fetches a term of it.
-   `realization_beside_a_fetch_can_resolve_to_neither`, another run Hegel found, has a fetch
-   here beside the realization of a conflict between this machine's fetch and the other's
-   deletion of `y`, and the merge of the two cancels the conflict, leaving `y@origin` resolved
-   to a value neither has, whose expected value is itself.
+   `a_resolved_merge_is_its_own_expected_value` checks the test's expected-value helper
+   directly, without a repository or oracle: a resolved merge, absent included, has its own
+   expected value even if neither parent had it, and never asks for a conflict side.
 
    musubi's *shortcut* for merging per-machine fields (`PerMachine::merged_trivially`) takes
    the side that changed, where at most one did; otherwise, or where a side has a tracked

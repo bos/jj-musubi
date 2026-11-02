@@ -672,27 +672,26 @@ fn conflicted_expected(model: &Model) -> Option<RefTarget> {
     (!Alg::resolved(&origin.v.r)).then(|| origin.e.clone())
 }
 
-/// The expected value of `y@origin` in `merged`, a merge of `heads`, in that order if
+/// The expected value of `y@origin` at `r`, a merge of `heads`, in that order if
 /// `in_order`: the remote bookmark if it is resolved, as where a fetch and a conflict on it
 /// merge to neither, or else the first parent's with the same conflict, or the side, where
 /// the merge made it.
 fn merged_expected(
-    alg: &Alg,
-    merged: &[Slot; 4],
-    mut heads: [&Model; 2],
+    side: impl FnOnce(&RefTarget) -> Option<RefTarget>,
+    r: &RefTarget,
+    mut heads: [&Machine; 2],
     in_order: bool,
 ) -> RefTarget {
-    let r = &merged[Ref::Origin as usize].r;
     if Alg::resolved(r) {
         return r.clone();
     }
     if !in_order {
         heads.reverse();
     }
-    match heads.iter().find(|m| m.get(Ref::Origin).v.r == *r) {
-        Some(parent) => parent.get(Ref::Origin).expected(),
+    match heads.iter().find(|m| m.v.r == *r) {
+        Some(parent) => parent.expected(),
         // Two fetches' conflict has a side, a commit: one of them fetched it.
-        None => alg.side(r).expect("a fetched side"),
+        None => side(r).expect("a fetched side"),
     }
 }
 
@@ -958,8 +957,12 @@ impl Refs {
                 } else {
                     Model::merge(&self.alg, &base, &theirs, &at_ours)
                 };
-                let e =
-                    merged_expected(&self.alg, &merged, [&at_ours, &theirs], parents[0] == ours);
+                let e = merged_expected(
+                    |r| self.alg.side(r),
+                    &merged[Ref::Origin as usize].r,
+                    [&at_ours, &theirs].map(|m| m.get(Ref::Origin)),
+                    parents[0] == ours,
+                );
                 for (r, v) in Ref::ALL.into_iter().zip(merged) {
                     realized.at(r).v = v;
                 }
@@ -980,9 +983,9 @@ impl Refs {
                     Model::merge(&self.alg, &at_ours, &realized, &self.model)
                 };
                 let e = merged_expected(
-                    &self.alg,
-                    &merged,
-                    [&self.model, &realized],
+                    |r| self.alg.side(r),
+                    &merged[Ref::Origin as usize].r,
+                    [&self.model, &realized].map(|m| m.get(Ref::Origin)),
                     parents[0] == mine,
                 );
                 for (r, v) in Ref::ALL.into_iter().zip(merged) {
@@ -1235,23 +1238,38 @@ fn realization_beside_a_fetch_keeps_the_fetch() {
     refs.musubi_realizes_with(Some((Ref::X, root)), base, false, false, None);
 }
 
-/// A fetch beside a realization of a conflict that merges with it to neither, as Hegel found:
-/// this machine fetches `base` while the other, behind, fetches `y` deleted in `origin`, so
-/// that the realization conflicts `y@origin` as `base - one + absent`, from `one`, where both
-/// started. Beside it, this machine fetches `one`, a change of `one - base`, and in jj's merge
-/// of the two its `one` and `base` cancel the conflict's, leaving `y@origin` absent, which
-/// neither has. The expected value of a resolved remote bookmark is itself, so there is no side
-/// to write.
+/// A resolved merge has its own expected value even if neither parent had it: absence
+/// included, where there is no conflict side to choose. jj's merge that produces this is
+/// pinned by `ref_laws::a_fetch_can_resolve_a_conflict_to_neither_side`.
 #[test]
-fn realization_beside_a_fetch_can_resolve_to_neither() {
-    let mut refs = Refs::new();
-    let [base, one] = [1, 2].map(|i| RefTarget::normal(refs.commits[i].clone()));
-    assert_eq!(refs.upstream, one);
-    refs.jj_fetches_from(base);
-    let fetch = Some(Beside::Fetches(one));
-    refs.musubi_realizes_with(None, RefTarget::absent(), false, true, fetch);
-    let origin = refs.model.get(Ref::Origin);
-    assert!(origin.v.r.is_absent(), "{origin:?}");
+fn a_resolved_merge_is_its_own_expected_value() {
+    let present = RefTarget::normal(CommitId::from_bytes(&[1; 20]));
+    let parent = Machine {
+        v: Slot {
+            l: present.clone(),
+            r: present.clone(),
+            k: present.clone(),
+            tr: true,
+        },
+        g: present.clone(),
+        e: present.clone(),
+        moved: false,
+        restored: false,
+    };
+    for target in [
+        RefTarget::absent(),
+        RefTarget::normal(CommitId::from_bytes(&[2; 20])),
+    ] {
+        assert_eq!(
+            merged_expected(
+                |_| panic!("a resolved merge needs no side"),
+                &target,
+                [&parent, &parent],
+                true
+            ),
+            target,
+        );
+    }
 }
 
 /// A fetch here beside a realization of a conflict, `beside_keeps_fetch` as musubi does it:

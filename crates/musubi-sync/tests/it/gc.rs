@@ -83,6 +83,13 @@ fn gc_keeps_every_commit_the_hive_requires() {
     alpha.write_file("g", "1");
     alpha.jj(&["abandon", "@"]);
     hive.sync_all().unwrap();
+    // A small hive has real cruft, but not enough to make collection worthwhile.
+    for repo in [&alpha, &beta] {
+        let cruft = gc::Cruft::of(&repo.repo_path());
+        assert!(cruft.extras_files > 0 && cruft.keep_refs > 0, "{cruft:?}");
+        assert!(!cruft.worth_collecting(), "{cruft:?}");
+        assert!(!gc::due(&repo.repo_path(), SystemTime::now()));
+    }
     beta.write_file("h", "1");
     beta.jj(&["commit", "-m", "beta work"]);
     hive.sync_all().unwrap();
@@ -171,25 +178,4 @@ fn objects_removed_before_realizing_are_fetched_again() {
         "f",
     ]);
     assert_eq!(content, "alpha's work");
-}
-
-/// A copy that has just joined has too little to clean up for gc to be due, however long
-/// since it last ran: it would only spend time on a machine that may not live long.
-#[test]
-fn a_new_copy_is_not_worth_collecting() {
-    let env = TestEnv::new();
-    let alpha = env.init_repo("alpha");
-    let beta = env.init_repo("beta");
-    let mut hive = Hive::new(&env.root().join("hub"), Backend::Git).unwrap();
-    join(&mut hive, &alpha);
-    join(&mut hive, &beta);
-    alpha.write_file("f", "1");
-    alpha.jj(&["commit", "-m", "one"]);
-    hive.sync_all().unwrap();
-    for repo in [&alpha, &beta] {
-        let cruft = gc::Cruft::of(&repo.repo_path());
-        assert!(cruft.extras_files > 0 && cruft.keep_refs > 0, "{cruft:?}");
-        assert!(!cruft.worth_collecting(), "{cruft:?}");
-        assert!(!gc::due(&repo.repo_path(), SystemTime::now()));
-    }
 }

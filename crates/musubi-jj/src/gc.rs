@@ -269,18 +269,43 @@ mod tests {
         assert!(waited(&path, now + INTERVAL));
     }
 
+    /// The thresholds include their boundary, and either kind of cruft can justify a run.
+    #[test]
+    fn collection_needs_enough_cruft() {
+        let worth = |extras_files, keep_refs| {
+            Cruft {
+                extras_files,
+                keep_refs,
+            }
+            .worth_collecting()
+        };
+        assert!(!worth(0, 0));
+        assert!(!worth(EXTRAS_FILES, KEEP_REFS_COUNT));
+        assert!(worth(EXTRAS_FILES + 1, 0));
+        assert!(worth(0, KEEP_REFS_COUNT + 1));
+    }
+
     /// Whether the machine is on battery is asked only once gc would otherwise run: on
-    /// macOS, asking starts a process.
+    /// macOS, asking starts a process. A recent marker or too little cruft rules a run out.
     #[test]
     fn the_battery_is_asked_last() {
-        let env = TestEnv::new();
-        let repo = repo(&env);
-        let path = repo.repo_path();
+        let dir = musubi_testutil::tempdir();
+        let extra = dir.path().join("store/extra");
+        fs::create_dir_all(&extra).unwrap();
+        for n in 0..=EXTRAS_FILES {
+            fs::write(extra.join(n.to_string()), []).unwrap();
+        }
+        fs::create_dir(dir.path().join("musubi")).unwrap();
         let now = SystemTime::now();
-        assert!(collect_if_due_at(&path, &repo.settings(), now, mains).unwrap());
-        assert!(!due_unless(&path, now + DAY, || panic!(
-            "asked about the battery"
-        )));
+        fs::File::create(marker(dir.path()))
+            .unwrap()
+            .set_modified(now)
+            .unwrap();
+        let battery = || panic!("asked about the battery");
+        assert!(!due_unless(dir.path(), now + DAY, battery));
+        fs::remove_file(marker(dir.path())).unwrap();
+        fs::remove_dir_all(extra).unwrap();
+        assert!(!due_unless(dir.path(), now, battery));
     }
 
     /// A run that fails waits a week too, rather than trying again at every check.

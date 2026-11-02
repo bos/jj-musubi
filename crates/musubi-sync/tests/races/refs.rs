@@ -673,8 +673,9 @@ fn conflicted_expected(model: &Model) -> Option<RefTarget> {
 }
 
 /// The expected value of `y@origin` in `merged`, a merge of `heads`, in that order if
-/// `in_order`: the first parent's with the same conflict, or the side, where the merge made
-/// it.
+/// `in_order`: the remote bookmark if it is resolved, as where a fetch and a conflict on it
+/// merge to neither, or else the first parent's with the same conflict, or the side, where
+/// the merge made it.
 fn merged_expected(
     alg: &Alg,
     merged: &[Slot; 4],
@@ -682,6 +683,9 @@ fn merged_expected(
     in_order: bool,
 ) -> RefTarget {
     let r = &merged[Ref::Origin as usize].r;
+    if Alg::resolved(r) {
+        return r.clone();
+    }
     if !in_order {
         heads.reverse();
     }
@@ -1229,6 +1233,25 @@ fn realization_beside_a_fetch_keeps_the_fetch() {
     let (there, g) = read(&refs.fixture.load(THERE), Ref::Origin);
     assert_eq!((&there.r, &there.k, &g), (&base, &base, &base));
     refs.musubi_realizes_with(Some((Ref::X, root)), base, false, false, None);
+}
+
+/// A fetch beside a realization of a conflict that merges with it to neither, as Hegel found:
+/// this machine fetches `base` while the other, behind, fetches `y` deleted in `origin`, so
+/// that the realization conflicts `y@origin` as `base - one + absent`, from `one`, where both
+/// started. Beside it, this machine fetches `one`, a change of `one - base`, and in jj's merge
+/// of the two its `one` and `base` cancel the conflict's, leaving `y@origin` absent, which
+/// neither has. The expected value of a resolved remote bookmark is itself, so there is no side
+/// to write.
+#[test]
+fn realization_beside_a_fetch_can_resolve_to_neither() {
+    let mut refs = Refs::new();
+    let [base, one] = [1, 2].map(|i| RefTarget::normal(refs.commits[i].clone()));
+    assert_eq!(refs.upstream, one);
+    refs.jj_fetches_from(base);
+    let fetch = Some(Beside::Fetches(one));
+    refs.musubi_realizes_with(None, RefTarget::absent(), false, true, fetch);
+    let origin = refs.model.get(Ref::Origin);
+    assert!(origin.v.r.is_absent(), "{origin:?}");
 }
 
 /// A fetch here beside a realization of a conflict, `beside_keeps_fetch` as musubi does it:

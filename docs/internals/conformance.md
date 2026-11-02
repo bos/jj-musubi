@@ -449,7 +449,7 @@ links:
    | A `jj` command at the operation before the latest action (`--at-op`) moves `x` or `y`, and `jj status` follows | on the older operation's slots, `set` and `jjExport` of every ref (it imports nothing); then `TSlot.merge` of the head with them against the older operation's, in the order of the merge operation's parents, then as a `jj` command that changes nothing |
    | `jj undo`, or `jj op restore` to the operation before the latest action or to the one both machines last synced at | as a `jj` command that imports; then, if it restored an operation, which its description names, every ref's slot but `K` from that operation's view (`restoreLocal`, `restoreRemote`), the expected value the head's (`restoreC`), and `jjExport` of every ref |
    | The other machine moves `x` or `t` or fetches `y`, and both sync, with `refs/heads/x.lock` held here or not | `LStep.advance` of `x`, `y` and `t` and `CStep.advance` of `y@origin`, with this machine's expected value, then `jjExport` of every ref, except where the lock makes `x`'s update fail, then `exportConflicted` of `y@origin`; nothing if there was nothing to realize |
-   | The other machine moves `x` or `t` or fetches `y` before it has this machine's latest operations, merges them with its own as it syncs, and this machine syncs | the other's operation realized from the slots both last synced at, and `realizeMerge` of it with the head, against those slots, in the order of the merge's parents, which is `TSlot.merge`; then the exports, as above. Two fetches that moved `y@origin` to different values merge to a conflict, whose expected value is its side; a conflict from one parent keeps that parent's |
+   | The other machine moves `x` or `t` or fetches `y` before it has this machine's latest operations, merges them with its own as it syncs, and this machine syncs | the other's operation realized from the slots both last synced at, and `realizeMerge` of it with the head, against those slots, in the order of the merge's parents, which is `TSlot.merge`; then the exports, as above. Two fetches that moved `y@origin` to different values merge to a conflict, whose expected value is its side; a conflict from one parent keeps that parent's, and a merge that resolves it has the remote bookmark itself |
    | Either of the last two, with a `jj` command here that moves `x`, `y` or `t` or fetches `y` after the other machine's operations and before this machine syncs | the command, as above; then the other's operation realized as above from this machine's slots before the command, and `jjExport` of every ref, against `.git` as the command left it, then `exportConflictedBeside` of `y@origin` against the command's record; then `TSlot.merge` of the two against the slots before the command, in the order of the merge's parents, and the exports, as above, with the merge's expected value: `LStep.beside` and `CStep.beside`. The other machine then syncs |
 
    The mapping follows what jj does. jj imports `x@git`, `y@git` and `y@origin` in that
@@ -477,6 +477,10 @@ links:
    `realization_beside_a_fetch_here_keeps_the_fetch` is the same on this machine, against the
    model (`beside_keeps_fetch`): the other machine merges its own operation with this one's
    restore of a conflict, keeping it, while this machine fetches a term of it.
+   `realization_beside_a_fetch_can_resolve_to_neither`, another run Hegel found, has a fetch
+   here beside the realization of a conflict between this machine's fetch and the other's
+   deletion of `y`, and the merge of the two cancels the conflict, leaving `y@origin` resolved
+   to a value neither has, whose expected value is itself.
 
    musubi's *shortcut* for merging per-machine fields (`PerMachine::merged_trivially`) takes
    the side that changed, where at most one did; otherwise, or where a side has a tracked

@@ -9,6 +9,10 @@ dev:
 release:
     cargo build --locked -p jj-musubi --release
 
+# Show the balance of production, proof/model, test and miscellaneous code (needs tokei).
+loc:
+    @python3 contrib/loc.py
+
 # Install musubi (`just install dev` for a dev build) and restart a running daemon.
 install profile="release":
     #!/usr/bin/env bash

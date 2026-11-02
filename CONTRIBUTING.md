@@ -28,6 +28,25 @@ You need:
 Run `just --list` to see every recipe. `just dev` builds `target/debug/musubi`, and
 `just install` installs it and restarts a running daemon.
 
+## Code size
+
+`just loc` (Python 3 and `tokei` on `PATH`) shows code lines and shares by purpose, with Rust
+and Lean first and the smaller languages combined. It counts the current checkout, including
+edits, and excludes blank lines, comments, documentation, lockfiles and ignored build output.
+The categories are:
+
+- **Production:** Rust under the crates' `src/`, excluding test-only and Kani items.
+- **Proof/model:** Lean models, executable models and proofs, and Rust's Kani harnesses.
+- **Tests:** integration and inline tests, test helpers, fuzzing, the Lean oracle's I/O and
+  codec, and Lean files named `*Test.lean`.
+- **Misc:** benchmarks, examples, developer scripts, configuration and CI.
+
+This is an estimate by purpose, not a count of proved statements or test coverage. The Rust
+split recognizes rustfmt-formatted top-level `cfg(test)`, `cfg(all(test, ...))`, `cfg(fuzzing)`,
+`cfg(any(test, fuzzing))` (in either order) and `cfg(kani)` items, and follows their out-of-line
+test modules. Other conditional code stays with its file. Embedded examples in documentation
+aren't code in this report.
+
 ## Checks
 
 ```sh

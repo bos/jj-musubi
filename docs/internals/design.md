@@ -903,6 +903,22 @@ takes the records. Where the command's operation is beside the realization of th
 the realization is merged with its rewrite, as with any realization beside a machine's own
 heads ([Local integration](#local-integration)), and the merge goes where the heads move.
 
+Before moving the op heads, the machine saves the records it is taking in the same
+`records.json` write that counts their renaming, with the renamed pending drops and fix-up
+state. Otherwise a stop after the renaming left a machine that had dropped the operations
+without holding their records or having them pending; if the hub lost those records, it
+retried a push carrying no drops, which the hub kept rejecting. This save makes it responsible
+for publishing the drops again. A failed save restores the previous in-memory bookkeeping;
+the appended logs count only once the save succeeds. A saved move intent keeps the exact old
+heads and their images, the target heads, and the local-to-canonical facts needed after losing
+the disposable translation cache. Recovery finishes partial publication and moves workspace
+records, keeping newer heads a `jj` command made and detecting any further abandonment. The
+intent remains until the affected heads are physically normalized and the workspace pass is
+complete, so a second crash and cache loss can resume too. Taking the
+records can therefore finish during `advance`, without a later `Adopted` core step; the
+adapter invalidates its staged graph and ancestry cache when that changes its record state,
+including when the advance subsequently returns an error.
+
 Each machine keeps, for every id a record superseded, the id or ids it became, and translation
 renames through it. An operation that a `jj` command wrote on a superseded operation, having
 loaded the repository before the record arrived, is canonicalized with its parents renamed;

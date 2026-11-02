@@ -100,6 +100,9 @@ pub(super) struct Records {
     /// Whether this node is moving its op heads to the rewrites of a renaming it recorded,
     /// as a restart then resumes.
     moving: bool,
+    /// Where records this node took move its op heads and workspaces, until they have: a
+    /// restart moves them there (`realign_heads`).
+    realign: Option<Realign>,
     /// How many renamings this node made: applied records', and rewrites of this node's own
     /// drops.
     steps: usize,
@@ -119,6 +122,111 @@ pub(super) struct Records {
     to_node: std::sync::Mutex<Option<Contraction>>,
     /// The hub's records this node is getting ready to take.
     taking: Option<Taking>,
+    /// For tests of crashes and errors: where the next taking of records stops.
+    stop: Option<TakingStop>,
+    /// Whether `realign`'s translations are in the translation cache, as this opened it.
+    realign_mapped: bool,
+}
+
+/// Where a test stops the next taking of records ([`NodeRepo::fail_holding_records`],
+/// [`NodeRepo::crash_taking_records`], [`NodeRepo::crash_publishing_taken_heads`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TakingStop {
+    /// The write that holds them fails, having written none of it.
+    Hold,
+    /// Once they are held, before the op heads move there.
+    Heads,
+    /// Once the new op heads are in, before the old ones come out.
+    Publishing,
+    /// Once the op heads moved there, before the workspaces.
+    Workspaces,
+}
+
+/// Where taking records moves the op heads and the workspaces, by the local operations
+/// themselves, which, unlike the translation cache, a crash doesn't lose, written with the
+/// records before anything moves.
+#[derive(Clone, Debug)]
+struct Realign {
+    /// The op heads as they were, each with what it becomes.
+    from: HashMap<LocalOp, Vec<LocalOp>>,
+    /// The op heads they become.
+    to: Vec<LocalOp>,
+    /// The canonical operation each local operation the move names stands for, as the
+    /// translation cache had it, and the rewrites of those the records rename: for the
+    /// workspaces to move as the op heads did, and a `jj` command written on the op heads
+    /// meanwhile to be canonicalized, and moved where the records name the history, as any
+    /// other, even where the translation cache lost them since.
+    canonical: HashMap<LocalOp, CanonicalOp>,
+}
+
+/// [`Realign`] as `records.json` has it, in hex.
+#[derive(Serialize, Deserialize)]
+struct RealignFile {
+    from: Vec<(String, Vec<String>)>,
+    to: Vec<String>,
+    canonical: Vec<(String, String)>,
+}
+
+impl Realign {
+    fn to_file(&self) -> RealignFile {
+        let hex = |ops: &[LocalOp]| ops.iter().map(|op| op.0.hex()).collect::<Vec<_>>();
+        let mut from: Vec<(String, Vec<String>)> = self
+            .from
+            .iter()
+            .map(|(old, new)| (old.0.hex(), hex(new)))
+            .collect();
+        from.sort();
+        let mut canonical: Vec<(String, String)> = self
+            .canonical
+            .iter()
+            .map(|(local, canonical)| (local.0.hex(), canonical.0.hex()))
+            .collect();
+        canonical.sort();
+        RealignFile {
+            from,
+            to: hex(&self.to),
+            canonical,
+        }
+    }
+
+    fn from_file(path: &Path, file: &RealignFile) -> Result<Self, NodeError> {
+        let ops = |hexes: &[String]| -> Result<Vec<LocalOp>, NodeError> {
+            Ok(parse_ids(path, hexes)?.into_iter().map(LocalOp).collect())
+        };
+        let mut from = HashMap::new();
+        for (old, new) in &file.from {
+            from.insert(ops(std::slice::from_ref(old))?.swap_remove(0), ops(new)?);
+        }
+        let mut canonical = HashMap::new();
+        for (local, op) in &file.canonical {
+            let [local, op] = [local, op].map(|hex| parse_ids(path, std::slice::from_ref(hex)));
+            canonical.insert(
+                LocalOp(local?.swap_remove(0)),
+                CanonicalOp(op?.swap_remove(0)),
+            );
+        }
+        Ok(Self {
+            from,
+            to: ops(&file.to)?,
+            canonical,
+        })
+    }
+}
+
+/// What taking records changes of what `records.json` has: to go back to if writing it
+/// fails, so that this node never goes on as if it held records it doesn't.
+struct Checkpoint {
+    prefix: RecordPrefix,
+    applied: Vec<Record>,
+    digests: Vec<RecordDigest>,
+    earlier: Vec<Earlier>,
+    fresh: bool,
+    pending: Record,
+    fixup: Option<Fixup>,
+    fixup_written: bool,
+    fixup_from: Option<CanonicalOp>,
+    realign: Option<Realign>,
+    steps: usize,
 }
 
 /// A record this node took that it no longer holds.
@@ -132,7 +240,7 @@ struct Earlier {
 }
 
 /// Records of the hub's being taken: the node's history renamed as they name it, written
-/// beside its own, until its op heads move there.
+/// beside its own, until its op heads move there, as this node takes them.
 struct Taking {
     /// The first of them, known only by their count and digest.
     prefix: RecordPrefix,
@@ -145,7 +253,7 @@ struct Taking {
     dropped: HashSet<CanonicalOp>,
     /// Node space now to node space then.
     renaming: HashMap<CanonicalOp, Vec<CanonicalOp>>,
-    /// Whether the op heads moved there.
+    /// Whether the op heads moved there, this node holding them.
     switched: bool,
     /// `pending`, as the records name the history.
     pending: Record,
@@ -171,6 +279,8 @@ struct RecordsFile {
     fixup_from: Option<String>,
     #[serde(default)]
     moving: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    realign: Option<RealignFile>,
     /// How many renamings of the steps log count: one appended after is from a run cut short.
     #[serde(default)]
     steps: usize,
@@ -310,6 +420,11 @@ impl Records {
                 .and_then(OperationId::try_from_hex)
                 .map(CanonicalOp),
             moving: file.moving,
+            realign: file
+                .realign
+                .as_ref()
+                .map(|realign| Realign::from_file(&path, realign))
+                .transpose()?,
             ..Self::default()
         };
         // Each log has every block that `records.json`, written after it, counts on, unless a
@@ -331,20 +446,19 @@ impl Records {
         let path = musubi_dir.join(STEPS_FILE);
         let mut steps = parse_steps(&read_log(&path)?);
         for number in 1..=file.steps {
-            let Some((step, dropped, sources)) = steps.remove(&number).and_then(Block::whole)
-            else {
+            let Some(step) = steps.remove(&number).and_then(Block::whole) else {
                 return Err(damaged(path));
             };
             records.compose(step);
-            records.dropped.extend(dropped);
-            records.sources.extend(sources);
+            records.steps = number;
         }
         Ok(records)
     }
 
-    /// Adds a renaming to what the steps compose. Each lookup composes them, so that adding
-    /// one costs only its own size, as reading them all does.
-    fn compose(&mut self, step: HashMap<CanonicalOp, Vec<CanonicalOp>>) {
+    /// Adds a step, a renaming with what it dropped and the sources it established, to what
+    /// the steps compose, leaving its counting to the caller. Each lookup composes them, so
+    /// that adding one costs only its own size, as reading them all does.
+    fn compose(&mut self, (step, dropped, sources): Step) {
         debug_assert!(
             step.values()
                 .flatten()
@@ -352,7 +466,51 @@ impl Records {
             "a renaming names as what an operation became one superseded"
         );
         self.superseded.extend(step);
-        self.steps += 1;
+        self.dropped.extend(dropped);
+        self.sources.extend(sources);
+    }
+
+    fn checkpoint(&self) -> Checkpoint {
+        Checkpoint {
+            prefix: self.prefix.clone(),
+            applied: self.applied.clone(),
+            digests: self.digests.clone(),
+            earlier: self.earlier.clone(),
+            fresh: self.fresh,
+            pending: self.pending.clone(),
+            fixup: self.fixup.clone(),
+            fixup_written: self.fixup_written,
+            fixup_from: self.fixup_from.clone(),
+            realign: self.realign.clone(),
+            steps: self.steps,
+        }
+    }
+
+    fn restore(&mut self, checkpoint: Checkpoint) {
+        let Checkpoint {
+            prefix,
+            applied,
+            digests,
+            earlier,
+            fresh,
+            pending,
+            fixup,
+            fixup_written,
+            fixup_from,
+            realign,
+            steps,
+        } = checkpoint;
+        self.prefix = prefix;
+        self.applied = applied;
+        self.digests = digests;
+        self.earlier = earlier;
+        self.fresh = fresh;
+        self.pending = pending;
+        self.fixup = fixup;
+        self.fixup_written = fixup_written;
+        self.fixup_from = fixup_from;
+        self.realign = realign;
+        self.steps = steps;
     }
 
     /// What `op` is now ([`current`]).
@@ -676,6 +834,7 @@ impl NodeRepo {
             fixup_written: records.fixup_written,
             fixup_from: records.fixup_from.as_ref().map(|op| op.0.hex()),
             moving: records.moving,
+            realign: records.realign.as_ref().map(Realign::to_file),
             steps: records.steps,
             earlier: records
                 .earlier
@@ -698,6 +857,22 @@ impl NodeRepo {
         dropped: &HashSet<CanonicalOp>,
         counterparts: &HashMap<LocalOp, CanonicalOp>,
     ) -> Result<(), NodeError> {
+        if let Some(step) = self.append_step(step, dropped, counterparts)? {
+            self.records.compose(step);
+            self.records.steps += 1;
+        }
+        Ok(())
+    }
+
+    /// Appends a renaming, which dropped `dropped`, to the steps log, in one write, as the
+    /// next step, which `records.json` counts once saved. Returns it, as composed, unless it
+    /// changes nothing.
+    fn append_step(
+        &self,
+        step: HashMap<CanonicalOp, Vec<CanonicalOp>>,
+        dropped: &HashSet<CanonicalOp>,
+        counterparts: &HashMap<LocalOp, CanonicalOp>,
+    ) -> Result<Option<Step>, NodeError> {
         let step: HashMap<CanonicalOp, Vec<CanonicalOp>> = step
             .into_iter()
             .filter(|(old, new)| new != std::slice::from_ref(old))
@@ -716,19 +891,19 @@ impl NodeRepo {
             })
             .collect();
         if step.is_empty() && sources.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         let path = self.repo_path.join("musubi").join(STEPS_FILE);
         append_log(
             &path,
             &format_step(self.records.steps + 1, &step, dropped, &sources),
         )?;
-        self.records
-            .dropped
-            .extend(step.keys().filter(|old| dropped.contains(*old)).cloned());
-        self.records.sources.extend(sources);
-        self.records.compose(step);
-        Ok(())
+        let dropped = step
+            .keys()
+            .filter(|old| dropped.contains(*old))
+            .cloned()
+            .collect();
+        Ok(Some((step, dropped, sources)))
     }
 
     /// Appends how the records of `records`, after the records `start` is the digest of,
@@ -1065,7 +1240,9 @@ impl NodeRepo {
             .filter(|pushed| Some(pushed) != base.as_ref());
         let heads = self.local_heads()?;
         let checked = (heads, base, pushed);
-        if self.abandon_checked.as_ref() == Some(&checked) {
+        // A move that taking records left to do, as after an error, is done whether or not
+        // the op heads changed since.
+        if self.abandon_checked.as_ref() == Some(&checked) && self.records.realign.is_none() {
             return Ok(false);
         }
         let (heads, base, pushed) = checked;
@@ -1132,10 +1309,66 @@ impl NodeRepo {
         std::mem::take(&mut self.abandon_noticed)
     }
 
-    /// Moves each op head that stands for an operation a renaming superseded to the local
-    /// operation of what it became, as a crash between recording the renaming and moving the
-    /// op heads leaves them.
+    /// Moves the op heads and the workspaces where records this node took move them, if a
+    /// crash or an error stopped that, exactly as they would have, where the op heads are
+    /// still those it moves from or to; and where others are beside some it moves from,
+    /// those to what each becomes. Op heads a `jj` command made in place of all of them are
+    /// left to [`Self::notice_abandon`] and canonicalizing, as any other, which find what the
+    /// operations the move names stood for even where the translation cache lost it since.
+    /// Then moves each op head that stands for an operation a renaming superseded to the
+    /// local operation of what it became, as a crash between recording the renaming and
+    /// moving the op heads leaves them.
     fn realign_heads(&mut self, heads: &[LocalOp]) -> Result<(), NodeError> {
+        if let Some(realign) = self.records.realign.clone() {
+            if !self.records.realign_mapped {
+                for (local, canonical) in &realign.canonical {
+                    if self.canonical_of(local).is_none() {
+                        self.insert_map(local.clone(), canonical.clone())?;
+                    }
+                }
+                self.records.realign_mapped = true;
+            }
+            let now: HashSet<&LocalOp> = heads.iter().collect();
+            let to: HashSet<&LocalOp> = realign.to.iter().collect();
+            let ours = now == realign.from.keys().collect() || now == to;
+            // Op heads beside some it moves from, as a crash while moving them leaves them,
+            // jj putting each new op head in before taking the old ones out, or a `jj`
+            // command made: those it moves from move, each where it was to, and the rest stay.
+            let beside = !ours && heads.iter().any(|head| realign.from.contains_key(head));
+            if ours && now != to {
+                self.publish_heads(heads, &realign.to)?;
+            } else if beside {
+                self.move_heads(heads, &realign.from, None, None)?;
+            }
+            let moved = ours || beside;
+            if moved {
+                self.forget_local_caches();
+                self.move_workspaces(&HashMap::new())?;
+            }
+            // What the operations stood for is kept until none that a renaming superseded is
+            // below the op heads, as one a `jj` command wrote on is until it is reparented,
+            // canonicalized or not: the translation cache can be lost again before then.
+            // Nothing moves from it again.
+            let heads = if moved {
+                self.local_heads()?
+            } else {
+                heads.to_vec()
+            };
+            let renamed = !self.superseded_below(&heads, &realign.canonical)?;
+            // Written only where it changes: once, then once more, when it goes.
+            let moving = !realign.from.is_empty() || !realign.to.is_empty();
+            if renamed || moving {
+                self.records.realign = (!renamed).then(|| Realign {
+                    from: HashMap::new(),
+                    to: vec![],
+                    canonical: realign.canonical,
+                });
+                self.save_records()?;
+            }
+            if moved {
+                return Ok(());
+            }
+        }
         let mut moved = false;
         for head in heads {
             let Some(canonical) = self.canonical_of(head) else {
@@ -1709,6 +1942,18 @@ impl NodeRepo {
         head: Option<&LocalOp>,
         merged: Option<&LocalOp>,
     ) -> Result<(), NodeError> {
+        let new = self.new_heads(heads, locals, head, merged)?;
+        self.publish_heads(heads, &new)
+    }
+
+    /// The op heads [`Self::move_heads`] moves `heads` to.
+    fn new_heads(
+        &self,
+        heads: &[LocalOp],
+        locals: &HashMap<LocalOp, Vec<LocalOp>>,
+        head: Option<&LocalOp>,
+        merged: Option<&LocalOp>,
+    ) -> Result<Vec<LocalOp>, NodeError> {
         let mut new = self.moved_heads(heads, locals, head)?;
         if let Some(merged) = merged {
             let parents = LocalOp::parents_of(
@@ -1721,6 +1966,11 @@ impl NodeRepo {
             new.retain(|op| !parents.contains(op));
             new.push(merged.clone());
         }
+        Ok(new)
+    }
+
+    /// Makes `new` the op heads in place of `heads`.
+    fn publish_heads(&mut self, heads: &[LocalOp], new: &[LocalOp]) -> Result<(), NodeError> {
         let old: Vec<OperationId> = heads
             .iter()
             .filter(|h| !new.contains(h))
@@ -1732,6 +1982,11 @@ impl NodeRepo {
         if let Some((last, rest)) = new.split_last() {
             for head in rest {
                 op_heads.update_op_heads(&[], &head.0).block_on()?;
+            }
+            if self.records.stop == Some(TakingStop::Publishing) {
+                // As a crash in jj's update leaves them, its new op head in.
+                op_heads.update_op_heads(&[], &last.0).block_on()?;
+                self.stop_taking(TakingStop::Publishing)?;
             }
             op_heads.update_op_heads(&old, &last.0).block_on()?;
         }
@@ -2176,13 +2431,14 @@ impl NodeRepo {
         Ok(beside)
     }
 
-    /// Moves the op heads where the records being taken name them, and to `head` too if
-    /// given: `heads := max(images(heads) ∪ {head})`, with `merged`, if given, a merge of
-    /// `head` with heads [`Self::taken_beside`] it, in place of those it merges, preparing the
-    /// records again first if the op heads moved ([`Self::prepare_again_if_moved`]). Does
-    /// nothing if no records are being taken, or the op heads are there already. The caller
-    /// moves the workspaces after (`move_taken_workspaces`), holding no lock of jj's: jj takes
-    /// a workspace's lock before its colocated git lock.
+    /// Takes the records being taken, and moves the op heads where they name them, and to
+    /// `head` too if given: `heads := max(images(heads) ∪ {head})`, with `merged`, if given, a
+    /// merge of `head` with heads [`Self::taken_beside`] it, in place of those it merges,
+    /// preparing the records again first if the op heads moved
+    /// ([`Self::prepare_again_if_moved`]). Does nothing if no records are being taken, or the
+    /// op heads are there already. The caller moves the workspaces after
+    /// ([`Self::move_taken_workspaces`]), holding no lock of jj's: jj takes a workspace's lock
+    /// before its colocated git lock.
     pub(super) fn switch_to_taken(
         &mut self,
         head: Option<&LocalOp>,
@@ -2193,12 +2449,39 @@ impl NodeRepo {
             return Ok(());
         };
         if !taking.switched {
+            // Translation no longer names the history as `taking` does, whether this fails,
+            // dropping it, or holds it, its pending drops becoming this node's.
+            self.forget_to_node();
+            // Every operation the move names written first, which the realizations are by now.
+            self.settle()?;
             let heads = self.local_heads()?;
-            // Recorded first: a restart before the op heads move moves them
-            // (`realign_heads`).
-            self.add_step(taking.renaming.clone(), &taking.dropped, &HashMap::new())?;
-            self.save_records()?;
-            self.move_heads(&heads, &taking.locals, head, merged)?;
+            let to = self.new_heads(&heads, &taking.locals, head, merged)?;
+            let renamed = taking
+                .locals
+                .iter()
+                .filter(|(old, new)| new.as_slice() != std::slice::from_ref(*old))
+                .flat_map(|(old, new)| std::iter::once(old).chain(new));
+            let canonical = heads
+                .iter()
+                .chain(&to)
+                .chain(renamed)
+                .filter_map(|local| Some((local.clone(), self.canonical_of(local)?)))
+                .collect();
+            let from = heads
+                .iter()
+                .map(|head| {
+                    let new = taking.locals.get(head).cloned();
+                    (head.clone(), new.unwrap_or_else(|| vec![head.clone()]))
+                })
+                .collect();
+            let realign = Realign {
+                from,
+                to: to.clone(),
+                canonical,
+            };
+            self.hold_taken(&mut taking, realign)?;
+            self.stop_taking(TakingStop::Heads)?;
+            self.publish_heads(&heads, &to)?;
             self.forget_local_caches();
             taking.switched = true;
         }
@@ -2206,26 +2489,66 @@ impl NodeRepo {
         Ok(())
     }
 
-    /// Moves the workspaces' recorded operations where the records being taken name them.
-    pub(super) fn move_taken_workspaces(&self) -> Result<(), NodeError> {
-        match &self.records.taking {
-            Some(taking) if taking.switched => self.move_workspaces(&taking.locals),
-            _ => Ok(()),
+    /// Whether one of the local operations `canonical` names that stands for an operation a
+    /// renaming superseded is below `heads`.
+    fn superseded_below(
+        &self,
+        heads: &[LocalOp],
+        canonical: &HashMap<LocalOp, CanonicalOp>,
+    ) -> Result<bool, NodeError> {
+        let superseded: HashMap<&LocalOp, &CanonicalOp> = canonical
+            .iter()
+            .filter(|(_, c)| self.current_ids(c) != std::slice::from_ref(*c))
+            .collect();
+        // Below the lowest of them, an operation that stands for one of the store's has none
+        // of them below it. One written on one of them, canonicalized on what that became, is
+        // as high as that one, at least.
+        let mut floor = u64::MAX;
+        for c in superseded.values() {
+            if self.canonical.has_operation(c) {
+                floor = floor.min(self.canonical.generation(c)?);
+            }
         }
+        let op_store = self.loader.op_store();
+        let mut stack = heads.to_vec();
+        let mut seen = HashSet::new();
+        while let Some(local) = stack.pop() {
+            if !seen.insert(local.clone()) || self.before_join.contains(&local) {
+                continue;
+            }
+            if superseded.contains_key(&local) {
+                return Ok(true);
+            }
+            if self
+                .canonical_of(&local)
+                .is_some_and(|c| self.canonical.generation(&c).is_ok_and(|g| g < floor))
+            {
+                continue;
+            }
+            let op = op_store.read_operation(&local.0).block_on()?;
+            stack.extend(LocalOp::parents_of(&op));
+        }
+        Ok(false)
     }
 
-    /// Takes the hub's records, after the first ones `prefix` stands for, none of which drops
-    /// an op head. Returns the operation the hub accepted that this machine fetches from, as
-    /// they name it.
-    pub fn adopt_records(
-        &mut self,
-        prefix: &RecordPrefix,
-        records: &[Record],
-    ) -> Result<Option<HubOp>, NodeError> {
-        self.prepare_records(prefix, records)?;
-        self.switch_to_taken(None, None)?;
-        self.move_taken_workspaces()?;
-        let taking = self.records.taking.take().expect("prepared above");
+    /// Makes the records being taken the records this node holds, and what they rename its
+    /// history, pending drops and fix-up as, in the write that counts their renaming, before
+    /// the op heads move there: counted alone, the renaming would leave what they drop
+    /// dropped here, but neither pending nor in a record this node holds, so that if the hub
+    /// lost them, nothing here would publish it again. The op heads and the workspaces move
+    /// after, as `realign` says, which the write records, so that a restart moves them if
+    /// they hadn't (`realign_heads`). If the write fails, this node holds what it did, as
+    /// `records.json` still says.
+    fn hold_taken(&mut self, taking: &mut Taking, realign: Realign) -> Result<(), NodeError> {
+        // Appended first, each counting only once `records.json` says so.
+        self.write_hub_renamings(
+            &taking.prefix.digest,
+            &taking.records,
+            taking.common,
+            &taking.hub_renamings,
+        )?;
+        let step = self.append_step(taking.renaming.clone(), &taking.dropped, &HashMap::new())?;
+        let checkpoint = self.records.checkpoint();
         // Its own drops published, the fix-up goes with them.
         if taking.pending.is_empty() {
             self.records.fixup = None;
@@ -2254,20 +2577,97 @@ impl NodeRepo {
                 None => fixup.expected = None,
             }
         }
-        self.write_hub_renamings(
-            &taking.prefix.digest,
-            &taking.records,
-            taking.common,
-            &taking.hub_renamings,
-        )?;
-        self.records.hub_renamings.truncate(taking.common);
-        self.records.hub_renamings.extend(taking.hub_renamings);
-        self.records.hold(taking.prefix, taking.records);
+        self.records
+            .hold(taking.prefix.clone(), taking.records.clone());
         self.records.fresh = false;
-        self.records.pending = taking.pending;
+        self.records.pending = taking.pending.clone();
+        self.records.steps += usize::from(step.is_some());
+        self.records.realign = Some(realign);
+        if let Err(err) = self
+            .stop_taking(TakingStop::Hold)
+            .and_then(|()| self.save_records())
+        {
+            self.records.restore(checkpoint);
+            return Err(err);
+        }
+        if let Some(step) = step {
+            self.records.compose(step);
+        }
+        self.records.hub_renamings.truncate(taking.common);
+        self.records
+            .hub_renamings
+            .extend(std::mem::take(&mut taking.hub_renamings));
         self.forget_to_node();
-        self.save_records()?;
-        Ok(taking.base)
+        Ok(())
+    }
+
+    /// Moves the workspaces' recorded operations where the records taken name them, once the
+    /// op heads are there, which is the last of taking them.
+    pub(super) fn move_taken_workspaces(&mut self) -> Result<(), NodeError> {
+        let Some(taking) = self.records.taking.take_if(|taking| taking.switched) else {
+            return Ok(());
+        };
+        self.stop_taking(TakingStop::Workspaces)?;
+        self.move_workspaces(&taking.locals)?;
+        self.records.realign = None;
+        self.save_records()
+    }
+
+    /// For tests of errors: the next write that holds records taken fails, as an I/O error
+    /// would, having written none of it.
+    pub fn fail_holding_records(&mut self) {
+        self.records.stop = Some(TakingStop::Hold);
+    }
+
+    /// For tests of crashes: the next taking of records stops, failing, once it holds them,
+    /// before the op heads move there, or, if `heads_moved`, once they have, before the
+    /// workspaces. Reopening the repository then is a crash there.
+    pub fn crash_taking_records(&mut self, heads_moved: bool) {
+        self.records.stop = Some(if heads_moved {
+            TakingStop::Workspaces
+        } else {
+            TakingStop::Heads
+        });
+    }
+
+    /// For tests of crashes: the next move of the op heads, as taking records makes it,
+    /// stops, failing, once the new op heads are in, before the old ones come out, as a crash
+    /// in jj's update of them leaves them.
+    pub fn crash_publishing_taken_heads(&mut self) {
+        self.records.stop = Some(TakingStop::Publishing);
+    }
+
+    /// Fails, once, if a test said to stop taking records `at`.
+    fn stop_taking(&mut self, at: TakingStop) -> Result<(), NodeError> {
+        if self.records.stop != Some(at) {
+            return Ok(());
+        }
+        self.records.stop = None;
+        Err(NodeError::Io {
+            path: self.records_path(),
+            source: std::io::Error::other(format!("stopped for a test: {at:?}")),
+        })
+    }
+
+    /// Takes the hub's records, after the first ones `prefix` stands for, none of which drops
+    /// an op head. Returns the operation the hub accepted that this machine fetches from, as
+    /// they name it.
+    pub fn adopt_records(
+        &mut self,
+        prefix: &RecordPrefix,
+        records: &[Record],
+    ) -> Result<Option<HubOp>, NodeError> {
+        self.prepare_records(prefix, records)?;
+        self.switch_to_taken(None, None)?;
+        let base = self
+            .records
+            .taking
+            .as_ref()
+            .expect("prepared above")
+            .base
+            .clone();
+        self.move_taken_workspaces()?;
+        Ok(base)
     }
 
     /// What the fix-up must write for the state at `new`, the node-space rewrite of `old`,
@@ -2366,14 +2766,18 @@ impl NodeRepo {
         else {
             return git::Expected::new();
         };
-        // Records being taken rename it before `adopt_records` re-keys it, and the op heads
-        // may move there first: under both names until then.
-        let taken = self.records.taking.as_ref().and_then(|taking| {
-            match taking.locals.get(&at).map(Vec::as_slice) {
+        // Records being taken rename it before taking them re-keys it, as the op heads move
+        // there, and a realization in the history they name is exported first: under both
+        // names until then.
+        let taken = self
+            .records
+            .taking
+            .as_ref()
+            .filter(|taking| !taking.switched)
+            .and_then(|taking| match taking.locals.get(&at).map(Vec::as_slice) {
                 Some([now]) => Some(now.clone()),
                 _ => None,
-            }
-        });
+            });
         let mut known = git::Expected::new();
         for (name, token) in &expectation.values {
             let Some(value) = git::parse_expected_token(token) else {
@@ -2763,7 +3167,7 @@ mod tests {
                 );
             }
             eager.extend(step.clone());
-            records.compose(step);
+            records.compose((step, vec![], HashMap::new()));
             kept.extend(made);
             current = kept;
         }

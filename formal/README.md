@@ -648,6 +648,16 @@ rest on:
   report its length, and check the hash once it reaches the claimed length, as musubi's does
   (`preach_abs`).
 
+The real repository's `advance` can also finish taking records. It holds them in the same
+save that counts their renaming before moving heads; after an interrupted move, recovery
+finishes the heads and workspace records. Holding them only in a later `Adopted` step lost
+the responsibility to republish a drop if the hub rolled back in between, and the machine
+could retry the same rejected push indefinitely. The real-repository races
+`a_sync_stopped_while_taking_an_abandon_the_hub_then_loses` and
+`taking_an_abandon_resumes_where_it_stopped` check the completed advance and its internal
+save/head/workspace boundaries. They close that concrete implementation gap, not the full
+retry/response refinement in [#78](https://github.com/bos/jj-musubi/issues/78).
+
 ## The executable model and the conformance oracle
 
 The relational model can't be run, since its sets are predicates. To check the Rust core

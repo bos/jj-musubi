@@ -417,6 +417,440 @@ fn a_jj_command_while_taking_an_abandon() {
     }
 }
 
+/// A machine taking another's abandon, which drops its op head, realizes the hub's head and
+/// advances to it, which renames its history as the records name it; then its sync stops
+/// before the step after, as a crash or an error stops it. If the hub then loses the records,
+/// as a power cut can make it, the machine still has the drop to publish, and publishes it
+/// itself, without the machine that abandoned the operation syncing first. Taking the drop as
+/// renamed but not as held, it pushed the renamed history with no drop, which the hub, without
+/// the records, rejected at every step.
+#[test]
+fn a_sync_stopped_while_taking_an_abandon_the_hub_then_loses() {
+    use musubi_core::hub::HubStorage as _;
+    use musubi_core::node::LocalRepo as _;
+    use musubi_core::node::Step;
+    use musubi_jj::op_id::CanonicalOp;
+    use musubi_jj::records::HubOp;
+
+    for (lose, crash) in [(false, true), (true, false), (true, true)] {
+        let case = format!("lose {lose}, crash {crash}");
+        let (mut hive, before, dropped_hub, _) = abandoned_at_beta(Abandoned::Head);
+
+        // Beta prepares to take the record, which drops its op head, realizes what the hub
+        // has after it, and advances, moving its op heads where the record names the history.
+        hive.hive.fetch(1).unwrap();
+        let member = &mut hive.hive.members[1];
+        let mut advanced = false;
+        for _ in 0..8 {
+            match member.core.step(&mut member.adapter).unwrap() {
+                Step::Realized(_) => {}
+                Step::Advanced(_) => {
+                    advanced = true;
+                    break;
+                }
+                step => panic!("{case}: {step:?}"),
+            }
+        }
+        assert!(advanced, "{case}");
+        if crash {
+            hive.reopen(1);
+        }
+        assert!(
+            hive.node(1)
+                .is_dropped(&HubOp(CanonicalOp(dropped_hub.clone()))),
+            "{case}"
+        );
+
+        if lose {
+            hive.hive.hub_goes_back(before).unwrap();
+        }
+        // Beta alone, for at most eight steps, so that a sync that gets nowhere stops.
+        let mut pushes = vec![];
+        let taken = hive
+            .hive
+            .sync_steps(1, 8, &mut |request, reply| {
+                if let (
+                    Request::Push {
+                        expected, dropped, ..
+                    },
+                    Reply::Head { kind, seq, .. },
+                ) = (request, &reply)
+                {
+                    pushes.push((
+                        *kind,
+                        expected.clone(),
+                        dropped.contains(&dropped_hub),
+                        *seq,
+                    ));
+                }
+                reply
+            })
+            .unwrap();
+        assert!(taken < 8, "{case}: {pushes:?}");
+        if lose {
+            // Its one push publishes the drop on the head the hub went back to.
+            assert_eq!(
+                pushes,
+                [(HeadKind::Accepted, dropped_hub.clone(), true, before + 1)],
+                "{case}"
+            );
+            assert!(hive.hive.hub.is_dropped(&dropped_hub, &[]).unwrap());
+        } else {
+            assert!(pushes.is_empty(), "{case}: {pushes:?}");
+        }
+        assert_eq!(
+            hive.hive.members[1].adapter.records().unwrap(),
+            hive.hive.hub.records(),
+            "{case}"
+        );
+        assert!(hive.node(1).pending_drops().is_empty(), "{case}");
+
+        hive.sync();
+        hive.assert_converged();
+        assert_eq!(hive.hive.hub.store().record_count(), 1, "{case}");
+        for machine in 0..2 {
+            assert!(
+                !op_log(hive.repo(machine))
+                    .iter()
+                    .any(|(_, d)| d.starts_with("create bookmark dropped")),
+                "{case}: {machine}"
+            );
+        }
+    }
+}
+
+/// What of beta's alpha abandons.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Abandoned {
+    /// The operation alpha made that is beta's op head.
+    Head,
+    /// The merge beta made of its own work and alpha's, its op head, with alpha's work.
+    Merge,
+    /// An operation below beta's op head, which alpha made.
+    Below,
+}
+
+/// Alpha abandons an operation beta has, and publishes the abandon, which beta hasn't taken
+/// yet. Returns the hive, the hub's sequence number with beta's op head as its head then,
+/// the operation the test follows, of those alpha abandoned, and how it is described.
+fn abandoned_at_beta(what: Abandoned) -> (Fixture, u64, musubi_sync::OpId, String) {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    let (abandon, followed, described) = match what {
+        Abandoned::Merge => {
+            hive.commit(0, "a", "alpha's");
+            let alphas = op_log(hive.repo(0))[0].1.clone();
+            hive.commit(1, "b", "beta's");
+            let betas = op_log(hive.repo(1))[0].1.clone();
+            hive.hive.sync(0).unwrap();
+            hive.hive.sync(1).unwrap();
+            assert_eq!(op_log(hive.repo(1))[0].1, "reconcile divergent operations");
+            hive.hive.sync(0).unwrap();
+            let merge = op_described(hive.repo(0), "reconcile divergent operations");
+            let below = op_described(hive.repo(0), &betas);
+            hive.commit(0, "c", "on the merge");
+            // The merge and alpha's work below it: jj abandons no merge alone.
+            (format!("{below}..{merge}"), hive.hive.hub_head(), alphas)
+        }
+        Abandoned::Head => {
+            hive.commit(0, "a", "first");
+            hive.repo(0)
+                .jj(&["bookmark", "create", "dropped", "-r", "@-"]);
+            let dropped = op_log(hive.repo(0))[0].0.clone();
+            hive.sync();
+            // Beta's working copy records it.
+            hive.repo(1).jj(&["status"]);
+            hive.commit(0, "b", "second");
+            (
+                dropped,
+                hive.hive.hub_head(),
+                "create bookmark dropped".to_owned(),
+            )
+        }
+        Abandoned::Below => {
+            hive.commit(0, "a", "first");
+            hive.repo(0).jj(&["bookmark", "create", "x", "-r", "@-"]);
+            let x = op_log(hive.repo(0))[0].0.clone();
+            hive.sync();
+            let followed = hive.hive.hub_head();
+            for name in ["y", "z"] {
+                hive.repo(0).jj(&["bookmark", "create", name, "-r", "@-"]);
+            }
+            hive.sync();
+            hive.repo(1).jj(&["status"]);
+            (x, followed, "create bookmark x".to_owned())
+        }
+    };
+    let before = hive.hive.hub.store().head().0;
+    hive.repo(0).jj(&["op", "abandon", &abandon]);
+    hive.hive.sync(0).unwrap();
+    assert_eq!(hive.hive.hub.store().record_count(), 1);
+    (hive, before, followed, described)
+}
+
+/// The operations in `repo`'s history, described, read without a snapshot, which would
+/// change it.
+fn history(repo: &musubi_testutil::TestRepo) -> Vec<(String, String)> {
+    repo.jj(&[
+        "--ignore-working-copy",
+        "op",
+        "log",
+        "--no-graph",
+        "-T",
+        "id ++ \" \" ++ description.first_line() ++ \"\\n\"",
+    ])
+    .lines()
+    .map(|line| {
+        let (id, description) = line.split_once(' ').unwrap_or((line, ""));
+        (id.to_owned(), description.to_owned())
+    })
+    .collect()
+}
+
+/// Taking that abandon stops partway, in an error that leaves the repository open, or a
+/// crash, which may lose the translation cache too, or be followed by a `jj` command on the
+/// op head, or a `jj op abandon` of another operation below it: the write that holds the
+/// records fails, having written nothing; or it stops once that write is done, before the
+/// op heads move where the records name the history, or once they have, before the
+/// workspaces. Beta resumes where it stopped: it holds the records only if it wrote that it
+/// does, its op heads and its working copy are on history that has none of what it dropped,
+/// nothing abandoned comes back, its own work goes on, and it publishes what it dropped
+/// itself if the hub then loses the records.
+#[test]
+fn taking_an_abandon_resumes_where_it_stopped() {
+    use musubi_core::node::LocalRepo as _;
+    use musubi_core::node::Step;
+    use musubi_jj::node::NodeOp;
+    use musubi_jj::op_id::CanonicalOp;
+    use musubi_jj::records::HubOp;
+
+    #[derive(Debug)]
+    enum Stop {
+        Hold,
+        Heads,
+        /// Partway through moving the op heads, the new ones in and the old ones not out.
+        Publishing,
+        Workspaces,
+    }
+    #[derive(Debug, PartialEq)]
+    enum Then {
+        /// The repository stays open.
+        Error,
+        /// It is opened again.
+        Crash,
+        /// It is opened again, having lost the translation cache too.
+        CrashLosingCache,
+        /// `jj op abandon` drops another operation below beta's op head, then it is opened
+        /// again.
+        CrashThenAbandon,
+        /// A `jj` command makes an operation on beta's op head, then it is opened again,
+        /// having lost the translation cache, and again after canonicalizing that command,
+        /// before reparenting it.
+        CrashLosingCacheThenCommand,
+        /// A `jj` command at an operation below beta's op head makes another beside it: at
+        /// beta's own work, which the abandon keeps, or, losing the translation cache twice
+        /// as above, at one the abandon drops.
+        CrashThenCommandBeside,
+        CrashThenCommandAtDropped,
+    }
+    use Abandoned::*;
+    let cases = [
+        (Stop::Hold, Head, Then::Error, true),
+        (Stop::Heads, Head, Then::Crash, true),
+        (Stop::Heads, Head, Then::CrashLosingCache, false),
+        (Stop::Heads, Merge, Then::Error, true),
+        (Stop::Workspaces, Head, Then::CrashLosingCache, false),
+        (Stop::Heads, Below, Then::CrashLosingCache, false),
+        (Stop::Heads, Below, Then::CrashThenAbandon, false),
+        (Stop::Heads, Head, Then::CrashLosingCacheThenCommand, false),
+        (Stop::Publishing, Merge, Then::Crash, false),
+        (Stop::Heads, Merge, Then::CrashThenCommandBeside, false),
+        (Stop::Heads, Below, Then::CrashThenCommandAtDropped, false),
+    ];
+    for (stop, what, then, lose) in cases {
+        let case = format!("{stop:?}, {what:?}, {then:?}, lose {lose}");
+        let (mut hive, before, followed, abandoned) = abandoned_at_beta(what);
+        let followed_hub = HubOp(CanonicalOp(followed.clone()));
+        match stop {
+            Stop::Hold => hive.node(1).fail_holding_records(),
+            Stop::Heads => hive.node(1).crash_taking_records(false),
+            Stop::Publishing => hive.node(1).crash_publishing_taken_heads(),
+            Stop::Workspaces => hive.node(1).crash_taking_records(true),
+        }
+        // Beta takes the records, first realizing the hub's head and advancing to it where
+        // they drop its op head, and stops.
+        hive.hive.fetch(1).unwrap();
+        let member = &mut hive.hive.members[1];
+        let mut stopped = false;
+        for _ in 0..8 {
+            match member.core.step(&mut member.adapter) {
+                Ok(Step::Realized(_)) => {}
+                Err(_) => {
+                    stopped = true;
+                    break;
+                }
+                Ok(step) => panic!("{case}: {step:?}"),
+            }
+        }
+        assert!(stopped, "{case}");
+        let mut gone = vec![abandoned.clone()];
+        let beside = matches!(
+            then,
+            Then::CrashThenCommandBeside | Then::CrashThenCommandAtDropped
+        );
+        let lose_twice = matches!(
+            then,
+            Then::CrashLosingCacheThenCommand | Then::CrashThenCommandAtDropped
+        );
+        let command = beside || then == Then::CrashLosingCacheThenCommand;
+        if then == Then::CrashThenCommandAtDropped {
+            let (at, _) = history(hive.repo(1))
+                .into_iter()
+                .find(|(_, d)| d.starts_with(&format!("{abandoned} ")))
+                .unwrap();
+            hive.repo(1)
+                .jj(&["--at-op", &at, "bookmark", "create", "late", "-r", "@-"]);
+            assert_eq!(hive.node(1).local_heads().unwrap().len(), 2, "{case}");
+        } else if then == Then::CrashThenCommandBeside {
+            // At beta's own work below its op head, which the abandon keeps.
+            let template = r#"id ++ " " ++ workspace_name ++ " " ++ description ++ "\n""#;
+            let ops = hive.repo(1).jj(&[
+                "--ignore-working-copy",
+                "op",
+                "log",
+                "--no-graph",
+                "-T",
+                template,
+            ]);
+            let at = ops
+                .lines()
+                .find(|line| line.split(' ').nth(1) == Some("beta@") && line.contains(" commit "))
+                .and_then(|line| line.split(' ').next())
+                .unwrap()
+                .to_owned();
+            hive.repo(1)
+                .jj(&["--at-op", &at, "bookmark", "create", "late", "-r", "@-"]);
+            assert_eq!(hive.node(1).local_heads().unwrap().len(), 2, "{case}");
+        } else if command {
+            hive.repo(1).jj(&["bookmark", "create", "late", "-r", "@-"]);
+        }
+        if then == Then::CrashLosingCache || lose_twice {
+            std::fs::remove_file(hive.repo(1).repo_path().join("musubi/translation")).unwrap();
+        }
+        if then == Then::CrashThenAbandon {
+            let (q, described) = history(hive.repo(1))
+                .into_iter()
+                .find(|(_, d)| d.starts_with("create bookmark y "))
+                .unwrap();
+            hive.repo(1).jj(&["op", "abandon", &q]);
+            gone.push(described);
+        }
+        if then != Then::Error {
+            hive.reopen(1);
+        }
+        if lose_twice {
+            // Recovery runs, and the op heads are canonicalized, but not yet moved where
+            // their canonical forms are, before the cache is lost again.
+            hive.node(1).check_abandon().unwrap();
+            for head in hive.node(1).local_heads().unwrap() {
+                hive.node(1).canonicalize(&head).unwrap();
+            }
+            hive.node(1).check_abandon().unwrap();
+            std::fs::remove_file(hive.repo(1).repo_path().join("musubi/translation")).unwrap();
+            hive.reopen(1);
+        }
+        // What a sync reads first, which resumes the move.
+        let heads = hive.node(1).canonical_heads().unwrap();
+        let held = !matches!(stop, Stop::Hold);
+        assert_eq!(
+            hive.hive.members[1].adapter.records().unwrap().count,
+            u64::from(held),
+            "{case}"
+        );
+        assert_eq!(hive.node(1).is_dropped(&followed_hub), held, "{case}");
+        for head in heads {
+            assert_eq!(hive.node(1).current(&head), [NodeOp(head)], "{case}");
+        }
+        let beta = history(hive.repo(1));
+        if held {
+            for described in &gone {
+                assert!(
+                    !beta.iter().any(|(_, d)| d.starts_with(described.as_str())),
+                    "{case}: {described} is still in beta's history"
+                );
+            }
+        }
+        // A working copy at the merge isn't moved, even where taking the records doesn't
+        // stop, as no one operation stands for it now.
+        if what != Merge {
+            let repo = hive.repo(1);
+            let recorded = recorded_op(repo, repo.path());
+            assert!(
+                beta.iter().any(|(id, _)| *id == recorded),
+                "{case}: the working copy records {recorded}, not in its history"
+            );
+        }
+
+        if lose {
+            hive.hive.hub_goes_back(before).unwrap();
+        }
+        // Beta alone, for at most eight steps, so that a sync that gets nowhere stops.
+        let mut pushes = vec![];
+        let taken = hive
+            .hive
+            .sync_steps(1, 8, &mut |request, reply| {
+                if let (
+                    Request::Push {
+                        expected, dropped, ..
+                    },
+                    Reply::Head { kind, seq, .. },
+                ) = (request, &reply)
+                {
+                    pushes.push((*kind, expected.clone(), dropped.contains(&followed), *seq));
+                }
+                reply
+            })
+            .unwrap();
+        assert!(taken < 8, "{case}: {pushes:?}");
+        if held && lose {
+            // It publishes the drop it took on the head the hub went back to.
+            assert_eq!(
+                pushes,
+                [(HeadKind::Accepted, followed.clone(), true, before + 1)],
+                "{case}"
+            );
+        } else if then == Then::CrashThenAbandon || command {
+            // It publishes its own abandon, or its own work.
+            assert!(
+                matches!(pushes.as_slice(), [(HeadKind::Accepted, _, false, _)]),
+                "{case}: {pushes:?}"
+            );
+        } else {
+            assert!(pushes.is_empty(), "{case}: {pushes:?}");
+        }
+
+        hive.sync();
+        hive.assert_converged();
+        assert_eq!(
+            hive.hive.hub.store().record_count(),
+            if then == Then::CrashThenAbandon { 2 } else { 1 },
+            "{case}"
+        );
+        if command {
+            assert!(hive.bookmarks(0).contains_key("late@"), "{case}");
+        }
+        for machine in 0..2 {
+            for described in &gone {
+                assert!(
+                    !op_log(hive.repo(machine))
+                        .iter()
+                        .any(|(_, d)| d.starts_with(described.as_str())),
+                    "{case}: {machine}: {described}"
+                );
+            }
+        }
+    }
+}
+
 /// A machine offline while another abandons operations, which keeps working, takes the
 /// abandon when it comes back: its work syncs on the rewritten history.
 #[test]

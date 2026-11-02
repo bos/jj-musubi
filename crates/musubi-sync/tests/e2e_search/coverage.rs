@@ -286,6 +286,12 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
     ),
     ("empty_repositories_make_a_hive", Some(&["setup:empty"])),
     ("op_abandon_replicates", Some(&["op_abandon"])),
+    // These require exact cuts within record taking, not just a partial sync and rollback.
+    (
+        "a_sync_stopped_while_taking_an_abandon_the_hub_then_loses",
+        None,
+    ),
+    ("taking_an_abandon_resumes_where_it_stopped", None),
     (
         "op_abandon_under_a_realized_head_replicates",
         Some(&["op_abandon"]),

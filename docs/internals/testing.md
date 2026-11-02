@@ -44,6 +44,14 @@ leaves the affected machine's published heads alone. [Conformance and
 limits](conformance.md#a-repository-advance-that-also-merges) explains what these observations
 connect to the proofs.
 
+`a_sync_stopped_while_taking_an_abandon_the_hub_then_loses` requires the affected machine to
+republish a drop after an interrupted adoption and hub rollback, before any other machine
+syncs. `taking_an_abandon_resumes_where_it_stopped` stops the shipping path at its hold save,
+head publication (including its partial effects) and workspace move, then checks held metadata,
+published heads and workspace
+records before resuming bounded syncs. These tests cover repository effects the core fake
+makes atomic; they do not prove the full asynchronous convergence bridge.
+
 ## Running the tests
 
 `just test` runs the default suite and `just property` the search. `just check` runs formatting,

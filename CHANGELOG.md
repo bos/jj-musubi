@@ -6,6 +6,10 @@ change the protocol, so run the same release on the hub and every machine (see
 
 ## Unreleased
 
+- A sync interrupted while taking another machine's `jj op abandon` can publish it again
+  if the hub then loses it. Previously that machine could retry the same rejected push
+  indefinitely until another machine synced. Restarting while applying the abandon also
+  resumes moving its operation heads and workspace records.
 - A build of musubi's source can go to every machine between releases. Push it, then on the
   hub's machine, `upgrade-from-source --deploy` (in [contrib](contrib/upgrade-from-source))
   deploys `main`, or the revision you name, as a build named for the release it follows, the

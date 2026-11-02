@@ -202,6 +202,14 @@ impl NodeAdapter {
         Ok(())
     }
 
+    /// Forgets what was staged, and the ancestry of the base, as the hub named them before
+    /// this node took its records or noticed an abandon.
+    fn forget_staged(&mut self) {
+        self.staged.clear();
+        self.staged_children.clear();
+        *self.base_ancestry.borrow_mut() = None;
+    }
+
     /// Makes `base_ancestry` hold `anc*(base)`, `base` a hub name, as this node names the
     /// history, extending what it held where `base` descends from that.
     fn cache_ancestry(&self, base: &OpId) -> anyhow::Result<()> {
@@ -420,9 +428,7 @@ impl LocalRepo for NodeAdapter {
         let heads = op_ids(self.repo.canonical_heads()?);
         // Noticed here, or by whatever read the op heads since, as reconciling settings does.
         if self.repo.take_abandon_noticed() {
-            self.staged.clear();
-            self.staged_children.clear();
-            *self.base_ancestry.borrow_mut() = None;
+            self.forget_staged();
         }
         let mut reachable = false;
         for NodeOp(base) in self.repo.to_node(&hub(&base))? {
@@ -642,7 +648,14 @@ impl LocalRepo for NodeAdapter {
 
     fn advance(&mut self, op: &OpId) -> anyhow::Result<()> {
         let node = self.node_name(op)?;
-        self.repo.advance(&node)?;
+        let records = self.repo.record_state();
+        let advanced = self.repo.advance(&node);
+        // Advancing while taking the hub's records takes them, as `adopt` does, even where it
+        // fails after.
+        if self.repo.record_state() != records {
+            self.forget_staged();
+        }
+        advanced?;
         Ok(())
     }
 
@@ -699,19 +712,18 @@ impl LocalRepo for NodeAdapter {
 
     fn adopt(&mut self, records: &Records<OpId>) -> anyhow::Result<()> {
         self.repo.settle()?;
+        let prefix = prefix_of(&records.base);
+        let adopted = self
+            .repo
+            .adopt_records(&prefix, &records_of(&records.records));
+        // Staged operations, as the hub named them before, are stale, even where taking the
+        // records fails once this node holds them.
+        self.forget_staged();
         // The base, as the hub names it now: what it became, or, if dropped, the first of
         // what was below it, also accepted.
-        let prefix = prefix_of(&records.base);
-        if let Some(HubOp(base)) = self
-            .repo
-            .adopt_records(&prefix, &records_of(&records.records))?
-        {
+        if let Some(HubOp(base)) = adopted? {
             self.set_accepted_base(&base.0)?;
         }
-        // Staged operations, as the hub named them before, are stale.
-        self.staged.clear();
-        self.staged_children.clear();
-        *self.base_ancestry.borrow_mut() = None;
         Ok(())
     }
 

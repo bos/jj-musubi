@@ -260,6 +260,34 @@ concurrent head set to merge (`converged_quiescent`), so realization does not ca
 
 ## Liveness
 
+The real repository also has an adoption boundary the core harness's atomic fake cannot
+reach. `history::a_sync_stopped_while_taking_an_abandon_the_hub_then_loses` stops immediately
+after advancing to a head whose records drop the machine's old head, with and without a
+restart, then makes the hub lose those records. Before the fix, the machine repeatedly pushed
+the renamed head without the drop and received the same rejection. It now holds the records
+in the save that counts the renaming, before the heads move. The test requires that machine
+alone to make one accepted push carrying the drop and reach idle with matching records;
+another machine cannot conceal the failure by publishing first. A control keeps the records
+on the hub and requires no push.
+
+`history::taking_an_abandon_resumes_where_it_stopped` stops the shipping taking path at
+four finer boundaries: the hold save fails before writing; it succeeds but heads have not
+moved; a new head was added but old heads remain; or heads have moved but workspaces have not.
+It resumes the same handle for an error or reopens for a crash, including loss of the
+translation cache. A saved exact move intent supplies the old heads and their images,
+target heads and canonical facts. It preserves a newer command or abandonment made before
+recovery, including a second cache loss before late reparenting finishes. A dropped merge
+head expands to multiple parents, all of which must be recovered. The test checks held
+records and drop state, raw
+canonical heads, the singleton working copy's recorded operation, bounded progress without
+another machine, and final convergence. The merge case does not require a workspace recorded
+at a multi-image operation to move to one image; that pre-existing case has no unique rewrite.
+The hooks stop the shipping path; no saved metadata is manufactured. This pins the concrete
+recovery boundaries, not the full retry/response refinement, which remains
+[#78](https://github.com/bos/jj-musubi/issues/78). The adapter clears its staged graph and
+ancestry cache when `advance` changes record state, as a separate `Adopted` step used to do,
+even if a later part of the advance fails.
+
 `formal/Musubi/Liveness.lean` proves that once users stop, nodes following the policy
 (`PStep`) converge: a lexicographic measure falls on every policy step, and some step is
 enabled until every node is at the hub's head. `Regress.lean` proves the same of a hub that

@@ -610,7 +610,7 @@ theorem SRSteps.par {S T : SState} (h : SRSteps N S T) :
 open Classical in
 /-- The id of `x` in state `S` under the dropped set `D` (`Contract.cid`). -/
 noncomputable def SState.cidOf (S : SState) (D : OSet) (x : Nat) : Contract.CId :=
-  Contract.cid S.s.U.par (fun y => decide (D y)) x
+  Contract.cid id S.s.U.par (fun y => decide (D y)) x
 
 /-- Ids of operations that exist stay as they were, as later operations are created. -/
 theorem cid_stable {S T : SState} (hS : SRReachable N S) (hST : SRSteps N S T) (D : OSet)
@@ -635,7 +635,7 @@ theorem superseded_never_returns {S T T' : SState} (hS : SRReachable N S)
   have hIT' := (sinv_reachable (hST'.reachable hS)).base
   rw [← cid_stable hS hST' (S.nodeD n) hx]
   obtain ⟨-, hpar⟩ := hST'.par
-  apply Contract.superseded_ne hIT'.parLt
+  apply Contract.superseded_ne hIT'.parLt (fun _ _ h => h)
   · rcases hsup with h | ⟨a, hA, hne, hTa, hSa⟩
     · exact Or.inl (by simpa using hTT.nodeD h)
     · refine Or.inr ⟨a, ?_, hne, by simpa using hTT.nodeD hTa, by simpa using hSa⟩
@@ -657,7 +657,7 @@ theorem superseded_never_returns_hub {S T T' : SState} (hS : SReachable N S)
   have hIT' := (sinv_reachable (hST'.sr.reachable hSR)).base
   rw [← cid_stable hSR hST'.sr S.hubD hx]
   obtain ⟨-, hpar⟩ := hST'.sr.par
-  apply Contract.superseded_ne hIT'.parLt
+  apply Contract.superseded_ne hIT'.parLt (fun _ _ h => h)
   · rcases hsup with h | ⟨a, hA, hne, hTa, hSa⟩
     · exact Or.inl (by simpa using hTT.hubD h)
     · refine Or.inr ⟨a, ?_, hne, by simpa using hTT.hubD hTa, by simpa using hSa⟩

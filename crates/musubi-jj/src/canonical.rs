@@ -10,6 +10,7 @@
 mod codec;
 mod contract;
 mod log;
+mod origin;
 
 use std::io;
 use std::path::Path;
@@ -376,6 +377,11 @@ impl Shared {
     }
 
     fn write_operation(&self, op: &Operation) -> Result<OperationId, CanonicalError> {
+        self.write_original(&origin::fresh(op))
+    }
+
+    /// Writes immutable content already prepared by fresh creation or contraction.
+    fn write_original(&self, op: &Operation) -> Result<OperationId, CanonicalError> {
         let id = OperationId::new(blake2b_hash(op).to_vec());
         self.log
             .append_operation(&id, &codec::encode_operation(op))
@@ -489,6 +495,24 @@ impl CanonicalStore {
 
     pub fn read_operation(&self, id: &CanonicalOp) -> Result<Operation, CanonicalError> {
         self.shared.read_operation(&id.0)
+    }
+
+    /// The immutable identity before contraction, recomputed from original parent material.
+    pub fn original_id(&self, id: &CanonicalOp) -> Result<OperationId, CanonicalError> {
+        Ok(self.read_operation_and_original(id)?.1)
+    }
+
+    /// Read once when a caller needs both the operation and its original identity.
+    pub fn read_operation_and_original(
+        &self,
+        id: &CanonicalOp,
+    ) -> Result<(Operation, OperationId), CanonicalError> {
+        let op = self.read_operation(id)?;
+        if id == self.root_operation_id() {
+            return Ok((op, id.0.clone()));
+        }
+        let original = origin::identity(&op)?;
+        Ok((op, original))
     }
 
     /// A stored operation as jj's walks over operations take it.
@@ -693,6 +717,7 @@ impl CanonicalStore {
             actual: OperationId::new(blake2b_hash(&op).to_vec()).hex(),
             names_its_commits: names_decoded_commits(bytes, encoded_op_commits, op_commit_ids(&op)),
         })?;
+        origin::identity(&op)?;
         Ok(op.parents)
     }
 
@@ -1516,7 +1541,7 @@ mod tests {
         );
         assert_eq!(store.write_operation(&op).unwrap(), op_id);
         assert_eq!(store.torn().unwrap(), Vec::<String>::new());
-        assert_eq!(store.read_operation(&op_id).unwrap(), op);
+        assert_eq!(store.read_operation(&op_id).unwrap(), origin::fresh(&op));
     }
 
     /// Stores a view encoded by hand, as a peer could send it.
@@ -1744,7 +1769,12 @@ mod tests {
         let merge = store.write_operation(&merge).unwrap();
         let orphan = proto::Operation {
             view_id: view_id.to_bytes(),
-            metadata: Some(Default::default()),
+            metadata: Some(proto::OperationMetadata {
+                attributes: vec![(origin::ORIGINAL_PARENTS.to_owned(), root.0.hex())]
+                    .into_iter()
+                    .collect(),
+                ..Default::default()
+            }),
             ..Default::default()
         }
         .encode_to_vec();

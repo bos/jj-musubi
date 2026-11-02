@@ -18,6 +18,7 @@ use musubi_fuzz::refusing_jj_lib_panics;
 use musubi_fuzz::scratch;
 use musubi_jj::canonical::CanonicalError;
 use musubi_jj::canonical::CanonicalStore;
+use musubi_jj::op_id::CanonicalOp;
 
 thread_local! {
     static STORE: RefCell<CanonicalStore> = RefCell::new(open());
@@ -55,7 +56,7 @@ fuzz_target!(|data: &[u8]| {
             if is_view {
                 store.import_view(&ViewId::from_bytes(id), bytes)
             } else {
-                store.import_operation(&OperationId::from_bytes(id), bytes)
+                store.import_operation(&CanonicalOp(OperationId::from_bytes(id)), bytes)
             }
         })
     };
@@ -98,9 +99,10 @@ fn admit(
         // Stored in normal form, which may order fields differently from `bytes`.
         assert_eq!(store.view_bytes(&id).unwrap().len(), bytes.len());
     } else {
-        let op = store.read_operation(&id).unwrap();
+        let canonical = CanonicalOp(id.clone());
+        let op = store.read_operation(&canonical).unwrap();
         assert_eq!(blake2b_hash(&op).as_slice(), id.as_bytes());
-        assert_eq!(store.operation_bytes(&id).unwrap(), bytes);
+        assert_eq!(store.operation_bytes(&canonical).unwrap(), bytes);
     }
     Outcome::Admitted
 }

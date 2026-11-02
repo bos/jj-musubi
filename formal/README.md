@@ -253,15 +253,26 @@ makes its node good, so the hub head moves at most once per node that is not goo
 ### Abandoned operations (`Contract.lean`, `Supersede.lean`)
 
 `Contract.lean` is about any history (`ParLt par`) and a dropped set `D`. Ids are terms
-(`CId`), so the hash they stand for is injective.
+(`CId`), so the hash they stand for is injective. `cid` takes an arbitrary immutable content
+function, allowing equal content at different operations. `equal_content_recreates_id` proves
+the three-operation counterexample when the content function is constant.
 
 - `cpar_union`, `cid_union`: dropping `D₁`, then `D₂` from what is left, gives the parents and
   ids that dropping `D₁ ∪ D₂` gives; hence `cid_comm`, either order.
-- `cid_eq`: two survivors' ids under two dropped sets are equal only for the same operation,
+- `cid_eq`, assuming injective immutable content: two survivors' ids under two dropped sets
+  are equal only for the same operation,
   with the sets agreeing on its proper ancestors. `superseded_ne`: an id from before a dropped
   set grew to include the operation or one of its ancestors is no survivor's id after.
 - `anc_cpar_iff`: among survivors, contraction keeps ancestry; `cid_congr`: ids depend only on
   what is below.
+
+Composition and ancestry need no content injectivity. `cid_eq`, `superseded_ne`, and the
+protocol's never-return corollaries do. The protocol instantiates content with the original's
+identity (`id`), representing the immutable original-parent material enforced by Rust's fresh
+creation and contraction APIs. Runtime input-history and hub-publication checks reject duplicate
+or explicitly dropped originals even when received with new current ids. Hash collision freedom
+remains an assumption. These proofs do not authenticate a peer's claimed rewrite provenance. See the contraction correspondence in
+[conformance.md](../docs/internals/conformance.md).
 
 `Supersede.lean` models the protocol over each operation's original, so the states of
 `Model.lean` stay as they are, and adds the hub's and each node's dropped sets (`SState`).

@@ -35,7 +35,7 @@ use crate::Attachment;
 use crate::blobs::BlobId;
 use crate::blobs::BlobStore;
 
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 pub const JJ_LIB_VERSION: &str = "0.46.0";
 /// This release of musubi, as every message says.
 pub const RELEASE: &str = env!("CARGO_PKG_VERSION");

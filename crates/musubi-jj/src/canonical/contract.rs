@@ -10,6 +10,9 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::hash::Hash;
 
+use jj_lib::object_id::ObjectId as _;
+use jj_lib::op_store::OperationId;
+
 use super::CanonicalError;
 use super::CanonicalStore;
 use crate::op_id::CanonicalOp;
@@ -27,6 +30,9 @@ pub struct Contraction {
     images: HashMap<CanonicalOp, Vec<CanonicalOp>>,
     /// The operations met that keep their ids.
     same: HashSet<CanonicalOp>,
+    /// Each original may occur only once in the input history, even when it came from a
+    /// peer. A store can hold many historical versions; one history cannot contain two.
+    checked: HashSet<CanonicalOp>,
 }
 
 impl Contraction {
@@ -50,6 +56,7 @@ impl Contraction {
             floor,
             images: HashMap::new(),
             same: HashSet::new(),
+            checked: HashSet::new(),
         })
     }
 
@@ -85,8 +92,52 @@ impl Contraction {
         store: &CanonicalStore,
         op: &CanonicalOp,
     ) -> Result<Vec<CanonicalOp>, CanonicalError> {
+        if !self.is_empty() {
+            self.check_origins(store, op)?;
+        }
         self.work_out(store, op)?;
         Ok(self.image(op))
+    }
+
+    /// Check before writing anything, including the low generations the rewrite skips.
+    /// Content hashing authenticates bytes, but does not establish unique originals.
+    fn check_origins(
+        &mut self,
+        store: &CanonicalStore,
+        head: &CanonicalOp,
+    ) -> Result<(), CanonicalError> {
+        if self.checked.contains(head) {
+            return Ok(());
+        }
+        let mut origins: HashMap<OperationId, CanonicalOp> = HashMap::new();
+        let mut seen = HashSet::new();
+        let mut complete = true;
+        let mut stack = vec![head.clone()];
+        while let Some(id) = stack.pop() {
+            if id == *store.root_operation_id() || !seen.insert(id.clone()) {
+                continue;
+            }
+            // Translation also asks about names not downloaded yet. They remain themselves;
+            // do not cache an incomplete closure as validated when their bytes may arrive.
+            if !store.has_operation(&id) {
+                complete = false;
+                continue;
+            }
+            let op = store.read_operation(&id)?;
+            let origin = super::origin::identity(&op)?;
+            if let Some(other) = origins.get(&origin) {
+                if *other != id {
+                    return Err(CanonicalError::MalformedOperation(id.0.hex()));
+                }
+            } else {
+                origins.insert(origin, id.clone());
+            }
+            stack.extend(CanonicalOp::parents_of(&op));
+        }
+        if complete {
+            self.checked.extend(seen);
+        }
+        Ok(())
     }
 
     /// What the operations worked out so far become, where that isn't just themselves.
@@ -149,7 +200,7 @@ impl Contraction {
             } else {
                 let mut operation = store.read_operation(&id)?;
                 operation.parents = contracted.iter().map(|op| op.0.clone()).collect();
-                let rewritten = store.write_operation(&operation)?;
+                let rewritten = CanonicalOp(store.shared.write_original(&operation)?);
                 store.note_generation(&rewritten, &contracted);
                 self.images.insert(id, vec![rewritten]);
             }
@@ -218,9 +269,71 @@ mod tests {
 
     use super::*;
 
+    /// `Contract.CId`, with byte hashes as immutable content symbols instead of naturals.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct CId(OperationId, Vec<Self>);
+
+    fn stored_cid(store: &CanonicalStore, id: &CanonicalOp) -> CId {
+        CId(
+            store.original_id(id).unwrap(),
+            store
+                .parents(id)
+                .unwrap()
+                .iter()
+                .map(|parent| stored_cid(store, parent))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn contraction_does_not_recreate_a_dropped_id() {
+        let dir = musubi_testutil::tempdir();
+        let store = CanonicalStore::open(dir.path(), CommitId::from_bytes(&[0; 20])).unwrap();
+        let view = store
+            .write_view(&View::make_root(CommitId::from_bytes(&[0; 20])))
+            .unwrap();
+        let mut op = Operation::make_root(view);
+        op.parents = vec![store.root_operation_id().0.clone()];
+        let a = store.write_operation(&op).unwrap();
+        op.parents = vec![a.0.clone()];
+        let x = store.write_operation(&op).unwrap();
+        assert_ne!(a, x);
+        let mut contraction = Contraction::new(&store, [a.clone()]).unwrap();
+        let image = contraction.images(&store, &x).unwrap();
+        assert_ne!(image, vec![a]);
+    }
+
+    #[test]
+    fn peer_cannot_put_two_versions_of_one_original_in_a_history() {
+        let dir = musubi_testutil::tempdir();
+        let store = CanonicalStore::open(dir.path(), CommitId::from_bytes(&[0; 20])).unwrap();
+        let ids = history(&store, &[vec![0], vec![1]], &[0, 1]);
+        let mut forged = store.read_operation(&ids[1]).unwrap();
+        forged.parents = vec![ids[2].0.clone()];
+        let id = CanonicalOp(OperationId::new(
+            jj_lib::content_hash::blake2b_hash(&forged).to_vec(),
+        ));
+        store
+            .import_operation(&id, &super::super::codec::encode_operation(&forged))
+            .unwrap();
+        let count = store.operation_ids().unwrap().len();
+        let mut contraction = Contraction::new(&store, [ids[2].clone()]).unwrap();
+        assert!(contraction.images(&store, &id).is_err());
+        assert_eq!(
+            store.operation_ids().unwrap().len(),
+            count,
+            "refuse before rewriting"
+        );
+    }
+
     /// A history of `parents.len()` operations on the root, the `i`th with the given parents
-    /// among those before it (`None` for the root), each told apart by its description.
-    fn history(store: &CanonicalStore, parents: &[Vec<usize>]) -> Vec<CanonicalOp> {
+    /// among those before it, allowing equal nonparent content. Identical initial operations
+    /// are one original, so only those are given distinct descriptions.
+    fn history(
+        store: &CanonicalStore,
+        parents: &[Vec<usize>],
+        contents: &[u8],
+    ) -> Vec<CanonicalOp> {
         let view = store
             .write_view(&View::make_root(CommitId::from_bytes(&[0; 20])))
             .unwrap();
@@ -228,8 +341,13 @@ mod tests {
         for (i, ps) in parents.iter().enumerate() {
             let mut op = Operation::make_root(view.clone());
             op.parents = ps.iter().map(|&p| ids[p].0.clone()).collect();
-            op.metadata.description = format!("op {i}");
-            ids.push(store.write_operation(&op).unwrap());
+            op.metadata.description = format!("content {}", contents[i]);
+            let mut id = store.write_operation(&op).unwrap();
+            if ids.contains(&id) {
+                op.metadata.description = format!("distinct op {i}");
+                id = store.write_operation(&op).unwrap();
+            }
+            ids.push(id);
         }
         ids
     }
@@ -266,7 +384,10 @@ mod tests {
             .collect();
         let dir = musubi_testutil::tempdir();
         let store = CanonicalStore::open(dir.path(), CommitId::from_bytes(&[0; 20])).unwrap();
-        let ids = history(&store, &parents);
+        let contents: Vec<u8> = (0..count)
+            .map(|_| tc.draw(gs::integers::<u8>().max_value(2)))
+            .collect();
+        let ids = history(&store, &parents, &contents);
         // Asked about in any order, as a machine's translation is.
         let mut order: Vec<usize> = (1..=count).collect();
         for i in (1..order.len()).rev() {
@@ -293,6 +414,7 @@ mod tests {
         let mut both = Contraction::new(&store, both_sets).unwrap();
         // What each original contracts to, by the definition, as indices.
         let mut expected: Vec<Vec<usize>> = vec![vec![0]];
+        let mut terms = vec![CId(store.original_id(&ids[0]).unwrap(), vec![])];
         for i in 1..=count {
             let mut contracted = vec![];
             for &p in &parents[i - 1] {
@@ -303,6 +425,13 @@ mod tests {
                 }
             }
             let dropped = first.contains(&i) || second.contains(&i);
+            // `cid_eq_mk`: immutable content and the ids of `cpar`'s parents. Unlike the
+            // implementation, this builds terms from the generated graph, with no hashes
+            // of rewritten operations and no store traversal.
+            terms.push(CId(
+                store.original_id(&ids[i]).unwrap(),
+                contracted.iter().map(|&q| terms[q].clone()).collect(),
+            ));
             expected.push(if dropped { contracted.clone() } else { vec![i] });
             let images = both.images(&store, &ids[i]).unwrap();
             assert_eq!(in_order[&i], images, "op {i}, asked out of order");
@@ -317,6 +446,14 @@ mod tests {
             }
             let id = images;
             assert_eq!(id.len(), 1);
+            assert_eq!(stored_cid(&store, &id[0]), terms[i]);
+            for &old in first.union(&second) {
+                assert_ne!(id[0], ids[old], "a dropped id cannot return");
+            }
+            assert_eq!(
+                store.original_id(&id[0]).unwrap(),
+                store.original_id(&ids[i]).unwrap()
+            );
             let via_first = twice.images(&store, &after_first[i][0]).unwrap();
             assert_eq!(via_first, id, "op {i}");
             let image_parents: Vec<CanonicalOp> = contracted

@@ -91,6 +91,8 @@ pub struct HubStore {
     /// sequence number `j`, the range `anc*(hist[i]) \ anc*(hist[j])` is the operations
     /// accepted after `j` and by `i`.
     accepted: HashMap<OperationId, u64>,
+    /// Unique originals in the accepted history, indexed once at acceptance.
+    accepted_origins: HashMap<OperationId, OperationId>,
     /// `hist`: the head accepted at each sequence number, the root operation at 0 and the
     /// head now last. Each as the records now name it, or as it was, if they dropped it.
     history: Vec<OperationId>,
@@ -103,10 +105,12 @@ pub struct HubStore {
     superseded: HashMap<OperationId, Vec<OperationId>>,
     /// Every operation a record named.
     named: HashSet<OperationId>,
+    named_origins: HashSet<OperationId>,
 }
 
 /// What the history becomes with more dropped: what [`HubStore::contract`] works out.
 pub struct Contracted {
+    dropped_origins: HashSet<OperationId>,
     /// The head whose history this is.
     pub head: OperationId,
     pub dropped: Vec<OperationId>,
@@ -158,11 +162,13 @@ impl HubStore {
             backend,
             canonical,
             accepted: HashMap::new(),
+            accepted_origins: HashMap::new(),
             history: vec![],
             records: vec![],
             digests: vec![RecordDigest::root()],
             superseded: HashMap::new(),
             named: HashSet::new(),
+            named_origins: HashSet::new(),
         };
         for (head, record) in history {
             if !record.is_empty() {
@@ -218,7 +224,13 @@ impl HubStore {
             .into_iter()
             .map(|(old, new)| (old.0, new.into_iter().map(|op| op.0).collect()))
             .collect();
+        let dropped_origins = dropped
+            .iter()
+            .filter(|id| self.canonical.has_operation(&CanonicalOp((*id).clone())))
+            .map(|id| self.canonical.original_id(&CanonicalOp(id.clone())))
+            .collect::<Result<_, _>>()?;
         Ok(Contracted {
+            dropped_origins,
             head,
             dropped,
             images,
@@ -228,12 +240,25 @@ impl HubStore {
     /// Takes a contraction as the next record: renames the history and what is accepted.
     fn take(&mut self, contracted: Contracted) {
         let Contracted {
-            dropped, images, ..
+            dropped,
+            images,
+            dropped_origins,
+            ..
         } = contracted;
         if dropped.is_empty() {
             return;
         }
         let image = |op: &OperationId| images.get(op).cloned().unwrap_or_else(|| vec![op.clone()]);
+        self.accepted_origins.retain(|_, op| {
+            if dropped.contains(op) {
+                return false;
+            }
+            if let Some(rewrite) = images.get(op).and_then(|ops| ops.first()) {
+                *op = rewrite.clone();
+            }
+            true
+        });
+        self.named_origins.extend(dropped_origins);
         let accepted = std::mem::take(&mut self.accepted);
         for (op, seq) in accepted {
             if let Some(images) = images.get(&op) {
@@ -312,6 +337,10 @@ impl HubStore {
         }
         let accepted = self.unaccepted_ancestors(new)?;
         for id in accepted {
+            self.accepted_origins.insert(
+                self.canonical.original_id(&CanonicalOp(id.clone()))?,
+                id.clone(),
+            );
             self.accepted.insert(id, seq);
         }
         self.history.push(new.clone());
@@ -340,6 +369,10 @@ impl HubStore {
     fn accept(&mut self, head: OperationId) -> Result<(), StoreError> {
         let seq = self.history.len() as u64;
         for id in self.unaccepted_ancestors(&head)? {
+            self.accepted_origins.insert(
+                self.canonical.original_id(&CanonicalOp(id.clone()))?,
+                id.clone(),
+            );
             self.accepted.insert(id, seq);
         }
         self.history.push(head);
@@ -472,10 +505,15 @@ impl HubStore {
         let mut missing = vec![];
         let mut reached = vec![];
         let mut boundary = BTreeSet::from([self.head().1.clone()]);
+        let mut origins = HashMap::new();
         let mut seen = HashSet::new();
         let mut stack = vec![op.clone()];
         while let Some(id) = stack.pop() {
             if !seen.insert(id.clone()) {
+                continue;
+            }
+            if self.is_superseded(&id) || contracted.is_some_and(|c| c.dropped.contains(&id)) {
+                missing.push(format!("operation {} was abandoned", id.hex()));
                 continue;
             }
             if self.accepted.contains_key(&id) || rewrites.contains(&id) {
@@ -487,7 +525,27 @@ impl HubStore {
                 missing.push(format!("operation {}", id.hex()));
                 continue;
             }
-            let operation = self.canonical.read_operation(&canonical)?;
+            let (operation, origin) = self.canonical.read_operation_and_original(&canonical)?;
+            let dropped_here = contracted.is_some_and(|c| c.dropped_origins.contains(&origin));
+            let accepted_id = self.accepted_origins.get(&origin).map(|old| {
+                contracted
+                    .and_then(|c| c.images.get(old))
+                    .and_then(|images| images.first())
+                    .unwrap_or(old)
+            });
+            if self.named_origins.contains(&origin)
+                || dropped_here
+                || accepted_id.is_some_and(|other| *other != id)
+                || origins
+                    .insert(origin, id.clone())
+                    .is_some_and(|other| other != id)
+            {
+                missing.push(format!(
+                    "operation {} repeats an original identity",
+                    id.hex()
+                ));
+                continue;
+            }
             if !self.canonical.has_view(&operation.view_id) {
                 missing.push(format!("view {}", operation.view_id.hex()));
                 continue;

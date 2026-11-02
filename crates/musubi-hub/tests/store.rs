@@ -22,6 +22,60 @@ use musubi_jj::objects::bundle::Record;
 use musubi_jj::op_id::CanonicalOp;
 use musubi_testutil::TestEnv;
 
+#[test]
+fn contraction_keeps_a_survivor_publishable_and_refuses_replayed_origins() {
+    use jj_lib::content_hash::blake2b_hash;
+    use jj_lib::op_store::{Operation, OperationId, View};
+    use musubi_jj::records::HubOp;
+
+    let dir = musubi_testutil::tempdir();
+    let path = dir.path().join("hub");
+    let mut hub = HubStore::init(&path, Backend::Simple).unwrap();
+    let root = hub.canonical().root_operation_id().clone();
+    let view = hub
+        .canonical()
+        .write_view(&View::make_root(Backend::Simple.root_commit()))
+        .unwrap();
+    let mut op = Operation::make_root(view);
+    op.parents = vec![root.0.clone()];
+    let a = hub.canonical().write_operation(&op).unwrap();
+    op.parents = vec![a.0.clone()];
+    let x = hub.canonical().write_operation(&op).unwrap();
+    assert!(hub.missing_closure(&x.0).unwrap().is_empty());
+    hub.set_head(1, &x.0, None).unwrap();
+    let contracted = hub.contract(&[HubOp(a.clone())]).unwrap();
+    let now = contracted.image(&x.0)[0].clone();
+    assert_ne!(now, a.0);
+    assert!(
+        hub.missing_closure_with(&now, Some(&contracted))
+            .unwrap()
+            .is_empty()
+    );
+    hub.set_head(2, &now, Some(contracted)).unwrap();
+    assert!(!hub.is_superseded(&now));
+    assert!(hub.is_superseded(&a.0));
+
+    // A peer can give a dropped original new current parents and hence a fresh current id.
+    // Its recomputable original identity still forbids publishing it, including after reopen.
+    let mut forged = hub.canonical().read_operation(&a).unwrap();
+    forged.parents = vec![now.clone()];
+    let forged_id = CanonicalOp(OperationId::new(blake2b_hash(&forged).to_vec()));
+    let mut bytes = hub.canonical().operation_bytes(&a).unwrap();
+    let at = bytes
+        .windows(66)
+        .position(|field| field[..2] == [0x12, 64] && field[2..] == *root.0.as_bytes())
+        .unwrap();
+    bytes[at + 2..at + 66].copy_from_slice(now.as_bytes());
+    hub.canonical()
+        .import_operation(&forged_id, &bytes)
+        .unwrap();
+    assert!(!hub.missing_closure(&forged_id.0).unwrap().is_empty());
+    drop(hub);
+    let hub = HubStore::open(&path).unwrap();
+    assert_eq!(hub.head().1, &now);
+    assert!(!hub.missing_closure(&forged_id.0).unwrap().is_empty());
+}
+
 fn canonical_ancestry(node: &NodeRepo, head: &CanonicalOp) -> Vec<CanonicalOp> {
     let store = node.canonical_store();
     let mut order = vec![];

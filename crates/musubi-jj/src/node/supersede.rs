@@ -95,6 +95,8 @@ pub(super) struct Records {
     superseded: HashMap<CanonicalOp, Vec<CanonicalOp>>,
     /// The operations a step dropped, rather than rewrote, as it named them.
     dropped: HashSet<CanonicalOp>,
+    /// Source operations whose canonical identity this session established.
+    sources: HashMap<LocalOp, CanonicalOp>,
     /// How each record this node took renamed the hub's history below the base then, new name
     /// to old: to name what it drops as the hub does after the hub goes back and takes others.
     hub_renamings: Vec<HashMap<CanonicalOp, CanonicalOp>>,
@@ -296,6 +298,10 @@ impl Records {
     /// What `op` is now ([`current`]).
     fn current(&self, op: &CanonicalOp) -> Vec<CanonicalOp> {
         current(&self.superseded, op)
+    }
+
+    pub(super) fn source(&self, local: &LocalOp) -> Option<&CanonicalOp> {
+        self.sources.get(local)
     }
 }
 
@@ -530,12 +536,26 @@ impl NodeRepo {
         &mut self,
         step: HashMap<CanonicalOp, Vec<CanonicalOp>>,
         dropped: &HashSet<CanonicalOp>,
+        counterparts: &HashMap<LocalOp, CanonicalOp>,
     ) -> Result<(), NodeError> {
         let step: HashMap<CanonicalOp, Vec<CanonicalOp>> = step
             .into_iter()
             .filter(|(old, new)| new != std::slice::from_ref(old))
             .collect();
-        if step.is_empty() {
+        let sources: HashMap<LocalOp, CanonicalOp> = counterparts
+            .iter()
+            .filter(|(_, old)| !dropped.contains(*old))
+            .filter_map(|(source, old)| {
+                let current = match step.get(old).map(Vec::as_slice) {
+                    Some([current]) => current,
+                    None => old,
+                    Some(_) => return None,
+                };
+                (self.records.sources.get(source) != Some(current))
+                    .then(|| (source.clone(), current.clone()))
+            })
+            .collect();
+        if step.is_empty() && sources.is_empty() {
             return Ok(());
         }
         let path = self.repo_path.join("musubi").join(STEPS_FILE);
@@ -543,6 +563,7 @@ impl NodeRepo {
         self.records
             .dropped
             .extend(step.keys().filter(|old| dropped.contains(*old)).cloned());
+        self.records.sources.extend(sources);
         self.records.compose(step);
         Ok(())
     }
@@ -827,12 +848,17 @@ impl NodeRepo {
         // realization names, or the one its old self, jj's, was.
         let mut counterparts: HashMap<LocalOp, CanonicalOp> = HashMap::new();
         for (id, op) in &unmapped {
-            let named = op
-                .metadata
-                .attributes
-                .get(CANONICAL_ATTRIBUTE)
-                .and_then(OperationId::try_from_hex)
-                .map(CanonicalOp)
+            let named = self
+                .records
+                .source(id)
+                .cloned()
+                .or_else(|| {
+                    op.metadata
+                        .attributes
+                        .get(CANONICAL_ATTRIBUTE)
+                        .and_then(OperationId::try_from_hex)
+                        .map(CanonicalOp)
+                })
                 .filter(|c| self.canonical.has_operation(c))
                 .and_then(|c| match self.current_ids(&c).as_slice() {
                     [now] => Some(now.clone()),
@@ -949,7 +975,7 @@ impl NodeRepo {
         // Recorded before the op heads move, so that a restart in between resumes the move; a
         // renaming appended without them doesn't count.
         let dropped_here = contraction.dropped().clone();
-        self.add_step(contraction.into_images(), &dropped_here)?;
+        self.add_step(contraction.into_images(), &dropped_here, &counterparts)?;
         self.records.moving = true;
         self.save_records()?;
         self.move_heads(&heads, &locals, None, None)?;
@@ -1166,6 +1192,11 @@ impl NodeRepo {
             !standing.contains_key(op) && !contraction.may_change(canonical, op).unwrap_or(true)
         })?;
         affected.retain(|op| self.local_of(op).is_some() || standing.contains_key(op));
+        // Validate and contract tips before their prefixes: asking in parents-first order
+        // would rescan each growing prefix to check original identities, quadratically.
+        for c in affected.iter().rev() {
+            contraction.images(canonical, c)?;
+        }
         // Parents first: `ancestors_until` puts them so.
         let mut local_now: HashMap<CanonicalOp, LocalOp> = HashMap::new();
         let mut locals: HashMap<LocalOp, Vec<LocalOp>> = HashMap::new();
@@ -1188,7 +1219,10 @@ impl NodeRepo {
             for parent in self.canonical.parents(&new)? {
                 parents.push(self.local_for(&parent, &local_now)?.0);
             }
-            let changed = op.parents != parents
+            let changed = new != *c
+                || (counterparts.contains_key(&template)
+                    && !op.metadata.attributes.contains_key(CANONICAL_ATTRIBUTE))
+                || op.parents != parents
                 || op
                     .metadata
                     .attributes
@@ -1196,11 +1230,12 @@ impl NodeRepo {
                     .is_some_and(|hex| *hex != new.0.hex());
             let rewrite = if changed {
                 op.parents = parents;
-                if op.metadata.attributes.contains_key(CANONICAL_ATTRIBUTE) {
-                    op.metadata
-                        .attributes
-                        .insert(CANONICAL_ATTRIBUTE.to_owned(), new.0.hex());
-                }
+                // The translation map is disposable. Without a durable marker, translating
+                // this rewrite after cache loss would mint an origin from its new parents.
+                // It also prevents jj's local content addressing from coalescing originals.
+                op.metadata
+                    .attributes
+                    .insert(CANONICAL_ATTRIBUTE.to_owned(), new.0.hex());
                 LocalOp(op_store.write_operation(&op).block_on()?)
             } else {
                 template.clone()
@@ -1643,7 +1678,7 @@ impl NodeRepo {
             let heads = self.local_heads()?;
             // Recorded first: a restart before the op heads move moves them
             // (`realign_heads`).
-            self.add_step(taking.renaming.clone(), &taking.dropped)?;
+            self.add_step(taking.renaming.clone(), &taking.dropped, &HashMap::new())?;
             self.save_records()?;
             self.move_heads(&heads, &taking.locals, head, merged)?;
             self.forget_local_caches();

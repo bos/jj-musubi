@@ -192,6 +192,28 @@ has a node abandon an operation the hub has, and the other take the record, and
 `concurrent_supersedes_conformance` two nodes abandon different operations at once, the hub
 ending up with both records.
 
+### Contraction identity
+
+`canonical::contract::tests::dropping_twice_is_dropping_both` checks the Rust contraction
+against copies of `Contract.cpar` and `cid_eq_mk`: generated parent lists are expanded by index,
+and ids become terms of immutable original identity and parent terms. It compares those terms
+with the stored result, and sequential with union contraction, in shuffled query order. The
+generator permits equal nonparent fields across different parents. If an initial operation
+would duplicate an earlier one's full content, its description is changed to make a distinct
+original. The test also checks that no dropped id returns and original identity stays.
+
+`contraction_does_not_recreate_a_dropped_id` is the minimal store counterexample. Removing the
+immutable original parents makes it fail by exact id equality; it is the Rust counterpart of
+`Contract.equal_content_recreates_id`. `peer_cannot_put_two_versions_of_one_original_in_a_history`
+checks refusal before rewrites. The hub test
+`contraction_keeps_a_survivor_publishable_and_refuses_replayed_origins` checks that a survivor
+remains closed and publishable, and that a hash-valid alternate version of a dropped original
+is refused, including after reopening. `original_parent_encoding_is_pinned_and_cannot_be_supplied_by_a_caller`
+pins the new encoding and fresh-write enforcement.
+
+The `import` fuzz target varies the reserved attribute with a valid content hash so that
+origin validation is reached.
+
 ## Running it
 
 ```sh

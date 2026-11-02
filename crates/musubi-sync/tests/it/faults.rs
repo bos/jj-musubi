@@ -455,32 +455,45 @@ fn calls_leave_no_uploads_behind() {
 #[test]
 fn calls_leave_no_downloads_behind() {
     let session = session();
-    // A fetch with two downloads, and the request that begins the second.
-    let (call, second) = session
+    // A fetch that brings both operations and objects. Use smaller chunks here so both
+    // attachments span chunks, independently of their hash order and encoding size.
+    let call = session
         .calls
         .iter()
-        .find_map(|call| {
-            let requests = &session.seen.requests[call.start..call.start + call.requests];
-            let mut downloads = requests.iter().enumerate().filter_map(|(n, bytes)| {
-                match Envelope::decode(bytes) {
-                    Ok(HubRequest::GetChunk { blob, .. }) => Some((n, blob)),
-                    _ => None,
-                }
-            });
-            let (_, first) = downloads.next()?;
-            let (second, _) = downloads.find(|(_, blob)| *blob != first)?;
-            Some((call, second))
-        })
+        .find(|call| matches!(call.request, Request::Fetch { .. }) && call.requests > 1)
         .unwrap();
     run_local(async {
         let dir = musubi_testutil::tempdir();
         let hub_dir = dir.path().join("hub");
-        let network = MemoryNetwork::new(1, MAX_PAYLOAD);
+        let network = MemoryNetwork::new(1, 512);
         serve(
             session.hub_after(call.start, &hub_dir),
             Arc::new(network.connect()),
         )
         .await;
+        // Record this read-only fetch at this payload size before choosing its failure
+        // point. An indirect reply may precede the two retained attachment downloads.
+        let probe = Link::new(Arc::new(network.connect()), &hub_dir, None);
+        let probe_dir = dir.path().join("probe");
+        let remote = RemoteHub::new(probe.clone(), RPC.into(), &probe_dir, TIMEOUT).unwrap();
+        drop(
+            remote
+                .call(call.request(&session.seen, &probe_dir))
+                .await
+                .unwrap(),
+        );
+        let requests = probe.sent();
+        let downloads: Vec<_> = requests
+            .iter()
+            .enumerate()
+            .filter_map(|(n, bytes)| match Envelope::decode(bytes) {
+                Ok(HubRequest::GetChunk { blob, .. }) => Some((n, blob)),
+                _ => None,
+            })
+            .collect();
+        let (_, last) = downloads.last().unwrap();
+        let second = downloads.iter().find(|(_, blob)| blob == last).unwrap().0;
+        assert!(downloads.iter().filter(|(_, blob)| blob == last).count() >= 2);
         let blobs = dir.path().join("node");
         let stored = |sub: &str| std::fs::read_dir(blobs.join(sub)).unwrap().count();
         let failing = |at| {
@@ -1304,22 +1317,15 @@ fn prepare(hub: &mut HubService, fetch: &[u8]) -> (BlobId, u64) {
     let Ok(HubReply::Protocol(reply)) = Envelope::decode(&reply) else {
         panic!("the fetch failed");
     };
-    let mut blobs = vec![];
-    map_reply(
-        reply,
-        |id| id,
-        |attachment| {
-            if let WireAttachment::Blob { blob, len } = attachment {
-                blobs.push((blob, len));
-            }
-            Ok(())
-        },
-    )
-    .unwrap();
-    let [blob] = blobs.as_slice() else {
-        panic!("the fetch's reply has blobs {blobs:?}");
-    };
-    *blob
+    // Operation metadata can make the operations travel as a blob too. These tests
+    // exercise the large objects bundle, independently of the operations' encoding size.
+    match reply {
+        Reply::Fetched {
+            objects: WireAttachment::Blob { blob, len },
+            ..
+        } => (blob, len),
+        other => panic!("the fetch's reply has no objects blob: {other:?}"),
+    }
 }
 
 /// The chunk of `blob` at `offset`, as a node asks for it.

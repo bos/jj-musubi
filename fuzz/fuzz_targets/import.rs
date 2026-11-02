@@ -27,6 +27,7 @@ use musubi_fuzz::scratch;
 use musubi_jj::canonical::CanonicalStore;
 use musubi_jj::objects::bundle;
 use musubi_jj::objects::bundle::BundleWriter;
+use musubi_jj::op_id::CanonicalOp;
 use prost::Message as _;
 
 /// How many operations, each with a view of its own, the history has.
@@ -36,6 +37,7 @@ const LENGTH: usize = 6;
 struct History {
     views: Vec<(ViewId, Vec<u8>)>,
     ops: Vec<(OperationId, Vec<u8>)>,
+    decoded: Vec<Operation>,
 }
 
 fn root_commit() -> CommitId {
@@ -49,7 +51,7 @@ fn history() -> &'static History {
         fs::remove_dir_all(&dir).ok();
         let store = CanonicalStore::open(&dir, root_commit()).unwrap();
         let mut parent = store.root_operation_id().clone();
-        let (mut views, mut ops) = (vec![], vec![]);
+        let (mut views, mut ops, mut decoded) = (vec![], vec![], vec![]);
         for i in 0..LENGTH as u8 {
             let mut view = View::make_root(root_commit());
             view.head_ids = (1 + i..8 + 2 * i)
@@ -57,14 +59,19 @@ fn history() -> &'static History {
                 .collect();
             let view_id = store.write_view(&view).unwrap();
             let mut op = Operation::make_root(view_id.clone());
-            op.parents = vec![parent];
+            op.parents = vec![parent.0];
             op.metadata.description = format!("operation {i}");
             let op_id = store.write_operation(&op).unwrap();
             views.push((view_id.clone(), store.view_bytes(&view_id).unwrap()));
-            ops.push((op_id.clone(), store.operation_bytes(&op_id).unwrap()));
+            ops.push((op_id.0.clone(), store.operation_bytes(&op_id).unwrap()));
+            decoded.push(store.read_operation(&op_id).unwrap());
             parent = op_id;
         }
-        History { views, ops }
+        History {
+            views,
+            ops,
+            decoded,
+        }
     })
 }
 
@@ -160,7 +167,35 @@ fuzz_target!(|data: &[u8]| {
         }
         if control & 0x30 != 0x30 {
             let (op_id, op) = &history.ops[i];
-            writer.operation(op_id.as_bytes(), op).unwrap();
+            if control & 0xc0 == 0 {
+                writer.operation(op_id.as_bytes(), op).unwrap();
+            } else {
+                // Reach origin validation with a correct content hash, rather than being
+                // refused by the hash check before parsing the reserved attribute.
+                honest = false;
+                let value = match control & 0xc0 {
+                    0x40 => None,
+                    0x80 => Some(String::from_utf8_lossy(input.bytes()).into_owned()),
+                    _ => Some("00".repeat(64)),
+                };
+                let mut decoded = history.decoded[i].clone();
+                let mut encoded = proto::Operation::decode(op.as_slice()).unwrap();
+                let attributes = &mut encoded.metadata.as_mut().unwrap().attributes;
+                decoded
+                    .metadata
+                    .attributes
+                    .remove("musubi.original-parents");
+                attributes.remove("musubi.original-parents");
+                if let Some(value) = &value {
+                    decoded
+                        .metadata
+                        .attributes
+                        .insert("musubi.original-parents".to_owned(), value.clone());
+                    attributes.insert("musubi.original-parents".to_owned(), value.clone());
+                }
+                let id = jj_lib::content_hash::blake2b_hash(&decoded);
+                writer.operation(&id, &encoded.encode_to_vec()).unwrap();
+            }
         } else {
             honest = false;
         }
@@ -180,7 +215,12 @@ fuzz_target!(|data: &[u8]| {
     if honest {
         for ((view_id, view), (op_id, op)) in history.views.iter().zip(&history.ops) {
             assert_eq!(&reopened.view_bytes(view_id).unwrap(), view);
-            assert_eq!(&reopened.operation_bytes(op_id).unwrap(), op);
+            assert_eq!(
+                &reopened
+                    .operation_bytes(&CanonicalOp(op_id.clone()))
+                    .unwrap(),
+                op
+            );
         }
     }
 });

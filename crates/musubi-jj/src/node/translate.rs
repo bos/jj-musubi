@@ -75,6 +75,9 @@ impl NodeRepo {
                 continue;
             }
             op.parents = parents;
+            op.metadata
+                .attributes
+                .insert(CANONICAL_ATTRIBUTE.to_owned(), canonical.0.hex());
             let rewrite = LocalOp(op_store.write_operation(&op).block_on()?);
             self.insert_map(rewrite.clone(), canonical)?;
             rewrites.insert(local.clone(), rewrite);
@@ -123,7 +126,10 @@ impl NodeRepo {
         if local == self.root_op_id() {
             return Some(self.canonical.root_operation_id().clone());
         }
-        self.map.canonical_of(local).cloned()
+        self.map
+            .canonical_of(local)
+            .or_else(|| self.records.source(local))
+            .cloned()
     }
 
     pub fn local_of(&self, canonical: &CanonicalOp) -> Option<LocalOp> {

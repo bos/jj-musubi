@@ -751,6 +751,30 @@ after them, never come back.
 
 ### Contraction
 
+An operation's nonparent content need not be unique: jj can make equal views, metadata and
+commit predecessors at different places in history. Reparenting one can otherwise recreate
+another's exact bytes and id, including an id the hive dropped. Each fresh canonical operation
+therefore records its initial canonical parents in `musubi.original-parents`, replacing any
+caller-supplied value. Contraction preserves that attribute verbatim. The original operation's
+hash is recomputed by removing the attribute and restoring those parents; the original parents
+are identity material and need not remain stored or reachable after an abandon.
+
+Contraction checks that its input history contains at most one version of each original,
+including below the generation at which it can stop rewriting. Different versions may exist
+elsewhere in the store. A received attribute must be a nonempty list of lowercase full parent
+ids separated by single spaces. The hub indexes original identities as it accepts operations,
+rejects duplicate originals in proposed history, and remembers the originals explicitly dropped
+by its records. An imported alternate version of a dropped original cannot evade rejection by
+choosing new current parents. The attribute is not proof of a peer's historical provenance;
+the protocol's model describes fresh creation and contraction, not arbitrary reparenting.
+This validation reads each input head's full ancestry once, even when only recent operations
+need rewriting. Tips are checked before their prefixes to avoid rescanning every growing
+prefix in a linear history; subsequent queries on that contraction reuse the validation.
+
+Every rewritten local survivor also records its canonical image in `musubi.canonical`, so
+rebuilding the disposable translation cache preserves its original identity and local jj ids
+cannot coalesce when a remote abandon is taken.
+
 The hive's history drops a set of canonical operations. Each surviving operation's parent list
 has every dropped parent replaced, where it stands, by that parent's own parents, themselves so
 replaced, and then each duplicate after the first removed. A survivor whose parents change gets a
@@ -860,7 +884,8 @@ in the log again, working out each contraction as it first did.
 
 A record renames every operation after one it drops. In a hive that is nearly every operation
 since the oldest one dropped, because merges tie every machine's work back together. So
-abandoning recent operations costs little, but trimming the history (`jj op abandon ..X`) leaves
+rewriting recent operations costs little after the full identity check described above, but
+trimming the history (`jj op abandon ..X`) leaves
 the hub no smaller. The dropped operations' ids still take the memory that the operations did.
 The kept operations' old ids are added, and every kept operation is stored twice.
 

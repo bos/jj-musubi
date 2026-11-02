@@ -204,6 +204,26 @@ The test's objects have no structure, so the test's hub ignores `closure(base)` 
 out exactly what the haves name, as the model's `hubFetch` does; a node's haves there are
 every object it holds.
 
+The original-ancestry guards above are a known limit of this harness, not a guard on every
+accepted production push. `history::a_push_can_drop_its_expected_head_and_reuse_a_cached_fixup`
+uses real stores, interrupted adoption and hub rollback to reach an accepted push whose
+expected head is not an original ancestor of the cached fix-up. The pending drops contract
+that head into ancestors of the fix-up. Both real adapters allow this, while `SStep.sup`
+requires original ancestry. The trace then converges; narrowing the production guard to fit
+the model would change that valid behavior.
+
+`ContractOrder.lean` defines `Below` for the comparison through all surviving images, and
+`belowB` additionally requires a nonempty image, as `HubAdapter::descends` does. The real
+trace supplies the immutable parent material from its actual stores to the
+`contractedAncestry` oracle route, checks `descends=true` and `original=false` at that accepted
+push, and separately checks its hub head and sequence. This is the current expected hub head;
+the hub's temporary contraction starts there, so this test does not establish equivalence
+for arbitrary ancestor queries. The production closure and surviving-new-head guards still
+apply. `below_contracted_iff` and `below_two_step` connect the mathematical comparisons across
+contraction; the CId/physical-store projection and a revised full-state refinement remain
+necessary. Expansion may contain duplicate images; the check is universal membership, not
+an exact image-list comparison.
+
 ## A repository advance that also merges
 
 The core harness's `FakeRepo::advance` updates heads only. `NodeRepo::advance` can also call
@@ -287,6 +307,68 @@ recovery boundaries, not the full retry/response refinement, which remains
 [#78](https://github.com/bos/jj-musubi/issues/78). The adapter clears its staged graph and
 ancestry cache when `advance` changes record state, as a separate `Adopted` step used to do,
 even if a later part of the advance fails.
+
+`AsyncLiveness.lean` separates two events hidden by an atomic push/fetch exchange.
+`bad_accept_before_reply` proves that acceptance makes the pusher good while its `known`
+still names the old head. `measureR_delayed_learn` proves descent for learning a strictly
+newer pair from the current hub history, even if it is no longer the latest pair.
+`lost_acceptance_and_delayed_fetch_make_progress` drives the core and oracle through both:
+it withholds an acceptance reply, checks descent immediately at the hub, recovers through a
+new fetch, advances the hub again, and delivers a fetch that names the intermediate head.
+It checks descent before final quiescence, so convergence alone cannot hide either boundary.
+
+`settling_hub_stabilizes` proves that a reachable `SettlingStep` run eventually has a fixed
+hub. It permits delayed consistent replies, bookkeeping and local policy steps; each hub
+movement lowers `mBad`. The implementation-to-suffix correspondence is not yet established:
+fix-ups written before a failed push, obsolete-history recovery and stale ordered-record
+adoption still require their finite-disturbance arguments. This is partial progress on
+[#78](https://github.com/bos/jj-musubi/issues/78), not full asynchronous convergence.
+
+The transport contract additionally checks canceled calls and replies delayed beyond a
+fresh exchange, and repeats a completed reply. A deterministic unit test of the shipping
+stream receiver, `replies_only_complete_the_matching_pending_call_once`, injects the raw
+obsolete/duplicate frames while a later request is pending. This pins the stream client's
+own ID lookup and consume-once rule, which service-side reply inboxes can otherwise mask.
+Neither test forbids a still-pending request's reply arriving after a hub remake.
+
+The receiver unit also compares each injected reply's matched slot and remaining pending
+ids with `Retry.Inbox.finish`, through the `retryInbox` oracle route. The Lean model proves
+that only finitely many pre-cut slots can be consumed, even with infinitely many unmatched
+duplicates. Request allocation and disconnect are read from the implementation, rather
+than exercised by this unit; the correspondence assumes the `u64` request counter is not
+exhausted. It does not bound notification delivery or force a live old call to finish.
+
+`history::op_abandon_replicates` additionally checks the production fix-up cache against
+`Retry.Fixup.write`, through `retryFixup`. After a supported jj abandon, it writes the
+fix-up without publishing a push, retries, reopens `NodeRepo` from disk and retries again.
+The first call creates an operation; both retries keep the same heads and pending record.
+After the existing sync converges, adoption clears the modeled pending drops. Disabling the
+`fixup_written` guard makes the first retry create another operation and fails this check;
+omitting the marker when saving records fails the retry after reopening.
+The model bounds writes by one within an epoch whose pending originals shrink after its
+first current adoption. This test pins cached reuse and reopening, not that monotonicity
+premise or eventual entry into such an epoch. Raw hub ids can change during adoption and
+cannot serve as the immutable names in that premise. The causal connection from a cached
+fix-up to `SPStepR` is still open, as is the final fair-retry convergence theorem.
+
+`RecordStability.lean` derives eventual full-record-list and pruned-prefix stability from
+bounded immutable original drops and cessation of rollback, without assuming that hub heads
+stabilize. `sexec_record_control` reads the append/unchanged and pruning effects directly from
+the existing executable rules. `sexec_record_prefix_stabilizes` composes those effects and
+their pruning bound; it still has the original-drop bound as a premise. These are derived
+counting theorems over existing record constructors, not a new transition system. They do
+not extend `sexecStep` to the contracted acceptance above. The module also derives pending
+shrink for record extensions from `adoptR`, and a common stabilization cut for finitely many
+monotone bounded node drop sets; it does not prove every runtime adoption is an extension.
+`eventual_original_chain` composes a record cut with `Contract.Below` on an immutable
+birth-parent graph to recover an eventual reflexive ancestry chain. Its surviving-head and
+contracted-comparison premises still need the physical-store projection described above.
+
+`history::a_cached_fixup_can_idle_with_a_pending_drop_until_another_machine_syncs` reaches
+truthful known/head equality and matching node/hub records with a cached fix-up and a pending
+original. The core returns `Idle` there; the whole hive converges when another machine
+syncs. This rules out a proposed per-node exclusion invariant, not global convergence. A
+complete bridge still needs to account for the other machines' outstanding work.
 
 `formal/Musubi/Liveness.lean` proves that once users stop, nodes following the policy
 (`PStep`) converge: a lexicographic measure falls on every policy step, and some step is
@@ -463,6 +545,7 @@ Deliberately broken versions of the core, each caught:
 | Hub accepts a `Push` without checking ancestry | invariants and conformance |
 | Hub accepts a `Push` when `head ≠ expected` | invariants and conformance |
 | Node ignores fetched record regrouping when dropped unions agree | `regrouped_records_conformance`: the expected record-only adoption becomes a realization |
+| Repository rewrites an already written fix-up on retry | `history::op_abandon_replicates`, against `Retry.Fixup.write` |
 | Node realizes an operation before its parents | invariants and conformance |
 | Node realizes an operation before its objects arrive | invariants and conformance |
 | Node learns a head whose `seq` equals the one it knows | conformance only: harmless, but not a model step |
@@ -624,6 +707,34 @@ Consequences of the model that the Rust test implementations must match:
 Every array is sorted ascending, but records, which keep their order, each sorted. `net` is
 sorted by `(msg, node, ...)`. `ops` lists every created operation except the root.
 `pruned` is how many of the hub's first records it has pruned.
+
+### Retry control
+
+These stateless routes evaluate `RetryControl.lean`'s definitions; they do not change the
+protocol session.
+
+`retryInbox` takes `next`, a list of live `pending` request ids, a `cut`, and `action`:
+`start`, `finish` (with `id`), or `disconnect`. It returns `next`, `pending`, whether a
+finish `matched` a live slot, and the remaining count `old` below `cut`. List order is not
+part of the production correspondence. Delivery, timeout and canceled-call cleanup all
+retire a matching slot; a canceled receiver may remain in the pending map until then.
+
+`retryFixup` takes `pending` original-operation names, `written`, `aligned`, and `action`:
+`write`, or `adopt` with `nextPending`. It returns those three state fields, whether a write
+`emitted` a new fix-up, and the remaining `credit` (zero or one). `aligned` means a first
+current-epoch adoption has occurred. A later adoption that grows pending is refused; that
+guard is the epoch premise, not a proof about arbitrary production adoption. The model's
+empty-pending `write` is a core-level no-op: `NodeCore` does not call the backend's
+`write_fixup` when pending is empty.
+
+### Contracted ancestry
+
+`contractedAncestry` is stateless. `parents` is an array of parent lists with every parent
+numbered before its child; `expected` and `head` are in that array, and `dropped` names
+originals. It returns `descends` (`Contract.belowB`), `original` (ordinary ancestry), and
+`images` (the expansion of the expected head, which may contain duplicates). The supplied
+graph is immutable original parent material; the route does not interpret raw canonical ids
+or check the production protocol's closure, record, root-drop or surviving-head guards.
 
 ## Presence
 

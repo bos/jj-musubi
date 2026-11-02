@@ -11,6 +11,10 @@ import Musubi.Scenario
 import Musubi.ExecSound
 import Musubi.SupersedeExecSound
 import Musubi.RecordLiveness
+import Musubi.AsyncLiveness
+import Musubi.RetryControl
+import Musubi.RecordStability
+import Musubi.ContractOrder
 import Musubi.RegressScenario
 import Musubi.Refs
 import Musubi.AbandonRefs
@@ -132,6 +136,37 @@ open Musubi
 #print axioms Exec.reconcile_executable
 #print axioms Exec.record_progress_at_convergence
 #print axioms Exec.record_finish
+-- Split asynchronous exchanges (the full retry bridge is still open)
+#print axioms measureR_delayed_learn
+#print axioms bad_accept_before_reply
+#print axioms measureR_accept_before_reply
+#print axioms settling_decreases
+#print axioms settling_hub_stabilizes
+-- Retry-control bounds under their explicit epoch constraints
+#print axioms Retry.finish_missing
+#print axioms Retry.start_fresh
+#print axioms Retry.inbox_old_credit
+#print axioms Retry.old_slots_eventually_stop
+#print axioms Retry.fixup_step_credit
+#print axioms Retry.fixup_writes_le_one
+#print axioms Retry.fixups_eventually_stop
+-- Stabilization of records, without assuming head stabilization
+#print axioms Exec.sexec_record_control
+#print axioms Exec.takeRecs_eq_iff
+#print axioms Exec.eventual_original_chain
+#print axioms Exec.record_prefix_eventually_stabilizes
+#print axioms Exec.sexec_record_prefix_stabilizes
+#print axioms Exec.adopt_pending_subset
+#print axioms Exec.retry_adopt_of_extension
+#print axioms Exec.node_drop_sets_eventually_stabilize
+-- Contracted expected heads; the original-history embedding is still incomplete
+#print axioms Contract.below_survivor_iff
+#print axioms Contract.below_contracted_iff
+#print axioms Contract.below_two_step
+#print axioms Contract.below_mono
+#print axioms Contract.below_trans
+#print axioms Contract.belowB_iff
+#print axioms Contract.stable_suffix_chain
 -- Per-machine and shared view state
 #print axioms Refs.noSpuriousRevert
 #print axioms Refs.import_moves_only_after_git

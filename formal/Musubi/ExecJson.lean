@@ -10,6 +10,8 @@ import Musubi.Copies
 import Musubi.Chunks
 import Musubi.Names
 import Musubi.RefsExec
+import Musubi.RetryControl
+import Musubi.ContractOrder
 import Musubi.ExpectedExec
 
 namespace Musubi.Exec.Json
@@ -421,6 +423,49 @@ def expectedReply (j : Json) : Except String Json := do
 
 /-! ## Liveness (`Exec.lean`, "The liveness measure") -/
 
+def contractedAncestryReply (j : Json) : Except String Json := do
+  let parents ← j.getObjValAs? (Array (List Nat)) "parents"
+  let dropped ← getNats j "dropped"
+  let expected ← getNat j "expected"
+  let head ← getNat j "head"
+  unless (List.range parents.size).all (fun x => (parents[x]!).all (· < x)) do
+    throw "an operation's parents must come before it"
+  unless expected < parents.size && head < parents.size do
+    throw "head outside the history"
+  let par := fun x => parents[x]?.getD []
+  let D := fun x => dropped.contains x
+  pure (Json.mkObj [("ok", toJson true),
+    ("descends", toJson (Contract.belowB par D expected head)),
+    ("original", toJson (ancB par expected head)),
+    ("images", toJson (Contract.exp par D expected))])
+
+def retryFixupReply (j : Json) : Except String Json := do
+  let s : Retry.Fixup := {
+    pending := ← getNats j "pending",
+    written := ← j.getObjValAs? Bool "written",
+    aligned := ← j.getObjValAs? Bool "aligned" }
+  let (t, emitted) ← match ← j.getObjValAs? String "action" with
+    | "write" => pure s.write
+    | "adopt" =>
+      match s.adopt (← getNats j "nextPending") with
+      | none => throw "pending grew after current-epoch alignment"
+      | some t => pure (t, false)
+    | _ => throw "unknown fix-up action"
+  pure (Json.mkObj [("ok", toJson true), ("pending", toJson t.pending),
+    ("written", toJson t.written), ("aligned", toJson t.aligned),
+    ("emitted", toJson emitted), ("credit", toJson t.credit)])
+
+def retryInboxReply (j : Json) : Except String Json := do
+  let s : Retry.Inbox := { next := ← getNat j "next", pending := ← getNats j "pending" }
+  let cut ← getNat j "cut"
+  let (t, matched) ← match ← j.getObjValAs? String "action" with
+    | "start" => pure (s.start.1, false)
+    | "finish" => pure (s.finish (← getNat j "id"))
+    | "disconnect" => pure (s.disconnect, false)
+    | _ => throw "unknown inbox action"
+  pure (Json.mkObj [("ok", toJson true), ("next", toJson t.next),
+    ("pending", toJson t.pending), ("matched", toJson matched), ("old", toJson (t.old cut))])
+
 /-- The session state's measures, and whether it has converged. -/
 def measureReply (N : Nat) (ses : SEState) : Json :=
   let es := ses.es
@@ -500,6 +545,18 @@ def handle (sess : Session) (line : String) : Json × Session :=
       | .ok cases => (copiesReply cases, sess)
     | .ok "expected" =>
       match expectedReply j with
+      | .error e => (errReply s!"bad request: {e}", sess)
+      | .ok reply => (reply, sess)
+    | .ok "retryFixup" =>
+      match retryFixupReply j with
+      | .error e => (errReply s!"bad request: {e}", sess)
+      | .ok reply => (reply, sess)
+    | .ok "contractedAncestry" =>
+      match contractedAncestryReply j with
+      | .error e => (errReply s!"bad request: {e}", sess)
+      | .ok reply => (reply, sess)
+    | .ok "retryInbox" =>
+      match retryInboxReply j with
       | .error e => (errReply s!"bad request: {e}", sess)
       | .ok reply => (reply, sess)
     | .ok "refs" =>

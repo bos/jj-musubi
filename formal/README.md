@@ -80,6 +80,10 @@ is `formal/.lake/build/bin/oracle`.
 | `Musubi/SupersedeExec.lean` | The executable model with supersedes: `SEState`, which adds the hub's records and each node's dropped set, the `SAction`s, `sexecStep`, and `smeasure` computed (`smeasureE`, `sconvergedE`). |
 | `Musubi/SupersedeExecSound.lean` | Soundness of `sexecStep` against `SRStep`, and of those computations. |
 | `Musubi/RecordLiveness.lean` | Record agreement and finite reconciliation after convergence. |
+| `Musubi/AsyncLiveness.lean` | Progress at split exchange boundaries and hub stabilization on a constrained suffix; not yet the full retry bridge. |
+| `Musubi/RetryControl.lean` | Finite pre-cut request-slot consumption and cached fix-up writes within an explicitly constrained epoch. |
+| `Musubi/RecordStability.lean` | Finite record appends and pruning for bounded original drops, and pending shrink under record extension. |
+| `Musubi/ContractOrder.lean` | Ancestry through a contracted expected head, including its difference from original ancestry. |
 | `Musubi/SupersedeExecTest.lean` | `#guard` smoke tests of `sexecStep`, checked at build time. |
 | `Musubi/Refs.lean` | Per-machine refs, for one git ref: imports, exports, merges, conflicted remote bookmarks, and `jj undo` and `jj op restore`. |
 | `Musubi/Expected.lean` | The conflicted-ref history walk, agreement under operation renaming, termination and the import-agreement boundary. |
@@ -169,7 +173,7 @@ the full asynchronous system with `N` nodes. The properties are stated in
 Liveness is proved for the policy model `PStep`: users have stopped (there is no `UserOp`), and
 each node takes the policy's actions as atomic request/reply exchanges that succeed, nodes and
 actions scheduled in any order. `Merge` is a policy step, because musubi loads the repository
-and jj merges. [Why the policy model suffices](#why-the-policy-model-suffices-for-liveness)
+and jj merges. [The asynchronous bridge](#the-asynchronous-liveness-bridge)
 explains why this covers the real, lossy system.
 
 `Converged N s` means that every node `n < N` has `heads = {hub.head}` and
@@ -522,44 +526,122 @@ theirs, as the hub, which names every machine, lists them.
   names of this machine's own, given machine names and suffixes without `/`, as musubi makes
   them; only a machine key edited by hand could have one.
 
-## Why the policy model suffices for liveness
+## The asynchronous liveness bridge
 
-The liveness theorems are about `PStep`, whose exchanges never fail; the policy's priority
-order is one schedule among those it allows. This is why that covers the real system. Points 1
-and 4 are theorems; 2 and 3 are argued here, not proved; 5 is checked by a test.
+The termination theorems concern successful atomic policy exchanges. `pstep_reachable`
+embeds each policy step into the asynchronous safety model; it does not prove that an
+asynchronous implementation run eventually takes policy steps. `Merged.lean` constructs
+successful merged exchanges with the same measure and convergence result. The Rust
+conformance test checks measure descent at completed, serialized exchanges. None alone
+establishes convergence under arbitrary asynchronous delivery and retries.
 
-1. **Each `PStep` is a run of the real system** (`pstep_reachable`), so every safety invariant
-   holds along a policy run. The implementation sends the merged requests instead, and
-   `Merged.lean` shows their runs end in states the measure and `Converged` can't tell from
-   the policy step's ([Merged requests](#merged-requests-mergedlean)).
-2. **Failures only delay.** A failed exchange (lost request or reply, crash, hub restart)
-   leaves persistent state unchanged, or changes it in a way a retry absorbs:
-   - Storing is idempotent.
-   - `Learn` ignores stale and duplicate sequence numbers.
-   - `Cas` with `new = head` answers `Accepted` and changes nothing.
-   - Realizing an operation that is already local adds nothing.
-   - A `Cas` that was accepted but whose reply was lost has exactly the hub-side effect of
-     `pushAccept`. The node's next `Fetch` performs the remaining `Learn`.
-   - Stored-but-unacknowledged uploads only grow hub stores, which the measure ignores.
+`AsyncLiveness.lean` proves progress at the boundaries that the atomic exchanges hide:
 
-   With eventual delivery, each retried exchange eventually completes. The run of
-   persistent-state changes is then a `PStep` run, interleaved with steps the measure
-   ignores.
-3. **Stale in-flight messages are finitely many** once users stop:
-   - A stale `Cas(e, d)` can change the hub at most once, because the head never returns to
-     `e`, and it can only move the head forward.
-   - Stale head-carrying replies only raise `known.seq`, which is bounded by `hub.seq`.
-   - Stale `Fetched` and `Ops` replies only stage accepted operations, and stale uploads
-     only grow hub stores.
+- `bad_accept_before_reply` and `measureR_accept_before_reply`: a hub acceptance makes
+  its pusher good before the acknowledgement, provided that node still has the single head
+  it pushed and its old `known` belongs to the current hub history. Losing the reply leaves
+  this progress intact. Stores and message bookkeeping do not affect the result.
+- `measureR_delayed_learn`: learning a strictly newer pair from the current hub history
+  decreases `rmeasure`, even when another acceptance has moved the hub beyond that pair.
+  This does not cover a reply from a history the hub lost, or a recovery reset.
+- `settling_hub_stabilizes`: every reachable run of `SettlingStep` eventually has a fixed
+  hub head and sequence number. Its first measure component never increases, and every
+  hub movement strictly decreases it. Local policy steps, including advance and merge,
+  remain allowed, as do delayed consistent learning and bookkeeping. Fix-up creation,
+  hub regression and obsolete-history recovery are excluded from this suffix relation.
 
-   After them, `eventually_converges` applies again from the then-current state, because it
-   holds from every reachable state, whatever messages are still in flight.
-4. **Termination does not depend on fairness among nodes.** `measure_decreases` holds for
-   every policy step, so no schedule runs forever, and `progress` gives a node following the
-   policy something to do until convergence.
-5. **The Rust policy's steps make the measure fall**, and its pushes upload `upOps` and
-   `upObjs`, as `Merged.lean` assumes, for a hub that has gone back too ([conformance.md,
-   "Liveness"](../docs/internals/conformance.md#liveness)).
+`RetryControl.lean` proves two finite bounds, with executable boundary checks described in
+[conformance.md](../docs/internals/conformance.md#liveness):
+
+- `old_slots_eventually_stop`: after any finite request-id cut, only finitely many replies
+  can consume a pre-cut live request slot. New requests cannot recharge the budget, and
+  duplicate frames cannot consume a slot twice. This permits infinitely many unmatched
+  duplicates. It assumes ids are never reused; production uses `u64`, so the correspondence
+  excludes exhausting that counter. It does not bound queued notifications or prove that a
+  still-live pre-cut call is eventually retired.
+- `fixup_writes_le_one` and `fixups_eventually_stop`: at most one completed fix-up write
+  per node in an epoch with no new abandonment discovery, obsolete-prefix adoption or
+  interrupted write. The first current-epoch adoption may replace pending drops; later
+  adoptions must only remove them, in immutable original-operation names. Clearing the cache
+  after alignment requires empty pending, which cannot then grow. A write produces a finite
+  saved work list and final operation. No bound on network retries is assumed. The
+  real-repository check pins cached reuse and reopening, but does not prove entry into this
+  epoch or the monotonicity premise for all production adoptions.
+
+`RecordStability.lean` derives part of the epoch argument. After rollback stops, every
+changed full modeled record list appends a nonempty difference, spending a previously unseen
+original drop. Bounded original drops therefore give an eventual fixed ordered list, without
+assuming head stabilization. Pruning then spends a bounded prefix. The executable
+`sexec_record_prefix_stabilizes` discharges the append and pruning premises from the existing
+record constructors; its original-drop bound and cessation of rollback remain assumptions.
+The independent `node_drop_sets_eventually_stabilize` gives a common cut for finitely many
+monotone bounded node drop sets. `adopt_pending_subset` derives pending-original shrink from
+`adoptR` when the new record list extends the old dropped union. These results neither prove
+that every production adoption is such an extension nor repair the ancestry gap below.
+
+That gap has a real-repository counterexample:
+`a_push_can_drop_its_expected_head_and_reuse_a_cached_fixup`. After interrupted adoption and
+hub rollback, the hub accepts a cached fix-up that does not originally descend from its
+expected head: the push drops that head, whose surviving images are below the fix-up. The
+trace converges. This is valid contracted ancestry, but `SStep.sup` and `SPStepR.supPush`
+require original ancestry and cannot represent this acceptance. The core harness's fake
+stores share that restriction, so their correspondence does not cover this real trace.
+
+`ContractOrder.lean` models this comparison as `Below`: every surviving image of the expected
+head is below the new head. `belowB` also checks that the image is nonempty, as the hub does.
+`below_two_step` connects contraction of an already contracted history with contraction by
+the union; `below_contracted_iff` connects original and current-graph ancestry of the images.
+For a fixed drop set, `stable_suffix_chain` recovers a reflexive original-ancestry chain of
+surviving heads. It does not repair the earlier history or establish strict changes, the
+epoch projection, or the full protocol invariants. The real trace checks the accepted push
+against `belowB` through the `contractedAncestry` oracle route, supplying its immutable DAG.
+`RecordStability.lean`'s `eventual_original_chain` composes the record cut with that relational
+argument: a trace of surviving hub heads compared under each resulting dropped set has an
+eventual original-ancestry chain. It takes the immutable graph and contracted comparisons
+as premises; it does not derive their physical-store projection or strict head changes.
+
+Another reachable boundary prevents a per-node shortcut:
+`a_cached_fixup_can_idle_with_a_pending_drop_until_another_machine_syncs` reaches matching
+node/hub records and an idle node whose written fix-up still has a pending original. The
+whole hive converges when another machine syncs. An invariant forbidding that local state
+would be false; the missing argument must account for the other machines.
+
+Establishing that the implementation eventually enters the settling suffix is still part
+of [#78](https://github.com/bos/jj-musubi/issues/78). A failed sync can leave an accepted hub
+head, partially received data, or a newly written fix-up. `supFix` combines fix-up creation
+with acceptance; a failed push leaves the creation without its compensating decrease.
+The production cache may then return no new operation, whereas that policy step always
+creates one. Also, the policy compares original-operation identities while the core compares
+their contracted ids. A causal invariant connecting cached fix-ups, pending drops and
+accepted history is still needed; the retry bounds do not supply it. Adopting an obsolete
+ordered-record list can increase `recordLagE` even when no dropped set changes. The
+record-aware theorem covers taking current hub records, not arbitrary old announcements.
+
+The intended environmental assumptions are eventual cessation of user operations,
+abandonments, hub regressions and disruptive crashes; resumed participating nodes; finite
+influence from obsolete replies; eventually successful honest retries and transfers; and
+fair scheduling of enabled local work. Permanent repository errors, unavailable objects or
+unsupported jj merges do not satisfy those assumptions. Fairness must describe actual
+work being scheduled, rather than assume that the rank eventually decreases. The proof
+still needs to connect these assumptions to finite record/fix-up disturbances and completed
+policy progress, with the composite repository correspondence described above.
+
+Request correlation is relevant but does not by itself supply that argument.
+`StreamTransport` consumes the matching pending request, removes it on timeout and drains
+pending requests on disconnect. `NodeDriver` processes one protocol call at a time, and
+the daemon handles notifications outside `sync`. These facts exclude assigning a retired
+call's late reply to a later request, assuming request ids are not reused. A still-live call
+can nevertheless return a reply computed before a hub remake. The safety model allows
+arbitrary replay, and `learnUnfiltered` permits `known` to move backwards during recovery;
+neither finite obsolete delivery nor monotone `known.seq` follows from that model.
+
+`lost_acceptance_and_delayed_fetch_make_progress` checks the two split-exchange lemmas
+through the core and the oracle before quiescing. The transport contract checks a canceled
+call's reply arriving after a fresh exchange and duplicates of a completed reply.
+`replies_only_complete_the_matching_pending_call_once` also sends obsolete and duplicate
+frames directly through the stream client's receiver in a fixed order, since service-side
+reply inboxes may discard them before they become frames. These checks support the
+boundaries; the full reverse refinement remains open.
 
 ## Modeling choices
 

@@ -1005,6 +1005,63 @@ pub mod fuzzing {
 mod tests {
     use super::*;
 
+    /// Service-side reply inboxes can discard duplicates before they become stream frames.
+    /// Deliver frames here, in a fixed order, to pin the client's own correlation rule.
+    #[test]
+    fn replies_only_complete_the_matching_pending_call_once() {
+        use serde_json::json;
+
+        let shared = Shared {
+            while_disconnected: WhileDisconnected::Wait,
+            failed_attempts: watch::channel(0).0,
+            state: Mutex::new(State {
+                out: None,
+                stalled: Arc::new(Notify::new()),
+                max_payload: 1024,
+                next_id: 4,
+                subscriptions: HashMap::new(),
+                pending: HashMap::new(),
+            }),
+            connected: watch::channel(false).0,
+            reconnected: watch::channel(0).0,
+        };
+        let (abandoned, canceled) = oneshot::channel();
+        shared.lock().pending.insert(1, ("rpc".into(), abandoned));
+        drop(canceled);
+        let (fresh, mut completed) = oneshot::channel();
+        shared.lock().pending.insert(2, ("rpc".into(), fresh));
+        let (current, mut waiting) = oneshot::channel();
+        shared.lock().pending.insert(3, ("rpc".into(), current));
+        let mut oracle = crate::oracle::Oracle::spawn();
+        let mut model = json!({"op": "retryInbox", "action": "finish",
+            "next": 4, "pending": [1, 2, 3], "cut": 3});
+        let mut finish = |id, payload| {
+            model["id"] = json!(id);
+            let expected = oracle.call(&model);
+            assert_eq!(expected["ok"], true, "{expected}");
+            let matched = shared.lock().pending.contains_key(&id);
+            shared.receive(Frame::Reply { id, payload }).unwrap();
+            assert_eq!(expected["matched"], matched);
+            let mut live: Vec<_> = shared.lock().pending.keys().copied().collect();
+            live.sort_unstable();
+            assert_eq!(expected["pending"], json!(live));
+            assert_eq!(expected["next"], shared.lock().next_id);
+            model["pending"] = expected["pending"].clone();
+        };
+        finish(2, Bytes::from_static(b"fresh"));
+        assert_eq!(completed.try_recv().unwrap().unwrap(), "fresh");
+        for id in [1, 2, 1, 999] {
+            finish(id, Bytes::from_static(b"obsolete"));
+            assert!(matches!(
+                waiting.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+        }
+        finish(3, Bytes::from_static(b"current"));
+        assert_eq!(waiting.try_recv().unwrap().unwrap(), "current");
+        assert!(shared.lock().pending.is_empty());
+    }
+
     fn round_trip(frame: Frame) {
         let encoded = frame.encode();
         let len = u32::from_be_bytes([encoded[0], encoded[1], encoded[2], encoded[3]]);

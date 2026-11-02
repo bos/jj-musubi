@@ -75,3 +75,17 @@
 {"op": "step", "action": {"kind": "adopt", "node": 0, "records": [[1]]}}
 {"op": "step", "action": {"kind": "prune", "count": 1}}
 {"op": "measure"}
+{"action":"start","cut":3,"next":4,"op":"retryInbox","pending":[1,2]}
+{"action":"finish","cut":3,"id":2,"next":5,"op":"retryInbox","pending":[4,1,2]}
+{"action":"finish","cut":3,"id":2,"next":5,"op":"retryInbox","pending":[4,1]}
+{"action":"disconnect","cut":3,"next":5,"op":"retryInbox","pending":[4,1]}
+{"action":"write","aligned":false,"op":"retryFixup","pending":[1],"written":false}
+{"action":"write","aligned":false,"op":"retryFixup","pending":[1],"written":true}
+{"action":"adopt","aligned":false,"nextPending":[2],"op":"retryFixup","pending":[],"written":false}
+{"action":"adopt","aligned":true,"nextPending":[2],"op":"retryFixup","pending":[1,2],"written":true}
+{"action":"adopt","aligned":true,"nextPending":[],"op":"retryFixup","pending":[2],"written":true}
+{"action":"adopt","aligned":true,"nextPending":[2],"op":"retryFixup","pending":[],"written":false}
+{"op":"contractedAncestry","parents":[[],[0],[0]],"dropped":[1],"expected":1,"head":2}
+{"op":"contractedAncestry","parents":[[],[0],[0]],"dropped":[],"expected":1,"head":2}
+{"op":"contractedAncestry","parents":[[],[0],[0],[1,2],[1]],"dropped":[3],"expected":3,"head":4}
+{"op":"contractedAncestry","parents":[[]],"dropped":[0],"expected":0,"head":0}

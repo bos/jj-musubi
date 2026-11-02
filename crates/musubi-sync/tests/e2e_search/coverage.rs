@@ -292,6 +292,16 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         None,
     ),
     ("taking_an_abandon_resumes_where_it_stopped", None),
+    // These need a specific interrupted adoption across two record histories, not merely
+    // the op_abandon and hub_goes_back rules occurring in the same generated sequence.
+    (
+        "a_push_can_drop_its_expected_head_and_reuse_a_cached_fixup",
+        None,
+    ),
+    (
+        "a_cached_fixup_can_idle_with_a_pending_drop_until_another_machine_syncs",
+        None,
+    ),
     (
         "op_abandon_under_a_realized_head_replicates",
         Some(&["op_abandon"]),

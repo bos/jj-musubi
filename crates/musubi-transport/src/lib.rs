@@ -155,3 +155,8 @@ pub(crate) fn check_size(payload: &Bytes, limit: usize) -> Result<(), TransportE
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "../../musubi-core/tests/support/oracle.rs"]
+#[allow(dead_code)]
+mod oracle;

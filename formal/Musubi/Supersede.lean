@@ -40,6 +40,11 @@ node that did could make the hub take back an operation it pruned.
 
 What holds:
 
+These results concern the original-ancestry abstraction below. Production also accepts a
+push whose expected head contracts into ancestors of its new head without originally being
+one. That case is not represented by `SStep.sup`; `ContractOrder.lean` and the asynchronous
+liveness section of `formal/README.md` describe the remaining refinement gap.
+
 - The protocol's states are those of `Model.lean` (`SReachable.base`) or `Regress.lean`
   (`SRReachable.base`), so every theorem there holds as stated: `noDuplicateMerge` among
   them. Copies are no new operations, so they make no merge.

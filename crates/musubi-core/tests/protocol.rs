@@ -433,6 +433,41 @@ fn push_after_forgotten_upload_reuploads() {
     world.check_invariants();
 }
 
+/// Acceptance makes progress before the acknowledgement, and an honest delayed fetch
+/// still makes progress after another push moved the hub. These are the two split-exchange
+/// boundaries of AsyncLiveness, not a claim that every asynchronous event lowers the rank.
+#[test]
+fn lost_acceptance_and_delayed_fetch_make_progress() {
+    let mut world = World::new(2, Some(Oracle::spawn()));
+    world.user_op(0, 0, 1);
+    let request = world.net_len();
+    assert!(world.node_step(0, 0));
+    let before = world.measure().unwrap();
+    world.deliver(request);
+    let accepted = world.measure().unwrap();
+    assert_eq!(world.hub_head(), 1);
+    assert_eq!(world.known(0), (0, 0)); // The acceptance reply is lost.
+    assert!(accepted.rmeasure < before.rmeasure);
+
+    let fetch = world.net_len();
+    world.poll(1);
+    let delayed = world.net_len();
+    world.deliver(fetch); // The reply names head 1, but is not delivered yet.
+
+    world.poll_now(0); // A retry learns the accepted push through a fresh fetch.
+    world.user_op(0, 1, 1);
+    world.exchange(0, 0);
+    assert_eq!(world.hub_head(), 2);
+    let before = world.measure().unwrap();
+    world.deliver(delayed);
+    let learned = world.measure().unwrap();
+    assert_eq!(world.known(1), (1, 1));
+    assert_eq!(world.hub_seq(), 2);
+    assert!(learned.rmeasure < before.rmeasure);
+    world.quiesce();
+    world.check_invariants();
+}
+
 /// A push from the hub's head whose closure the hub still lacks is `Incomplete`, not
 /// `Rejected`: a node takes `Rejected` for a lost race, and would fetch and push the same
 /// again forever, though it can't send what it lacks.

@@ -58,6 +58,65 @@ async fn check_contract(a: &dyn Transport, b: &dyn Transport) {
     let (reply, ()) = tokio::join!(request, respond);
     assert_eq!(reply.unwrap(), "pong");
 
+    // A canceled call's late reply cannot become the answer to a newer call, nor can a
+    // duplicate of a completed reply. Receive the old request before canceling it, so this
+    // also covers a hub that acted on a request whose caller will never see the result.
+    let mut abandoned = Box::pin(a.request(
+        "musubi.test.rpc",
+        Bytes::from_static(b"abandoned"),
+        Duration::from_secs(30),
+    ));
+    let old = tokio::select! {
+        reply = &mut abandoned => panic!("answered before the responder: {reply:?}"),
+        message = rpc.next() => message.unwrap(),
+    };
+    assert_eq!(old.payload, "abandoned");
+    drop(abandoned);
+    let respond = async {
+        let fresh = rpc.next().await.unwrap();
+        assert_eq!(fresh.payload, "fresh");
+        b.publish(
+            &fresh.reply.clone().unwrap(),
+            Bytes::from_static(b"fresh reply"),
+        )
+        .await
+        .unwrap();
+        fresh.reply.unwrap()
+    };
+    let (reply, completed) = tokio::join!(
+        a.request(
+            "musubi.test.rpc",
+            Bytes::from_static(b"fresh"),
+            Duration::from_secs(5)
+        ),
+        respond,
+    );
+    assert_eq!(reply.unwrap(), "fresh reply");
+    let respond = async {
+        let current = rpc.next().await.unwrap();
+        b.publish(&old.reply.unwrap(), Bytes::from_static(b"late old reply"))
+            .await
+            .unwrap();
+        b.publish(&completed, Bytes::from_static(b"duplicate reply"))
+            .await
+            .unwrap();
+        b.publish(
+            &current.reply.unwrap(),
+            Bytes::from_static(b"current reply"),
+        )
+        .await
+        .unwrap();
+    };
+    let (reply, ()) = tokio::join!(
+        a.request(
+            "musubi.test.rpc",
+            Bytes::from_static(b"current"),
+            Duration::from_secs(5)
+        ),
+        respond,
+    );
+    assert_eq!(reply.unwrap(), "current reply");
+
     // Wildcards match one token, or the rest.
     let mut one = b.subscribe("wild.*.rpc").await.unwrap();
     let mut rest = b.subscribe("wild.>").await.unwrap();

@@ -182,6 +182,11 @@ fn long_offline_machine_catches_up() {
 /// too, the repository staying as it was, and the hive converges.
 #[test]
 fn op_abandon_replicates() {
+    use musubi_jj::node::NodeRepo;
+    use serde_json::json;
+
+    use crate::oracle::Oracle;
+
     let mut hive = Fixture::new(&["alpha", "beta"]);
     hive.commit(0, "a", "first");
     hive.commit(0, "b", "second");
@@ -189,8 +194,47 @@ fn op_abandon_replicates() {
     hive.assert_converged();
     let abandoned = commit_op(hive.repo(0));
     hive.repo(0).jj(&["op", "abandon", "..@-"]);
+    hive.node(0).settle().unwrap();
+    assert!(hive.node(0).check_abandon().unwrap());
+    let pending = hive.node(0).pending_drops().clone();
+    assert!(!pending.is_empty());
+    let mut oracle = Oracle::spawn();
+    let mut model = json!({"op": "retryFixup", "action": "write",
+        "pending": (0..pending.ops().len()).collect::<Vec<_>>(),
+        "written": false, "aligned": false});
+    // No push reaches the hub: a canceled/failed call must reuse the written fix-up.
+    // Reopen as well, so the bound depends on the persisted marker, not an in-memory cache.
+    let first = hive.node(0).write_fixup().unwrap();
+    assert!(first.is_some());
+    let heads = hive.node(0).local_heads().unwrap();
+    for attempt in 0..3 {
+        let actual = if attempt == 0 {
+            first.clone()
+        } else {
+            if attempt == 2 {
+                let repo = hive.repo(0);
+                let reopened = NodeRepo::open(&repo.repo_path(), &repo.settings())
+                    .unwrap()
+                    .with_repo_config(Some(repo.repo_config_path()));
+                *hive.node(0) = reopened;
+            }
+            hive.node(0).write_fixup().unwrap()
+        };
+        let reply = oracle.call(&model);
+        assert_eq!(reply["ok"], true, "{reply}");
+        assert_eq!(reply["emitted"], actual.is_some());
+        model["written"] = reply["written"].clone();
+        assert_eq!(hive.node(0).pending_drops(), &pending);
+        assert_eq!(hive.node(0).local_heads().unwrap(), heads);
+    }
     hive.sync();
     hive.assert_converged();
+    assert!(hive.node(0).pending_drops().is_empty());
+    model["action"] = json!("adopt");
+    model["nextPending"] = json!([]);
+    let repaired = oracle.call(&model);
+    assert_eq!(repaired["ok"], true, "{repaired}");
+    assert_eq!(repaired["credit"], 0);
     for machine in 0..2 {
         assert!(
             !has_operation(hive.repo(machine), &abandoned.1),
@@ -202,6 +246,244 @@ fn op_abandon_replicates() {
     hive.sync();
     hive.assert_converged();
     assert!(hive.visible(0).iter().any(|c| c.ends_with("third")));
+}
+
+#[test]
+fn a_cached_fixup_can_idle_with_a_pending_drop_until_another_machine_syncs() {
+    use musubi_core::hub::HubStorage as _;
+    use musubi_core::node::LocalRepo as _;
+
+    let mut hive = Fixture::new(&["alpha", "beta", "gamma"]);
+    let base = hive.hive.hub.store().head().0;
+
+    // Beta keeps a branch alpha never took, which the hub then loses.
+    hive.commit(1, "q", "beta's later drop");
+    let q = op_log(hive.repo(1)).swap_remove(0);
+    hive.commit(1, "b", "beta keeps this");
+    hive.hive.sync(1).unwrap();
+    hive.hive.hub_goes_back(base).unwrap();
+
+    // Alpha publishes a different drop, stopping before adopting its accepted record.
+    hive.commit(0, "p", "alpha's drop");
+    let p = op_log(hive.repo(0)).swap_remove(0);
+    hive.commit(0, "a", "alpha keeps this");
+    hive.hive.sync(0).unwrap();
+    hive.repo(0).jj(&["op", "abandon", &p.0]);
+    hive.hive.sync_steps(0, 1, &mut |_, reply| reply).unwrap();
+    assert!(!hive.node(0).pending_drops().is_empty());
+    hive.hive.sync(2).unwrap();
+
+    // On a new hub history beta publishes Q. Alpha takes Q, then crashes before advancing
+    // to beta's head. Its unpublished P keeps the old fix-up marked written.
+    hive.hive.hub_goes_back(base).unwrap();
+    hive.repo(1).jj(&["op", "abandon", &q.0]);
+    hive.hive.sync(1).unwrap();
+    hive.hive.sync_steps(0, 1, &mut |_, reply| reply).unwrap();
+    assert!(!hive.node(0).pending_drops().is_empty());
+    hive.reopen(0);
+
+    // The hub loses Q; gamma restores only P, on top of alpha's old fix-up.
+    hive.hive.hub_goes_back(base).unwrap();
+    hive.hive.sync(2).unwrap();
+    hive.hive.sync(0).unwrap();
+    let pending = hive.node(0).pending_drops().clone();
+    let heads = hive.node(0).canonical_heads().unwrap();
+    let known = hive.hive.members[0].core.known().clone();
+    assert_eq!(
+        hive.hive.members[0].adapter.records().unwrap(),
+        hive.hive.hub.records()
+    );
+    assert!(!pending.is_empty());
+    assert_eq!(heads.len(), 1);
+    assert_eq!(heads[0].0, known.1);
+    let member = &mut hive.hive.members[0];
+    assert!(matches!(
+        member.core.step(&mut member.adapter).unwrap(),
+        musubi_core::node::Step::Idle
+    ));
+    hive.sync();
+    hive.assert_converged();
+    assert!(hive.node(0).pending_drops().is_empty());
+}
+
+#[test]
+fn a_push_can_drop_its_expected_head_and_reuse_a_cached_fixup() {
+    use std::collections::BTreeSet;
+
+    use jj_lib::op_store::OperationId;
+    use musubi_jj::op_id::CanonicalOp;
+    use serde_json::json;
+
+    use crate::oracle::Oracle;
+
+    let mut hive = Fixture::new(&["alpha", "beta", "gamma"]);
+    let base = hive.hive.hub.store().head().0;
+    let beta_base = op_log(hive.repo(1)).swap_remove(0).0;
+    hive.commit(1, "q", "beta's later drop");
+    let q = op_log(hive.repo(1)).swap_remove(0);
+    hive.hive.sync(1).unwrap();
+    let old = hive.hive.hub_head();
+    hive.hive.sync(2).unwrap(); // Gamma holds precisely the head beta will abandon.
+    hive.commit(1, "b", "beta keeps this");
+    hive.hive.sync(1).unwrap();
+    hive.hive.hub_goes_back(base).unwrap();
+
+    hive.commit(0, "p", "alpha's drop");
+    let p = op_log(hive.repo(0)).swap_remove(0);
+    hive.commit(0, "a", "alpha keeps this");
+    hive.hive.sync(0).unwrap();
+    hive.repo(0).jj(&["op", "abandon", &p.0]);
+    hive.hive.sync_steps(0, 1, &mut |_, reply| reply).unwrap();
+    let fixup = hive.hive.hub_head();
+
+    hive.hive.hub_goes_back(base).unwrap();
+    hive.repo(1)
+        .jj(&["op", "abandon", &format!("{beta_base}..{}", q.0)]);
+    hive.hive.sync(1).unwrap();
+    hive.hive.sync_steps(0, 1, &mut |_, reply| reply).unwrap();
+    hive.reopen(0);
+
+    hive.hive.hub_goes_back(base).unwrap();
+    hive.hive.sync(2).unwrap();
+    assert_eq!(hive.hive.hub_head(), old);
+    // Follow immutable original-parent material, rather than the already contracted
+    // parent list, to check that alpha's cached fix-up never descended from this head.
+    let old_original = hive
+        .node(2)
+        .canonical_store()
+        .original_id(&CanonicalOp(old.clone()))
+        .unwrap();
+    let store = hive.node(0).canonical_store();
+    let mut stack = vec![CanonicalOp(fixup.clone())];
+    let mut seen = BTreeSet::new();
+    while let Some(op) = stack.pop() {
+        if !seen.insert(op.clone()) || op == *store.root_operation_id() {
+            continue;
+        }
+        assert_ne!(store.original_id(&op).unwrap(), old_original);
+        let raw = store.read_operation(&op).unwrap();
+        for parent in raw.metadata.attributes["musubi.original-parents"].split(' ') {
+            stack.push(CanonicalOp(OperationId::try_from_hex(parent).unwrap()));
+        }
+    }
+    // Give the oracle the immutable DAG from the real stores. Parent material names the
+    // canonical forms current at birth, so translate those names to original identities
+    // before numbering the DAG in parent order.
+    let mut names = BTreeMap::new();
+    let mut raw_parents = BTreeMap::new();
+    for machine in 0..3 {
+        let store = hive.node(machine).canonical_store();
+        for op in store.operation_ids().unwrap() {
+            names.insert(op.0.clone(), store.original_id(&op).unwrap());
+        }
+    }
+    let mut stack = vec![CanonicalOp(old.clone()), CanonicalOp(fixup.clone())];
+    let mut visited = BTreeSet::new();
+    let root = hive.node(0).canonical_store().root_operation_id().clone();
+    while let Some(op) = stack.pop() {
+        if !visited.insert(op.clone()) {
+            continue;
+        }
+        let (raw, original) = (0..3)
+            .find_map(|machine| {
+                hive.node(machine)
+                    .canonical_store()
+                    .read_operation_and_original(&op)
+                    .ok()
+            })
+            .unwrap();
+        let parents = if op == root {
+            vec![]
+        } else {
+            raw.metadata.attributes["musubi.original-parents"]
+                .split(' ')
+                .map(|p| OperationId::try_from_hex(p).unwrap())
+                .collect::<Vec<_>>()
+        };
+        stack.extend(parents.iter().cloned().map(CanonicalOp));
+        names.insert(op.0, original.clone());
+        if let Some(previous) = raw_parents.insert(original, parents.clone()) {
+            assert_eq!(previous, parents);
+        }
+    }
+    let graph: BTreeMap<_, Vec<_>> = raw_parents
+        .into_iter()
+        .map(|(op, parents)| {
+            (
+                op,
+                parents
+                    .into_iter()
+                    .map(|parent| names[&parent].clone())
+                    .collect(),
+            )
+        })
+        .collect();
+    fn number(
+        op: &OperationId,
+        graph: &BTreeMap<OperationId, Vec<OperationId>>,
+        numbers: &mut BTreeMap<OperationId, usize>,
+        parents: &mut Vec<Vec<usize>>,
+    ) -> usize {
+        if let Some(index) = numbers.get(op) {
+            return *index;
+        }
+        let ps = graph[op]
+            .iter()
+            .map(|parent| number(parent, graph, numbers, parents))
+            .collect();
+        let index = parents.len();
+        numbers.insert(op.clone(), index);
+        parents.push(ps);
+        index
+    }
+    let mut numbers = BTreeMap::new();
+    let mut parents = vec![];
+    for op in graph.keys() {
+        number(op, &graph, &mut numbers, &mut parents);
+    }
+    let mut oracle = Oracle::spawn();
+    assert_eq!(hive.hive.hub.store().record_count(), 0);
+    let seq = hive.hive.hub.store().head().0;
+    let mut accepted = 0;
+    hive.hive
+        .sync_through(0, &mut |request, reply| {
+            if let Reply::Head {
+                kind: HeadKind::Accepted,
+                ..
+            } = &reply
+            {
+                let Request::Push {
+                    expected,
+                    new,
+                    dropped,
+                    ..
+                } = request
+                else {
+                    panic!("only a push can be accepted");
+                };
+                assert_eq!(expected, &old);
+                assert_eq!(new, &fixup);
+                assert!(!dropped.is_empty());
+                // Drops outside both heads' immutable ancestry cannot affect this check.
+                let answer = oracle.call(&json!({"op": "contractedAncestry",
+                    "parents": parents, "expected": numbers[&names[expected]],
+                    "head": numbers[&names[new]],
+                    "dropped": dropped.iter().filter_map(|op| numbers.get(&names[op]))
+                        .collect::<Vec<_>>()
+                }));
+                assert_eq!(answer["ok"], true, "{answer}");
+                assert_eq!(answer["descends"], true, "{answer}");
+                assert_eq!(answer["original"], false, "{answer}");
+                accepted += 1;
+            }
+            reply
+        })
+        .unwrap();
+    assert_eq!(accepted, 1);
+    assert_eq!(hive.hive.hub.store().head().0, seq + 1);
+    assert_eq!(hive.hive.hub_head(), fixup);
+    hive.sync();
+    hive.assert_converged();
 }
 
 /// The same when this machine's latest operation is a realization of another machine's:

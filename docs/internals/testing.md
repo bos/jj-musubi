@@ -26,7 +26,7 @@ on the next run. *The search* is the generated end-to-end tests below, run with 
 | Example tests | each crate's `tests/` | jj integration details: translation, git refs, objects, joins, transports, the hub's hives, the CLI | ~0.2–0.5 s per test |
 | Fault tests | `crates/musubi-sync/tests/it/faults.rs`, `crates/musubi-sync/tests/it/lies.rs` | Malformed requests reaching the hub's decoders, malformed replies reaching a node's, well-formed but wrong replies reaching its protocol core and repository, and links that die or stall partway through a sync | ~0.2–1.5 s per test |
 | Fuzz targets | `fuzz/` | Bytes no honest peer sends reaching the decoders of frames, messages, bundles, and imported operations and views | Minutes to hours a run; opt-in |
-| Kani proofs | `#[cfg(kani)]` modules | Arithmetic on sizes and offsets a peer controls going wrong for any value, however unlikely | Under a second each; opt-in |
+| Kani proofs | `#[cfg(kani)]` modules | Arithmetic on sizes and offsets, and bounded hub pushes across storage failures and retries | Arithmetic under a second each; storage solver ~11 s on macOS arm64; opt-in |
 | Generated end-to-end tests | `crates/musubi-sync/tests/e2e_search` | Everything interacting: real `jj` commands, real repositories, faults | Seconds per case; opt-in |
 
 Costs are for one test running among the rest of the suite, on 32 Linux cores. When a change
@@ -337,7 +337,8 @@ The files musubi appends lines to have Hegel properties beside their parsers ins
 [Kani](https://model-checking.github.io/kani/) checks a Rust function for every value of its
 inputs at once, rather than for those a test or a fuzzer happens to try, and gives a failing
 input when it finds one. It suits small, pure arithmetic on numbers a peer sends or a hub
-offers, where the case that goes wrong is one no test would pick:
+offers, where the case that goes wrong is one no test would pick. A small finite storage
+adapter also makes bounded retries tractable:
 
 - `blobs::proofs`: where the bytes of a chunk that extend what a blob's receiver has start,
   for any length so far, offset and chunk length, including offsets near `u64::MAX`.
@@ -349,6 +350,12 @@ offers, where the case that goes wrong is one no test would pick:
 - `remote::proofs`: each window of chunks an upload or download sends starts at its offset,
   goes up a chunk at a time without overflowing, and either reaches the end or is a full
   window.
+- `musubi-core::storage_proofs`: the production push handler over a three-operation graph,
+  with two independently faulty pushes, retained import subsets, a complete honest retry
+  and an idempotent replay. It checks closed monotone heads and truthful replies, in about
+  11 seconds of solver time. [Bounds, adapter assumptions and mutation
+  evidence](bounded-verification.md) distinguish this opt-in check from unbounded liveness
+  or verification of the real storage adapters.
 
 It is slow on code that handles strings or long buffers: a proof that `fit_error` cuts a
 message to fit, which takes more than 1 KiB of message to reach the cut, ran for 15 minutes

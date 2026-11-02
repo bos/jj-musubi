@@ -8,3 +8,6 @@
 pub mod hub;
 pub mod message;
 pub mod node;
+
+#[cfg(kani)]
+mod storage_proofs;

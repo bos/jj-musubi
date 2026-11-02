@@ -15,17 +15,19 @@
 #   jj config set --user musubi.upgrade-command '~/bin/upgrade-from-source ~/dev/jj-musubi'
 #
 # The daemon runs it with MUSUBI_UPGRADE_TO set to the release the hub runs. For a release,
-# such as 0.4.0, it installs the release's tag, v0.4.0, if its top-level Cargo.toml says that
+# such as 0.6.0, it installs the release's tag, v0.6.0, if its top-level Cargo.toml says that
 # is the release. For a build deployed from source, such as 0.3.0+20261102153012.4a0db205e1f0,
 # it installs that build's commit as that build. It fetches from SOURCE's remotes first if
 # SOURCE lacks either, and fails, saying so, if it still does. It builds a copy of the commit's
 # files, never touching SOURCE's working copy or snapshotting your edits there: you may be in
 # the middle of a change when it runs.
 #
-# With --deploy, it installs REVISION as a build named for the release it follows, the time in
-# UTC and its commit, newer than every build of that release deployed before it. Push REVISION
-# where the machines' clones of the source fetch from, deploy it, then restart the hub, and
-# machines that upgrade with this follow (docs/guides/manage.md, "Deploy a build from source").
+# With --deploy, it fetches from SOURCE's remotes, then installs REVISION as a build named for
+# the release it follows, the time in UTC and its commit, newer than every build of that release
+# deployed before it. It refuses a REVISION none of SOURCE's remotes has, which no machine could
+# fetch. Push REVISION where the machines' clones of the source fetch from, deploy it, then
+# restart the hub, and machines that upgrade with this follow (docs/guides/manage.md, "Deploy a
+# build from source").
 #
 # It needs jj, git and cargo on the daemon's PATH (the one `musubi daemon install` saw), and
 # installs with `cargo install`, where cargo does by default: ~/.cargo/bin, or
@@ -35,7 +37,7 @@
 #
 # To try it, name a release; this installs it:
 #
-#   MUSUBI_UPGRADE_TO=0.4.0 upgrade-from-source ~/dev/jj-musubi
+#   MUSUBI_UPGRADE_TO=0.6.0 upgrade-from-source ~/dev/jj-musubi
 
 set -euo pipefail
 
@@ -105,9 +107,13 @@ resolve() {
             section == "[workspace.package]" && /^version *=/ { print $2; exit }')
 }
 
+# Deploying, build REVISION as the machines will fetch it, not as SOURCE last fetched it.
+if $deploying && [[ -n $(jj git remote list) ]]; then
+    jj --quiet git fetch --all-remotes
+fi
 resolve
 if ! $deploying && [[ $release != "$want" && -n $(jj git remote list) ]]; then
-    jj git fetch
+    jj --quiet git fetch --all-remotes
     resolve
 fi
 if [[ -z $commit ]]; then
@@ -115,6 +121,13 @@ if [[ -z $commit ]]; then
     exit 1
 fi
 if $deploying; then
+    # Machines fetch the commit from where SOURCE does, so a remote must have it already.
+    if [[ -n $(jj git remote list) &&
+        -z $(jj log --no-graph --revisions "$commit & ::remote_bookmarks()" --template '"x"') ]]
+    then
+        echo "$name: $label in $source is on no remote; push it first" >&2
+        exit 1
+    fi
     want=$release
     # Named for now, the build is newer than every build of its release deployed before it.
     build=$(date -u +%Y%m%d%H%M%S).${commit:0:12}

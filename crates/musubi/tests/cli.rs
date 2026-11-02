@@ -1344,8 +1344,10 @@ chmod +x "{exe}.new" && mv "{exe}.new" "{exe}"
 /// build named for the time, in UTC, and its commit. It builds neither the edit in progress in
 /// the repository's working copy nor snapshots it, and refuses, installing nothing, no release,
 /// a release with `--deploy`, what names neither a release nor a build, and a release or build
-/// the repository lacks. The source is a stand-in whose `musubi` says only the release musubi's
-/// own build script names, which builds in a second. Fetching from a remote isn't tried.
+/// the repository lacks. Once the repository has a remote, it refuses to deploy what the remote
+/// lacks, which no machine could fetch. The source is a stand-in whose `musubi` says only the
+/// release musubi's own build script names, which builds in a second. Fetching a commit or tag
+/// from a remote isn't tried.
 #[cfg(unix)]
 #[test]
 fn the_example_upgrade_command_installs_from_source() {
@@ -1495,6 +1497,13 @@ fn the_example_upgrade_command_installs_from_source() {
         fs::read_to_string(source.path().join("Cargo.toml")).unwrap(),
         manifest("0.3.0")
     );
+    // A remote that has none of the source's commits.
+    let remote = env.root().join("remote.git");
+    source.git(&["init", "--bare", "--quiet", remote.to_str().unwrap()]);
+    source.jj(&["git", "remote", "add", "origin", remote.to_str().unwrap()]);
+    let output = upgrade(true, None);
+    assert!(!output.status.success());
+    insta::assert_snapshot!(String::from_utf8_lossy(&output.stderr), @"upgrade-from-source: main in $ROOT/source is on no remote; push it first");
 }
 
 /// Serves the hub's socket in `dir` as a hub of a build deployed from source of musubi 99.0.0,

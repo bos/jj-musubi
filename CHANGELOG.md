@@ -11,14 +11,14 @@ change the protocol, so run the same release on the hub and every machine (see
   deploys `main`, or the revision you name, as a build named for the release it follows, the
   time and its commit, such as `musubi 0.3.0+20261102153012.4a0db205e1f0`. Restart the hub,
   and machines whose upgrade command is `upgrade-from-source` follow it, building that commit.
-  Told a release, `upgrade-from-source` builds its tag, such as `v0.4.0`, not `main`. See
+  Told a release, `upgrade-from-source` builds its tag, such as `v0.6.0`, not `main`. See
   [Deploy a build from source](docs/guides/manage.md#deploy-a-build-from-source).
 - Contracting operation history now keeps each operation's original identity even when two
   operations have identical views and metadata. This changes the canonical encoding and ids
-  (protocol 9, release 0.5.0, the first since 0.1.0): upgrade the hub and every machine
+  (protocol 9, release 0.6.0, the first since 0.1.0): upgrade the hub and every machine
   together. Existing hives and their local musubi state must be recreated from preserved jj
   repositories: follow
-  [Recreate hives when upgrading to 0.5.0](docs/guides/manage.md#recreate-hives-when-upgrading-to-050).
+  [Recreate hives when upgrading to 0.6.0](docs/guides/manage.md#recreate-hives-when-upgrading-to-060).
   If jj itself coalesces two operation ids while abandoning history, syncing stops with a
   command to restore the missing history.
 - The hub forgets a `jj op abandon` once every machine still in the hive has taken it, so trimming

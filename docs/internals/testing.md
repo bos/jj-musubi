@@ -177,9 +177,10 @@ that it installs a release from its tag and a deployed build from its commit, no
 or the edit in the working copy; that `--deploy` installs `main` as a build named for the time
 in UTC, between the clock's readings before and after, and its commit; that it leaves the
 repository's operation log as it was; and that it refuses, installing nothing, no release, a
-release with `--deploy`, what isn't a release, and a release or build the repository lacks.
-The stand-in builds with musubi's own build script, which names the build. It doesn't try
-fetching from a remote.
+release with `--deploy`, what isn't a release, a release or build the repository lacks, and,
+once the repository has a remote, a deploy of a revision the remote lacks. The stand-in builds
+with musubi's own build script, which names the build. It doesn't fetch a commit or tag from a
+remote.
 
 `recreating_hives_keeps_work_without_inheriting_remote_workspaces` follows the upgrade
 guide with two copies and a real linked workspace whose name contains `/`, including the

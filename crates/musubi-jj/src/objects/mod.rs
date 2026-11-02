@@ -23,6 +23,7 @@ mod git;
 mod power;
 mod simple;
 
+pub use git::CHANGE_ID_LENGTH;
 pub use git::GitObjects;
 pub use git::GitStore;
 pub use git::Incompleteness;

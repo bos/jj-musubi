@@ -8,7 +8,9 @@ use std::path::Path;
 use std::time::SystemTime;
 
 use jj_lib::object_id::ObjectId as _;
+use jj_lib::protos::git_store;
 use musubi_jj::node::NodeRepo;
+use musubi_jj::objects::CHANGE_ID_LENGTH;
 use musubi_jj::objects::GitObjects;
 use musubi_jj::objects::GitStore;
 use musubi_jj::objects::ObjectError;
@@ -19,6 +21,7 @@ use musubi_jj::op_id::LocalOp;
 use musubi_jj::ref_locks;
 use musubi_testutil::TestEnv;
 use musubi_testutil::TestRepo;
+use prost::Message as _;
 
 fn open(repo: &TestRepo) -> NodeRepo {
     NodeRepo::open(&repo.repo_path(), &repo.settings()).unwrap()
@@ -302,11 +305,14 @@ fn change_ids_without_headers_survive_transfer() {
     assert_eq!(on_b, on_a);
 }
 
-/// Extras for a commit id of another length than a git commit's, as a buggy or hostile peer
-/// can send, are refused with their bundle: a node's table of extras would panic on them, and
-/// a hub would keep a file named after them.
+/// Extras jj can't take, as a buggy or hostile peer can send, are refused with their bundle:
+/// for a commit id of another length than a git commit's, which a node's table of extras would
+/// panic on, and a hub would name a file after; or that jj would panic on as it reads the
+/// commit: not its encoding, or with a change id of another length or an even number of terms
+/// of the root tree. Extras jj writes are taken: with a change id, or none, and with a root tree
+/// of any odd number of terms, as jj wrote for a conflict before the `jj:trees` header.
 #[test]
-fn extras_for_an_id_of_another_length_are_refused() {
+fn malformed_extras_are_refused() {
     let env = TestEnv::new();
     let node = open(&env.init_repo("alpha"));
     let (git, hub_git, hub_extras) = (
@@ -317,18 +323,52 @@ fn extras_for_an_id_of_another_length_are_refused() {
     GitObjects::init_bare(git, &hub_git).unwrap();
     std::fs::create_dir_all(&hub_extras).unwrap();
     let hub = GitStore::for_hub(git, &hub_git, &hub_extras);
+    assert_eq!(node.loader().store().change_id_length(), CHANGE_ID_LENGTH);
     let stores: [Box<dyn ObjectStore + '_>; 2] = [node.object_store().unwrap(), Box::new(hub)];
-    for len in [1, 32] {
-        let bundle = env.root().join(format!("extras-{len}"));
+    let extras = |change_id: usize, terms: usize| {
+        git_store::Commit {
+            change_id: vec![1; change_id],
+            root_tree: vec![vec![1; 20]; terms],
+            uses_tree_conflict_format: true,
+            ..Default::default()
+        }
+        .encode_to_vec()
+    };
+    let bundle = |n: usize, len: usize, value: &[u8]| {
+        let bundle = env.root().join(format!("extras-{n}"));
         let mut writer = BundleWriter::create(&bundle).unwrap();
-        writer.extras(&vec![1; len], b"extras").unwrap();
+        writer.extras(&vec![n as u8; len], value).unwrap();
         writer.finish().unwrap();
+        bundle
+    };
+    let bad_ids = [1, 32].map(|len| (len, extras(16, 0)));
+    let bad_values = [b"\xff".to_vec(), extras(15, 0), extras(16, 2)].map(|value| (20, value));
+    for (n, (len, value)) in bad_ids.into_iter().chain(bad_values).enumerate() {
+        let bundle = bundle(n, len, &value);
         for store in &stores {
             let err = store.import(&bundle, &[], &[]).unwrap_err();
-            assert!(matches!(err, ObjectError::MalformedBundle(_)), "{err:?}");
+            if len == 20 {
+                assert!(
+                    matches!(err, ObjectError::MalformedExtras(_)),
+                    "{n}: {err:?}"
+                );
+            } else {
+                assert!(
+                    matches!(err, ObjectError::MalformedBundle(_)),
+                    "{n}: {err:?}"
+                );
+            }
         }
     }
     assert_eq!(std::fs::read_dir(&hub_extras).unwrap().count(), 0);
+    let good = [extras(16, 0), extras(0, 0), extras(16, 1), extras(16, 3)];
+    for (n, value) in good.iter().enumerate() {
+        let bundle = bundle(100 + n, 20, value);
+        for store in &stores {
+            store.import(&bundle, &[], &[]).unwrap();
+        }
+    }
+    assert_eq!(std::fs::read_dir(&hub_extras).unwrap().count(), good.len());
 }
 
 /// After the translation cache is lost, realizing a descendant must reuse the existing

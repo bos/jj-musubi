@@ -21,6 +21,7 @@ use jj_lib::git_backend::GitBackend;
 use jj_lib::git_backend::JJ_TREES_COMMIT_HEADER;
 use jj_lib::git_backend::synthetic_change_id_from_git_commit_id;
 use jj_lib::object_id::ObjectId as _;
+use jj_lib::protos::git_store;
 use jj_lib::stacked_table::TableSegment as _;
 use jj_lib::stacked_table::TableStore;
 use prost::Message as _;
@@ -46,6 +47,9 @@ const HEAD_REFS: &str = "refs/musubi/head/";
 
 /// Where jj keeps a ref to each commit it writes or imports, so that git's gc keeps it.
 pub const KEEP_REFS: &str = "refs/jj/keep/";
+
+/// The length of a change id in jj's git backend, as its `CHANGE_ID_LENGTH`, which is private.
+pub const CHANGE_ID_LENGTH: usize = 16;
 
 /// git's defaults for `gc.auto` and `gc.autoPackLimit`.
 const GC_AUTO: i64 = 6700;
@@ -692,16 +696,15 @@ pub(crate) struct ExtrasEntry {
     pub value: Vec<u8>,
 }
 
-/// The fields of a `git_store.Commit`, the value of a commit in jj's extras table, that
-/// musubi reads, numbered as jj's `git_store.proto` numbers them; decoding skips the rest.
-/// jj's own type is private to its git backend.
-#[derive(Clone, PartialEq, prost::Message)]
-struct CommitExtras {
-    /// Alternating positive and negative terms, for a conflict only.
-    #[prost(bytes = "vec", repeated, tag = "1")]
-    root_tree: Vec<Vec<u8>>,
-    #[prost(bytes = "vec", tag = "4")]
-    change_id: Vec<u8>,
+/// Whether jj's git backend can read `value` as a commit's extras without panicking: it
+/// decodes them as it reads the commit, takes the change id as one of the length its index
+/// asserts, and the root tree's terms as a merge, which has an odd number of them.
+fn readable(value: &[u8]) -> bool {
+    let Ok(extras) = git_store::Commit::decode(value) else {
+        return false;
+    };
+    (extras.change_id.is_empty() || extras.change_id.len() == CHANGE_ID_LENGTH)
+        && (extras.root_tree.is_empty() || extras.root_tree.len() % 2 == 1)
 }
 
 /// The error for `commit`, which couldn't be read for the reason `source` gives.
@@ -727,8 +730,8 @@ pub(crate) fn extras_to_ship(
         let Some(value) = table.get_value(commit.as_bytes()) else {
             continue;
         };
-        let extras =
-            CommitExtras::decode(value).map_err(|_| ObjectError::MalformedExtras(commit.hex()))?;
+        let extras = git_store::Commit::decode(value)
+            .map_err(|_| ObjectError::MalformedExtras(commit.hex()))?;
         let oid = gix::ObjectId::try_from(commit.as_bytes()).map_err(read_err(commit))?;
         let object = git_repo.find_object(oid).map_err(read_err(commit))?;
         let git_commit = object.try_to_commit_ref().map_err(read_err(commit))?;
@@ -923,7 +926,9 @@ impl ObjectStore for GitStore<'_> {
             Ok(())
         })?;
         // Extras for an id of another length name no commit here, and would panic jj's table
-        // of extras, whose keys must all be one length, or name a stray file on a hub.
+        // of extras, whose keys must all be one length, or name a stray file on a hub. Extras
+        // jj can't read would panic it as it reads the commit, and a hub would serve them to
+        // every node that fetches the commit.
         if !extras.is_empty() {
             let len = self.git.gix()?.object_hash().len_in_bytes();
             if let Some(entry) = extras
@@ -934,6 +939,9 @@ impl ObjectStore for GitStore<'_> {
                     "extras for a commit id of {} bytes",
                     entry.commit.as_bytes().len()
                 )));
+            }
+            if let Some(entry) = extras.iter().find(|entry| !readable(&entry.value)) {
+                return Err(ObjectError::MalformedExtras(entry.commit.hex()));
             }
         }
         // Extras first: jj derives and saves its own entries the first time it reads a

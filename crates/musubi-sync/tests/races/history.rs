@@ -868,6 +868,76 @@ fn abandoning_the_latest_work_of_a_copy_just_forgotten_keeps_it_forgotten() {
     hive.assert_converged();
 }
 
+/// `jj op abandon` again before the machine publishes the first, of an operation the first
+/// rewrote, as one it kept above what it dropped: the hub names that operation as it was. The
+/// machine publishes the drop so, rather than offer the hub one it can't place, again and again.
+#[test]
+fn abandoning_what_an_unpublished_abandon_rewrote_publishes_both() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(0, "a", "first");
+    hive.commit(0, "b", "second");
+    // So that what becomes of `second` isn't the op head, which jj doesn't abandon.
+    hive.commit(0, "c", "third");
+    hive.sync();
+    let commits: Vec<(String, String)> = op_log(hive.repo(0))
+        .into_iter()
+        .filter(|(_, d)| d.starts_with("commit "))
+        .collect();
+    let [second, first] = [&commits[1], &commits[2]];
+    hive.repo(0).jj(&["op", "abandon", &first.0]);
+    assert!(hive.node(0).check_abandon().unwrap());
+    let rewritten = op_log(hive.repo(0))
+        .into_iter()
+        .find(|(_, d)| *d == second.1)
+        .unwrap();
+    assert_ne!(rewritten.0, second.0);
+    hive.repo(0).jj(&["op", "abandon", &rewritten.0]);
+    hive.sync();
+    hive.assert_converged();
+    for machine in 0..2 {
+        assert!(!has_operation(hive.repo(machine), &first.1), "{machine}");
+        assert!(!has_operation(hive.repo(machine), &second.1), "{machine}");
+    }
+}
+
+/// …three times, each of what the last rewrote, before the machine publishes any: renamed
+/// twice here, an operation is still named as the hub has it.
+#[test]
+fn abandoning_three_times_before_publishing_publishes_all() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    for (file, message) in [
+        ("a", "first"),
+        ("b", "second"),
+        ("c", "third"),
+        ("d", "fourth"),
+    ] {
+        hive.commit(0, file, message);
+    }
+    hive.sync();
+    let commits: Vec<String> = op_log(hive.repo(0))
+        .into_iter()
+        .filter(|(_, d)| d.starts_with("commit "))
+        .map(|(_, d)| d)
+        .collect();
+    // The three below the newest, oldest first: what becomes of each isn't the op head.
+    let abandoned: Vec<String> = commits[1..4].iter().rev().cloned().collect();
+    for description in &abandoned {
+        let (op, _) = op_log(hive.repo(0))
+            .into_iter()
+            .find(|(_, d)| d == description)
+            .unwrap();
+        hive.repo(0).jj(&["op", "abandon", &op]);
+        assert!(hive.node(0).check_abandon().unwrap());
+    }
+    hive.sync();
+    hive.assert_converged();
+    for machine in 0..2 {
+        for description in &abandoned {
+            assert!(!has_operation(hive.repo(machine), description), "{machine}");
+        }
+    }
+}
+
 /// With `snapshot.auto-update-stale`, a command in a workspace whose working copy recorded an
 /// operation `jj op abandon` rewrote brings back what jj abandoned, as on one machine
 /// (races.md, "Known jj limitations"). A later `jj op abandon` below that then moves what came

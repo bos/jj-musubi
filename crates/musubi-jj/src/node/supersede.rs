@@ -755,6 +755,68 @@ impl NodeRepo {
         Ok(dedup(images))
     }
 
+    /// The hub's names for what this node's pending drops renamed here, by their names here.
+    /// Noticing a drop renames what it keeps above it at once, in node space, but the hub
+    /// renames nothing until the drop reaches it. So a later drop of one of those must name it
+    /// as the hub does. These are the operations below `base`, a hub name, above the lowest
+    /// pending drop, and any other hub operation translated to node space since, as one
+    /// fetched above `base`.
+    fn hub_names(
+        &self,
+        base: &CanonicalOp,
+    ) -> Result<HashMap<CanonicalOp, CanonicalOp>, NodeError> {
+        let pending = match &self.records.taking {
+            Some(taking) => &taking.pending,
+            None => &self.records.pending,
+        };
+        // The store may lack a drop, as one the hub's history no longer has.
+        let mut floor: Option<u64> = None;
+        for op in pending.ops() {
+            if self.canonical.has_operation(&op.0) {
+                let generation = self.canonical.generation(&op.0)?;
+                floor = Some(floor.map_or(generation, |floor| floor.min(generation)));
+            }
+        }
+        let Some(floor) = floor else {
+            return Ok(HashMap::new());
+        };
+        let below = |op: &CanonicalOp| {
+            self.canonical
+                .generation(op)
+                .is_ok_and(|generation| generation <= floor)
+        };
+        let mut names = HashMap::new();
+        // Descendants first, so that checking the first one's origins covers the rest.
+        let hubs = self
+            .canonical
+            .ancestors_until(std::slice::from_ref(base), below)?;
+        for hub in hubs.into_iter().rev() {
+            if pending.contains(&HubOp(hub.clone())) {
+                continue;
+            }
+            if let [node] = self.to_node_ids(&hub)?.as_slice()
+                && *node != hub
+            {
+                names.insert(node.clone(), hub);
+            }
+        }
+        let to_node = self
+            .records
+            .to_node
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(to_node) = to_node.as_ref() {
+            for (hub, node) in to_node.images_so_far() {
+                if let [node] = node.as_slice()
+                    && !to_node.drops(hub)
+                {
+                    names.entry(node.clone()).or_insert_with(|| hub.clone());
+                }
+            }
+        }
+        Ok(names)
+    }
+
     /// Forgets the hub-to-node translation worked out so far, `pending` having changed.
     fn forget_to_node(&mut self) {
         *self
@@ -1144,25 +1206,7 @@ impl NodeRepo {
             None => None,
         };
         let locals = self.rewrite_locals(&mut contraction, &heads, &counterparts, &unmapped)?;
-        // In hub names: what a drop of this node's own, not yet published, renamed.
-        let hub_names: HashMap<CanonicalOp, CanonicalOp> = self
-            .records
-            .to_node
-            .get_mut()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref()
-            .map(|to_node| {
-                to_node
-                    .images_so_far()
-                    .iter()
-                    .filter(|(hub, _)| !to_node.drops(hub))
-                    .filter_map(|(hub, node)| match node.as_slice() {
-                        [node] => Some((node.clone(), hub.clone())),
-                        _ => None,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let hub_names = self.hub_names(&base.0)?;
         let pending = self.records.pending.ops().iter().cloned().chain(
             dropped
                 .iter()

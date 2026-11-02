@@ -211,8 +211,34 @@ remains closed and publishable, and that a hash-valid alternate version of a dro
 is refused, including after reopening. `original_parent_encoding_is_pinned_and_cannot_be_supplied_by_a_caller`
 pins the new encoding and fresh-write enforcement.
 
-The `import` fuzz target varies the reserved attribute with a valid content hash so that
-origin validation is reached.
+`translation::repeated_restores_keep_distinct_identities_when_contracted` reaches the content
+collision through real jj commands: repeated restores with an intervening describe and equal
+operation timestamps. It checks canonical contraction, jj's own local-id coalescence, refusal
+before any pending drops, and recovery by integrating the old head. It cannot recover the
+user's abandon intent from identical local bytes; the protocol proofs assume that detection
+has supplied the intended original set. The combined abandonment/ref refinement is tracked
+separately in issue #77. The `import` fuzz target varies the reserved attribute with a valid
+content hash so that origin validation is reached.
+
+`taking_an_abandon_preserves_original_identity_after_cache_loss` covers a remote record and
+work created on the old history: both local rewrite paths keep durable canonical markers, and
+rebuilding the translation cache returns the same originals. `coalesced_history_after_gc_is_refused_before_publishing_drops`
+covers jj collecting the old local evidence before another command and sync: no drops are
+published when the original intent is no longer recoverable.
+`fresh_equal_time_operation_is_not_an_old_counterpart` checks that unpublished work with the
+same time metadata as an old operation keeps its view after an abandon, even after jj gc,
+cache loss and restart. Removing the durable evidence too causes a refusal before any drops.
+`node::originals::tests::torn_rows_never_establish_an_identity` checks partial rows followed
+by a complete append, and preserves multiple fingerprints per original and shared
+fingerprints across originals. The existing repeated-abandon
+restore tests also exercise a translation walk resuming on an old unmarked jj rewrite after
+`check_abandon` moved the heads: that source keeps its established canonical correspondence.
+`a_delayed_child_of_a_jj_rewrite_keeps_its_origin_after_cache_loss` checks that the source alias
+survives cache loss and restart, that retaining a counted step while losing its head move
+completes the physical rewrite, and that a delayed child keeps the original identity afterward.
+`torn_steps_lose_only_themselves` generates the source rows too: no partial counted block can
+silently omit an alias that records depend on. These local translation and crash boundaries
+are tested runtime obligations, not additional theorems of the abstract protocol model.
 
 ## Running it
 

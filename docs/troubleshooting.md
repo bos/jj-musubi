@@ -300,6 +300,19 @@ command fails. For each operation id in `.jj/repo/op_heads/heads`, run
 `jj --at-op <head> op log -n1` to find the one that made the merge commit, then run
 `jj --at-op <head> op revert @` at that head.
 
+### "cannot tell which operations jj abandoned"
+
+Two operations can have the same view and metadata. If `jj op abandon` rewrites one into
+another's exact bytes, their ids agree too, and musubi cannot tell which one you meant to keep.
+Syncing stops before passing any removals to the hive. Run the `jj op integrate <operation>`
+command in the hint to restore the missing history, then run `musubi sync` again. This restores
+the history you had published; inspect it before attempting another abandon. `jj op restore`
+restores a view and does not put the missing ancestry back. Avoid forcing equal operation
+timestamps when making operations that may later be abandoned.
+If `jj util gc` has already removed the missing history, the old operation cannot be
+integrated. musubi then gives the history-mismatch error below, whose recovery makes a new
+copy and brings your work across.
+
 ### "this repository's history no longer matches the hive's, so it can't sync again"
 
 ```text

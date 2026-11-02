@@ -107,6 +107,12 @@ pub enum NodeError {
     /// power cut can leave it. Which, the daemon's log says.
     #[error("{HISTORY_GONE}")]
     DamagedLog,
+    /// jj can reparent an operation into another one's exact bytes and id. There is then
+    /// no way to recover which identical operation the user meant to retain.
+    #[error(
+        "cannot tell which operations jj abandoned\nHint: run `jj op integrate {0}` to restore the missing history before syncing"
+    )]
+    AmbiguousAbandon(String),
     /// The hub accepts an operation only with everything it requires, which a shallow or
     /// partial clone can't send.
     #[error(

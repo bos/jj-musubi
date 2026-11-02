@@ -162,6 +162,15 @@ that it installs the release asked for from `main`, not the edit in the working 
 the repository's operation log as it was, and refuses another release; it doesn't try fetching
 from a remote.
 
+`recreating_hives_keeps_work_without_inheriting_remote_workspaces` follows the upgrade
+guide with two copies and a real linked workspace whose name contains `/`, including the
+first copy leaving before the other. It removes old remote workspace names, archives both
+copies' musubi state and the hub, then creates and
+joins a fresh hive. It checks that both copies retain their commits and show exactly the
+local and remote workspaces expected. Omitting the workspace cleanup republishes old remote
+names as new local workspaces. This exercises recreation with the current release, not
+compatibility with an earlier release's files.
+
 `the_quick_start_works_as_written` follows the README's quick start as a new user would:
 `musubi hub` run in a repository rather than in the home directory, then the commands it
 prints, pasted as printed, on the hub's machine and over the stand-in for ssh, the refusals a
@@ -289,7 +298,8 @@ unversioned, and the files the targets write go in `/dev/shm`.
 
 The files musubi appends lines to have Hegel properties beside their parsers instead:
 
-- the translation map and the joins: among whole lines, a line torn anywhere names nothing,
+- the translation map, the joins and local original evidence: among whole lines, a line
+  torn anywhere names nothing,
   and the whole ones are read;
 - a node's logs of renamings and of how records renamed the hub's history: with more appended
   after, a line torn anywhere names nothing, and a block counts as far as its whole lines go;

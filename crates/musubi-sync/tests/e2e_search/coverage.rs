@@ -303,6 +303,16 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         "crash_with_writes_in_flight",
         Some(&["crash:writes_in_flight"]),
     ),
+    // Fixed timestamps intentionally defeat jj metadata uniqueness; the search advances
+    // time per command, so this limitation is covered by a targeted jj test.
+    (
+        "repeated_restores_keep_distinct_identities_when_contracted",
+        None,
+    ),
+    (
+        "coalesced_history_after_gc_is_refused_before_publishing_drops",
+        None,
+    ),
     // A negative control of a design musubi does not use.
     ("verbatim_replication_reverts_bookmarks", None),
 ];

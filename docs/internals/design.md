@@ -770,10 +770,15 @@ the protocol's model describes fresh creation and contraction, not arbitrary rep
 This validation reads each input head's full ancestry once, even when only recent operations
 need rewriting. Tips are checked before their prefixes to avoid rescanning every growing
 prefix in a linear history; subsequent queries on that contraction reuse the validation.
-
 Every rewritten local survivor also records its canonical image in `musubi.canonical`, so
 rebuilding the disposable translation cache preserves its original identity and local jj ids
 cannot coalesce when a remote abandon is taken.
+An unmarked rewrite made by jj can still be the parent of a command that loaded it before
+the sync. The local renaming step therefore records its established canonical identity as a
+forward-only source alias, in the same counted block as the contraction and before moving
+heads. It survives losing the translation cache and never replaces a preferred marked local
+realization. A partial counted block is damage; during recovery, a reachable source alias is
+still physically rewritten before the pending head move is considered complete.
 
 The hive's history drops a set of canonical operations. Each surviving operation's parent list
 has every dropped parent replaced, where it stands, by that parent's own parents, themselves so
@@ -791,6 +796,24 @@ merges after it, musubi rewrites the abandoning machine's local operations again
 contraction.
 
 ### Publishing an abandon
+
+jj's own reparenting can also recreate an earlier local id. Where a surviving local operation
+has the same view and metadata as a missing one, or two missing originals share that content,
+musubi cannot infer which survived. It refuses before recording drops or moving op heads. The
+error gives `jj op integrate <operation>` to restore the published history; `jj op restore`
+would restore only a view, leaving the missing ancestry missing.
+Equal time metadata never establishes identity: distinct operations can have the same
+timestamps, author and description but different views or command arguments. Before a native
+operation, join point or realization is available for publication, `musubi/originals` records
+its full local nonparent fingerprint against the immutable canonical original. Several local
+forms may have the same canonical original because canonicalization strips per-machine
+fields. Every fingerprint is retained, and a fingerprint shared by distinct originals stays
+ambiguous. This local evidence is not accepted from peers and is not part of the disposable
+translation cache. It preserves inference across jj gc, cache loss and restart without
+reconstructing fields canonicalization discarded. An original with missing evidence is
+refused before any drops; timestamp equality cannot fill that gap. Recording evidence for
+an operation that a crash never publishes is harmless: detection considers only originals
+in the history below the established published base.
 
 A machine notices an abandon as before: canonical operations it had published are no longer
 reachable from its op heads. It looks before anything else reads the op heads, to merge or

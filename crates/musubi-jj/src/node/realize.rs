@@ -259,6 +259,7 @@ impl NodeRepo {
             view,
             per_machine,
         } = realization;
+        self.remember_original(&canonical, &op)?;
         let store = self.loader.op_store().clone();
         let expected = id.clone();
         let write = thread::Builder::new()

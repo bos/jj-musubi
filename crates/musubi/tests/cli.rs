@@ -2077,6 +2077,121 @@ fn a_new_hive_doesnt_inherit_members() {
     assert!(!workspaces.contains("alpha/"), "{workspaces}");
 }
 
+/// The upgrade guide recreates identity state from preserved views, after removing the old
+/// remote workspace names while their ownership is still known. The first copy to leave
+/// must not publish those names as its own in the new hive; its commits stay available.
+#[test]
+fn recreating_hives_keeps_work_without_inheriting_remote_workspaces() {
+    let env = TestEnv::new();
+    let mut logs = Logs::default();
+    let hub = Hub::start(&env, &mut logs);
+    let mut daemons = Daemons::default();
+    let (alpha, beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
+    let linked = env.root().join("alpha-linked");
+    alpha.jj(&[
+        "workspace",
+        "add",
+        "--name",
+        "local/linked",
+        linked.to_str().unwrap(),
+    ]);
+    fs::write(linked.join("linked-work"), "saved work").unwrap();
+    let mut describe = alpha.program(Path::new("jj"));
+    describe
+        .args(["describe", "-m", "linked work"])
+        .current_dir(&linked);
+    run(&env, &logs, describe);
+    for repo in [&alpha, &beta] {
+        repo.write_file("saved-work", repo.machine());
+        repo.jj(&["describe", "-m", "saved local work"]);
+    }
+    musubi_in(&env, &logs, &alpha, &["sync"]);
+    musubi_in(&env, &logs, &beta, &["sync"]);
+    musubi_in(&env, &logs, &alpha, &["sync"]);
+    let mut linked_head = alpha.program(Path::new("jj"));
+    linked_head
+        .args([
+            "--ignore-working-copy",
+            "log",
+            "-r",
+            "@",
+            "--no-graph",
+            "-T",
+            "commit_id",
+        ])
+        .current_dir(&linked);
+    let mut commits = vec![run(&env, &logs, linked_head)];
+    musubi_in(&env, &logs, &alpha, &["leave"]);
+    musubi_in(&env, &logs, &alpha, &["daemon", "stop"]);
+    // Alpha no longer hears beta's subsequent leave.
+    assert!(
+        alpha
+            .jj(&["workspace", "list", "-T", NAMES])
+            .lines()
+            .any(|name| name == "beta/beta")
+    );
+    musubi_in(&env, &logs, &beta, &["leave"]);
+    musubi_in(&env, &logs, &beta, &["daemon", "stop"]);
+    for repo in [&alpha, &beta] {
+        commits.push(repo.jj(&[
+            "--ignore-working-copy",
+            "log",
+            "-r",
+            "@",
+            "--no-graph",
+            "-T",
+            "commit_id",
+        ]));
+        let names = repo.jj(&["workspace", "list", "-T", NAMES]);
+        for name in names
+            .lines()
+            .filter(|name| *name != repo.machine() && *name != "local/linked")
+        {
+            repo.jj(&["workspace", "forget", name]);
+        }
+        fs::rename(
+            repo.repo_path().join("musubi"),
+            env.root()
+                .join(format!("{}-musubi-archive", repo.machine())),
+        )
+        .unwrap();
+    }
+    drop(hub);
+    fs::rename(env.root().join("hub"), env.root().join("hub-archive")).unwrap();
+    let hub = Hub::start(&env, &mut logs);
+    musubi_in(&env, &logs, &alpha, &["create", "--hub", &hub.url]);
+    musubi_in(&env, &logs, &beta, &["join", "--hub", &hub.url]);
+    musubi_in(&env, &logs, &alpha, &["sync"]);
+    for (repo, expected) in [
+        (&alpha, vec!["alpha", "local/linked", "beta/beta"]),
+        (&beta, vec!["beta", "alpha/alpha", "alpha/local/linked"]),
+    ] {
+        let names = repo.jj(&["workspace", "list", "-T", NAMES]);
+        let actual: std::collections::BTreeSet<_> = names.lines().collect();
+        assert_eq!(actual, expected.into_iter().collect());
+        for commit in &commits {
+            assert_eq!(
+                repo.jj(&[
+                    "--ignore-working-copy",
+                    "log",
+                    "-r",
+                    &format!("all() & {}", commit.trim()),
+                    "--no-graph",
+                    "-T",
+                    "commit_id"
+                ]),
+                *commit
+            );
+        }
+    }
+    assert_eq!(
+        alpha
+            .jj(&["workspace", "root", "--name", "local/linked"])
+            .trim(),
+        linked.canonicalize().unwrap().to_str().unwrap()
+    );
+}
+
 /// A `file://` URL for `path`, which git, unlike for a plain path, fetches from as from any
 /// other remote: shallowly, if asked.
 fn file_url(path: &Path) -> String {
@@ -2265,6 +2380,54 @@ fn op_abandon_syncs_but_history_otherwise_lost_stops_syncing() {
     assert!(log(&beta).contains("third"), "{}", log(&beta));
     let (_, hints) = status_in(&env, &logs, &alpha);
     insta::assert_snapshot!(hints, @"");
+
+    // jj can coalesce a surviving restore into an earlier restore's exact id. Stop the
+    // daemons while making that history so that no intervening realization distinguishes it.
+    for repo in [&alpha, &beta] {
+        musubi_in(&env, &logs, repo, &["daemon", "stop"]);
+    }
+    let head = || {
+        alpha.jj(&[
+            "--ignore-working-copy",
+            "op",
+            "log",
+            "--no-graph",
+            "-n1",
+            "-T",
+            "id",
+        ])
+    };
+    let target = head();
+    let restore = || {
+        let mut command = alpha.program(Path::new("jj"));
+        command
+            .args(["--ignore-working-copy", "op", "restore", target.trim()])
+            .env("JJ_OP_TIMESTAMP", "2001-02-03T04:05:06Z");
+        run(&env, &logs, command);
+        head()
+    };
+    alpha.jj(&["describe", "-m", "before the restore"]);
+    let first = restore();
+    alpha.jj(&["describe", "-m", "between the restores"]);
+    let last = restore();
+    musubi_in(&env, &logs, &alpha, &["sync"]);
+    alpha.jj(&[
+        "--ignore-working-copy",
+        "op",
+        "abandon",
+        &format!("{}-..{}-", first.trim(), last.trim()),
+    ]);
+    let mut settings = insta::Settings::clone_current();
+    settings.add_filter(&regex_escape(last.trim()), "<operation>");
+    let checks = settings.bind_to_scope();
+    insta::assert_snapshot!(musubi_fails(&env, &logs, &alpha, &["sync"]), @"
+    Error: cannot tell which operations jj abandoned
+    Hint: run `jj op integrate <operation>` to restore the missing history before syncing
+    ");
+    drop(checks);
+    alpha.jj(&["--ignore-working-copy", "op", "integrate", last.trim()]);
+    musubi_in(&env, &logs, &alpha, &["sync"]);
+    musubi_in(&env, &logs, &alpha, &["daemon", "start"]);
 
     let before = alpha.jj(&["op", "log", "--no-graph", "-n1", "-T", "id"]);
     alpha.write_file("c", "c");

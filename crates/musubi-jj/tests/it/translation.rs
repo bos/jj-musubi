@@ -23,8 +23,396 @@ use musubi_testutil::TestEnv;
 use musubi_testutil::TestRepo;
 use prost::Message as _;
 
+fn repeated_restore_ops(repo: &TestRepo) -> (LocalOp, LocalOp, LocalOp) {
+    let target = repo.jj(&[
+        "--ignore-working-copy",
+        "op",
+        "log",
+        "--no-graph",
+        "-n",
+        "1",
+        "-T",
+        "id",
+    ]);
+    let restore = || {
+        let output = repo
+            .program(Path::new("jj"))
+            .args(["--ignore-working-copy", "op", "restore", target.trim()])
+            .env("JJ_OP_TIMESTAMP", "2001-02-03T04:05:06Z")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let id = repo.jj(&[
+            "--ignore-working-copy",
+            "op",
+            "log",
+            "--no-graph",
+            "-n",
+            "1",
+            "-T",
+            "id",
+        ]);
+        LocalOp(jj_lib::op_store::OperationId::try_from_hex(id.trim()).unwrap())
+    };
+    repo.jj(&["describe", "-m", "before"]);
+    let a_local = restore();
+    repo.jj(&["describe", "-m", "between"]);
+    let between = repo.jj(&[
+        "--ignore-working-copy",
+        "op",
+        "log",
+        "--no-graph",
+        "-n",
+        "1",
+        "-T",
+        "id",
+    ]);
+    let between = LocalOp(jj_lib::op_store::OperationId::try_from_hex(between.trim()).unwrap());
+    let x_local = restore();
+    assert_ne!(a_local, x_local);
+    (a_local, between, x_local)
+}
+
+#[test]
+fn repeated_restores_keep_distinct_identities_when_contracted() {
+    let env = TestEnv::new();
+    let repo = env.init_repo("alpha");
+    let (a_local, between, x_local) = repeated_restore_ops(&repo);
+    let mut node = open(&repo);
+    let a = node.canonicalize(&a_local).unwrap();
+    let x = node.canonicalize(&x_local).unwrap();
+    let between = node.canonicalize(&between).unwrap();
+    let store = node.canonical_store();
+    let mut a_content = store.read_operation(&a).unwrap();
+    let mut x_content = store.read_operation(&x).unwrap();
+    a_content.parents.clear();
+    x_content.parents.clear();
+    a_content
+        .metadata
+        .attributes
+        .remove("musubi.original-parents");
+    x_content
+        .metadata
+        .attributes
+        .remove("musubi.original-parents");
+    assert_eq!(a_content, x_content);
+    let mut contraction =
+        musubi_jj::canonical::Contraction::new(store, [a.clone(), between]).unwrap();
+    assert_ne!(contraction.images(store, &x).unwrap(), vec![a]);
+
+    // jj itself has no discriminator: its reparented survivor is byte-for-byte the old a.
+    // Refuse before interpreting that a as a survivor and publishing the wrong drops.
+    repo.jj(&[
+        "--ignore-working-copy",
+        "op",
+        "abandon",
+        &format!("{}-..{}-", a_local.0.hex(), x_local.0.hex()),
+    ]);
+    let head = repo.jj(&[
+        "--ignore-working-copy",
+        "op",
+        "log",
+        "--no-graph",
+        "-n1",
+        "-T",
+        "id",
+    ]);
+    assert_eq!(head.trim(), a_local.0.hex());
+    let err = node
+        .notice_abandon(&musubi_jj::records::HubOp(x.clone()))
+        .unwrap_err();
+    assert!(
+        matches!(err, musubi_jj::node::NodeError::AmbiguousAbandon(_)),
+        "{err}"
+    );
+    assert!(node.pending_drops().is_empty());
+    repo.jj(&["--ignore-working-copy", "op", "integrate", &x_local.0.hex()]);
+    assert!(!node.notice_abandon(&musubi_jj::records::HubOp(x)).unwrap());
+}
+
+#[test]
+fn taking_an_abandon_preserves_original_identity_after_cache_loss() {
+    use musubi_jj::canonical::Contraction;
+    use musubi_jj::records::{HubOp, Record};
+
+    let env = TestEnv::new();
+    let repo = env.init_repo("alpha");
+    let (a_local, between, x_local) = repeated_restore_ops(&repo);
+    let mut node = open(&repo);
+    let a = node.canonicalize(&a_local).unwrap();
+    let between = node.canonicalize(&between).unwrap();
+    let x = node.canonicalize(&x_local).unwrap();
+    let mut contraction =
+        Contraction::new(node.canonical_store(), [a.clone(), between.clone()]).unwrap();
+    let expected = contraction.images(node.canonical_store(), &x).unwrap()[0].clone();
+    node.adopt_records(&[Record::new([HubOp(a), HubOp(between)])])
+        .unwrap();
+    let head = repo.jj(&[
+        "--ignore-working-copy",
+        "op",
+        "log",
+        "--no-graph",
+        "-n1",
+        "-T",
+        "id",
+    ]);
+    let head = LocalOp(jj_lib::op_store::OperationId::try_from_hex(head.trim()).unwrap());
+    assert_ne!(
+        head, a_local,
+        "the survivor must not coalesce into the dropped local id"
+    );
+    drop(node);
+    std::fs::remove_file(repo.repo_path().join("musubi/translation")).unwrap();
+    let mut node = open(&repo);
+    assert_eq!(node.canonicalize(&head).unwrap(), expected);
+
+    // A command that loaded the old history is canonicalized on the renamed parents and
+    // then reparented locally by reparent_late, a second path that needs the durable marker.
+    repo.jj(&[
+        "--ignore-working-copy",
+        "--at-op",
+        &x_local.0.hex(),
+        "new",
+        "-m",
+        "late work",
+    ]);
+    node.canonical_heads().unwrap();
+    let heads: Vec<_> = node
+        .local_heads()
+        .unwrap()
+        .into_iter()
+        .map(|head| {
+            let canonical = node.canonicalize(&head).unwrap();
+            (head, canonical)
+        })
+        .collect();
+    drop(node);
+    std::fs::remove_file(repo.repo_path().join("musubi/translation")).unwrap();
+    let mut node = open(&repo);
+    for (local, canonical) in heads {
+        assert_eq!(node.canonicalize(&local).unwrap(), canonical);
+    }
+}
+
+#[test]
+fn coalesced_history_after_gc_is_refused_before_publishing_drops() {
+    use musubi_jj::records::HubOp;
+
+    let env = TestEnv::new();
+    let repo = env.init_repo("alpha");
+    let (a, _, x) = repeated_restore_ops(&repo);
+    let mut node = open(&repo);
+    let base = node.canonicalize(&x).unwrap();
+    repo.jj(&[
+        "--ignore-working-copy",
+        "op",
+        "abandon",
+        &format!("{}-..{}-", a.0.hex(), x.0.hex()),
+    ]);
+    repo.jj(&["--ignore-working-copy", "util", "gc", "--expire", "now"]);
+    assert!(
+        !repo
+            .repo_path()
+            .join("op_store/operations")
+            .join(x.0.hex())
+            .exists()
+    );
+    repo.jj(&["--ignore-working-copy", "describe", "-m", "after gc"]);
+    let err = node.notice_abandon(&HubOp(base)).unwrap_err();
+    assert!(
+        matches!(err, musubi_jj::node::NodeError::UnreachableHistory),
+        "{err}"
+    );
+    assert!(node.pending_drops().is_empty());
+}
+
+#[test]
+fn a_delayed_child_of_a_jj_rewrite_keeps_its_origin_after_cache_loss() {
+    use musubi_jj::records::HubOp;
+
+    let env = TestEnv::new();
+    let repo = env.init_repo("alpha");
+    let op_head = || {
+        repo.jj(&[
+            "--ignore-working-copy",
+            "op",
+            "log",
+            "--no-graph",
+            "-n1",
+            "-T",
+            "id",
+        ])
+    };
+    repo.jj(&["describe", "-m", "first"]);
+    let first = op_head();
+    repo.jj(&["describe", "-m", "middle"]);
+    let middle = LocalOp(jj_lib::op_store::OperationId::try_from_hex(op_head().trim()).unwrap());
+    repo.jj(&["describe", "-m", "last"]);
+    let last = LocalOp(jj_lib::op_store::OperationId::try_from_hex(op_head().trim()).unwrap());
+    let mut node = open(&repo);
+    let base = node.canonicalize(&last).unwrap();
+    let original = node.canonicalize(&middle).unwrap();
+    repo.jj(&["--ignore-working-copy", "op", "abandon", first.trim()]);
+    let log = repo.jj(&[
+        "--ignore-working-copy",
+        "op",
+        "log",
+        "--no-graph",
+        "-n2",
+        "-T",
+        "id ++ \"\\n\"",
+    ]);
+    let source =
+        LocalOp(jj_lib::op_store::OperationId::try_from_hex(log.lines().nth(1).unwrap()).unwrap());
+    let raw_head =
+        LocalOp(jj_lib::op_store::OperationId::try_from_hex(log.lines().next().unwrap()).unwrap());
+    assert_ne!(source, middle);
+    assert!(node.notice_abandon(&HubOp(base.clone())).unwrap());
+    let expected = node.current(&original)[0].0.clone();
+    let expected_head = node.current(&base)[0].0.clone();
+    drop(node);
+    std::fs::remove_file(repo.repo_path().join("musubi/translation")).unwrap();
+    // A power cut can retain the counted step while losing the head move and final
+    // moving=false write. Source aliases must not hide that unfinished physical move.
+    let heads = repo.repo_path().join("op_heads/heads");
+    for head in std::fs::read_dir(&heads).unwrap() {
+        std::fs::remove_file(head.unwrap().path()).unwrap();
+    }
+    std::fs::write(heads.join(raw_head.0.hex()), "").unwrap();
+    let records = repo.repo_path().join("musubi/records.json");
+    let mut state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&records).unwrap()).unwrap();
+    state["moving"] = true.into();
+    std::fs::write(&records, serde_json::to_vec(&state).unwrap()).unwrap();
+    let mut node = open(&repo);
+    assert!(node.notice_abandon(&HubOp(base)).unwrap());
+    assert!(!node.local_heads().unwrap().contains(&raw_head));
+    assert_eq!(node.canonical_heads().unwrap(), vec![expected_head]);
+    drop(node);
+    std::fs::remove_file(repo.repo_path().join("musubi/translation")).unwrap();
+    // A command loaded the unmarked source before the sync, and publishes after restart.
+    repo.jj(&[
+        "--ignore-working-copy",
+        "--at-op",
+        &source.0.hex(),
+        "new",
+        "-m",
+        "delayed",
+    ]);
+    let mut node = open(&repo);
+    assert_eq!(node.canonicalize(&source).unwrap(), expected);
+    node.canonical_heads().unwrap();
+    assert_ne!(
+        node.local_of(&expected),
+        Some(source),
+        "an alias is not the preferred realization"
+    );
+}
+
 fn open(repo: &TestRepo) -> NodeRepo {
     NodeRepo::open(&repo.repo_path(), &repo.settings()).unwrap()
+}
+
+#[test]
+fn fresh_equal_time_operation_is_not_an_old_counterpart() {
+    use musubi_jj::node::NodeError;
+    use musubi_jj::records::HubOp;
+    use pollster::FutureExt as _;
+
+    for (collect, lose_evidence) in [(false, false), (true, false), (true, true)] {
+        let env = TestEnv::new();
+        let repo = env.init_repo("alpha");
+        let op_head = || {
+            let hex = repo.jj(&[
+                "--ignore-working-copy",
+                "op",
+                "log",
+                "--no-graph",
+                "-n1",
+                "-T",
+                "id",
+            ]);
+            LocalOp(jj_lib::op_store::OperationId::try_from_hex(hex.trim()).unwrap())
+        };
+        let new_at_same_time = |message: &str| {
+            let output = repo
+                .program(Path::new("jj"))
+                .args(["--ignore-working-copy", "new", "-m", message])
+                .env("JJ_OP_TIMESTAMP", "2001-02-03T04:05:06Z")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            op_head()
+        };
+        repo.jj(&["describe", "-m", "published ancestor"]);
+        let p = op_head();
+        let a = new_at_same_time("published old view");
+        let mut node = open(&repo);
+        let base = node.canonicalize(&a).unwrap();
+        let x = new_at_same_time("unpublished new view");
+        let x_op = node
+            .loader()
+            .op_store()
+            .read_operation(&x.0)
+            .block_on()
+            .unwrap();
+        let x_view = node
+            .loader()
+            .op_store()
+            .read_view(&x_op.view_id)
+            .block_on()
+            .unwrap();
+        let expected = x_view.wc_commit_ids.values().next().unwrap().clone();
+        repo.jj(&[
+            "--ignore-working-copy",
+            "op",
+            "abandon",
+            &format!("{}-..{}-", p.0.hex(), x.0.hex()),
+        ]);
+        if collect {
+            repo.jj(&["--ignore-working-copy", "util", "gc", "--expire", "now"]);
+            assert!(
+                !repo
+                    .repo_path()
+                    .join("op_store/operations")
+                    .join(a.0.hex())
+                    .exists()
+            );
+        }
+        drop(node);
+        std::fs::remove_file(repo.repo_path().join("musubi/translation")).unwrap();
+        if lose_evidence {
+            std::fs::remove_file(repo.repo_path().join("musubi/originals")).unwrap();
+        }
+        let mut node = open(&repo);
+        if lose_evidence {
+            assert!(matches!(
+                node.notice_abandon(&HubOp(base)),
+                Err(NodeError::UnreachableHistory)
+            ));
+            assert!(node.pending_drops().is_empty());
+            continue;
+        }
+        assert!(node.notice_abandon(&HubOp(base)).unwrap());
+        let heads = node.canonical_heads().unwrap();
+        assert_eq!(heads.len(), 1);
+        let replicated = node
+            .canonical_store()
+            .read_operation_view(&heads[0])
+            .unwrap();
+        assert!(
+            replicated.wc_commit_ids.values().any(|id| *id == expected),
+            "the fresh operation's working-copy commit {expected:?} was omitted: {replicated:?}"
+        );
+    }
 }
 
 /// Ships the objects that the canonical operations reachable from `head` require and `to`

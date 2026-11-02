@@ -304,6 +304,9 @@ enum Command {
     /// rarely needed, except to see at once how a sync goes. It asks the daemon to sync, if
     /// the daemon serves the repository, and otherwise syncs in this process, saying if
     /// that's because the daemon isn't running.
+    ///
+    /// If jj made the result of an operation abandon ambiguous, syncing stops and gives a
+    /// `jj op integrate` command to restore the missing history before trying again.
     Sync,
     /// Run the daemon that keeps this machine's repositories in sync, or control it.
     ///

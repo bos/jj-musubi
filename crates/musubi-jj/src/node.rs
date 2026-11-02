@@ -45,6 +45,7 @@ mod expiry;
 mod git;
 mod git_config;
 mod join;
+mod originals;
 mod presence;
 mod realize;
 mod settings;
@@ -59,6 +60,7 @@ pub use expiry::FORGET_AFTER_KEY;
 use git::Colocation;
 use git::NodeGit;
 pub use join::JoinSummary;
+use originals::Originals;
 pub use realize::REALIZE_AT_ONCE;
 use realize::Unwritten;
 pub use supersede::NodeOp;
@@ -77,6 +79,7 @@ pub struct NodeRepo {
     local_root: LocalOp,
     canonical: CanonicalStore,
     map: TranslationMap,
+    originals: Originals,
     /// The repository's git repository, if its backend is git; otherwise it is simple.
     git: Option<NodeGit>,
     /// Whether every operation reachable from the op heads has been mapped since opening.
@@ -196,12 +199,18 @@ impl NodeRepo {
             path: map_path,
             source,
         })?;
+        let originals_path = musubi_dir.join("originals");
+        let originals = Originals::open(&originals_path).map_err(|source| NodeError::Io {
+            path: originals_path,
+            source,
+        })?;
         let mut node = Self {
             repo_path: repo_path.to_owned(),
             local_root: LocalOp(loader.op_store().root_operation_id().clone()),
             loader,
             canonical,
             map,
+            originals,
             git,
             heads_mapped: false,
             last_realized: None,
@@ -445,6 +454,22 @@ impl NodeRepo {
             .insert(local, canonical)
             .map_err(|source| NodeError::Io {
                 path: self.repo_path.join("musubi/translation"),
+                source,
+            })
+    }
+
+    fn remember_original(
+        &mut self,
+        canonical: &CanonicalOp,
+        op: &jj_lib::op_store::Operation,
+    ) -> Result<(), NodeError> {
+        self.originals
+            .record(
+                self.canonical.original_id(canonical)?,
+                join::fingerprint(op),
+            )
+            .map_err(|source| NodeError::Io {
+                path: self.repo_path.join("musubi/originals"),
                 source,
             })
     }

@@ -72,6 +72,7 @@ impl NodeRepo {
         local_op: &StoreOperation,
         canonical: CanonicalOp,
     ) -> Result<(), NodeError> {
+        self.remember_original(&canonical, local_op)?;
         let path = self.joins_path();
         let io_err = |source| NodeError::Io {
             path: path.clone(),

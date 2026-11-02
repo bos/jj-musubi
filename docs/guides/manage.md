@@ -158,6 +158,36 @@ To stop using musubi on a machine altogether:
 
 ## Upgrade musubi
 
+### Recreate hives when upgrading to 0.3.0
+
+Release 0.3.0 changes operation ids to preserve identity when history is abandoned. Its hub
+state and each copy's musubi state must be made afresh; the jj repositories and their work stay.
+
+1. Before upgrading, sync every copy with the old release. In each copy run `musubi leave`,
+   or `musubi leave --force` if its hub is gone, then stop its daemon with
+   `musubi daemon stop`.
+2. Keep a backup of every repository. Run `jj workspace list` in each copy, then
+   `jj workspace forget <name>` for each workspace belonging to another machine. Keep this
+   machine's own workspaces, including its linked workspaces. A local workspace's name can
+   contain `/`; `jj workspace root --name <name>` shows its recorded local directory.
+   Leaving can leave the other machines' workspaces here; remove them before the next step
+   so that the new hive doesn't treat them as this machine's own. This removes their
+   workspace names from this copy.
+3. Move each repository's `musubi` directory out of its jj repository directory (normally
+   `.jj/repo/musubi`) to a separate archive. Keep that archive; it includes the old hive
+   membership and translation records. For linked workspaces, use the repository directory
+   they share, once for that repository.
+4. Stop the old hub and archive its state directory. Install 0.3.0 on the hub and every
+   machine, then start the hub with an empty state directory, as in the setup guide.
+5. In one preserved repository run `musubi create`, then in each other copy run
+   `musubi join`. Joining starts its daemon. Use the usual join, which shares the present
+   view; do not use `--full-history` to carry old realizations into the new hive.
+
+The old operation history remains in the local jj repositories. Inspect work on every copy
+before discarding any archive.
+
+### Keep machines on the hub's release
+
 Until 1.0, a release may change how machines and hubs talk, and a machine and a hub running
 different releases refuse to sync, saying so. So run the same release on the hub's machine and
 every other machine.
@@ -212,7 +242,7 @@ needs `jj`, `git` and `cargo` on the daemon's `PATH`. To try it, name the releas
 revision is; this installs it:
 
 ```sh
-MUSUBI_UPGRADE_TO=0.3.0 ~/bin/upgrade-from-source ~/dev/jj-musubi
+MUSUBI_UPGRADE_TO=0.4.0 ~/bin/upgrade-from-source ~/dev/jj-musubi
 ```
 
 If the command fails, or installs another release, the daemon carries on as it was, and

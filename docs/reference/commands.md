@@ -41,7 +41,7 @@ unless jj's config sets it already. See [Set up a hub and machines](../guides/se
 | --- | --- |
 | `list` | Show the hubs' hives, this machine's copies of them, and whether each is syncing. `-T` prints only the hubs, hives and copies, with a template of your own, as jj's list commands do (see `musubi list --help`); `-T 'json(self) ++ "\n"'` gives them as JSON, for a script. |
 | `status` | Show what musubi does with the repository you're in: its hive, hub and machine name, its last sync, whether the hub has this machine's latest work, each machine's working copies, each copy in the hive with when it was last used and when it will be forgotten, and the daemon's process, socket and log. Warn of what keeps it from syncing, and say what to do. Outside a hive, show the default hub and the daemon. `-T` prints only the report, with a template of your own (see `musubi status --help`); `-T 'json(self) ++ "\n"'` gives it as JSON, for a script or an agent (see [below](#musubi-status-as-json)). |
-| `sync` | Sync the repository you're in now, and see at once whether it worked. |
+| `sync` | Sync the repository you're in now, and see at once whether it worked. If jj left an operation abandon ambiguous, follow the `jj op integrate` hint to restore the missing history first. |
 | `top` | Watch what flows through the hubs, and which machines are offline, behind, or failing, as it happens. |
 
 `status` never starts the daemon or asks the hub, so it answers at once, and it exits 0

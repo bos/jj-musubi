@@ -271,7 +271,9 @@ protocol's never-return corollaries do. The protocol instantiates content with t
 identity (`id`), representing the immutable original-parent material enforced by Rust's fresh
 creation and contraction APIs. Runtime input-history and hub-publication checks reject duplicate
 or explicitly dropped originals even when received with new current ids. Hash collision freedom
-remains an assumption. These proofs do not authenticate a peer's claimed rewrite provenance. See the contraction correspondence in
+remains an assumption. These proofs do not authenticate a peer's claimed rewrite provenance or
+infer which operation jj meant to retain when jj itself coalesces local ids; that ambiguous
+case is refused. See the contraction correspondence in
 [conformance.md](../docs/internals/conformance.md).
 
 `Supersede.lean` models the protocol over each operation's original, so the states of

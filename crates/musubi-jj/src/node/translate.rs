@@ -313,7 +313,7 @@ impl NodeRepo {
     }
 
     fn write_canonical(
-        &self,
+        &mut self,
         id: &LocalOp,
         op: &StoreOperation,
         parents: Vec<CanonicalOp>,
@@ -365,6 +365,7 @@ impl NodeRepo {
             commit_predecessors: op.commit_predecessors.clone(),
         };
         let canonical = self.canonical.write_operation(&canonical_op)?;
+        self.remember_original(&canonical, op)?;
         self.remember_presence(canonical.clone(), presence.apply(&canonical, &kind));
         Ok(canonical)
     }

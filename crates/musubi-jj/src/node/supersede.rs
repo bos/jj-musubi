@@ -95,7 +95,8 @@ pub(super) struct Records {
     superseded: HashMap<CanonicalOp, Vec<CanonicalOp>>,
     /// The operations a step dropped, rather than rewrote, as it named them.
     dropped: HashSet<CanonicalOp>,
-    /// Source operations whose canonical identity this session established.
+    /// Unmarked jj rewrites whose original identity was established while detecting an
+    /// abandon. A delayed command can still refer to them after cache loss or restart.
     sources: HashMap<LocalOp, CanonicalOp>,
     /// How each record this node took renamed the hub's history below the base then, new name
     /// to old: to name what it drops as the hub does after the hub goes back and takes others.
@@ -201,20 +202,6 @@ fn parse_ids(path: &Path, hexes: &[String]) -> Result<Vec<OperationId>, NodeErro
         .collect()
 }
 
-/// When, by whom and for what an operation was made, which canonicalizing it keeps.
-fn time_key(op: &StoreOperation) -> String {
-    let metadata = &op.metadata;
-    format!(
-        "{} {} {} {}@{} {}",
-        metadata.time.start.timestamp.0,
-        metadata.time.end.timestamp.0,
-        metadata.time.end.tz_offset,
-        metadata.username,
-        metadata.hostname,
-        metadata.description
-    )
-}
-
 /// `ops` without duplicates, the first of each kept.
 fn dedup<Op: Clone + Eq + std::hash::Hash>(ops: impl IntoIterator<Item = Op>) -> Vec<Op> {
     let mut seen = HashSet::new();
@@ -273,11 +260,13 @@ impl Records {
         let path = musubi_dir.join(STEPS_FILE);
         let mut steps = parse_steps(&read_log(&path)?);
         for number in 1..=file.steps {
-            let Some((step, dropped)) = steps.remove(&number).and_then(Block::whole) else {
+            let Some((step, dropped, sources)) = steps.remove(&number).and_then(Block::whole)
+            else {
                 return Err(damaged(path));
             };
             records.compose(step);
             records.dropped.extend(dropped);
+            records.sources.extend(sources);
         }
         Ok(records)
     }
@@ -439,7 +428,11 @@ fn parse_hub_renamings(text: &str) -> HashMap<String, Block<HashMap<CanonicalOp,
 }
 
 /// A renaming, and what it dropped.
-type Step = (HashMap<CanonicalOp, Vec<CanonicalOp>>, Vec<CanonicalOp>);
+type Step = (
+    HashMap<CanonicalOp, Vec<CanonicalOp>>,
+    Vec<CanonicalOp>,
+    HashMap<LocalOp, CanonicalOp>,
+);
 
 /// Renaming `number`, which dropped `dropped`, as the steps log has it: a `step <number>
 /// <lines>` line, then an `old new` line for each operation it superseded and each it became,
@@ -449,8 +442,9 @@ fn format_step(
     number: usize,
     step: &HashMap<CanonicalOp, Vec<CanonicalOp>>,
     dropped: &HashSet<CanonicalOp>,
+    sources: &HashMap<LocalOp, CanonicalOp>,
 ) -> String {
-    let lines: usize = step.values().map(|new| new.len().max(1)).sum();
+    let lines: usize = step.values().map(|new| new.len().max(1)).sum::<usize>() + sources.len();
     let mut text = format!("\nstep {number:0NUMBER_DIGITS$} {lines:0NUMBER_DIGITS$}\n");
     for (old, new) in step {
         let mark = if dropped.contains(old) { "-" } else { "" };
@@ -460,6 +454,10 @@ fn format_step(
         for op in new {
             writeln!(text, "{mark}{} {}", old.0.hex(), op.0.hex()).expect("writing to a String");
         }
+    }
+    for (local, canonical) in sources {
+        writeln!(text, "source {} {}", local.0.hex(), canonical.0.hex())
+            .expect("writing to a String");
     }
     text
 }
@@ -480,6 +478,16 @@ fn parse_steps(text: &str) -> std::collections::BTreeMap<usize, Block<Step>> {
             }
             continue;
         }
+        if let Some(pair) = line.strip_prefix("source ") {
+            if let Some((local, canonical)) = pair.split_once(' ')
+                && let (Some(local), Some(canonical)) = (whole_id(local), whole_id(canonical))
+                && let Some(block) = current.and_then(|number| steps.get_mut(&number))
+            {
+                block.read.2.insert(LocalOp(local), CanonicalOp(canonical));
+                block.seen += 1;
+            }
+            continue;
+        }
         let (dropped, line) = match line.strip_prefix('-') {
             Some(line) => (true, line),
             None => (false, line),
@@ -493,7 +501,7 @@ fn parse_steps(text: &str) -> std::collections::BTreeMap<usize, Block<Step>> {
         };
         let block: Option<&mut Block<Step>> = current.and_then(|number| steps.get_mut(&number));
         if let (Some(block), Some(old), Some(new)) = (block, whole_id(old).map(CanonicalOp), new) {
-            let (step, drops) = &mut block.read;
+            let (step, drops, _) = &mut block.read;
             let became = step.entry(old.clone()).or_insert_with(|| {
                 if dropped {
                     drops.push(old);
@@ -559,7 +567,10 @@ impl NodeRepo {
             return Ok(());
         }
         let path = self.repo_path.join("musubi").join(STEPS_FILE);
-        append_log(&path, &format_step(self.records.steps + 1, &step, dropped))?;
+        append_log(
+            &path,
+            &format_step(self.records.steps + 1, &step, dropped, &sources),
+        )?;
         self.records
             .dropped
             .extend(step.keys().filter(|old| dropped.contains(*old)).cloned());
@@ -693,8 +704,11 @@ impl NodeRepo {
                 continue;
             }
             if let Some(canonical) = self.canonical_of(&id) {
-                mapped.push((id, canonical));
-                continue;
+                // An alias establishes identity, not that a pending physical move finished.
+                if !self.records.moving || self.records.source(&id).is_none() {
+                    mapped.push((id, canonical));
+                    continue;
+                }
             }
             let op = op_store.read_operation(&id.0).block_on()?;
             if !op.metadata.attributes.contains_key(CANONICAL_ATTRIBUTE)
@@ -821,28 +835,37 @@ impl NodeRepo {
         let region = self
             .canonical
             .ancestors_until(&bases, |op| kept.contains(op))?;
-        let mut by_fingerprint = HashMap::new();
-        for c in &region {
-            if let Some(local) = self.local_of(c) {
-                // `jj util gc` may have removed what nothing reaches any more.
-                match self.loader.op_store().read_operation(&local.0).block_on() {
-                    Ok(op) => {
-                        by_fingerprint.insert(fingerprint(&op), c.clone());
-                    }
+        let ambiguous = |this: &Self| -> Result<NodeError, NodeError> {
+            for local in bases.iter().filter_map(|c| this.local_of(c)) {
+                match this.loader.op_store().read_operation(&local.0).block_on() {
+                    Ok(_) => return Ok(NodeError::AmbiguousAbandon(local.0.hex())),
                     Err(jj_lib::op_store::OpStoreError::ObjectNotFound { .. }) => {}
                     Err(err) => return Err(err.into()),
                 }
             }
+            Ok(NodeError::UnreachableHistory)
+        };
+        let mut surviving_fingerprints = HashSet::new();
+        for (local, _) in &mapped {
+            let op = self.loader.op_store().read_operation(&local.0).block_on()?;
+            surviving_fingerprints.insert(fingerprint(&op));
         }
-        // Failing that, by when and by whom it was made, which canonicalizing keeps: where
-        // `jj util gc` removed the old local operations.
-        let mut by_time: HashMap<String, Option<CanonicalOp>> = HashMap::new();
+        let mut by_fingerprint: HashMap<String, Option<CanonicalOp>> = HashMap::new();
         for c in &region {
-            let key = time_key(&self.canonical.read_operation(c)?);
-            by_time
-                .entry(key)
-                .and_modify(|found| *found = None)
-                .or_insert_with(|| Some(c.clone()));
+            let original = self.canonical.original_id(c)?;
+            let fingerprints = self
+                .originals
+                .fingerprints(&original)
+                .ok_or(NodeError::UnreachableHistory)?;
+            for key in fingerprints {
+                if surviving_fingerprints.contains(key) {
+                    return Err(ambiguous(self)?);
+                }
+                by_fingerprint
+                    .entry(key.clone())
+                    .and_modify(|found| *found = None)
+                    .or_insert_with(|| Some(c.clone()));
+            }
         }
         // What each rewritten local operation stands for: the canonical operation a
         // realization names, or the one its old self, jj's, was.
@@ -864,9 +887,11 @@ impl NodeRepo {
                     [now] => Some(now.clone()),
                     _ => None,
                 });
-            let found = named
-                .or_else(|| by_fingerprint.get(&fingerprint(op)).cloned())
-                .or_else(|| by_time.get(&time_key(op)).cloned().flatten());
+            let fingerprint = by_fingerprint.get(&fingerprint(op));
+            if named.is_none() && matches!(fingerprint, Some(None)) {
+                return Err(ambiguous(self)?);
+            }
+            let found = named.or_else(|| fingerprint.cloned().flatten());
             if let Some(c) = found {
                 counterparts.insert(id.clone(), c);
             }
@@ -877,6 +902,8 @@ impl NodeRepo {
             // A rewrite recorded before a restart: move the op heads it didn't.
             let mut nothing = Contraction::new(&self.canonical, std::iter::empty())?;
             let locals = self.rewrite_locals(&mut nothing, &heads, &counterparts, &unmapped)?;
+            self.add_step(HashMap::new(), &HashSet::new(), &counterparts)?;
+            self.save_records()?;
             self.move_heads(&heads, &locals, None, None)?;
             self.move_workspaces(&locals)?;
             self.records.moving = false;
@@ -2017,7 +2044,11 @@ mod tests {
                     dropped.insert(old);
                 }
             }
-            let formatted = format_step(number, &step, &dropped);
+            let sources: HashMap<LocalOp, CanonicalOp> = (0..tc
+                .draw(gs::integers::<u8>().max_value(3)))
+                .map(|o| (LocalOp(id(150 + 4 * a + o).0), id(230 + o)))
+                .collect();
+            let formatted = format_step(number, &step, &dropped, &sources);
             // The empty line that starts the append, the number, then each operation's.
             let mut lines: Vec<Option<(&CanonicalOp, Option<&CanonicalOp>)>> = vec![None, None];
             for (old, new) in &step {
@@ -2026,11 +2057,13 @@ mod tests {
                 }
                 lines.extend(new.iter().map(|op| Some((old, Some(op)))));
             }
+            let alias_start = lines.len();
+            lines.extend(sources.iter().map(|_| None));
             let written = written(&tc, &formatted);
             let whole = whole_lines(&formatted, written);
             if whole >= 2 {
-                let (mut block, mut drops) = Step::default();
-                for (old, new) in lines[2..whole].iter().flatten() {
+                let (mut block, mut drops, mut aliases) = Step::default();
+                for (old, new) in lines[2..whole.min(alias_start)].iter().flatten() {
                     let became = block.entry((*old).clone()).or_insert_with(|| {
                         if dropped.contains(*old) {
                             drops.push((*old).clone());
@@ -2039,7 +2072,16 @@ mod tests {
                     });
                     became.extend(new.cloned());
                 }
-                expected.insert(number, (whole == lines.len()).then_some((block, drops)));
+                aliases.extend(
+                    sources
+                        .iter()
+                        .take(whole.saturating_sub(alias_start))
+                        .map(|(local, canonical)| (local.clone(), canonical.clone())),
+                );
+                expected.insert(
+                    number,
+                    (whole == lines.len()).then_some((block, drops, aliases)),
+                );
             }
             text.push_str(&formatted[..written]);
         }

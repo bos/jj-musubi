@@ -2273,6 +2273,18 @@ impl NodeRepo {
     /// Writes the fix-up on the single op head, if it hasn't been, and returns the canonical
     /// operation of its last operation.
     pub fn write_fixup(&mut self) -> Result<Option<NodeOp>, NodeError> {
+        self.write_fixup_until(None)
+    }
+
+    /// For tests of crashes: writes the fix-up's work by its first `written` copies, then
+    /// stops, as a crash would, with the fix-up not yet written. It writes the rest of the
+    /// work, and the forget after it, only when written again.
+    pub fn crash_writing_fixup(&mut self, written: usize) -> Result<(), NodeError> {
+        self.write_fixup_until(Some(written)).map(drop)
+    }
+
+    /// [`Self::write_fixup`], stopping after `stop` operations if given.
+    fn write_fixup_until(&mut self, stop: Option<usize>) -> Result<Option<NodeOp>, NodeError> {
         // Before reading the fix-up, which an abandon noticed now replaces, and not between
         // its operations.
         self.check_abandon()?;
@@ -2312,7 +2324,10 @@ impl NodeRepo {
             }
             tx
         };
-        for work in &fixup.work {
+        for (written, work) in fixup.work.iter().enumerate() {
+            if stop == Some(written) {
+                return Ok(None);
+            }
             let repo = self.merged_repo_unchecked()?;
             let mut tx = start(&repo);
             tx.set_attribute(WORK_ATTRIBUTE.to_owned(), work.copy.clone());
@@ -2337,6 +2352,9 @@ impl NodeRepo {
             if work.forgotten == Some(true) {
                 after_work.push(work.copy.clone());
             }
+        }
+        if stop.is_some() {
+            return Ok(None);
         }
         let repo = self.merged_repo_unchecked()?;
         let mut tx = start(&repo);

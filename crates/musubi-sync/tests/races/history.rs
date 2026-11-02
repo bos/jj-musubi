@@ -828,25 +828,78 @@ fn abandoning_the_latest_work_of_a_forgotten_copy_keeps_its_workspaces() {
 #[test]
 fn abandoning_the_latest_work_of_a_copy_just_forgotten_keeps_it_forgotten() {
     let mut hive = Fixture::new(&["alpha", "beta"]);
+    let beta = forget_then_abandon_latest_work(&mut hive);
+    hive.sync();
+    assert_stays_forgotten(&mut hive, &beta);
+}
+
+/// …and the machine crashes after writing the fix-up's work, before its forget: written again,
+/// the fix-up forgets the copy all the same. Deciding afresh, it would find its own work at the
+/// op head, and the copy present.
+#[test]
+fn a_fix_up_written_again_after_a_crash_keeps_the_copy_forgotten() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    let beta = forget_then_abandon_latest_work(&mut hive);
+    crash_after_the_fixups_work(&mut hive);
+    hive.sync();
+    assert_stays_forgotten(&mut hive, &beta);
+}
+
+/// …and, after the crash, the machine abandons its own commit too, so that a fix-up replaces
+/// the one it was writing: that one forgets the copy too.
+#[test]
+fn a_fix_up_replaced_after_a_crash_keeps_the_copy_forgotten() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    let beta = forget_then_abandon_latest_work(&mut hive);
+    crash_after_the_fixups_work(&mut hive);
+    // Alpha's commit, published, which the first abandon rewrote.
+    let alpha = newest_of(hive.repo(0), "alpha");
+    hive.repo(0).jj(&["op", "abandon", &alpha]);
+    hive.sync();
+    assert_stays_forgotten(&mut hive, &beta);
+}
+
+/// Alpha publishes a commit above beta's latest work, then forgets beta and, before it syncs,
+/// abandons beta's work. The abandon keeps alpha's commit, with presence as it was, which names
+/// beta's work, now dropped, so the fix-up does that work again. The forget is then alpha's
+/// only operation the hub lacks. Returns beta's machine key.
+fn forget_then_abandon_latest_work(hive: &mut Fixture) -> String {
     hive.commit(1, "b", "from beta");
     hive.sync();
     let work = newest_of(hive.repo(0), "beta");
-    // Alpha's work above beta's, published: the abandon keeps it, with presence as it was,
-    // naming beta's work, which it drops, so the fix-up does that work again. The forget is
-    // then alpha's only operation the hub lacks.
     hive.commit(0, "a", "from alpha");
     hive.hive.sync(0).unwrap();
     let beta = hive.machine_key(1);
     assert!(hive.node(0).forget_copy(&beta, "beta").unwrap());
     hive.repo(0).jj(&["op", "abandon", &work]);
-    hive.sync();
-    let (pass_on, _) = op_log(hive.repo(0))
+    beta
+}
+
+/// Alpha writes the fix-up's work for beta and crashes before the forget after it, then
+/// restarts.
+fn crash_after_the_fixups_work(hive: &mut Fixture) {
+    hive.node(0).crash_writing_fixup(1).unwrap();
+    let log = op_log(hive.repo(0));
+    assert!(log.iter().any(|(_, d)| d.starts_with("musubi: keep ")));
+    assert!(!has_operation(
+        hive.repo(0),
+        "musubi: pass on jj op abandon"
+    ));
+    hive.reopen(0);
+}
+
+/// After [`forget_then_abandon_latest_work`] and a sync: the fix-up's one last operation forgets
+/// beta, which keeps its own workspace, and the hive has converged.
+fn assert_stays_forgotten(hive: &mut Fixture, beta: &str) {
+    let pass_on: Vec<String> = op_log(hive.repo(0))
         .into_iter()
-        .find(|(_, d)| d == "musubi: pass on jj op abandon")
-        .unwrap();
+        .filter(|(_, d)| d == "musubi: pass on jj op abandon")
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(pass_on.len(), 1, "{pass_on:?}");
     let attributes = hive.repo(0).jj(&[
         "--at-op",
-        &pass_on,
+        &pass_on[0],
         "--ignore-working-copy",
         "op",
         "log",

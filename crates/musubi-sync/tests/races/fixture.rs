@@ -19,6 +19,7 @@ use musubi_jj::objects::Backend;
 use musubi_jj::op_id::CanonicalOp;
 use musubi_sync::hive::Hive;
 use musubi_sync::node::Clock;
+use musubi_sync::node::NodeAdapter;
 use musubi_testutil::TestEnv;
 use musubi_testutil::TestRepo;
 
@@ -229,6 +230,21 @@ impl Fixture {
     /// on to now.
     pub fn node(&mut self, index: usize) -> &mut NodeRepo {
         self.hive.members[index].adapter.repo_mut()
+    }
+
+    /// Restarts machine `index`'s daemon, as after a crash: it opens the repository again,
+    /// keeping nothing it held in memory, and its protocol state starts again.
+    pub fn reopen(&mut self, index: usize) {
+        // A crash doesn't record what it was writing, as dropping the node would.
+        self.node(index).crash_before_settling();
+        let repo = &self.repos[index];
+        let node = NodeRepo::open(&repo.repo_path(), &repo.settings())
+            .unwrap()
+            .with_repo_config(Some(repo.repo_config_path()));
+        let mut adapter = NodeAdapter::new(node).unwrap();
+        adapter.set_clock(Box::new(TestClock(self.env.clock())));
+        self.hive.members[index].adapter = adapter;
+        self.hive.restart(index);
     }
 
     /// The names of the workspaces in machine `index`'s view, read in process, so that

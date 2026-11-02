@@ -1,5 +1,7 @@
 //! Operation-log level races: undo, op abandon, offline machines, restarts.
 
+use std::collections::BTreeMap;
+
 use musubi_sync::node::history_lost;
 use musubi_testutil::TestEnv;
 
@@ -506,22 +508,52 @@ fn two_op_abandons_before_a_sync() {
 }
 
 /// `jj util gc` removes what an abandon left unreachable before musubi sees it: the abandon
-/// still reaches the other machine.
+/// still reaches the other machine, and drops nothing more. jj's rewrites of the operations
+/// above it, an undo among them, whose description names an operation by its local id, are
+/// matched to theirs by the fingerprints the machine kept for them.
 #[test]
 fn op_abandon_then_gc() {
     let mut hive = Fixture::new(&["alpha", "beta"]);
     hive.commit(0, "a", "first");
     hive.commit(0, "b", "second");
+    hive.repo(0).jj(&["undo"]);
+    hive.commit(0, "c", "third");
     hive.sync();
-    let abandoned = commit_op(hive.repo(0));
+    let descriptions = |hive: &Fixture| {
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for (_, op) in op_log(hive.repo(0)) {
+            *counts.entry(op).or_default() += 1;
+        }
+        counts
+    };
+    // The commit the undo undid.
+    let ops = op_log(hive.repo(0));
+    let undo = ops
+        .iter()
+        .position(|(_, op)| op.starts_with("undo: "))
+        .unwrap();
+    let abandoned = ops[undo + 1].clone();
+    assert!(abandoned.1.starts_with("commit "));
+    let mut kept = descriptions(&hive);
+    kept.remove(&abandoned.1);
     hive.repo(0).jj(&["op", "abandon", &abandoned.0]);
     hive.repo(0).jj(&["util", "gc", "--expire=now"]);
     hive.sync();
     hive.assert_converged();
+    let now = descriptions(&hive);
+    for (op, count) in &kept {
+        assert!(now.get(op).is_some_and(|now| now >= count), "{op} is gone");
+    }
     for machine in 0..2 {
         assert!(
             !has_operation(hive.repo(machine), &abandoned.1),
             "{machine}"
+        );
+        assert!(
+            op_log(hive.repo(machine))
+                .iter()
+                .any(|(_, op)| op.starts_with("undo: ")),
+            "{machine}: the undo is gone"
         );
     }
 }
@@ -772,19 +804,56 @@ fn concurrent_operation_on_one_machine() {
     assert!(hive.bookmarks(1).contains_key("stale-view@"));
 }
 
-/// A node that restarts loses its protocol state and its translation cache; it must
-/// recover both and converge without duplicating anything.
+/// A node that restarts loses its protocol state and its translation cache. It recovers both,
+/// and converges without duplicating or dropping anything. With the cache lost, nothing maps
+/// its own operations above its join, so it looks for a `jj op abandon` there, matching each
+/// of them to an operation the hive has by its fingerprint. An operation and jj's rewrite of
+/// it, both in the history once a command run at an operation from before the abandon writes
+/// on the operation, have the same fingerprint: which survived is ambiguous, and the node
+/// stopped for good. It must find, as canonicalizing would, that each stands for an
+/// operation the hive has. The undo is matched either way.
 #[test]
 fn restart_with_lost_cache() {
     let mut hive = Fixture::new(&["alpha", "beta"]);
     hive.commit(0, "a", "before restart");
+    let latest = |hive: &Fixture, bookmark: &str| {
+        let (id, description) = op_log(hive.repo(0)).swap_remove(0);
+        assert!(description.starts_with(&format!("create bookmark {bookmark} ")));
+        id
+    };
+    hive.repo(0).jj(&["bookmark", "create", "x", "-r", "@-"]);
+    let x = latest(&hive, "x");
+    hive.repo(0).jj(&["bookmark", "create", "y", "-r", "@-"]);
+    let y = latest(&hive, "y");
+    hive.repo(0).jj(&["op", "abandon", &x]);
+    hive.repo(0)
+        .jj(&["--at-op", &y, "bookmark", "create", "z", "-r", "@-"]);
+    hive.commit(1, "u", "undone");
+    hive.repo(1).jj(&["undo"]);
     hive.sync();
-    std::fs::remove_file(hive.repo(1).repo_path().join("musubi/translation")).unwrap();
-    hive.hive.restart(1);
+    for index in 0..2 {
+        let heads = hive.node(index).canonical_heads().unwrap();
+        std::fs::remove_file(hive.repo(index).repo_path().join("musubi/translation")).unwrap();
+        hive.reopen(index);
+        assert_eq!(
+            hive.node(index).canonical_heads().unwrap(),
+            heads,
+            "translated afresh, {index}'s op heads changed"
+        );
+    }
     hive.commit(0, "b", "after restart");
     hive.commit(1, "c", "beta after restart");
     hive.sync();
     hive.assert_converged();
+    for index in 0..2 {
+        let ops = op_log(hive.repo(index));
+        let count = |prefix: &str| ops.iter().filter(|(_, op)| op.starts_with(prefix)).count();
+        assert_eq!(
+            (count("undo: "), count("create bookmark y ")),
+            (1, 2),
+            "the undo, or bookmark y's operation or its rewrite, is gone: {ops:#?}"
+        );
+    }
 }
 
 /// The hub restarts between one machine's push and another's fetch; its store is on disk.

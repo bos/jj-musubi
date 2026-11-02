@@ -555,6 +555,16 @@ impl CanonicalStore {
         self.shared.write_view(view)
     }
 
+    /// The id [`Self::write_operation`] gives `op`, without storing it.
+    pub fn operation_id(op: &Operation) -> CanonicalOp {
+        CanonicalOp(OperationId::new(blake2b_hash(&origin::fresh(op)).to_vec()))
+    }
+
+    /// The id [`Self::write_view`] gives `view`, without storing it.
+    pub fn view_id(&self, view: &View) -> Result<ViewId, CanonicalError> {
+        Ok(self.shared.views.encode(view)?.0)
+    }
+
     /// Resolves a hex prefix of a canonical operation id.
     pub fn resolve_prefix(&self, prefix: &str) -> Result<Option<CanonicalOp>, CanonicalError> {
         let Some(prefix) = HexPrefix::try_from_hex(prefix) else {

@@ -724,6 +724,58 @@ impl NodeRepo {
         Ok((mapped, unmapped))
     }
 
+    /// Whether every one of `bases` is below one of the canonical operations `mapped` has.
+    fn reaches(
+        &self,
+        bases: &[CanonicalOp],
+        mapped: &[(LocalOp, CanonicalOp)],
+    ) -> Result<bool, NodeError> {
+        for base in bases {
+            let mut found = false;
+            for (_, c) in mapped {
+                if self.canonical.is_ancestor_of(base, c)? {
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Maps what [`Self::local_walk`] found as canonicalizing would, where the hive has the
+    /// canonical operations already: join points, and each of `unmapped`, parents first, with
+    /// its canonical form (`exact_canonical`). Where the translation cache was lost, that is
+    /// every local operation but jj's rewrites and those new since the last sync. Notes those
+    /// from before the join too. Returns whether it mapped or noted any of `unmapped`.
+    fn map_exactly(
+        &mut self,
+        mapped: &[(LocalOp, CanonicalOp)],
+        unmapped: &[(LocalOp, StoreOperation)],
+    ) -> Result<bool, NodeError> {
+        for (local, canonical) in mapped {
+            if self.canonical_of(local).is_none() {
+                self.insert_map(local.clone(), canonical.clone())?;
+            }
+        }
+        let mut found = false;
+        for (id, op) in unmapped {
+            match self.exact_canonical(id, op) {
+                Ok(Some(canonical)) => {
+                    self.insert_map(id.clone(), canonical)?;
+                    found = true;
+                }
+                Ok(None) => found |= self.before_join.contains(id),
+                // Canonicalizing refuses it too; matching it otherwise is left to the caller.
+                Err(NodeError::Format { .. }) => {}
+                Err(err) => return Err(err),
+            }
+        }
+        Ok(found)
+    }
+
     /// The operation the hub accepted that this machine fetches from (the sync adapter's
     /// `accepted_base`), a hub name, if it has one.
     fn stored_base(&self) -> Option<HubOp> {
@@ -807,22 +859,18 @@ impl NodeRepo {
             return Ok(false);
         }
         let heads = self.local_heads()?;
-        let (mapped, unmapped) = self.local_walk(&heads)?;
-        let frontier: Vec<CanonicalOp> = mapped.iter().map(|(_, c)| c.clone()).collect();
-        let mut reached = true;
-        for base in &bases {
-            let mut found = false;
-            for c in &frontier {
-                if self.canonical.is_ancestor_of(base, c)? {
-                    found = true;
-                    break;
-                }
-            }
-            reached &= found;
+        let (mut mapped, mut unmapped) = self.local_walk(&heads)?;
+        let mut reached = self.reaches(&bases, &mapped)?;
+        // So too where the translation cache was lost: look again once what canonicalizes to
+        // an operation the hive has is mapped, as canonicalizing would map it.
+        if !reached && self.map_exactly(&mapped, &unmapped)? {
+            (mapped, unmapped) = self.local_walk(&heads)?;
+            reached = self.reaches(&bases, &mapped)?;
         }
         if reached && !self.records.moving {
             return Ok(false);
         }
+        let frontier: Vec<CanonicalOp> = mapped.iter().map(|(_, c)| c.clone()).collect();
         // The history below what is intact stays; what was above it, and below the base, is
         // where the abandoned operations were, and what jj rewrote stands for.
         let mut kept: HashSet<CanonicalOp> = self
@@ -2203,5 +2251,50 @@ mod tests {
             let expected = eager.get(&op).cloned().unwrap_or_else(|| vec![op.clone()]);
             assert_eq!(records.current(&op), expected, "{op:?}");
         }
+    }
+
+    /// Where the translation cache was lost, `map_exactly` maps the local operations as
+    /// canonicalizing did, working their canonical forms out without storing them: here a
+    /// merge with an operation from before the join, which canonicalizing leaves out, and an
+    /// operation on it; but not a new one. It fails if what is from before the join stays
+    /// unknown, as nothing above it is then mapped, and if a form it works out is stored.
+    #[test]
+    fn map_exactly_maps_a_lost_translation_as_canonicalizing_did() {
+        let env = musubi_testutil::TestEnv::new();
+        let repo = env.init_repo("alpha");
+        let open = || NodeRepo::open(&repo.repo_path(), &repo.settings()).unwrap();
+        let ops = repo.jj(&["op", "log", "--no-graph", "-T", r#"id ++ "\n""#]);
+        let ops: Vec<&str> = ops.lines().collect();
+        // Below the join point, the head.
+        let before_join = ops[ops.len() - 2].to_owned();
+        assert_ne!(before_join, ops[0]);
+        open().create_join_operation("musubi: alpha joins").unwrap();
+        repo.jj(&["bookmark", "create", "h", "-r", "@-"]);
+        repo.jj(&[
+            "--at-op",
+            &before_join,
+            "bookmark",
+            "create",
+            "w",
+            "-r",
+            "root()",
+        ]);
+        // Merges first.
+        repo.jj(&["bookmark", "create", "m", "-r", "@-"]);
+        let mut node = open();
+        let head = node.merge_heads().unwrap();
+        let canonical = node.canonicalize(&head).unwrap();
+        let stored = node.canonical_store().operation_ids().unwrap();
+        drop(node);
+        fs::remove_file(repo.repo_path().join("musubi/translation")).unwrap();
+        // One the hive lacks, whose canonical form is worked out but not stored.
+        repo.jj(&["bookmark", "create", "n", "-r", "@-"]);
+        let mut node = open();
+        let heads = node.local_heads().unwrap();
+        let (mapped, unmapped) = node.local_walk(&heads).unwrap();
+        assert!(node.map_exactly(&mapped, &unmapped).unwrap());
+        assert_eq!(node.canonical_of(&head), Some(canonical));
+        assert_eq!(node.canonical_of(&heads[0]), None);
+        assert_eq!(node.canonical_store().operation_ids().unwrap(), stored);
     }
 }

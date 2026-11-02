@@ -294,6 +294,8 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         "hub_goes_back_or_is_remade_after_a_rewrite",
         Some(&["op_abandon", "hub_goes_back"]),
     ),
+    // The search runs no `jj util gc`.
+    ("op_abandon_then_gc", None),
     ("restart_with_lost_cache", Some(&["lose_cache"])),
     (
         "lost_cache_does_not_duplicate_realizations",

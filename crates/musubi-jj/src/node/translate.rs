@@ -8,6 +8,8 @@ use std::sync::Arc;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::Operation as StoreOperation;
 use jj_lib::op_store::OperationId;
+use jj_lib::op_store::View;
+use jj_lib::op_store::ViewId;
 use pollster::FutureExt as _;
 
 use super::CANONICAL_ATTRIBUTE;
@@ -15,11 +17,14 @@ use super::NodeError;
 use super::NodeRepo;
 use super::join::fingerprint;
 use super::supersede::FIXUP_ATTRIBUTE;
+use crate::canonical::CanonicalError;
+use crate::canonical::CanonicalStore;
 use crate::format_guard;
 use crate::format_guard::FormatError;
 use crate::op_id::CanonicalOp;
 use crate::op_id::LocalOp;
 use crate::presence::Kind;
+use crate::presence::Presence;
 use crate::remote_url::without_credentials;
 use crate::workspaces;
 
@@ -318,6 +323,76 @@ impl NodeRepo {
         op: &StoreOperation,
         parents: Vec<CanonicalOp>,
     ) -> Result<CanonicalOp, NodeError> {
+        let (canonical_op, presence, kind) =
+            self.canonical_form(id, op, parents, |view| self.canonical.write_view(view))?;
+        let canonical = self.canonical.write_operation(&canonical_op)?;
+        self.remember_original(&canonical, op)?;
+        self.remember_presence(canonical.clone(), presence.apply(&canonical, &kind));
+        Ok(canonical)
+    }
+
+    /// The canonical operation canonicalizing would map a local operation to, where the hive
+    /// has it already, and not a join point. Its parents must be in the translation map, or
+    /// from before the join, as canonicalizing would give them first; otherwise None. So too
+    /// where its canonical form isn't stored, which this doesn't store, as for jj's rewrite
+    /// of an operation, or a realization whose parents jj changed. Notes, as canonicalizing
+    /// does, an operation from before the join, and one found on parents a record renamed.
+    pub(super) fn exact_canonical(
+        &mut self,
+        id: &LocalOp,
+        op: &StoreOperation,
+    ) -> Result<Option<CanonicalOp>, NodeError> {
+        // Canonicalizing would give the others canonical forms first, which the hive lacks.
+        let local_parents = LocalOp::parents_of(op);
+        if local_parents
+            .iter()
+            .any(|parent| self.canonical_of(parent).is_none() && !self.before_join.contains(parent))
+        {
+            return Ok(None);
+        }
+        let (parents, renamed) = self.current_parents(&local_parents);
+        let late = renamed
+            || local_parents
+                .iter()
+                .any(|parent| self.late.contains(parent));
+        let found = if let Some(named) = op.metadata.attributes.get(CANONICAL_ATTRIBUTE) {
+            let Some(named) = OperationId::try_from_hex(named)
+                .map(CanonicalOp)
+                .filter(|c| self.canonical.has_operation(c))
+            else {
+                return Ok(None);
+            };
+            let canonical = match self.current_ids(&named).as_slice() {
+                [now] => now.clone(),
+                _ => named,
+            };
+            (self.canonical.parents(&canonical)? == parents).then_some(canonical)
+        } else if self.is_before_join(id, op)? {
+            self.before_join.insert(id.clone());
+            None
+        } else {
+            let (canonical_op, _, _) =
+                self.canonical_form(id, op, parents, |view| self.canonical.view_id(view))?;
+            let canonical = CanonicalStore::operation_id(&canonical_op);
+            self.canonical
+                .has_operation(&canonical)
+                .then_some(canonical)
+        };
+        if found.is_some() && late {
+            self.late.push(id.clone());
+        }
+        Ok(found)
+    }
+
+    /// The canonical form of local operation `id`, `op`, on `parents`, its view given an id by
+    /// `view_id`, which may store it; and the presence its parents give it, and its kind.
+    fn canonical_form(
+        &self,
+        id: &LocalOp,
+        op: &StoreOperation,
+        parents: Vec<CanonicalOp>,
+        view_id: impl FnOnce(&View) -> Result<ViewId, CanonicalError>,
+    ) -> Result<(StoreOperation, Presence<CanonicalOp>, Kind), NodeError> {
         self.check_format(id, op)?;
         let view = self.loader.op_store().read_view(&op.view_id).block_on()?;
         let mut metadata = op.metadata.clone();
@@ -355,7 +430,7 @@ impl NodeRepo {
                     op.commit_predecessors.as_ref(),
                     &kind,
                 )?;
-                (self.canonical.write_view(&view)?, presence)
+                (view_id(&view)?, presence)
             }
         };
         let canonical_op = StoreOperation {
@@ -364,10 +439,7 @@ impl NodeRepo {
             metadata,
             commit_predecessors: op.commit_predecessors.clone(),
         };
-        let canonical = self.canonical.write_operation(&canonical_op)?;
-        self.remember_original(&canonical, op)?;
-        self.remember_presence(canonical.clone(), presence.apply(&canonical, &kind));
-        Ok(canonical)
+        Ok((canonical_op, presence, kind))
     }
 
     /// Refuses operations whose files contain fields this jj-lib would drop.

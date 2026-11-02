@@ -362,6 +362,14 @@ fn records_of(records: &[Vec<OpId>]) -> Vec<Record> {
         .collect()
 }
 
+/// `records`, as the core has them.
+fn ops_of(records: &[Record]) -> Vec<Vec<OpId>> {
+    records
+        .iter()
+        .map(|record| record.ops().iter().map(|op| op.0.0.clone()).collect())
+        .collect()
+}
+
 /// The records the core's `base` stands for.
 fn prefix_of(base: &RecordState) -> RecordPrefix {
     RecordPrefix {
@@ -654,12 +662,7 @@ impl LocalRepo for NodeAdapter {
         let prefix = self.repo.record_prefix();
         Ok(Records {
             base: state_of(prefix.count, &prefix.digest),
-            records: self
-                .repo
-                .applied_records()
-                .iter()
-                .map(|record| record.ops().iter().map(|op| op.0.0.clone()).collect())
-                .collect(),
+            records: ops_of(self.repo.applied_records()),
         })
     }
 
@@ -718,6 +721,16 @@ impl LocalRepo for NodeAdapter {
 
     fn share(&mut self) -> anyhow::Result<()> {
         Ok(self.repo.share()?)
+    }
+
+    fn held(&self, prefix: &RecordState) -> anyhow::Result<Option<Records<OpId>>> {
+        Ok(self
+            .repo
+            .held_records(&prefix_of(prefix))
+            .map(|(base, records)| Records {
+                base: state_of(base.count, &base.digest),
+                records: ops_of(&records),
+            }))
     }
 
     fn lacks_pruned(&self) -> anyhow::Error {

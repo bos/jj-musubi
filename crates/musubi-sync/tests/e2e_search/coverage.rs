@@ -336,6 +336,11 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         "a_forgotten_copy_that_took_the_pruned_records_comes_back",
         Some(&["prune:forgotten_took", "commit"]),
     ),
+    // The search delivers every reply at once, never one held up across a prune.
+    (
+        "a_machine_takes_records_from_a_pruned_one_it_held_before",
+        None,
+    ),
     ("a_machine_joins_after_a_prune", Some(&["join:after_prune"])),
     (
         "hub_restarts_after_a_prune",

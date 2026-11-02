@@ -309,18 +309,22 @@ Steps:
   them: `D_node := D_node ∪ D_hub`, renaming what it has and what it pends. A node whose
   pending drops the hub's history no longer has under those ids, after the hub went back or took
   another record, renames them to the hub's history first.
-- `Prune(k)`, on the hub, once every node's records start with the hub's first `k`: `pruned :=
+- `Prune(k)`, on the hub, once every node has held the hub's first `k` records: `pruned :=
   k`. It no longer knows their ids, nor can it send those records. The Rust hub remembers what
   each machine's last request said it took, and prunes all its records, `k = |dropped|`, once
   every copy the hive hasn't forgotten, and every machine joining it, has said it took them
   ([design.md, "What an abandon costs the hub"](design.md#what-an-abandon-costs-the-hub)).
 - A `Fetched` reply carries the hub's records the node lacks, or, if the node's records aren't
-  its first ones, all it remembers, with `pruned`'s count and digest. A node whose records don't
-  start with those can never take the hub's, and may hold operations they drop: it stops.
-  Except a node with nothing of the hive's, as one that has just joined, which takes the hub's
-  records from there, holding the first `pruned` by their count and digest alone; and one that
-  holds records so, which, from a hub that went back or was made again and has pruned nothing,
-  takes the hub's records, all whole, in their place.
+  its first ones, all it remembers, with `pruned`'s count and digest. A node takes any reply
+  about the head it knows, however old, so it may take fewer records than it took. One that
+  has held records that start with those, now or before, takes the hub's records after them,
+  having dropped what they drop; it ignores a reply it can't complete from the records it holds
+  now, as the next starts from `pruned`. One that never held them can never take the hub's,
+  and may hold operations they drop: it stops. Except a node with nothing of the hive's, as one
+  that has just joined, which takes the hub's records from there, holding the first `pruned` by
+  their count and digest alone; and one that holds records so, which, from a hub that went back
+  or was made again and has pruned nothing, takes the hub's records, all whole, in their
+  place.
 
 Policy, before the steps above: if a record the node lacks drops none of its heads, adopt; if
 it has pending drops and the hub's records, supersede, instead of an ordinary push.

@@ -884,6 +884,16 @@ hub's head, which descends from it. So applying a record never leaves a machine 
 merge, and never repeats a merge another machine made. The hub never takes a head it has
 dropped, and a machine never advances to one.
 
+A machine takes the records that a reply about the head it knows announces, however old the
+reply: after a restart, or from a hive made again, that can be fewer records than it took, or
+others. What the records it took drop and the hub's don't then stands among its pending drops,
+to publish once it has taken the hub's, unless they drop it too. That is the only way pending
+drops grow without a new abandon, and a machine publishes them again only to a hub that lacks
+them, having gone back or been made again: a hub that pruned them refuses its push, its records
+not being the hub's, and the machine takes them back with the hub's ([What an abandon costs the
+hub](#what-an-abandon-costs-the-hub)). So the records a hub appends are bounded by new drops
+and what a hub that went back lost.
+
 A machine works out how records rename its history, and writes the rewrites of its local
 operations, before it takes them, from the op heads as they are then. A `jj` command can write
 in between, and the sync's next step gives its operation a canonical form, on the history the
@@ -1007,11 +1017,25 @@ What this means for a machine:
 
 - One that is offline, and that the hive hasn't forgotten, holds pruning back until it syncs.
 - Once the hive forgets a copy, the hub no longer waits for it, so forgetting is no longer soft
-  ([Copies that go away](#copies-that-go-away)) for a copy behind what the hub has pruned. Its
-  records don't start with the ones the hub pruned, which the hub can no longer send, and it
-  may hold operations they drop, under ids the hub no longer knows (`behind_not_carried`). Its
-  next fetch says so, and it stops, with the message for a history that no longer matches the
-  hive's: a new copy takes its work.
+  ([Copies that go away](#copies-that-go-away)) for a copy behind what the hub has pruned. It
+  never took the records the hub pruned, which the hub can no longer send, and it may hold
+  operations they drop, under ids the hub no longer knows (`behind_not_carried`). Its next
+  fetch says so, and it stops, with the message for a history that no longer matches the hive's:
+  a new copy takes its work.
+- One that took the records the hub pruned, but holds fewer now, takes the hub's from them all
+  the same. A machine takes the records an old reply announces ([Taking the
+  hub's](#taking-the-hubs)), which may be fewer than it said it took, and the hub may prune
+  them meanwhile. The hub prunes only records every machine said it took, and each said so of
+  records it held then, so a machine keeps, in its `records.json`, the records it took and no
+  longer holds: among those and the ones it holds, it finds the ones the hub pruned by their
+  count and digest, and takes the hub's after them, dropping what it had left to publish of
+  them. A reply that it can't complete from the records it holds, as one to a request sent
+  before it took fewer, it ignores: the reply to its next request starts from the pruned ones.
+  `Exec.sexec_announced_held` proves that every machine the hub waits for has held what it
+  pruned. But a machine that joined after a prune, holding the pruned records only by their
+  count and digest, no longer finds them once it has taken other records whole in their place
+  (below): if the hub's pruned records start with those again and it holds fewer, it stops, as
+  lacking records the hub pruned. The model, whose machines are fixed, has no such machine.
 - One that joins after a prune starts from the hub's records where it pruned them, holding
   their count and digest but none of the pruned ids, as the `Fetched` reply carries them.
   Only a machine with nothing of the hive's may: one that joined on the root, and has taken no

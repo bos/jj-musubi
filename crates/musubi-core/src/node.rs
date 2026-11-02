@@ -132,6 +132,13 @@ pub trait LocalRepo {
     /// now on it is no longer [fresh](Self::fresh).
     fn share(&mut self) -> Result<(), Self::Error>;
 
+    /// The records whose count and digest are `prefix`, as this node took them, if it ever
+    /// held them: the first of those it holds now, or of records it took before an older
+    /// announcement gave it fewer, or others. Having held them, it dropped what they drop, so
+    /// it may take the hub's records from those the hub pruned (docs/internals/design.md,
+    /// "What an abandon costs the hub"). Their base is this node's, or none.
+    fn held(&self, prefix: &RecordState) -> Result<Option<Records<Self::Op>>, Self::Error>;
+
     /// The error that says this node lacks records the hub pruned, so that it can never take
     /// the hub's, nor sync again.
     fn lacks_pruned(&self) -> Self::Error;
@@ -575,8 +582,8 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
 
     /// Takes in the hub's records from a `Fetched` reply about the head this node knows:
     /// `new_records`, from the `from`th on, and `pruned`, the count and digest of the first
-    /// ones, which the hub no longer has. Fails if this node's records don't start with those,
-    /// unless it is fresh, and then starts from them.
+    /// ones, which the hub no longer has. Fails if this node never held those, unless it is
+    /// fresh, and then starts from them.
     fn note_announced<R>(
         &mut self,
         repo: &R,
@@ -612,31 +619,35 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
             all = None;
         }
         let Some(all) = all else {
-            let starts_with_pruned = match first(pruned.count) {
-                Some(prefix) => repo.records_state(&prefix)? == pruned,
-                None => false,
-            };
-            if starts_with_pruned {
-                // Not records this node can have asked about: from a request sent before it
-                // took others.
-                return Ok(());
+            // The hub's records from those it pruned, which this node took, or held before an
+            // older announcement, after a restart or from a hub made again, gave it fewer: the
+            // hub prunes only records every node said it took, so it dropped what they drop
+            // (`Exec.sexec_announced_held`). That includes none, whose records a node with
+            // records it knows only by their count and digest takes whole where a hub that
+            // went back or was made again has pruned nothing. A fresh node, which has nothing
+            // of the hive's, starts from them as the hub keeps them.
+            let held = repo.held(&pruned)?;
+            if from == pruned.count {
+                let base = match &held {
+                    Some(held) => Some(held.clone()),
+                    None => repo.fresh()?.then(|| Records {
+                        base: pruned.clone(),
+                        records: vec![],
+                    }),
+                };
+                if let Some(mut base) = base {
+                    base.records.extend(new_records);
+                    if repo.records_state(&base)? == records {
+                        self.announced = Some(base);
+                        self.hub_records = Some(records);
+                        return Ok(());
+                    }
+                }
             }
-            // A fresh node, which has nothing of the hive's, starts from the hub's records
-            // where it pruned them. A node with records it knows only by their count and
-            // digest, as one that joined after a prune, holds nothing they drop: where a hub
-            // that went back or was made again lacks them, and has pruned nothing, it takes
-            // the hub's records, all of them whole, in their place.
-            let rebase = mine.base.count > 0 && pruned.count == 0;
-            let base = Records {
-                base: pruned.clone(),
-                records: new_records,
-            };
-            if from == pruned.count
-                && (rebase || repo.fresh()?)
-                && repo.records_state(&base)? == records
-            {
-                self.announced = Some(base);
-                self.hub_records = Some(records);
+            if held.is_some() {
+                // Records this node can't complete from those it holds now, as they answer a
+                // request sent before it took others: the reply to its next request starts
+                // from those the hub pruned.
                 return Ok(());
             }
             return Err(repo.lacks_pruned());

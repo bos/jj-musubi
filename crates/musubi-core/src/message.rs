@@ -104,7 +104,8 @@ pub enum Reply<O, A> {
     /// ancestors first, with their objects. With the hub's records: `new_records` are those
     /// from the `records_from`th on: the ones the node lacks, or, if the node's aren't the
     /// first of the hub's, all those the hub hasn't pruned. `pruned` is the count and digest
-    /// of those it has: a node whose records don't start with them can never take the hub's.
+    /// of those it has: a node that never held records that start with them can never take
+    /// the hub's.
     Fetched {
         seq: u64,
         head: O,

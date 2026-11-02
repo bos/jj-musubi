@@ -679,6 +679,11 @@ impl World {
         &self.repos[node].dropped
     }
 
+    /// The hub's records `node` took last.
+    pub fn applied(&self, node: usize) -> &[Vec<Op>] {
+        &self.repos[node].applied
+    }
+
     pub fn heads(&self, node: usize) -> &BTreeSet<Op> {
         &self.repos[node].heads
     }

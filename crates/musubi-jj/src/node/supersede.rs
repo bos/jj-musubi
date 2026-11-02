@@ -81,6 +81,10 @@ pub(super) struct Records {
     applied: Vec<Record>,
     /// The digest of `prefix` and each first so many of `applied`.
     digests: Vec<RecordDigest>,
+    /// Records this node took that it no longer holds, as an older announcement gave it fewer
+    /// or others: each with the digest of the records up to it, and of those before it. With
+    /// those it holds, they are the records it has held ([`NodeRepo::held_records`]).
+    earlier: Vec<Earlier>,
     /// Whether this node has nothing of the hive's, so that it may take the hub's records
     /// from those the hub pruned (`musubi_core::node::LocalRepo::fresh`): it joined on the
     /// root, and has taken no records, pushed nothing and realized nothing since.
@@ -115,6 +119,16 @@ pub(super) struct Records {
     to_node: std::sync::Mutex<Option<Contraction>>,
     /// The hub's records this node is getting ready to take.
     taking: Option<Taking>,
+}
+
+/// A record this node took that it no longer holds.
+#[derive(Clone)]
+struct Earlier {
+    /// The digest of the records up to it.
+    digest: RecordDigest,
+    /// The digest of the records before it.
+    before: RecordDigest,
+    record: Record,
 }
 
 /// Records of the hub's being taken: the node's history renamed as they name it, written
@@ -162,6 +176,9 @@ struct RecordsFile {
     steps: usize,
     #[serde(default)]
     fresh: bool,
+    /// `Records::earlier`, each the hex digest of the records before it, and the record.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    earlier: Vec<(String, Vec<String>)>,
 }
 
 /// What a fix-up writes: work by each copy whose latest work or forget-after an abandon
@@ -250,22 +267,39 @@ impl Records {
             .iter()
             .map(|record| parse_record(&path, record))
             .collect::<Result<Vec<_>, _>>()?;
+        let parse_digest = |hex: &str| {
+            jj_lib::hex_util::decode_hex(hex)
+                .map(|bytes| RecordDigest::from_bytes(&bytes))
+                .ok_or_else(|| NodeError::Io {
+                    path: path.clone(),
+                    source: std::io::Error::other(format!("bad record digest {hex}")),
+                })
+        };
         let prefix = match &file.prefix {
             None => RecordPrefix::none(),
             Some((count, hex)) => RecordPrefix {
                 count: *count,
-                digest: jj_lib::hex_util::decode_hex(hex)
-                    .map(|bytes| RecordDigest::from_bytes(&bytes))
-                    .ok_or_else(|| NodeError::Io {
-                        path: path.clone(),
-                        source: std::io::Error::other(format!("bad record digest {hex}")),
-                    })?,
+                digest: parse_digest(hex)?,
             },
         };
+        let earlier = file
+            .earlier
+            .iter()
+            .map(|(before, record)| {
+                let before = parse_digest(before)?;
+                let record = parse_record(&path, record)?;
+                Ok(Earlier {
+                    digest: before.then(&record),
+                    before,
+                    record,
+                })
+            })
+            .collect::<Result<Vec<_>, NodeError>>()?;
         let mut records = Self {
             digests: digests(&prefix.digest, &applied),
             prefix,
             applied,
+            earlier,
             fresh: file.fresh,
             pending: parse_record(&path, &file.pending)?,
             fixup: file.fixup,
@@ -328,6 +362,77 @@ impl Records {
 
     pub(super) fn source(&self, local: &LocalOp) -> Option<&CanonicalOp> {
         self.sources.get(local)
+    }
+
+    /// [`NodeRepo::held_records`].
+    fn held(&self, prefix: &RecordPrefix) -> Option<(RecordPrefix, Vec<Record>)> {
+        let mut digest = &prefix.digest;
+        let mut earlier = vec![];
+        let (base, mut held) = loop {
+            if let Some(count) = self.digests.iter().position(|held| held == digest) {
+                break (self.prefix.clone(), self.applied[..count].to_vec());
+            }
+            if *digest == RecordDigest::root() {
+                break (RecordPrefix::none(), vec![]);
+            }
+            let record = self.earlier.iter().find(|e| e.digest == *digest)?;
+            earlier.push(record.record.clone());
+            digest = &record.before;
+        };
+        held.extend(earlier.into_iter().rev());
+        (base.count + held.len() as u64 == prefix.count).then_some((base, held))
+    }
+
+    /// Makes `records`, after the first ones `prefix` stands for, the records this node holds,
+    /// keeping those it no longer holds among `earlier`: the hub may have pruned them since
+    /// it reported them, and it can take the hub's records from them ([`Self::held`]).
+    fn hold(&mut self, prefix: RecordPrefix, records: Vec<Record>) {
+        let digests = digests(&prefix.digest, &records);
+        let holds: HashSet<&RecordDigest> = digests.iter().collect();
+        let mut kept: HashSet<RecordDigest> = self
+            .earlier
+            .iter()
+            .map(|e| e.digest.clone())
+            .filter(|digest| !holds.contains(digest))
+            .collect();
+        self.earlier.retain(|e| kept.contains(&e.digest));
+        for (k, record) in self.applied.iter().enumerate() {
+            let digest = &self.digests[k + 1];
+            if !holds.contains(digest) && kept.insert(digest.clone()) {
+                self.earlier.push(Earlier {
+                    digest: digest.clone(),
+                    before: self.digests[k].clone(),
+                    record: record.clone(),
+                });
+            }
+        }
+        drop(holds);
+        self.digests = digests;
+        self.prefix = prefix;
+        self.applied = records;
+        // Those after a prefix known only by its count and digest that it no longer holds, it
+        // can't find again.
+        let lost: HashSet<RecordDigest> = self
+            .earlier
+            .iter()
+            .filter(|e| !self.reaches(&e.digest))
+            .map(|e| e.digest.clone())
+            .collect();
+        self.earlier.retain(|e| !lost.contains(&e.digest));
+    }
+
+    /// Whether the records `digest` is the digest of, back through `earlier`, start with none
+    /// or with records this node holds.
+    fn reaches<'a>(&'a self, mut digest: &'a RecordDigest) -> bool {
+        loop {
+            if *digest == RecordDigest::root() || self.digests.contains(digest) {
+                return true;
+            }
+            match self.earlier.iter().find(|e| e.digest == *digest) {
+                Some(e) => digest = &e.before,
+                None => return false,
+            }
+        }
     }
 }
 
@@ -572,6 +677,11 @@ impl NodeRepo {
             fixup_from: records.fixup_from.as_ref().map(|op| op.0.hex()),
             moving: records.moving,
             steps: records.steps,
+            earlier: records
+                .earlier
+                .iter()
+                .map(|earlier| (digest_hex(&earlier.before), hex_ids(&earlier.record)))
+                .collect(),
         };
         let path = self.records_path();
         let bytes = serde_json::to_vec_pretty(&file).map_err(|err| NodeError::Io {
@@ -657,6 +767,14 @@ impl NodeRepo {
             records.prefix.count + records.applied.len() as u64,
             records.digests.last().expect("the prefix's digest").clone(),
         )
+    }
+
+    /// The records that `prefix` counts and digests, as this node took them, after the first
+    /// ones, known only by their count and digest, that it holds: the first of those it holds
+    /// now, or of records it held before. `None` if it never held them, or knows them only by
+    /// a count and digest it no longer holds.
+    pub fn held_records(&self, prefix: &RecordPrefix) -> Option<(RecordPrefix, Vec<Record>)> {
+        self.records.held(prefix)
     }
 
     /// Whether this node has nothing of the hive's: it joined on the root, and has taken no
@@ -2144,9 +2262,7 @@ impl NodeRepo {
         )?;
         self.records.hub_renamings.truncate(taking.common);
         self.records.hub_renamings.extend(taking.hub_renamings);
-        self.records.digests = digests(&taking.prefix.digest, &taking.records);
-        self.records.prefix = taking.prefix;
-        self.records.applied = taking.records;
+        self.records.hold(taking.prefix, taking.records);
         self.records.fresh = false;
         self.records.pending = taking.pending;
         self.forget_to_node();
@@ -2385,6 +2501,61 @@ mod tests {
 
     fn id(byte: u8) -> CanonicalOp {
         CanonicalOp(OperationId::new(vec![byte; 64]))
+    }
+
+    /// A node finds every first so many of every list of records it has held, from those it
+    /// holds now and those it held before, by their count and digest; and nothing else.
+    #[test]
+    fn a_node_finds_the_records_it_held() {
+        let record = |byte: u8| Record::new([HubOp(id(byte))]);
+        let [a, b, c, d, x] = [1, 2, 3, 4, 5].map(record);
+        let state = |records: &[Record]| RecordPrefix {
+            count: records.len() as u64,
+            digest: RecordDigest::of(records),
+        };
+        let held = |records: &Records, list: &[Record]| records.held(&state(list));
+        let whole = |list: &[Record]| Some((RecordPrefix::none(), list.to_vec()));
+        let mut records = Records {
+            digests: vec![RecordDigest::root()],
+            ..Records::default()
+        };
+        let lists = [
+            vec![a.clone(), b.clone(), c.clone()],
+            vec![a.clone()],
+            vec![a.clone(), x.clone()],
+            vec![a.clone(), b.clone(), c.clone(), d.clone()],
+            vec![],
+        ];
+        for (taken, list) in lists.iter().enumerate() {
+            records.hold(RecordPrefix::none(), list.clone());
+            for list in &lists[..=taken] {
+                for count in 0..=list.len() {
+                    assert_eq!(held(&records, &list[..count]), whole(&list[..count]));
+                }
+            }
+            // Each record it held, kept once, and none it holds now.
+            assert_eq!(records.earlier.len(), [0, 2, 2, 1, 5][taken]);
+        }
+        assert_eq!(held(&records, std::slice::from_ref(&b)), None);
+        assert_eq!(held(&records, &[a.clone(), c.clone()]), None);
+        // A digest it holds, but not of as many records.
+        let mut wrong = state(&[a.clone(), b]);
+        wrong.count = 3;
+        assert_eq!(records.held(&wrong), None);
+        // After records it knows only by their count and digest, those first.
+        let base = state(&[x.clone(), d.clone()]);
+        records.hold(base.clone(), vec![a.clone()]);
+        let mut after = state(&[x, d, a.clone()]);
+        assert_eq!(records.held(&after), Some((base.clone(), vec![a])));
+        assert_eq!(records.held(&base), Some((base, vec![])));
+        after.count = 1;
+        assert_eq!(records.held(&after), None);
+        // Records after a prefix it no longer holds, it no longer keeps.
+        after.count = 3;
+        records.hold(RecordPrefix::none(), vec![]);
+        assert_eq!(records.held(&after), None);
+        assert_eq!(records.earlier.len(), 5);
+        assert_eq!(held(&records, &lists[3]), whole(&lists[3]));
     }
 
     /// The logs' ids and digests are whole at the length jj's operation ids and record digests

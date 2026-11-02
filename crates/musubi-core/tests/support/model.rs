@@ -56,16 +56,19 @@ impl Univ {
         }
     }
 
+    /// The records `state` is the state of, if `record_state` made it.
+    pub fn records_of(&self, state: &RecordState) -> Option<&[Vec<Op>]> {
+        let index = usize::from_le_bytes(state.digest.as_slice().try_into().ok()?);
+        let records = self.record_lists.get(index)?;
+        (records.len() as u64 == state.count).then_some(records.as_slice())
+    }
+
     /// The state of `records` after the records `base` is the state of.
     pub fn record_state_after(&mut self, base: &RecordState, records: &[Vec<Op>]) -> RecordState {
-        let index = usize::from_le_bytes(
-            base.digest
-                .as_slice()
-                .try_into()
-                .expect("a digest made by record_state"),
-        );
-        let mut all = self.record_lists[index].clone();
-        assert_eq!(all.len() as u64, base.count, "a base's count is its list's");
+        let mut all = self
+            .records_of(base)
+            .expect("a base's count and digest made by record_state")
+            .to_vec();
         all.extend(records.iter().cloned());
         self.record_state(&all)
     }
@@ -349,6 +352,9 @@ pub struct FakeRepo {
     pub dropped: BTreeSet<Op>,
     /// The hub's records this node took last.
     pub applied: Vec<Vec<Op>>,
+    /// Every list of the hub's records this node has taken, `applied` among them, and none to
+    /// begin with (the model's `held`).
+    pub held: Vec<Vec<Vec<Op>>>,
     /// The fix-up the last `write_fixup` wrote: `(id, parent)`.
     pub last_fixup: Option<(Op, Op)>,
 }
@@ -372,6 +378,7 @@ impl FakeRepo {
             objects_lost: false,
             dropped: BTreeSet::new(),
             applied: vec![],
+            held: vec![vec![]],
             last_fixup: None,
         }
     }
@@ -582,7 +589,25 @@ impl LocalRepo for FakeRepo {
         );
         self.dropped.extend(flat(&records.records));
         self.applied = records.records.clone();
+        if !self.held.contains(&self.applied) {
+            self.held.push(self.applied.clone());
+        }
         Ok(())
+    }
+
+    /// The first of a list this node has taken, as the model's `heldPrefix` finds them.
+    fn held(&self, prefix: &RecordState) -> Result<Option<Records<Op>>, Infallible> {
+        let mut univ = self.univ.borrow_mut();
+        let Some(first) = univ.records_of(prefix).map(<[Vec<Op>]>::to_vec) else {
+            return Ok(None);
+        };
+        if !self.held.iter().any(|list| list.starts_with(&first)) {
+            return Ok(None);
+        }
+        Ok(Some(Records {
+            base: univ.record_state(&[]),
+            records: first,
+        }))
     }
 
     fn fresh(&self) -> Result<bool, Infallible> {

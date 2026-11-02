@@ -733,6 +733,60 @@ fn prune_conformance() {
     world.check_invariants();
 }
 
+/// Node 1 asks the hub for its records, and the reply is held up; meanwhile node 0 abandons an
+/// operation, both nodes take the record, and the hub prunes it.
+fn prune_after_held_reply(world: &mut World, remade: bool) -> Vec<usize> {
+    world.user_op(0, 0, 0);
+    world.user_op(0, 1, 0);
+    world.quiesce();
+    if remade {
+        world.op_abandon(0, vec![1]);
+        world.quiesce();
+        // The hive is made again: node 0 publishes the abandon again, after the reply.
+        world.remake();
+    }
+    let sent = world.net_len();
+    world.poll(1);
+    world.deliver(sent);
+    let held: Vec<usize> = world
+        .undelivered()
+        .into_iter()
+        .filter(|&index| index > sent)
+        .collect();
+    if !remade {
+        world.op_abandon(0, vec![1]);
+    }
+    world.quiesce();
+    world.prune();
+    assert_eq!(world.hub_pruned(), 1);
+    held
+}
+
+/// A node that restarts takes the reply held up since before the hub pruned its record, which
+/// tells it of no records, as about the head it knows: it takes none. Having held the record
+/// the hub pruned, it then takes the hub's records from there, though the hub knows that
+/// record only by its count and digest. Without that, the node stops for good, as
+/// lacking records the hub pruned. With the hive made again in between, the reply comes from
+/// the hub made again, at its root, before the node took the records again: the node takes it
+/// as after a restart, but the hub it prunes on went back and took them again. Through the core
+/// and the oracle.
+#[test]
+fn a_node_takes_records_from_a_pruned_prefix_it_held() {
+    for remade in [false, true] {
+        let mut world = World::new(2, Some(Oracle::spawn()));
+        let held = prune_after_held_reply(&mut world, remade);
+        world.crash_node(1);
+        for index in held {
+            world.deliver(index);
+        }
+        world.node_step(1, 0);
+        assert!(world.applied(1).is_empty(), "remade: {remade}");
+        world.quiesce();
+        world.check_invariants();
+        assert_eq!(world.applied(1), [vec![1]], "remade: {remade}");
+    }
+}
+
 /// A push with the hub's records is refused if its new head is one the hub dropped, or one
 /// the push itself drops. A node never names an operation a record it took drops, so neither
 /// conformance nor the model reaches the first; the hub checks it anyway, while it remembers

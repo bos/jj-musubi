@@ -1763,6 +1763,50 @@ fn a_forgotten_copy_that_took_the_pruned_records_comes_back() {
     assert!(hive.visible(0).iter().any(|c| c.ends_with("gamma back")));
 }
 
+/// A machine restarts, and the reply to its first poll is one held up since before the hub
+/// pruned a record it took, which tells it of no records: it takes none. Restarted again, it
+/// takes the hub's records from the pruned one, which the hub knows only by its count and
+/// digest, as it held that record before; and the abandoned operation doesn't come back.
+/// Taking none, it can no longer take the hub's records from the pruned one by what it holds,
+/// and stops for good unless it remembers what it held, across a restart.
+#[test]
+fn a_machine_takes_records_from_a_pruned_one_it_held_before() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(0, "a", "first");
+    hive.commit(0, "b", "second");
+    hive.sync();
+    let mut held = None;
+    hive.hive
+        .sync_through(1, &mut |request, reply| {
+            if matches!(request, Request::Fetch { .. }) && held.is_none() {
+                held = Some(reply.clone());
+            }
+            reply
+        })
+        .unwrap();
+    let abandoned = commit_op(hive.repo(0));
+    hive.repo(0).jj(&["op", "abandon", &abandoned.0]);
+    hive.sync();
+    hive.sync();
+    assert_eq!(hive.hive.hub.store().pruned(), 1);
+    assert_eq!(hive.node(1).record_state().0, 1);
+    hive.reopen(1);
+    hive.hive
+        .sync_steps(1, 1, &mut |_, reply| held.take().unwrap_or(reply))
+        .unwrap();
+    assert_eq!(hive.node(1).record_state().0, 0);
+    hive.reopen(1);
+    hive.sync();
+    hive.assert_converged();
+    assert_eq!(hive.node(1).record_state().0, 1);
+    for machine in 0..2 {
+        assert!(
+            !has_operation(hive.repo(machine), &abandoned.1),
+            "{machine}"
+        );
+    }
+}
+
 /// A machine that joins after the hub pruned its records starts from them as the hub keeps
 /// them, knowing only how many there are and their digest: it syncs, the hub waits for it
 /// once it is in the hive, and it takes a later abandon like any machine.

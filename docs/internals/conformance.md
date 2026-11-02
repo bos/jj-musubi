@@ -63,6 +63,7 @@ These keep exactly the model's state:
 | Hub `ops`, `objs`, `head`, `seq` | `FakeHub` |
 | Node `lops`, `lobj`, `heads`, `known`, `sops`, `sobj` | `FakeRepo` (`lops`…`sobj`) and `NodeCore` (`known`) |
 | Hub records, node `nodeD` and the records it took last | `FakeHub::records`, `FakeRepo::dropped` and `applied` |
+| Every list of records a node has taken, `held` | `FakeRepo::held` |
 | Hub `pruned` | `FakeHub::pruned`, which keeps every record, as the model's `recs` does, those pruned standing for their count and digest |
 | `net`, the set of every message sent | the test's network: a set, so any message can be delivered any number of times, or never |
 
@@ -120,7 +121,10 @@ notification carries them too, but the node doesn't take them from it: another n
 dropped what it did, and the model announces nothing with a notification. The Rust core sends
 only the merged requests (`Push`, `Fetch`); the finer-grained actions remain in the model and
 the oracle. The hub prunes only when every node has said, in a request, that it took every
-record, and the oracle checks each node's records start with them when it does. The model's
+record, and the oracle checks that each node has held them when it does. A node takes the
+records a reply about the head it knows announces, however old, so it may take fewer than it
+took, after a restart; it takes the hub's records after those pruned from records it held
+(`LocalRepo::held`), and the oracle checks that it held them, as `adopt` requires. The model's
 nodes are fixed, so none joins after a prune: `FakeRepo` holds every record whole, and a node
 that lacked records the hub pruned would panic.
 
@@ -439,11 +443,11 @@ array of sets, compared in order.
 | `hubRegress` | `seq` | `RStep`'s `State.regress` (`Regress.lean`), the hub going back: `seq ≤ hub.seq`; `head := hist seq`, `seq := seq`, its records, and how many of them it had pruned, go back to what they were then, and nothing else changes |
 | `abandon` | `node`, `ops` | `SStep.abandon`: `ops` are below `node`'s heads, none of them, and not the root |
 | `sendSup` | `node`, `new` | `SStep.sendSup`: a `supersede` message with the records `node` took, its dropped set, and `new`, the head of the push it rides on, which no record `node` took drops |
-| `sendD` | `node` | `SStep.sendD`: a `dropped` message with the hub's records |
-| `adopt` | `node`, `records` | `SStep.adopt`: `records` were announced to `node`, and drop none of its heads; its dropped set gains theirs, and they become the records it took |
+| `sendD` | `node` | `SStep.sendD`: a `dropped` message with the hub's records, and how many of them it has pruned |
+| `adopt` | `node`, `records` | `SStep.adopt`: `records` were announced to `node`, which has held as many of them as the hub had pruned then (`heldPrefix`), and drop none of its heads; its dropped set gains theirs, and they become the records it took, and among those it has held |
 | `hubSupAccept` | `node`, `ops`, `objs`, `expected`, `new`, `applied`, `dropped` | `SStep.sup` with the `hubPushAccept` it rides on: a `supersede` message of `applied`, `dropped` and `new` is in `net`, `applied` are the hub's records, and `new` is neither among the records the hub remembers nor among what `dropped` drops beyond `applied`; the hub adds a record of what `dropped` drops that it doesn't, if any |
 | `hubPushRefuse` | `node`, `ops`, `objs`, `expected`, `new`, `applied`, `dropped` | no step: the `push` and a `supersede` message are in `net`, and `applied` aren't the hub's records, or `new` is among the records it remembers or what `dropped` drops beyond `applied` |
-| `prune` | `count` | `SStep.prune`: the hub prunes its first `count` records, at least as many as it had pruned and at most as many as it has; the oracle requires every node's records to start with them, though `SStep.prune` needs no such guard for safety |
+| `prune` | `count` | `SStep.prune`: the hub prunes its first `count` records, at least as many as it had pruned and at most as many as it has; the oracle requires every node to have held them, though `SStep.prune` needs no such guard for safety |
 
 `headKind` is one of `head`, `accepted`, `rejected`, `incomplete`, `notify`.
 

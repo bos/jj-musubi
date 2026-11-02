@@ -1018,6 +1018,63 @@ fn abandoning_three_times_before_publishing_publishes_all() {
     }
 }
 
+/// …and between the two, another machine publishes an abandon of its own, below both, so that
+/// the hub's record renames what the machine abandons next; whether the machine takes that
+/// record before its second abandon or after. It names both drops as the hub does.
+#[test]
+fn abandoning_twice_around_another_machines_record_publishes_all() {
+    for take_between in [false, true] {
+        let mut hive = Fixture::new(&["alpha", "beta"]);
+        hive.commit(1, "z", "beta's");
+        hive.sync();
+        let (_, theirs) = op_log(hive.repo(1))
+            .into_iter()
+            .find(|(_, d)| d.starts_with("commit "))
+            .unwrap();
+        for (file, message) in [("a", "first"), ("b", "second"), ("c", "third")] {
+            hive.commit(0, file, message);
+        }
+        hive.sync();
+        let commits: Vec<String> = op_log(hive.repo(0))
+            .into_iter()
+            .filter(|(_, d)| d.starts_with("commit "))
+            .map(|(_, d)| d)
+            .collect();
+        let (third, second, first) = (&commits[0], &commits[1], &commits[2]);
+        hive.repo(0)
+            .jj(&["op", "abandon", &op_described(hive.repo(0), first)]);
+        assert!(hive.node(0).check_abandon().unwrap());
+        hive.repo(1)
+            .jj(&["op", "abandon", &op_described(hive.repo(1), &theirs)]);
+        hive.hive.sync(1).unwrap();
+        assert_eq!(hive.hive.hub.store().record_count(), 1);
+        if take_between {
+            // One step takes the hub's record, before alpha publishes its own.
+            hive.hive.sync_steps(0, 1, &mut |_, reply| reply).unwrap();
+            assert_eq!(hive.node(0).record_state().0, 1);
+            assert!(!hive.node(0).pending_drops().ops().is_empty());
+            assert_eq!(hive.hive.hub.store().record_count(), 1);
+        }
+        hive.repo(0)
+            .jj(&["op", "abandon", &op_described(hive.repo(0), second)]);
+        hive.sync();
+        hive.assert_converged();
+        let case = format!("take between: {take_between}");
+        for machine in 0..2 {
+            for abandoned in [first, second, &theirs] {
+                assert!(
+                    !has_operation(hive.repo(machine), abandoned),
+                    "{machine}, {case}"
+                );
+            }
+            assert!(
+                has_operation(hive.repo(machine), third),
+                "{machine}, {case}"
+            );
+        }
+    }
+}
+
 /// With `snapshot.auto-update-stale`, a command in a workspace whose working copy recorded an
 /// operation `jj op abandon` rewrote brings back what jj abandoned, as on one machine
 /// (races.md, "Known jj limitations"). A later `jj op abandon` below that then moves what came

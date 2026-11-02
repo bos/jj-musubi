@@ -41,8 +41,8 @@ flowchart LR
   subgraph laptop["laptop"]
     D2["daemon"] --- R2["~/src/app"]
   end
-  subgraph desktop["desktop"]
-    D3["daemon"] --- R3["~/code/app"]
+  subgraph gpu["gpu"]
+    D3["daemon"] --- R3["~/src/app"]
   end
   D1 <-->|local socket| H
   D2 <-->|ssh| H

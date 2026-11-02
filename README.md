@@ -1,8 +1,8 @@
 # jj-musubi
 
 Your [jj](https://jj-vcs.dev) repositories on every machine you use, always up to date. Work
-on your laptop, close the lid, and sit down at your desktop: the change you were working on is
-already there. No pushing work in progress to GitHub, no fetching it back, no wondering which
+on your laptop, then pick up on your devbox: the change you were working on is already
+there. No pushing work in progress to GitHub, no fetching it back, no wondering which
 machine is behind.
 
 musubi is for jj, the git-compatible version control system, and all it needs is ssh to one
@@ -16,23 +16,24 @@ own machines, over plain ssh, with no service to sign up for.
 ## What you get
 
 - **Agents on every machine, and their work everywhere.** Run Claude Code or Codex on your
-  laptop, your desktop, and a couple of devboxes, all in one repository. Every agent's work
+  laptop and a couple of devboxes, all in one repository. Every agent's work
   shows up in `jj log` on every machine as it goes, as `devbox/default@` or `laptop/agent-2@`:
-  that machine's working copy, which you can look at and build on like any commit. One
+  the change that workspace is on, as of its last `jj` command, which you can look at and build
+  on like any commit. One
   `jj log` shows what every agent everywhere is doing. Review an agent's change from wherever
   you are, hand it to an agent on another machine with `jj new devbox/default@`, and never ask
   "which machine was that on?" again. A [skill for
   agents](skills/jj-musubi/SKILL.md) keeps them from tripping over each other.
-- **Every machine current, all the time.** Laptop, desktop, home server: each has every
+- **Every machine current, all the time.** Laptop, devbox, home server: each has every
   commit, bookmark and change you've made on any of them, within a second or so of the `jj`
   command that made it, and a machine that was asleep catches up within seconds of waking. You
   never have to remember which one is behind.
-- **Close the lid, pick up anywhere.** Shut your laptop at work and go home. Your desktop
-  already has everything up to your last `jj` command, as `laptop/default@`;
-  `jj new laptop/default@` and carry on. Open the laptop again and it catches up with the
-  evening's work within seconds of waking.
+- **Close the lid, and the work carries on.** Shut your laptop halfway through a change. Your
+  devbox already has everything up to your last `jj` command, as `laptop/default@`, so an agent
+  there can `jj new laptop/default@` and keep going while the laptop sleeps. Open the laptop
+  again and it catches up within seconds of waking.
 - **GitHub, everywhere at once.** `jj git fetch` on one machine and every machine has the new
-  `main@origin`. `jj git push` from the desktop and the laptop shows it pushed. Fetch once,
+  `main@origin`. `jj git push` from the devbox and the laptop shows it pushed. Fetch once,
   not once per machine.
 - **Undo that follows you.** jj records every command you run, so that `jj undo` can take any
   of them back. musubi shares that record, so a mistake made on one machine can be put right
@@ -47,14 +48,14 @@ own machines, over plain ssh, with no service to sign up for.
   commands on real repositories through crashes, lost connections and power cuts. [How musubi
   keeps your work safe](docs/safety.md) tells the story.
 
-Here a change described on the laptop shows up on the desktop a second later:
+Here a change described on the laptop shows up on the devbox a second later:
 
 ```text
 laptop:~/src/app$ jj describe -m "Add retry logic to the fetcher"
 Working copy  (@) now at: kkmpptxz 8d0b4e11 Add retry logic to the fetcher
 Parent commit (@-)      : zzzzzzzz 00000000 (empty) (no description set)
 
-desktop:~/code/app$ jj log
+devbox:~/src/app$ jj log
 @  vruxwmqv me@example.com 2026-10-23 10:14:02 default@ 3f2a1c9e
 │  (empty) (no description set)
 │ ○  kkmpptxz me@example.com 2026-10-23 10:14:01 laptop/default@ 8d0b4e11
@@ -153,9 +154,9 @@ To keep the daemon running across reboots, run `musubi daemon install` on each m
 ## Day to day
 
 Keep using jj as you always have; there's nothing to push, fetch or remember. `jj log` shows
-each other machine's working copy as a workspace named after it, such as `laptop/default@`,
-which you can diff, build on, or rebase like any other revision. musubi's own commands are for
-checking on it:
+the change each other machine's workspace is on, named after the machine and workspace, such
+as `laptop/default@`, which you can diff, build on, or rebase like any other revision.
+musubi's own commands are for checking on it:
 
 - `musubi` (or `musubi list`) shows the hub's hives, this machine's copies of them, and
   whether each is syncing.

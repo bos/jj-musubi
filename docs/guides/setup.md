@@ -22,10 +22,10 @@ shallow or partial clone, since it couldn't send other machines everything they 
 
 ## Choose the hub's machine
 
-Run the hub on a machine that is usually on and that every other machine can reach over ssh:
-a devbox, a home server, or a desktop that never sleeps. A laptop is a poor choice, since the
-others can't sync while it sleeps. The hub's machine can have copies of the repositories
-too: a devbox you work on is a fine hub.
+Run the hub on a machine that is usually on and that every other machine can reach over ssh: a
+devbox, a home server, or anything else that never sleeps. A laptop is a poor choice, since the
+others can't sync while it sleeps. The hub's machine can have copies of the repositories too: a
+devbox you work on is a fine hub.
 
 ## Start the hub
 

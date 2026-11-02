@@ -10,9 +10,9 @@ machines have copies, and how each copy on this machine is syncing:
 
 ```text
 Hub devbox:
-  app  2 machines: desktop, laptop
+  app  2 machines: gpu, laptop
     here: /home/you/src/app  synced 4s ago
-  dotfiles  1 machine: desktop
+  dotfiles  1 machine: gpu
     here: /home/you/dotfiles  synced 12s ago
 Daemon: running, serving 2 repositories; starts at login
 ```
@@ -31,7 +31,7 @@ musubi top: 1 hub, every 5s
 This machine's daemon is running, serving 2 repositories.
 Hub devbox: up 3h12m, musubi 0.1.0, 2 hives.
 Issues:
-  app: desktop not heard from in 6m: offline, or its daemon isn't running
+  app: gpu not heard from in 6m: offline, or its daemon isn't running
 
 HIVE      HEAD  IN/s     OUT/s    OPS  COMMITS  MACHINES  ISSUES
 app       #412  12 KiB/s 40 KiB/s 96   51       2/3       1
@@ -42,8 +42,8 @@ app since the hub started:
   96 operations came in, with 51 commits, and 180 went out
   40 pushes moved the head, and 2 found it moved already
   MACHINE  HEARD   AT    MUSUBI  STATE
-  desktop  6m ago  #401  0.1.0   not heard from in 6m: offline, or its daemon isn't running
   devbox   3s ago  #412  0.1.0   up to date
+  gpu      6m ago  #401  0.1.0   not heard from in 6m: offline, or its daemon isn't running
   laptop   2s ago  #412  0.1.0   up to date
 
   AGO     HEAD  FROM    OPS  COMMITS  WHAT

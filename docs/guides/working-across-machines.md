@@ -7,17 +7,17 @@ share.
 
 ## Pick up on another machine
 
-Close the laptop, and sit down at the desktop. In the same repository there, the laptop's
-working copy is already in `jj log`, as `laptop/default@`. Carry on from it:
+Stop work on the laptop, and pick it up on the devbox. In the same repository there, the change
+the laptop was working on is already in `jj log`, as `laptop/default@`. Carry on from it:
 
 ```sh
 jj new laptop/default@   # a new change on top of the laptop's
 ```
 
 When you open the laptop again, its daemon reconnects and brings in what you did on the
-desktop; there's nothing to run.
+devbox; there's nothing to run.
 
-What reaches the desktop is the laptop's work as of its last `jj` command, since that's when
+What reaches the devbox is the laptop's work as of its last `jj` command, since that's when
 jj records edits. To have jj record them each time you save a file, without running a command,
 turn on its [watchman](https://facebook.github.io/watchman/) trigger, with watchman installed:
 
@@ -32,8 +32,8 @@ Everything jj records reaches every machine, so keep secrets in ignored files.
 
 Agents working on several machines in one repository see each other's work as you do. Give
 each agent on a machine its own jj workspace, with `jj workspace add`, so that agents don't
-share files; every machine then shows each agent's working copy, as `devbox/default@` or
-`laptop/agent-2@`. From any machine:
+share files; every machine then shows the change each agent is working on, as
+`devbox/default@` or `laptop/agent-2@`. From any machine:
 
 ```sh
 jj log -r 'working_copies()'   # what every agent on every machine is working on
@@ -79,12 +79,12 @@ this copy last synced, and whether the hub has its latest work:
 
 ```text
 Hive: app on devbox
-This machine: desktop, synced 3s ago; the hub has all its work
+This machine: devbox, synced 3s ago; the hub has all its work
 Working copies:
 default@: kxqpwzlm 3f2a1c9e fix the parser
 laptop/default@: vruxwmqv 8d0b4e11 (no description set)
 Copies:
-desktop (this machine): used 1m ago, never forgotten
+devbox (this machine): used 1m ago, never forgotten
 laptop: used 2h ago, never forgotten
 Daemon: running (pid 4182), serving this repository; starts at login
 Daemon socket: /run/user/1000/musubi/daemon.sock

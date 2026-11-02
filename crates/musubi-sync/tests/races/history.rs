@@ -532,6 +532,42 @@ fn a_push_to_a_hive_made_again_is_rejected() {
     assert_eq!(hive.hive.hub_head(), root);
 }
 
+/// `jj op abandon` rewrites an operation a working copy records, but doesn't move the working
+/// copy where another operation came after it, as one musubi writes can. musubi moves it to
+/// the rewrite, as it moves every working copy an abandon leaves behind, even where the
+/// operation isn't published yet, so that no record of the hive's renames it. Left where it
+/// was, the next command there, with `snapshot.auto-update-stale`, merged what the abandon
+/// dropped back in, and the hub refused every push of it: the sync never settled.
+#[test]
+fn a_working_copy_at_an_unpublished_operation_follows_an_abandon() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(0, "a", "first");
+    let abandoned = op_log(hive.repo(0))
+        .into_iter()
+        .find(|(_, description)| description.starts_with("commit "))
+        .unwrap();
+    hive.commit(0, "b", "second");
+    hive.sync();
+    // The working copy records this operation, which isn't published.
+    hive.repo(0)
+        .jj(&["describe", "@-", "-m", "second, described"]);
+    // musubi writes above it: any operation of musubi's will do, and a forget writes one.
+    let beta = hive.machine_key(1);
+    assert!(hive.node(0).forget_copy(&beta, "beta").unwrap());
+    hive.repo(0).jj(&["op", "abandon", &abandoned.0]);
+    hive.hive.sync(0).unwrap();
+    hive.commit(0, "c", "third");
+    assert!(
+        !has_operation(hive.repo(0), &abandoned.1),
+        "jj brought it back"
+    );
+    hive.hive.sync(0).unwrap();
+    let descriptions = hive.visible(0);
+    for work in ["second, described", "third"] {
+        assert!(descriptions.iter().any(|c| c.ends_with(work)), "{work}");
+    }
+}
+
 /// `jj op abandon` of a forget keeps every view above it, and so the views that leave the
 /// forgotten copy out, but drops the forget from the history presence is worked out from. Work
 /// another machine did on one of those views before the abandon reached it is realized, after,

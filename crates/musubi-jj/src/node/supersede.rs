@@ -1601,8 +1601,10 @@ impl NodeRepo {
         if let Some(root) = self.repo_path.parent().and_then(Path::parent) {
             roots.insert(root.to_owned());
         }
+        // Worked out only if a working copy needs it.
+        let by_content = std::cell::OnceCell::new();
         for root in roots {
-            if let Err(err) = self.move_workspace(&root, locals) {
+            if let Err(err) = self.move_workspace(&root, locals, &by_content) {
                 tracing::warn!(
                     "recording {}'s operation as rewritten: {err}",
                     root.display()
@@ -1612,10 +1614,79 @@ impl NodeRepo {
         Ok(())
     }
 
+    /// The rewrites `locals` makes, by the fingerprint of what each rewrites: its content but
+    /// for its parents, which jj's own rewrite of an operation keeps. None for a fingerprint
+    /// that more than one operation has, or one that `locals` drops or splits.
+    fn rewrites_by_content(
+        &self,
+        locals: &HashMap<LocalOp, Vec<LocalOp>>,
+    ) -> HashMap<String, Option<LocalOp>> {
+        let op_store = self.loader.op_store();
+        let mut by_content: HashMap<String, Option<LocalOp>> = HashMap::new();
+        for (old, new) in locals {
+            // One that can't be read stands for nothing here.
+            let Ok(op) = op_store.read_operation(&old.0).block_on() else {
+                continue;
+            };
+            let rewrite = match new.as_slice() {
+                [new] => Some(new.clone()),
+                _ => None,
+            };
+            by_content
+                .entry(fingerprint(&op))
+                .and_modify(|found| *found = None)
+                .or_insert(rewrite);
+        }
+        by_content
+    }
+
+    /// The rewrite of `recorded`, an operation a working copy records that `jj op abandon`
+    /// rewrote without moving the working copy, as it does one not at an op head, where no
+    /// renaming names its rewrite: one not yet published, whose canonical form no record
+    /// superseded. jj's rewrite keeps all but the parents, so it is the one operation
+    /// `by_content` has with the same fingerprint, if the op heads no longer reach `recorded`.
+    /// Left stale, the working copy's next command would merge what the abandon dropped back
+    /// in, with `snapshot.auto-update-stale`, and the hub would refuse every push of it.
+    fn rewrite_by_content(
+        &self,
+        recorded: &LocalOp,
+        by_content: &HashMap<String, Option<LocalOp>>,
+    ) -> Result<Option<LocalOp>, NodeError> {
+        let op = match self
+            .loader
+            .op_store()
+            .read_operation(&recorded.0)
+            .block_on()
+        {
+            Ok(op) => op,
+            Err(jj_lib::op_store::OpStoreError::ObjectNotFound { .. }) => return Ok(None),
+            Err(err) => return Err(err.into()),
+        };
+        let Some(Some(rewrite)) = by_content.get(&fingerprint(&op)) else {
+            return Ok(None);
+        };
+        // An operation still in the history keeps its working copy.
+        let heads = self.local_heads()?;
+        let mut stack = heads.clone();
+        let mut seen = HashSet::new();
+        while let Some(local) = stack.pop() {
+            if local == *recorded {
+                return Ok(None);
+            }
+            if !seen.insert(local.clone()) {
+                continue;
+            }
+            let op = self.loader.op_store().read_operation(&local.0).block_on()?;
+            stack.extend(LocalOp::parents_of(&op));
+        }
+        Ok(Some(rewrite.clone()))
+    }
+
     fn move_workspace(
         &self,
         root: &Path,
         locals: &HashMap<LocalOp, Vec<LocalOp>>,
+        by_content: &std::cell::OnceCell<HashMap<String, Option<LocalOp>>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if !root.join(".jj").join("working_copy").is_dir() {
             return Ok(());
@@ -1641,12 +1712,20 @@ impl NodeRepo {
         let recorded = LocalOp(locked.locked_wc().old_operation_id().clone());
         let rewrite = match locals.get(&recorded).map(Vec::as_slice) {
             Some([rewrite]) => Some(rewrite.clone()),
-            _ => self.canonical_of(&recorded).and_then(|canonical| {
-                match self.current_ids(&canonical).as_slice() {
+            _ => self
+                .canonical_of(&recorded)
+                .and_then(|canonical| match self.current_ids(&canonical).as_slice() {
                     [now] if *now != canonical => self.local_of(now),
                     _ => None,
-                }
-            }),
+                })
+                .map_or_else(
+                    || {
+                        let by_content =
+                            by_content.get_or_init(|| self.rewrites_by_content(locals));
+                        self.rewrite_by_content(&recorded, by_content)
+                    },
+                    |op| Ok(Some(op)),
+                )?,
         };
         let Some(rewrite) = rewrite.filter(|rewrite| *rewrite != recorded) else {
             return Ok(());

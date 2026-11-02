@@ -885,7 +885,10 @@ Each machine keeps, for every id a record superseded, the id or ids it became, a
 renames through it. An operation that a `jj` command wrote on a superseded operation, having
 loaded the repository before the record arrived, is canonicalized with its parents renamed;
 musubi then reparents it locally too, before anything merges it. musubi also moves each other
-workspace's recorded operation to its rewrite, which `jj op abandon` itself doesn't do. A `jj`
+workspace's recorded operation to its rewrite, which `jj op abandon` itself doesn't do, and
+the one `jj op abandon` ran in too, if another operation came after that workspace's last
+command. It finds the rewrite through the renamings; for an operation not yet published, which
+no renaming names, it looks for jj's rewrite of it, which differs only in its parents. A `jj`
 command that merges such an operation with the rewritten head before musubi reparents it merges
 against an older common ancestor, as jj does after a local `jj op abandon` ([races.md, "Known jj
 limitations"](races.md#known-jj-limitations)).

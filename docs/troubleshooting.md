@@ -348,6 +348,22 @@ since its last sync, then run `musubi leave --force` in this one, which keeps al
 `musubi create` says this, the hive it made is empty, and this copy can't fill it: run
 `musubi leave --force`, and remove the hive with `musubi hub remove`.
 
+### "the hub refused this machine's work: ..."
+
+```text
+the hub refused this machine's work: it lacks something the work needs, or brings back
+operations `jj op abandon` removed (the hub's log says which)
+```
+
+The hub checks everything it takes, and refuses this machine's work, every time it syncs, for
+one of two reasons, which the hub's log names ([above](#troubleshooting)): something the work
+needs didn't reach it, or the work brings back an operation that a `jj op abandon` removed
+from the hive. Either is a bug: please report it at
+<https://github.com/bos/jj-musubi/issues>, with this machine's `daemon.log` and the hub's log.
+
+To carry on here, make a new copy with `musubi clone`, bring across any work this copy made
+since its last sync, then run `musubi leave --force` in this one.
+
 ### "unknown field ... (written by a newer jj?)"
 
 A `jj` newer than 0.46.0, the version musubi supports, wrote an operation with fields musubi

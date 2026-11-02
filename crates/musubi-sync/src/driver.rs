@@ -149,8 +149,8 @@ impl NodeDriver {
         // Pushing again would send the same, and get the same answer.
         anyhow::ensure!(
             !incomplete,
-            "the hub can't accept this machine's work: it still lacks objects that the work \
-             requires, after this machine sent what it had (the hub's log names them)"
+            "the hub refused this machine's work: it lacks something the work needs, or brings \
+             back operations `jj op abandon` removed (the hub's log says which)"
         );
         Ok(())
     }

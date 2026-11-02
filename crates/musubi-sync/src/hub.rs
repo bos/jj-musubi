@@ -314,10 +314,10 @@ impl HubStorage for HubAdapter {
             })?
         };
         if !missing.is_empty() {
-            // The node hears only that something is missing (`Incomplete`).
+            // The node hears only that the push can't be taken (`Incomplete`).
             let shown: Vec<&str> = missing.iter().take(5).map(String::as_str).collect();
             tracing::warn!(
-                "a push of {} can't be closed: {} missing, among them {}",
+                "a push of {} can't be taken: {} missing, abandoned or repeated, among them {}",
                 short(op),
                 missing.len(),
                 shown.join(", ")

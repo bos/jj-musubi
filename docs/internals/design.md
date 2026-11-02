@@ -867,6 +867,10 @@ The hub takes it with the push, in the push's compare-and-swap, and computes the
 itself, so the push carries only the machine's new operations. A supersede that loses the race, to
 another push or another supersede, is rewritten by what won, and pushed again.
 
+A machine publishes the drop of a push even if the hub has since gone back and lost it: another
+machine may have taken the push first, and would push it again. That costs a record and a
+[fix-up](#the-fix-up), and only after the hub loses heads.
+
 ### Taking the hub's
 
 The hub keeps the dropped sets it took, in order, each a *record* naming operations by the ids

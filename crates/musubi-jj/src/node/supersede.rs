@@ -940,7 +940,8 @@ impl NodeRepo {
         let base = self.stored_base();
         // This machine's push the hub took, which the base may not have moved to yet, as where
         // a sync stopped right after the reply, or lost it: an abandon of it is one of an
-        // operation the hub accepted all the same.
+        // operation the hub accepted all the same. Both it and the base outlive the hub going
+        // back: another machine may have taken them (design.md, "Publishing an abandon").
         let pushed = self
             .stored_op(ACCEPTED_PUSH)
             .filter(|pushed| Some(pushed) != base.as_ref());

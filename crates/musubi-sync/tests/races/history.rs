@@ -571,6 +571,33 @@ fn abandoning_a_push_the_hub_just_accepted_drops_it() {
     }
 }
 
+/// The hub takes a machine's push, another machine takes it too, and the hub goes back and loses
+/// it; then the first machine abandons the push, and syncs first. It publishes the drop all the
+/// same, so the other machine drops the push rather than push it again.
+#[test]
+fn abandoning_a_push_the_hub_lost_drops_it_everywhere() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(1, "a", "first");
+    hive.sync();
+    let seq = hive.hive.hub.store().head().0;
+    hive.commit(1, "b", "pushed");
+    let pushed = op_log(hive.repo(1)).swap_remove(0);
+    hive.hive.sync(1).unwrap();
+    hive.hive.sync(0).unwrap();
+    assert!(has_operation(hive.repo(0), &pushed.1));
+    hive.hive.hub_goes_back(seq).unwrap();
+    // So that the push isn't the op head, which jj won't abandon.
+    hive.repo(1)
+        .jj(&["bookmark", "create", "after", "-r", "@-"]);
+    hive.repo(1).jj(&["op", "abandon", &pushed.0]);
+    hive.hive.sync(1).unwrap();
+    hive.sync();
+    hive.assert_converged();
+    for machine in 0..2 {
+        assert!(!has_operation(hive.repo(machine), &pushed.1), "{machine}");
+    }
+}
+
 /// As above, where the machine never hears that the hub took its push, as when it crashes
 /// before the reply: it learns it from its next poll, which comes before it reads its op heads,
 /// and notices the abandon then. So too where another machine has pushed on top meanwhile, and

@@ -1134,7 +1134,10 @@ sender's release of musubi, encoded the same way in every release. Each side rea
 refuses a message whose protocol or jj-lib versions aren't its own, so that a message from another
 release is refused as such rather than misread. A daemon that hears from a hub of a newer release,
 in the hub's answer to its report after each sync, which comes even when the hub refuses it, runs
-`musubi.upgrade-command` for that release (`crates/musubi/src/upgrade.rs`).
+`musubi.upgrade-command` for that release (`crates/musubi/src/upgrade.rs`). A build deployed from
+source gives, after its release, when it was deployed and its commit, as semver build metadata
+(`crates/musubi-sync/build.rs`), which the daemon orders releases by too, so that a build
+deployed later is newer, without a version of its own.
 
 ## Testing
 

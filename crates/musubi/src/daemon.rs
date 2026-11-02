@@ -42,6 +42,7 @@ use musubi_sync::wire::HUB_TOKEN;
 use musubi_sync::wire::HeadNotice;
 use musubi_sync::wire::HubWideReply;
 use musubi_sync::wire::HubWideRequest;
+use musubi_sync::wire::RELEASE;
 use musubi_sync::wire::release_of;
 use musubi_sync::wire::rpc_subject;
 use musubi_transport::stream::WhileDisconnected;
@@ -1066,7 +1067,7 @@ fn report(
             machine: machine.to_owned(),
             seq,
             error: error.cloned(),
-            version: env!("CARGO_PKG_VERSION").to_owned(),
+            version: RELEASE.to_owned(),
         },
     };
     let Ok(payload) = Envelope::encode(request) else {

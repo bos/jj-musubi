@@ -173,9 +173,13 @@ again in place once its binary is that release, and that `musubi status` shows a
 installed nothing; it can't run a real newer release, so the command installs a script that
 only says it is one. A third, Unix only, runs `contrib/upgrade-from-source`, the example
 upgrade command, against a stand-in for musubi's source that builds in a second, and checks
-that it installs the release asked for from `main`, not the edit in the working copy, leaves
-the repository's operation log as it was, and refuses another release; it doesn't try fetching
-from a remote.
+that it installs a release from its tag and a deployed build from its commit, not from `main`
+or the edit in the working copy; that `--deploy` installs `main` as a build named for the time
+in UTC, between the clock's readings before and after, and its commit; that it leaves the
+repository's operation log as it was; and that it refuses, installing nothing, no release, a
+release with `--deploy`, what isn't a release, and a release or build the repository lacks.
+The stand-in builds with musubi's own build script, which names the build. It doesn't try
+fetching from a remote.
 
 `recreating_hives_keeps_work_without_inheriting_remote_workspaces` follows the upgrade
 guide with two copies and a real linked workspace whose name contains `/`, including the

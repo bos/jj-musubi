@@ -2,22 +2,30 @@
 #
 # Builds and installs the release of musubi a hub runs from a jj repository of musubi's
 # source, for the daemon to run as `musubi.upgrade-command` (docs/guides/manage.md, "Upgrade
-# musubi").
+# musubi"); or, on the hub's machine, deploys a build of the source for machines to follow.
 #
-# Usage: upgrade-from-source [SOURCE [REVISION]]
+# Usage: upgrade-from-source [SOURCE]
+#        upgrade-from-source --deploy [SOURCE [REVISION]]
 #
 #   SOURCE    the jj repository of musubi's source; ~/dev/jj-musubi unless given
-#   REVISION  the revision of it to build; main unless given
+#   REVISION  the revision of it to deploy; main unless given
 #
 # Set it up on each machine with:
 #
 #   jj config set --user musubi.upgrade-command '~/bin/upgrade-from-source ~/dev/jj-musubi'
 #
-# The daemon runs it with MUSUBI_UPGRADE_TO set to the release the hub runs, such as 0.3.0.
-# It installs REVISION if its top-level Cargo.toml says that is the release, fetching from
-# SOURCE's remotes first if it doesn't, and fails, saying so, if it still doesn't. It builds
-# a copy of REVISION's files, never touching SOURCE's working copy or snapshotting your
-# edits there: you may be in the middle of a change when it runs.
+# The daemon runs it with MUSUBI_UPGRADE_TO set to the release the hub runs. For a release,
+# such as 0.4.0, it installs the release's tag, v0.4.0, if its top-level Cargo.toml says that
+# is the release. For a build deployed from source, such as 0.3.0+20261102153012.4a0db205e1f0,
+# it installs that build's commit as that build. It fetches from SOURCE's remotes first if
+# SOURCE lacks either, and fails, saying so, if it still does. It builds a copy of the commit's
+# files, never touching SOURCE's working copy or snapshotting your edits there: you may be in
+# the middle of a change when it runs.
+#
+# With --deploy, it installs REVISION as a build named for the release it follows, the time in
+# UTC and its commit, newer than every build of that release deployed before it. Push REVISION
+# where the machines' clones of the source fetch from, deploy it, then restart the hub, and
+# machines that upgrade with this follow (docs/guides/manage.md, "Deploy a build from source").
 #
 # It needs jj, git and cargo on the daemon's PATH (the one `musubi daemon install` saw), and
 # installs with `cargo install`, where cargo does by default: ~/.cargo/bin, or
@@ -25,32 +33,72 @@
 # ~/.cache/musubi/upgrade-from-source (in XDG_CACHE_HOME if set), which keeps the build's
 # dependencies, so that the next upgrade builds only musubi's own crates.
 #
-# To try it, name the release REVISION is; this installs it:
+# To try it, name a release; this installs it:
 #
-#   MUSUBI_UPGRADE_TO=0.3.0 upgrade-from-source ~/dev/jj-musubi
+#   MUSUBI_UPGRADE_TO=0.4.0 upgrade-from-source ~/dev/jj-musubi
 
 set -euo pipefail
 
 name=${0##*/}
+deploying=false
+if [[ ${1:-} == --deploy ]]; then
+    deploying=true
+    shift
+elif (($# > 1)); then
+    echo "$name: only --deploy takes a REVISION" >&2
+    exit 1
+fi
 source=${1:-$HOME/dev/jj-musubi}
 revision=${2:-main}
 want=${MUSUBI_UPGRADE_TO:-}
 cache=${XDG_CACHE_HOME:-$HOME/.cache}/musubi/upgrade-from-source
-
-if [[ -z $want ]]; then
-    echo "$name: MUSUBI_UPGRADE_TO must name the release to install" >&2
-    exit 1
-fi
 
 # Never snapshot or update SOURCE's working copy, which may be in the middle of a change.
 jj() {
     command jj --repository "$source" --ignore-working-copy "$@"
 }
 
-# The commit REVISION names, and the release its workspace Cargo.toml gives.
+# What this calls the revision it builds.
+label=$revision
+# What follows a deployed build's release: when it was deployed, then its commit.
+build=
+# A release, then for a deployed build, `+` and that.
+named='^([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)(\+([0-9]{14}\.[0-9a-f]{12,40}))?$'
+if $deploying; then
+    if [[ -n $want ]]; then
+        echo "$name: --deploy takes no MUSUBI_UPGRADE_TO" >&2
+        exit 1
+    fi
+elif [[ -z $want ]]; then
+    echo "$name: MUSUBI_UPGRADE_TO must name the release to install" >&2
+    exit 1
+elif [[ $want =~ $named ]]; then
+    want=${BASH_REMATCH[1]}
+    build=${BASH_REMATCH[4]}
+    if [[ -n $build ]]; then
+        label="commit ${build#*.}"
+        revision="commit_id(${build#*.})"
+    else
+        label="tag v$want"
+        revision="tags(exact:\"v$want\")"
+    fi
+else
+    echo "$name: $MUSUBI_UPGRADE_TO isn't a release or a build deployed from source" >&2
+    exit 1
+fi
+
+# The commit the revision names, and the release its workspace Cargo.toml gives; neither if
+# it names a tag or commit SOURCE lacks.
 commit=
 release=
 resolve() {
+    commit=
+    release=
+    local found
+    found=$(jj log --no-graph --revisions "$revision" --template '"x"')
+    if [[ -z $found ]]; then
+        return
+    fi
     commit=$(jj log --no-graph --revisions "exactly($revision, 1)" --template commit_id)
     release=$(jj file show --revision "$commit" 'root:"Cargo.toml"' |
         awk -F'"' '/^\[/ { section = $0 }
@@ -58,13 +106,23 @@ resolve() {
 }
 
 resolve
-if [[ $release != "$want" && -n $(jj git remote list) ]]; then
+if ! $deploying && [[ $release != "$want" && -n $(jj git remote list) ]]; then
     jj git fetch
     resolve
 fi
-if [[ $release != "$want" ]]; then
+if [[ -z $commit ]]; then
+    echo "$name: no $label in $source" >&2
+    exit 1
+fi
+if $deploying; then
+    want=$release
+    # Named for now, the build is newer than every build of its release deployed before it.
+    build=$(date -u +%Y%m%d%H%M%S).${commit:0:12}
+fi
+if [[ -z $release || $release != "$want" ]]; then
     found=${release:+musubi $release}
-    echo "$name: $revision in $source is ${found:-no release of musubi}, not musubi $want" >&2
+    not=${want:+, not musubi $want}
+    echo "$name: $label in $source is ${found:-no release of musubi}$not" >&2
     exit 1
 fi
 
@@ -74,5 +132,7 @@ rm -rf "$cache/src"
 mkdir -p "$cache/src"
 git --git-dir="$(jj git root)" archive "$commit" | tar -x -m -C "$cache/src"
 # From inside the copy, so that its own cargo config and toolchain apply, as in a checkout.
+# MUSUBI_BUILD names a deployed build, and is empty for a release (crates/musubi-sync/build.rs).
 cd "$cache/src"
-cargo install --locked --force --path crates/musubi --target-dir "$cache/target"
+MUSUBI_BUILD=$build cargo install --locked --force --path crates/musubi \
+    --target-dir "$cache/target"

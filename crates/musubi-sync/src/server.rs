@@ -39,6 +39,7 @@ use crate::wire::HUB_TOKEN;
 use crate::wire::HubReply;
 use crate::wire::HubWideReply;
 use crate::wire::HubWideRequest;
+use crate::wire::RELEASE;
 use crate::wire::fit_error;
 use crate::wire::head_subject;
 use crate::wire::rpc_subject;
@@ -208,8 +209,7 @@ impl HubServer {
                         })
                         .collect()
                 };
-                let version = env!("CARGO_PKG_VERSION");
-                let mut activity = self.activity().snapshot(hives, version, Instant::now());
+                let mut activity = self.activity().snapshot(hives, RELEASE, Instant::now());
                 // A reply too large to send would leave `musubi top` waiting for nothing.
                 while Envelope::encode(HubWideReply::Activity(activity.clone()))
                     .is_ok_and(|reply| reply.len() > max_payload)

@@ -146,18 +146,26 @@ others showing it.
 
 ### "incompatible peer: protocol ... but this is protocol ..."
 
-This machine and the hub run different releases of musubi, which can't talk to each other
-before 1.0. Install the same release everywhere. Set `musubi.upgrade-command` for a machine to
-follow its hub by itself. See [Upgrade musubi](guides/manage.md#upgrade-musubi).
+This machine and the hub run releases of musubi that can't talk to each other: before 1.0, a
+release can change how they talk, and so can a build deployed from source. Install the same
+release or build everywhere. Set `musubi.upgrade-command` for a machine to follow its hub by
+itself. See [Upgrade musubi](guides/manage.md#upgrade-musubi).
 
 ### "Upgrade: upgrading to musubi ... failed: ..."
 
-A hub runs a newer release, and the daemon ran `musubi.upgrade-command` to install it, but
-the command failed, or ran for over an hour, or installed some other release where the daemon
-started `musubi` from. The message says which; the command's output is in `upgrade.log` in the
-state directory. Fix the command, as by running it yourself with `MUSUBI_UPGRADE_TO` set to the
-release, then run `musubi daemon restart` for the daemon to try again. If the command
-installs `musubi` somewhere else now, run `musubi daemon install` too.
+A hub runs a newer release, or a newer build deployed from source, and the daemon ran
+`musubi.upgrade-command` to install it, but the command failed, or ran for over an hour, or
+installed some other release or build where the daemon started `musubi` from. The message says
+which; the command's output is in `upgrade.log` in the state directory. Fix the command, as by
+running it yourself with `MUSUBI_UPGRADE_TO` set to the release or build the message names,
+then run `musubi daemon restart` for the daemon to try again. If the command installs
+`musubi` somewhere else now, run `musubi daemon install` too.
+
+If `upgrade.log` ends `upgrade-from-source: no tag ... in ...` or `no commit ... in ...`, this
+machine's clone of musubi's source can't fetch the release's tag, or the commit of the build
+deployed from source, that the hub runs. Push it to where that clone fetches from, then run
+`musubi daemon restart` here. See [Deploy a build from
+source](guides/manage.md#deploy-a-build-from-source).
 
 ### "the running daemon is musubi ..., but this is ...; restart it with `musubi daemon restart`"
 

@@ -51,6 +51,7 @@ use musubi_sync::progress::Progress;
 use musubi_sync::remote::HiveGone;
 use musubi_sync::wire::HubWideReply;
 use musubi_sync::wire::HubWideRequest;
+use musubi_sync::wire::RELEASE;
 
 use crate::config::Entry;
 use crate::config::HiveConfig;
@@ -69,7 +70,7 @@ use crate::ui::Ui;
 #[derive(Parser)]
 #[command(
     name = "musubi",
-    version,
+    version = RELEASE,
     about = "Replicate jj repositories between machines",
     after_help = "Run `musubi <command> --help` for more on a command. The user guide is at \
                   https://github.com/bos/jj-musubi/blob/main/docs/README.md"
@@ -314,9 +315,9 @@ enum Command {
     /// error. Other commands start it in the background when they need it, logging to
     /// `daemon.log` in musubi's state directory, or under systemd, to the journal.
     ///
-    /// When a hub runs a newer release of musubi, the daemon runs the command
-    /// `musubi.upgrade-command` names, if set, with `MUSUBI_UPGRADE_TO` set to that release,
-    /// and once the `musubi` it started from is that release, starts again from it.
+    /// When a hub runs a newer release of musubi, or a newer build deployed from source, the
+    /// daemon runs the command `musubi.upgrade-command` names, if set, with `MUSUBI_UPGRADE_TO`
+    /// set to it, and once the `musubi` it started from is that, starts again from it.
     Daemon {
         #[command(subcommand)]
         action: Option<DaemonAction>,

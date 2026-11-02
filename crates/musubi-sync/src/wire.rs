@@ -37,8 +37,9 @@ use crate::blobs::BlobStore;
 
 pub const PROTOCOL_VERSION: u32 = 7;
 pub const JJ_LIB_VERSION: &str = "0.46.0";
-/// This release of musubi, as every message says.
-pub const RELEASE: &str = env!("CARGO_PKG_VERSION");
+/// This release of musubi, as every message says, and `musubi --version`: for a build deployed
+/// from source, followed by when it was deployed and its commit (`build.rs`).
+pub const RELEASE: &str = env!("MUSUBI_RELEASE");
 
 /// An operation or commit id on the wire.
 pub type WireId = Vec<u8>;

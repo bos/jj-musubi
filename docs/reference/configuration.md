@@ -28,7 +28,7 @@ change them. Set them with `--user`.
 | `musubi.daemon.log` | What the daemon logs, unless `--log` or `RUST_LOG` says. See [Logging](#logging). |
 | `musubi.daemon.socket` | The path of the daemon's control socket, in place of the usual one. See [Files and directories](#files-and-directories). |
 | `musubi.daemon.connections` | `as-needed`, the default, for the daemon to keep one connection to each hub, which every repository there shares, and to open another for each transfer of 16 MiB or more while it lasts. `one` to keep to one connection to each hub, large transfers included, as where each new ssh is costly: through a tunnel that asks you to log in, say. |
-| `musubi.upgrade-command` | A command that installs the release of musubi in `$MUSUBI_UPGRADE_TO`, which the daemon runs when a hub runs a newer release than its own, and then starts again from it. Unset, the default, the daemon upgrades nothing. See [Upgrade musubi](../guides/manage.md#upgrade-musubi). |
+| `musubi.upgrade-command` | A command that installs the release of musubi in `$MUSUBI_UPGRADE_TO`, which the daemon runs when a hub runs a newer release than its own, or a newer build deployed from source, and then starts again from it. Unset, the default, the daemon upgrades nothing. See [Upgrade musubi](../guides/manage.md#upgrade-musubi). |
 | `musubi.templates.list` | The template, in jj's template language, `musubi list` prints each hub, hive and copy with, unless `-T` gives one. `musubi list --help` lists its keywords. |
 
 The daemon reads `musubi.daemon.*` when it starts, so run `musubi daemon restart` after
@@ -60,7 +60,8 @@ A hive always shares these repo config keys, whatever `musubi.shared-config` say
 | `MUSUBI_SSH` | The ssh program to run, in place of `ssh`. |
 | `MUSUBI_SOCKET` | The daemon's control socket, in place of the usual one. Same as `--socket`. |
 | `MUSUBI_STATE_DIR` | One directory for musubi's state and the daemon's socket, in place of the usual ones. With `JJ_CONFIG` for its settings, this runs a second, separate musubi. |
-| `MUSUBI_UPGRADE_TO` | Set by the daemon, not read: the release `musubi.upgrade-command` is to install. |
+| `MUSUBI_UPGRADE_TO` | Set by the daemon, not read: the release `musubi.upgrade-command` is to install, as `musubi --version` gives it, such as `0.3.0`, or `0.3.0+20261102153012.4a0db205e1f0` for a build deployed from source. |
+| `MUSUBI_BUILD` | Read when building musubi, not when running it: for a build deployed from source, what follows its release in `musubi --version`, as `contrib/upgrade-from-source` sets it: when it was deployed and its commit, such as `20261102153012.4a0db205e1f0`. See [Deploy a build from source](../guides/manage.md#deploy-a-build-from-source). |
 | `COMPLETE` | Set by your shell to have musubi complete what you type. See [Complete commands in your shell](commands.md#complete-commands-in-your-shell). |
 
 On macOS and Linux, `musubi daemon install` (and `musubi hub install`) passes your `PATH`,

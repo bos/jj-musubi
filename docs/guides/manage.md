@@ -200,7 +200,8 @@ jj config set --user musubi.upgrade-command ~/bin/upgrade-musubi
 ```
 
 Whenever the daemon finds a hub running a newer release than its own, it runs the command
-once for that release, with `MUSUBI_UPGRADE_TO` set to it, such as `0.3.0`. Once the `musubi`
+once for that release, with `MUSUBI_UPGRADE_TO` set to it, such as `0.3.0`, or for a build
+[deployed from source](#deploy-a-build-from-source), its name. Once the `musubi`
 the daemon started from says it is that release (`musubi --version`), the daemon starts again
 from it. A machine that was asleep or away does this when it next reaches the hub.
 
@@ -227,19 +228,17 @@ cargo install --locked --version "$MUSUBI_UPGRADE_TO" jj-musubi
 
 If you build musubi on each machine from a jj repository of its source (made with `jj git
 clone`), copy [contrib/upgrade-from-source](../../contrib/upgrade-from-source) into your
-dotfiles and give it the repository, and optionally the revision to build, `main` unless you
-say:
+dotfiles and give it the repository:
 
 ```sh
 jj config set --user musubi.upgrade-command '~/bin/upgrade-from-source ~/dev/jj-musubi'
 ```
 
-It builds the revision only if its `Cargo.toml` gives the release asked for, fetching first
-if not; otherwise it fails, saying which release it found. So push the new release to the
-remote the machines fetch from before upgrading the hub. It builds a copy of the revision's
-files, so it never touches the repository's working copy, or your edits in progress there. It
-needs `jj`, `git` and `cargo` on the daemon's `PATH`. To try it, name the release the
-revision is; this installs it:
+For a release, it builds the release's tag, such as `v0.4.0`, and for a build deployed from
+source, that build's commit, fetching first if the repository lacks it; otherwise it fails,
+saying what it found. It builds a copy of the commit's files, so it never touches the
+repository's working copy, or your edits in progress there. It needs `jj`, `git` and `cargo`
+on the daemon's `PATH`. To try it, name a release; this installs it:
 
 ```sh
 MUSUBI_UPGRADE_TO=0.4.0 ~/bin/upgrade-from-source ~/dev/jj-musubi
@@ -248,12 +247,45 @@ MUSUBI_UPGRADE_TO=0.4.0 ~/bin/upgrade-from-source ~/dev/jj-musubi
 If the command fails, or installs another release, the daemon carries on as it was, and
 `musubi status` says why. Once the command works, `musubi daemon restart` tries again.
 
-Only a newer release starts the command. Builds from source between releases all share the
-release they follow, so none of them starts it, and neither does putting a hub back on an
-older release: upgrade or go back by hand then.
+Only a newer release starts the command, or a build deployed later, as below. A build from
+source that wasn't deployed, as with `cargo install --path`, says only the release it follows,
+so it starts nothing, and neither does putting a hub back on an older release: upgrade or go
+back by hand then.
 
 Upgrade `jj` with musubi, not before: each release of musubi works with one release of jj, and
 refuses operations that a newer jj wrote.
+
+### Deploy a build from source
+
+To run a build of musubi's source on every machine between releases, deploy it from the hub's
+machine with `upgrade-from-source --deploy`:
+
+1. Push the revision where the machines' clones of the source fetch from, as by pushing
+   `main`.
+2. On the hub's machine, deploy it, `main` unless you name another revision:
+
+   ```sh
+   ~/bin/upgrade-from-source --deploy ~/dev/jj-musubi main
+   ```
+
+   This installs it with `cargo install`, into `~/.cargo/bin` or `CARGO_INSTALL_ROOT`, which
+   must be where the hub runs `musubi` from, as a build named for the release it follows (the
+   `version` in its `Cargo.toml`), the time in UTC, and its commit, such as
+   `musubi 0.3.0+20261102153012.4a0db205e1f0`. `musubi --version` prints that name.
+3. Stop `musubi hub` and start it again, or if it runs at login, run `musubi hub install`
+   again.
+
+Each machine whose upgrade command is `upgrade-from-source` then follows the hub to that build,
+even if it changes how machines and hubs talk: it builds the build's commit, fetching it if its
+clone lacks it. [`musubi top`](#watch-every-machine) shows which build each machine runs.
+Another upgrade command, such as the cargo one above, can't install a deployed build, and
+`musubi status` says so. A machine that tried before the commit was pushed tries again after
+`musubi daemon restart`, or when you deploy again.
+
+Of two builds that follow the same release, the one deployed later by the clock of the
+machine you deploy on is newer, whatever its commit, so deploying an older revision again takes
+every machine back to it. A deployed build is newer than the release it follows and older than
+the next, so deploying a revision from before the release the machines run starts nothing.
 
 ## Move, copy or restore a repository
 

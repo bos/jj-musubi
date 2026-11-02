@@ -1234,10 +1234,11 @@ fn a_sync_says_at_once_that_the_hub_is_gone() {
 }
 
 /// A daemon whose hub runs a newer release runs `musubi.upgrade-command`, telling it the
-/// release, and once its binary is that release, starts again from it, in place. Here the
-/// command first installs a stand-in that says it is musubi 99.0.0, and runs the real binary;
-/// the daemon run from that runs the command again, which installs nothing this time, so the
-/// daemon carries on as it is, and `musubi status` says why.
+/// release, and once its binary is that release, starts again from it, in place. Here the hub
+/// runs a build deployed from source, whose release says when it was deployed and its commit,
+/// and the command first installs a stand-in that says it is that build, and runs the real
+/// binary; the daemon run from that runs the command again, which installs nothing this time,
+/// so the daemon carries on as it is, and `musubi status` says why.
 #[cfg(unix)]
 #[test]
 fn the_daemon_upgrades_towards_a_newer_hub() {
@@ -1245,7 +1246,7 @@ fn the_daemon_upgrades_towards_a_newer_hub() {
     let mut settings = insta::Settings::clone_current();
     settings.add_filter(&regex_escape(musubi().to_str().unwrap()), "[musubi]");
     settings.add_filter(
-        &regex_escape(&format!("musubi {}", env!("CARGO_PKG_VERSION"))),
+        &regex_escape(&format!("musubi {}", musubi_sync::wire::RELEASE)),
         "musubi [this release]",
     );
     settings.add_filter(r"protocol \d+", "protocol N");
@@ -1272,7 +1273,7 @@ fn the_daemon_upgrades_towards_a_newer_hub() {
             r#"echo "$MUSUBI_UPGRADE_TO" >>"{ran}"
 [ -e "{installed}" ] && exit 0
 : >"{installed}"
-printf '#!/bin/sh\n[ "$1" = --version ] && exec echo musubi 99.0.0\nexec "%s" "$@"\n' \
+printf '#!/bin/sh\n[ "$1" = --version ] && exec echo musubi 99.0.0+20991231235959.ffffffffffff\nexec "%s" "$@"\n' \
   "{real}" >"{exe}.new"
 chmod +x "{exe}.new" && mv "{exe}.new" "{exe}"
 "#,
@@ -1302,7 +1303,10 @@ chmod +x "{exe}.new" && mv "{exe}.new" "{exe}"
     musubi_fails(&env, &logs, &alpha, &["sync"]);
     let failed = state.join("upgrade-failed");
     wait_for(&logs, "the upgrade to fail", || failed.exists());
-    assert_eq!(fs::read_to_string(&ran).unwrap(), "99.0.0\n99.0.0\n");
+    assert_eq!(
+        fs::read_to_string(&ran).unwrap(),
+        "99.0.0+20991231235959.ffffffffffff\n99.0.0+20991231235959.ffffffffffff\n"
+    );
     assert_eq!(
         daemon_pid(&state).unwrap(),
         pid,
@@ -1311,7 +1315,7 @@ chmod +x "{exe}.new" && mv "{exe}.new" "{exe}"
     assert!(daemon_logged(
         &env,
         &alpha,
-        "upgraded to musubi 99.0.0; starting again"
+        "upgraded to musubi 99.0.0+20991231235959.ffffffffffff; starting again"
     ));
     let (stdout, stderr) = status_in(&env, &logs, &alpha);
     insta::assert_snapshot!(stdout, @"
@@ -1324,21 +1328,24 @@ chmod +x "{exe}.new" && mv "{exe}.new" "{exe}"
     Daemon: running (pid N), serving this repository; doesn't start at login
     Daemon socket: [daemon socket]
     Daemon log: $ROOT/home/musubi-alpha/daemon.log
-    Upgrade: upgrading to musubi 99.0.0 failed: musubi.upgrade-command succeeded, but [musubi] is musubi [this release], not musubi 99.0.0
+    Upgrade: upgrading to musubi 99.0.0+20991231235959.ffffffffffff failed: musubi.upgrade-command succeeded, but [musubi] is musubi [this release], not musubi 99.0.0+20991231235959.ffffffffffff
     ");
     insta::assert_snapshot!(stderr, @"
     Hint: Once that's fixed, `musubi daemon restart` tries again.
-    Warning: Syncing fails: incompatible peer: protocol N with jj-lib 0.46.0 (musubi 99.0.0), but this is protocol N with jj-lib 0.46.0 (musubi [this release]); run the same release of musubi on the hub and every machine
+    Warning: Syncing fails: incompatible peer: protocol N with jj-lib 0.46.0 (musubi 99.0.0+20991231235959.ffffffffffff), but this is protocol N with jj-lib 0.46.0 (musubi [this release]); run the same release of musubi on the hub and every machine
     Hint: The daemon keeps trying. Its log: $ROOT/home/musubi-alpha/daemon.log
     ");
 }
 
-/// The example `musubi.upgrade-command`, `contrib/upgrade-from-source`, installs the release
-/// it is told from a revision of a jj repository of musubi's source, run from another
-/// directory as the daemon runs it, and builds neither the edit in progress in that
-/// repository's working copy nor snapshots it. Asked for another release, it says what the
-/// revision is instead, and installs nothing. The source is a stand-in whose `musubi` says
-/// only its release, which builds in a second. Fetching from a remote isn't tried.
+/// The example `musubi.upgrade-command`, `contrib/upgrade-from-source`, run from another
+/// directory as the daemon runs it, installs the release it is told from that release's tag in
+/// a jj repository of musubi's source, and a build deployed from source from that build's
+/// commit, rather than from `main`, which has moved on. With `--deploy`, it installs `main` as a
+/// build named for the time, in UTC, and its commit. It builds neither the edit in progress in
+/// the repository's working copy nor snapshots it, and refuses, installing nothing, no release,
+/// a release with `--deploy`, what names neither a release nor a build, and a release or build
+/// the repository lacks. The source is a stand-in whose `musubi` says only the release musubi's
+/// own build script names, which builds in a second. Fetching from a remote isn't tried.
 #[cfg(unix)]
 #[test]
 fn the_example_upgrade_command_installs_from_source() {
@@ -1351,22 +1358,43 @@ fn the_example_upgrade_command_installs_from_source() {
              [workspace.package]\nversion = \"{release}\"\nedition = \"2024\"\n"
         )
     };
+    let lock = |release: &str| {
+        format!("version = 4\n\n[[package]]\nname = \"jj-musubi\"\nversion = \"{release}\"\n")
+    };
     source.write_file("Cargo.toml", &manifest("0.2.0"));
-    source.write_file(
-        "Cargo.lock",
-        "version = 4\n\n[[package]]\nname = \"jj-musubi\"\nversion = \"0.2.0\"\n",
-    );
+    source.write_file("Cargo.lock", &lock("0.2.0"));
     source.write_file(
         "crates/musubi/Cargo.toml",
         "[package]\nname = \"jj-musubi\"\nversion.workspace = true\n\
          edition.workspace = true\n\n[[bin]]\nname = \"musubi\"\npath = \"main.rs\"\n",
     );
     source.write_file(
+        "crates/musubi/build.rs",
+        include_str!("../../musubi-sync/build.rs"),
+    );
+    source.write_file(
         "crates/musubi/main.rs",
-        "fn main() {\n    println!(\"musubi {}\", env!(\"CARGO_PKG_VERSION\"));\n}\n",
+        "fn main() {\n    println!(\"musubi {}\", env!(\"MUSUBI_RELEASE\"));\n}\n",
     );
     source.jj(&["commit", "-m", "musubi 0.2.0"]);
+    source.jj(&["tag", "set", "v0.2.0", "-r", "@-"]);
+    source.write_file("Cargo.toml", &manifest("0.2.1"));
+    source.write_file("Cargo.lock", &lock("0.2.1"));
+    source.jj(&["commit", "-m", "musubi 0.2.1"]);
     source.jj(&["bookmark", "create", "main", "-r", "@-"]);
+    let short_id = |revision: &str| {
+        let log = [
+            "log",
+            "--ignore-working-copy",
+            "--no-graph",
+            "-r",
+            revision,
+            "-T",
+            "commit_id.short()",
+        ];
+        source.jj(&log)
+    };
+    let (tagged, main) = (short_id("@--"), short_id("@-"));
     let op_log = [
         "op",
         "log",
@@ -1387,31 +1415,81 @@ fn the_example_upgrade_command_installs_from_source() {
             .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
     )
     .unwrap();
-    let upgrade = |release: &str| {
+    // In a time zone far from UTC, so that a build named for the local time would show.
+    let upgrade = |deploy: bool, release: Option<&str>| {
         let mut command = source.program(&script);
+        if deploy {
+            command.arg("--deploy");
+        }
         command
             .arg(source.path())
             .current_dir(env.root())
-            .env("MUSUBI_UPGRADE_TO", release)
+            .env_remove("MUSUBI_UPGRADE_TO")
+            .env("TZ", "Pacific/Kiritimati")
             .env("PATH", &path)
             .env("CARGO_INSTALL_ROOT", &installed);
+        if let Some(release) = release {
+            command.env("MUSUBI_UPGRADE_TO", release);
+        }
         command.output().unwrap()
     };
-    let refused = upgrade("0.3.0");
-    assert!(!refused.status.success());
-    insta::assert_snapshot!(String::from_utf8_lossy(&refused.stderr), @"upgrade-from-source: main in $ROOT/source is musubi 0.2.0, not musubi 0.3.0");
+    let refusals: String = [
+        (false, None),
+        (true, Some("0.2.0")),
+        (false, Some("0.2.0+custom")),
+        (false, Some("0.3.0")),
+        (false, Some("0.2.0+20261102153012.ffffffffffff")),
+    ]
+    .into_iter()
+    .map(|(deploy, release)| {
+        let output = upgrade(deploy, release);
+        assert!(!output.status.success());
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    })
+    .collect();
+    insta::assert_snapshot!(refusals, @"
+    upgrade-from-source: MUSUBI_UPGRADE_TO must name the release to install
+    upgrade-from-source: --deploy takes no MUSUBI_UPGRADE_TO
+    upgrade-from-source: 0.2.0+custom isn't a release or a build deployed from source
+    upgrade-from-source: no tag v0.3.0 in $ROOT/source
+    upgrade-from-source: no commit ffffffffffff in $ROOT/source
+    ");
     assert!(!installed.exists());
-    let output = upgrade("0.2.0");
+    let installs = |deploy: bool, release: Option<&str>| {
+        let output = upgrade(deploy, release);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let version = Command::new(installed.join("bin/musubi"))
+            .arg("--version")
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&version.stdout).into_owned()
+    };
+    assert_eq!(installs(false, Some("0.2.0")), "musubi 0.2.0\n");
+    let utc_now = || {
+        let date = Command::new("date")
+            .args(["-u", "+%Y%m%d%H%M%S"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&date.stdout).trim().to_owned()
+    };
+    let before = utc_now();
+    let deployed = installs(true, None);
+    let after = utc_now();
+    let (at, commit) = deployed
+        .strip_prefix("musubi 0.2.1+")
+        .and_then(|build| build.trim_end().split_once('.'))
+        .unwrap_or_else(|| panic!("deployed {deployed:?}"));
     assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
+        before.as_str() <= at && at <= after.as_str(),
+        "deployed at {at}, between {before} and {after}"
     );
-    let version = Command::new(installed.join("bin/musubi"))
-        .arg("--version")
-        .output()
-        .unwrap();
-    assert_eq!(String::from_utf8_lossy(&version.stdout), "musubi 0.2.0\n");
+    assert_eq!(commit, main);
+    let build = format!("0.2.0+20261102153012.{tagged}");
+    assert_eq!(installs(false, Some(&build)), format!("musubi {build}\n"));
     assert_eq!(source.jj(&op_log), op, "the command changed the source");
     assert_eq!(
         fs::read_to_string(source.path().join("Cargo.toml")).unwrap(),
@@ -1419,9 +1497,9 @@ fn the_example_upgrade_command_installs_from_source() {
     );
 }
 
-/// Serves the hub's socket in `dir` as a hub of musubi 99.0.0, on another protocol, would:
-/// answering every request with a message this release refuses. Serves until the runtime it
-/// returns is dropped.
+/// Serves the hub's socket in `dir` as a hub of a build deployed from source of musubi 99.0.0,
+/// on another protocol, would: answering every request with a message this release refuses.
+/// Serves until the runtime it returns is dropped.
 #[cfg(unix)]
 fn serve_newer_hub(dir: &Path) -> tokio::runtime::Runtime {
     use std::sync::Arc;
@@ -1439,7 +1517,7 @@ fn serve_newer_hub(dir: &Path) -> tokio::runtime::Runtime {
         postcard::to_stdvec(&Envelope {
             protocol: PROTOCOL_VERSION + 1,
             jj_lib: JJ_LIB_VERSION.to_owned(),
-            release: "99.0.0".to_owned(),
+            release: "99.0.0+20991231235959.ffffffffffff".to_owned(),
             body: HubWideReply::Error("from the future".to_owned()),
         })
         .unwrap(),

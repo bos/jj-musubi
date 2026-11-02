@@ -6,6 +6,13 @@ change the protocol, so run the same release on the hub and every machine (see
 
 ## Unreleased
 
+- A build of musubi's source can go to every machine between releases. Push it, then on the
+  hub's machine, `upgrade-from-source --deploy` (in [contrib](contrib/upgrade-from-source))
+  deploys `main`, or the revision you name, as a build named for the release it follows, the
+  time and its commit, such as `musubi 0.3.0+20261102153012.4a0db205e1f0`. Restart the hub,
+  and machines whose upgrade command is `upgrade-from-source` follow it, building that commit.
+  Told a release, `upgrade-from-source` builds its tag, such as `v0.4.0`, not `main`. See
+  [Deploy a build from source](docs/guides/manage.md#deploy-a-build-from-source).
 - Contracting operation history now keeps each operation's original identity even when two
   operations have identical views and metadata. This changes the canonical encoding and ids
   (protocol 7, release 0.3.0): upgrade the hub and every machine together. Existing hives and

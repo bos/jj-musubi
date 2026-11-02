@@ -276,17 +276,39 @@ mod tests {
 
     use super::*;
 
-    /// Only a release newer than this one, read as semver, calls for an upgrade: not this
-    /// one, as every unreleased build is, nor an older one, nor what isn't a version, which
-    /// would otherwise reach the upgrade command's environment.
+    /// Only a release newer than this one, read as semver, calls for an upgrade, a build of
+    /// this release deployed later among them: not this one, as every build from source that
+    /// wasn't deployed is, nor an older one, nor what isn't a version, which would otherwise
+    /// reach the upgrade command's environment.
     #[test]
     fn only_a_newer_release_calls_for_an_upgrade() {
         let this = Version::parse(RELEASE).unwrap();
         let next = Version::new(this.major, this.minor, this.patch + 1);
         assert_eq!(newer(&next.to_string()), Some(next));
+        let deployed = format!(
+            "{}+99991231235959.ffffffffffff",
+            Version::new(this.major, this.minor, this.patch)
+        );
+        assert_eq!(newer(&deployed), Version::parse(&deployed).ok());
         assert_eq!(newer(RELEASE), None);
         assert_eq!(newer("0.0.0"), None);
         assert_eq!(newer("99.0.0; rm -rf ~"), None);
         assert_eq!(newer(""), None);
+    }
+
+    /// A build deployed from source is newer than the release it follows, older than the
+    /// next, and newer than any deployed before it, whatever its commit. semver gives build
+    /// metadata no precedence, but the semver crate orders by it, field by field, and the
+    /// daemon relies on that to follow a deployed build.
+    #[test]
+    fn a_build_deployed_later_is_newer() {
+        let order = [
+            "0.3.0",
+            "0.3.0+20261101090000.ffffffffffff",
+            "0.3.0+20261102153012.000000000000",
+            "0.3.1",
+        ]
+        .map(|release| Version::parse(release).unwrap());
+        assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{order:?}");
     }
 }

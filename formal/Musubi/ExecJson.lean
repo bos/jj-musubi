@@ -176,7 +176,7 @@ def encodeNode (nd : ENode) (dropped : List Nat) (applied : List Rec) : Json :=
 def encodeSMsgs (ses : SEState) : List Json :=
   ses.sups.map (fun e => msgObj "supersede" e.1 [("applied", recsJson e.2.1),
       ("dropped", nats e.2.2.1), ("new", toJson e.2.2.2)]) ++
-    ses.dmsgs.map (fun e => msgObj "dropped" e.1 [("records", recsJson e.2)])
+    ses.dmsgs.map (fun e => msgObj "dropped" e.1 [("records", recsJson e.2.1)])
 
 def encodeOp (o : EOp) : Json :=
   Json.mkObj [("id", toJson o.id), ("parents", nats o.parents), ("objs", nats o.objs)]

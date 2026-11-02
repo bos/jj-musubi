@@ -119,6 +119,7 @@ open Musubi
 #print axioms Exec.sabs_initSE
 #print axioms Exec.sexec_ok
 #print axioms Exec.sexec_allPruned
+#print axioms Exec.sexec_announced_held
 #print axioms Exec.sexec_reachable
 #print axioms Exec.sexec_inv
 #print axioms Exec.smeasureE_eq

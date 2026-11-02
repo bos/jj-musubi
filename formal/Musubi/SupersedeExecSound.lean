@@ -169,12 +169,13 @@ theorem sstate_ext {A B : SState} (h1 : A.s = B.s) (h2 : A.hubD = B.hubD)
 /-! ## What executable states keep -/
 
 /-- What every executable state reachable from `initSE` keeps, which soundness needs: a node
-has dropped the operations of the records it took, and the hub has pruned no more records than
-it has, as of any head. -/
+has dropped the operations of the records it took, and of every list of records it took
+before, and the hub has pruned no more records than it has, as of any head. -/
 structure SEOK (ses : SEState) : Prop where
   applied : ∀ n x, x ∈ flat (ses.appliedF n) → x ∈ ses.nodeDF n
   pruned : ses.pruned ≤ ses.recs.length
   hist : ∀ e ∈ ses.recHist, e.2.2 ≤ e.2.1.length
+  held : ∀ n L x, L ∈ ses.heldF n → x ∈ flat L → x ∈ ses.nodeDF n
 
 theorem SEOK.histF {ses : SEState} (hok : SEOK ses) (i : Nat) :
     ses.prunedHistF i ≤ (ses.recHistF i).length := by
@@ -189,6 +190,21 @@ theorem appliedF_setD (ses : SEState) (n : Nat) (D : List Nat) (i : Nat) :
 theorem appliedF_adoptR (ses : SEState) (n : Nat) (R : List Rec) (i : Nat) :
     (ses.adoptR n R).appliedF i = if i = n then R else ses.appliedF i :=
   assocF_set _ _ _ _ _
+
+theorem heldF_setD (ses : SEState) (n : Nat) (D : List Nat) (i : Nat) :
+    (ses.setD n D).heldF i = ses.heldF i := rfl
+
+theorem heldF_adoptR (ses : SEState) (n : Nat) (R : List Rec) (i : Nat) :
+    (ses.adoptR n R).heldF i = if i = n then R :: ses.heldF n else ses.heldF i :=
+  assocF_set _ _ _ _ _
+
+/-- What a node has held, it holds once it takes more. -/
+theorem heldF_adoptR_mono (ses : SEState) (n : Nat) (R : List Rec) (i : Nat) {L : List Rec}
+    (h : L ∈ ses.heldF i) : L ∈ (ses.adoptR n R).heldF i := by
+  rw [heldF_adoptR]
+  by_cases hi : i = n
+  · subst hi; simp only [↓reduceIte]; exact List.mem_cons_of_mem _ h
+  · simp only [hi, ↓reduceIte]; exact h
 
 /-- Records that are the hub's drop every operation it pruned. -/
 theorem pruned_of_records {ses : SEState} {A : List Rec}
@@ -398,9 +414,10 @@ theorem sexec_sound {N : Nat} {ses ses' : SEState} {a : SAction} (hok : SEOK ses
       (not_mem_of_not_contains hd)
   | sendD n =>
     simp only [sexecCore] at h
+    obtain ⟨-, h⟩ := sreq_ok h
     cases h
     left; left
-    have e : sabs { ses with dmsgs := ses.dmsgs ++ [(n, ses.recs)] } =
+    have e : sabs { ses with dmsgs := ses.dmsgs ++ [(n, ses.recs, ses.pruned)] } =
         { sabs ses with
           dmsgs := fun m Δ => (sabs ses).dmsgs m Δ ∨ (m = n ∧ Δ = (sabs ses).hubD) } := by
       show SState.mk _ _ _ _ _ _ _ _ = SState.mk _ _ _ _ _ _ _ _
@@ -426,7 +443,8 @@ theorem sexec_sound {N : Nat} {ses ses' : SEState} {a : SAction} (hok : SEOK ses
     left; left
     obtain ⟨em, hem, hmatch⟩ := List.any_eq_true.1 hm
     simp only [Bool.and_eq_true, beq_iff_eq] at hmatch
-    have hR : setP (flat em.2) = setP (flat R) := recEq_flat hmatch.2
+    obtain ⟨⟨hmn, hmR⟩, -⟩ := hmatch
+    have hR : setP (flat em.2.1) = setP (flat R) := recEq_flat hmR
     have e : sabs (ses.adoptR n R) =
         { sabs ses with
           nodeD := upd (sabs ses).nodeD n
@@ -438,7 +456,7 @@ theorem sexec_sound {N : Nat} {ses ses' : SEState} {a : SAction} (hok : SEOK ses
       exact this
     rw [e]
     refine SStep.adopt _ n (setP (flat R)) (of_decide_eq_true hn)
-      ⟨em, hem, hmatch.1, hR.symm⟩ ?_
+      ⟨em, hem, hmn, hR.symm⟩ ?_
     intro g hg hgR
     rw [List.all_eq_true] at hhd
     exact not_mem_of_not_contains (hhd g hg) hgR
@@ -579,6 +597,10 @@ theorem seok_init : SEOK initSE where
   applied := fun _ _ h => by simp [SEState.appliedF, initSE, assocF, flat] at h
   pruned := Nat.le_refl _
   hist := fun _ h => by simp [initSE] at h
+  held := fun _ L _ hL h => by
+    simp only [SEState.heldF, initSE, assocF, List.find?_nil, Option.map_none,
+      Option.getD_none, List.mem_singleton] at hL
+    subst hL; simp [flat] at h
 
 /-- A node's dropped set that grows keeps what it had. -/
 theorem seok_setD {ses : SEState} (hok : SEOK ses) (n : Nat) (D : List Nat)
@@ -591,6 +613,12 @@ theorem seok_setD {ses : SEState} (hok : SEOK ses) (n : Nat) (D : List Nat)
     · simp only [hm, ↓reduceIte]; exact hok.applied m x hx
   pruned := hok.pruned
   hist := hok.hist
+  held := fun m L x hL hx => by
+    rw [heldF_setD] at hL
+    rw [nodeDF_setD]
+    by_cases hm : m = n
+    · subst hm; simp only [↓reduceIte]; exact hD x (hok.held m L x hL hx)
+    · simp only [hm, ↓reduceIte]; exact hok.held m L x hL hx
 
 /-- **Every action keeps `SEOK`.** -/
 theorem sexec_ok {N : Nat} {ses ses' : SEState} {a : SAction} (hok : SEOK ses)
@@ -633,24 +661,34 @@ theorem sexec_ok {N : Nat} {ses ses' : SEState} {a : SAction} (hok : SEOK ses)
     simp only [sexecCore] at h
     obtain ⟨-, h⟩ := sreq_ok h; obtain ⟨-, h⟩ := sreq_ok h
     cases h
-    exact ⟨hok.applied, hok.pruned, hok.hist⟩
+    exact ⟨hok.applied, hok.pruned, hok.hist, hok.held⟩
   | sendD n =>
     simp only [sexecCore] at h
+    obtain ⟨-, h⟩ := sreq_ok h
     cases h
-    exact ⟨hok.applied, hok.pruned, hok.hist⟩
+    exact ⟨hok.applied, hok.pruned, hok.hist, hok.held⟩
   | adopt n R =>
     simp only [sexecCore] at h
     obtain ⟨-, h⟩ := sreq_ok h; obtain ⟨-, h⟩ := sreq_ok h; obtain ⟨-, h⟩ := sreq_ok h
     cases h
-    refine { hok with applied := ?_ }
-    intro m x hx
-    have e1 : (ses.adoptR n R).nodeDF m = (ses.setD n (union (ses.nodeDF n) (flat R))).nodeDF m :=
-      rfl
-    rw [e1, nodeDF_setD]
-    rw [appliedF_adoptR] at hx
-    by_cases hm : m = n
-    · subst hm; simp only [↓reduceIte] at hx ⊢; exact mem_union.2 (Or.inr hx)
-    · simp only [hm, ↓reduceIte] at hx ⊢; exact hok.applied m x hx
+    have e1 : ∀ m, (ses.adoptR n R).nodeDF m =
+        (ses.setD n (union (ses.nodeDF n) (flat R))).nodeDF m := fun _ => rfl
+    refine { hok with applied := ?_, held := ?_ }
+    · intro m x hx
+      rw [e1, nodeDF_setD]
+      rw [appliedF_adoptR] at hx
+      by_cases hm : m = n
+      · subst hm; simp only [↓reduceIte] at hx ⊢; exact mem_union.2 (Or.inr hx)
+      · simp only [hm, ↓reduceIte] at hx ⊢; exact hok.applied m x hx
+    · intro m L x hL hx
+      rw [e1, nodeDF_setD]
+      rw [heldF_adoptR] at hL
+      by_cases hm : m = n
+      · subst hm; simp only [↓reduceIte] at hL ⊢
+        rcases List.mem_cons.1 hL with rfl | hL
+        · exact mem_union.2 (Or.inr hx)
+        · exact mem_union.2 (Or.inl (hok.held m L x hL hx))
+      · simp only [hm, ↓reduceIte] at hL ⊢; exact hok.held m L x hL hx
   | hubSupAccept n S O e d A Δ =>
     simp only [sexecCore] at h
     obtain ⟨-, h⟩ := sreq_ok h; obtain ⟨-, h⟩ := sreq_ok h; obtain ⟨-, h⟩ := sreq_ok h
@@ -767,6 +805,7 @@ theorem sexec_pruned {N : Nat} {ses ses' : SEState} {a : SAction} (hok : SEOK se
     exact sepruned_mono hp rfl rfl rfl (fun _ _ hx => hx)
   | sendD n =>
     simp only [sexecCore] at h
+    obtain ⟨-, h⟩ := sreq_ok h
     cases h
     exact sepruned_mono hp rfl rfl rfl (fun _ _ hx => hx)
   | adopt n R =>
@@ -807,9 +846,10 @@ theorem sexec_pruned {N : Nat} {ses ses' : SEState} {a : SAction} (hok : SEOK se
     have taken : ∀ n, n < N → ∀ x, x ∈ flat (ses.recs.take k) → x ∈ ses.nodeDF n := by
       intro n hn x hx
       rw [List.all_eq_true] at hall
-      have e2 := congrFun (recEq_flat (hall n (List.mem_range.2 hn))) x
+      obtain ⟨L, hL, heq⟩ := List.any_eq_true.1 (hall n (List.mem_range.2 hn))
+      have e2 := congrFun (recEq_flat heq) x
       simp only [setP] at e2
-      exact hok.applied n x (mem_flat_take (e2.mpr hx))
+      exact hok.held n L x hL (mem_flat_take (e2.mpr hx))
     refine ⟨taken, fun e he n hn x hx => ?_⟩
     rcases List.mem_cons.1 he with rfl | he
     · exact taken n hn x hx
@@ -827,6 +867,169 @@ one where `eventually_convergesS` applies. -/
 theorem sexec_allPruned {N : Nat} {ses : SEState} (h : SExecReachable N ses) :
     AllPruned N (sabs ses) :=
   fun n hn x hx => (sexec_reachable_pruned h).now n hn x hx
+
+/-! ## Nodes keep what the hub pruned -/
+
+/-- What every executable state reachable from `initSE` keeps: every node has held the hub's
+records as far as the hub has pruned them, now and as of any head it can go back
+to; and the node every announcement is for has held the announced records as far as they were
+pruned. A node holds the records it took last. -/
+structure SEHeld (N : Nat) (ses : SEState) : Prop where
+  applied : ∀ n, ses.appliedF n ∈ ses.heldF n
+  now : ∀ n, n < N → ses.heldPrefix n ses.recs ses.pruned = true
+  hist : ∀ e ∈ ses.recHist, ∀ n, n < N → ses.heldPrefix n e.2.1 e.2.2 = true
+  msgs : ∀ e ∈ ses.dmsgs, ses.heldPrefix e.1 e.2.1 e.2.2 = true
+
+/-- What a node has held, it holds in a state that keeps every list it held. -/
+theorem heldPrefix_mono {ses ses' : SEState} {n : Nat} {R : List Rec} {p : Nat}
+    (hH : ∀ L, L ∈ ses.heldF n → L ∈ ses'.heldF n) (h : ses.heldPrefix n R p = true) :
+    ses'.heldPrefix n R p = true := by
+  obtain ⟨L, hL, e⟩ := List.any_eq_true.1 h
+  exact List.any_eq_true.2 ⟨L, hH L hL, e⟩
+
+/-- Every node has held the first zero records of anything. -/
+theorem heldPrefix_zero {ses : SEState} (hH : SEHeld N ses) (n : Nat) (R : List Rec) :
+    ses.heldPrefix n R 0 = true :=
+  List.any_eq_true.2 ⟨_, hH.applied n, by simp [recEq]⟩
+
+/-- A step that changes no records and no announcements, and only adds to what nodes held,
+keeping what each took last among it, keeps it. -/
+theorem seheld_mono {N : Nat} {ses ses' : SEState} (hH : SEHeld N ses)
+    (hr : ses'.recs = ses.recs) (hk : ses'.pruned = ses.pruned) (hh : ses'.recHist = ses.recHist)
+    (hd : ses'.dmsgs = ses.dmsgs) (hL : ∀ n L, L ∈ ses.heldF n → L ∈ ses'.heldF n)
+    (ha : ∀ n, ses'.appliedF n ∈ ses'.heldF n) : SEHeld N ses' where
+  applied := ha
+  now := fun n hn => by rw [hr, hk]; exact heldPrefix_mono (hL n) (hH.now n hn)
+  hist := fun e he n hn => by rw [hh] at he; exact heldPrefix_mono (hL n) (hH.hist e he n hn)
+  msgs := fun e he => by rw [hd] at he; exact heldPrefix_mono (hL e.1) (hH.msgs e he)
+
+theorem seheld_init (N : Nat) : SEHeld N initSE where
+  applied := fun _ => by simp [SEState.appliedF, SEState.heldF, initSE, assocF]
+  now := fun _ _ => by simp [SEState.heldPrefix, SEState.heldF, initSE, assocF, recEq]
+  hist := fun _ h => by simp [initSE] at h
+  msgs := fun _ h => by simp [initSE] at h
+
+/-- **Every action keeps `SEHeld`.** -/
+theorem sexec_held {N : Nat} {ses ses' : SEState} {a : SAction} (hok : SEOK ses)
+    (hH : SEHeld N ses) (h : sexecStep N ses a = .ok ses') : SEHeld N ses' := by
+  obtain ⟨-, h⟩ := sreq_ok h
+  cases a with
+  | base a =>
+    simp only [sexecCore] at h
+    cases hs : execStep N ses.es a with
+    | error e => rw [hs] at h; cases h
+    | ok es' =>
+      rw [hs] at h
+      simp only at h
+      cases hr : a.regressSeq with
+      | some i =>
+        rw [hr] at h
+        cases h
+        refine ⟨hH.applied, fun n hn => ?_, hH.hist, hH.msgs⟩
+        show ses.heldPrefix n (ses.recHistF i) (ses.prunedHistF i) = true
+        unfold SEState.recHistF SEState.prunedHistF
+        rcases assocF_cases ses.recHist i ([], 0) with e | ⟨q, hq, e⟩
+        · rw [e]; exact heldPrefix_zero hH n _
+        · rw [← e]; exact hH.hist q hq n hn
+      | none =>
+        rw [hr] at h
+        simp only at h
+        obtain ⟨-, h⟩ := sreq_ok h
+        obtain ⟨-, h⟩ := sreq_ok h
+        cases h
+        refine ⟨hH.applied, hH.now, ?_, hH.msgs⟩
+        unfold SEState.withBase
+        split
+        · exact hH.hist
+        · intro e he
+          rcases List.mem_cons.1 he with rfl | he
+          · exact hH.now
+          · exact hH.hist e he
+  | abandon n D =>
+    simp only [sexecCore] at h
+    obtain ⟨-, h⟩ := sreq_ok h; obtain ⟨-, h⟩ := sreq_ok h
+    obtain ⟨-, h⟩ := sreq_ok h; obtain ⟨-, h⟩ := sreq_ok h
+    cases h
+    exact seheld_mono hH rfl rfl rfl rfl (fun _ _ hL => hL) hH.applied
+  | sendSup n d =>
+    simp only [sexecCore] at h
+    obtain ⟨-, h⟩ := sreq_ok h; obtain ⟨-, h⟩ := sreq_ok h
+    cases h
+    exact seheld_mono hH rfl rfl rfl rfl (fun _ _ hL => hL) hH.applied
+  | sendD n =>
+    simp only [sexecCore] at h
+    obtain ⟨hn, h⟩ := sreq_ok h
+    cases h
+    refine ⟨hH.applied, hH.now, hH.hist, fun e he => ?_⟩
+    rcases List.mem_append.1 he with he | he
+    · exact hH.msgs e he
+    · rw [List.mem_singleton.1 he]; exact hH.now n (of_decide_eq_true hn)
+  | adopt n R =>
+    simp only [sexecCore] at h
+    obtain ⟨-, h⟩ := sreq_ok h; obtain ⟨-, h⟩ := sreq_ok h; obtain ⟨-, h⟩ := sreq_ok h
+    cases h
+    refine seheld_mono hH rfl rfl rfl rfl (fun m L hL => heldF_adoptR_mono ses n R m hL)
+      (fun m => ?_)
+    rw [appliedF_adoptR, heldF_adoptR]
+    by_cases hm : m = n
+    · subst hm; simp only [↓reduceIte]; exact List.mem_cons_self
+    · simp only [hm, ↓reduceIte]; exact hH.applied m
+  | hubSupAccept n S O e d A Δ =>
+    simp only [sexecCore] at h
+    obtain ⟨-, h⟩ := sreq_ok h; obtain ⟨-, h⟩ := sreq_ok h; obtain ⟨-, h⟩ := sreq_ok h
+    cases hs : execStep N ses.es (.hubPushAccept n S O e d) with
+    | error e => rw [hs] at h; cases h
+    | ok es' =>
+      rw [hs] at h
+      simp only at h
+      obtain ⟨-, h⟩ := sreq_ok h
+      cases h
+      have hF : (ses.takeRecs Δ).take ses.pruned = ses.recs.take ses.pruned :=
+        takeRecs_take ses Δ hok.pruned
+      have now : ∀ n, n < N → ses.heldPrefix n (ses.takeRecs Δ) ses.pruned = true := by
+        intro n hn
+        unfold SEState.heldPrefix
+        rw [hF]; exact hH.now n hn
+      refine ⟨hH.applied, now, fun e he n hn => ?_, hH.msgs⟩
+      rcases List.mem_cons.1 he with rfl | he
+      · exact now n hn
+      · exact hH.hist e he n hn
+  | hubPushRefuse n S O e d A Δ =>
+    simp only [sexecCore] at h
+    obtain ⟨-, h⟩ := sreq_ok h; obtain ⟨-, h⟩ := sreq_ok h; obtain ⟨-, h⟩ := sreq_ok h
+    cases h
+    exact hH
+  | prune k =>
+    simp only [sexecCore] at h
+    obtain ⟨-, h⟩ := sreq_ok h
+    obtain ⟨-, h⟩ := sreq_ok h
+    obtain ⟨hall, h⟩ := sreq_ok h
+    cases h
+    rw [List.all_eq_true] at hall
+    have now : ∀ n, n < N → ses.heldPrefix n ses.recs k = true :=
+      fun n hn => hall n (List.mem_range.2 hn)
+    refine ⟨hH.applied, now, fun e he n hn => ?_, hH.msgs⟩
+    rcases List.mem_cons.1 he with rfl | he
+    · exact now n hn
+    · exact hH.hist e he n hn
+
+/-- Every state reachable through `sexecStep` keeps `SEHeld`. -/
+theorem sexec_reachable_held {N : Nat} {ses : SEState} (h : SExecReachable N ses) :
+    SEHeld N ses := by
+  induction h with
+  | init => exact seheld_init N
+  | step a hr hs ih => exact sexec_held (sexec_reachable_ok hr) ih hs
+
+/-- **Every node the hub waits for has held the records it pruned**: every announcement,
+however old, passes the check `adopt` makes of it, that its node has held the announced records
+as far as they were pruned. So a node that took fewer records since, from an older
+announcement, takes the hub's records all the same, as the implementation does from the count
+and digest of the pruned ones; and every node has held the hub's records as far as it has
+pruned them now. -/
+theorem sexec_announced_held {N : Nat} {ses : SEState} (h : SExecReachable N ses) :
+    (∀ e ∈ ses.dmsgs, ses.heldPrefix e.1 e.2.1 e.2.2 = true) ∧
+      ∀ n, n < N → ses.heldPrefix n ses.recs ses.pruned = true :=
+  ⟨(sexec_reachable_held h).msgs, (sexec_reachable_held h).now⟩
 
 /-- Every state reachable through `sexecStep` is a state of the system with supersedes, so
 every theorem of `Supersede.lean` applies to it. -/

@@ -13,9 +13,17 @@ hub accepts is taken as a supersede (`hubSupAccept`), which adds a record only i
 operations the hub hasn't. A node takes the records the hub announces (`adopt`), once none of
 its heads is dropped by them.
 
-The hub prunes its first records (`prune`) once every node has taken them. The implementation
-keeps of them only what a push's records must match; here `recs` stays whole and stands for
-that, and the hub's guards check a head only against the records after the first `pruned`.
+The hub prunes its first records (`prune`) once every node has taken them, as the reports in
+its nodes' requests say: each a list of records its node held when it sent the request, maybe
+long before. The implementation keeps of them only what a push's records must match, and
+announces them only by their count and digest; here `recs` stays whole and stands for that, and
+the hub's guards check a head only against the records after the first `pruned`. So a node
+takes announced records only if it has held the ones the hub had pruned (`heldPrefix`): among
+its records now, or among records it took before an older announcement gave it fewer, since a
+node takes any announcement, however old. The hub prunes a whole list some node reported, so
+remembering each list it held, by count and digest, is enough for a node to check that. The
+implementation's reply carries only the records after those the node reported; one the node
+can't complete from what it holds now, it ignores, and the next one starts from the pruned.
 -/
 import Musubi.Exec
 import Musubi.Supersede
@@ -54,11 +62,14 @@ structure SEState where
   nodeD : List (Nat × List Nat)
   /-- The hub's records each node took last (default none). -/
   applied : List (Nat × List Rec)
+  /-- Every list of the hub's records each node has taken, its last among them (default: none
+  but the empty one). Having taken them, it has dropped what they drop. -/
+  held : List (Nat × List (List Rec))
   /-- Supersedes sent: the node, the records it took last, its dropped set, and the head of the
   push they ride on. -/
   sups : List (Nat × List Rec × List Nat × Nat)
-  /-- The hub's records, as announced to a node. -/
-  dmsgs : List (Nat × List Rec)
+  /-- The hub's records, as announced to a node, with how many of them it had pruned. -/
+  dmsgs : List (Nat × List Rec × Nat)
   deriving Repr
 
 def initSE : SEState where
@@ -68,6 +79,7 @@ def initSE : SEState where
   recHist := []
   nodeD := []
   applied := []
+  held := []
   sups := []
   dmsgs := []
 
@@ -75,6 +87,7 @@ namespace SEState
 
 def nodeDF (ses : SEState) (n : Nat) : List Nat := assocF ses.nodeD n []
 def appliedF (ses : SEState) (n : Nat) : List Rec := assocF ses.applied n []
+def heldF (ses : SEState) (n : Nat) : List (List Rec) := assocF ses.held n [[]]
 def recHistF (ses : SEState) (i : Nat) : List Rec := (assocF ses.recHist i ([], 0)).1
 def prunedHistF (ses : SEState) (i : Nat) : Nat := (assocF ses.recHist i ([], 0)).2
 
@@ -86,6 +99,11 @@ def hubPL (ses : SEState) : List Nat := flat (ses.recs.take ses.pruned)
 
 /-- What the hub remembers dropping: what it can check a head against. -/
 def remDL (ses : SEState) : List Nat := flat (ses.recs.drop ses.pruned)
+
+/-- Whether node `n` has held the first `p` records of `R`: what it checks of records announced
+with `p` of them pruned, which it knows only by their count and digest. -/
+def heldPrefix (ses : SEState) (n : Nat) (R : List Rec) (p : Nat) : Bool :=
+  (ses.heldF n).any fun L => recEq (L.take p) (R.take p)
 
 end SEState
 
@@ -104,7 +122,7 @@ def sabs (ses : SEState) : SState where
   nodeD := fun n => setP (ses.nodeDF n)
   sups := fun n T Δ h => ∃ e ∈ ses.sups,
     e.1 = n ∧ T = setP (flat e.2.1) ∧ Δ = setP e.2.2.1 ∧ h = e.2.2.2
-  dmsgs := fun n Δ => ∃ e ∈ ses.dmsgs, e.1 = n ∧ Δ = setP (flat e.2)
+  dmsgs := fun n Δ => ∃ e ∈ ses.dmsgs, e.1 = n ∧ Δ = setP (flat e.2.1)
 
 /-! ## Actions -/
 
@@ -127,7 +145,7 @@ inductive SAction
   remembers dropping. -/
   | hubPushRefuse (node : Nat) (ops objs : List Nat) (expected new : Nat)
       (applied : List Rec) (dropped : List Nat)
-  /-- The hub prunes its first `count` records, which every node has taken. -/
+  /-- The hub prunes its first `count` records, which every node has taken, now or before. -/
   | prune (count : Nat)
   deriving Repr
 
@@ -201,7 +219,8 @@ def SEState.pruneR (ses : SEState) (k : Nat) : SEState :=
 /-- Node `n` takes records `R`. -/
 def SEState.adoptR (ses : SEState) (n : Nat) (R : List Rec) : SEState :=
   { ses.setD n (union (ses.nodeDF n) (flat R)) with
-    applied := (n, R) :: ses.applied.filter (fun p => p.1 != n) }
+    applied := (n, R) :: ses.applied.filter (fun p => p.1 != n)
+    held := (n, R :: ses.heldF n) :: ses.held.filter (fun p => p.1 != n) }
 
 /-- One step, with every guard checked. Errors are `"<action>: <failed guard>"`. -/
 def sexecCore (N : Nat) (ses : SEState) : SAction → Except String SEState
@@ -231,11 +250,14 @@ def sexecCore (N : Nat) (ses : SEState) : SAction → Except String SEState
     sreq (!(flat (ses.appliedF n)).contains d)
       (fun _ => s!"sendSup: node {n} pushes {d}, which a record it took drops") fun _ =>
     .ok { ses with sups := ses.sups ++ [(n, ses.appliedF n, ses.nodeDF n, d)] }
-  | .sendD n => .ok { ses with dmsgs := ses.dmsgs ++ [(n, ses.recs)] }
+  | .sendD n =>
+    sreq (decide (n < N)) (fun _ => s!"sendD: node {n} out of range") fun _ =>
+    .ok { ses with dmsgs := ses.dmsgs ++ [(n, ses.recs, ses.pruned)] }
   | .adopt n R =>
     sreq (decide (n < N)) (fun _ => s!"adopt: node {n} out of range") fun _ =>
-    sreq (ses.dmsgs.any fun e => e.1 == n && recEq e.2 R)
-      (fun _ => s!"adopt: records {repr R} not announced to node {n}") fun _ =>
+    sreq (ses.dmsgs.any fun e => e.1 == n && recEq e.2.1 R && ses.heldPrefix n e.2.1 e.2.2)
+      (fun _ => s!"adopt: records {repr R} not announced to node {n}, or announced with \
+        records pruned that it never took") fun _ =>
     sreq ((ses.es.nodeOf n).heads.all fun h => !(flat R).contains h)
       (fun _ => s!"adopt: records drop a head of node {n}") fun _ =>
     .ok (ses.adoptR n R)
@@ -268,8 +290,8 @@ def sexecCore (N : Nat) (ses : SEState) : SAction → Except String SEState
       (fun _ => s!"prune: pruned {ses.pruned} records already, more than {k}") fun _ =>
     sreq (decide (k ≤ ses.recs.length))
       (fun _ => s!"prune: {k} records, of {ses.recs.length}") fun _ =>
-    sreq ((List.range N).all fun n => recEq ((ses.appliedF n).take k) (ses.recs.take k))
-      (fun _ => s!"prune: a node hasn't taken the first {k} records") fun _ =>
+    sreq ((List.range N).all fun n => ses.heldPrefix n ses.recs k)
+      (fun _ => s!"prune: a node has never taken the first {k} records") fun _ =>
     .ok (ses.pruneR k)
 
 /-- The executable step. -/

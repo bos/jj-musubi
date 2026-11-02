@@ -694,8 +694,9 @@ Theorems (`Musubi/ExecSound.lean`):
 
 With supersedes (`Musubi/SupersedeExec.lean`, `Musubi/SupersedeExecSound.lean`), `SEState`
 adds to an `EState` the hub's records, in the order it took them, and how many of the first it
-has pruned, with a ghost copy of both as of each sequence number, each node's dropped set and
-the records it took last, and the supersedes and announcements in flight.
+has pruned, with a ghost copy of both as of each sequence number, each node's dropped set, the
+records it took last and every list of records it has taken, and the supersedes and
+announcements in flight, each announcement with how many of its records were pruned.
 `sabs` maps it to an `SState`. `sexecStep` runs every action of `execStep`, checking `HeadOK`
 and `HeadsOK` too, and the actions of `SStep`:
 
@@ -704,6 +705,10 @@ and `HeadsOK` too, and the actions of `SStep`:
 - `sexec_allPruned`: every state reached has `AllPruned`, since the hub prunes only records
   every node has taken, now and as of any head it can go back to (`SEPruned`), so
   `eventually_convergesS` applies to it.
+- `sexec_announced_held`: every node the hub waits for has held the records it pruned. Every
+  announcement, however old, agrees on its pruned records with a list its node has taken
+  (`SEHeld`), so `adopt` takes it: a node that took fewer records since takes the hub's all
+  the same.
 - `sexec_sound : SEOK ses → sexecStep N ses a = .ok ses' → SRStep N (sabs ses) (sabs ses') ∨
   sabs ses' = sabs ses`, for every action, and `sabs_initSE`. So `sexec_reachable` and
   `sexec_inv`: every state reached is `SRReachable`, and `SInv` holds in it, as do the
@@ -722,9 +727,11 @@ union. `regrouped_records_conformance` reaches this through the core and oracle.
 record-only adoption omitted by that policy. Set-based progress may increase record debt,
 so it comes last. `recordLag_adopt_lt` and `recordLag_le` bound repairs by the number of
 machines while the hub is fixed. `record_finish` proves finite completion from abstract
-convergence, preserving the entire abstract state. `reconcile_executable` checks the
-announced-record adoption and its head guard. `NodeCore` already follows this rule: it
-adopts differing record lists even with no missing drop, opening the executable push guard.
+convergence where every node has dropped what the hub pruned (`AllPruned`, as
+`sexec_allPruned` gives), preserving the entire abstract state. `reconcile_executable` checks
+the announced-record adoption, its head guard and its pruned-prefix check. `NodeCore` already
+follows this rule: it adopts differing record lists even with no missing drop, opening the
+executable push guard.
 The oracle/harness check both record debt and concrete convergence independently of the
 set measure. This does not prove the asynchronous reply/retry scheduling bridge (#78) or
 collision resistance of record digests; see [conformance.md, "Liveness"](
@@ -736,10 +743,11 @@ accepts as a supersede, carrying the node's dropped set and the records the node
 record only for what the push drops that it hadn't. It refuses a push whose node's records
 aren't its own, changing nothing (`hubPushRefuse`), since that node's ids aren't the hub's, and
 one whose new head is among the records it remembers or the push drops beyond its records. A
-node takes the hub's records as announced (`sendD`, `adopt`), and the records it took last
-become those. The hub prunes its first records (`prune`) once every node's records start with
-them; `recs` stays whole, standing for what a push's records must match, and the hub checks a
-head only against the records after those.
+node takes the hub's records as announced (`sendD`, to a node of the hive, `adopt`), and the
+records it took last become those, if it has held the announced records as far as they were
+pruned. The hub prunes its first records (`prune`) once every node has held them; `recs` stays
+whole, standing for what a push's records must match, and the hub checks a head only against
+the records after those.
 
 `PresenceExec.lean` does the same for presence: `presentB` and `latestB` are proved to compute
 `Present` and `UMax` (`presentB_iff`, `mem_latestB`), and the oracle answers presence requests

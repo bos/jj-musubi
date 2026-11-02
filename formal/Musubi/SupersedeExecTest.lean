@@ -2,11 +2,12 @@
 Smoke test of the executable model with supersedes, checked at build time: node 0 pushes two
 operations, abandons the first, and publishes the abandon with a fix-up operation; node 1
 fetches the hub's head with its records, catches up and takes them; then node 0 takes them, the
-hub prunes them, and takes a push and another record after. Then the guards: no head abandoned,
-no push accepted whose records aren't the hub's, or to a head it or the push drops, nothing
-pruned that a node hasn't taken, no op named that a record its node took drops, and no stale
-push accepted to a head the hub has pruned. `test/smoke.jsonl` replays the run through the
-oracle.
+hub prunes them, and takes a push and another record after. A node that takes fewer records
+from an announcement older than the prune takes the hub's again. Then the guards: no head
+abandoned, no push accepted whose records aren't the hub's, or to a head it or the push drops,
+nothing pruned that a node has never taken, no op named that a record its node took drops,
+and no stale push accepted to a head the hub has pruned. `test/smoke.jsonl` replays the run
+through the oracle.
 -/
 import Musubi.SupersedeExecSound
 import Musubi.ExecTest
@@ -84,13 +85,23 @@ def afterPruning : List SAction :=
   | .ok ses => ses.recs == [[1]] && ses.pruned == 1
   | .error _ => false
 
--- The hub prunes nothing a node hasn't taken: node 0 published the record, but hasn't taken it;
--- and node 1 hasn't taken the second.
+-- Node 1, told of the hub's records before there were any, takes that announcement after the
+-- prune, and holds none of the records; then it takes the hub's, having held the pruned one.
+#guard match srun 2 initSE (pushes ++ [.sendD 1] ++ supersede ++ catchUp ++ pruning ++
+    [.adopt 1 [], .sendD 1, .adopt 1 [[1]]]) with
+  | .ok ses => ses.appliedF 1 == [[1]] && ses.pruned == 1 && ses.sconvergedE 2
+  | .error _ => false
+
+-- A node has held no records but none, to begin with.
+#guard !(initSE.heldPrefix 0 [[1]] 1) && initSE.heldPrefix 0 [[1]] 0
+
+-- The hub prunes nothing a node has never taken: node 0 published the record, but hasn't taken
+-- it; and node 1 hasn't taken the second.
 #guard errorOf (srun 2 initSE (pushes ++ supersede ++ catchUp ++ [.prune 1])) ==
-  "prune: a node hasn't taken the first 1 records"
+  "prune: a node has never taken the first 1 records"
 #guard errorOf (srun 2 initSE (pushes ++ supersede ++ catchUp ++ pruning ++ afterPruning ++
     [.sendD 0, .adopt 0 [[1], [4]], .prune 2])) ==
-  "prune: a node hasn't taken the first 2 records"
+  "prune: a node has never taken the first 2 records"
 
 -- No node pushes an operation that a record it took drops.
 #guard errorOf (srun 2 initSE (pushes ++ supersede ++ catchUp ++ [.sendSup 1 1])) ==

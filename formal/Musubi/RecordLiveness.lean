@@ -98,15 +98,19 @@ theorem recordPolicy_wf : WellFounded
     (InvImage.wf (recordMeasure N) recordLex_wf)
 
 /-- An actual executable adoption after announcing current records, with exactly the head
-check used by NodeCore's prepare/adopt path. -/
+check used by NodeCore's prepare/adopt path, and the check that the node has held the records
+the hub pruned, as every node has (`sexec_announced_held`). -/
 theorem reconcile_executable {N n : Nat} {ses : SEState} (hn : n < N)
     (hok : ses.es.parOK = true)
+    (hheld : ses.heldPrefix n ses.recs ses.pruned = true)
     (hh : ∀ h, h ∈ (ses.es.nodeOf n).heads → h ∉ ses.hubDL) :
-    sexecStep N { ses with dmsgs := ses.dmsgs ++ [(n, ses.recs)] }
+    sexecStep N { ses with dmsgs := ses.dmsgs ++ [(n, ses.recs, ses.pruned)] }
       (.adopt n ses.recs) =
-      .ok { ses.adoptR n ses.recs with dmsgs := ses.dmsgs ++ [(n, ses.recs)] } := by
+      .ok { ses.adoptR n ses.recs with dmsgs := ses.dmsgs ++ [(n, ses.recs, ses.pruned)] } := by
+  simp only [SEState.heldPrefix, SEState.heldF] at hheld
   simp [sexecStep, sexecCore, sreq, hok, hn, List.any_append, recEq_self,
-    SEState.hubDL, SEState.adoptR, SEState.setD, SEState.nodeDF] at *
+    SEState.hubDL, SEState.adoptR, SEState.setD, SEState.nodeDF, SEState.heldPrefix,
+    SEState.heldF, hheld] at *
   exact hh
 
 /-- At abstract convergence every mismatch is enabled: all drops are local and the sole

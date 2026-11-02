@@ -234,10 +234,11 @@ set-based measure components, but removes one record mismatch. No state is injec
 
 `RecordLiveness.lean` proves `recordMeasure_decreases` and `recordPolicy_wf` for projected
 `SPStepR` steps and current-record adoptions with no missing drop. `record_finish` proves
-that abstract convergence permits finite completion to ordered-record agreement without
-changing the abstract state. At that point every head is the hub's surviving head, so the
-adoption guard is satisfied. There is at most one unit of debt per machine (`recordLag_le`),
-and each such adoption removes one; with the hub fixed there are at most N repairs.
+that abstract convergence, where every node has dropped what the hub pruned, permits finite
+completion to ordered-record agreement without changing the abstract state. At that point
+every head is the hub's surviving head, so the adoption guard is satisfied. There is at most
+one unit of debt per machine (`recordLag_le`), and each such adoption removes one; with the hub
+fixed there are at most N repairs.
 `reconcile_executable` checks the actual executable adoption after a current announcement.
 
 The Rust correspondence is `NodeCore::note_announced` reconstructing the current records

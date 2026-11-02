@@ -356,7 +356,7 @@ operations `jj op abandon` removed (the hub's log says which)
 ```
 
 The hub checks everything it takes, and refuses this machine's work, every time it syncs, for
-one of two reasons, which the hub's log names ([above](#troubleshooting)): something the work
+one of two reasons, which the hub's log names (see the top of this page): something the work
 needs didn't reach it, or the work brings back an operation that a `jj op abandon` removed
 from the hive. Either is a bug: please report it at
 <https://github.com/bos/jj-musubi/issues>, with this machine's `daemon.log` and the hub's log.

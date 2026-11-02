@@ -763,3 +763,10 @@ cargo nextest run -p musubi-sync --test races \
 Restore the source before running normal checks. The native advance campaign's coverage and
 failure-path controls are recorded with its
 [conformance boundary](conformance.md#a-repository-advance-that-also-merges).
+
+## Measuring assurance
+
+[The assurance network](assurance.md) records per-test Rust execution, oracle calls, fuzz
+checkpoints and mutation results, and rebuilds the code graph with a deterministic layout.
+Its collector passes `LLVM_PROFILE_FILE` through test subprocess environments; normal test
+runs stay hermetic.

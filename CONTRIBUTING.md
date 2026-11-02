@@ -22,7 +22,7 @@ You need:
 - Rust 1.97.1 or later, and `just`.
 - `jj` 0.46.0 and `git` on `PATH`: the tests run them.
 - `cargo-nextest`, `cargo-deny`, `cargo-machete`, and `typos`, for `just check`.
-- Python 3.9 or newer as `python3`, for the fuzz runner and its tests in `just check`.
+- Python 3.11 or newer as `python3`, for the fuzz runner and assurance checks in `just check`.
 - Lean, with `lake`, on `PATH`, for the proofs and the conformance oracle. `elan` installs
   the version `formal/lean-toolchain` names.
 
@@ -47,6 +47,11 @@ split recognizes rustfmt-formatted top-level `cfg(test)`, `cfg(all(test, ...))`,
 `cfg(any(test, fuzzing))` (in either order) and `cfg(kani)` items, and follows their out-of-line
 test modules. Other conditional code stays with its file. Embedded examples in documentation
 aren't code in this report.
+
+## Assurance network
+
+[Reproducing the assurance network](docs/internals/assurance.md) gives the collection, layout
+and offline rendering commands. `just assurance-check` checks the collector and layout.
 
 ## Checks
 

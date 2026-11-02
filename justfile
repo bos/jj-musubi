@@ -1,5 +1,5 @@
 # The full local check. AGENTS.md says when to run it.
-check: fmt-check lint oracle test docs deny machete typos fuzz-runner-test
+check: fmt-check lint oracle test docs deny machete typos fuzz-runner-test assurance-check
 
 # Build musubi: target/debug/musubi.
 dev:
@@ -210,3 +210,17 @@ mutants-adapter *args: oracle
         --test-tool nextest --build-timeout 600 --timeout 120 \
         --output mutants.out-adapter "$@" \
         -- --max-fail 1:immediate --lib --test races -E "$filter"
+
+# Collect a new assurance capture; output directories must not contain an earlier run.
+assurance-tests out:
+    python3 contrib/assurance/assurance.py tests --out {{quote(out)}}
+
+assurance-fuzz out:
+    python3 contrib/assurance/assurance.py fuzz --out {{quote(out)}}
+
+assurance-mutation out:
+    python3 contrib/assurance/assurance.py mutation --out {{quote(out)}}
+
+# Check the assurance graph, evidence and renderer; see docs/internals/assurance.md.
+assurance-check:
+    python3 -m unittest discover -s contrib/assurance -p 'test_*.py'

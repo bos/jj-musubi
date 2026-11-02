@@ -101,3 +101,6 @@ The crates, from the bottom up:
 
 Outside the crates, [formal/](../../formal) holds the Lean model,
 [fuzz/](../../fuzz) the fuzz targets, and [bench/](../../bench) the benchmarks.
+
+[The assurance network](assurance.md) collects execution data and regenerates its code graph.
+[Its renderer](assurance-renderer.md) describes the layout, visual encodings and interaction.

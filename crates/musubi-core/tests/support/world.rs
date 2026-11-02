@@ -88,6 +88,7 @@ struct NodeView {
     heads: BTreeSet<Op>,
     known: (u64, Op),
     dropped: BTreeSet<Op>,
+    applied: Vec<Vec<Op>>,
     crash_pending: bool,
 }
 
@@ -922,9 +923,9 @@ impl World {
     ///
     /// With an oracle, it checks the policy against the liveness proofs as it goes
     /// (docs/internals/conformance.md, "Liveness"): each exchange that changes a node's
-    /// operations, heads or `known` makes the model's measures fall, and one that doesn't
-    /// leaves them where they were or lower. `measure` is checked only while the hub has
-    /// never gone back.
+    /// operations, heads, `known`, dropped set or applied records makes the refined measure
+    /// fall, and one that doesn't leaves it where it was or lower. The older measures are
+    /// checked only before drops, and `measure` only before the hub has gone back too.
     pub fn quiesce(&mut self) {
         self.trace.push(json!({"marker": "quiesce"}));
         let mut measure = self.measure();
@@ -973,8 +974,25 @@ impl World {
     }
 
     /// The oracle's measures of the current state, with an oracle.
-    fn measure(&mut self) -> Option<Measure> {
-        self.oracle.as_mut().map(Oracle::measure)
+    pub fn measure(&mut self) -> Option<Measure> {
+        let measure = self.oracle.as_mut().map(Oracle::measure);
+        if let Some(measure) = &measure {
+            let record_lag = self
+                .repos
+                .iter()
+                .filter(|repo| repo.applied != self.hub.records)
+                .count() as u64;
+            assert_eq!(
+                measure.smeasure[8], record_lag,
+                "record lag differs from Lean"
+            );
+            assert_eq!(
+                measure.converged,
+                self.converged(),
+                "convergence differs from Lean"
+            );
+        }
+        measure
     }
 
     /// The parts of a node the measures read, which an exchange that changes the node
@@ -986,13 +1004,15 @@ impl World {
             heads: repo.heads.clone(),
             known: *self.cores[node].known(),
             dropped: repo.dropped.clone(),
+            applied: repo.applied.clone(),
             crash_pending: repo.crash_before_objects,
         })
     }
 
     /// After one of `node`'s exchanges in `quiesce`: the measure falls if the exchange
-    /// changed the node, and does not rise if it didn't. `measure` falls only while
-    /// the hub has never gone back; `rmeasure` falls whether or not it has.
+    /// changed the node, and does not rise if it didn't. Only the record-aware measure must
+    /// fall for an exchange that changes applied records alone. The older measures apply
+    /// only before drops, and `measure` only before the hub has gone back too.
     fn check_measure(
         &mut self,
         node: usize,
@@ -1011,6 +1031,7 @@ impl World {
         }
         let changed = (&before.lops, &before.heads, before.known, &before.dropped)
             != (&after.lops, &after.heads, after.known, &after.dropped);
+        let records_changed = before.applied != after.applied;
         let fell = |old: &Vec<u64>, new: &Vec<u64>| {
             if changed { new < old } else { new <= old }
         };
@@ -1029,9 +1050,18 @@ impl World {
             new.rmeasure,
             self.trace
         );
+        let what = if changed || records_changed {
+            "fall"
+        } else {
+            "stay or fall"
+        };
         assert!(
-            fell(&old.smeasure, &new.smeasure),
-            "node {node}'s exchange did not make smeasure {what}: {:?} to {:?}\ntrace: {:#?}",
+            if changed || records_changed {
+                new.smeasure < old.smeasure
+            } else {
+                new.smeasure <= old.smeasure
+            },
+            "node {node}'s exchange did not make the record measure {what}: {:?} to {:?}\ntrace: {:#?}",
             old.smeasure,
             new.smeasure,
             self.trace

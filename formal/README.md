@@ -76,6 +76,7 @@ is `formal/.lake/build/bin/oracle`.
 | `Musubi/ExecTest.lean` | `#guard` smoke tests of `execStep`, checked at build time. |
 | `Musubi/SupersedeExec.lean` | The executable model with supersedes: `SEState`, which adds the hub's records and each node's dropped set, the `SAction`s, `sexecStep`, and `smeasure` computed (`smeasureE`, `sconvergedE`). |
 | `Musubi/SupersedeExecSound.lean` | Soundness of `sexecStep` against `SRStep`, and of those computations. |
+| `Musubi/RecordLiveness.lean` | Record agreement and finite reconciliation after convergence. |
 | `Musubi/SupersedeExecTest.lean` | `#guard` smoke tests of `sexecStep`, checked at build time. |
 | `Musubi/Refs.lean` | Per-machine refs, for one git ref: imports, exports, merges, conflicted remote bookmarks, and `jj undo` and `jj op restore`. |
 | `Musubi/Presence.lean` | Which copies a hive shows. |
@@ -591,8 +592,27 @@ announcements in flight. `sabs` maps it to an `SState`. `sexecStep` runs every a
   sabs ses' = sabs ses`, for every action, and `sabs_initSE`. So `sexec_reachable` and
   `sexec_inv`: every state reached is `SRReachable`, and `SInv` holds in it, as do the
   theorems that superseded ids never come back.
-- `smeasureE_eq` and `sconvergedE_iff`: `smeasure` and `SConverged`, which the oracle's
-  `measure` reply carries as `smeasure` and `converged`.
+- `smeasureE_eq` and `sconvergedE_iff`: the set-based `smeasure` and `SConverged`.
+- `RecordLiveness.lean` adds `RecordConverged`, requiring the ordered applied records to
+  match the hub's too, and `recordMeasure`: `(smeasure, recordLagE)`. `recordMeasureE_eq`
+  and `recordConvergedE_iff` connect their computations to the oracle, which returns the
+  first eight components as `smeasure`, the last as `recordLag`, and the stronger
+  convergence check as `converged`.
+
+The set abstraction alone does not establish record agreement: after a remake, a machine
+may republish two old drops as one record while another retains two records with the same
+union. `regrouped_records_conformance` reaches this through the core and oracle.
+`recordMeasure_decreases` and `recordPolicy_wf` cover projected `SPStepR` progress and the
+record-only adoption omitted by that policy. Set-based progress may increase record debt,
+so it comes last. `recordLag_adopt_lt` and `recordLag_le` bound repairs by the number of
+machines while the hub is fixed. `record_finish` proves finite completion from abstract
+convergence, preserving the entire abstract state. `reconcile_executable` checks the
+announced-record adoption and its head guard. `NodeCore` already follows this rule: it
+adopts differing record lists even with no missing drop, opening the executable push guard.
+The oracle/harness check both record debt and concrete convergence independently of the
+set measure. This does not prove the asynchronous reply/retry scheduling bridge (#78) or
+collision resistance of record digests; see [conformance.md, "Liveness"](
+../docs/internals/conformance.md#liveness).
 
 It is stricter than `SRStep` where the implementation is. The hub takes every push it
 accepts as a supersede, carrying the node's dropped set and the records the node took last

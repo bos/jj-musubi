@@ -90,7 +90,11 @@ impl Oracle {
         Measure {
             measure: numbers(&reply, "measure"),
             rmeasure: numbers(&reply, "rmeasure"),
-            smeasure: numbers(&reply, "smeasure"),
+            smeasure: {
+                let mut measure = numbers(&reply, "smeasure");
+                measure.push(reply["recordLag"].as_u64().expect("record lag"));
+                measure
+            },
             converged: reply["converged"] == true,
         }
     }
@@ -118,9 +122,9 @@ pub struct Measure {
     /// `rmeasure` of `Regress.lean`, which falls whether or not it has, while no node has
     /// dropped anything.
     pub rmeasure: Vec<u64>,
-    /// `smeasure` of `Supersede.lean`, which falls whatever nodes drop.
+    /// `recordMeasureE`: `smeasure` followed by the number of record mismatches.
     pub smeasure: Vec<u64>,
-    /// `SConverged`.
+    /// `recordConvergedE`: set-based convergence and ordered-record agreement.
     pub converged: bool,
 }
 

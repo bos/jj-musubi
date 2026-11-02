@@ -615,6 +615,46 @@ fn concurrent_supersedes_conformance() {
     assert_eq!(world.hub_records().len(), 2);
 }
 
+/// A remake lets a machine republish two drops as one record. Another machine still has
+/// the same dropped union in two records: adoption changes only its ordered records.
+#[test]
+fn regrouped_records_conformance() {
+    let mut world = World::new(2, Some(Oracle::spawn()));
+    world.user_op(0, 0, 0);
+    world.user_op(0, 1, 0);
+    world.user_op(0, 2, 0);
+    world.quiesce();
+    world.op_abandon(0, vec![1]);
+    world.quiesce();
+    world.op_abandon(0, vec![2]);
+    world.quiesce();
+    assert_eq!(world.hub_records(), [vec![1], vec![2]]);
+
+    world.remake();
+    // Only machine 0 talks to the remade hub, and republishes both drops at once.
+    world.poll_now(0);
+    for _ in 0..20 {
+        world.exchange(0, 0);
+        if world.hub_records() == [vec![1, 2]] {
+            break;
+        }
+    }
+    assert_eq!(world.hub_records(), [vec![1, 2]]);
+    assert_eq!(world.dropped(1), world.dropped(0));
+    world.poll_now(1);
+    let before = world.measure().unwrap().smeasure;
+    let drops = world.dropped(1).clone();
+    let trace = world.trace.len();
+    world.node_step(1, 0);
+    assert_eq!(world.trace[trace]["kind"], "adopt");
+    assert_eq!(world.dropped(1), &drops);
+    let after = world.measure().unwrap().smeasure;
+    assert_eq!(&before[..8], &after[..8]);
+    assert_eq!(after[8] + 1, before[8]);
+    world.quiesce();
+    world.check_invariants();
+}
+
 /// A push whose node hasn't taken the hub's latest record is refused, even from the hub's
 /// head: its ids aren't the hub's. The node never sends one knowingly, so the test answers
 /// one itself.

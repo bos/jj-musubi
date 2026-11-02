@@ -195,12 +195,15 @@ which writes the fix-up first, as musubi does), with the measure `smeasure`.
 `upOps` and `upObjs` of the abstracted state (`measureE_eq`, `rmeasureE_eq`,
 `convergedE_iff`, `mem_upOpsL`, `mem_upObjsL`, in `ExecSound.lean`); and
 `SupersedeExec.lean` computes `smeasureE` and `sconvergedE`, proved equal to `smeasure` and
-`SConverged` (`smeasureE_eq`, `sconvergedE_iff`). The oracle answers with them:
+`SConverged` (`smeasureE_eq`, `sconvergedE_iff`). `recordMeasureE` appends `recordLagE`, the
+number of nodes whose ordered applied records differ from the hub's. `RecordLiveness.lean`
+proves its correspondence (`recordMeasureE_eq`) and the stronger convergence check
+(`recordConvergedE_iff`). The oracle answers with:
 
 ```json
 {"op": "measure"}
 {"ok": true, "measure": [1, 0, 0, 0, 0], "rmeasure": [1, 0, 0, 0, 0, 0],
- "smeasure": [0, 0, 1, 0, 0, 0, 0, 0], "converged": false}
+ "smeasure": [0, 0, 1, 0, 0, 0, 0, 0], "recordLag": 0, "converged": false}
 {"op": "upload", "node": 0, "new": 1}
 {"ok": true, "ops": [1], "objs": [10]}
 ```
@@ -210,8 +213,31 @@ merges)`; `rmeasure` is `(nodes not good, inconsistent nodes, Σ staleness of co
 Σ missing ops, Σ pending advances, Σ pending merges)`; `smeasure` is `(drops not yet the
 hub's, Σ the hub's drops not yet a node's)` and then `rmeasure`. All compare
 lexicographically; [formal/README.md](../../formal/README.md) defines their terms.
-`converged` is `SConverged`: the protocol has converged, and every node has the hub's dropped
-set.
+`converged` is `RecordConverged`: `SConverged` and ordered-record agreement. The harness
+compares `(smeasure, recordLag)` lexicographically. Dropped-set progress may increase record
+lag; an adoption that changes only applied records must decrease it.
+
+Equal dropped unions do not imply equal records. `regrouped_records_conformance` creates
+`[[1],[2]]`, remakes the hub, and has one machine republish both drops as `[[1,2]]`. Another
+machine still has the original two records. Its next adoption changes none of the eight
+set-based measure components, but removes one record mismatch. No state is injected.
+
+`RecordLiveness.lean` proves `recordMeasure_decreases` and `recordPolicy_wf` for projected
+`SPStepR` steps and current-record adoptions with no missing drop. `record_finish` proves
+that abstract convergence permits finite completion to ordered-record agreement without
+changing the abstract state. At that point every head is the hub's surviving head, so the
+adoption guard is satisfied. There is at most one unit of debt per machine (`recordLag_le`),
+and each such adoption removes one; with the hub fixed there are at most N repairs.
+`reconcile_executable` checks the actual executable adoption after a current announcement.
+
+The Rust correspondence is `NodeCore::note_announced` reconstructing the current records
+from a fetch and `NodeCore::step` taking them before further work. Its comparison is of the
+ordered lists, with no missing-drop condition. `prepare_records` checks the same head guard,
+and `adopt` replaces the applied records even when the dropped union is unchanged. The
+hub's `recEq` push guard is then open. As elsewhere, record digests are treated as identifying
+the record lists; this argument does not prove collision resistance. Delivering a fresh
+honest fetch and scheduling the policy fairly remain assumptions; the asynchronous
+reply/retry bridge is tracked in [#78](https://github.com/bos/jj-musubi/issues/78).
 
 The conformance test checks:
 
@@ -221,16 +247,17 @@ The conformance test checks:
   asks for the measures after each exchange: a node's `Fetch` and the reply, or one policy
   step and the replies to what it sent. An exchange that changes the node's operations,
   heads, `known` or dropped set must make the measure fall, and any other must leave it
-  where it was or lower. `smeasure` must do so in every case; `rmeasure` only while no node
+  where it was or lower. A change only to applied records must strictly decrease the refined
+  measure too. `(smeasure, recordLag)` must do so in every case; `rmeasure` only while no node
   has dropped anything, and `measure` only while the hub has never gone back too, since its
   proof needs every state to be `Reachable`. Each node's turn starts with a
   `Fetch`, whose reply puts its `known` in the hub's current history before it realizes
   anything, as `PStepR` requires. A crash the test armed before quiescing, which happens
   when the node next stages a `Fetched` reply, is not a policy step, so the check starts
   afresh after it.
-- Once the Rust side has converged, so has the oracle's state. The states already agree
-  after every action, so this cross-checks `sconvergedE`. The Rust side converges only once
-  every node has taken the hub's records, in order, too.
+- Each measure request cross-checks `recordLagE` against the Rust record lists and
+  `recordConvergedE` against concrete convergence, in both directions. The states already
+  agree after every action; neither side may declare convergence with records still unequal.
 
 The measure falling shows that the policy's steps are ones the termination proof covers, not
 that each is a `PStep`. Hub-only work, such as storing a rejected push's upload, changes
@@ -320,6 +347,7 @@ Deliberately broken versions of the core, each caught:
 | Hub accepts a `Push` without checking the closure is stored | invariants (HubClosed) and conformance |
 | Hub accepts a `Push` without checking ancestry | invariants and conformance |
 | Hub accepts a `Push` when `head ≠ expected` | invariants and conformance |
+| Node ignores fetched record regrouping when dropped unions agree | `regrouped_records_conformance`: the expected record-only adoption becomes a realization |
 | Node realizes an operation before its parents | invariants and conformance |
 | Node realizes an operation before its objects arrive | invariants and conformance |
 | Node learns a head whose `seq` equals the one it knows | conformance only: harmless, but not a model step |

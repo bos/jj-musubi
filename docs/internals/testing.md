@@ -136,8 +136,11 @@ node's policy until nothing changes. The test then checks liveness: every node's
 `{hub.head}`, and every operation created is in its ancestry, after false replies too. A bound
 on quiescence steps turns livelock into a failure. While quiescing, `conformance` also asks the
 Lean model for its liveness measures after each exchange, and requires them to fall whenever
-the exchange changes the node, and every push the policy sends to upload what the liveness
-proofs assume ([conformance.md, "Liveness"](conformance.md#liveness)).
+the exchange changes the node, including its ordered applied records. The refined measure
+appends the number of record mismatches to the eight set-based components.
+`regrouped_records_conformance` reaches a remake and republication that preserves the dropped
+union but changes record grouping, then checks the record-only adoption's strict decrease.
+Every push the policy sends must upload what the liveness proofs assume ([conformance.md, "Liveness"](conformance.md#liveness)).
 
 ## Example tests
 

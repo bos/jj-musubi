@@ -391,7 +391,8 @@ def measureReply (N : Nat) (ses : SEState) : Json :=
   Json.mkObj [("ok", Json.bool true), ("measure", toJson #[a, b, c, d, e]),
     ("rmeasure", toJson #[a', b', c', d', e', f']),
     ("smeasure", toJson #[p, l, a', b', c', d', e', f']),
-    ("converged", Json.bool (ses.sconvergedE N))]
+    ("recordLag", toJson (ses.recordLagE N)),
+    ("converged", Json.bool (ses.recordConvergedE N))]
 
 /-- What node `n` uploads with a policy `Push` of `new`: `upOps` and `upObjs`. -/
 def uploadReply (es : EState) (n new : Nat) : Json :=

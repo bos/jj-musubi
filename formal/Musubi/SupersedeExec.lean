@@ -253,6 +253,18 @@ def smeasureE (N : Nat) (ses : SEState) :
 def sconvergedE (N : Nat) (ses : SEState) : Bool :=
   ses.es.convergedE N && (List.range N).all fun n => seteq (ses.nodeDF n) ses.hubDL
 
+/-- Nodes whose ordered applied records differ from the hub's, even with equal dropped sets. -/
+def recordLagE (N : Nat) (ses : SEState) : Nat :=
+  sumN N fun n => if recEq (ses.appliedF n) ses.recs then 0 else 1
+
+/-- The set-based measure, followed by record reconciliation. Earlier progress may increase
+record lag; a record-only adoption must decrease it. -/
+def recordMeasureE (N : Nat) (ses : SEState) := (ses.smeasureE N, ses.recordLagE N)
+
+/-- Concrete convergence also requires the ordered records used by the push guard. -/
+def recordConvergedE (N : Nat) (ses : SEState) : Bool :=
+  ses.sconvergedE N && (List.range N).all fun n => recEq (ses.appliedF n) ses.recs
+
 end SEState
 
 end Musubi.Exec

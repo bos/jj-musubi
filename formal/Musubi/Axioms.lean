@@ -10,6 +10,7 @@ import Musubi.Chunks
 import Musubi.Scenario
 import Musubi.ExecSound
 import Musubi.SupersedeExecSound
+import Musubi.RecordLiveness
 import Musubi.RegressScenario
 import Musubi.Refs
 import Musubi.Presence
@@ -111,6 +112,14 @@ open Musubi
 #print axioms Exec.sexec_inv
 #print axioms Exec.smeasureE_eq
 #print axioms Exec.sconvergedE_iff
+-- Ordered-record reconciliation
+#print axioms Exec.recordMeasureE_eq
+#print axioms Exec.recordConvergedE_iff
+#print axioms Exec.recordMeasure_decreases
+#print axioms Exec.recordPolicy_wf
+#print axioms Exec.reconcile_executable
+#print axioms Exec.record_progress_at_convergence
+#print axioms Exec.record_finish
 -- Per-machine and shared view state
 #print axioms Refs.noSpuriousRevert
 #print axioms Refs.import_moves_only_after_git

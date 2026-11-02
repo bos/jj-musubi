@@ -9,6 +9,11 @@ use std::time::SystemTime;
 
 use jj_lib::object_id::ObjectId as _;
 use musubi_jj::node::NodeRepo;
+use musubi_jj::objects::GitObjects;
+use musubi_jj::objects::GitStore;
+use musubi_jj::objects::ObjectError;
+use musubi_jj::objects::ObjectStore;
+use musubi_jj::objects::bundle::BundleWriter;
 use musubi_jj::op_id::CanonicalOp;
 use musubi_jj::op_id::LocalOp;
 use musubi_jj::ref_locks;
@@ -295,6 +300,35 @@ fn change_ids_without_headers_survive_transfer() {
     sync(&a_node, &mut b_node, &a_head);
     let on_b = b.jj(&["log", "--no-graph", "-r", &commit_id, "-T", template]);
     assert_eq!(on_b, on_a);
+}
+
+/// Extras for a commit id of another length than a git commit's, as a buggy or hostile peer
+/// can send, are refused with their bundle: a node's table of extras would panic on them, and
+/// a hub would keep a file named after them.
+#[test]
+fn extras_for_an_id_of_another_length_are_refused() {
+    let env = TestEnv::new();
+    let node = open(&env.init_repo("alpha"));
+    let (git, hub_git, hub_extras) = (
+        Path::new("git"),
+        env.root().join("hub/git"),
+        env.root().join("hub/extras"),
+    );
+    GitObjects::init_bare(git, &hub_git).unwrap();
+    std::fs::create_dir_all(&hub_extras).unwrap();
+    let hub = GitStore::for_hub(git, &hub_git, &hub_extras);
+    let stores: [Box<dyn ObjectStore + '_>; 2] = [node.object_store().unwrap(), Box::new(hub)];
+    for len in [1, 32] {
+        let bundle = env.root().join(format!("extras-{len}"));
+        let mut writer = BundleWriter::create(&bundle).unwrap();
+        writer.extras(&vec![1; len], b"extras").unwrap();
+        writer.finish().unwrap();
+        for store in &stores {
+            let err = store.import(&bundle, &[], &[]).unwrap_err();
+            assert!(matches!(err, ObjectError::MalformedBundle(_)), "{err:?}");
+        }
+    }
+    assert_eq!(std::fs::read_dir(&hub_extras).unwrap().count(), 0);
 }
 
 /// After the translation cache is lost, realizing a descendant must reuse the existing

@@ -922,6 +922,20 @@ impl ObjectStore for GitStore<'_> {
             }
             Ok(())
         })?;
+        // Extras for an id of another length name no commit here, and would panic jj's table
+        // of extras, whose keys must all be one length, or name a stray file on a hub.
+        if !extras.is_empty() {
+            let len = self.git.gix()?.object_hash().len_in_bytes();
+            if let Some(entry) = extras
+                .iter()
+                .find(|entry| entry.commit.as_bytes().len() != len)
+            {
+                return Err(ObjectError::MalformedBundle(format!(
+                    "extras for a commit id of {} bytes",
+                    entry.commit.as_bytes().len()
+                )));
+            }
+        }
         // Extras first: jj derives and saves its own entries the first time it reads a
         // commit, and those must not win over the sender's.
         self.store_extras(&extras)?;

@@ -204,6 +204,11 @@ once the repository has a remote, a deploy of a revision the remote lacks. The s
 with musubi's own build script, which names the build. It doesn't fetch a commit or tag from a
 remote.
 
+`copies_leave_a_removed_hive` checks that copies leave a hive removed from the hub, keeping
+their work. Before taking its final listing snapshot, it waits for both the saved membership
+and the daemon's reported repository count: the daemon saves membership before it finishes
+cleanup, so the membership file alone cannot tell when its thread has stopped.
+
 `recreating_hives_keeps_work_without_inheriting_remote_workspaces` follows the upgrade
 guide with two copies and a real linked workspace whose name contains `/`, including the
 first copy leaving before the other. It removes old remote workspace names, archives both

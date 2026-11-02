@@ -1176,9 +1176,20 @@ fn copies_leave_a_removed_hive() {
     // Alpha's daemon hears when it next syncs, as after an operation here.
     alpha.write_file("after", "after");
     alpha.jj(&["status"]);
-    wait_for(&logs, "alpha's daemon to leave the hive", || {
-        membership(&alpha) == "removed"
-    });
+    // Membership is saved before the daemon finishes leaving. Wait for its thread too,
+    // since `musubi list` counts it until it exits.
+    wait_for(
+        &logs,
+        "alpha's daemon to stop serving the removed hive",
+        || {
+            if membership(&alpha) != "removed" {
+                return false;
+            }
+            let status = musubi_in(&env, &logs, &alpha, &["status", "-T", "json(self)"]);
+            let status: serde_json::Value = serde_json::from_str(&status).expect(&status);
+            status["daemon"]["running"] == true && status["daemon"]["served"] == 0
+        },
+    );
     let list = musubi_in(&env, &logs, &alpha, &["list"]);
     insta::assert_snapshot!(list, @"
     Hub $ROOT/hub:

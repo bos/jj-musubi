@@ -53,7 +53,7 @@ app since the hub started:
 Each hive's row shows the bytes a second going into and out of the hub, and the operations and
 commits that came in since the hub started. Below, for the hive you pick with the arrow keys, it
 shows each machine and the latest updates, with the machine each came from and what `jj op log`
-calls it. The issues at the top are what needs you: a hub out of reach or failing requests, and
+calls it. The issues at the top need attention: a hub out of reach or failing requests, and
 machines offline, stuck behind, or failing to sync.
 [Troubleshooting](../troubleshooting.md#what-musubi-top-reports) says what to do about each.
 
@@ -75,13 +75,13 @@ Renaming changes the name that commands take and `musubi list` and `musubi statu
 Copies keep syncing, and each machine picks up the new name as its daemon next syncs, within
 half a minute, or the next time `musubi list` runs there.
 
-`hub remove` takes the hive's whole name or its id, not a prefix as other commands do. Each
+`musubi hub remove` requires the hive's whole name or its id. Each
 machine's copy leaves the hive as it next syncs, as with `musubi leave`, keeping everything it
 has. The hub keeps the hive's data in `removed/` for a day, then only an empty directory, as a
 record that the hive was removed, so that no copy brings it back. To share the repository
 again, start a new hive with `musubi create`, and run `musubi join --hive <name>` in the other
-copies: a plain `musubi join` in a copy whose hive was removed says so, rather than joining
-another hive.
+copies. A plain `musubi join` in a copy whose hive was removed refuses to join another hive
+and says that the old one was removed.
 
 ## Take a repository or machine out
 
@@ -264,7 +264,7 @@ source that wasn't deployed, as with `cargo install --path`, says only the relea
 so it starts nothing, and neither does putting a hub back on an older release: upgrade or go
 back by hand then.
 
-Upgrade `jj` with musubi, not before: each release of musubi works with one release of jj, and
+Upgrade `jj` and musubi together: each release of musubi works with one release of jj, and
 refuses operations that a newer jj wrote.
 
 ### Deploy a build from source
@@ -311,9 +311,9 @@ would overwrite each other's working copy. So musubi doesn't sync a duplicate: `
 in it says it isn't synced, and `musubi join`, `sync` and `leave` there refuse. Use it as a
 plain jj repository, or make another copy with `musubi clone`.
 
-Some repositories are the copy, as far as you know, though musubi takes them for a
-duplicate: a copy moved by copying it and deleting the original, or restored from a backup
-onto a new machine. Once the original is gone, `musubi join --original` syncs it as the copy.
+musubi also treats a repository as a duplicate if you moved it by copying it and deleting the
+original, or restored it from a backup onto a new machine. Once the original is gone,
+`musubi join --original` syncs the replacement as the original copy.
 A backup restored in place, over the copy, is the copy already: it syncs as before, and
 fetches the work it lacks.
 

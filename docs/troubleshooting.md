@@ -329,9 +329,9 @@ copy with `musubi clone`, bring this one's work across to it, then run `musubi l
 here
 ```
 
-This copy's operation history and the hive's have parted in a way musubi can't reconcile, so
-musubi stops syncing it rather than bring back operations the hive no longer has: `musubi
-status` says retrying won't get past it.
+This copy's operation history and the hive's have parted in a way musubi can't reconcile.
+Syncing stops to keep abandoned operations from returning to the hive. `musubi status` says
+retrying won't get past it.
 
 That's expected if the hive forgot this copy, with `musubi forget` or after its
 `musubi.forget-after`, or it left with `musubi leave` and joined again, and since then another
@@ -410,8 +410,7 @@ more. Otherwise `musubi sync` tries again.
 ### "Warning: The daemon isn't running, so this repository syncs only when you run `musubi sync`."
 
 Start it with `musubi daemon start`, and to have it start at login from now on, run `musubi
-daemon install`. Until then, "the hub lacks its latest work" means just that: other machines
-see this machine's work once you run `musubi sync`.
+daemon install`. Until then, other machines see this machine's work once you run `musubi sync`.
 
 ### "Warning: The daemon doesn't serve this repository."
 
@@ -457,9 +456,9 @@ machines fill it as they sync, and nothing is lost.
 ### "not heard from since the hub started" or "not heard from in a day: it may have left the hive"
 
 The hive shows a working copy of this machine, but the hub hasn't heard from its daemon since
-the hub started, or in over a day. This isn't a problem in itself: a machine that left the
-hive, or whose copy was deleted, still shows its working copy. A machine still in the hive is
-heard from once it next syncs, within half a minute.
+the hub started, or in over a day. A machine that left the hive, or whose copy was deleted,
+still shows its working copy until you forget it with `musubi forget`. A machine still in the
+hive is heard from once it next syncs, within half a minute.
 
 ### "This machine's daemon isn't running; `musubi daemon start` starts it."
 
@@ -541,7 +540,8 @@ repository, delete it. Nothing is lost: jj exports the bookmark again at its nex
 
 ### An annotated tag is lightweight on other machines
 
-musubi moves the commits a tag points to, not git's tag objects, so an annotated tag fetched
-on one machine is a lightweight tag at the same commit on the others: `git describe` without
+musubi shares a tag's target commit and leaves git's tag object on the machine that fetched
+it. An annotated tag fetched on one machine is a lightweight tag at the same commit on the
+others: `git describe` without
 `--tags` passes over it, and `git tag -v` has nothing to verify. Fetch the tag on a machine
 that needs it.

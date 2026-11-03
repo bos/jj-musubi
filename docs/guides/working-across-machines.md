@@ -163,9 +163,8 @@ bookmarks and their `.git` remote-tracking refs; there's no need to fetch on eac
 
 ## Share settings
 
-Some settings live outside jj's operation log, in each machine's git and repo config, yet
-machines need to agree on them. musubi shares these, and leaves the rest of each machine's
-config alone.
+musubi also shares the git remotes and repo config settings that machines need to agree on.
+These live outside jj's operation log. The rest of each machine's config stays local.
 
 ### Git remotes
 
@@ -235,8 +234,8 @@ they can after `jj op abandon` on one machine: set them again with `jj bookmark 
 
 ## Things to avoid
 
-- **A newer `jj`** than the one musubi supports, 0.46.0. musubi refuses operations with fields
-  it doesn't know rather than drop them. [Upgrade jj and musubi
+- **A newer `jj`** than the one musubi supports, 0.46.0. Operations with unknown fields stop
+  the sync. [Upgrade jj and musubi
   together](manage.md#upgrade-musubi).
 - **Copying a repository's directory** to make another machine's copy. Use `musubi clone`, or
   clone from the remote and `musubi join`.

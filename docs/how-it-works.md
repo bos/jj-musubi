@@ -1,8 +1,10 @@
 # How musubi works
 
-musubi makes several machines' copies of one jj repository behave like workspaces of a single
-repository. This page explains what moves between machines, what stays on each, and what you
-see when machines change the same thing at once. For the design behind it, see
+musubi lets you pick up work on another machine, run agents on several machines, and fetch or
+push once for all of them. Each machine has its own copy of the repository, and shows the
+others' work as jj workspaces: separate checkouts that share a repository's history. This page
+explains what moves between machines and what happens when they change the same thing at once.
+For the design behind it, see
 [docs/internals/design.md](internals/design.md), and for how it's checked, [How musubi keeps
 your work safe](safety.md).
 
@@ -11,8 +13,8 @@ your work safe](safety.md).
 - **Every machine has the whole repository.** Each machine's copy is an ordinary jj
   repository, with every commit, bookmark and change from every machine. You can unplug any of
   them and keep working. Other machines' working copies show up in it as workspaces, such as
-  `laptop/default@`: names for the commit each is on, not bookmarks, so nothing of theirs is
-  ever pushed unless you push it.
+  `laptop/default@`. These name the commit each working copy is on. Pushing to a git remote
+  still requires a bookmark and an explicit push.
 - **Your work moves when jj records it.** jj records your edits each time you run a `jj`
   command, and musubi sends each record to the other machines within a second or so. Edits
   you've made since your last `jj` command stay on that machine until the next one, or until
@@ -21,13 +23,13 @@ your work safe](safety.md).
   machine rewrites the commit you're on, jj says so, and you update your files when you choose.
 - **You still push and fetch.** musubi never talks to GitHub or any other remote for you. When
   you push or fetch on one machine, though, every machine sees the result.
-- **The hub is a meeting point, not a master.** It keeps a copy of each repository it serves,
+- **The hub passes work between machines.** It keeps a copy of each repository it serves,
   in its directory on its machine, and decides the order in which machines' work lands. Other
   machines reach it over ssh, with a key that can reach the hub and nothing else on its
-  machine. It holds nothing the machines don't have too. Anyone who can reach the hub can read
-  and write every repository it serves, so treat it as you would any machine with your
+  machine. The machines also keep everything the hub holds. Anyone who can reach the hub can
+  read and write every repository it serves, so treat it as you would any machine with your
   repositories on it.
-- **Leaving costs nothing.** `musubi leave` takes a repository out of its hive, and it keeps
+- **Leaving keeps your work.** `musubi leave` takes a repository out of its hive, and it keeps
   everything it has, its working copy included.
 
 ## Hubs, hives, and machines
@@ -64,10 +66,9 @@ daemon reconnects by itself after a network change or a sleep.
 
 Every `jj` command that changes the repository records what it did as an operation, in jj's
 [operation log](https://docs.jj-vcs.dev/latest/operation-log/): the record that `jj undo` takes
-back and `jj op log` shows. musubi syncs that record, not just branches. The daemon sends each
-new operation, with the commits it needs, to the hub, which passes it on to the other
-machines, within a second or so. So every machine has not only the same commits, but the same
-history of how they got there.
+back and `jj op log` shows. musubi syncs that record. The daemon sends each new operation,
+with the commits it needs, to the hub, which passes it on to the other machines within a
+second or so. Every machine has the same commits and the same history of how they got there.
 
 | Shared across the hive | Each machine's own |
 | --- | --- |
@@ -165,7 +166,7 @@ machines are active and the hive's settings, stays as it was.
 Every machine keeps every operation and commit of its hive, so the daemon cleans up what
 `jj util gc` would: operations that nothing reachable from the current one needs, and files jj
 no longer reads, none less than two weeks old. It runs once enough has built up, at most once
-a week, and not on battery. Unlike `jj util gc`, it deletes no git object.
+a week, skipping cleanup on battery power. It leaves git objects in place.
 
 ## Moving and copying repositories
 
@@ -185,7 +186,6 @@ op-id` with that id on the other machine.
 
 ## The hub needn't be durable
 
-Every machine has every operation it has seen, so a hub holds nothing that isn't on the
-machines too. A hub that loses its state, through a power cut or a deleted directory, loses no
-work: start a new one, and make its hives again from the machines' copies. See [Replace or
-move a hub](guides/manage.md#replace-or-move-a-hub).
+The machines keep the operations they send and receive. If the hub loses its state through a
+power cut or a deleted directory, start a new one and make its hives again from the machines'
+copies. See [Replace or move a hub](guides/manage.md#replace-or-move-a-hub).

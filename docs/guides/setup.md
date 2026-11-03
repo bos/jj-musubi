@@ -71,8 +71,8 @@ it.
 
 ### Keep the hub running
 
-`musubi hub` runs in the foreground until you stop it. To run the hub at login from now on,
-and now, stop it and run instead:
+`musubi hub` runs in the foreground until you stop it. To start it now and at each login,
+stop it and run:
 
 ```sh
 musubi hub install
@@ -199,10 +199,10 @@ Two machines may share a name: musubi tells them apart by an id of its own, and 
 
 ## Bring the operation history
 
-By default, a machine that creates or joins a hive shares its repository's current state, not
-its past operations, so other machines' `jj op log` starts from the join. This keeps old
-operations out of the hive: a repository used for years can have tens of thousands, whose
-views keep alive commits nothing else needs, such as old working-copy snapshots.
+By default, a machine that creates or joins a hive shares its repository's current state.
+Other machines' `jj op log` starts from the join. A repository used for years can have tens of
+thousands of past operations, keeping old working-copy snapshots and other unused commits
+alive; leaving these out keeps the hive smaller.
 
 To share the whole operation history instead, pass `--full-history` to `create` or `join`.
 

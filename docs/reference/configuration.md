@@ -60,8 +60,8 @@ A hive always shares these repo config keys, whatever `musubi.shared-config` say
 | `MUSUBI_SSH` | The ssh program to run, in place of `ssh`. |
 | `MUSUBI_SOCKET` | The daemon's control socket, in place of the usual one. Same as `--socket`. |
 | `MUSUBI_STATE_DIR` | One directory for musubi's state and the daemon's socket, in place of the usual ones. With `JJ_CONFIG` for its settings, this runs a second, separate musubi. |
-| `MUSUBI_UPGRADE_TO` | Set by the daemon, not read: the release `musubi.upgrade-command` is to install, as `musubi --version` gives it, such as `0.3.0`, or `0.3.0+20261102153012.4a0db205e1f0` for a build deployed from source. |
-| `MUSUBI_BUILD` | Read when building musubi, not when running it: for a build deployed from source, what follows its release in `musubi --version`, as `contrib/upgrade-from-source` sets it: when it was deployed and its commit, such as `20261102153012.4a0db205e1f0`. See [Deploy a build from source](../guides/manage.md#deploy-a-build-from-source). |
+| `MUSUBI_UPGRADE_TO` | The daemon sets this for `musubi.upgrade-command` to read: the release to install, as `musubi --version` gives it, such as `0.3.0`, or `0.3.0+20261102153012.4a0db205e1f0` for a build deployed from source. |
+| `MUSUBI_BUILD` | A build-time variable for builds deployed from source. `contrib/upgrade-from-source` sets it to the deployment time and commit, such as `20261102153012.4a0db205e1f0`. It follows the release in `musubi --version`. See [Deploy a build from source](../guides/manage.md#deploy-a-build-from-source). |
 | `COMPLETE` | Set by your shell to have musubi complete what you type. See [Complete commands in your shell](commands.md#complete-commands-in-your-shell). |
 
 On macOS and Linux, `musubi daemon install` (and `musubi hub install`) passes your `PATH`,
@@ -83,9 +83,8 @@ themselves.
   musubi's state directory, starting the log afresh when it starts if it has passed 10 MiB.
   Under systemd, it logs to the journal instead: `journalctl --user -u musubi`.
 
-Logs are in colour only on a terminal, and then as for the rest of what musubi prints (see
-[Colours](#colours)). A log file never is, nor is anything else the hub or the daemon writes
-to one.
+Logs use colour on a terminal, following the same [colour settings](#colours) as other musubi
+output. The hub and daemon write their logs and command output to files without colour codes.
 
 To choose what a command logs, pass `--log` with a filter in [`RUST_LOG`'s syntax][filter],
 or set `RUST_LOG`; `--log` wins:
@@ -99,16 +98,15 @@ When a daemon serves the repository, `musubi sync` asks it to sync, so the reque
 daemon's to log. To watch them, run the daemon in the foreground: `musubi daemon stop`, then
 `musubi --log musubi_sync=debug daemon`.
 
-A daemon started for you isn't given `--log`: set `musubi.daemon.log` and run `musubi daemon
-restart`. One started by another command itself, rather than through launchd or systemd,
-inherits that command's `RUST_LOG`, which then takes the setting's place.
+A daemon started for you uses `musubi.daemon.log`: set it and run `musubi daemon restart`.
+If another command starts the daemon directly, it inherits that command's `RUST_LOG`, which
+overrides the setting. Daemons started through launchd or systemd use the service's environment.
 
 [filter]: https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html#directives
 
 ## Colours
 
-musubi prints as jj does, through jj's own formatting, reading jj's config for it as `jj`
-does outside any repository: the system's and yours, not a repository's.
+musubi uses jj's formatting and reads colour settings from jj's system and user config.
 `--color` (`always`, `never`, `debug`, or `auto`) or else jj's `ui.color` says when to colour
 what it prints: by default, `auto`, only on a terminal, and `never` if `NO_COLOR` is set and your
 config doesn't set `ui.color`. jj's `colors` table says how, by label; `--color=debug` shows

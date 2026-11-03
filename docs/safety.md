@@ -1,45 +1,46 @@
 # How musubi keeps your work safe
 
-A tool that moves history between machines while you rewrite it on all of them has to be
-right, every time. A sync that drops a commit, or applies the same rebase twice, is worse than
-no sync at all. So musubi was built proof first: its protocol was designed and proved correct
-in the Lean theorem prover, its code is checked against that proof, and its tests drive real
-jj repositories through the races, crashes and network failures that real machines have.
+musubi shares work in progress between machines while keeping each machine's files under your
+control. Its sync protocol has proofs in the Lean theorem prover, its code is checked against
+the model those proofs use, and its tests drive jj repositories through concurrent edits,
+crashes and network failures.
 
 This page says what musubi promises, and how each promise is checked. The [contributor
 docs](internals/README.md) have the full detail.
 
 ## What musubi promises
 
-- **Nothing you do is lost.** Every change any machine makes reaches every other machine once
+- **Changes reach every machine.** Every change any machine makes reaches every other machine once
   they can reach the hub. Even if a power cut makes the hub forget its last few minutes, the
   machines still have that work, and send it again.
-- **Every machine ends up the same.** Once the machines stop changing things and can reach the
+- **Machines reach the same history.** Once the machines stop changing things and can reach the
   hub, they all reach the same history, whatever order things happened in.
 - **Concurrent changes combine as jj combines them.** Two machines changing the same thing at
   once get exactly what jj makes of two commands run at once on one machine: the same
-  divergent change, or the same conflicted bookmark, and nothing worse.
-- **No merge is done twice.** When two machines' work crosses, exactly one of them merges it,
+  divergent change or the same conflicted bookmark.
+- **Concurrent work is merged once.** When two machines' work crosses, one of them merges it,
   so the hive never ends up with two copies of the same rebase. The one exception is a hub
   that a power cut sets back, after which two machines can merge the same work; nothing is
   lost, and at worst a change is left divergent.
-- **A quiet hive stays quiet.** Taking in another machine's work creates no copy to send back.
+- **Receiving work creates no extra operation.** Taking in another machine's work creates no
+  copy to send back.
   If it meets this machine's concurrent work, jj merges them and that merge syncs too. Once
   everyone has the same history, machines don't echo changes at each other.
 - **Your files are never touched.** musubi writes only what jj keeps, never your working copy.
-- **Losing the hub loses nothing.** Every machine has everything it has seen, so a hub that
-  dies is replaced, and fills again from the machines.
-- **Leaving costs nothing.** `musubi leave` takes a repository out, and it keeps everything it
+- **Hub state can be rebuilt.** Each machine keeps the work it sends and receives. A replacement
+  hub fills again from those copies.
+- **Leaving keeps your work.** `musubi leave` takes a repository out, and it keeps everything it
   has, its working copy included.
 
 ## Designed so that less can go wrong
 
-Much of musubi's safety comes from what it doesn't do.
+The hub orders updates, while each machine uses jj to combine them. musubi checks incoming
+data before using it.
 
-- **One referee, no negotiation.** The hub decides the order in which machines' updates land,
+- **The hub orders updates.** The hub decides the order in which machines' updates land,
   with a compare-and-swap: an update is accepted only if it builds on the latest one. When two
   machines send at once, the second is turned away, merges with the first, and sends again.
-  There's no voting, and the order of your work never depends on anyone's clock.
+  The order of repository operations is independent of the machines' clocks.
 - **The hub never merges.** It stores and orders; jj, on the machines, does every merge, with
   the same code that merges concurrent commands on one machine.
 - **Everything is checked by its hash.** Commits, trees and operations are named by the hash of
@@ -49,23 +50,23 @@ Much of musubi's safety comes from what it doesn't do.
   anything uses it.
 - **Collected objects can be fetched again.** If `jj util gc` removes objects after you restore
   and abandon history, musubi fetches them again from the hub.
-- **What it doesn't understand, it refuses.** An operation from a newer jj, with fields musubi
-  doesn't know, is refused rather than passed on with those fields dropped. A machine and a hub
-  that speak different versions of the protocol refuse each other, saying so.
+- **Unknown fields stop the sync.** musubi refuses an operation from a newer jj if it contains
+  fields musubi doesn't know. A machine and a hub that speak different versions of the protocol
+  refuse each other, saying so.
 - **Abandoned history stays abandoned.** A `jj op abandon` of history other machines have
   reaches every machine, and the abandoned operations never come back, even from a machine
   that was offline, or after you replace the hub ([Abandoning
   operations](guides/working-across-machines.md#abandoning-operations)).
-- **A copy of a copy isn't the copy.** A repository duplicated by copying its directory, by
-  hand or by a file-syncing tool, isn't synced as the original, so two repositories never sync
-  as one and overwrite each other's working copy.
+- **Duplicate repositories are kept out of the hive.** musubi detects a repository duplicated
+  by copying its directory, by hand or by a file-syncing tool, and leaves it unsynced. This
+  prevents two repositories from syncing as one and overwriting each other's working copy.
 
 ## Proved in Lean
 
-The sync protocol is modelled in [Lean 4](https://lean-lang.org/), a theorem prover, as a
-state machine with any number of machines and a network that loses, duplicates, delays and
-reorders messages, and in which any machine can crash at any point, and so can the hub. In
-every state that can be reached, Lean checks proofs that:
+The sync protocol is modelled in [Lean 4](https://lean-lang.org/), a theorem prover. The model
+is a state machine with any number of machines. Its network can lose, duplicate, delay and
+reorder messages, and any machine or the hub can crash at any point. In every reachable state,
+Lean checks proofs that:
 
 - the hub only ever moves forward, and anything it has accepted stays accepted;
 - the hub has everything its latest state needs, and so does each machine;
@@ -87,15 +88,15 @@ housekeeping stops writing new operations. The proof assumes each repository cal
 specified, with focused tests checking those boundaries. It does not prove that housekeeping
 stops by itself.
 
-At the level of successful exchanges, each progress step lowers a measure with five parts,
-compared in order: how many machines have work the hub hasn't taken, how far behind each is,
-what each is missing, and how many updates and merges each has pending. A machine that loses
-a race learns the newer state from the
-reply, so it is less far behind; and the hub's state moves at most once for each machine with
-work to send. The measure can't fall forever, so the sync ends, and the proof shows it ends
-with everyone the same. The retry proof separately bounds the effects of obsolete replies
-and interrupted recovery, then proves the remaining work reaches agreement; it does not
-assume every message or retry lowers that measure.
+In the main model, the proof that sync finishes uses a measure with five parts. Each progress
+step of a successful exchange lowers it, comparing the parts in order: how many machines have
+work the hub hasn't taken, how far behind each is, what each is missing, and how many updates
+and merges each has pending. A machine that loses a race learns the newer state from the reply,
+so it is less far behind; and the hub's state moves at most once for each machine with work to
+send. The measure can't fall forever, so the sync ends, and the proof shows it ends with
+everyone the same. The retry proof separately bounds the effects of obsolete replies and
+interrupted recovery, then proves the remaining work reaches agreement; it does not assume
+every message or retry lowers that measure.
 
 Separate models cover the rest of what could go wrong: how each machine's git refs and jj's
 import and export of them interact, including `jj undo` and `jj op restore`; which machines'
@@ -103,24 +104,23 @@ copies a hive shows as they come and go; which directory on a machine is the cop
 duplicate; and the chunked transfers, whose receiver is proved to put together exactly the
 bytes that were sent.
 
-That's more than 400 theorems in all, none left unfinished and no axioms added, and every
+There are more than 400 theorems in all, none left unfinished and no axioms added, and every
 proof is checked again on every change. [The Lean model](../formal/README.md) names each
 theorem, and lists what the models assume of the code.
 
 ## Checking the code against the proof
 
-A proof is only as good as the match between the model and the code. So the model is also a
-program: an executable version of it, proved to agree with the model, runs as an oracle in the
-tests of musubi's protocol code. Property tests drive musubi's own Rust state machines for the hub
-and the machines through generated sequences of user changes, message deliveries, losses,
-duplicates, crashes, and a hub that misbehaves, and after every step ask the oracle whether the
-model allows it. When the machines settle, the tests also check, step by step, that the measure
-from the liveness proof fell.
+An executable version of the model, proved to agree with it, runs as an oracle in the protocol
+tests. Property tests drive musubi's Rust state machines for the hub and the machines through
+generated sequences of user changes, message deliveries, losses, duplicates, crashes, and a hub
+that misbehaves. After every step, they ask the oracle whether the model allows it. When the
+machines settle, the tests also check, step by step, that the measure from the liveness proof
+fell.
 
-To check that the checks have teeth, deliberately broken versions of the code are run against
-them: a hub that accepts an update without checking that it builds on the latest, a machine
-that applies an operation before its parents, a machine that pushes before merging. Each is
-caught. `cargo-mutants` makes many more such changes to the hub's and machines' logic
+The tests also run against deliberately broken versions of the code: a hub that accepts an
+update without checking that it builds on the latest, a machine that applies an operation
+before its parents, a machine that pushes before merging. Each is caught. `cargo-mutants`
+makes many more such changes to the hub's and machines' logic
 automatically, and the tests are expected to catch every one.
 [conformance.md](internals/conformance.md) has the details.
 
@@ -130,17 +130,17 @@ Machines in a hive can run into every race that two jj commands on one machine c
 their own: a machine forgets another's workspace while it's building on it, two machines both use
 workspace `default`, a commit is rewritten on one machine while another has unsaved edits on top
 of it. The [race catalogue](internals/races.md) lists more than 70 of them, each with its outcome,
-and each pinned by a test that runs real repositories through the real protocol and hub storage.
+and each covered by a test that syncs repositories through the protocol and hub storage.
 The rule throughout is that machines resolve a race exactly as jj resolves it on one machine;
 where jj would do something harmful only because the commands came from different machines, musubi
 notices and stops.
 
-## A search through real jj
+## Searching with jj commands
 
-The cases nobody thought of are found by a search. A generated test drives two or three real
-repositories with the real `jj` command: commits, rebases, squashes, abandons, undos, commands
-run at an older operation, bookmark and tag moves, and workspaces added and forgotten. It moves
-branches behind jj's back with `git`, has someone else push to the remote, and fetches and
+Generated tests search for failures beyond the hand-written cases. A test drives two or three
+repositories with the `jj` command: commits, rebases, squashes, abandons, undos,
+commands run at an older operation, bookmark and tag moves, and workspaces added and forgotten.
+It moves branches behind jj's back with `git`, has someone else push to the remote, and fetches and
 pushes. It crashes machines partway through a sync, restarts the hub, cuts off the last of the
 hub's history as a power cut would, and loses replies.
 
@@ -169,19 +169,18 @@ new seed.
   another reply's contents. It must not crash, and once the hub answers honestly again, every
   machine must come to show the same history, everyone's work in it.
 - **Fuzzing.** Coverage-guided fuzzers attack every decoder of what a peer sends: frames,
-  messages, bundles of commits, and operations imported from them. Each checks more than that
-  nothing crashes: a message that decodes must encode back to one that decodes the same, and
-  nothing a fuzzer sends may leave a store holding anything that isn't what its hash says.
+  messages, groups of commits, and operations imported from them. A message that decodes must
+  encode back to one that decodes the same. Every stored object's contents must match its hash.
+  Each fuzzer also checks for crashes.
 - **Torn files.** Files musubi appends to are tested cut off anywhere, zero-filled and
   garbled: each reads back what was written before the damage, or is known to be damaged, and
   never reads as something else.
 
 ## Keeping up with jj
 
-musubi links the same jj library the `jj` command does, and works through it rather than
-around it. Every night, CI builds musubi against jj's main branch and runs the suite, so a
-change in jj that would break musubi shows up before a release brings it. Every change is
-tested on Linux, macOS and Windows.
+musubi uses the same jj library as the `jj` command. Every night, CI builds musubi against jj's
+main branch and runs the suite, so a change in jj that would break musubi shows up before a
+release brings it. Every change is tested on Linux, macOS and Windows.
 
 ## Read further
 

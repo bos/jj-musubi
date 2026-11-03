@@ -887,12 +887,21 @@ dropped, and a machine never advances to one.
 A machine takes the records that a reply about the head it knows announces, however old the
 reply: after a restart, or from a hive made again, that can be fewer records than it took, or
 others. What the records it took drop and the hub's don't then stands among its pending drops,
-to publish once it has taken the hub's, unless they drop it too. That is the only way pending
-drops grow without a new abandon, and a machine publishes them again only to a hub that lacks
-them, having gone back or been made again: a hub that pruned them refuses its push, its records
-not being the hub's, and the machine takes them back with the hub's ([What an abandon costs the
-hub](#what-an-abandon-costs-the-hub)). So the records a hub appends are bounded by new drops
-and what a hub that went back lost.
+to publish once it has taken the hub's, unless they drop it too. The same holds for records it
+received and kept in custody before writing history they explain, even if it never took them.
+These are the ways pending drops grow without a new abandon. A machine publishes them again
+only to a hub that lacks them, having gone back or been made again: a hub that pruned them
+refuses its push, its records not being the hub's, and the machine takes them back with the
+hub's ([What an abandon costs the hub](#what-an-abandon-costs-the-hub)). So the records a hub
+appends are bounded by new drops and what a hub that went back lost.
+
+Before preparation writes any local operation, the machine saves the new records in custody
+in `records.json`. Custody is separate from the records it applied: it neither acknowledges
+them to the hub nor makes a pruned prefix readable as applied history. Taking the next full
+announcement consumes custody in the same write as its renaming: matching records become
+applied, and lost ones become pending. This reconciliation also runs when the announcement
+equals the already applied list, as when both are empty after a rollback. Any local version of
+an original a lost record drops is contracted as part of that move.
 
 A machine works out how records rename its history, and writes the rewrites of its local
 operations, before it takes them, from the op heads as they are then. A `jj` command can write

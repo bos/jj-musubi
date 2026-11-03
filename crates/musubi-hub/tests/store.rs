@@ -55,6 +55,27 @@ fn contraction_keeps_a_survivor_publishable_and_refuses_replayed_origins() {
     assert!(!hub.is_superseded(&now));
     assert!(hub.is_superseded(&a.0));
 
+    // A late packet can still name the old versions. Once its drops are already taken,
+    // they change no record or current name: acceptance follows the raw surviving DAG.
+    let count = hub.record_count();
+    let unknown = HubOp(CanonicalOp(OperationId::from_bytes(&[99; 64])));
+    assert!(hub.contract(&[unknown]).is_err());
+    assert_eq!(hub.record_count(), count);
+    let old_image = hub.current(&x.0);
+    let again = hub.contract(&[HubOp(a.clone()), HubOp(x.clone())]).unwrap();
+    assert_eq!(again.image(&now), vec![now.clone()]);
+    op.parents = vec![now.clone()];
+    let next = hub.canonical().write_operation(&op).unwrap();
+    assert!(
+        hub.canonical()
+            .is_ancestor_of(&CanonicalOp(now.clone()), &next)
+            .unwrap()
+    );
+    hub.set_head(3, &next.0, Some(again)).unwrap();
+    assert_eq!(hub.record_count(), count);
+    assert_eq!(hub.current(&x.0), old_image);
+    assert_eq!(hub.current(&now), vec![now.clone()]);
+
     // A peer can give a dropped original new current parents and hence a fresh current id.
     // Its recomputable original identity still forbids publishing it, including after reopen.
     let mut forged = hub.canonical().read_operation(&a).unwrap();
@@ -72,7 +93,12 @@ fn contraction_keeps_a_survivor_publishable_and_refuses_replayed_origins() {
     assert!(!hub.missing_closure(&forged_id.0).unwrap().is_empty());
     drop(hub);
     let hub = HubStore::open(&path).unwrap();
-    assert_eq!(hub.head().1, &now);
+    assert_eq!(hub.head().1, &next.0);
+    assert_eq!(hub.record_count(), count);
+    assert_eq!(hub.current(&x.0), old_image);
+    assert_eq!(hub.current(&now), vec![now]);
+    let again = hub.contract(&[HubOp(a), HubOp(x)]).unwrap();
+    assert_eq!(again.image(&next.0), vec![next.0.clone()]);
     assert!(!hub.missing_closure(&forged_id.0).unwrap().is_empty());
 }
 

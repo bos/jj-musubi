@@ -979,6 +979,44 @@ impl CanonicalStore {
         Ok(writer.finish()?)
     }
 
+    /// Exports operations with the canonical bodies needed to rename record names later.
+    /// The extra bodies are metadata, including their parents and views; receivers must
+    /// not stage or realize them merely because they occur in the bundle.
+    pub fn export_operations_with_records(
+        &self,
+        ops: &[CanonicalOp],
+        record_ops: &[CanonicalOp],
+        out: &Path,
+    ) -> Result<(), CanonicalError> {
+        if record_ops.is_empty() {
+            return self.export_operations(ops, out);
+        }
+        let mut exported = self.record_operations(record_ops)?;
+        let mut seen: HashSet<CanonicalOp> = exported.iter().cloned().collect();
+        exported.extend(ops.iter().filter(|op| seen.insert((*op).clone())).cloned());
+        self.export_operations(&exported, out)
+    }
+
+    /// The complete operation ancestry of record names, parents first. Unlike
+    /// `ancestors_until`, missing bodies or views are errors: a record holder must be able
+    /// to rename every name after a later rollback, without realizing its old history.
+    pub fn record_operations(
+        &self,
+        record_ops: &[CanonicalOp],
+    ) -> Result<Vec<CanonicalOp>, CanonicalError> {
+        let ops = self.ancestors_until(record_ops, |_| false)?;
+        for id in record_ops.iter().chain(&ops) {
+            let op = self.read_operation(id)?;
+            if !self.has_view(&op.view_id) {
+                self.read_view(&op.view_id)?;
+            }
+            for parent in &op.parents {
+                self.read_operation(&CanonicalOp(parent.clone()))?;
+            }
+        }
+        Ok(ops)
+    }
+
     /// Verifies and stores the views and operations of a bundle written by
     /// [`Self::export_operations`]. Returns the operations in bundle order, each with its
     /// parents if this stored it, or `None` if it was stored already.
@@ -2063,6 +2101,63 @@ mod tests {
         let mut op = Operation::make_root(view_id);
         op.parents = vec![parent.0.clone()];
         op
+    }
+
+    #[test]
+    fn record_metadata_arrives_without_current_operations_or_parent_views() {
+        let dir = musubi_testutil::tempdir();
+        let root_commit = CommitId::from_bytes(&[0; 20]);
+        let sender = CanonicalStore::open(&dir.path().join("sender"), root_commit.clone()).unwrap();
+        let root = sender.root_operation_id().clone();
+        let parent_view = sender.write_view(&view_with_heads(30)).unwrap();
+        let parent = sender
+            .write_operation(&operation(&root, parent_view.clone()))
+            .unwrap();
+        let dropped_view = sender.write_view(&view_with_heads(31)).unwrap();
+        let dropped = sender
+            .write_operation(&operation(&parent, dropped_view.clone()))
+            .unwrap();
+        let bundle = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
+        // The normal history delta may be empty, or share an ancestor with the metadata.
+        for (i, normal) in [vec![], vec![parent.clone()]].into_iter().enumerate() {
+            let receiver = CanonicalStore::open(
+                &dir.path().join(format!("receiver-{i}")),
+                root_commit.clone(),
+            )
+            .unwrap();
+            sender
+                .export_operations_with_records(
+                    &normal,
+                    std::slice::from_ref(&dropped),
+                    bundle.path(),
+                )
+                .unwrap();
+            let imported = receiver.import_operations(bundle.path()).unwrap();
+            assert_eq!(
+                imported.iter().map(|(id, _)| id).collect::<Vec<_>>(),
+                [&parent, &dropped]
+            );
+            assert_eq!(
+                receiver
+                    .record_operations(std::slice::from_ref(&dropped))
+                    .unwrap(),
+                [parent.clone(), dropped.clone()]
+            );
+            assert_eq!(
+                receiver.read_view(&parent_view).unwrap(),
+                view_with_heads(30)
+            );
+            assert_eq!(
+                receiver.read_view(&dropped_view).unwrap(),
+                view_with_heads(31)
+            );
+        }
+        let absent = CanonicalOp(OperationId::from_bytes(&[99; 64]));
+        assert!(
+            sender
+                .export_operations_with_records(&[], &[absent], bundle.path())
+                .is_err()
+        );
     }
 
     /// jj writes a set in hash order, so two stores can hold different bytes for the same

@@ -281,7 +281,8 @@ impl HubStore {
     }
 
     /// The history with `dropped` dropped too: every accepted operation's image, the rewrites
-    /// written to the store. Ids the history lacks drop nothing.
+    /// written to the store. Every newly named drop must have its canonical metadata:
+    /// receivers need it to rename that name if the hub later loses the record.
     pub fn contract(&self, dropped: &[HubOp]) -> Result<Contracted, StoreError> {
         let dropped: Vec<OperationId> = dropped
             .iter()
@@ -290,6 +291,8 @@ impl HubStore {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
+        self.canonical
+            .record_operations(&dropped.iter().cloned().map(CanonicalOp).collect::<Vec<_>>())?;
         let mut contraction =
             Contraction::new(&self.canonical, dropped.iter().cloned().map(CanonicalOp))?
                 .sharing(self.presences.clone());

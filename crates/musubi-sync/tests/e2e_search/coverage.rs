@@ -293,9 +293,31 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         None,
     ),
     ("taking_an_abandon_resumes_where_it_stopped", None),
+    // These require a receiver that has only record metadata for a dropped operation,
+    // followed by rollback and a different raw version of the same immutable original.
+    (
+        "record_bodies_keep_pending_drops_named_after_hub_rollback",
+        None,
+    ),
+    (
+        "lost_records_follow_an_older_name_the_receiver_never_held",
+        None,
+    ),
     // The search's fixed participants never leave. These native boundary checks also need
     // exact cuts before realization/advancement or a dropped merge with separate images.
     // The generated core survivor_advance_conformance separately targets the new steps.
+    (
+        "received_records_survive_departure_and_drop_local_aliases",
+        None,
+    ),
+    (
+        "an_operation_first_received_after_rollback_uses_the_applied_namespace",
+        None,
+    ),
+    (
+        "lost_received_records_preserve_work_before_the_fixup_arrives",
+        None,
+    ),
     (
         "a_dropped_head_published_again_is_dropped_by_who_took_it",
         None,
@@ -315,6 +337,10 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
     // This also needs explicit integration and work on an unpublished realization.
     (
         "pending_drops_get_a_new_tip_when_the_hub_already_has_the_cached_fixup",
+        None,
+    ),
+    (
+        "a_receiver_takes_records_that_drop_its_head_above_a_cached_fixup",
         None,
     ),
     // These need a specific interrupted adoption across two record histories, not merely

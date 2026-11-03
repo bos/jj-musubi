@@ -80,6 +80,19 @@ pub trait HubStorage {
         base: &Self::Op,
     ) -> Result<(Vec<OpEntry<Self::Op>>, Self::Attachment), Self::Error>;
 
+    /// As `ops_since`, also carrying the canonical bodies and parent closure of the
+    /// records sent with this reply. Only the returned entries are current-head history.
+    /// A backend whose ids describe immutable operations needs no extra bodies.
+    #[expect(clippy::type_complexity)]
+    fn ops_with_records(
+        &self,
+        head: &Self::Op,
+        base: &Self::Op,
+        _records: &[Vec<Self::Op>],
+    ) -> Result<(Vec<OpEntry<Self::Op>>, Self::Attachment), Self::Error> {
+        self.ops_since(head, base)
+    }
+
     /// An attachment carrying the stored objects that `for_ops` require, omitting what the
     /// node has: `closure(base)`, and what `haves` says.
     fn objects_for(
@@ -146,10 +159,10 @@ pub fn handle<S: HubStorage>(
         } => {
             storage.report(&machine, &records);
             let (seq, head) = storage.head();
-            let (ops, ops_attachment) = storage.ops_since(&head, &base)?;
+            let (records_from, new_records) = storage.records_since(&records)?;
+            let (ops, ops_attachment) = storage.ops_with_records(&head, &base, &new_records)?;
             let ids: Vec<S::Op> = ops.iter().map(|entry| entry.id.clone()).collect();
             let objects = storage.objects_for(&ids, &base, &haves)?;
-            let (records_from, new_records) = storage.records_since(&records)?;
             reply(Reply::Fetched {
                 seq,
                 head,

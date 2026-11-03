@@ -107,7 +107,7 @@ impl NodeRepo {
 
     /// The canonical parents of a local operation, as they are now: what renamings
     /// superseded, renamed. Also whether any was.
-    fn current_parents(&self, parents: &[LocalOp]) -> (Vec<CanonicalOp>, bool) {
+    fn current_parents(&self, parents: &[LocalOp]) -> Result<(Vec<CanonicalOp>, bool), NodeError> {
         let mut renamed = false;
         let mut current = vec![];
         for parent in parents {
@@ -117,7 +117,7 @@ impl NodeRepo {
             let canonical = self
                 .canonical_of(parent)
                 .expect("parents canonicalized first");
-            let now = self.current_ids(&canonical);
+            let now = self.current_ids(&canonical)?;
             renamed |= now != [canonical];
             for op in now {
                 if !current.contains(&op) {
@@ -125,7 +125,7 @@ impl NodeRepo {
                 }
             }
         }
-        (current, renamed)
+        Ok((current, renamed))
     }
 
     pub fn canonical_of(&self, local: &LocalOp) -> Option<CanonicalOp> {
@@ -200,7 +200,7 @@ impl NodeRepo {
                     self.before_join.insert(id);
                     continue;
                 } else {
-                    let (parents, renamed) = self.current_parents(&parents);
+                    let (parents, renamed) = self.current_parents(&parents)?;
                     if renamed || late {
                         self.late.push(id.clone());
                     }
@@ -293,12 +293,12 @@ impl NodeRepo {
                 op: id.0.hex(),
                 canonical: canonical.to_owned(),
             })?;
-        let canonical_id = match self.current_ids(&named).as_slice() {
+        let canonical_id = match self.current_ids(&named)?.as_slice() {
             [now] => now.clone(),
             _ => named,
         };
         let local_parents = LocalOp::parents_of(op);
-        let (parents, renamed) = self.current_parents(&local_parents);
+        let (parents, renamed) = self.current_parents(&local_parents)?;
         if renamed
             || local_parents
                 .iter()
@@ -352,7 +352,7 @@ impl NodeRepo {
         {
             return Ok(None);
         }
-        let (parents, renamed) = self.current_parents(&local_parents);
+        let (parents, renamed) = self.current_parents(&local_parents)?;
         let late = renamed
             || local_parents
                 .iter()
@@ -364,7 +364,7 @@ impl NodeRepo {
             else {
                 return Ok(None);
             };
-            let canonical = match self.current_ids(&named).as_slice() {
+            let canonical = match self.current_ids(&named)?.as_slice() {
                 [now] => now.clone(),
                 _ => named,
             };

@@ -249,8 +249,17 @@ impl HubStorage for HubAdapter {
         head: &OpId,
         base: &OpId,
     ) -> anyhow::Result<(Vec<OpEntry<OpId>>, Attachment)> {
+        self.ops_with_records(head, base, &[])
+    }
+
+    fn ops_with_records(
+        &self,
+        head: &OpId,
+        base: &OpId,
+        records: &[Vec<OpId>],
+    ) -> anyhow::Result<(Vec<OpEntry<OpId>>, Attachment)> {
         let ids = self.store.ops_since(head, base)?;
-        if ids.is_empty() {
+        if ids.is_empty() && records.is_empty() {
             return Ok((vec![], Attachment::None));
         }
         let canonical = self.store.canonical();
@@ -263,7 +272,9 @@ impl HubStorage for HubAdapter {
             });
         }
         let bundle = temp_bundle(&self.tmp)?;
-        canonical.export_operations(&ids, &bundle)?;
+        let record_ops: Vec<CanonicalOp> =
+            records.iter().flatten().cloned().map(CanonicalOp).collect();
+        canonical.export_operations_with_records(&ids, &record_ops, &bundle)?;
         Ok((entries, Attachment::bundle(bundle)))
     }
 

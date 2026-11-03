@@ -82,6 +82,7 @@ is `formal/.lake/build/bin/oracle`.
 | `Musubi/RecordLiveness.lean` | Record agreement and finite reconciliation after convergence. |
 | `Musubi/AsyncLiveness.lean` | Progress at split exchange boundaries and hub stabilization on a constrained suffix; not yet the full retry bridge. |
 | `Musubi/RetryControl.lean` | Finite pre-cut request-slot consumption and cached fix-up writes within an explicitly constrained epoch. |
+| `Musubi/RecordEpoch.lean` | Persistent received records, finite record adoptions and stale-plan reopens after current replies replace obsolete callbacks. |
 | `Musubi/RecordStability.lean` | Finite record appends and pruning for bounded original drops, and pending shrink under record extension. |
 | `Musubi/ContractOrder.lean` | Ancestry through a contracted expected head, including its difference from original ancestry. |
 | `Musubi/SurvivorAdvance.lean` | The complete surviving-image frontier, preservation of local work, and its full-frontier merge. |
@@ -532,6 +533,12 @@ theirs, as the hub, which names every machine, lists them.
   them; only a machine key edited by hand could have one.
 
 ## The asynchronous liveness bridge
+
+`RecordEpoch.lean` models received records that still need reconciliation separately from
+applied records. Its executable control permits equal-record adoption when a receipt remains,
+and its finite credit bounds both adoption and stale-plan reopens after fresh replies replace
+obsolete callbacks. The native departure regression compares this equal-record path with the
+`recordEpoch` oracle route. These local bounds do not close the full retry/response bridge.
 
 The termination theorems concern successful atomic policy exchanges. `pstep_reachable`
 embeds each policy step into the asynchronous safety model; it does not prove that an

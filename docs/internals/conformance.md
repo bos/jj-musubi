@@ -406,13 +406,60 @@ monotone bounded node drop sets; it does not prove every runtime adoption is an 
 birth-parent graph to recover an eventual reflexive ancestry chain. Its surviving-head and
 contracted-comparison premises still need the physical-store projection described above.
 
+`history::a_receiver_takes_records_that_drop_its_head_above_a_cached_fixup` reaches a receiver
+stall using honest real-repository operations, interrupted record-taking, reopening and hub
+rollback. A cached fix-up is accepted with a drop above it; the follower still has that
+dropped head and already descends from the hub's head. The core must advance while taking
+the prepared records anyway. Removing that guard makes the final sync return idle without
+taking them; the repaired path takes the records, publishes its surviving work and reaches
+idle with the current hub pair. A cheap core regression pins the same policy choice with a
+valid finite rogue prefix. Neither test imposes the false invariant that an accepted head
+cannot be an ancestor of a dropped operation.
+
+`history::record_bodies_keep_pending_drops_named_after_hub_rollback` tests a receiver that
+never realized a record's dropped operation. Another record renames it after rollback. The
+receiver must retain the missing metadata, rename the pending drop and publish the actual
+new raw target; the test pins the final record's target, not just a changed head id. Without
+metadata transfer the original trace made twenty accepted pushes in twenty-four steps while
+the drop remained pending. `CanonicalStore`'s
+`record_metadata_arrives_without_current_operations_or_parent_views` separately checks the
+record-only bundle, complete parent/view custody, ordering, deduplication and missing-name
+refusal.
+
+`history::lost_records_follow_an_older_name_the_receiver_never_held` tests the reverse alias:
+the receiver first holds two records under a newer name, then another machine restores the
+older raw operation after rollback. Normalization runs after local abandon discovery and
+again after lost records become pending, even without another fetch. Disabling that hook
+leaves repeated incomplete pushes at the twenty-four-step bound. The repaired path publishes
+a record naming the older target, clears pending and supplies its drop metadata to a newly
+created hub. Canonical metadata is not staged as current history. The finite core's operation
+ids already are immutable originals, so the name reconciliation and metadata hooks have no
+additional projected history effect there.
+
+`history::received_records_survive_departure_and_drop_local_aliases` stops receipt after
+writing rewritten operations but before applying their record. The producer publishes its
+departure and never syncs again. After reopening and a hub rollback, the receiver must
+republish the received abandonment; disabling custody fails at that assertion. A second
+rollback restores another raw name, and the receiver must remove its physical alias, retain
+the off-frontier record name's image across reopening, and publish both abandonments.
+Custody is saved before preparation writes any local operation and stays separate from the
+applied records reported to the hub. The core retains an equal-record announcement when the
+backend still has receipts to reconcile. The production driver ends a round on an incomplete
+reply with its documented refusal error; the low-level hive harness deliberately continues
+past that boundary, so a bounded retry trace alone does not demonstrate one endless driver
+round.
+
+
 The stronger real trace
 `history::pending_drops_get_a_new_tip_when_the_hub_already_has_the_cached_fixup` receives a
 realization without advancing, installs it with `jj op integrate`, then receives and realizes
 a fix-up before its records are held. Restart loses the record announcement; valid `jj`
 commands remove the old branch, and after hub rollback the receiver publishes that fix-up
-without the drop. Before the fix both cores returned `Idle` and `when_idle` returned false,
-with equal heads and ordered records but a producer's pending original absent from the hub.
+without the drop. The fixture restores its actual pre-receipt `records.json` after a power
+cut loses the recent custody write while jj's later operation writes survive; an ordinary
+reopen now retains that receipt. Before the publication-tip fix both cores returned `Idle`
+and `when_idle` returned false, with equal heads and ordered records but a producer's pending
+original absent from the hub.
 
 The core now asks for a neutral publication child when the restoring write is cached and
 the head is known. The adapter rechecks exact current ids and writes only the fix-up marker,
@@ -830,6 +877,15 @@ empty-pending `write` is a core-level no-op: `NodeCore` does not call the backen
 and separate `restoring` and neutral `tip` booleans. A created child makes `headKnown=false`.
 Retrying that state emits neither kind; arbitrary new learning or adoption is outside that
 local result. The restoring-write bound does not count these additional neutral tips.
+
+`recordEpoch` takes `current` (the fixed ordered-record identity), `applied`, nullable
+`announced`, `receipts`, `stalePlan`, and `action`: `fetched`, `keepReceipt`, `adopt`,
+`staleFailure`, `clearPlan`, or `wait`. `keepReceipt` and `adopt` also take `records`.
+It executes `Retry.Records.exec`, proved sound against `Step`, and returns the state,
+`adopts`, `fails`, and the recovery credit before and after. The native departure regression
+checks an equal-record fetch and adoption against this route: custody is consumed while the
+applied list stays empty, and its effects become pending. Only after that transaction can its
+readable old prefix be held as earlier applied effects. Saving a receipt alone never does so.
 
 ### Contracted ancestry
 

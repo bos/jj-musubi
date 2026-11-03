@@ -13,6 +13,7 @@ import Musubi.SupersedeExecSound
 import Musubi.RecordLiveness
 import Musubi.AsyncLiveness
 import Musubi.RetryControl
+import Musubi.RecordEpoch
 import Musubi.RecordStability
 import Musubi.ContractOrder
 import Musubi.SurvivorAdvance
@@ -328,3 +329,8 @@ open Musubi
 #print axioms Refs.Expected.eval_without_known_agrees
 #print axioms Refs.Expected.checkpoint
 #print axioms Refs.Expected.conflicted_import_agrees_of_history
+
+-- Persistent received records and equal-record recovery
+#print axioms Retry.Records.exec_sound
+#print axioms Retry.Records.step_credit
+#print axioms Retry.Records.record_disturbances_stop

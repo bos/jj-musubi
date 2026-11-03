@@ -36,6 +36,8 @@ use super::NodeRepo;
 use super::git;
 use super::join::fingerprint;
 use crate::canonical;
+use crate::canonical::CanonicalError;
+use crate::canonical::CanonicalStore;
 use crate::canonical::Contraction;
 use crate::canonical::current;
 use crate::files;
@@ -85,6 +87,12 @@ pub(super) struct Records {
     /// or others: each with the digest of the records up to it, and of those before it. With
     /// those it holds, they are the records it has held ([`NodeRepo::held_records`]).
     earlier: Vec<Earlier>,
+    /// Records of the hub's beyond those this node holds that it realized operations named as
+    /// they name the history, before taking them, as while they drop an op head: each with
+    /// the digest of the records up to it, and of those before it. Its history may leave out
+    /// what they drop without its holding them, so that if the hub loses them, it publishes
+    /// what they drop as its own drops. Not held: they count as none of the records it took.
+    custody: Vec<Earlier>,
     /// Whether this node has nothing of the hive's, so that it may take the hub's records
     /// from those the hub pruned (`musubi_core::node::LocalRepo::fresh`): it joined on the
     /// root, and has taken no records, pushed nothing and realized nothing since.
@@ -119,7 +127,10 @@ pub(super) struct Records {
     /// to old: to name what it drops as the hub does after the hub goes back and takes others.
     hub_renamings: Vec<HashMap<CanonicalOp, CanonicalOp>>,
     /// Hub space to node space: the hub's history with `pending` dropped too, as worked out.
-    to_node: std::sync::Mutex<Option<Contraction>>,
+    to_node: std::sync::Mutex<Option<Normalizer>>,
+    /// Names as this node's history has them for raw operations of other histories
+    /// ([`NodeRepo::current_ids`]).
+    normal: std::sync::Mutex<Normal>,
     /// The hub's records this node is getting ready to take.
     taking: Option<Taking>,
     /// For tests of crashes and errors: where the next taking of records stops.
@@ -213,6 +224,210 @@ impl Realign {
     }
 }
 
+/// What a canonical operation is made of that naming it needs: its parents and its original.
+/// Immutable, so kept whatever this node drops.
+#[derive(Clone)]
+struct Fact {
+    parents: Vec<CanonicalOp>,
+    original: OperationId,
+}
+
+/// The facts read so far, and the normalizer for what this node drops now, until that changes.
+#[derive(Default)]
+struct Normal {
+    facts: HashMap<CanonicalOp, Fact>,
+    normalizer: Option<Normalizer>,
+}
+
+/// Where a raw operation stands, given the originals a history drops.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Class {
+    /// Neither it nor anything below it is a version of one.
+    Same,
+    /// A version of one.
+    Drop,
+    /// Something below it is.
+    Changed,
+}
+
+/// Names raw operations as a history that drops `dropped`, originals, does: any operation
+/// that is, or is above, another version of one of them, as another history names it,
+/// becomes its contraction by every version of them below it. A contraction keeps the
+/// original. On shared history with the received records retained, dropping the same
+/// originals gives the hub's names; this does not reconstruct unowned missing ancestry.
+/// A version of a dropped original becomes what its parents do.
+struct Normalizer {
+    dropped: HashSet<OperationId>,
+    class: HashMap<CanonicalOp, Class>,
+    /// Every operation classed as a version of one so far.
+    drops: Vec<CanonicalOp>,
+    /// The contraction by `drops`, made again when they grow: one that drops nothing below
+    /// an operation names it as one that doesn't drop that at all.
+    contraction: Option<Contraction>,
+    /// What those made before it worked out, and whether each is dropped: still what this
+    /// one works out, as every closure they worked out was whole when classed, and nothing
+    /// found since is below it.
+    worked: HashMap<CanonicalOp, (Vec<CanonicalOp>, bool)>,
+}
+
+fn fact(
+    store: &CanonicalStore,
+    facts: &mut HashMap<CanonicalOp, Fact>,
+    op: &CanonicalOp,
+) -> Result<Fact, NodeError> {
+    if let Some(fact) = facts.get(op) {
+        return Ok(fact.clone());
+    }
+    let (operation, original) = store.read_operation_and_original(op)?;
+    let fact = Fact {
+        parents: CanonicalOp::parents_of(&operation),
+        original,
+    };
+    facts.insert(op.clone(), fact.clone());
+    Ok(fact)
+}
+
+impl Normalizer {
+    fn new(dropped: HashSet<OperationId>) -> Self {
+        Self {
+            dropped,
+            class: HashMap::new(),
+            drops: vec![],
+            contraction: None,
+            worked: HashMap::new(),
+        }
+    }
+
+    /// What `op` is named as. Itself if nothing below it is a version of a dropped original,
+    /// or if the store lacks something below it: then nothing is worked out, nor kept, so
+    /// that what arrives later is looked at.
+    fn names(
+        &mut self,
+        store: &CanonicalStore,
+        presences: &Arc<canonical::PresenceMemo>,
+        facts: &mut HashMap<CanonicalOp, Fact>,
+        op: &CanonicalOp,
+    ) -> Result<Vec<CanonicalOp>, NodeError> {
+        Ok(self
+            .complete_names(store, presences, facts, op)?
+            .unwrap_or_else(|| vec![op.clone()]))
+    }
+
+    /// [`Self::names`], or none if the store lacks something below `op`.
+    fn complete_names(
+        &mut self,
+        store: &CanonicalStore,
+        presences: &Arc<canonical::PresenceMemo>,
+        facts: &mut HashMap<CanonicalOp, Fact>,
+        op: &CanonicalOp,
+    ) -> Result<Option<Vec<CanonicalOp>>, NodeError> {
+        if self.dropped.is_empty() {
+            return Ok(Some(vec![op.clone()]));
+        }
+        match self.classify(store, facts, op)? {
+            None => Ok(None),
+            Some(Class::Same) => Ok(Some(vec![op.clone()])),
+            Some(Class::Drop | Class::Changed) => {
+                if let Some((images, _)) = self.worked.get(op) {
+                    return Ok(Some(images.clone()));
+                }
+                if self.contraction.is_none() {
+                    self.contraction = Some(
+                        Contraction::new(store, self.drops.iter().cloned())?
+                            .sharing(presences.clone()),
+                    );
+                }
+                let contraction = self.contraction.as_mut().expect("made above");
+                // Checks the whole history below it before writing any rewrite.
+                Ok(Some(contraction.images(store, op)?))
+            }
+        }
+    }
+
+    /// What each operation worked out so far became, where that isn't just itself, and
+    /// whether it is dropped.
+    fn worked_out(&self) -> impl Iterator<Item = (&CanonicalOp, &Vec<CanonicalOp>, bool)> {
+        self.worked
+            .iter()
+            .map(|(op, (images, dropped))| (op, images, *dropped))
+            .chain(self.contraction.iter().flat_map(|contraction| {
+                contraction
+                    .images_so_far()
+                    .iter()
+                    .map(|(op, images)| (op, images, contraction.drops(op)))
+            }))
+    }
+
+    /// Keeps what the contraction worked out, which a contraction by more drops is about to
+    /// replace.
+    fn retire(&mut self) {
+        let Some(contraction) = self.contraction.take() else {
+            return;
+        };
+        for (op, images) in contraction.into_images() {
+            let dropped = self.class.get(&op) == Some(&Class::Drop);
+            self.worked.insert(op, (images, dropped));
+        }
+    }
+
+    /// The class of `op`, or none if the store lacks something below it. Looks only at what
+    /// it hasn't classed yet.
+    fn classify(
+        &mut self,
+        store: &CanonicalStore,
+        facts: &mut HashMap<CanonicalOp, Fact>,
+        op: &CanonicalOp,
+    ) -> Result<Option<Class>, NodeError> {
+        let root = store.root_operation_id();
+        let mut incomplete: HashSet<CanonicalOp> = HashSet::new();
+        // (operation, whether its parents have been pushed)
+        let mut stack = vec![(op.clone(), false)];
+        while let Some((id, expanded)) = stack.pop() {
+            if self.class.contains_key(&id) || incomplete.contains(&id) {
+                continue;
+            }
+            if id == *root {
+                self.class.insert(id, Class::Same);
+                continue;
+            }
+            if !store.has_operation(&id) {
+                incomplete.insert(id);
+                continue;
+            }
+            let fact = fact(store, facts, &id)?;
+            if !expanded {
+                stack.push((id, true));
+                stack.extend(
+                    fact.parents
+                        .into_iter()
+                        .filter(|p| !self.class.contains_key(p) && !incomplete.contains(p))
+                        .map(|p| (p, false)),
+                );
+                continue;
+            }
+            if fact.parents.iter().any(|p| incomplete.contains(p)) {
+                incomplete.insert(id);
+                continue;
+            }
+            let class = if self.dropped.contains(&fact.original) {
+                self.drops.push(id.clone());
+                self.retire();
+                Class::Drop
+            } else if fact
+                .parents
+                .iter()
+                .any(|p| self.class.get(p) != Some(&Class::Same))
+            {
+                Class::Changed
+            } else {
+                Class::Same
+            };
+            self.class.insert(id, class);
+        }
+        Ok(self.class.get(op).copied())
+    }
+}
+
 /// What taking records changes of what `records.json` has: to go back to if writing it
 /// fails, so that this node never goes on as if it held records it doesn't.
 struct Checkpoint {
@@ -220,6 +435,7 @@ struct Checkpoint {
     applied: Vec<Record>,
     digests: Vec<RecordDigest>,
     earlier: Vec<Earlier>,
+    custody: Vec<Earlier>,
     fresh: bool,
     pending: Record,
     fixup: Option<Fixup>,
@@ -229,7 +445,8 @@ struct Checkpoint {
     steps: usize,
 }
 
-/// A record this node took that it no longer holds.
+/// A record this node took that it no longer holds, or one it keeps in custody
+/// (`Records::custody`).
 #[derive(Clone)]
 struct Earlier {
     /// The digest of the records up to it.
@@ -264,6 +481,9 @@ struct Taking {
     /// The operation the hub accepted that this machine fetches from, as the records name
     /// it: what it became, or, if dropped, the first of what was below it.
     base: Option<HubOp>,
+    /// The digests of the records in custody that these records lack, whose drops are among
+    /// `pending`.
+    lost_custody: HashSet<RecordDigest>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -289,6 +509,9 @@ struct RecordsFile {
     /// `Records::earlier`, each the hex digest of the records before it, and the record.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     earlier: Vec<(String, Vec<String>)>,
+    /// `Records::custody`, as `earlier` is.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    custody: Vec<(String, Vec<String>)>,
 }
 
 /// What a fix-up writes: work by each copy whose latest work or forget-after an abandon
@@ -392,24 +615,28 @@ impl Records {
                 digest: parse_digest(hex)?,
             },
         };
-        let earlier = file
-            .earlier
-            .iter()
-            .map(|(before, record)| {
-                let before = parse_digest(before)?;
-                let record = parse_record(&path, record)?;
-                Ok(Earlier {
-                    digest: before.then(&record),
-                    before,
-                    record,
+        let entries = |entries: &[(String, Vec<String>)]| {
+            entries
+                .iter()
+                .map(|(before, record)| {
+                    let before = parse_digest(before)?;
+                    let record = parse_record(&path, record)?;
+                    Ok(Earlier {
+                        digest: before.then(&record),
+                        before,
+                        record,
+                    })
                 })
-            })
-            .collect::<Result<Vec<_>, NodeError>>()?;
+                .collect::<Result<Vec<_>, NodeError>>()
+        };
+        let earlier = entries(&file.earlier)?;
+        let custody = entries(&file.custody)?;
         let mut records = Self {
             digests: digests(&prefix.digest, &applied),
             prefix,
             applied,
             earlier,
+            custody,
             fresh: file.fresh,
             pending: parse_record(&path, &file.pending)?,
             fixup: file.fixup,
@@ -468,6 +695,20 @@ impl Records {
         self.superseded.extend(step);
         self.dropped.extend(dropped);
         self.sources.extend(sources);
+        self.forget_normalizer();
+    }
+
+    /// Forgets the normalizer, what this node drops having changed; the facts it read stay.
+    fn forget_normalizer(&mut self) {
+        self.normal
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .normalizer = None;
+        // The hub-to-node translation names as this node drops too.
+        *self
+            .to_node
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 
     fn checkpoint(&self) -> Checkpoint {
@@ -476,6 +717,7 @@ impl Records {
             applied: self.applied.clone(),
             digests: self.digests.clone(),
             earlier: self.earlier.clone(),
+            custody: self.custody.clone(),
             fresh: self.fresh,
             pending: self.pending.clone(),
             fixup: self.fixup.clone(),
@@ -492,6 +734,7 @@ impl Records {
             applied,
             digests,
             earlier,
+            custody,
             fresh,
             pending,
             fixup,
@@ -504,6 +747,7 @@ impl Records {
         self.applied = applied;
         self.digests = digests;
         self.earlier = earlier;
+        self.custody = custody;
         self.fresh = fresh;
         self.pending = pending;
         self.fixup = fixup;
@@ -511,6 +755,7 @@ impl Records {
         self.fixup_from = fixup_from;
         self.realign = realign;
         self.steps = steps;
+        self.forget_normalizer();
     }
 
     /// What `op` is now ([`current`]).
@@ -568,6 +813,7 @@ impl Records {
         self.digests = digests;
         self.prefix = prefix;
         self.applied = records;
+        self.forget_normalizer();
         // Those after a prefix known only by its count and digest that it no longer holds, it
         // can't find again.
         let lost: HashSet<RecordDigest> = self
@@ -841,6 +1087,11 @@ impl NodeRepo {
                 .iter()
                 .map(|earlier| (digest_hex(&earlier.before), hex_ids(&earlier.record)))
                 .collect(),
+            custody: records
+                .custody
+                .iter()
+                .map(|custody| (digest_hex(&custody.before), hex_ids(&custody.record)))
+                .collect(),
         };
         let path = self.records_path();
         let bytes = serde_json::to_vec_pretty(&file).map_err(|err| NodeError::Io {
@@ -992,13 +1243,135 @@ impl NodeRepo {
         &self.records.pending
     }
 
-    /// What `op`, a name from before a renaming here, or none, is now in node space.
-    pub fn current(&self, op: &CanonicalOp) -> Vec<NodeOp> {
-        self.current_ids(op).into_iter().map(NodeOp).collect()
+    /// Names this node's pending drops as the hub's history does, `known` being that history
+    /// as this node has it: the canonical ancestors of the hub's head it knows. A pending drop
+    /// that is another version of one of them, the same original under a name another record
+    /// gave it (a contraction keeps the original identity), becomes that one, for a drop is
+    /// of the original. Records the hub went back past name what they dropped as they did,
+    /// and another machine may then restore it under its name from before them: published
+    /// under the other name, the drop would miss it, and the hub's history would bring it back
+    /// here. A pending drop whose body this node lacks, or with no version in `known`, keeps
+    /// its name. Returns whether any changed.
+    ///
+    /// Only the pending drops change: the records this node holds are the hub's, and the
+    /// fix-up restores a head of this machine's history, which it drops nothing of. Records
+    /// being taken whose op heads haven't moved are worked out again, from the pending drops as
+    /// they are now; once the op heads have moved, the pending drops are what those records
+    /// left, and their moves go on as recorded. Fails if `known` has two versions of an
+    /// original a pending drop is, as no history can, rather than choose one.
+    pub fn name_pending_as(&mut self, known: &[CanonicalOp]) -> Result<bool, NodeError> {
+        let store = &self.canonical;
+        // The original each pending drop is, where its body is here to say.
+        let mut originals: HashMap<&CanonicalOp, OperationId> = HashMap::new();
+        for op in self.records.pending.ops() {
+            if store.has_operation(&op.0) {
+                originals.insert(&op.0, store.original_id(&op.0)?);
+            }
+        }
+        if originals.is_empty() {
+            return Ok(false);
+        }
+        let wanted: HashSet<&OperationId> = originals.values().collect();
+        // The version of each in the hub's history, of which it has one at most.
+        let mut versions: HashMap<OperationId, &CanonicalOp> = HashMap::new();
+        for op in known.iter().filter(|op| store.has_operation(op)) {
+            let original = store.original_id(op)?;
+            if !wanted.contains(&original) {
+                continue;
+            }
+            match versions.get(&original) {
+                Some(other) if *other != op => {
+                    return Err(CanonicalError::MalformedOperation(op.0.hex()).into());
+                }
+                Some(_) => {}
+                None => {
+                    versions.insert(original, op);
+                }
+            }
+        }
+        let named = Record::new(self.records.pending.ops().iter().map(|op| {
+            match originals
+                .get(&op.0)
+                .and_then(|original| versions.get(original))
+            {
+                Some(version) => HubOp((*version).clone()),
+                None => op.clone(),
+            }
+        }));
+        if named == self.records.pending {
+            return Ok(false);
+        }
+        let checkpoint = self.records.checkpoint();
+        self.records.pending = named;
+        if let Err(err) = self.save_records() {
+            self.records.restore(checkpoint);
+            return Err(err);
+        }
+        self.forget_to_node();
+        if self
+            .records
+            .taking
+            .as_ref()
+            .is_some_and(|taking| !taking.switched)
+        {
+            self.records.taking = None;
+        }
+        Ok(true)
     }
 
-    pub(super) fn current_ids(&self, op: &CanonicalOp) -> Vec<CanonicalOp> {
-        self.records.current(op)
+    /// What `op`, a name from before a renaming here, or none, is now in node space.
+    pub fn current(&self, op: &CanonicalOp) -> Result<Vec<NodeOp>, NodeError> {
+        Ok(self.current_ids(op)?.into_iter().map(NodeOp).collect())
+    }
+
+    /// What `op` is now in node space: what the renamings here made of it, each as this
+    /// node's history names it ([`Normalizer`]), so that one of another history, as one
+    /// imported since or one a `jj` command wrote on an old one, above another version of
+    /// something this node dropped, is named without it.
+    pub(super) fn current_ids(&self, op: &CanonicalOp) -> Result<Vec<CanonicalOp>, NodeError> {
+        let now = self.records.current(op);
+        let mut normal = self
+            .records
+            .normal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Normal { facts, normalizer } = &mut *normal;
+        if normalizer.is_none() {
+            *normalizer = Some(Normalizer::new(self.dropped_originals(facts, &[])?));
+        }
+        let normalizer = normalizer.as_mut().expect("made above");
+        let mut names = vec![];
+        for op in &now {
+            names.extend(normalizer.names(&self.canonical, &self.presences, facts, op)?);
+        }
+        Ok(dedup(names))
+    }
+
+    /// The originals of what this node drops: what the records it holds and held drop, what
+    /// its renamings dropped, and its pending drops, with `extra`, where the store has them.
+    /// Not records in custody: this node holds none of them.
+    fn dropped_originals(
+        &self,
+        facts: &mut HashMap<CanonicalOp, Fact>,
+        extra: &[CanonicalOp],
+    ) -> Result<HashSet<OperationId>, NodeError> {
+        let records = &self.records;
+        let names = records
+            .applied
+            .iter()
+            .chain(records.earlier.iter().map(|earlier| &earlier.record))
+            .flat_map(Record::ops)
+            .chain(records.pending.ops())
+            .map(|op| &op.0)
+            .chain(&records.dropped)
+            .chain(extra);
+        let mut originals = HashSet::new();
+        for name in names {
+            if self.canonical.has_operation(name) {
+                originals.insert(fact(&self.canonical, facts, name)?.original);
+            }
+        }
+        Ok(originals)
     }
 
     /// Whether this node dropped `op`, a hub name: what it has yet to publish, or what records
@@ -1025,25 +1398,42 @@ impl NodeRepo {
             Some(taking) => &taking.pending,
             None => &self.records.pending,
         };
-        let current = self.current_ids(op);
         if pending.is_empty() {
-            return Ok(current);
+            return self.current_ids(op);
         }
+        // As `current_ids` names, but without every version of the pending drops too, by their
+        // originals: those of records being taken that the hub lost may be named otherwise
+        // than the hub's history names them.
+        let now = self.records.current(op);
+        let names: Vec<CanonicalOp> = pending.ops().iter().map(|op| op.0.clone()).collect();
+        // Always this one, then `normal`.
         let mut to_node = self
             .records
             .to_node
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut normal = self
+            .records
+            .normal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let facts = &mut normal.facts;
         if to_node.is_none() {
-            *to_node = Some(
-                Contraction::new(&self.canonical, pending.ops().iter().map(|op| op.0.clone()))?
-                    .sharing(self.presences.clone()),
-            );
+            *to_node = Some(Normalizer::new(self.dropped_originals(facts, &names)?));
         }
-        let contraction = to_node.as_mut().expect("made above");
+        let normalizer = to_node.as_mut().expect("made above");
         let mut images = vec![];
-        for op in &current {
-            images.extend(contraction.images(&self.canonical, op)?);
+        for op in &now {
+            match normalizer.complete_names(&self.canonical, &self.presences, facts, op)? {
+                Some(named) => images.extend(named),
+                // Below which the store lacks something: as the pending drops' names alone
+                // drop, worked out afresh and kept nowhere, so that what arrives later counts.
+                None => images.extend(
+                    Contraction::new(&self.canonical, names.iter().cloned())?
+                        .sharing(self.presences.clone())
+                        .images(&self.canonical, op)?,
+                ),
+            }
         }
         Ok(dedup(images))
     }
@@ -1099,9 +1489,9 @@ impl NodeRepo {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(to_node) = to_node.as_ref() {
-            for (hub, node) in to_node.images_so_far() {
+            for (hub, node, dropped) in to_node.worked_out() {
                 if let [node] = node.as_slice()
-                    && !to_node.drops(hub)
+                    && !dropped
                 {
                     names.entry(node.clone()).or_insert_with(|| hub.clone());
                 }
@@ -1117,6 +1507,7 @@ impl NodeRepo {
             .to_node
             .get_mut()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        self.records.forget_normalizer();
     }
 
     /// The local operations reachable from `heads`: those the translation map, a join point
@@ -1286,7 +1677,7 @@ impl NodeRepo {
                 let now = match counterparts.get(&parent) {
                     Some(c) => vec![c.clone()],
                     None => match self.canonical_of(&parent) {
-                        Some(c) => self.current_ids(&c),
+                        Some(c) => self.current_ids(&c)?,
                         None => return Ok(true),
                     },
                 };
@@ -1374,7 +1765,7 @@ impl NodeRepo {
             let Some(canonical) = self.canonical_of(head) else {
                 continue;
             };
-            if let [now] = self.current_ids(&canonical).as_slice()
+            if let [now] = self.current_ids(&canonical)?.as_slice()
                 && *now != canonical
                 && let Some(local) = self.local_of(now)
             {
@@ -1478,11 +1869,14 @@ impl NodeRepo {
                         .and_then(OperationId::try_from_hex)
                         .map(CanonicalOp)
                 })
-                .filter(|c| self.canonical.has_operation(c))
-                .and_then(|c| match self.current_ids(&c).as_slice() {
+                .filter(|c| self.canonical.has_operation(c));
+            let named = match named {
+                Some(c) => match self.current_ids(&c)?.as_slice() {
                     [now] => Some(now.clone()),
                     _ => None,
-                });
+                },
+                None => None,
+            };
             let fingerprint = by_fingerprint.get(&fingerprint(op));
             if named.is_none() && matches!(fingerprint, Some(None)) {
                 return Err(ambiguous(self)?);
@@ -2167,20 +2561,23 @@ impl NodeRepo {
         let recorded = LocalOp(locked.locked_wc().old_operation_id().clone());
         let rewrite = match locals.get(&recorded).map(Vec::as_slice) {
             Some([rewrite]) => Some(rewrite.clone()),
-            _ => self
-                .canonical_of(&recorded)
-                .and_then(|canonical| match self.current_ids(&canonical).as_slice() {
-                    [now] if *now != canonical => self.local_of(now),
-                    _ => None,
-                })
-                .map_or_else(
+            _ => {
+                let now = match self.canonical_of(&recorded) {
+                    Some(canonical) => match self.current_ids(&canonical)?.as_slice() {
+                        [now] if *now != canonical => self.local_of(now),
+                        _ => None,
+                    },
+                    None => None,
+                };
+                now.map_or_else(
                     || {
                         let by_content =
                             by_content.get_or_init(|| self.rewrites_by_content(locals));
                         self.rewrite_by_content(&recorded, by_content)
                     },
                     |op| Ok(Some(op)),
-                )?,
+                )?
+            }
         };
         let Some(rewrite) = rewrite.filter(|rewrite| *rewrite != recorded) else {
             return Ok(());
@@ -2227,6 +2624,54 @@ impl NodeRepo {
             self.canonical_of(head)
                 .is_some_and(|c| taking.dropped.contains(&c))
         }))
+    }
+
+    /// Whether received records remain in custody. Taking the hub's next announcement either
+    /// applies them or, if the hub lost them, makes their drops pending, even when it announces
+    /// the records this node already applied.
+    pub fn has_record_custody(&self) -> bool {
+        !self.records.custody.is_empty()
+    }
+
+    /// Keeps in custody `records`, after those `prefix` stands for, beyond the first `common`
+    /// this node holds, before anything written for them or named as they name the history
+    /// is: its history may then leave out what they drop, though it takes them only later, as
+    /// while they drop an op head, or never, if the hub loses them first. Writes only records
+    /// it doesn't hold or keep already.
+    fn keep_custody(
+        &mut self,
+        prefix: &RecordPrefix,
+        records: &[Record],
+        common: usize,
+    ) -> Result<(), NodeError> {
+        let chain = digests(&prefix.digest, records);
+        let new: Vec<Earlier> = {
+            let held: HashSet<&RecordDigest> = self.records.digests.iter().collect();
+            let kept: HashSet<&RecordDigest> = self
+                .records
+                .custody
+                .iter()
+                .map(|custody| &custody.digest)
+                .collect();
+            (common..records.len())
+                .filter(|&k| !held.contains(&chain[k + 1]) && !kept.contains(&chain[k + 1]))
+                .map(|k| Earlier {
+                    digest: chain[k + 1].clone(),
+                    before: chain[k].clone(),
+                    record: records[k].clone(),
+                })
+                .collect()
+        };
+        if new.is_empty() {
+            return Ok(());
+        }
+        let checkpoint = self.records.checkpoint();
+        self.records.custody.extend(new);
+        if let Err(err) = self.save_records() {
+            self.records.restore(checkpoint);
+            return Err(err);
+        }
+        Ok(())
     }
 
     /// Renames this node's history as `records` name it, writing the rewrites of its local
@@ -2279,7 +2724,6 @@ impl NodeRepo {
         if *prefix != self.records.prefix && prefix.count > 0 && !self.is_fresh() {
             return Err(NodeError::PrunedRecords);
         }
-        let store = &self.canonical;
         let applied = self.records.applied.clone();
         let common = if *prefix == self.records.prefix {
             applied
@@ -2290,6 +2734,42 @@ impl NodeRepo {
         } else {
             0
         };
+        // Before anything below, or anything named as they name the history, writes a local
+        // operation.
+        self.keep_custody(prefix, records, common)?;
+        let store = &self.canonical;
+        let heads = self.local_heads()?;
+        let (mapped, unmapped) = self.local_walk(&heads)?;
+        // Records in custody that these lack: the hub lost them, and this node publishes what
+        // they drop, as of records it took that the hub lost. It never took them, so its
+        // history may still have what they drop, which it drops now too.
+        let incoming: HashSet<RecordDigest> =
+            digests(&prefix.digest, records).into_iter().collect();
+        let lost_custody: Vec<&Earlier> = self
+            .records
+            .custody
+            .iter()
+            .filter(|custody| !incoming.contains(&custody.digest))
+            .collect();
+        // Another raw version of a dropped original may be here without the record that
+        // renamed it. Match physical history, not old bodies in the canonical cache.
+        let mut local_versions: HashMap<OperationId, Vec<CanonicalOp>> = HashMap::new();
+        if common < records.len() || !lost_custody.is_empty() {
+            let wanted: HashSet<OperationId> = records[common..]
+                .iter()
+                .chain(lost_custody.iter().map(|custody| &custody.record))
+                .flat_map(Record::ops)
+                .filter(|op| store.has_operation(&op.0))
+                .map(|op| store.original_id(&op.0))
+                .collect::<Result<_, _>>()?;
+            let tops: Vec<CanonicalOp> = mapped.into_iter().map(|(_, op)| op).collect();
+            for op in store.ancestors_until(&tops, |_| false)? {
+                let original = store.original_id(&op)?;
+                if wanted.contains(&original) {
+                    local_versions.entry(original).or_default().push(op);
+                }
+            }
+        }
         // A hub name from after the `from`th record this node took, as the history named the
         // operation after the records the hub and this node share: back through how each
         // record since renamed the hub's history. An operation made since has no such name,
@@ -2315,6 +2795,35 @@ impl NodeRepo {
         for (k, record) in applied.iter().enumerate().skip(common) {
             mine.extend(record.ops().iter().map(|op| back(&op.0, k)));
         }
+        // Named as the history this node realized named them; `name_pending_as` names them as
+        // the hub's does, by their originals.
+        let mut to_drop = vec![];
+        // What the records both hold drop already is no drop of this node's.
+        let mut shared_originals = HashSet::new();
+        for op in applied[..common].iter().flat_map(Record::ops) {
+            if store.has_operation(&op.0) {
+                shared_originals.insert(store.original_id(&op.0)?);
+            }
+        }
+        for custody in &lost_custody {
+            for op in custody.record.ops() {
+                if store.has_operation(&op.0)
+                    && shared_originals.contains(&store.original_id(&op.0)?)
+                {
+                    continue;
+                }
+                mine.push(op.0.clone());
+                if store.has_operation(&op.0)
+                    && let Some(versions) = local_versions.get(&store.original_id(&op.0)?)
+                {
+                    to_drop.extend(versions.iter().cloned());
+                }
+            }
+        }
+        let lost_custody: HashSet<RecordDigest> = lost_custody
+            .into_iter()
+            .map(|custody| custody.digest.clone())
+            .collect();
         // Where the hub lost records this machine took, it may have lost the base too: the
         // root is accepted wherever the hub went back to, at the cost of fetching everything.
         let mut base = if common < applied.len() {
@@ -2326,11 +2835,13 @@ impl NodeRepo {
         // the hub's history below the base; and the node names of what they drop, but what
         // this node dropped already, whose node names are what is left below it.
         let mut renamings: Vec<HashMap<CanonicalOp, CanonicalOp>> = vec![];
-        let mut to_drop = vec![];
         for record in &records[common..] {
             let names: Vec<CanonicalOp> = record.ops().iter().map(|op| op.0.clone()).collect();
             let dropped_here: HashSet<CanonicalOp> = mine.iter().cloned().collect();
             for op in &names {
+                if let Some(versions) = local_versions.get(&store.original_id(op)?) {
+                    to_drop.extend(versions.iter().cloned());
+                }
                 let shared = renamings.iter().rev().fold(op.clone(), |op, renaming| {
                     renaming.get(&op).cloned().unwrap_or(op)
                 });
@@ -2350,10 +2861,20 @@ impl NodeRepo {
             let mut ours =
                 Contraction::new(store, to_drop.iter().cloned())?.sharing(self.presences.clone());
             let theirs: HashSet<&CanonicalOp> = names.iter().collect();
+            // A record drops an original, whatever it names it: what this node dropped as
+            // another version of one the record names is published by it, as another machine
+            // published it under the name the hub's history gave it.
+            let mut theirs_originals = HashSet::new();
+            for op in names.iter().filter(|op| store.has_operation(op)) {
+                theirs_originals.insert(store.original_id(op)?);
+            }
             let mut renamed = vec![];
             for op in mine.iter().filter(|op| !theirs.contains(op)) {
                 if !store.has_operation(op) {
                     renamed.push(op.clone());
+                    continue;
+                }
+                if theirs_originals.contains(&store.original_id(op)?) {
                     continue;
                 }
                 let images = contraction.images(store, op)?;
@@ -2385,8 +2906,6 @@ impl NodeRepo {
             );
         }
         let mut contraction = Contraction::new(store, to_drop)?.sharing(self.presences.clone());
-        let heads = self.local_heads()?;
-        let (_, unmapped) = self.local_walk(&heads)?;
         let locals = self.rewrite_locals(&mut contraction, &heads, &HashMap::new(), &unmapped)?;
         let mut heads = heads;
         heads.sort();
@@ -2402,6 +2921,7 @@ impl NodeRepo {
             locals,
             heads,
             base: base.map(HubOp),
+            lost_custody,
         })
     }
 
@@ -2496,10 +3016,12 @@ impl NodeRepo {
         heads: &[LocalOp],
         canonical: &HashMap<LocalOp, CanonicalOp>,
     ) -> Result<bool, NodeError> {
-        let superseded: HashMap<&LocalOp, &CanonicalOp> = canonical
-            .iter()
-            .filter(|(_, c)| self.current_ids(c) != std::slice::from_ref(*c))
-            .collect();
+        let mut superseded: HashMap<&LocalOp, &CanonicalOp> = HashMap::new();
+        for (local, c) in canonical {
+            if self.current_ids(c)? != std::slice::from_ref(c) {
+                superseded.insert(local, c);
+            }
+        }
         // Below the lowest of them, an operation that stands for one of the store's has none
         // of them below it. One written on one of them, canonicalized on what that became, is
         // as high as that one, at least.
@@ -2577,8 +3099,31 @@ impl NodeRepo {
                 None => fixup.expected = None,
             }
         }
+        // Lost receipts have now had their effects applied with the incoming records. Keep
+        // their readable prefixes as earlier records, without ever reporting them as the
+        // current applied list. The hold's reachability cleanup discards unknown prefixes.
+        let earlier: HashSet<RecordDigest> = self
+            .records
+            .earlier
+            .iter()
+            .map(|entry| entry.digest.clone())
+            .collect();
+        self.records.earlier.extend(
+            self.records
+                .custody
+                .iter()
+                .filter(|entry| {
+                    taking.lost_custody.contains(&entry.digest) && !earlier.contains(&entry.digest)
+                })
+                .cloned(),
+        );
         self.records
             .hold(taking.prefix.clone(), taking.records.clone());
+        // Custody taken, or lost and now pending, in the same write.
+        let held: HashSet<RecordDigest> = self.records.digests.iter().cloned().collect();
+        self.records.custody.retain(|custody| {
+            !held.contains(&custody.digest) && !taking.lost_custody.contains(&custody.digest)
+        });
         self.records.fresh = false;
         self.records.pending = taking.pending.clone();
         self.records.steps += usize::from(step.is_some());
@@ -2824,17 +3369,101 @@ impl NodeRepo {
         self.write_fixup_until(Some(written)).map(drop)
     }
 
+    /// Restores only work whose operation the pending records removed before this machine
+    /// received its publisher's fix-up. The original identity authenticates its timestamp
+    /// in the retained record body; current presence supplies newer work and forgetting.
+    fn repair_received_work(&mut self, head: &CanonicalOp) -> Result<(), NodeError> {
+        if self.records.pending.is_empty() {
+            return Ok(());
+        }
+        let mut sources = HashMap::new();
+        for op in self.records.pending.ops() {
+            if self.canonical.has_operation(&op.0) {
+                sources.insert(self.canonical.original_id(&op.0)?, op.0.clone());
+            }
+        }
+        let presence = self.presence(head)?;
+        let mut repairs = vec![];
+        for copy in presence.known() {
+            let has_receipt_ghost = presence
+                .ops_of(copy)
+                .filter(|work| work.op.is_none())
+                .any(|work| sources.contains_key(&work.original));
+            if !has_receipt_ghost {
+                continue;
+            }
+            let missing: Vec<_> = presence
+                .worked(copy)
+                .into_iter()
+                .flatten()
+                .filter(|work| work.op.is_none())
+                .collect();
+            if missing
+                .iter()
+                .any(|work| !sources.contains_key(&work.original))
+            {
+                continue;
+            }
+            let mut last = self.worked_at(&presence, copy)?;
+            for work in missing {
+                let millis = self.work_time(&sources[&work.original])?;
+                last = Some(last.map_or(millis, |at| at.max(millis)));
+            }
+            repairs.push(Work {
+                copy: copy.clone(),
+                forget_after: presence
+                    .has_forget_after(copy)
+                    .then(|| format_forget_after(presence.forget_after(copy))),
+                worked_at: last,
+                forgotten: None,
+            });
+        }
+        if repairs.is_empty() {
+            return Ok(());
+        }
+        // Completed restoration stays in history. A new obligation must not replay its
+        // settings or expected values; an unfinished recipe keeps its partial-write choices.
+        let mut fixup = if self.records.fixup_written {
+            Fixup::default()
+        } else {
+            self.records.fixup.clone().unwrap_or_default()
+        };
+        for repair in repairs {
+            if let Some(work) = fixup.work.iter_mut().find(|work| work.copy == repair.copy) {
+                // Current causal work may have an earlier clock time than an old recipe.
+                work.worked_at = repair.worked_at;
+            } else {
+                fixup.work.push(repair);
+            }
+        }
+        if !self.records.fixup_written && self.records.fixup.as_ref() == Some(&fixup) {
+            return Ok(());
+        }
+        let checkpoint = self.records.checkpoint();
+        if self.records.fixup_written {
+            self.records.fixup_from = None;
+        }
+        self.records.fixup = Some(fixup);
+        self.records.fixup_written = false;
+        if let Err(err) = self.save_records() {
+            self.records.restore(checkpoint);
+            return Err(err);
+        }
+        Ok(())
+    }
+
     /// [`Self::write_fixup`], stopping after `stop` operations if given.
     fn write_fixup_until(&mut self, stop: Option<usize>) -> Result<Option<NodeOp>, NodeError> {
         // Before reading the fix-up, which an abandon noticed now replaces, and not between
         // its operations.
         self.check_abandon()?;
+        let head = self.merged_repo_unchecked()?;
+        let canonical_head = self.canonicalize(&LocalOp(head.op_id().clone()))?;
+        self.repair_received_work(&canonical_head)?;
         if self.records.fixup_written {
             return Ok(None);
         }
         let mut after_work: Vec<String> = vec![];
-        let head = self.merged_repo_unchecked()?;
-        let canonical_head = self.canonicalize(&LocalOp(head.op_id().clone()))?;
         // Which copies are forgotten at the op head, which may have operations above the
         // fix-up's `new`, as a forget not yet published: the fix-up leaves each so.
         if let Some(fixup) = &self.records.fixup

@@ -278,8 +278,8 @@ fn a_delayed_child_of_a_jj_rewrite_keeps_its_origin_after_cache_loss() {
         LocalOp(jj_lib::op_store::OperationId::try_from_hex(log.lines().next().unwrap()).unwrap());
     assert_ne!(source, middle);
     assert!(node.notice_abandon(&HubOp(base.clone())).unwrap());
-    let expected = node.current(&original)[0].0.clone();
-    let expected_head = node.current(&base)[0].0.clone();
+    let expected = node.current(&original).unwrap()[0].0.clone();
+    let expected_head = node.current(&base).unwrap()[0].0.clone();
     drop(node);
     std::fs::remove_file(repo.repo_path().join("musubi/translation")).unwrap();
     // A power cut can retain the counted step while losing the head move and final

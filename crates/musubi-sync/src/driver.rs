@@ -50,7 +50,7 @@ impl NodeDriver {
         self.tally = Tally::default();
         // Polled first: what the hub sends says whether it took this node's last push, which
         // reading the op heads must know, to notice an abandon of it.
-        let poll = self.core.poll(&self.adapter)?;
+        let poll = self.adapter.poll(&self.core)?;
         self.deliver(poll).await?;
         self.adapter.before_sync()?;
         let mut steps = 0;

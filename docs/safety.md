@@ -47,6 +47,8 @@ Much of musubi's safety comes from what it doesn't do.
 - **Big transfers resume.** Large objects travel in chunks, and a transfer cut off by a
   dropped connection picks up where it stopped. The whole is checked against its hash before
   anything uses it.
+- **Collected objects can be fetched again.** If `jj util gc` removes objects after you restore
+  and abandon history, musubi fetches them again from the hub.
 - **What it doesn't understand, it refuses.** An operation from a newer jj, with fields musubi
   doesn't know, is refused rather than passed on with those fields dropped. A machine and a hub
   that speak different versions of the protocol refuse each other, saying so.

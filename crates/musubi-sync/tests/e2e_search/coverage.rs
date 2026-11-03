@@ -287,6 +287,11 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
     ),
     ("empty_repositories_make_a_hive", Some(&["setup:empty"])),
     ("op_abandon_replicates", Some(&["op_abandon"])),
+    // The search does not run jj's object-pruning gc after restoring and abandoning a base.
+    (
+        "collected_objects_of_an_abandoned_fetch_base_are_fetched_again",
+        None,
+    ),
     // These require exact cuts within record taking, not just a partial sync and rollback.
     (
         "a_sync_stopped_while_taking_an_abandon_the_hub_then_loses",

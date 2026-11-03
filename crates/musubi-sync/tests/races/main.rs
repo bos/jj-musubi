@@ -17,6 +17,7 @@ mod bookmarks;
 mod changes;
 mod config;
 mod expiry;
+mod fetch_base;
 mod forget;
 mod found;
 mod history;

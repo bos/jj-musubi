@@ -327,11 +327,23 @@ fn run(
     false_replies: bool,
     storage_failures: bool,
 ) -> Option<Oracle> {
+    run_from(tc, oracle, false_replies, storage_failures, |_, _| 0)
+}
+
+/// [`run`], from where `prefix` takes the hive first, which returns how many crashes it used.
+fn run_from(
+    tc: TestCase,
+    oracle: Option<Oracle>,
+    false_replies: bool,
+    storage_failures: bool,
+    prefix: impl FnOnce(&TestCase, &mut World) -> usize,
+) -> Option<Oracle> {
     let nodes = tc.draw(gs::integers::<usize>().min_value(2).max_value(3));
     let world = Rc::new(RefCell::new(World::new(nodes, oracle)));
+    let crashes = prefix(&tc, &mut world.borrow_mut());
     hegel::stateful::machine(Machine {
         world: world.clone(),
-        crashes: 0,
+        crashes,
         false_replies,
         storage_failures,
     })
@@ -385,6 +397,90 @@ fn conformance(tc: TestCase) {
     thread_local!(static ORACLE: Cell<Option<Oracle>> = const { Cell::new(None) });
     let oracle = ORACLE.take().unwrap_or_else(Oracle::spawn);
     ORACLE.set(run(tc, Some(oracle), false, false));
+}
+
+/// A head the hub accepted through what survives of the one before need not reach it. Once
+/// the hub has forgotten objects only that one reached, going back there would leave a hub
+/// without what its head needs. The environment explicitly chooses a remake, and every
+/// node's work reaches the new one; native detection of the damaged interval is not modeled.
+#[test]
+fn going_back_past_an_acceptance_through_survivors_remakes_the_hub() {
+    let mut world = World::new(2, Some(Oracle::spawn()));
+    for parent in 0..3 {
+        world.user_op(0, parent, 1);
+        world.exchange(0, 0);
+    }
+    world.op_abandon(0, vec![2]);
+    while world.hub_records().is_empty() {
+        world.exchange(0, 0);
+    }
+    fetch(&mut world, 1);
+    world.exchange(1, 0);
+    world.user_op(1, 0, 1);
+    world.hub_goes_back(2);
+    world.poll_now_checked(1);
+    for _ in 0..16 {
+        world.exchange_checked(1, 0);
+    }
+    // Node 1 published the drop, through what survives of 2, which its head doesn't reach.
+    assert!(world.hub_seq() > 2);
+    assert!(world.hub_records().iter().flatten().any(|&op| op == 2));
+    world.hub_forget();
+    let lost = world.objects(2);
+    assert!(!lost.is_empty());
+    assert!(lost.iter().all(|&obj| !world.hub_has_object(obj)));
+    assert!(!world.hub_closed(2));
+    world.hub_goes_back(2);
+    assert!(world.remade_for_rollback);
+    assert_eq!((world.hub_seq(), world.hub_head()), (0, 0));
+    world.quiesce();
+    world.check_invariants();
+}
+
+/// Generated sequences seldom reach a node that knows a head it dropped and lacks what
+/// survives of it: one that took the hub's records before realizing that history, when the
+/// hub then goes back to that head. Each case here starts there, generated, and goes on as
+/// `conformance` does, so that advancing to what survives, the hub accepting a push through
+/// it, and switching to prepared records are checked against the Lean model with the rest.
+#[hegel::test(test_cases = conformance_cases())]
+fn survivor_advance_conformance(tc: TestCase) {
+    thread_local!(static ORACLE: Cell<Option<Oracle>> = const { Cell::new(None) });
+    let oracle = ORACLE.take().unwrap_or_else(Oracle::spawn);
+    ORACLE.set(run_from(tc, Some(oracle), false, false, dropped_known));
+}
+
+/// Node 0 makes a few operations, one on another, and drops some of those below its head;
+/// node 1 takes the records without that history, perhaps with work of its own; the hub goes
+/// back to one of the dropped operations; and node 1 hears of it and takes a few steps first.
+/// One crash.
+fn dropped_known(tc: &TestCase, world: &mut World) -> usize {
+    let length = tc.draw(gs::integers::<u64>().min_value(3).max_value(5));
+    for parent in 0..length {
+        let objs = tc.draw(gs::integers::<usize>().max_value(1));
+        world.user_op(0, parent, objs);
+        world.exchange(0, 0);
+    }
+    let dropped: Vec<u64> = (1..length).filter(|_| tc.draw(gs::booleans())).collect();
+    tc.assume(!dropped.is_empty());
+    world.op_abandon(0, dropped.clone());
+    while world.hub_records().is_empty() {
+        world.exchange(0, 0);
+    }
+    fetch(world, 1);
+    world.exchange(1, 0);
+    for _ in 0..tc.draw(gs::integers::<usize>().max_value(2)) {
+        let local = world.local_ops(1);
+        let parent = local[pick(tc, local.len())];
+        world.user_op(1, parent, 0);
+    }
+    world.hub_goes_back(dropped[pick(tc, dropped.len())]);
+    // Node 1 hears of it first, and takes some steps, before anything else happens: each, as
+    // `quiesce`'s, makes the measures fall.
+    world.poll_now_checked(1);
+    for _ in 0..tc.draw(gs::integers::<usize>().max_value(12)) {
+        world.exchange_checked(1, 0);
+    }
+    1
 }
 
 /// Storage errors are observed before recovery, then the daemon's reopen/restart is
@@ -1148,31 +1244,45 @@ fn a_push_to_a_dropped_head_is_refused() {
     assert_eq!(world.hub_head(), head);
 }
 
-/// A node never advances to a head it dropped: here one it took from the hub's records, which
-/// the hub then lost, going back to that head. It waits until another node publishes the
-/// drop again.
+/// A node never advances to a head it dropped, but to what survives of it: here one it took
+/// from the hub's records, which the hub then lost, going back to that head. It realizes what
+/// survives, merges it with any work of its own, and publishes the drop itself, rather than
+/// waiting for the node that dropped it, which here never syncs again before quiescing.
 #[test]
-fn a_node_never_advances_to_a_head_it_dropped() {
-    let mut world = World::new(2, Some(Oracle::spawn()));
-    world.user_op(0, 0, 0);
-    world.exchange(0, 0);
-    world.user_op(0, 1, 0);
-    world.exchange(0, 0);
-    world.op_abandon(0, vec![1]);
-    while world.hub_records().is_empty() {
-        world.exchange(0, 0);
-    }
-    // Node 1 fetches the hub's head and records, and takes them: its only head is the root.
-    fetch(&mut world, 1);
-    world.exchange(1, 0);
-    assert!(world.dropped(1).contains(&1));
-    world.hub_goes_back(1);
-    // Node 1 hears that the hub went back to 1, realizes it, and waits there.
-    world.poll_now(1);
-    for _ in 0..4 {
+fn a_node_advances_to_what_survives_of_a_head_it_dropped() {
+    for own_work in [true, false] {
+        let mut world = World::new(2, Some(Oracle::spawn()));
+        for parent in 0..3 {
+            world.user_op(0, parent, 0);
+            world.exchange(0, 0);
+        }
+        // Node 0 drops 2, between 1 and its head 3, and publishes the drop.
+        world.op_abandon(0, vec![2]);
+        while world.hub_records().is_empty() {
+            world.exchange(0, 0);
+        }
+        // Node 1 fetches the hub's head and records, and takes them: its only head is the root.
+        fetch(&mut world, 1);
         world.exchange(1, 0);
+        assert!(world.dropped(1).contains(&2));
+        if own_work {
+            world.user_op(1, 0, 0);
+        }
+        world.hub_goes_back(2);
+        // Node 1 hears that the hub went back to 2, and goes on from 1, which survives it,
+        // each step making the measures fall, as in `quiesce`.
+        world.poll_now_checked(1);
+        for _ in 0..16 {
+            world.exchange_checked(1, 0);
+        }
+        assert!(!world.heads(1).contains(&2), "own work: {own_work}");
+        assert_ne!(world.hub_head(), 2, "own work: {own_work}");
+        assert!(
+            world.hub_records().iter().flatten().any(|&op| op == 2),
+            "own work: {own_work}"
+        );
+        world.check_invariants();
+        world.quiesce();
+        world.check_invariants();
     }
-    assert!(!world.heads(1).contains(&1));
-    world.quiesce();
-    world.check_invariants();
 }

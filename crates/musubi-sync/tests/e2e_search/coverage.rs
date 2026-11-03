@@ -72,6 +72,7 @@ pub const EVENTS: &[&str] = &[
     "setup:shared_hostname",
     "setup:prejoin",
     "setup:empty",
+    "setup:dropped_merge",
     "push:accepted",
     "crash:writes_in_flight",
     // Imports of git refs, by what explains each ref they changed (`imports`).
@@ -292,6 +293,25 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         None,
     ),
     ("taking_an_abandon_resumes_where_it_stopped", None),
+    // The search's fixed participants never leave. These native boundary checks also need
+    // exact cuts before realization/advancement or a dropped merge with separate images.
+    // The generated core survivor_advance_conformance separately targets the new steps.
+    (
+        "a_dropped_head_published_again_is_dropped_by_who_took_it",
+        None,
+    ),
+    (
+        "advancing_to_what_survives_of_a_dropped_head",
+        Some(&["setup:dropped_merge"]),
+    ),
+    (
+        "advancing_to_what_survives_refuses_what_jj_cannot_merge",
+        None,
+    ),
+    (
+        "realizing_an_operation_this_machine_dropped_writes_nothing",
+        None,
+    ),
     // This also needs explicit integration and work on an unpublished realization.
     (
         "pending_drops_get_a_new_tip_when_the_hub_already_has_the_cached_fixup",

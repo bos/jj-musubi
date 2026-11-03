@@ -30,7 +30,10 @@ use crate::view::TEMPLATE;
 use crate::view::View;
 
 /// Machine directories. Their hostnames are the same, unless the setup shares one.
-pub const MACHINES: [&str; 3] = ["alpha", "beta", "gamma"];
+pub const MACHINES: [&str; 4] = ["alpha", "beta", "gamma", "delta"];
+/// How many machines a search's hive grows to: the fourth is for the dropped merge's setup
+/// only (`World::hold_dropped_merge`).
+pub const SEARCH_MACHINES: usize = 3;
 /// Small pools, so that machines collide on names.
 pub const BOOKMARKS: [&str; 3] = ["main", "feature", "topic"];
 pub const TAGS: [&str; 2] = ["v1", "v2"];
@@ -137,6 +140,13 @@ pub struct Workspace {
     pub path: Option<PathBuf>,
 }
 
+/// What an actual jj command read and wrote, before canonicalization or abandonment can
+/// expand its parent. This is independent source evidence for the reference replay.
+pub struct CommandSnapshot {
+    pub base: jj_lib::op_store::View,
+    pub made: jj_lib::op_store::View,
+}
+
 /// How many operations a sequence may revert to get past jj failing to merge operations.
 const MAX_UNMERGEABLE_REVERTS: usize = 10;
 
@@ -166,6 +176,10 @@ pub struct World {
     /// replaced, which jj keeps as it keeps every operation's, and whether that was a
     /// realization: no longer, perhaps, jj's merge of their parents, or a merge at all.
     pub kept_merges: BTreeMap<String, (jj_lib::op_store::View, bool)>,
+    pub commands: BTreeMap<String, CommandSnapshot>,
+    /// The object and jj metadata stores of command sources, including copies later
+    /// replaced. The fixture retains their directories until the case ends.
+    pub command_sources: BTreeMap<PathBuf, PathBuf>,
     /// What each machine saw at its op heads, when it last looked.
     seen: Vec<Option<(Vec<String>, Seen)>>,
     pub ledger: Ledger,
@@ -259,6 +273,8 @@ impl World {
             abandoned: vec![],
             forgot: BTreeMap::new(),
             kept_merges: BTreeMap::new(),
+            commands: BTreeMap::new(),
+            command_sources: BTreeMap::new(),
             seen: vec![None; setup.nodes],
             ledger: Ledger::default(),
             imports: Imports::default(),
@@ -432,11 +448,13 @@ impl World {
     /// run, it snapshots, imports, and merges first, so the commits it lists are exactly
     /// those the next command can see. Recorded, since it may change things.
     pub fn observe(&mut self, m: usize) -> View {
+        let history_before = self.command_history(m);
         let before = self.seen(m);
         self.dirty[m] = false;
         let present = self.abandoned_present(m);
         let view =
             View::parse(&self.raw_jj(m, &["log", "--no-graph", "-r", "all()", "-T", TEMPLATE]));
+        self.record_commands(m, &history_before);
         self.forgive_jj_returns(m, present);
         self.learn(&view);
         let after = Seen::of(std::slice::from_ref(&view));
@@ -568,6 +586,7 @@ impl World {
         args: &[&str],
         refusals: &[&str],
     ) -> Result<String, String> {
+        let history_before = self.command_history(m);
         let before = self.seen(m);
         let present = self.abandoned_present(m);
         let stale = self.is_stale(m, ws);
@@ -587,6 +606,7 @@ impl World {
         };
         self.record(format!("{place}: jj {}", args.join(" ")));
         let output = self.fx.repo(m).jj_output(&full);
+        self.record_commands(m, &history_before);
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         if !output.status.success() {
             if refusals.iter().any(|r| stderr.contains(r)) {
@@ -660,6 +680,7 @@ impl World {
         let before = Seen::of(&[self.view_at(m, op)]);
         let present = self.abandoned_present(m);
         let heads_before = self.op_heads(m);
+        let history_before = self.command_history(m);
         let mut full = vec!["--at-op", op];
         full.extend_from_slice(args);
         self.record(format!(
@@ -669,6 +690,7 @@ impl World {
             args.join(" ")
         ));
         let output = self.fx.repo(m).jj_output(&full);
+        self.record_commands(m, &history_before);
         if !output.status.success() {
             self.fail(&format!(
                 "`jj {}` failed on {}:\n{}",
@@ -687,6 +709,71 @@ impl World {
         let what = self.trace.last().cloned().unwrap_or_default();
         self.ledger.record(m, &what, &before, &after, true);
         self.forgive_jj_returns(m, present);
+    }
+
+    /// The source history before a command. Keys also recognize operations an abandon
+    /// rewrites without changing their metadata, so those are not mistaken for new work.
+    fn command_history(&self, m: usize) -> BTreeSet<String> {
+        let store = self.fx.hive.members[m].adapter.repo().loader().op_store();
+        let mut pending = self.op_heads(m);
+        let mut seen = BTreeSet::new();
+        let mut keys = BTreeSet::new();
+        while let Some(head) = pending.pop() {
+            if !seen.insert(head.clone()) {
+                continue;
+            }
+            let id = jj_lib::op_store::OperationId::try_from_hex(&head).unwrap();
+            let op = futures::executor::block_on(store.read_operation(&id)).unwrap();
+            keys.insert(merge_key(&op));
+            pending.extend(op.parents.iter().map(jj_lib::object_id::ObjectId::hex));
+        }
+        keys
+    }
+
+    fn record_commands(&mut self, m: usize, history_before: &BTreeSet<String>) {
+        let store = self.fx.hive.members[m]
+            .adapter
+            .repo()
+            .loader()
+            .op_store()
+            .clone();
+        let mut pending = self.op_heads(m);
+        let mut seen = BTreeSet::new();
+        while let Some(head) = pending.pop() {
+            if !seen.insert(head.clone()) {
+                continue;
+            }
+            let id = jj_lib::op_store::OperationId::try_from_hex(&head).unwrap();
+            let op = futures::executor::block_on(store.read_operation(&id)).unwrap();
+            if history_before.contains(&merge_key(&op)) {
+                continue;
+            }
+            // A command can first write a snapshot or import, then its requested work.
+            // Record the complete new interval, not just its final operation head.
+            pending.extend(op.parents.iter().map(jj_lib::object_id::ObjectId::hex));
+            let [parent] = op.parents.as_slice() else {
+                continue;
+            };
+            // A command can trigger jj's automatic reconciliation before doing no work.
+            // Such a merge must still be compared with jj, never trusted as a payload.
+            if op.metadata.description == "reconcile divergent operations" {
+                continue;
+            }
+            let snapshot = futures::executor::block_on(async {
+                let parent = store.read_operation(parent).await.unwrap();
+                CommandSnapshot {
+                    base: store.read_view(&parent.view_id).await.unwrap(),
+                    made: store.read_view(&op.view_id).await.unwrap(),
+                }
+            });
+            let repo = self.fx.repo(m);
+            self.command_sources.insert(
+                repo.path().join(".git/objects"),
+                repo.repo_path().join("store/extra"),
+            );
+            // Later rewrites keep the same key; retain the actual command's first input.
+            self.commands.entry(merge_key(&op)).or_insert(snapshot);
+        }
     }
 
     /// Operations made since setup that machine `m` can run a command at, other than its
@@ -1104,6 +1191,139 @@ impl World {
         }
         self.note_pruning(pruned);
         self.record_merges(m);
+    }
+
+    /// Lets node `m` sync until it has taken the hub's records and realized its head, and
+    /// stops there, before advancing to it.
+    pub fn sync_taking(&mut self, m: usize) {
+        self.touched.insert(m);
+        self.record(format!(
+            "{}: sync until the hub's records are taken and its head realized",
+            self.machine(m)
+        ));
+        self.merge_local_heads(m);
+        let result = (|| -> anyhow::Result<()> {
+            let poll = {
+                let member = &mut self.fx.hive.members[m];
+                member.core.poll(&member.adapter)?
+            };
+            self.deliver(m, poll, false)?;
+            self.fx.hive.members[m].adapter.before_sync()?;
+            let mut adopted = false;
+            for _ in 0..64 {
+                if adopted && !self.behind_hub(m) {
+                    return Ok(());
+                }
+                let member = &mut self.fx.hive.members[m];
+                match member.core.step(&mut member.adapter)? {
+                    Step::Adopted => adopted = true,
+                    Step::Send(requests) => {
+                        for request in requests {
+                            self.deliver(m, request, false)?;
+                        }
+                    }
+                    Step::Realized(_) | Step::Merged => {}
+                    step => anyhow::bail!("{step:?} before taking the records"),
+                }
+            }
+            anyhow::bail!("never took the records and realized the hub's head")
+        })();
+        if let Err(err) = result {
+            self.fail(&format!("{} taking records: {err:#}", self.machine(m)));
+        }
+        self.record_merges(m);
+    }
+
+    /// From a hive of four, a merge the hub accepted that one machine drops, another keeps,
+    /// and a third took the drop of without advancing, before the hub went back and the
+    /// keeper published it again: what survives of it is two operations, neither below the
+    /// other (`races::history`, `Survivors::Apart`). Alpha commits work and delta takes it;
+    /// the hub goes back, and gamma commits separate work; delta merges without publishing, and
+    /// alpha's merge of them, which gamma keeps, is accepted. Alpha abandons its merge alone,
+    /// and publishes that; beta, with `work` of its own (files it commits), takes the record
+    /// and realizes the hub's head, then restarts. The hub goes back to gamma's work, losing the
+    /// record, and gamma publishes the merge again. Returns it.
+    pub fn hold_dropped_merge(&mut self, work: &[usize]) -> OpId {
+        assert_eq!(self.nodes(), 4);
+        let base = self.hub_seq();
+        for &file in work {
+            self.commit(1, 0, file);
+        }
+        self.commit(0, 0, 0);
+        self.sync(0);
+        self.sync(3);
+        self.hub_goes_back(usize::try_from(self.hub_seq() - base).unwrap());
+        self.commit(2, 0, 1);
+        self.sync(2);
+        let q = self.hub_seq();
+        self.sync_realizing(3, usize::MAX);
+        self.sync(0);
+        let ours = self.fx.hive.hub_head();
+        self.sync(2);
+        self.sync(3);
+        let both = self.fx.hive.hub_head();
+        self.sync(0);
+        self.jj(0, &["describe", "-m", "after survivor merge"]);
+        self.sync(0);
+        let (theirs, kept) = {
+            let node = self.fx.node(0);
+            let parents = node
+                .canonical_store()
+                .parents(&CanonicalOp(both.clone()))
+                .unwrap();
+            if parents.len() != 2 || !parents.contains(&CanonicalOp(ours.clone())) {
+                self.fail(&format!("the merge of both isn't on alpha's: {parents:?}"));
+            }
+            let node = self.fx.node(0);
+            let theirs = parents.into_iter().find(|op| op.0 != ours).unwrap();
+            let local = |op: &CanonicalOp| node.local_of(op).unwrap().0.hex();
+            (local(&theirs), local(&CanonicalOp(ours.clone())))
+        };
+        // Only alpha's merge: delta's has both its parents.
+        self.abandon_ops(0, &format!("{theirs}..{kept}"), std::slice::from_ref(&kept));
+        self.sync(0);
+        if self.fx.hive.hub.store().record_count() != 1 {
+            self.fail("alpha's abandon was not published");
+        }
+        self.sync_taking(1);
+        self.restart(1);
+        self.hub_goes_back(usize::try_from(self.hub_seq() - q).unwrap());
+        self.sync(2);
+        if self.fx.hive.hub_head() != ours {
+            self.fail("gamma did not publish the dropped merge again");
+        }
+        ours
+    }
+
+    /// Machine `m` alone published the drop of `kept`: the hub dropped it, and `m` merged
+    /// what survives of it with its own work, three operations, in one operation.
+    pub fn check_dropped_by(&mut self, m: usize, kept: &OpId) {
+        if !self.fx.hive.hub.is_dropped(kept, &[]).unwrap() {
+            self.fail(&format!(
+                "{} did not publish the drop of the merge",
+                self.machine(m)
+            ));
+        }
+        let merges = self.raw_jj(
+            m,
+            &[
+                "--ignore-working-copy",
+                "op",
+                "log",
+                "--no-graph",
+                "-T",
+                r#"if(parents.len() == 3, description.first_line() ++ "\n")"#,
+            ],
+        );
+        if !merges
+            .lines()
+            .any(|d| d == "reconcile divergent operations")
+        {
+            self.fail(&format!(
+                "{} did not merge what survives with its work at once",
+                self.machine(m)
+            ));
+        }
     }
 
     fn try_sync_partial(
@@ -1547,15 +1767,26 @@ impl World {
     /// Machine `m` runs `jj op abandon` of its operation `op`, which no machine may have
     /// afterwards.
     pub fn op_abandon(&mut self, m: usize, op: &str) {
-        let key = self.op_key(m, op);
-        let at = jj_lib::op_store::OperationId::try_from_hex(op).unwrap();
+        self.abandon_ops(m, op, &[op.to_owned()]);
+    }
+
+    /// `jj op abandon` of `spec` on machine `m`: one operation, or a range `x..y`, which drops
+    /// the operations `dropped`.
+    pub fn abandon_ops(&mut self, m: usize, spec: &str, dropped: &[String]) {
         let store = self.fx.hive.members[m]
             .adapter
             .repo()
             .loader()
             .op_store()
             .clone();
-        let merge = merge_key(&futures::executor::block_on(store.read_operation(&at)).unwrap());
+        let dropped: Vec<(String, String)> = dropped
+            .iter()
+            .map(|op| {
+                let at = jj_lib::op_store::OperationId::try_from_hex(op).unwrap();
+                let op_store = futures::executor::block_on(store.read_operation(&at)).unwrap();
+                (self.op_key(m, op), merge_key(&op_store))
+            })
+            .collect();
         // The merges whose parents it changes, keeping their views as it keeps every
         // operation's: those above what it abandons, and those above the operations beside it,
         // which it moves onto the abandoned operation's parent, one of them perhaps left a
@@ -1563,7 +1794,7 @@ impl World {
         // reference holds the hive's to.
         let before = self.ops_by_key(m, false);
         let merges = self.ops_by_key(m, true);
-        self.jj(m, &["op", "abandon", op]);
+        self.jj(m, &["op", "abandon", spec]);
         let after = self.ops_by_key(m, false);
         for (key, old) in &before {
             // Only a key one operation had before, and has after: operations sharing a key,
@@ -1583,7 +1814,9 @@ impl World {
             });
             self.kept_merges.insert(key.clone(), replaced);
         }
-        self.abandoned.push((m, key, merge));
+        for (key, merge) in dropped {
+            self.abandoned.push((m, key, merge));
+        }
     }
 
     /// Machine `m`'s operations, or only its merges, by `merge_key`, with their ids: more

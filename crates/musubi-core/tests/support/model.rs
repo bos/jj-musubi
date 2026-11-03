@@ -132,6 +132,33 @@ impl Univ {
             .filter(|&x| !set.iter().any(|&y| y != x && self.is_ancestor(x, y)))
             .collect()
     }
+
+    /// What survives of `op` once `dropped` is: `op` itself, if it isn't dropped, or else
+    /// what survives of each of its parents (`Contract.exp`, as a set).
+    pub fn images(&self, dropped: &BTreeSet<Op>, op: Op) -> BTreeSet<Op> {
+        let mut images = BTreeSet::new();
+        let mut seen = BTreeSet::new();
+        let mut stack = vec![op];
+        while let Some(x) = stack.pop() {
+            if !seen.insert(x) {
+                continue;
+            }
+            if dropped.contains(&x) {
+                stack.extend(self.parents[x as usize].iter().copied());
+            } else {
+                images.insert(x);
+            }
+        }
+        images
+    }
+
+    /// `belowB`: something survives of `a` once `dropped` is, and all of it is below `b`.
+    /// Original ancestry, where `a` survives (`below_survivor_iff`).
+    pub fn below(&self, dropped: &BTreeSet<Op>, a: Op, b: Op) -> bool {
+        let images = self.images(dropped, a);
+        let ancestors = self.ancestors(b);
+        !images.is_empty() && images.iter().all(|p| ancestors.contains(p))
+    }
 }
 
 pub type SharedUniv = Rc<RefCell<Univ>>;
@@ -318,8 +345,48 @@ impl HubStorage for FakeHub {
         Ok(self.closed(*op))
     }
 
-    fn descends(&self, ancestor: &Op, op: &Op, _: &[Op]) -> Result<bool, Infallible> {
-        Ok(self.univ.borrow().is_ancestor(*ancestor, *op))
+    /// As the real hub compares, through what survives of `ancestor` once everything its
+    /// records ever dropped, pruned or not, and the push's drops are (`acceptDrops`).
+    fn descends(&self, ancestor: &Op, op: &Op, dropped: &[Op]) -> Result<bool, Infallible> {
+        let mut drops = self.dropped();
+        drops.extend(dropped.iter().copied());
+        Ok(self.univ.borrow().below(&drops, *ancestor, *op))
+    }
+}
+
+/// How a node's last advance moved its heads, which says which model action it is.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Advanced {
+    /// To the hub's head, as the original-history model's `advance`.
+    Plain,
+    /// To what survives of a head this node dropped (`imageAdvance`, also `advance`).
+    Images,
+    /// While the hub's records are prepared and drop a head: every head and the hub's head
+    /// as those records name them, taking the records at once (`advancePrepared`), as a real
+    /// repository does in switching to them.
+    Prepared(Vec<Vec<Op>>),
+}
+
+impl Advanced {
+    /// The model action of `node`'s advance.
+    pub fn action(&self, node: usize) -> serde_json::Value {
+        match self {
+            Self::Plain | Self::Images => serde_json::json!({"kind": "advance", "node": node}),
+            Self::Prepared(records) => {
+                let records: Vec<Vec<Op>> = records
+                    .iter()
+                    .map(|record| {
+                        record
+                            .iter()
+                            .copied()
+                            .collect::<BTreeSet<_>>()
+                            .into_iter()
+                            .collect()
+                    })
+                    .collect();
+                serde_json::json!({"kind": "advancePrepared", "node": node, "records": records})
+            }
+        }
     }
 }
 
@@ -360,6 +427,11 @@ pub struct FakeRepo {
     /// The recorded receipt/rollback endpoint has already restored its payload. The
     /// stateful model tests leave this false, using their eager restoring abstraction.
     pub fixup_cached: bool,
+    /// The hub's records `prepare_records` got ready to take, which drop a head, until
+    /// `adopt` takes some: a real repository names the hub's history as they do meanwhile.
+    pub prepared: Option<Vec<Vec<Op>>>,
+    /// How the last `advance` moved the heads.
+    pub last_advance: Option<Advanced>,
 }
 
 impl FakeRepo {
@@ -384,6 +456,8 @@ impl FakeRepo {
             held: vec![vec![]],
             last_fixup: None,
             fixup_cached: false,
+            prepared: None,
+            last_advance: None,
         }
     }
 
@@ -420,6 +494,18 @@ impl FakeRepo {
     }
 }
 
+impl FakeRepo {
+    /// Takes the hub's `records`: drops what they drop, as the ones taken last.
+    fn take(&mut self, records: &[Vec<Op>]) {
+        self.dropped.extend(flat(records));
+        self.applied = records.to_vec();
+        self.prepared = None;
+        if !self.held.contains(&self.applied) {
+            self.held.push(self.applied.clone());
+        }
+    }
+}
+
 impl LocalRepo for FakeRepo {
     type Op = Op;
     type Attachment = Vec<Obj>;
@@ -433,12 +519,16 @@ impl LocalRepo for FakeRepo {
         Ok(self.heads.iter().copied().collect())
     }
 
+    /// The model keeps every operation's original, dropped or not, and realizes it whole:
+    /// one this node dropped is local once realized, when all that survives of it is too. A
+    /// real repository need not realize it, having what survives in its place.
     fn is_local(&self, op: &Op) -> Result<bool, Infallible> {
         Ok(self.lops.contains(op))
     }
 
+    /// Or, for an `ancestor` this node dropped, whether all that survives of it is below `op`.
     fn is_ancestor(&self, ancestor: &Op, op: &Op) -> Result<bool, Infallible> {
-        Ok(self.univ.borrow().is_ancestor(*ancestor, *op))
+        Ok(self.univ.borrow().below(&self.dropped, *ancestor, *op))
     }
 
     fn merge_heads(&mut self) -> Result<(), Infallible> {
@@ -535,11 +625,46 @@ impl LocalRepo for FakeRepo {
         Ok(())
     }
 
+    /// `heads := max(heads ∪ images(op))`: `op` itself, or what survives of it if this node
+    /// dropped it. While records it prepared drop a head, every head and `op` are named as
+    /// those records name them, and the records taken with them, as a real repository
+    /// switches to them: never one without the other.
     fn advance(&mut self, op: &Op) -> Result<(), Infallible> {
-        assert!(self.lops.contains(op), "advance {op}: not local");
+        let prepared = self
+            .prepared
+            .clone()
+            .filter(|records| self.heads.iter().any(|head| flat(records).contains(head)));
+        let univ = self.univ.clone();
+        let univ = univ.borrow();
+        if let Some(records) = prepared {
+            let mut drops = self.dropped.clone();
+            drops.extend(flat(&records));
+            let mut named = BTreeSet::new();
+            for &x in self.heads.iter().chain([op]) {
+                named.extend(univ.images(&drops, x));
+            }
+            assert!(
+                !named.is_empty() && named.is_subset(&self.lops),
+                "advance {op}: not local"
+            );
+            self.heads = univ.maximal(&named);
+            self.take(&records);
+            self.last_advance = Some(Advanced::Prepared(records));
+            return Ok(());
+        }
+        let images = univ.images(&self.dropped, *op);
+        assert!(
+            !images.is_empty() && images.is_subset(&self.lops),
+            "advance {op}: not local"
+        );
         let mut heads = self.heads.clone();
-        heads.insert(*op);
-        self.heads = self.univ.borrow().maximal(&heads);
+        heads.extend(images);
+        self.heads = univ.maximal(&heads);
+        self.last_advance = Some(if self.dropped.contains(op) {
+            Advanced::Images
+        } else {
+            Advanced::Plain
+        });
         Ok(())
     }
 
@@ -583,7 +708,9 @@ impl LocalRepo for FakeRepo {
             "records with a base, for a node not fresh"
         );
         let dropped = flat(&records.records);
-        Ok(self.heads.iter().any(|head| dropped.contains(head)))
+        let drops_head = self.heads.iter().any(|head| dropped.contains(head));
+        self.prepared = drops_head.then(|| records.records.clone());
+        Ok(drops_head)
     }
 
     fn adopt(&mut self, records: &Records<Op>) -> Result<(), Infallible> {
@@ -591,11 +718,7 @@ impl LocalRepo for FakeRepo {
             !self.prepare_records(records)?,
             "adopt: records drop a head"
         );
-        self.dropped.extend(flat(&records.records));
-        self.applied = records.records.clone();
-        if !self.held.contains(&self.applied) {
-            self.held.push(self.applied.clone());
-        }
+        self.take(&records.records);
         Ok(())
     }
 

@@ -24,7 +24,7 @@
 //! `target/tmp/e2e_search/coverage.txt` (printed with `--no-capture`). Environment:
 //!
 //! - `MUSUBI_SEARCH_CASES`: test cases per shard (default 8; a case takes up to a few minutes when
-//!   four shards run at once);
+//!   several shards run at once);
 //! - `MUSUBI_SEARCH_STEPS`: rules per sequence (default 30);
 //! - `MUSUBI_SEARCH_SEED`: base seed, shard `n` using `seed + n` (default: random);
 //! - `MUSUBI_SEARCH_SHRINK`: `0` reports a shard's first failure unshrunk, `1` shrinks the
@@ -65,6 +65,7 @@ use hegel::generators as gs;
 
 use crate::coverage::fired;
 use crate::machine::Search;
+use crate::world::FILES;
 use crate::world::Naming;
 use crate::world::Setup;
 use crate::world::World;
@@ -165,8 +166,15 @@ fn search(tc: TestCase, config: Config) {
             fired(event);
         }
     }
+    walk(tc, config, setup, |_, _| {});
+}
+
+/// A case: the hive `setup` makes, which `prefix` takes further, a generated walk from there,
+/// and convergence.
+fn walk(tc: TestCase, config: Config, setup: Setup, prefix: impl FnOnce(&TestCase, &mut World)) {
     let started = std::time::Instant::now();
     let world = Rc::new(RefCell::new(World::new(setup)));
+    prefix(&tc, &mut world.borrow_mut());
     let set_up = started.elapsed();
     hegel::stateful::machine(Search {
         world: world.clone(),
@@ -195,6 +203,114 @@ fn search(tc: TestCase, config: Config) {
             started.elapsed() - walked
         );
     }
+}
+
+/// The search from a merge alpha dropped and gamma keeps, which beta, with work of its own,
+/// took the drop of without advancing, before the hub went back and gamma published the merge
+/// again (`World::hold_dropped_merge`). Beta alone, before alpha does anything again, advances
+/// to what survives of it, two operations neither below the other, merged with its work in
+/// one operation, and publishes the drop. Then a walk, as the search's, and convergence.
+#[hegel::standalone_function(config.settings())]
+fn dropped_merge_search(tc: TestCase, config: Config) {
+    let _case = coverage::start_case();
+    let setup = Setup {
+        nodes: 4,
+        naming: [Naming::Own, Naming::Default, Naming::SharedHostname]
+            [tc.draw(gs::integers::<usize>().max_value(2))],
+        prejoin: tc.draw(gs::booleans()),
+        secondary: tc.draw(gs::booleans()),
+    };
+    fired("setup:dropped_merge");
+    walk(tc, config, setup, |tc, world| {
+        let work: Vec<usize> = (0..tc.draw(gs::integers::<usize>().min_value(1).max_value(2)))
+            .map(|_| tc.draw(gs::integers::<usize>().max_value(FILES.len() - 1)))
+            .collect();
+        let kept = world.hold_dropped_merge(&work);
+        world.sync(1);
+        world.check_dropped_by(1, &kept);
+    });
+}
+
+#[test]
+fn e2e_dropped_merge() {
+    let _report = coverage::Report("dropped-merge");
+    dropped_merge_search(Config::smoke());
+}
+
+/// A command above an abandoned merge keeps its own payload when its one parent
+/// expands to two. The later, genuine reconciliation must still merge both commands.
+#[test]
+fn e2e_command_above_dropped_merge() {
+    let mut world = World::new(Setup {
+        nodes: 4,
+        naming: Naming::Own,
+        prejoin: false,
+        secondary: false,
+    });
+    let kept = world.hold_dropped_merge(&[0]);
+    world.sync(1);
+    world.check_dropped_by(1, &kept);
+    let target = |world: &World, m, suffix: &str| {
+        world
+            .view_at_head(m)
+            .commits
+            .into_iter()
+            .find(|c| c.subject.ends_with(suffix))
+            .unwrap()
+            .id
+    };
+    let a = target(&world, 0, "on alpha");
+    let b = target(&world, 2, "on gamma");
+    world.jj(0, &["bookmark", "set", "both", "-r", &a]);
+    world.jj(2, &["bookmark", "set", "both", "-r", &b]);
+    world.converge();
+    let out = world.raw_jj(0, &["--ignore-working-copy", "bookmark", "list", "both"]);
+    assert!(
+        out.contains("conflict"),
+        "expected both commands' targets: {out}"
+    );
+}
+
+/// The reference needs operations written before the requested command, and a read that
+/// snapshots too: either can be the command whose parent later expands through a drop.
+#[test]
+fn e2e_records_snapshots_from_commands_and_looking() {
+    let mut world = World::new(Setup {
+        nodes: 2,
+        naming: Naming::Own,
+        prejoin: false,
+        secondary: false,
+    });
+    world.edit(0, 0);
+    world.jj(0, &["describe", "-m", "after snapshot"]);
+    let store = world.fx.hive.members[0]
+        .adapter
+        .repo()
+        .loader()
+        .op_store()
+        .clone();
+    let read = |hex: &str| {
+        let id = jj_lib::op_store::OperationId::try_from_hex(hex).unwrap();
+        futures::executor::block_on(store.read_operation(&id)).unwrap()
+    };
+    let command = read(&world.latest_op_head(0));
+    let snapshot = read(&jj_lib::object_id::ObjectId::hex(&command.parents[0]));
+    assert_eq!(snapshot.metadata.description, "snapshot working copy");
+    for op in [&snapshot, &command] {
+        assert!(world.commands.contains_key(&world::merge_key(op)));
+    }
+    world.edit(0, 1);
+    world.observe(0);
+    let snapshot = read(&world.latest_op_head(0));
+    assert_eq!(snapshot.metadata.description, "snapshot working copy");
+    assert!(world.commands.contains_key(&world::merge_key(&snapshot)));
+    world.converge();
+}
+
+#[test]
+fn e2e_search_shard_4() {
+    let _report = coverage::Report("shard-4-survivors");
+    dropped_merge_search(Config::shard(4));
 }
 
 #[test]

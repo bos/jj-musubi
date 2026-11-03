@@ -27,11 +27,19 @@ rollback and remaking a hive; `Supersede.lean` adds abandonment and its publicat
 operation's original. Their safety theorems hold for every reachable model state. Applying them
 to a real execution requires its states and transitions to have the stated projection.
 
-That projection does not yet cover every real repository transition. In particular, a valid
-contracted-head acceptance cannot always be represented by the original-ancestry model, and a
-cached restoring write and a separate publication tip are not its atomic `supFix`. The focused
-real-repository checks and local models below pin those boundaries; they do not establish a
-complete safety refinement or the [asynchronous convergence bridge](#liveness).
+`ContractedExec.lean` extends that original-operation submodel with survivor advancement,
+atomic preparation and record adoption, and contracted-head acceptance. The oracle checks the
+explicit union relation `ContractedRStep`; it does not identify these added transitions with
+`SRStep`. Each added primitive preserves `ContractedSafety.Safe`, the common store and frontier
+facts that do not assume an original-ancestry chain of accepted heads. These are primitive
+invariant cases, not a global invariant or convergence theorem for the union relation.
+
+The projection still does not cover every real repository transition. Raw canonical versions
+and normalization already present in their birth parents cannot in general be reconstructed
+from an original label and a party's current dropped set alone. A cached restoring write and
+a separate publication tip are also not the old policy's atomic `supFix`. The focused checks
+below pin those boundaries; they do not establish a complete safety refinement or the
+[asynchronous convergence bridge](#liveness).
 
 The chain has three links:
 
@@ -41,17 +49,21 @@ The chain has three links:
    whenever `execStep` accepts an action other than `hubRegress`, the corresponding
    relational `Step` exists between the abstracted states, and `exec_rsound` that whenever it
    accepts any action, an `RStep` of the extended model does. The executable model therefore
-   never accepts anything the proofs don't cover. `formal/Musubi/SupersedeExec.lean` adds
+   preserves the original relational guards. `formal/Musubi/SupersedeExec.lean` adds
    the hub's records and each node's dropped set: `sexec_sound` proves every action
    `sexecStep` accepts an `SRStep` of the system with supersedes, or no step.
+   `ContractedExec.cexecAction_sound` proves that the extended oracle accepts only an old
+   checked transition or one of its explicit added transitions. `cexecAction_ok` preserves
+   record custody, including the records held before preparation changes a frontier.
 2. **Executable model to oracle.** `formal/Oracle.lean` is a thin JSON wrapper around
-   `sexecStep`, built by `lake build oracle`. It contains no protocol logic of its own.
+   `cexecAction`, built by `lake build oracle`. It contains no protocol logic of its own.
 3. **Oracle to Rust.** The Hegel test `conformance`, in `crates/musubi-core/tests/protocol.rs`,
    runs the Rust hub and nodes, translates every step they take into model actions, and checks
    each one with the oracle. It fails on any action the oracle rejects, or any difference
    between the Rust state and the oracle's state. Hegel shrinks failures to a minimal trace.
 
-That carries safety, not liveness. The test also runs the nodes to convergence, which
+The original relation's safety theorems and the added primitive safety cases have the scopes
+above. The test also runs the nodes to convergence, which
 catches a node that never gets there, but not one whose steps the termination proof does
 not cover, or whose pushes don't upload what the proof assumes. So it also checks the Rust
 policy against the liveness proofs ([Liveness](#liveness)).
@@ -74,13 +86,25 @@ These keep exactly the model's state:
 
 `lops` and `lobj` are a node's local operations and objects, and `sops` and `sobj` what it
 has staged. Operations are their originals, as in `Supersede.lean`: dropping renames nothing
-here, so the test's storage keeps every operation it had, dropped or not, and checks closure
-and ancestry over all of them. A record state's digest is the index of its records in a
+here, so the test's storage keeps every operation it had, dropped or not, and checks storage
+closure over all of them. Its locality test deliberately still requires the original body:
+realization in this submodel needs original parents, whereas the native adapter can realize
+only their surviving images. Advancement and the hub's comparison use `exp` and `Below`.
+A record state's digest is the index of its records in a
 table of every list of records seen, so equal digests are equal records. The jj-specific parts of a real node (canonicalization, realization, bundles) are
 not covered by this link; the jj example tests and the generated end-to-end tests cover them
 ([testing.md](testing.md)).
 
 ## Storage errors
+
+The hub's logical loss and rollback rules describe recovery to a healthy hub. Normal body
+loss preserves every retained historical operation, since `HubStore::open` replays those
+bodies. Objects needed only by an older head may still be lost. The harness records that
+loss, verifies the requested rollback target is incomplete, then explicitly chooses the
+existing remake action. Native startup does not validate every historical object, so this
+is an environment recovery choice, not a claim about automatic native detection or every
+observable damaged-store prefix. Physical recovery across that interval remains outside
+the refinement; no hub durability is added.
 
 `storage_failures_preserve_operations` runs the same generated protocol sequences through
 `support/storage.rs`'s fallible wrappers around `FakeHub` and `FakeRepo`. One shared countdown
@@ -169,7 +193,7 @@ core does.
 | `NodeCore` takes in a `Fetched` reply | `learn` if its head is newer, then `recvOps` and `recvObjs` if it stages the operations; the states are compared after the last |
 | `NodeCore` stages an `Objects` reply | `recvObjs` |
 | `NodeCore` realizes | `realize` |
-| `NodeCore` advances through the fake repo | `advance`; a real repo may also merge ([below](#a-repository-advance-that-also-merges)) |
+| `NodeCore` advances through the fake repo | `advance`, including surviving images for a dropped known head; `advancePrepared` also takes prepared records atomically; a real repo may also merge ([below](#a-repository-advance-that-also-merges)) |
 | The hub handles `Fetch` | `hubFetch`, then `sendD`: its reply carries the hub's records |
 | The hub handles `GetObjects { for_ops: S, haves: H, .. }` | `hubGetObjs` with `objs(S) \ H` |
 | The hub handles `Push` | `hubPushIdem`, `hubSupAccept` then `sendD`, `hubPushReject`, `hubPushIncomplete`, or `hubPushRefuse` |
@@ -179,7 +203,7 @@ core does.
 | The hub restarts | `crashHub`; the hub forgets what each node said it took |
 | The hub goes back (test rule) | `hubRegress`; the hub forgets what each node said it took, as a restart does, and how many records it had pruned goes back too |
 | The hub prunes (test rule, half the time after a `quiesce`, and once after each case's final one): `hub::prune`, which prunes every record once every node's last `Fetch` or `Push` said it took them all | `prune` with the count, if it pruned any |
-| The hub forgets every operation and object outside `closure(head)` (test rule) | `hubForget` with what it keeps |
+| The hub loses data outside its current closure (test rule) | `hubForget` preserves operation bodies needed by retained history; historical-only objects may be lost. A requested rollback to an incomplete target takes a separately identified environment-chosen remake |
 | The hive is made again, empty, as `HubDir::remake` makes one whose store is corrupt (test rule) | `hubRegress` to 0, then `hubForget` keeping only the root: `State.remake` (`exec_remake`), a run of the extended model (`remake_reachable`) |
 | A reply to the node's own request that says the hub went back (`NodeCore::handle_reply`) | `loseKnown`, then `learn` if the reply's `seq` is above 0 (at 0, the restarted node already knows `(0, root)`) |
 
@@ -207,13 +231,17 @@ The test's objects have no structure, so the test's hub ignores `closure(base)` 
 out exactly what the haves name, as the model's `hubFetch` does; a node's haves there are
 every object it holds.
 
-The original-ancestry guards above are a known limit of this harness, not a guard on every
-accepted production push. `history::a_push_can_drop_its_expected_head_and_reuse_a_cached_fixup`
+The old original-ancestry relation cannot represent every accepted production push.
+`history::a_push_can_drop_its_expected_head_and_reuse_a_cached_fixup`
 uses real stores, interrupted adoption and hub rollback to reach an accepted push whose
 expected head is not an original ancestor of the cached fix-up. The pending drops contract
 that head into ancestors of the fix-up. Both real adapters allow this, while `SStep.sup`
 requires original ancestry. The trace then converges; narrowing the production guard to fit
-the model would change that valid behavior.
+the model would change that valid behavior. The extended core harness now checks such a
+comparison under the acceptance's full retained record union and packet drops. Rejection is
+packet-specific too: the oracle refuses an original-ancestry rejection when the contracted
+packet is acceptable. It retains the acceptance's drop set for subsequent history checks,
+even after the hub prunes the corresponding record ids.
 
 `ContractOrder.lean` defines `Below` for the comparison through all surviving images, and
 `belowB` additionally requires a nonempty image, as `HubAdapter::descends` does. The real
@@ -226,6 +254,16 @@ apply. `below_contracted_iff` and `below_two_step` connect the mathematical comp
 contraction; the CId/physical-store projection and a revised full-state refinement remain
 necessary. Expansion may contain duplicate images; the check is universal membership, not
 an exact image-list comparison.
+
+`history::a_dropped_head_published_again_is_dropped_by_who_took_it` reaches the supported
+departure case: the original producer leaves successfully, the hub rolls back, and another
+copy republishes a head a remaining machine already dropped. That machine must combine every
+surviving image with its own work and publish the drop itself. The native helper test
+`advancing_to_what_survives_of_a_dropped_head` compares the complete image frontier and merge
+parents with `SurvivorAdvance.lean` through `survivorAdvance`, including separate images,
+non-colocated repositories and git fetches. It samples the raw heads before a jj observer
+can merge them. The generated core tests check the abstract network transitions; these real
+repository tests check the native projection at the new boundary.
 
 ## A repository advance that also merges
 
@@ -432,7 +470,10 @@ which writes the fix-up first, as musubi does), with the measure `smeasure`.
 `SConverged` (`smeasureE_eq`, `sconvergedE_iff`). `recordMeasureE` appends `recordLagE`, the
 number of nodes whose ordered applied records differ from the hub's. `RecordLiveness.lean`
 proves its correspondence (`recordMeasureE_eq`) and the stronger convergence check
-(`recordConvergedE_iff`). The oracle answers with:
+(`recordConvergedE_iff`) for the original policy. The oracle retains the original `measure`
+and `rmeasure` outputs, but uses the extended record-aware suffix below for `smeasure`.
+The old `recordMeasureE_eq` theorem does not itself cover those added transitions. The
+oracle answers with:
 
 ```json
 {"op": "measure"}
@@ -450,6 +491,19 @@ lexicographically; [formal/README.md](../../formal/README.md) defines their term
 `converged` is `RecordConverged`: `SConverged` and ordered-record agreement. The harness
 compares `(smeasure, recordLag)` lexicographically. Dropped-set progress may increase record
 lag; an adoption that changes only applied records must decrease it.
+
+The extended oracle uses `ContractedMeasure.rmeasureCE` for the record-aware suffix. It counts
+surviving images not covered by any local head, rather than original ancestry of a dropped
+known head, and compares historical heads under the node's dropped set. A survivor advance
+can add a second head while original `mAdv` stays one, increasing the old measure. The new
+image count falls first; `uncoveredImages_after_advance` proves it is zero after the frontier
+step. Historical comparability is checked against each surviving image, and a singleton
+facing a dropped known head is unsettled until it covers every image of that head. Otherwise
+adding multiple images could increase the earlier unsettled-node count. The fixtures check
+the complete tuple for a receiver at one image and at a common ancestor of separate images.
+`rmeasureCE_without_drops` proves exact agreement with the old check before drops.
+The original `measure` and `rmeasure` outputs and their valid pre-drop checks are retained.
+These component results do not prove termination of the full extended relation.
 
 Equal dropped unions do not imply equal records. `regrouped_records_conformance` creates
 `[[1],[2]]`, remakes the hub, and has one machine republish both drops as `[[1,2]]`. Another
@@ -494,9 +548,10 @@ The conformance test checks:
   `recordConvergedE` against concrete convergence, in both directions. The states already
   agree after every action; neither side may declare convergence with records still unequal.
 
-The measure falling shows that the policy's steps are ones the termination proof covers, not
-that each is a `PStep`. Hub-only work, such as storing a rejected push's upload, changes
-nothing the measures read.
+Before drops, the measure correspondence checks the policy against the original termination
+proof. Through contracted transitions, strict decrease is an executable regression check;
+the full union termination proof remains open. Hub-only work, such as storing a rejected
+push's upload, changes nothing the measures read.
 
 Two fixed runs check what random cases may reach only rarely. `regress_scenario_conformance`
 drives the core through `RegressScenario.trace`, requires the actions it records to be that
@@ -642,7 +697,8 @@ A session starts with no records and nothing dropped.
 ### Actions
 
 Fields mirror the constructors of `EnvStep` and `SyncStep` in `formal/Musubi/Model.lean`,
-and of `SAction` in `formal/Musubi/SupersedeExec.lean`. `node` is a node index below
+and of `SAction` in `formal/Musubi/SupersedeExec.lean`, extended by `CAction` in
+`ContractedExec.lean`. `node` is a node index below
 `nodes`. Op and object ids are naturals. Sets are arrays, compared as sets. Records are an
 array of sets, compared in order.
 
@@ -657,7 +713,8 @@ array of sets, compared in order.
 | `recvOps` | `node`, `ops` | `SyncStep.recvOps` |
 | `recvObjs` | `node`, `objs` | `SyncStep.recvObjs` |
 | `realize` | `node`, `opId` | `SyncStep.realize` |
-| `advance` | `node` | `SyncStep.advance` |
+| `advance` | `node` | `SyncStep.advance`, or `ContractedRStep.advance` through every image of a dropped known head |
+| `advancePrepared` | `node`, `records` | `ContractedRStep.prepared`: announced records contract the whole frontier and become applied/held in the same backend boundary |
 | `uploadOps` | `node`, `ops` | `SyncStep.uploadOps` |
 | `uploadObjs` | `node`, `objs` | `SyncStep.uploadObjs` |
 | `push` | `node`, `expected`, `new` | `SyncStep.push` |
@@ -676,17 +733,17 @@ array of sets, compared in order.
 | `casReject` | `node`, `expected`, `new` | `SyncStep.casReject` |
 | `hubPushIdem` | `node`, `ops`, `objs`, `expected`, `new` | `SyncStep.hubPushIdem` |
 | `hubPushAccept` | `node`, `ops`, `objs`, `expected`, `new` | `SyncStep.hubPushAccept` |
-| `hubPushReject` | `node`, `ops`, `objs`, `expected`, `new` | `SyncStep.hubPushReject` |
+| `hubPushReject` | `node`, `ops`, `objs`, `expected`, `new`, with `applied`, `dropped` for packet-specific checks | `SyncStep.hubPushReject` plus the contracted rejection guard; a matching, closed, acceptable contracted packet cannot be rejected |
 | `hubPushIncomplete` | `node`, `ops`, `objs`, `expected`, `new` | `SyncStep.hubPushIncomplete` |
 | `hubFetch` | `node`, `base`, `haves` | `SyncStep.hubFetch`: replies with a `head`, an `ops` and an `objs` message |
 | `crashHub` | none | `SyncStep.crashHub` |
-| `hubForget` | `ops`, `objs` | `SyncStep.hubForget`: the hub keeps only `ops` and `objs`, which must be among what it stores and hold `closure(head)` |
-| `hubRegress` | `seq` | `RStep`'s `State.regress` (`Regress.lean`), the hub going back: `seq ≤ hub.seq`; `head := hist seq`, `seq := seq`, its records, and how many of them it had pruned, go back to what they were then, and nothing else changes |
+| `hubForget` | `ops`, `objs` | `SyncStep.hubForget` plus the retained-body guard: the kept subset closes the current head and preserves historical operation bodies, while historical-only objects may be lost |
+| `hubRegress` | `seq` | `State.regress`: `seq ≤ hub.seq` and the target is closed; head, sequence and records return to that entry. Recovery from an incomplete target is an explicit environment-chosen remake |
 | `abandon` | `node`, `ops` | `SStep.abandon`: `ops` are below `node`'s heads, none of them, and not the root |
 | `sendSup` | `node`, `new` | `SStep.sendSup`: a `supersede` message with the records `node` took, its dropped set, and `new`, the head of the push it rides on, which no record `node` took drops |
 | `sendD` | `node` | `SStep.sendD`: a `dropped` message with the hub's records, and how many of them it has pruned |
 | `adopt` | `node`, `records` | `SStep.adopt`: `records` were announced to `node`, which has held as many of them as the hub had pruned then (`heldPrefix`), and drop none of its heads; its dropped set gains theirs, and they become the records it took, and among those it has held |
-| `hubSupAccept` | `node`, `ops`, `objs`, `expected`, `new`, `applied`, `dropped` | `SStep.sup` with the `hubPushAccept` it rides on: a `supersede` message of `applied`, `dropped` and `new` is in `net`, `applied` are the hub's records, and `new` is neither among the records the hub remembers nor among what `dropped` drops beyond `applied`; the hub adds a record of what `dropped` drops that it doesn't, if any |
+| `hubSupAccept` | `node`, `ops`, `objs`, `expected`, `new`, `applied`, `dropped` | The original `SStep.sup` case or contracted acceptance: matching packet and records, a closed surviving new head, and every surviving expected-head image below it under the acceptance's effective dropped union; the hub records new drops |
 | `hubPushRefuse` | `node`, `ops`, `objs`, `expected`, `new`, `applied`, `dropped` | no step: the `push` and a `supersede` message are in `net`, and `applied` aren't the hub's records, or `new` is among the records it remembers or what `dropped` drops beyond `applied` |
 | `prune` | `count` | `SStep.prune`: the hub prunes its first `count` records, at least as many as it had pruned and at most as many as it has; the oracle requires every node to have held them, though `SStep.prune` needs no such guard for safety |
 

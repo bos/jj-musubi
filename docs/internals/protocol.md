@@ -291,6 +291,9 @@ State:
 
 Each party shows `contract(D)` of what it has, for its own `D`. A head is never in its holder's
 dropped set: the hub never takes such a head, and a node never advances to one.
+If the known hub head is dropped locally, advancement adds all its surviving images to the
+local frontier and merges them with the machine's work. It does not wait for the machine
+that originally published the drop, which may have left successfully before hub rollback.
 
 Steps:
 
@@ -305,8 +308,11 @@ Steps:
   reusing restoring work already written. If its head is already the hub's, it writes a
   neutral child so that accepting the push can publish the pending drops. The child keeps
   the current view and adds no work or saved settings; retries reuse it.
-  The hub answers it as any `Push`, checking the compare-and-swap against `contract(D_hub)`,
-  and also requires the new head not to be among `pending`; on accepting, it appends `pending`
+  The hub answers it as any `Push`, checking the compare-and-swap against
+  `contract(D_hub ∪ pending)`: every surviving image of the expected head must be an ancestor
+  of the new head, and the image must be nonempty. The expected head need not be an original
+  ancestor of the new head. It also requires the new head not to be among `pending`; on
+  accepting, it appends `pending`
   as a record, needing no id it pruned.
 - `Adopt`: a node that lacks some of the hub's records, none of whose heads they drop, applies
   them: `D_node := D_node ∪ D_hub`, renaming what it has and what it pends. A node whose
@@ -332,7 +338,7 @@ Steps:
 Policy, before the steps above: if a record the node lacks drops none of its heads, adopt; if
 it has pending drops and the hub's records, supersede, instead of an ordinary push.
 
-Properties, proved over the original operations in `formal/Musubi/Supersede.lean`:
+Properties of the original-ancestry relation in `formal/Musubi/Supersede.lean`:
 
 - Every safety property above holds as stated, MergeOwnership and no duplicate merges
   included: renaming creates no operation, and so performs no merge.
@@ -349,6 +355,14 @@ Properties, proved over the original operations in `formal/Musubi/Supersede.lean
   hub pruned, as pruning only records every node has taken ensures, every node reaches `heads =
   {hub.head}` and `D_node = D_hub`, which then holds every operation any node dropped, though
   the hub sends only the records it remembers.
+
+These theorems apply to that relation. `ContractedExec.lean` extends the executable submodel
+with surviving-image advancement, atomic prepared adoption and contracted acceptance.
+The added primitives preserve the common store and frontier facts in `ContractedSafety`,
+but an accepted expected head need not remain below later heads in original ancestry.
+The full union safety and asynchronous convergence refinement remain
+[#78](https://github.com/bos/jj-musubi/issues/78); [conformance](conformance.md) states the
+current executable and native boundary coverage.
 
 ## Translation layer
 

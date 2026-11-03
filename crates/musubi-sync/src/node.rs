@@ -619,15 +619,31 @@ impl LocalRepo for NodeAdapter {
     }
 
     fn realize(&mut self, op: &OpId) -> anyhow::Result<()> {
+        // What this node has in place of an operation it dropped is what survives below it,
+        // local once its parents are, as they are by now: there is nothing to write. The core
+        // plans such an operation where the hub went back to one this node dropped, before its
+        // parents were here.
+        if self.repo.is_dropped(&hub(op)) {
+            anyhow::ensure!(
+                self.is_local(op)?,
+                "operation {} is one this machine dropped, and what it has in its place isn't here",
+                op.hex()
+            );
+            self.staged.remove(op);
+            self.staged_children.remove(op);
+            return Ok(());
+        }
         // The operations likely realized after it, whose views can be made local with its:
-        // each the only staged child of the one before.
+        // each the only staged child of the one before, up to one this node dropped.
         let mut next = vec![];
         let mut last = op;
         while next.len() < REALIZE_AT_ONCE - 1 {
             let Some([child]) = self.staged_children.get(last).map(Vec::as_slice) else {
                 break;
             };
-            if self.staged.get(child).map(Vec::as_slice) != Some(std::slice::from_ref(last)) {
+            if self.staged.get(child).map(Vec::as_slice) != Some(std::slice::from_ref(last))
+                || self.repo.is_dropped(&hub(child))
+            {
                 break;
             }
             next.push(child.clone());
@@ -647,9 +663,21 @@ impl LocalRepo for NodeAdapter {
     }
 
     fn advance(&mut self, op: &OpId) -> anyhow::Result<()> {
-        let node = self.node_name(op)?;
+        // What this node's history has in place of `op`: itself, or, where this node dropped
+        // it, the maximal operations below it that survive.
+        let nodes: Vec<CanonicalOp> = self
+            .repo
+            .to_node(&hub(op))?
+            .into_iter()
+            .map(|NodeOp(op)| op)
+            .collect();
+        anyhow::ensure!(
+            !nodes.is_empty(),
+            "nothing stands for operation {}",
+            op.hex()
+        );
         let records = self.repo.record_state();
-        let advanced = self.repo.advance(&node);
+        let advanced = self.repo.advance_to(&nodes);
         // Advancing while taking the hub's records takes them, as `adopt` does, even where it
         // fails after.
         if self.repo.record_state() != records {

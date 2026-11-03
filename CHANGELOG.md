@@ -6,6 +6,10 @@ change the protocol, so run the same release on the hub and every machine (see
 
 ## Unreleased
 
+- After a hub rollback, an active machine can republish an abandonment after the machine
+  that made it has left. It keeps its own work and all surviving branches of the abandoned
+  history. Previously it could wait forever for the departed machine to sync again.
+
 - After a hub rollback, a machine republishes an abandonment even if the hub already has
   its latest operation. Previously interrupted receipt and `jj` work could leave every
   machine idle while an abandonment remained unpublished.

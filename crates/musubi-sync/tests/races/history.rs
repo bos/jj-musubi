@@ -1,6 +1,7 @@
 //! Operation-log level races: undo, op abandon, offline machines, restarts.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use musubi_core::message::HeadKind;
@@ -833,6 +834,797 @@ fn op_abandon_below_a_merge_with_concurrent_work_replicates() {
                 "{machine}: {work}"
             );
         }
+    }
+}
+
+/// What survives of an operation that is the hub's head when another machine dropped it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Survivors {
+    /// The one operation below it.
+    One,
+    /// A merge's, one below the other: what is left of the branch dropped with it, and the
+    /// other parent.
+    Nested,
+    /// A merge's two parents, neither below the other, as when two machines merged the same
+    /// heads, after the hub went back, and the abandon dropped one merge to the other.
+    Apart,
+    /// As `Apart`, but each a fetch of origin's `main`, which origin force-pushed between
+    /// them: merged, `main@origin` is a conflict.
+    Fetches,
+    /// As `Fetches`, but the second fetch beta's own, which it published with its work: one
+    /// of what survives is beta's op head.
+    FetchedHere,
+    /// As `Apart`, but the second a rebase that makes a loop with one of beta's own, which jj
+    /// can't merge.
+    Looping,
+}
+
+impl Survivors {
+    /// Whether what survives is two operations, neither below the other.
+    fn apart(self) -> bool {
+        !matches!(self, Self::One | Self::Nested)
+    }
+}
+
+/// Alpha, gamma and delta colocated, and beta, the machine that waits, colocated only if
+/// `colocated`.
+fn four_machines(colocated: bool) -> Fixture {
+    const NAMES: [&str; 4] = ["alpha", "beta", "gamma", "delta"];
+    if colocated {
+        return Fixture::new(&NAMES);
+    }
+    let env = TestEnv::new();
+    let repos = NAMES
+        .iter()
+        .map(|&name| match name {
+            "beta" => env.init_non_colocated_repo(name),
+            _ => env.init_repo(name),
+        })
+        .collect();
+    Fixture::join(env, repos)
+}
+
+/// `refs/remotes/origin/main` in machine `index`'s `.git`.
+fn git_main_at_origin(hive: &Fixture, index: usize) -> String {
+    hive.repo(index)
+        .git(&["rev-parse", "refs/remotes/origin/main"])
+        .trim()
+        .to_owned()
+}
+
+/// `main@origin` as machine `index`'s latest operation records it, without the import of a
+/// `jj` command: the commit, or `conflict`.
+fn recorded_main_at_origin(hive: &Fixture, index: usize) -> String {
+    let template = r#"if(remote == "origin", if(conflict, "conflict", normal_target.commit_id()))"#;
+    hive.repo(index).jj(&[
+        "--ignore-working-copy",
+        "bookmark",
+        "list",
+        "--all-remotes",
+        "main",
+        "-T",
+        template,
+    ])
+}
+
+/// Commits `upstream n` to origin's `main` from `seed`: on what it has, or, `forced`, in
+/// place of it.
+fn push_origin(hive: &Fixture, seed: &Path, n: usize, forced: bool) {
+    use crate::remotes::seed_git;
+
+    let origin = hive.env.root().join("origin.git");
+    let run = |args: &[&str]| seed_git(hive, seed, args);
+    if forced {
+        run(&["reset", "--quiet", "--hard", "HEAD~"]);
+    }
+    std::fs::write(seed.join("upstream"), format!("upstream {n}")).unwrap();
+    run(&["commit", "--quiet", "-am", &format!("upstream {n}")]);
+    run(&[
+        "push",
+        "--quiet",
+        "--force",
+        origin.to_str().unwrap(),
+        "main",
+    ]);
+}
+
+/// In `hive`, of [`four_machines`], alpha abandons an operation the hub accepted, which gamma
+/// keeps as its op head, and publishes the abandon. Beta, which has work of its own the hub
+/// hasn't, takes alpha's record and realizes the hub's head, but stops before advancing past
+/// what the record drops. With `leave`, alpha, and any other machine that would move the hub
+/// on, leaves the hive, as `musubi leave` does. Then the hub goes back, losing the record, the
+/// abandon and the leaves, and gamma publishes the operation again. Returns the hive, the
+/// operation, the machines that left, and how an operation the abandon drops is described.
+fn dropped_head_held(
+    mut hive: Fixture,
+    survivors: Survivors,
+    leave: bool,
+) -> (Fixture, musubi_sync::OpId, Vec<usize>, String) {
+    use musubi_core::node::LocalRepo as _;
+    use musubi_core::node::Step;
+    use musubi_jj::op_id::CanonicalOp;
+
+    // What every machine has first: origin, for fetches; X, Y on it, and Z, for rebases.
+    let seed = matches!(survivors, Survivors::Fetches | Survivors::FetchedHere).then(|| {
+        let seed = crate::remotes::create_origin(&hive);
+        let origin = hive.env.root().join("origin.git");
+        for repo in &hive.repos {
+            repo.jj(&["git", "remote", "add", "origin", origin.to_str().unwrap()]);
+        }
+        seed
+    });
+    if survivors == Survivors::Looping {
+        let alpha = hive.repo(0);
+        alpha.jj(&["new", "root()", "-m", "X"]);
+        alpha.jj(&["new", "-m", "Y"]);
+        alpha.jj(&["new", "root()", "-m", "Z"]);
+        alpha.jj(&["new", "root()"]);
+    }
+    if seed.is_some() || survivors == Survivors::Looping {
+        hive.sync();
+    }
+    let base = hive.hive.hub.store().head().0;
+    // Beta's own work on the base, not yet published.
+    hive.commit(1, "w", "beta's work");
+    match survivors {
+        // A fetch, before origin moves: its `.git` holds what its head records.
+        Survivors::Fetches => {
+            hive.repo(1).jj(&["git", "fetch"]);
+        }
+        Survivors::Looping => {
+            let (x, z) = (hive.commit_id(1, "X"), hive.commit_id(1, "Z"));
+            hive.repo(1).jj(&["rebase", "-s", &x, "-o", &z]);
+        }
+        _ => {}
+    }
+    let bookmark = |hive: &mut Fixture, name: &str| {
+        hive.repo(0).jj(&["bookmark", "create", name, "-r", "@-"]);
+        hive.hive.sync(0).unwrap();
+        (op_log(hive.repo(0))[0].0.clone(), hive.hive.hub_head())
+    };
+    // Steps `machine` until it advances, merging with its own head, but doesn't push.
+    let advance_only = |hive: &mut Fixture, machine: usize| {
+        hive.hive.fetch(machine).unwrap();
+        let member = &mut hive.hive.members[machine];
+        for _ in 0..16 {
+            match member.core.step(&mut member.adapter).unwrap() {
+                Step::Advanced(_) => return,
+                Step::Realized(_) | Step::Send(_) => {}
+                step => panic!("{step:?}"),
+            }
+        }
+        panic!("machine {machine} didn't advance");
+    };
+    let (abandon, kept, gone, regress, also_leave) = match survivors {
+        Survivors::One => {
+            bookmark(&mut hive, "p");
+            let (x, x_hub) = bookmark(&mut hive, "x");
+            hive.hive.sync(2).unwrap();
+            bookmark(&mut hive, "y");
+            (x, x_hub, "create bookmark x".to_owned(), base, vec![])
+        }
+        Survivors::Nested => {
+            hive.commit(2, "d", "gamma's work");
+            let gammas = op_log(hive.repo(2))[0].1.clone();
+            hive.commit(0, "a", "alpha's work");
+            let alphas = op_log(hive.repo(0))[0].1.clone();
+            hive.hive.sync(0).unwrap();
+            // Gamma merges alpha's work with its own: the merge it keeps.
+            hive.hive.sync(2).unwrap();
+            let merge = hive.hive.hub_head();
+            hive.hive.sync(0).unwrap();
+            bookmark(&mut hive, "y");
+            let below = op_described(hive.repo(0), &gammas);
+            let at = op_described(hive.repo(0), "reconcile divergent operations");
+            (format!("{below}..{at}"), merge, alphas, base, vec![])
+        }
+        Survivors::Apart | Survivors::Fetches | Survivors::FetchedHere | Survivors::Looping => {
+            // Alpha's p, which delta takes; the hub goes back, and gamma's q comes instead.
+            // Each on its machine's working-copy commit, which `.git` can have. Or each a
+            // fetch, of commits neither below the other, q beta's for `FetchedHere`. Or q a
+            // rebase, for `Looping`.
+            match &seed {
+                Some(seed) => {
+                    push_origin(&hive, seed, 2, false);
+                    hive.repo(0).jj(&["git", "fetch"]);
+                }
+                None => {
+                    hive.repo(0).jj(&["bookmark", "create", "p", "-r", "@"]);
+                }
+            }
+            hive.hive.sync(0).unwrap();
+            hive.hive.sync(3).unwrap();
+            hive.hive.hub_goes_back(base).unwrap();
+            let q_by = if survivors == Survivors::FetchedHere {
+                1
+            } else {
+                2
+            };
+            match &seed {
+                Some(seed) => {
+                    push_origin(&hive, seed, 3, true);
+                    hive.repo(q_by).jj(&["git", "fetch"]);
+                }
+                None if survivors == Survivors::Looping => {
+                    let (y, z) = (hive.commit_id(2, "Y"), hive.commit_id(2, "Z"));
+                    hive.repo(2).jj(&["rebase", "-s", &z, "-o", &y]);
+                }
+                None => {
+                    hive.repo(2).jj(&["bookmark", "create", "q", "-r", "@"]);
+                }
+            }
+            hive.hive.sync(q_by).unwrap();
+            let q = hive.hive.hub.store().head().0;
+            // Delta and alpha each merge p and q; alpha's is accepted, which gamma keeps.
+            advance_only(&mut hive, 3);
+            hive.hive.sync(0).unwrap();
+            let ours = hive.hive.hub_head();
+            hive.hive.sync(2).unwrap();
+            hive.hive.sync(3).unwrap();
+            let both = hive.hive.hub_head();
+            hive.hive.sync(0).unwrap();
+            bookmark(&mut hive, "y");
+            let node = hive.node(0);
+            let parents = node
+                .canonical_store()
+                .parents(&CanonicalOp(both.clone()))
+                .unwrap();
+            assert_eq!(parents.len(), 2, "{parents:?}");
+            let theirs = parents.into_iter().find(|op| op.0 != ours).unwrap();
+            let local = |op: &CanonicalOp| {
+                let local = node.local_of(op).unwrap();
+                jj_lib::object_id::ObjectId::hex(&local.0)
+            };
+            // Only alpha's merge: delta's has both its parents.
+            let range = format!("{}..{}", local(&theirs), local(&CanonicalOp(ours.clone())));
+            (
+                range,
+                ours,
+                "reconcile divergent operations".to_owned(),
+                q,
+                vec![3],
+            )
+        }
+    };
+    hive.repo(0).jj(&["op", "abandon", &abandon]);
+    hive.hive.sync(0).unwrap();
+    assert_eq!(hive.hive.hub.store().record_count(), 1, "{survivors:?}");
+    let mut left = vec![];
+    if leave {
+        for machine in std::iter::once(0).chain(also_leave) {
+            // As `musubi leave` does: forget this copy, sync, and, the hive having it gone,
+            // put its workspaces back; then it stops.
+            let removed = hive.node(machine).forget_self().unwrap().unwrap();
+            hive.hive.sync(machine).unwrap();
+            let key = hive.node(machine).machine().key().to_owned();
+            let (_, presence) = hive.node(machine).present_copies().unwrap();
+            assert!(!presence.is_present(&key), "{machine} still present");
+            hive.node(machine).restore_workspaces(&removed).unwrap();
+            left.push(machine);
+        }
+    }
+
+    // Beta takes the record and realizes the hub's head; the next step would advance to it.
+    hive.hive.fetch(1).unwrap();
+    let member = &mut hive.hive.members[1];
+    let mut adopted = false;
+    let mut realized = false;
+    for _ in 0..32 {
+        let known = member.core.known().1.clone();
+        if adopted && member.adapter.is_local(&known).unwrap() {
+            realized = true;
+            break;
+        }
+        match member.core.step(&mut member.adapter).unwrap() {
+            Step::Adopted => adopted = true,
+            Step::Realized(_) | Step::Send(_) => {}
+            step => panic!("{survivors:?}: {step:?}"),
+        }
+    }
+    assert!(adopted && realized, "{survivors:?}");
+    hive.reopen(1);
+
+    // The hub loses the record, the abandon and the leaves; gamma publishes it again.
+    hive.hive.hub_goes_back(regress).unwrap();
+    hive.hive.sync(2).unwrap();
+    assert_eq!(hive.hive.hub_head(), kept, "{survivors:?}");
+    (hive, kept, left, gone)
+}
+
+/// Syncs `participants` in fair rounds, each sync followed by the work a daemon does when its
+/// policy is idle, until a round changes nothing. Some participant makes an accepted push that
+/// drops `kept`, which the hub then has dropped, before the others take the record: once every
+/// machine has, the hub prunes it, forgetting the ids it dropped. Returns whether beta made it.
+fn settle_participants(
+    hive: &mut Fixture,
+    participants: &[usize],
+    kept: &musubi_sync::OpId,
+) -> bool {
+    use musubi_core::hub::HubStorage as _;
+
+    let (mut dropped_by, mut checked) = (None, false);
+    for _ in 0..6 {
+        let before = hive.hive.hub.store().head().0;
+        let mut quiet = true;
+        for &n in participants {
+            let taken = hive
+                .hive
+                .sync_steps(n, 60, &mut |request, reply| {
+                    if let (
+                        Request::Push { dropped, .. },
+                        Reply::Head {
+                            kind: HeadKind::Accepted,
+                            ..
+                        },
+                    ) = (request, &reply)
+                        && dropped.contains(kept)
+                    {
+                        dropped_by.get_or_insert(n);
+                    }
+                    reply
+                })
+                .unwrap();
+            if dropped_by.is_some() && !checked {
+                assert!(hive.hive.hub.is_dropped(kept, &[]).unwrap(), "{n}");
+                checked = true;
+            }
+            let idle = hive.hive.members[n].adapter.when_idle().unwrap();
+            assert!(taken < 60, "{n} keeps stepping");
+            quiet &= taken == 0 && !idle;
+        }
+        if quiet && hive.hive.hub.store().head().0 == before {
+            assert!(checked, "no accepted push dropped {kept:?}");
+            return dropped_by == Some(1);
+        }
+    }
+    panic!("the hive doesn't settle");
+}
+
+/// The hive, as `participants` have it, has dropped `kept`, the operation `gone` describes,
+/// and has beta's work: every participant at the hub's head, with its records and nothing
+/// pending. Beta merged what survives of `kept` with its own work in one operation, as jj
+/// merges op heads: both survivors where neither is below the other, not one at a time; of
+/// nested ones only the upper, not what its own work is on already.
+fn assert_dropped_head_settled(
+    hive: &mut Fixture,
+    participants: &[usize],
+    kept: &musubi_sync::OpId,
+    gone: &str,
+    survivors: Survivors,
+) {
+    use musubi_core::hub::HubStorage as _;
+    use musubi_core::node::LocalRepo as _;
+    use musubi_jj::op_id::CanonicalOp;
+    use musubi_jj::records::HubOp;
+
+    let hub = hive.hive.hub_head();
+    // The hub may have pruned the record since (`settle_participants` checked it held it), so
+    // every participant holds it, as the hub's count and digest say.
+    let records = hive.hive.hub.records();
+    assert!(records.count >= 1, "the drop is lost");
+    for &n in participants {
+        assert_eq!(
+            hive.node(n).canonical_heads().unwrap(),
+            [CanonicalOp(hub.clone())],
+            "{n}"
+        );
+        assert!(hive.node(n).pending_drops().is_empty(), "{n}");
+        assert_eq!(
+            hive.hive.members[n].adapter.records().unwrap(),
+            records,
+            "{n}"
+        );
+        assert!(
+            hive.node(n).is_dropped(&HubOp(CanonicalOp(kept.clone()))),
+            "{n}"
+        );
+        assert!(
+            hive.visible(n).iter().any(|c| c.ends_with("beta's work")),
+            "{n} lacks beta's work"
+        );
+        // Apart's description is the merges' it keeps too.
+        if !survivors.apart() {
+            assert!(
+                !history(hive.repo(n))
+                    .iter()
+                    .any(|(_, d)| d.starts_with(gone)),
+                "{n} still has {gone}"
+            );
+        }
+    }
+    let merges = hive.repo(1).jj(&[
+        "--ignore-working-copy",
+        "op",
+        "log",
+        "--no-graph",
+        "-T",
+        "description.first_line() ++ \" \" ++ parents.len() ++ \"\\n\"",
+    ]);
+    let three = merges
+        .lines()
+        .any(|line| line == "reconcile divergent operations 3");
+    let beside_own_work = matches!(survivors, Survivors::Apart | Survivors::Fetches);
+    assert_eq!(three, beside_own_work, "{merges}");
+    if matches!(survivors, Survivors::Fetches | Survivors::FetchedHere) {
+        // Every `.git` holds the same side of the conflict, which the import of each `jj`
+        // command above took alike.
+        let sides: BTreeSet<String> = participants
+            .iter()
+            .map(|&n| {
+                let side = git_main_at_origin(hive, n);
+                assert_eq!(recorded_main_at_origin(hive, n), side, "{n}");
+                side
+            })
+            .collect();
+        assert_eq!(sides.len(), 1, "{sides:?}");
+    }
+}
+
+/// The operations of `store` that `ops` stand for, and every one below them, numbered so
+/// that parents come first, with their parents as each was made, by the immutable
+/// `musubi.original-parents` each version keeps, and each version taken for its original.
+/// Returns the originals in that order, and each one's parents' numbers.
+fn original_history(
+    store: &musubi_jj::canonical::CanonicalStore,
+    ops: &[musubi_jj::op_id::CanonicalOp],
+) -> (Vec<jj_lib::op_store::OperationId>, Vec<Vec<usize>>) {
+    use jj_lib::op_store::OperationId;
+    use musubi_jj::op_id::CanonicalOp;
+
+    let root = store.root_operation_id().clone();
+    let parents_of = |op: &CanonicalOp| -> Vec<CanonicalOp> {
+        if *op == root {
+            return vec![];
+        }
+        let read = store.read_operation(op).unwrap();
+        read.metadata.attributes["musubi.original-parents"]
+            .split(' ')
+            .map(|hex| CanonicalOp(OperationId::try_from_hex(hex).unwrap()))
+            .collect()
+    };
+    let original = |op: &CanonicalOp| -> OperationId {
+        if *op == root {
+            root.0.clone()
+        } else {
+            store.original_id(op).unwrap()
+        }
+    };
+    let mut order: Vec<OperationId> = vec![];
+    let mut parents: Vec<Vec<usize>> = vec![];
+    let mut stack: Vec<(CanonicalOp, bool)> = ops.iter().map(|op| (op.clone(), false)).collect();
+    let mut seen = std::collections::HashSet::new();
+    while let Some((op, expanded)) = stack.pop() {
+        let id = original(&op);
+        if expanded {
+            if !order.contains(&id) {
+                let numbered = parents_of(&op)
+                    .iter()
+                    .map(|parent| {
+                        let parent = original(parent);
+                        order.iter().position(|o| *o == parent).unwrap()
+                    })
+                    .collect();
+                order.push(id);
+                parents.push(numbered);
+            }
+            continue;
+        }
+        if !seen.insert(op.clone()) {
+            continue;
+        }
+        stack.push((op.clone(), true));
+        stack.extend(parents_of(&op).into_iter().map(|parent| (parent, false)));
+    }
+    (order, parents)
+}
+
+/// The local helper contract for what a machine waiting on a dropped hub head would do,
+/// which the policy doesn't take yet (it still waits there): advancing to what survives of
+/// the operation, as the Lean model's `survivorAdvance` works it out over the original
+/// history, merged with this machine's own work in the one operation jj would make of them
+/// all, leaves its work in its history and none of what it dropped; and then the policy
+/// publishes the drop itself, and the hive settles, without the machine that abandoned the
+/// operation, which left. In a colocated repository musubi makes that merge and exports it,
+/// a conflicted remote bookmark included, at the side every machine's `.git` holds; in one
+/// that isn't, it publishes what survives apart, and jj merges them all at once. This is not
+/// the driver's own step: that awaits the model's.
+#[test]
+fn advancing_to_what_survives_of_a_dropped_head() {
+    use musubi_core::node::LocalRepo as _;
+    use musubi_jj::op_id::CanonicalOp;
+    use musubi_jj::op_id::LocalOp;
+    use musubi_jj::records::HubOp;
+    use serde_json::json;
+
+    use crate::oracle::Oracle;
+
+    let mut oracle = Oracle::spawn();
+    for (survivors, colocated) in [
+        (Survivors::One, true),
+        (Survivors::Nested, true),
+        (Survivors::Apart, true),
+        (Survivors::Apart, false),
+        (Survivors::Fetches, true),
+        (Survivors::FetchedHere, true),
+    ] {
+        let case = format!("{survivors:?}, colocated: {colocated}");
+        let (mut hive, kept, left, gone) =
+            dropped_head_held(four_machines(colocated), survivors, true);
+        assert_eq!(hive.repo(1).path().join(".git").exists(), colocated);
+        let participants: Vec<usize> = (0..hive.hive.members.len())
+            .filter(|n| !left.contains(n))
+            .collect();
+        // At the dropped head, having taken the hub's records, before the step that advances.
+        hive.hive.fetch(1).unwrap();
+        let member = &mut hive.hive.members[1];
+        let step = member.core.step(&mut member.adapter).unwrap();
+        assert!(
+            matches!(step, musubi_core::node::Step::Adopted),
+            "{case}: {step:?}"
+        );
+        assert_eq!(hive.hive.members[1].core.known().1, kept, "{case}");
+        let kept_hub = HubOp(CanonicalOp(kept.clone()));
+        assert!(hive.node(1).is_dropped(&kept_hub), "{case}");
+
+        // Before any jj command: the op heads, what stands for them, and the model's answer.
+        let (before, heads, dropped, order, frontier, merge, several) = {
+            let node = hive.node(1);
+            let before = node.local_heads().unwrap();
+            let heads: Vec<CanonicalOp> = before
+                .iter()
+                .map(|h| node.canonical_of(h).unwrap())
+                .collect();
+            let store = node.canonical_store();
+            let dropped: Vec<CanonicalOp> = node
+                .pending_drops()
+                .ops()
+                .iter()
+                .chain(node.applied_records().iter().flat_map(|r| r.ops()))
+                .flat_map(|op| node.current(&op.0).into_iter().map(|n| n.0))
+                .filter(|op| store.has_operation(op))
+                .collect();
+            let known = CanonicalOp(kept.clone());
+            let mut tops = heads.clone();
+            tops.push(known.clone());
+            tops.extend(dropped.iter().cloned());
+            let (order, parents) = original_history(store, &tops);
+            let number = |op: &CanonicalOp| {
+                let id = store_original(node, op);
+                order.iter().position(|o| *o == id).unwrap()
+            };
+            let reply = oracle.call(&json!({
+                "op": "survivorAdvance",
+                "parents": parents,
+                "dropped": dropped.iter().map(number).collect::<Vec<_>>(),
+                "heads": heads.iter().map(number).collect::<Vec<_>>(),
+                "known": number(&known),
+            }));
+            assert_eq!(reply["ok"], true, "{case}: {reply}");
+            let numbers = |key: &str| -> BTreeSet<usize> {
+                reply[key]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|n| usize::try_from(n.as_u64().unwrap()).unwrap())
+                    .collect()
+            };
+            let images: BTreeSet<usize> = node
+                .to_node(&kept_hub)
+                .unwrap()
+                .iter()
+                .map(|n| number(&n.0))
+                .collect();
+            assert_eq!(
+                images,
+                numbers("images"),
+                "{case}: what survives of the head"
+            );
+            let merge = reply["merge"].as_bool().unwrap();
+            let several = images.len() > 1;
+            (
+                before,
+                heads,
+                dropped,
+                order,
+                numbers("heads"),
+                merge,
+                several,
+            )
+        };
+
+        // What beta's own fetch left in its `.git`.
+        let fetched = matches!(survivors, Survivors::Fetches | Survivors::FetchedHere)
+            .then(|| git_main_at_origin(&hive, 1));
+
+        // The production helper, at that boundary.
+        hive.hive.members[1].adapter.advance(&kept).unwrap();
+
+        let node = hive.node(1);
+        let number = |op: &CanonicalOp| {
+            let id = store_original(node, op);
+            order.iter().position(|o| *o == id)
+        };
+        let after = node.local_heads().unwrap();
+        assert_eq!(after.len(), 1, "{case}: {after:?}");
+        let head = &after[0];
+        let read = |local: &LocalOp| {
+            futures::executor::block_on(node.loader().op_store().read_operation(&local.0)).unwrap()
+        };
+        let reached: BTreeSet<usize> = if merge {
+            // A new operation, merging exactly that frontier.
+            assert!(!before.contains(head), "{case}");
+            read(head)
+                .parents
+                .iter()
+                .map(|p| number(&node.canonical_of(&LocalOp(p.clone())).unwrap()).unwrap())
+                .collect()
+        } else {
+            std::iter::once(number(&node.canonical_of(head).unwrap()).unwrap()).collect()
+        };
+        assert_eq!(reached, frontier, "{case}: the merge's parents");
+        // Its own work stays below it, and nothing it dropped is.
+        let mut stack = vec![head.clone()];
+        let mut seen = std::collections::HashSet::new();
+        let mut below = BTreeSet::new();
+        while let Some(local) = stack.pop() {
+            if !seen.insert(local.clone()) {
+                continue;
+            }
+            if let Some(c) = node.canonical_of(&local) {
+                below.insert(store_original(node, &c));
+            }
+            stack.extend(read(&local).parents.into_iter().map(LocalOp));
+        }
+        for h in &heads {
+            assert!(
+                below.contains(&store_original(node, h)),
+                "{case}: own work lost"
+            );
+        }
+        for d in &dropped {
+            assert!(
+                !below.contains(&store_original(node, d)),
+                "{case}: dropped is back"
+            );
+        }
+        if !colocated && merge {
+            // Published apart, the realizations themselves, which jj then merged at once.
+            let read_head = read(head);
+            assert_eq!(
+                read_head.metadata.description, "reconcile divergent operations",
+                "{case}"
+            );
+            for parent in &read_head.parents {
+                let parent = LocalOp(parent.clone());
+                let canonical = node.canonical_of(&parent).unwrap();
+                assert_eq!(node.local_of(&canonical), Some(parent), "{case}");
+            }
+        }
+        if survivors == Survivors::Apart && colocated {
+            // `.git` has the merge as exported: both survivors' bookmarks.
+            let refs = hive.repo(1).git(&["show-ref"]);
+            for name in ["refs/heads/p", "refs/heads/q"] {
+                assert!(refs.contains(name), "{case}: {refs}");
+            }
+        }
+        if let Some(fetched) = fetched {
+            // The merge's conflicted `main@origin` exported as every machine's: the side
+            // gamma's `.git` has, where it keeps the operation, before any `jj` command here
+            // imports it. For `Fetches`, in place of beta's own fetch, which is no side; for
+            // `FetchedHere`, beta's fetch is one.
+            assert_eq!(recorded_main_at_origin(&hive, 1), "conflict", "{case}");
+            let side = git_main_at_origin(&hive, 1);
+            assert_eq!(side, git_main_at_origin(&hive, 2), "{case}");
+            if survivors == Survivors::Fetches {
+                assert_ne!(side, fetched, "{case}");
+            }
+        }
+        if several {
+            // Again, with the op heads at or above all that survives: nothing to do.
+            let now = hive.node(1).local_heads().unwrap();
+            hive.hive.members[1].adapter.advance(&kept).unwrap();
+            assert_eq!(hive.node(1).local_heads().unwrap(), now, "{case}");
+        }
+
+        // Then the policy publishes the drop, and the hive settles.
+        let published = settle_participants(&mut hive, &participants, &kept);
+        assert!(published, "{case}: beta never published the drop");
+        assert_dropped_head_settled(&mut hive, &participants, &kept, &gone, survivors);
+    }
+}
+
+/// Where what survives of a dropped head is several operations, and jj can't merge them with
+/// this machine's own work, here a rebase of beta's that makes a loop with one of them, the
+/// advance publishes nothing, and refuses as for any operation jj can't merge. It lists this
+/// machine's operations the hive doesn't have, rather than searching for the one to revert:
+/// that search goes by a single realization, and could name an operation that has nothing to
+/// do with the loop.
+#[test]
+fn advancing_to_what_survives_refuses_what_jj_cannot_merge() {
+    use musubi_core::node::LocalRepo as _;
+
+    let (mut hive, kept, _, _) = dropped_head_held(four_machines(true), Survivors::Looping, true);
+    // At the dropped head, having taken the hub's records, before the step that advances.
+    hive.hive.fetch(1).unwrap();
+    let member = &mut hive.hive.members[1];
+    let step = member.core.step(&mut member.adapter).unwrap();
+    assert!(matches!(step, musubi_core::node::Step::Adopted), "{step:?}");
+    let before = hive.node(1).local_heads().unwrap();
+    let err = hive.hive.members[1].adapter.advance(&kept).unwrap_err();
+    let err = format!("{err:#}");
+    assert!(err.contains("newest first: "), "{err}");
+    assert!(err.contains(" (rebase "), "{err}");
+    assert_eq!(hive.node(1).unmergeable_searches(), 0);
+    assert_eq!(hive.node(1).local_heads().unwrap(), before);
+}
+
+/// The hub going back to an operation this machine dropped, whose history it lacks, makes the
+/// core plan realizing that history, the dropped operations in it too: one of those, a merge
+/// with two operations that survive below it, can come up once its parents are local, before
+/// the rest of the plan has made the hub's head local. Realizing it writes nothing, and fails
+/// not, though nothing names it alone: what this machine has in its place is local already.
+#[test]
+fn realizing_an_operation_this_machine_dropped_writes_nothing() {
+    use musubi_core::node::LocalRepo as _;
+    use musubi_jj::op_id::CanonicalOp;
+    use musubi_jj::records::HubOp;
+
+    let (mut hive, kept, _, _) = dropped_head_held(four_machines(true), Survivors::Apart, true);
+    // At the dropped head, having taken the hub's records, before the step that advances.
+    hive.hive.fetch(1).unwrap();
+    let member = &mut hive.hive.members[1];
+    let step = member.core.step(&mut member.adapter).unwrap();
+    assert!(matches!(step, musubi_core::node::Step::Adopted), "{step:?}");
+    let kept_hub = HubOp(CanonicalOp(kept.clone()));
+    assert!(hive.node(1).is_dropped(&kept_hub));
+    assert_eq!(hive.node(1).to_node(&kept_hub).unwrap().len(), 2);
+    let member = &mut hive.hive.members[1];
+    assert!(member.adapter.is_local(&kept).unwrap());
+    let before = hive.node(1).local_heads().unwrap();
+    let ops = history(hive.repo(1)).len();
+    hive.hive.members[1].adapter.realize(&kept).unwrap();
+    assert_eq!(hive.node(1).local_heads().unwrap(), before);
+    assert_eq!(history(hive.repo(1)).len(), ops);
+}
+
+/// A machine that took another's record, but stopped before advancing past what it drops,
+/// holds that drop pending again once the hub loses the record. Where the hub's head is then
+/// the dropped operation itself, published again by a third machine that kept it, the
+/// machine advances to what survives of it, merged with its own work in the one operation
+/// jj would make of them all, and publishes the drop itself, rather than waiting for the
+/// machine that abandoned it, which may have left the hive (it had, before the hub lost both)
+/// and never comes back. Before, it waited: the hive never had its work or the drop again.
+#[test]
+fn a_dropped_head_published_again_is_dropped_by_who_took_it() {
+    let cases = [
+        (Survivors::One, true),
+        (Survivors::One, false),
+        (Survivors::Nested, true),
+        (Survivors::Apart, true),
+    ];
+    for (survivors, leave) in cases {
+        let (mut hive, kept, left, gone) = dropped_head_held(four_machines(true), survivors, leave);
+        let participants: Vec<usize> = (0..hive.hive.members.len())
+            .filter(|n| !left.contains(n))
+            .collect();
+        let published = settle_participants(&mut hive, &participants, &kept);
+        // Beta publishes the drop itself unless alpha, still in the hive, did first.
+        if leave {
+            assert!(published, "{survivors:?}: beta never published the drop");
+        }
+        assert_dropped_head_settled(&mut hive, &participants, &kept, &gone, survivors);
+    }
+}
+
+/// The original of `op`, in `node`'s store.
+fn store_original(
+    node: &musubi_jj::node::NodeRepo,
+    op: &musubi_jj::op_id::CanonicalOp,
+) -> jj_lib::op_store::OperationId {
+    if op == node.canonical_store().root_operation_id() {
+        op.0.clone()
+    } else {
+        node.canonical_store().original_id(op).unwrap()
     }
 }
 

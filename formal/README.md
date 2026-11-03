@@ -84,6 +84,11 @@ is `formal/.lake/build/bin/oracle`.
 | `Musubi/RetryControl.lean` | Finite pre-cut request-slot consumption and cached fix-up writes within an explicitly constrained epoch. |
 | `Musubi/RecordStability.lean` | Finite record appends and pruning for bounded original drops, and pending shrink under record extension. |
 | `Musubi/ContractOrder.lean` | Ancestry through a contracted expected head, including its difference from original ancestry. |
+| `Musubi/SurvivorAdvance.lean` | The complete surviving-image frontier, preservation of local work, and its full-frontier merge. |
+| `Musubi/ContractedSafety.lean` | Common store and frontier invariants without an original accepted-head chain; local primitive preservation and fixed-drop credit. |
+| `Musubi/ContractedExec.lean` | The explicit executable union with survivor advance, atomic prepared adoption and contracted acceptance and rejection. |
+| `Musubi/ContractedMeasure.lean` | The record-aware executable progress check through surviving images; coincidence with the old check before drops. |
+| `Musubi/ContractedExecTest.lean` | Build-time checks of independent recovery and mutually exclusive contracted outcomes. |
 | `Musubi/SupersedeExecTest.lean` | `#guard` smoke tests of `sexecStep`, checked at build time. |
 | `Musubi/Refs.lean` | Per-machine refs, for one git ref: imports, exports, merges, conflicted remote bookmarks, and `jj undo` and `jj op restore`. |
 | `Musubi/Expected.lean` | The conflicted-ref history walk, agreement under operation renaming, termination and the import-agreement boundary. |
@@ -592,8 +597,9 @@ That gap has a real-repository counterexample:
 hub rollback, the hub accepts a cached fix-up that does not originally descend from its
 expected head: the push drops that head, whose surviving images are below the fix-up. The
 trace converges. This is valid contracted ancestry, but `SStep.sup` and `SPStepR.supPush`
-require original ancestry and cannot represent this acceptance. The core harness's fake
-stores share that restriction, so their correspondence does not cover this real trace.
+require original ancestry and cannot represent this acceptance. `ContractedExec.lean` now
+extends the core harness's finite original-operation submodel with that comparison; it
+does not change the meaning or claimed invariants of `SRStep`.
 
 `ContractOrder.lean` models this comparison as `Below`: every surviving image of the expected
 head is below the new head. `belowB` also checks that the image is nonempty, as the hub does.
@@ -607,6 +613,17 @@ against `belowB` through the `contractedAncestry` oracle route, supplying its im
 argument: a trace of surviving hub heads compared under each resulting dropped set has an
 eventual original-ancestry chain. It takes the immutable graph and contracted comparisons
 as premises; it does not derive their physical-store projection or strict head changes.
+
+`ContractedExec.cexecAction_sound` targets the explicit union `ContractedRStep`. Old checked
+transitions remain available, with a tighter rejection guard where a contracted packet is
+acceptable. Added advancement uses every surviving image, and preparation changes the
+frontier and record custody in one boundary. `cexecAction_ok` preserves record custody;
+`imageAdvance_safe`, `preparedAdvance_safe` and `imageAccept_safe` prove the new primitive
+cases of `ContractedSafety.Safe`. They do not prove a global invariant of the union relation.
+`old_expected_accepts_eventually_stop` gives a finite credit argument after dropped sets
+stabilize, under its explicit local-step premises. Applying it to every network action and
+proving full convergence remain open. Raw canonical versions, including normalization in
+their birth parents, still need their own physical-store projection.
 
 Cached restoring work alone does not imply that its drops are published. The real regression
 `pending_drops_get_a_new_tip_when_the_hub_already_has_the_cached_fixup` reaches equal heads
@@ -698,15 +715,22 @@ boundaries; the full reverse refinement remains open.
 - **Relaxations of durability, proved safe.** `loseKnown` lets a restarting node lose `known`
   (reset to `(0, root)`) while keeping `staged`, as the Rust node does. `loseVolatile` lets it
   lose `staged` as well. `hubForget` lets the hub lose or garbage-collect any operations and
-  objects outside `closure(head)`. All safety theorems hold with these steps included.
+  objects outside `closure(head)` in the original-ancestry relation. The extended executable
+  model preserves operation bodies needed by retained historical heads: an older head can
+  be outside the current closure after contracted acceptance. Historical-only objects may
+  still be lost. A requested rollback to an incomplete target takes an explicit environment
+  recovery choice, remaking the hive. This does not claim that native startup detects every
+  damaged prefix or add a hub durability requirement; that physical interval remains open.
 - **Ghost state.** `creator`, `isMerge` and `birth` record each op's creator, whether it is a
   merge, and the hub `seq` at its creation; `hist` records the history of accepted heads.
 - **Original operations.** `Supersede.lean` identifies each canonical operation a drop renamed
   with its original. A node's operations there include the dropped ones it had, with their
   objects, as an abstraction of the real node, which keeps only survivors; the real hub's
   closure check, and a node's realization, are then taken over survivors, which contraction
-  keeps in the same ancestry (`anc_cpar_iff`). The ids each party shows are
-  `cid` of its operations under its own dropped set.
+  keeps in the same ancestry (`anc_cpar_iff`). Within this fixed-birth-graph abstraction,
+  the names are `cid` under each dropped set. Arbitrary native versions can already carry
+  normalization in their birth parents; an original label and a party's current drop set
+  alone do not give a complete physical-store projection.
 - **Translation layer.** It is not modeled. The model assumes what [protocol.md, "Translation
   layer"](../docs/internals/protocol.md#translation-layer) requires: `canon` is injective on
   reachable local operations, `canon(realize(C)) = C`, and realization never creates a canonical
@@ -772,7 +796,7 @@ that checks the Rust core against the oracle.
 2. **Executable to oracle.** `Oracle.lean` reads requests and writes replies, one JSON object
    per line, flushing after each. A rejected or malformed request leaves the state unchanged.
    Decoding, encoding and the request loop are in `Musubi/ExecJson.lean`; all protocol
-   logic is in `execStep`.
+   logic is in `execStep`, `sexecStep` and the explicit extension `cexecAction`.
 
 Theorems (`Musubi/ExecSound.lean`):
 
@@ -822,9 +846,11 @@ and `HeadsOK` too, and the actions of `SStep`:
 - `smeasureE_eq` and `sconvergedE_iff`: the set-based `smeasure` and `SConverged`.
 - `RecordLiveness.lean` adds `RecordConverged`, requiring the ordered applied records to
   match the hub's too, and `recordMeasure`: `(smeasure, recordLagE)`. `recordMeasureE_eq`
-  and `recordConvergedE_iff` connect their computations to the oracle, which returns the
-  first eight components as `smeasure`, the last as `recordLag`, and the stronger
-  convergence check as `converged`.
+  and `recordConvergedE_iff` connect their computations to the original model. The extended
+  oracle returns the record-aware `ContractedMeasure.rmeasureCE` suffix as part of
+  `smeasure`, record debt as `recordLag`, and the stronger convergence check as `converged`.
+  `rmeasureCE_without_drops` proves exact agreement before drops. Its new component facts
+  and the generated strict-decrease checks do not establish full union termination.
 
 The set abstraction alone does not establish record agreement: after a remake, a machine
 may republish two old drops as one record while another retains two records with the same

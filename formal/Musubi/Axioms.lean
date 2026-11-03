@@ -15,6 +15,9 @@ import Musubi.AsyncLiveness
 import Musubi.RetryControl
 import Musubi.RecordStability
 import Musubi.ContractOrder
+import Musubi.SurvivorAdvance
+import Musubi.ContractedExec
+import Musubi.ContractedMeasure
 import Musubi.RegressScenario
 import Musubi.Refs
 import Musubi.AbandonRefs
@@ -28,6 +31,29 @@ import Musubi.PresenceContract
 import Musubi.Supersede
 
 open Musubi
+
+#print axioms Exec.cexec_sound
+#print axioms Exec.cexec_ok
+#print axioms Exec.cexecAction_sound
+#print axioms Exec.cexecAction_ok
+#print axioms Exec.cexec_reachable_step
+#print axioms Exec.uncoveredImages_after_advance
+#print axioms Exec.uncoveredImages_singleton_zero
+#print axioms Exec.rmeasureCE_without_drops
+#print axioms Exec.preparedAdvance_safe
+#print axioms Exec.imageAdvance_safe
+#print axioms Exec.imageAccept_safe
+#print axioms Contracted.step_safe
+#print axioms Contracted.step_retains
+#print axioms Contracted.old_expected_accepts_eventually_stop
+
+#print axioms Contract.advanceImages_set
+#print axioms Contract.advanceImages_nodup
+#print axioms Contract.advanceImages_survives
+#print axioms Contract.advanceImages_covers
+#print axioms Contract.advanceImages_singleton_ready
+#print axioms Contract.advanceImages_merge_ready
+#print axioms Contract.advanceImages_merge_keeps
 
 #print axioms AbandonRefs.abstraction_unique
 #print axioms AbandonRefs.adoption_composes

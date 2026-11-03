@@ -12,6 +12,9 @@ import Musubi.Names
 import Musubi.RefsExec
 import Musubi.RetryControl
 import Musubi.ContractOrder
+import Musubi.SurvivorAdvance
+import Musubi.ContractedExec
+import Musubi.ContractedMeasure
 import Musubi.ExpectedExec
 
 namespace Musubi.Exec.Json
@@ -109,6 +112,17 @@ def decodeSAction (j : Json) : Except String SAction := do
   | "hubPushRefuse" => push .hubPushRefuse
   | "prune" => return .prune (← getNat j "count")
   | _ => return .base (← decodeAction j)
+
+def decodeCAction (j : Json) : Except String CAction := do
+  let kind ← j.getObjValAs? String "kind"
+  if kind == "advancePrepared" then
+    return .advancePrepared (← getNat j "node") (← getRecs j "records")
+  else if kind == "hubPushReject" && (j.getObjVal? "applied").isOk then
+    return .reject (← getNat j "node") (← getNats j "ops") (← getNats j "objs")
+      (← getNat j "expected") (← getNat j "new") (← getRecs j "applied")
+      (← getNats j "dropped")
+  else
+    return .old (← decodeSAction j)
 
 /-! ## Encoding -/
 
@@ -439,6 +453,25 @@ def contractedAncestryReply (j : Json) : Except String Json := do
     ("original", toJson (ancB par expected head)),
     ("images", toJson (Contract.exp par D expected))])
 
+def survivorAdvanceReply (j : Json) : Except String Json := do
+  let parents ← j.getObjValAs? (Array (List Nat)) "parents"
+  let dropped ← getNats j "dropped"
+  let heads ← getNats j "heads"
+  let known ← getNat j "known"
+  unless (List.range parents.size).all (fun x => (parents[x]!).all (· < x)) do
+    throw "an operation's parents must come before it"
+  unless known < parents.size && heads.all (· < parents.size) do
+    throw "head outside the history"
+  unless !heads.isEmpty && heads.all (fun x => !dropped.contains x) do
+    throw "current heads must be nonempty and survive"
+  let par := fun x => parents[x]?.getD []
+  let D := fun x => dropped.contains x
+  let images := Contract.exp par D known
+  unless !images.isEmpty do throw "known head has no surviving image"
+  let next := Contract.advanceImages par D heads known
+  pure (Json.mkObj [("ok", toJson true), ("images", toJson images),
+    ("heads", toJson next), ("merge", toJson (decide (next.length > 1)))])
+
 def retryFixupReply (j : Json) : Except String Json := do
   let s : Retry.Fixup := {
     pending := ← getNats j "pending",
@@ -484,10 +517,11 @@ def measureReply (N : Nat) (ses : SEState) : Json :=
   let es := ses.es
   let (a, b, c, d, e) := es.measureE N
   let (a', b', c', d', e', f') := es.rmeasureE N
+  let (ac, bc, cc, dc, ec, fc) := ses.rmeasureCE N
   let (p, l, _) := ses.smeasureE N
   Json.mkObj [("ok", Json.bool true), ("measure", toJson #[a, b, c, d, e]),
     ("rmeasure", toJson #[a', b', c', d', e', f']),
-    ("smeasure", toJson #[p, l, a', b', c', d', e', f']),
+    ("smeasure", toJson #[p, l, ac, bc, cc, dc, ec, fc]),
     ("recordLag", toJson (ses.recordLagE N)),
     ("converged", Json.bool (ses.recordConvergedE N))]
 
@@ -516,10 +550,10 @@ def handle (sess : Session) (line : String) : Json × Session :=
       match sess with
       | none => (errReply "bad request: step before reset", sess)
       | some (N, es) =>
-        match j.getObjVal? "action" >>= decodeSAction with
+        match j.getObjVal? "action" >>= decodeCAction with
         | .error e => (errReply s!"bad request: {e}", sess)
         | .ok a =>
-          match sexecStep N es a with
+          match cexecAction N es a with
           | .error e => (errReply e, sess)
           | .ok es' => (okReply N es', some (N, es'))
     | .ok "measure" =>
@@ -574,6 +608,10 @@ def handle (sess : Session) (line : String) : Json × Session :=
       | .ok reply => (reply, sess)
     | .ok "retryPublication" =>
       match retryPublicationReply j with
+      | .error e => (errReply s!"bad request: {e}", sess)
+      | .ok reply => (reply, sess)
+    | .ok "survivorAdvance" =>
+      match survivorAdvanceReply j with
       | .error e => (errReply s!"bad request: {e}", sess)
       | .ok reply => (reply, sess)
     | .ok "refs" =>

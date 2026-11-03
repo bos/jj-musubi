@@ -540,6 +540,13 @@ the hub's history, operation by operation, with the same parents:
    operations beside it, which it moves onto the abandoned operation's parent: jj keeps its
    view, as it keeps every operation's, so the hive's must be the view of the merge it
    replaced, as the realizations are held to theirs, and it goes in as the hive has it.
+   A command's one local parent can also expand to several canonical parents when that
+   parent was dropped. It remains a command: the harness records each new operation of a
+   jj invocation, including intermediate snapshots and imports, with its source input and
+   output. The reference checks its shared payload against that output and checks unexplained
+   divergence and conflicts against its input. Genuine reconciliations still take the merge
+   path. `e2e_command_above_dropped_merge` pairs such a bookmark command with a concurrent one
+   and checks the resulting genuine merge; the old classifier wrongly loses its target.
 2. Where jj's merge gives what the hive's did, comparing commits by contents, change ids and
    parents, the reference goes on from the hive's operation. Where it doesn't, it goes on from
    its own, applying later operations three-way as jj applies a concurrent one, until the two

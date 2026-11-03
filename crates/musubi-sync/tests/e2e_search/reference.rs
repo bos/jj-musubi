@@ -35,6 +35,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::fs;
 use std::hash::Hash;
 use std::hash::Hasher as _;
@@ -49,6 +50,7 @@ use jj_lib::config::ConfigLayer;
 use jj_lib::config::ConfigSource;
 use jj_lib::config::StackedConfig;
 use jj_lib::default_backend_factories::default_backend_factories;
+use jj_lib::git::REMOTE_NAME_FOR_LOCAL_GIT_REPO;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store;
 use jj_lib::op_store::OperationId;
@@ -133,7 +135,9 @@ fn hash(value: impl Hash) -> u64 {
 
 impl Reference {
     /// Rebuilds the hub's canonical history, up to its head, in a new repository whose git
-    /// store borrows machine 0's objects, and jj's record of their change ids and conflicts.
+    /// store borrows machine 0's objects and the recorded command sources', with jj's
+    /// record of their change ids and conflicts. A raw source base can contain commits
+    /// absent from the contracted canonical history, which machine 0 never fetched.
     pub fn build(world: &World) -> Self {
         let dir = musubi_testutil::tempdir();
         let git = dir.path().join("git");
@@ -144,11 +148,16 @@ impl Reference {
             .unwrap();
         assert!(status.success(), "git init failed");
         let machine = world.fx.repo(0);
-        fs::write(
-            git.join("objects/info/alternates"),
-            format!("{}\n", machine.path().join(".git/objects").display()),
-        )
-        .unwrap();
+        let mut sources = world.command_sources.clone();
+        sources.insert(
+            machine.path().join(".git/objects"),
+            machine.repo_path().join("store/extra"),
+        );
+        let mut alternates = String::new();
+        for path in sources.keys() {
+            writeln!(alternates, "{}", path.display()).unwrap();
+        }
+        fs::write(git.join("objects/info/alternates"), alternates).unwrap();
         let settings = settings();
         let root = dir.path().join("repo");
         fs::create_dir(&root).unwrap();
@@ -156,7 +165,9 @@ impl Reference {
         let repo_path = root.join(".jj/repo");
         let extra = repo_path.join("store/extra");
         fs::remove_dir_all(&extra).unwrap();
-        musubi_testutil::copy_tree(&machine.repo_path().join("store/extra"), &extra);
+        for source in sources.values() {
+            musubi_testutil::copy_tree(source, &extra);
+        }
         let loader =
             RepoLoader::init_from_file_system(&settings, &repo_path, &default_backend_factories())
                 .unwrap();
@@ -229,7 +240,14 @@ impl Reference {
             let op = &ops[&id];
             let op_parents = CanonicalOp::parents_of(op);
             let view = canonical.read_view(&op.view_id).unwrap();
-            if op_parents.len() > 1 {
+            // A command's single local parent may expand to several canonical parents.
+            // Its observed payload is still a command, not a new reconciliation of those
+            // parents. Only source-pinned commands get this treatment.
+            let command = (op_parents.len() > 1)
+                .then(|| world.commands.get(&merge_key(op)))
+                .flatten();
+            let is_merge = op_parents.len() > 1 && command.is_none();
+            if is_merge {
                 for (new, predecessors) in op.commit_predecessors.iter().flatten() {
                     reference
                         .rewrites
@@ -247,6 +265,40 @@ impl Reference {
                     "{}, which jj op abandon rewrote, keeping its view: {why}",
                     describe(&id, op)
                 ));
+            }
+            if let Some(command) = command
+                && let Some(why) = reference.unlike_replaced(&(command.made.clone(), false), &view)
+            {
+                reference.unexplained.push(format!(
+                    "{}, which is a source-recorded command: {why}",
+                    describe(&id, op)
+                ));
+            }
+            if let Some(command) = command {
+                let mut remotes = command.made.remote_views.clone();
+                remotes.remove(REMOTE_NAME_FOR_LOCAL_GIT_REPO);
+                if remotes != view.remote_views {
+                    reference.unexplained.push(format!(
+                        "{}, which is a source-recorded command: remote refs differ",
+                        describe(&id, op)
+                    ));
+                }
+            }
+            if let Some(command) = command
+                && !explained(op)
+            {
+                let made: Vec<String> = reference
+                    .made_divergent_or_conflicted(&command.base, &view)
+                    .iter()
+                    .map(Made::to_string)
+                    .collect();
+                if !made.is_empty() {
+                    reference.unexplained.push(format!(
+                        "{}: {}",
+                        describe(&id, op),
+                        made.join(", ")
+                    ));
+                }
             }
             if let [parent] = op_parents.as_slice()
                 && !explained(op)
@@ -279,14 +331,21 @@ impl Reference {
             let agreed = op_parents.iter().all(|p| replays[p].id() == copies[p].id());
             // A merge `jj op abandon` gave other parents keeps its view, as jj keeps every
             // operation's: it goes in as the hive has it, as a command does.
-            let replay = if (op_parents.len() < 2 || kept.is_some()) && agreed {
+            let replay = if (!is_merge || kept.is_some()) && agreed {
                 copy.clone()
             } else {
-                let (replayed, how) = if op_parents.len() < 2 {
-                    (
-                        reference.apply(&copies[&op_parents[0]], &copy, parents[0]),
-                        "applied",
-                    )
+                let (replayed, how) = if !is_merge {
+                    let replayed = if let [parent] = op_parents.as_slice() {
+                        reference.apply(&copies[parent], &copy, parents[0])
+                    } else {
+                        // Lift the command's payload between independently merged copy
+                        // and replay frontiers, retaining the existing deviation tracking.
+                        let input =
+                            reference.merge(op_parents.iter().map(|p| &copies[p]).collect());
+                        let onto = reference.merge(parents);
+                        reference.apply(&input.op, &copy, &onto.op)
+                    };
+                    (replayed, "applied")
                 } else {
                     (reference.merge(parents), "merged")
                 };
@@ -296,14 +355,14 @@ impl Reference {
                 let theirs = reference.summary(&replayed.view, &known);
                 // The same parents on both sides, but a different merge: it may be jj's own,
                 // on the machine that made it, of the parents as that machine had them.
-                let as_made = if op_parents.len() > 1 && agreed && ours != theirs {
+                let as_made = if is_merge && agreed && ours != theirs {
                     reference
                         .merged_as_made(world, &id, &op_parents, &replayed.view, &copies, &views)
                         .filter(|(merged, _)| reference.summary(merged, &known) == ours)
                 } else {
                     None
                 };
-                if op_parents.len() > 1 && agreed && ours != theirs && as_made.is_none() {
+                if is_merge && agreed && ours != theirs && as_made.is_none() {
                     // What the hive's merge did beyond jj's is musubi's, whatever later
                     // operations make of it.
                     let beyond = reference.beyond(&view, &replayed.view, &known);

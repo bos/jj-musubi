@@ -93,3 +93,9 @@
 {"op":"retryPublication","pending":[1],"written":true,"aligned":false,"headKnown":true}
 {"op":"retryPublication","pending":[1],"written":true,"aligned":false,"headKnown":false}
 {"op":"retryPublication","pending":[],"written":false,"aligned":true,"headKnown":true}
+{"op":"survivorAdvance","parents":[[],[0],[1],[0]],"dropped":[2],"heads":[3],"known":2}
+{"op":"survivorAdvance","parents":[[],[0],[0],[1,2],[0]],"dropped":[3],"heads":[4],"known":3}
+{"op":"survivorAdvance","parents":[[],[0],[1],[1]],"dropped":[2],"heads":[3],"known":2}
+{"op":"survivorAdvance","parents":[[],[0],[1]],"dropped":[2],"heads":[2],"known":2}
+{"op":"survivorAdvance","parents":[[],[0],[1]],"dropped":[2],"heads":[1],"known":2}
+{"op":"survivorAdvance","parents":[[],[0],[0],[1,2],[1]],"dropped":[1,2,3],"heads":[4],"known":3}

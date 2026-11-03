@@ -30,10 +30,12 @@ pub trait LocalRepo {
     /// The canonical forms of the local op heads (canonicalizing any new local operations).
     fn heads(&mut self) -> Result<Vec<Self::Op>, Self::Error>;
 
-    /// Whether `op` is present locally, as an original or a realization.
+    /// Whether `op` is present locally, as an original or a realization; or, if this node
+    /// dropped it, whether all its history has in place of it is.
     fn is_local(&self, op: &Self::Op) -> Result<bool, Self::Error>;
 
-    /// Whether `ancestor ∈ anc*(op)`, for local `op`.
+    /// Whether `ancestor ∈ anc*(op)`, for local `op`; or, if this node dropped `ancestor`,
+    /// whether all its history has in place of it is.
     fn is_ancestor(&self, ancestor: &Self::Op, op: &Self::Op) -> Result<bool, Self::Error>;
 
     /// Has jj merge the op heads, as any `jj` command would.
@@ -83,12 +85,15 @@ pub trait LocalRepo {
     /// `git`.
     fn objects_missing(&self, ops: &[Self::Op]) -> Result<Vec<Self::Op>, Self::Error>;
 
-    /// Realizes a staged operation whose parents are local and whose objects are available.
+    /// Realizes a staged operation whose parents are local and whose objects are available;
+    /// or, if this node dropped it, nothing: what it has in place of it is local already.
     fn realize(&mut self, op: &Self::Op) -> Result<(), Self::Error>;
 
-    /// Makes a local operation an op head (`heads := max(heads ∪ {op})`). A real repository
-    /// may also merge that head set, as `merge_heads` would: model this as advance followed
-    /// by an environment merge, not as a sync step that creates a canonical operation.
+    /// Makes a local operation an op head (`heads := max(heads ∪ {op})`), or, if this node
+    /// dropped it, what its history has in place of it: `heads := max(heads ∪ images(op))`,
+    /// the operations below it that survive the drop. A real repository may also merge that
+    /// head set, as `merge_heads` would: model this as advance followed by an environment
+    /// merge, not as a sync step that creates a canonical operation.
     fn advance(&mut self, op: &Self::Op) -> Result<(), Self::Error>;
 
     /// A local operation the hub has accepted, reachable from the op heads, used as the
@@ -304,10 +309,9 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
             descends |= repo.is_ancestor(&known, head)?;
         }
         if !descends {
-            // Never to a head this node dropped: it waits for the hub to move past it.
-            if repo.is_dropped(&known)? {
-                return Ok(Step::Idle);
-            }
+            // Never to a head this node dropped, but to what its history has in place of it,
+            // which the hub accepted too: the drop is then this node's to publish, beside its
+            // own work, rather than waiting for another machine to move the hub past it.
             repo.advance(&known)?;
             repo.set_accepted_base(&known)?;
             return Ok(Step::Advanced(known));

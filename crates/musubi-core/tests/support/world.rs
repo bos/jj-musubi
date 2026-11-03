@@ -16,6 +16,7 @@ use musubi_core::node::Step;
 use serde_json::Value;
 use serde_json::json;
 
+use super::model::Advanced;
 use super::model::FakeHub;
 use super::model::FakeRepo;
 use super::model::Obj;
@@ -87,6 +88,14 @@ pub struct World {
     /// Whether any node has dropped anything: the measure of `Liveness.lean`, which knows
     /// nothing of supersedes, falls only before.
     dropped_any: bool,
+    /// The sequence numbers of the heads the hub accepted through what survives of the head
+    /// it had, not as its descendant in the original history (`imageAccept`).
+    contracted_accepts: BTreeSet<u64>,
+    /// Whether any step left the original-history model: such an acceptance, an advance to
+    /// what survives of a dropped head, or one as prepared records name the history.
+    contracted: bool,
+    /// Whether the hub was remade where going back would have left it at a head it lacks.
+    pub remade_for_rollback: bool,
 }
 
 /// What of a node `World::quiesce` watches across an exchange.
@@ -141,6 +150,9 @@ impl World {
             misled: vec![false; nodes],
             offered: BTreeSet::new(),
             dropped_any: false,
+            contracted_accepts: BTreeSet::new(),
+            contracted: false,
+            remade_for_rollback: false,
         };
         if let Some(oracle) = &mut world.oracle {
             world.oracle_state = oracle.reset(nodes);
@@ -279,7 +291,11 @@ impl World {
                 self.act(json!({"kind": "merge", "node": node, "parents": parents, "objs": objs}));
             }
             Step::Realized(op) => self.act(json!({"kind": "realize", "node": node, "opId": op})),
-            Step::Advanced(_) => self.act(json!({"kind": "advance", "node": node})),
+            Step::Advanced(_) => {
+                let advanced = self.repos[node].last_advance.take().expect("advanced");
+                self.contracted |= advanced != Advanced::Plain;
+                self.act(advanced.action(node));
+            }
             Step::Send(requests) => {
                 for request in requests {
                     self.check_upload(node, &request);
@@ -443,6 +459,22 @@ impl World {
         self.round_trip(sent_before);
     }
 
+    /// [`Self::exchange`], with the measures checked across it, as `quiesce` checks them.
+    pub fn exchange_checked(&mut self, node: usize, merge_objs: usize) {
+        let mut measure = self.measure();
+        let before = self.node_view(node);
+        self.exchange(node, merge_objs);
+        self.check_measure(node, before, &mut measure);
+    }
+
+    /// [`Self::poll_now`], with the measures checked across it, as `quiesce` checks them.
+    pub fn poll_now_checked(&mut self, node: usize) {
+        let mut measure = self.measure();
+        let before = self.node_view(node);
+        self.poll_now(node);
+        self.check_measure(node, before, &mut measure);
+    }
+
     /// Delivers each request sent since `sent_before` to the hub, and its reply straight back.
     fn round_trip(&mut self, sent_before: usize) {
         let mut i = sent_before;
@@ -532,12 +564,17 @@ impl World {
                         with_sup("hubSupAccept"),
                         json!({"kind": "sendD", "node": node}),
                     ],
-                    CasOutcome::Rejected => vec![action("hubPushReject")],
+                    CasOutcome::Rejected => vec![with_sup("hubPushReject")],
                     CasOutcome::Incomplete => vec![action("hubPushIncomplete")],
                     CasOutcome::Refused => vec![with_sup("hubPushRefuse")],
                 };
                 let announced = outcome == CasOutcome::Accepted;
+                let contracted = announced && !self.univ.borrow().is_ancestor(*expected, *new);
                 self.reply_and_act(node, handled.reply, actions, handled.publish, announced);
+                if contracted {
+                    self.contracted_accepts.insert(self.hub.seq);
+                    self.contracted = true;
+                }
                 return;
             }
         };
@@ -735,8 +772,20 @@ impl World {
     /// the later ones (`hubRegress`). Going back to where it is changes nothing, and the
     /// properties that need a hub that never went back still hold.
     pub fn hub_goes_back(&mut self, seq: u64) {
+        // A head it accepted through what survives of the one before need not reach that one,
+        // whose objects it may have forgotten since: going back there leaves no hub that
+        // works. This harness explicitly chooses a maintainer's remake recovery; it does
+        // not claim that native startup detects every missing historical object.
+        if !self.hub.closed(self.hist[seq as usize]) {
+            self.trace
+                .push(json!({"marker": "rollback to an incomplete head: remake"}));
+            self.remade_for_rollback = true;
+            self.remake();
+            return;
+        }
         let lost: Vec<Op> = self.hist.drain(seq as usize + 1..).collect();
         self.went_back |= !lost.is_empty();
+        self.contracted_accepts.retain(|&accepted| accepted <= seq);
         self.lost.extend((seq + 1..).zip(lost));
         self.hub.head = self.hist[seq as usize];
         self.hub.seq = seq;
@@ -827,12 +876,21 @@ impl World {
         self.oracle.is_some()
     }
 
-    /// A hub that garbage-collects everything outside `closure(head)`, including uploads it
-    /// acknowledged but never accepted, as the model allows (`hubForget`).
+    /// A hub that garbage-collects what neither its head nor its history needs, including
+    /// uploads it acknowledged but never accepted, as the model allows (`hubForget`): every
+    /// operation outside the closures of the heads in its history, and every object outside
+    /// its head's. A real hub replays every head it logged on opening its store, which needs
+    /// their operations, not their objects.
     pub fn hub_forget(&mut self) {
+        // Where the heads in its history are each above the one before in the original
+        // history, as before any acceptance through what survives, the operations any of them
+        // reaches are those its head reaches.
         let univ = self.univ.borrow();
-        let keep = univ.ancestors(self.hub.head);
-        let objs = univ.objs_of(keep.iter().copied());
+        let mut keep = BTreeSet::new();
+        for &head in &self.hist {
+            keep.extend(univ.ancestors(head));
+        }
+        let objs = univ.objs_of(univ.ancestors(self.hub.head));
         self.hub.ops.retain(|op| keep.contains(op));
         self.hub.objs.retain(|obj| objs.contains(obj));
         drop(univ);
@@ -902,6 +960,21 @@ impl World {
         self.univ.borrow().parents[op as usize].clone()
     }
 
+    /// The objects operation `op` made.
+    pub fn objects(&self, op: Op) -> Vec<Obj> {
+        self.univ.borrow().objs[op as usize].clone()
+    }
+
+    /// Whether the hub stores operation `op` and every operation and object it reaches.
+    pub fn hub_closed(&self, op: Op) -> bool {
+        self.hub.closed(op)
+    }
+
+    /// Whether the hub stores object `obj`.
+    pub fn hub_has_object(&self, obj: Obj) -> bool {
+        self.hub.objs.contains(&obj)
+    }
+
     pub fn known(&self, node: usize) -> (u64, Op) {
         *self.cores[node].known()
     }
@@ -929,10 +1002,16 @@ impl World {
         self.node_handle(node, reply, own);
     }
 
-    /// The operations the hub has accepted, before going back or since.
+    /// The operations the hub has accepted, before going back or since: below any head it
+    /// accepted, not only its head, which an acceptance through what survives of the head
+    /// before it need not descend from.
     fn ever_accepted(&self, univ: &Univ) -> BTreeSet<Op> {
-        let mut accepted = univ.ancestors(self.hub.head);
-        for &(_, head) in &self.lost {
+        let mut accepted = BTreeSet::new();
+        for &head in self
+            .hist
+            .iter()
+            .chain(self.lost.iter().map(|(_, head)| head))
+        {
             accepted.extend(univ.ancestors(head));
         }
         accepted
@@ -1013,8 +1092,19 @@ impl World {
                 "KnownIsHubHistory on node {n}"
             );
         }
-        for pair in self.hist.windows(2) {
-            assert!(univ.is_ancestor(pair[0], pair[1]), "HubMonotone");
+        // Each head the hub accepted descends from the one before, or, where it accepted it
+        // through what survives of that one, is above all of it, once everything the hub had
+        // dropped then and the push dropped is (`imageAccept`'s `acceptDrops`).
+        for (seq, pair) in (1..).zip(self.hist.windows(2)) {
+            if self.contracted_accepts.contains(&seq) {
+                let drops = flat(&self.hub.record_hist[seq as usize]);
+                assert!(
+                    univ.below(&drops, pair[0], pair[1]),
+                    "HubMonotone, contracted"
+                );
+            } else {
+                assert!(univ.is_ancestor(pair[0], pair[1]), "HubMonotone");
+            }
         }
         // `SInv`: no head is in its holder's dropped set, and the root in none.
         let hub_dropped = self.hub.dropped();
@@ -1090,8 +1180,15 @@ impl World {
                 }
                 let univ = self.univ.borrow();
                 let accepted = univ.ancestors(self.hub.head);
+                // Through what survives, every operation the hub hasn't dropped; and in the
+                // original history, where no step left it, every one.
+                let dropped = self.hub.dropped();
                 assert!(
-                    (0..univ.next()).all(|x| accepted.contains(&x)),
+                    (0..univ.next()).all(|x| accepted.contains(&x) || dropped.contains(&x)),
+                    "converged, but not every operation that survives was accepted"
+                );
+                assert!(
+                    self.contracted || (0..univ.next()).all(|x| accepted.contains(&x)),
                     "converged, but not every operation was accepted"
                 );
                 return;

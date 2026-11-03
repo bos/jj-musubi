@@ -21,8 +21,20 @@ slow-timeout = { period = "300s", terminate-after = 12 }
 # The conformance test is the longest by far, and longer still while the rest run: start it
 # first, so that it doesn't finish alone at the end.
 [[profile.default.overrides]]
-filter = "test(=conformance)"
+filter = "test(=conformance) | test(=survivor_advance_conformance)"
 priority = 100
+
+# Keep all 150 oracle cases on CI: Linux and Windows exceeded the default two-minute
+# limit while the rest of the suite ran. The local 50-case run keeps its normal limit.
+[[profile.ci.overrides]]
+filter = "test(=survivor_advance_conformance)"
+slow-timeout = { period = "60s", terminate-after = 10 }
+
+# The four-repository survivor seed also runs a generated walk; leave time for slower
+# platforms without reducing the cases or any independent convergence/import checks.
+[[profile.ci.overrides]]
+filter = "test(=e2e_dropped_merge)"
+slow-timeout = { period = "60s", terminate-after = 6 }
 
 # Each case of the per-machine refs conformance test runs real `jj`, `git` and syncs. It is
 # the next longest, so it starts next; and shrinking a failure takes minutes, so it has long

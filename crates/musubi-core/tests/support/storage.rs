@@ -378,7 +378,10 @@ impl LocalRepo for Fallible<FakeRepo> {
     fn advance(&mut self, op: &Op) -> Result<(), StorageError> {
         let hit = self.enter("node.advance", true, false)?;
         infallible(self.inner.advance(op));
-        self.effect(|| json!({"kind": "advance", "node": self.inner.index}));
+        self.effect(|| {
+            let advanced = self.inner.last_advance.as_ref().expect("advanced");
+            advanced.action(self.inner.index)
+        });
         self.faults.borrow().finish(hit)
     }
 

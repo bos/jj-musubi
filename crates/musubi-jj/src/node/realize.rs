@@ -621,11 +621,45 @@ impl NodeRepo {
     /// alone does not. Working-copy cleanup below can load and merge the heads too, even
     /// in a non-colocated repository, and may write a separate working-copy repair.
     pub fn advance(&mut self, canonical: &CanonicalOp) -> Result<LocalOp, NodeError> {
-        let realized = self.realize(canonical)?;
+        // One operation alone is never left out.
+        self.advance_to(std::slice::from_ref(canonical))?
+            .ok_or(NodeError::NotRealizable(
+                String::new(),
+                "nothing to advance to",
+            ))
+    }
+
+    /// [`Self::advance`] to each of `canonicals` at once, as to what this machine's history
+    /// has in place of an operation it dropped: `heads := max(heads ∪ canonicals)`. Where
+    /// there are several, those at or below another of them, or at or below an op head, are
+    /// left out, by the op heads as they are when it publishes; if none is left, there is
+    /// nothing to do. Several left are published as one realization is beside this machine's
+    /// concurrent op heads, but merged with each other too, in the one operation jj would make
+    /// of them all as op heads: in a colocated repository, that merge, exported, is what is
+    /// published; in one that isn't, they are published apart, and the working-copy cleanup
+    /// at the end loads the repository, which merges them all at once. Merging them one at a
+    /// time would make operations jj wouldn't, and could merge them in another order. Returns
+    /// the first realization left, as exported, if one is.
+    pub fn advance_to(&mut self, canonicals: &[CanonicalOp]) -> Result<Option<LocalOp>, NodeError> {
+        if canonicals.is_empty() {
+            return Err(NodeError::NotRealizable(
+                String::new(),
+                "nothing to advance to",
+            ));
+        }
+        // Each realized first, so that those left can be worked out again from the op heads
+        // under the lock below, without realizing anything while holding it.
+        let all = canonicals
+            .iter()
+            .map(|canonical| self.realize(canonical))
+            .collect::<Result<Vec<_>, _>>()?;
         // Views made ahead inherit what this changes, in a colocated repository.
         self.prepared = None;
         let mut heads = self.local_heads()?;
-        let (mut superseded, mut concurrent) = self.check_mergeable(canonical, &realized)?;
+        let Some((mut left, mut realized)) = self.left_beside(canonicals, &all, &heads)? else {
+            return Ok(None);
+        };
+        let (mut superseded, mut concurrent) = self.check_mergeable(&left, &realized, &heads)?;
         let colocation = self.colocation();
         let colocated = colocation.is_some();
         let _lock = colocation.map(Colocation::lock).transpose()?;
@@ -635,15 +669,25 @@ impl NodeRepo {
         // would be merged by the next `jj` command, which doesn't export. The heads are
         // checked again only if they changed, so that the first check, whose search for an
         // operation to revert where jj can't merge them can take a while, keeps `jj` commands
-        // waiting for the lock only in that rare case.
+        // waiting for the lock only in that rare case. Which are left goes by the same heads.
         if colocated {
             let mut now = self.local_heads()?;
             heads.sort();
             now.sort();
             if now != heads {
-                (superseded, concurrent) = self.check_mergeable(canonical, &realized)?;
+                match self.left_beside(canonicals, &all, &now)? {
+                    Some(again) => (left, realized) = again,
+                    None => return Ok(None),
+                }
+                (superseded, concurrent) = self.check_mergeable(&left, &realized, &now)?;
             }
         }
+        let (canonical, primary) = (left[0].clone(), realized[0].clone());
+        // The others, merged with the first as op heads beside it would be.
+        let others: Vec<Operation> = realized[1..]
+            .iter()
+            .map(|op| self.loader.load_operation(&op.0).block_on())
+            .collect::<Result<_, _>>()?;
         // Records being taken move the op heads where they name the history, as they name the
         // realization: the heads it is published beside are those that leaves beside it,
         // renamed. The heads `check_mergeable` found name the history as it was, so most of
@@ -651,26 +695,35 @@ impl NodeRepo {
         let taking = self.taking_unswitched();
         if taking {
             concurrent = self
-                .taken_beside(&realized)?
+                .taken_beside(&primary)?
                 .iter()
                 .map(|op| self.loader.load_operation(&op.0).block_on())
                 .collect::<Result<_, _>>()?;
         }
+        // Everything the realization is merged with, each once: jj doesn't merge an operation
+        // with itself, and records being taken can leave another realization beside it too.
+        let mut merging: Vec<Operation> = vec![];
+        for op in concurrent.iter().chain(&others) {
+            if op.id() != &primary.0 && merging.iter().all(|m| m.id() != op.id()) {
+                merging.push(op.clone());
+            }
+        }
         let colocation = self.colocation();
         let pending = self.pending_expected();
+        // Exported beside all it is merged with next, as one realization beside the op heads.
         let head = match colocation {
             Some(colocation) => colocation.export_refs(
                 &self.loader,
-                &realized,
+                &primary,
                 &|op| self.is_join_point(op),
-                &concurrent,
+                &merging,
                 &pending,
             )?,
-            None => realized,
+            None => primary,
         };
         let merged = match colocation {
-            Some(colocation) if !concurrent.is_empty() => {
-                match self.merge_unpublished(&head, &concurrent) {
+            Some(colocation) if !merging.is_empty() => {
+                match self.merge_unpublished(&head, &merging) {
                     Ok(merged) => Some(colocation.export_refs(
                         &self.loader,
                         &merged,
@@ -693,10 +746,23 @@ impl NodeRepo {
         if colocated {
             self.insert_map(head.clone(), canonical.clone())?;
         }
+        // Published apart, where they weren't merged: the working-copy cleanup below merges
+        // them all at once, as loading the repository does.
+        let apart: Vec<&Operation> = if merged.is_none() {
+            others.iter().collect()
+        } else {
+            vec![]
+        };
         if taking {
             // The hub's head, named as records this machine is taking name the history: the
             // op heads move there, renamed, at once (`NodeRepo::switch_to_taken`).
             self.switch_to_taken(Some(&head), merged.as_ref())?;
+            for other in &apart {
+                self.loader
+                    .op_heads_store()
+                    .update_op_heads(&[], other.id())
+                    .block_on()?;
+            }
         } else {
             // The new head replaces those it descends from, as jj's own resolution of op
             // heads would: otherwise, after realizing several operations, the previous head
@@ -709,7 +775,14 @@ impl NodeRepo {
                 .parents;
             replaced.extend(superseded.into_iter().map(|op| op.0));
             if merged.is_some() {
-                replaced.extend(concurrent.iter().map(|op| op.id().clone()));
+                replaced.extend(merging.iter().map(|op| op.id().clone()));
+            }
+            // The new heads go in before the old come out, the last with them.
+            for other in &apart {
+                self.loader
+                    .op_heads_store()
+                    .update_op_heads(&[], other.id())
+                    .block_on()?;
             }
             self.loader
                 .op_heads_store()
@@ -719,7 +792,7 @@ impl NodeRepo {
         drop(_lock);
         self.move_taken_workspaces()?;
         self.replace_abandoned_working_copies()?;
-        Ok(head)
+        Ok(Some(head))
     }
 
     /// The realization `head` merged with this machine's concurrent op heads `theirs`, as
@@ -744,32 +817,42 @@ impl NodeRepo {
     }
 
     /// Refuses to publish a realization that jj cannot merge with this machine's own
-    /// concurrent operations. Published, it would be merged by every `jj` command here, and
-    /// each would fail, or for some jj bugs panic, until someone reverted an operation by
-    /// hand. Unpublished, jj keeps working, and the error says which operations to revert.
-    /// Returns the op heads the realization descends from, beyond its parents, which are
-    /// not concurrent with it: after a catch-up of several operations, the previous head;
-    /// and those that are.
+    /// concurrent operations, the op heads `heads`, and, where there are several, with each
+    /// other. Published, it would be merged by every `jj` command here, and each would fail,
+    /// or for some jj bugs panic, until someone reverted an operation by hand. Unpublished, jj
+    /// keeps working, and the error says which operations to revert. Returns the op heads the
+    /// realizations descend from, beyond their parents, which are not concurrent with them:
+    /// after a catch-up of several operations, the previous head; and those that are.
     fn check_mergeable(
         &self,
-        canonical: &CanonicalOp,
-        realized: &LocalOp,
+        canonicals: &[CanonicalOp],
+        realized: &[LocalOp],
+        heads: &[LocalOp],
     ) -> Result<(Vec<LocalOp>, Vec<Operation>), NodeError> {
-        let realized_op = self.loader.load_operation(&realized.0).block_on()?;
-        let mut heads = self.local_heads()?;
+        let realized_ops: Vec<Operation> = realized
+            .iter()
+            .map(|op| self.loader.load_operation(&op.0).block_on())
+            .collect::<Result<_, _>>()?;
+        let realized_op = realized_ops.first().expect("something to advance to");
+        let mut heads = heads.to_vec();
         let others: Vec<LocalOp> = heads
             .iter()
-            .filter(|head| *head != realized && !realized_op.parent_ids().contains(&head.0))
+            .filter(|head| {
+                !realized.contains(head)
+                    && !realized_ops
+                        .iter()
+                        .any(|op| op.parent_ids().contains(&head.0))
+            })
             .cloned()
             .collect();
         let mut theirs = vec![];
         let mut superseded = vec![];
         for head in others {
             let op = self.loader.load_operation(&head.0).block_on()?;
-            // Nothing of its own that the realization lacks: an ancestor.
+            // Nothing of its own that the realizations lack: an ancestor.
             let beyond = std::pin::pin!(op_walk::walk_ancestors_range(
                 std::slice::from_ref(&op),
-                std::slice::from_ref(&realized_op),
+                &realized_ops,
             ))
             .try_next()
             .block_on()?;
@@ -778,18 +861,31 @@ impl NodeRepo {
                 Some(_) => theirs.push(op),
             }
         }
-        if theirs.is_empty() {
+        if theirs.is_empty() && realized_ops.len() == 1 {
             return Ok((superseded, theirs));
         }
         // This machine's operations that the hive doesn't have: one of them conflicts.
-        let roots = realized_op.parents().block_on()?;
+        let mut roots: Vec<Operation> = vec![];
+        for op in &realized_ops {
+            for parent in op.parents().block_on()? {
+                if !roots.contains(&parent) {
+                    roots.push(parent);
+                }
+            }
+        }
         let ours: Vec<LocalOp> = op_walk::walk_ancestors_range(&theirs, &roots)
             .map_ok(|op| LocalOp(op.id().clone()))
             .try_collect()
             .block_on()?;
         let mut operations = theirs.clone();
-        operations.push(realized_op.clone());
+        operations.extend(realized_ops.iter().cloned());
         if let Err(reason) = self.try_merge(operations) {
+            // The search for the one to revert goes by a single realization: with several,
+            // the advice lists this machine's operations instead.
+            if realized_ops.len() > 1 {
+                return Err(self.unmergeable(&ours, None, reason));
+            }
+            let canonical = &canonicals[0];
             // The same heads and the hive's same operation, as when the sync is retried,
             // give the same result. Failing to find it leaves the advice to list them.
             heads.sort();
@@ -806,10 +902,10 @@ impl NodeRepo {
                     // An error, as reading the store, is no answer to keep.
                     // Failing a single revert that will do, one that will help.
                     let culprit = self
-                        .op_to_revert(&theirs, &ours, &realized_op)
+                        .op_to_revert(&theirs, &ours, realized_op)
                         .and_then(|found| match found {
                             Some(op) => Ok(Some(op)),
-                            None => self.first_unmergeable(&ours, &realized_op),
+                            None => self.first_unmergeable(&ours, realized_op),
                         })
                         .ok();
                     if let Some(culprit) = &culprit {
@@ -826,6 +922,71 @@ impl NodeRepo {
             return Err(self.unmergeable(&ours, culprit, reason));
         }
         Ok((superseded, theirs))
+    }
+
+    /// Of `canonicals`, realized as `realized`, those [`Self::advance_to`] publishes beside
+    /// the op heads `heads`, with their realizations: one alone; of several, each once, those
+    /// at or below none of the others nor any of `heads`. None if none is left.
+    #[expect(clippy::type_complexity)]
+    fn left_beside(
+        &self,
+        canonicals: &[CanonicalOp],
+        realized: &[LocalOp],
+        heads: &[LocalOp],
+    ) -> Result<Option<(Vec<CanonicalOp>, Vec<LocalOp>)>, NodeError> {
+        if canonicals.len() == 1 {
+            return Ok(Some((canonicals.to_vec(), realized.to_vec())));
+        }
+        let mut covering = vec![];
+        for head in heads {
+            covering.extend(self.canonical_at_or_below(head)?);
+        }
+        let mut left: (Vec<CanonicalOp>, Vec<LocalOp>) = (vec![], vec![]);
+        for (canonical, local) in canonicals.iter().zip(realized) {
+            if left.0.contains(canonical) {
+                continue;
+            }
+            let mut covered = false;
+            for above in &covering {
+                if self.canonical.is_ancestor_of(canonical, above)? {
+                    covered = true;
+                    break;
+                }
+            }
+            for other in canonicals {
+                if covered {
+                    break;
+                }
+                covered = other != canonical && self.canonical.is_ancestor_of(canonical, other)?;
+            }
+            if !covered {
+                left.0.push(canonical.clone());
+                left.1.push(local.clone());
+            }
+        }
+        Ok((!left.0.is_empty()).then_some(left))
+    }
+
+    /// The canonical form of local operation `op`, or, for one not canonicalized yet, as a
+    /// `jj` command's just published, those of the nearest operations below it that are:
+    /// what is below it of the canonical history.
+    fn canonical_at_or_below(&self, op: &LocalOp) -> Result<Vec<CanonicalOp>, NodeError> {
+        let mut found = vec![];
+        let mut seen = HashSet::new();
+        let mut stack = vec![op.clone()];
+        while let Some(local) = stack.pop() {
+            if !seen.insert(local.clone()) {
+                continue;
+            }
+            match self.canonical_of(&local) {
+                Some(canonical) => found.push(canonical),
+                None => {
+                    let read = self.loader.op_store().read_operation(&local.0).block_on()?;
+                    stack.extend(read.parents.into_iter().map(LocalOp));
+                }
+            }
+        }
+        Ok(found)
     }
 
     /// Whether jj can merge `operations` without failing or panicking. jj merges op heads in

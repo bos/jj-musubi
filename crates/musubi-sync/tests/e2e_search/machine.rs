@@ -16,7 +16,7 @@ use hegel::generators as gs;
 use crate::coverage::fired;
 use crate::world::BOOKMARKS;
 use crate::world::FILES;
-use crate::world::MACHINES;
+use crate::world::SEARCH_MACHINES;
 use crate::world::TAGS;
 use crate::world::World;
 
@@ -586,7 +586,7 @@ impl Search {
     fn join(&mut self, tc: TestCase) {
         let mut world = self.world.borrow_mut();
         let m = world.nodes();
-        tc.assume(m < MACHINES.len());
+        tc.assume(m < SEARCH_MACHINES);
         fired("join");
         world.clone_copy(m);
         drop(world);

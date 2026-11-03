@@ -306,6 +306,10 @@ enum Command {
     /// the daemon serves the repository, and otherwise syncs in this process, saying if
     /// that's because the daemon isn't running.
     ///
+    /// If a hub reply leaves needed data missing, the sync fails. If the daemon serves
+    /// this copy, it retries from the hub's current state. Run `musubi sync` again to retry
+    /// at once.
+    ///
     /// If jj made the result of an operation abandon ambiguous, syncing stops and gives a
     /// `jj op integrate` command to restore the missing history before trying again.
     Sync,

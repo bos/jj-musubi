@@ -292,6 +292,8 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         "collected_objects_of_an_abandoned_fetch_base_are_fetched_again",
         None,
     ),
+    // Hub remakes are between generated syncs, not between requests of a running round.
+    ("an_empty_object_reply_retries_from_the_remade_hub", None),
     // These require exact cuts within record taking, not just a partial sync and rollback.
     (
         "a_sync_stopped_while_taking_an_abandon_the_hub_then_loses",

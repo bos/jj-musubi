@@ -21,6 +21,7 @@ mod fetch_base;
 mod forget;
 mod found;
 mod history;
+mod objects;
 mod refs;
 mod remotes;
 mod repositories;

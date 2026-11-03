@@ -6,6 +6,10 @@ change the protocol, so run the same release on the hub and every machine (see
 
 ## Unreleased
 
+- If a recreated hub cannot supply objects requested from its old history, the machine
+  retries from the hub's current state. Previously one sync could keep asking for the same
+  missing objects until another machine restored them, without checking the hub again.
+
 - After restoring and abandoning operation history, a machine fetches objects that
   `jj util gc` removed even when its saved fetch base used to contain them. Previously the
   hub could keep omitting those objects and every retry failed, including after a restart.

@@ -643,7 +643,12 @@ impl LocalRepo for NodeAdapter {
 
     fn stage_objects(&mut self, for_ops: &[OpId], attachment: &Attachment) -> anyhow::Result<()> {
         if matches!(attachment, Attachment::None) {
-            // The hub had nothing this node lacks.
+            // A remade hub may no longer know the requested old operations. Treating its
+            // empty reply as progress would repeat GetObjects without learning its new head.
+            anyhow::ensure!(
+                self.objects_missing(for_ops)?.is_empty(),
+                "the hub did not supply the objects this machine needs"
+            );
             return Ok(());
         }
         let wants = self.required_commits(for_ops)?;

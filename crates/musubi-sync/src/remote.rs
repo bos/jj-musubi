@@ -401,8 +401,7 @@ fn window(offset: u64, total: u64, chunk: u64) -> impl Iterator<Item = u64> {
 }
 
 /// Blobs put in the store to upload, removed when this is dropped: once the hub has them,
-/// and however else the call ends, as when it fails, or when it is dropped partway, as the
-/// daemon drops a sync when the connection to the hub comes back.
+/// and however else the call ends, as when it fails or the caller drops it partway.
 struct Uploads<'a> {
     blobs: &'a BlobStore,
     ids: Vec<BlobId>,

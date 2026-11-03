@@ -370,6 +370,13 @@ A `jj` newer than 0.46.0, the version musubi supports, wrote an operation with f
 doesn't know, and musubi won't drop them by syncing it. Use jj 0.46.0 with this release of
 musubi, and upgrade the two together.
 
+### "the hub did not supply the objects this machine needs"
+
+The hub's reply left some commits missing, as when the hive was recreated while this machine
+was syncing. If the daemon serves this copy, it retries from the hub's current state.
+Run `musubi sync` to retry at once. If the error persists, check the hub's log; see below if
+every machine fails on the same object.
+
 ### Every machine's sync of a hive fails on the same object
 
 If the hub's machine lost power, a file the hub wrote just before may be cut short, and every

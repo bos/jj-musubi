@@ -521,6 +521,16 @@ working-copy entries, plus `commit_predecessors`, with all ancestors, trees, and
 refuses a head whose closure is incomplete, and a node realizes only complete operations, so
 uploads and downloads can be interrupted at any point without anyone seeing a dangling reference.
 
+An empty object reply must satisfy the requested operations too. A remade hub may no longer
+know an operation from an earlier reply and return no objects for it. If the node still lacks
+any required commit, `stage_objects` fails, just as an incomplete bundle import does. The
+daemon reopens and starts with a new `Fetch`; it does not repeat `GetObjects` against the old
+known head until another machine restores the data. Empty replies for operations whose
+objects are already present still succeed. The native regression
+`objects::an_empty_object_reply_retries_from_the_remade_hub` reaches this after interrupted
+receipt, a rejected push, and a hub remake between requests, then completes the receiver's
+retry before the other machine publishes again.
+
 ### git backend
 
 Objects move as git packfiles, made and read by the `git` binary: `git pack-objects --revs` with

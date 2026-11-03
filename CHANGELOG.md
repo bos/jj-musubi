@@ -6,6 +6,10 @@ change the protocol, so run the same release on the hub and every machine (see
 
 ## Unreleased
 
+- After restoring and abandoning operation history, a machine fetches objects that
+  `jj util gc` removed even when its saved fetch base used to contain them. Previously the
+  hub could keep omitting those objects and every retry failed, including after a restart.
+
 - A machine keeps received abandonment records before writing the history they explain,
   even when it cannot apply them yet. If the producer leaves and the hub later loses the
   records, the receiving machine can republish them after a restart. Applying a record also

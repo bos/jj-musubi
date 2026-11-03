@@ -585,6 +585,17 @@ keep refs to clean up, a week after it last ran (even if that run failed partway
 head, not on battery, and not while another process runs it. The hub never runs it: there, what
 git can't reach from the head is history the hive still needs.
 
+After a restore and abandonment, the saved accepted base can still name an operation whose raw
+view's objects jj has collected, even when its surviving local image is present. Before using
+that base, `NodeAdapter` checks that its required commits are present, once per round and base.
+The driver and native harnesses invalidate the check before polling, ahead of the initial fetch
+and its import; head discovery still waits for that reply. If any required commit is missing, it
+advertises the root for both operation and object transfer: the hub must not omit objects merely
+because the saved base used to hold them. The saved candidate is retained;
+setting the same candidate writes nothing. A new round rechecks it, so a user's gc between
+rounds cannot leave retries permanently claiming the old objects. The native regression is
+`fetch_base::collected_objects_of_an_abandoned_fetch_base_are_fetched_again`.
+
 A process killed partway through updating refs, musubi, git or jj alike, leaves behind the lock
 file git takes on a ref, `<ref>.lock` or `packed-refs.lock`, and every later update of that ref
 fails until it goes: git never removes one. musubi does, when one of its own ref updates fails:

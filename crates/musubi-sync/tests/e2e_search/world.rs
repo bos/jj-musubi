@@ -1205,7 +1205,7 @@ impl World {
         let result = (|| -> anyhow::Result<()> {
             let poll = {
                 let member = &mut self.fx.hive.members[m];
-                member.core.poll(&member.adapter)?
+                member.adapter.poll(&member.core)?
             };
             self.deliver(m, poll, false)?;
             self.fx.hive.members[m].adapter.before_sync()?;
@@ -1342,7 +1342,7 @@ impl World {
         // Polled first, as the daemon does (`Driver::sync`).
         let poll = {
             let member = &mut self.fx.hive.members[m];
-            member.core.poll(&member.adapter)?
+            member.adapter.poll(&member.core)?
         };
         deliver(self, poll)?;
         self.fx.hive.members[m].adapter.before_sync()?;

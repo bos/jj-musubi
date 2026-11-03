@@ -238,7 +238,7 @@ impl Hive {
     ) -> anyhow::Result<usize> {
         // Polled first, as the daemon does (`Driver::sync`).
         let member = &mut self.members[node];
-        let poll = member.core.poll(&member.adapter)?;
+        let poll = member.adapter.poll(&member.core)?;
         self.request(node, poll, through)?;
         self.members[node].adapter.before_sync()?;
         for steps in 0..10_000 {
@@ -273,7 +273,7 @@ impl Hive {
     ) -> anyhow::Result<usize> {
         // Polled first, as the daemon does (`Driver::sync`).
         let member = &mut self.members[node];
-        let poll = member.core.poll(&member.adapter)?;
+        let poll = member.adapter.poll(&member.core)?;
         self.request(node, poll, through)?;
         self.members[node].adapter.before_sync()?;
         for taken in 0..steps {
@@ -296,7 +296,7 @@ impl Hive {
     /// operations and objects it fetches, without realizing them.
     pub fn fetch(&mut self, node: usize) -> anyhow::Result<()> {
         let member = &mut self.members[node];
-        let poll = member.core.poll(&member.adapter)?;
+        let poll = member.adapter.poll(&member.core)?;
         self.request(node, poll, &mut |_, reply| reply)?;
         self.members[node].adapter.before_sync()
     }

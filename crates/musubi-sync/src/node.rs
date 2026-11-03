@@ -16,7 +16,9 @@ use jj_lib::object_id::ObjectId as _;
 use musubi_core::message::OpEntry;
 use musubi_core::message::RecordState;
 use musubi_core::message::Records;
+use musubi_core::message::Request;
 use musubi_core::node::LocalRepo;
+use musubi_core::node::NodeCore;
 use musubi_jj::node::NodeError;
 use musubi_jj::node::NodeOp;
 use musubi_jj::node::NodeRepo;
@@ -65,6 +67,9 @@ pub struct NodeAdapter {
     clock: Box<dyn Clock>,
     tmp: PathBuf,
     base_path: PathBuf,
+    /// Whether the saved raw base's objects are still here, checked once per round and
+    /// base. `jj util gc` may remove them after an operation restore and abandonment.
+    checked_base: RefCell<Option<(OpId, bool)>>,
     /// The head this node pushed last, and that head once it learns that the hub took it,
     /// which `NodeRepo::check_abandon` watches as it watches the base.
     pushed_path: PathBuf,
@@ -92,6 +97,7 @@ impl NodeAdapter {
         open_bundle_dir(&tmp)?;
         Ok(Self {
             base_path: musubi_dir.join("accepted_base"),
+            checked_base: RefCell::new(None),
             pushed_path: musubi_dir.join("pushed"),
             accepted_push_path: musubi_dir.join(musubi_jj::node::ACCEPTED_PUSH),
             repo,
@@ -148,6 +154,21 @@ impl NodeAdapter {
         self.show_other_workspaces()?;
         self.heads()?;
         Ok(())
+    }
+
+    /// Builds the round's first Fetch, rechecking the saved base before anything can be
+    /// omitted. Head discovery still waits for its reply, which may acknowledge a push.
+    pub fn poll(&self, core: &NodeCore<OpId>) -> anyhow::Result<Request<OpId, Attachment>> {
+        self.checked_base.borrow_mut().take();
+        core.poll(self)
+    }
+
+    fn read_base(&self) -> anyhow::Result<OpId> {
+        match fs::read_to_string(&self.base_path) {
+            Ok(hex) => OpId::try_from_hex(hex.trim()).context("corrupt accepted_base"),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(self.root().clone()),
+            Err(err) => Err(err.into()),
+        }
     }
 
     /// What a node does once its policy has nothing left to do, having just fetched the
@@ -758,15 +779,37 @@ impl LocalRepo for NodeAdapter {
     }
 
     fn accepted_base(&self) -> anyhow::Result<OpId> {
-        match fs::read_to_string(&self.base_path) {
-            Ok(hex) => OpId::try_from_hex(hex.trim()).context("corrupt accepted_base"),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(self.root().clone()),
-            Err(err) => Err(err.into()),
+        let base = self.read_base()?;
+        if base == *self.root() {
+            return Ok(base);
         }
+        let cached = self
+            .checked_base
+            .borrow()
+            .as_ref()
+            .filter(|(op, _)| *op == base)
+            .map(|(_, complete)| *complete);
+        let complete = match cached {
+            Some(complete) => complete,
+            None => {
+                let required = self.required_commits(std::slice::from_ref(&base))?;
+                let complete = self.repo.object_store()?.missing(&required)?.is_empty();
+                *self.checked_base.borrow_mut() = Some((base.clone(), complete));
+                complete
+            }
+        };
+        // The hub omits these objects unconditionally. A local image of the base does not
+        // establish that its raw view's objects survived an abandon and the user's gc.
+        Ok(if complete { base } else { self.root().clone() })
     }
 
     fn set_accepted_base(&mut self, op: &OpId) -> anyhow::Result<()> {
-        write_op(&self.base_path, op)
+        if self.read_base()? == *op {
+            return Ok(());
+        }
+        write_op(&self.base_path, op)?;
+        self.checked_base.take();
+        Ok(())
     }
 
     fn applied_records(&self) -> anyhow::Result<Records<OpId>> {

@@ -39,6 +39,7 @@ jobs:
       - run: just deny
       - run: just machete
       - run: just typos
+      - run: just fuzz-runner-test
 
   test:
     name: Test (${{ matrix.name }})

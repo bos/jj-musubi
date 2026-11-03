@@ -1,5 +1,5 @@
 # The full local check. Run before finishing any change.
-check: fmt-check lint oracle test docs deny machete typos
+check: fmt-check lint oracle test docs deny machete typos fuzz-runner-test
 
 # Build musubi: target/debug/musubi.
 dev:
@@ -105,25 +105,18 @@ bench-smoke: dev
 property:
     cargo nextest run --workspace --profile search
 
-# Run a fuzz target until stopped, or as libFuzzer's options say: `just fuzz bundle
-# -max_total_time=300`. See "Fuzzing" in docs/internals/testing.md.
-fuzz target *args:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    # Nightly's cargo and rustc, ahead of any others on PATH.
-    rustc=$(rustup which --toolchain nightly rustc)
-    PATH="$(dirname "$rustc"):$PATH"
-    cargo fuzz run {{target}} -- {{args}}
+# Fuzz all targets or one across available CPUs (see docs/internals/testing.md).
+[positional-arguments]
+fuzz target="all" *args:
+    @python3 contrib/fuzz.py "$@"
 
 # Run every fuzz target briefly, so that they keep up with the code. It finds little.
 fuzz-smoke:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    rustc=$(rustup which --toolchain nightly rustc)
-    PATH="$(dirname "$rustc"):$PATH"
-    for target in $(cargo fuzz list); do
-        cargo fuzz run "$target" -- -runs=2000
-    done
+    @python3 contrib/fuzz.py --smoke
+
+# Check the fuzz runner's process budget, failure reporting and cancellation.
+fuzz-runner-test:
+    python3 -m unittest discover -s contrib -p test_fuzz.py
 
 # Run every Kani proof, or as cargo-kani's options say: `just kani --harness window`. See
 # "Kani proofs" in docs/internals/testing.md.

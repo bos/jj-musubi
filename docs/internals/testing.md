@@ -375,10 +375,24 @@ each decoder of what a peer sends, and each checks more than that nothing panics
   the fuzzer's empty first input is one. Panics in jj-lib and jj-core count as refusals, as for
   `canonical`.
 
-`just fuzz bundle` runs one target until stopped, and takes libFuzzer's options after the
-target, as in `just fuzz bundle -max_total_time=300`; `just fuzz-smoke` runs each briefly, to
-check that they still build and run. They need `cargo-fuzz` and a nightly toolchain from
-rustup. `fuzz/` is a workspace of its own, so that `just check` neither builds nor lints it.
+`just fuzz` builds all targets once, then spreads workers across them, using the available
+CPUs. Each worker runs for 300 seconds; `just fuzz all -max_total_time=3600` gives each an
+hour. With fewer workers than targets, targets run in batches so that each gets a turn.
+`just fuzz bundle` puts all workers on one target until stopped, and takes libFuzzer's
+options after the target, as in `just fuzz bundle -max_total_time=300`. Set the total worker
+budget with `--jobs N` or `MUSUBI_FUZZ_JOBS`; for example, `just fuzz all --jobs 4`.
+Workers on the same target share its corpus, reloading each other's discoveries. A worker
+failure stops the run and the other workers, prints the end of its log, and exits nonzero.
+Each run keeps separate worker logs under `fuzz/target/fuzz-logs/`; crashes stay in
+`fuzz/artifacts/<target>/`. Replay one with
+`cargo +nightly fuzz run <target> fuzz/artifacts/<target>/<crash-file>`. Ctrl-C stops all
+workers too. Use the runner's `--jobs` to set parallelism; libFuzzer options that start
+subprocesses and positional replay inputs belong in `cargo fuzz run` instead.
+
+`just fuzz-smoke` builds once and runs each target for 2,000 inputs, with one worker per
+target up to the same CPU budget, to check that they still build and run. The runner needs
+Python 3.9 or newer, `cargo-fuzz` and a nightly toolchain from rustup, on Linux or macOS.
+`fuzz/` is a workspace of its own, so that `just check` neither builds nor lints it.
 Its targets reach private code only through `cfg(fuzzing)` modules, which cargo-fuzz sets and
 the tests build too, so that `just check` checks them. Corpora and crashes stay in `fuzz/`,
 unversioned, and the files the targets write go in `/dev/shm`.

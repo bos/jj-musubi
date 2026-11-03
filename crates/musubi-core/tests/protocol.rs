@@ -11,13 +11,17 @@ mod support;
 
 use std::cell::Cell;
 use std::cell::RefCell;
+use std::convert::Infallible;
 use std::rc::Rc;
 
 use hegel::TestCase;
 use hegel::generators as gs;
 use musubi_core::hub::CasOutcome;
+use musubi_core::hub::HubStorage;
+use musubi_core::hub::Push;
 use musubi_core::message::HeadKind;
 use musubi_core::message::OpEntry;
+use musubi_core::message::RecordState;
 use musubi_core::message::Reply;
 use serde_json::Value;
 use serde_json::json;
@@ -1153,6 +1157,337 @@ fn a_push_without_the_hubs_records_is_refused() {
     let new = *world.local_ops(0).last().unwrap();
     assert_eq!(world.answer_push(head, new, &[], &[]), CasOutcome::Refused);
     assert_eq!(world.hub_head(), head);
+}
+
+/// A hub whose storage answers `Push::answer`'s checks as it is told. Its records are a
+/// `RecordState`, compared whole by the hub. What an accept does to them is the backend's,
+/// and not modelled here: `set_head` moves only the sequence and the head.
+struct Scripted {
+    seq: u64,
+    head: u32,
+    records: RecordState,
+    dropped: bool,
+    closed: bool,
+    descends: bool,
+}
+
+fn record_state(count: u64, digest: u8) -> RecordState {
+    RecordState {
+        count,
+        digest: vec![digest],
+    }
+}
+
+impl HubStorage for Scripted {
+    type Op = u32;
+    type Attachment = ();
+    type Error = Infallible;
+
+    fn head(&self) -> (u64, u32) {
+        (self.seq, self.head)
+    }
+
+    fn set_head(&mut self, seq: u64, head: &u32, _: &[u32]) -> Result<(), Infallible> {
+        self.seq = seq;
+        self.head = *head;
+        Ok(())
+    }
+
+    fn records(&self) -> RecordState {
+        self.records.clone()
+    }
+
+    fn pruned(&self) -> RecordState {
+        record_state(0, 0)
+    }
+
+    fn records_since(&self, _: &RecordState) -> Result<(u64, Vec<Vec<u32>>), Infallible> {
+        unreachable!("a push asks for no records")
+    }
+
+    fn is_dropped(&self, _: &u32, _: &[u32]) -> Result<bool, Infallible> {
+        Ok(self.dropped)
+    }
+
+    fn report(&mut self, _: &str, _: &RecordState) {}
+
+    fn reported(&self, _: &str) -> Option<RecordState> {
+        None
+    }
+
+    fn prune(&mut self, _: u64) -> Result<(), Infallible> {
+        unreachable!("a push prunes nothing")
+    }
+
+    fn store_ops(&mut self, _: &[u32], _: &()) -> Result<(), Infallible> {
+        Ok(())
+    }
+
+    fn store_objects(&mut self, _: &[u32], _: &()) -> Result<(), Infallible> {
+        Ok(())
+    }
+
+    fn ops_since(&self, _: &u32, _: &u32) -> Result<(Vec<OpEntry<u32>>, ()), Infallible> {
+        unreachable!("a push sends no operations back")
+    }
+
+    fn objects_for(&self, _: &[u32], _: &u32, _: &()) -> Result<(), Infallible> {
+        unreachable!("a push sends no objects back")
+    }
+
+    fn is_closed(&self, _: &u32, _: &[u32]) -> Result<bool, Infallible> {
+        Ok(self.closed)
+    }
+
+    fn descends(&self, _: &u32, _: &u32, _: &[u32]) -> Result<bool, Infallible> {
+        Ok(self.descends)
+    }
+}
+
+/// `Push::answer` takes each of its paths as the Lean model's raw `rawPush` does, on raw ids,
+/// for every answer its storage can give and for records the hub's, or another count or
+/// digest of them: the outcome, and the hub's head and sequence after. Whether the records
+/// match is the hub's whole comparison of them, never one of counts.
+#[test]
+fn raw_push_answers_as_the_model() {
+    let mut oracle = Oracle::spawn();
+    let hub = record_state(2, 0xaa);
+    let offered = [
+        hub.clone(),
+        record_state(2, 0xbb),
+        record_state(3, 0xaa),
+        record_state(3, 0xbb),
+    ];
+    let mut seen = std::collections::BTreeSet::new();
+    for records in &offered {
+        for case in 0..64u8 {
+            let bit = |n: u8| case & (1 << n) != 0;
+            let mut storage = Scripted {
+                seq: 5,
+                head: 10,
+                records: hub.clone(),
+                dropped: bit(0),
+                closed: bit(1),
+                descends: bit(2),
+            };
+            let expected = if bit(3) { 10 } else { 9 };
+            let new = if bit(4) { 10 } else { 11 };
+            let dropped: &[u32] = if bit(5) { &[7] } else { &[] };
+            let (outcome, _) = Push {
+                machine: "n",
+                ops: &[],
+                ops_attachment: &(),
+                objects: &(),
+                expected: &expected,
+                new: &new,
+                records,
+                dropped,
+            }
+            .answer(&mut storage)
+            .unwrap();
+            let reply = oracle.call(&json!({
+                "op": "rawPush", "seq": 5, "head": 10,
+                "expected": expected, "new": new, "dropped": dropped,
+                "recordsMatch": *records == hub, "isDropped": bit(0),
+                "isClosed": bit(1), "descends": bit(2),
+            }));
+            assert_eq!(reply["ok"], true, "{reply}");
+            let name = format!("{outcome:?}");
+            assert_eq!(reply["outcome"], name, "{records:?}, case {case}: {reply}");
+            seen.insert(name);
+            assert_eq!(
+                (reply["seq"].as_u64(), reply["head"].as_u64()),
+                (Some(storage.seq), Some(u64::from(storage.head))),
+                "{records:?}, case {case}: {reply}"
+            );
+        }
+    }
+    assert_eq!(seen.len(), 5, "every outcome: {seen:?}");
+}
+
+/// The recovery choice reads a raw graph, locality, bodies and per-operation objects, not
+/// original identities or object ids in place of operation ids. Compare those reads before
+/// each actual core step, and check local steps and completed metadata calls by field effects.
+#[test]
+fn raw_recovery_choices_and_calls_match_the_model() {
+    use musubi_core::hub;
+    use musubi_core::node::{LocalRepo as _, NodeCore, Step};
+    use support::model::{FakeHub, FakeRepo, Op, ROOT, SharedUniv, Univ};
+
+    fn snapshot(repo: &FakeRepo, core: &NodeCore<Op>, raw: &[Op]) -> Value {
+        let univ = repo.univ.borrow();
+        let objects: Vec<Op> = raw
+            .iter()
+            .copied()
+            .filter(|op| {
+                // An absent body cannot establish that all of its objects are available.
+                (repo.lops.contains(op) || repo.sops.contains_key(op))
+                    && univ.objs[*op as usize]
+                        .iter()
+                        .all(|o| repo.lobj.contains(o) || repo.sobj.contains(o))
+            })
+            .collect();
+        json!({
+            "local": repo.lops, "heads": repo.heads,
+            "plan": core.planned().copied().collect::<Vec<_>>(),
+            "staged": repo.sops.keys().chain(repo.lops.iter()).copied().collect::<Vec<_>>(),
+            "objects": objects,
+        })
+    }
+
+    let mut oracle = Oracle::spawn();
+    let mut seen = std::collections::BTreeSet::new();
+    for prefix in 0..=2u64 {
+        for head_case in 0..3 {
+            for bits in 0..64u8 {
+                let bit = |n: u8| bits & (1 << n) != 0;
+                let univ = SharedUniv::new(RefCell::new(Univ::new()));
+                for parent in 0..2 {
+                    let mut u = univ.borrow_mut();
+                    // Several objects per operation distinguish operation and object ids.
+                    let objects = u.fresh_objs(3);
+                    u.create(0, vec![parent], objects);
+                }
+                let mut repo = FakeRepo::new(univ.clone(), 1);
+                for op in 1..=prefix {
+                    repo.lops.insert(op);
+                    repo.lobj
+                        .extend(univ.borrow().objs[op as usize].iter().copied());
+                }
+                repo.heads = [prefix].into();
+                if head_case > 0 {
+                    repo.user_op(prefix, 0);
+                }
+                if head_case == 2 {
+                    repo.user_op(ROOT, 0);
+                }
+                for op in 1..=2u64 {
+                    if bit((op - 1) as u8) {
+                        repo.sops.insert(op, vec![op - 1]);
+                    }
+                    if bit((op + 1) as u8) {
+                        repo.sobj
+                            .extend(univ.borrow().objs[op as usize].iter().copied());
+                    }
+                }
+                if bit(4) {
+                    if prefix == 0 || repo.heads.contains(&1) {
+                        continue;
+                    }
+                    repo.abandon(&[1]);
+                }
+                let mut hub = FakeHub::new(univ.clone());
+                hub.ops.extend([1, 2]);
+                hub.objs = univ.borrow().objs_of([1, 2]);
+                hub.set_head(1, &2, &[]).unwrap();
+                let mut heard = hub.records();
+                if bit(5) {
+                    heard.digest.push(0xff);
+                }
+                let mut core = NodeCore::new(ROOT);
+                // A Head, not Accepted, stores exactly this heard record state and announces
+                // no records. There are no concurrent commands or receipts in these cases.
+                core.handle_reply(
+                    &mut repo,
+                    Reply::Head {
+                        kind: HeadKind::Head,
+                        seq: 1,
+                        head: 2,
+                        records: heard.clone(),
+                    },
+                )
+                .unwrap();
+                let raw = [0, 1, 2];
+                for _ in 0..3 {
+                    let before = snapshot(&repo, &core, &raw);
+                    let images: Vec<Op> =
+                        univ.borrow().images(&repo.dropped, 2).into_iter().collect();
+                    let pending = !repo.pending().unwrap().is_empty();
+                    let known_local = repo.is_local(&2).unwrap();
+                    let mut query = json!({
+                        "op": "rawControl", "known": 2, "rawClosure": raw,
+                        "images": images, "before": before,
+                        "primitives": {
+                            "announced": false, "dropHead": false,
+                            "differ": heard != repo.records().unwrap(), "pending": pending,
+                            "headIsKnown": repo.heads.len() == 1 && repo.heads.contains(&2),
+                            // FakeRepo writes a fresh fix-up or uses a distinct head; no
+                            // concurrent command can make it decline the marker here.
+                            "newIsKnown": false,
+                        },
+                    });
+                    let step = core.step(&mut repo).unwrap();
+                    let mut stop = false;
+                    let choice = match step {
+                        Step::Idle => {
+                            stop = true;
+                            "idle"
+                        }
+                        Step::Merged => "merge",
+                        Step::Realized(op) => {
+                            query["opId"] = json!(op);
+                            "realize"
+                        }
+                        Step::Advanced(_) => "advance",
+                        Step::Superseded { .. } => {
+                            stop = true;
+                            "push"
+                        }
+                        Step::Send(requests) => {
+                            stop = true;
+                            if requests
+                                .iter()
+                                .any(|r| matches!(r, musubi_core::message::Request::Push { .. }))
+                            {
+                                "push"
+                            } else {
+                                let fetch = requests.iter().any(|r| {
+                                    matches!(r, musubi_core::message::Request::Fetch { .. })
+                                });
+                                for request in requests {
+                                    let reply = hub::handle(&mut hub, request).unwrap().reply;
+                                    core.handle_reply(&mut repo, reply).unwrap();
+                                }
+                                if fetch && known_local {
+                                    "poll"
+                                } else if fetch {
+                                    "fetch"
+                                } else {
+                                    "objects"
+                                }
+                            }
+                        }
+                        Step::Adopted => panic!("the setup announced no records"),
+                    };
+                    if ["merge", "realize", "advance", "fetch", "objects"].contains(&choice) {
+                        query["kind"] = json!(choice);
+                        query["after"] = snapshot(&repo, &core, &raw);
+                    }
+                    query["parents"] = json!(univ.borrow().parents);
+                    let reply = oracle.call(&query);
+                    assert_eq!(reply["ok"], true, "{reply}");
+                    assert_eq!(
+                        reply["choice"], choice,
+                        "prefix {prefix}, heads {head_case}, bits {bits}: {query}: {reply}"
+                    );
+                    if query.get("kind").is_some() {
+                        assert_eq!(reply["matches"], true, "{query}: {reply}");
+                    }
+                    seen.insert(choice);
+                    if stop {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(
+        seen,
+        [
+            "advance", "fetch", "idle", "merge", "objects", "poll", "push", "realize"
+        ]
+        .into()
+    );
 }
 
 /// The hub prunes its records once every node has said it took them all, and not before: then

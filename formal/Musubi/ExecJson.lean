@@ -11,12 +11,18 @@ import Musubi.Chunks
 import Musubi.Names
 import Musubi.RefsExec
 import Musubi.RetryControl
-import Musubi.RecordEpoch
 import Musubi.ContractOrder
 import Musubi.SurvivorAdvance
 import Musubi.ContractedExec
 import Musubi.ContractedMeasure
+import Musubi.PacketCoupling
+import Musubi.SerialReply
+import Musubi.RecordEpoch
+import Musubi.EarlyEntry
 import Musubi.ExpectedExec
+import Musubi.PacketAcceptance
+import Musubi.SysAcceptance
+import Musubi.NodeSysExec
 
 namespace Musubi.Exec.Json
 
@@ -500,6 +506,8 @@ def retryInboxReply (j : Json) : Except String Json := do
   pure (Json.mkObj [("ok", toJson true), ("next", toJson t.next),
     ("pending", toJson t.pending), ("matched", toJson matched), ("old", toJson (t.old cut))])
 
+/-- Decision/cache projection. The returned `headKnown` is the abstract fresh-result reading,
+not native post-write equality when a restoring body reuses the known canonical id. -/
 def retryPublicationReply (j : Json) : Except String Json := do
   let cache : Retry.Fixup := {
     pending := ← getNats j "pending"
@@ -525,6 +533,7 @@ def recordEpochReply (j : Json) : Except String Json := do
     | "keepReceipt" => pure (.keepReceipt (← getNat j "records"))
     | "adopt" => pure (.adopt (← getNat j "records"))
     | "staleFailure" => pure .staleFailure
+    | "reopen" => pure .reopen
     | "clearPlan" => pure .clearPlan
     | "wait" => pure .wait
     | _ => throw "unknown record control action"
@@ -533,6 +542,8 @@ def recordEpochReply (j : Json) : Except String Json := do
   pure (Json.mkObj [("ok", toJson true), ("applied", toJson t.applied),
     ("announced", toJson t.announced), ("receipts", toJson t.receipts),
     ("stalePlan", toJson t.stalePlan), ("adopts", toJson adopts), ("fails", toJson fails),
+    ("beforeNeedsRecords", toJson (Retry.Records.needsRecords s.applied s.announced s.receipts)),
+    ("needsRecords", toJson (Retry.Records.needsRecords t.applied t.announced t.receipts)),
     ("beforeCredit", toJson (s.credit R)), ("credit", toJson (t.credit R))])
 
 /-- The session state's measures, and whether it has converged. -/
@@ -552,6 +563,176 @@ def measureReply (N : Nat) (ses : SEState) : Json :=
 def uploadReply (es : EState) (n new : Nat) : Json :=
   Json.mkObj [("ok", Json.bool true), ("ops", nats (es.upOpsL n new)),
     ("objs", nats (es.upObjsL n new))]
+
+def pushSnapshotReply (N : Nat) (s : SEState) (j : Json) : Except String Json := do
+  let p : PushPacket := {
+    node := ← getNat j "node"
+    ops := ← getNats j "ops"
+    objs := ← getNats j "objs"
+    expected := ← getNat j "expected"
+    knownSeq := ← getNat j "knownSeq"
+    new := ← getNat j "new"
+    applied := ← getRecs j "applied"
+    pending := ← getNats j "pending" }
+  pure (Json.mkObj [("ok", toJson true), ("matches", toJson (p.sourceMatchesB N s)),
+    ("allDropped", nats p.allDrops)])
+
+def decodeGrowObs (j : Json) : Except String NodeSys.Exec.GrowObs := do
+  let raw ← j.getObjValAs? (Array (List Nat)) "rawParents"
+  let labels ← j.getObjValAs? (Array (List Nat)) "parents"
+  let emb ← j.getObjValAs? (Array Nat) "embedding"
+  unless emb.size = labels.size do throw "each label needs an embedding"
+  unless (List.range raw.size).all (fun x => (raw[x]!).all (· < x)) &&
+      (List.range labels.size).all (fun x => (labels[x]!).all (· < x)) do
+    throw "an operation's parents must come before it"
+  pure ⟨raw.size, labels.size, fun x => raw[x]?.getD [], fun x => labels[x]?.getD [],
+    fun x => emb[x]?.getD 0⟩
+
+def nodeGrowReply (j : Json) : Except String Json := do
+  let before ← decodeGrowObs (← j.getObjVal? "before")
+  let after ← decodeGrowObs (← j.getObjVal? "after")
+  let scopedBefore := NodeSys.Exec.scopeB before
+  let scopedAfter := NodeSys.Exec.scopeB after
+  let grows := NodeSys.Exec.growB before after
+  pure (Json.mkObj [("ok", toJson true), ("beforeScoped", toJson scopedBefore),
+    ("afterScoped", toJson scopedAfter), ("grows", toJson grows),
+    ("matches", toJson (scopedBefore && grows && scopedAfter))])
+
+def decodeAnswerSnap (j : Json) : Except String NodeSys.Snap := do
+  pure ⟨← getNat j "seq", ← getNat j "head", ← getNat j "recs"⟩
+
+/-- The actual hub snapshots and reply of one read call, checked by the executable event
+projection. Record ids stand for full ordered-record identities, including their digests. -/
+def hubReadReply (j : Json) : Except String Json := do
+  let body : NodeSys.Body ← match ← j.getObjValAs? String "call" with
+    | "fetch" => pure .fetch
+    | "objects" => pure .objs
+    | _ => throw "unknown hub read call"
+  let kind : SysAcceptance.AnswerKind ← match ← j.getObjValAs? String "kind" with
+    | "fetched" => pure .fetched
+    | "objects" => pure .objects
+    | "head" => pure .head
+    | "refused" => pure .refused
+    | _ => throw "unknown hub answer kind"
+  let replySnap ← match ← j.getObjVal? "replySnap" with
+    | .null => pure none
+    | snap => some <$> decodeAnswerSnap snap
+  let observed : SysAcceptance.AnswerObs := {
+    before := ← decodeAnswerSnap (← j.getObjVal? "before")
+    after := ← decodeAnswerSnap (← j.getObjVal? "after")
+    kind := kind
+    replySnap := replySnap
+    replyRecs := ← j.getObjValAs? (Option Nat) "replyRecs" }
+  pure (Json.mkObj [("ok", toJson true),
+    ("matches", toJson (SysAcceptance.checkAnswer body observed))])
+
+def headControlReply (j : Json) : Except String Json := do
+  let known ← j.getObjValAs? (Nat × Nat) "known"
+  let incoming ← j.getObjValAs? (Nat × Nat) "incoming"
+  let root ← getNat j "root"
+  let own ← j.getObjValAs? Bool "own"
+  let notify ← j.getObjValAs? Bool "notify"
+  pure (Json.mkObj [("ok", toJson true),
+    ("restart", toJson (own && !notify && Retry.Serial.wentBack known incoming)),
+    ("known", toJson (Retry.Serial.handleHead root own notify known incoming))])
+
+def burstState (j : Json) : Except String EarlyEntry.Burst.State := do
+  let ops ← getNats j "local"
+  pure ⟨ops.contains, ← getNats j "heads", ← getNats j "plan"⟩
+
+def burstWith (raw images : List Nat) (anc : Nat → Nat → Bool) (j : Json) :
+    Except String Json := do
+  let before ← j.getObjVal? "before" >>= burstState
+  let after ← j.getObjVal? "after" >>= burstState
+  let kind ← match ← j.getObjValAs? String "kind" with
+    | "realize" => pure (EarlyEntry.Burst.Kind.realize (← getNat j "opId"))
+    | "merge" => pure EarlyEntry.Burst.Kind.merge
+    | "advance" => pure EarlyEntry.Burst.Kind.advance
+    | other => throw s!"unknown local burst kind {other}"
+  pure (Json.mkObj [("ok", toJson true),
+    ("matches", toJson (EarlyEntry.Burst.stepB raw images anc kind before after)),
+    ("before", toJson (EarlyEntry.Burst.rank raw images anc before)),
+    ("after", toJson (EarlyEntry.Burst.rank raw images anc after))])
+
+def burstReply (s : SEState) (j : Json) : Except String Json := do
+  let n ← getNat j "node"
+  let known ← getNat j "known"
+  burstWith (ancL s.es.parF known) (Contract.exp s.es.parF (s.nodeDF n).contains known)
+    (ancB s.es.parF) j
+
+def rawBurstReply (j : Json) : Except String Json := do
+  let rows ← j.getObjValAs? (Array (Array Nat)) "parents"
+  let parents := rows.toList.map Array.toList
+  if !(parents.zipIdx.all fun (ps, i) => ps.all (fun p => p < i)) then
+    throw "raw burst parents must be older than their operation"
+  let raw ← getNats j "rawClosure"
+  let images ← getNats j "images"
+  burstWith raw images (ancB (fun x => (parents[x]?).getD [])) j
+
+def controlState (j : Json) : Except String EarlyEntry.Control.State := do
+  let burst ← burstState j
+  let staged ← getNats j "staged"
+  let objects ← getNats j "objects"
+  pure ⟨burst, staged.contains, objects.contains⟩
+
+def controlChoiceName : EarlyEntry.Control.Choice → String
+  | .adopt => "adopt"
+  | .merge => "merge"
+  | .realize => "realize"
+  | .fetch => "fetch"
+  | .objects => "objects"
+  | .idle => "idle"
+  | .advance => "advance"
+  | .poll => "poll"
+  | .push => "push"
+
+/-- Compute the core's choice from its before-state, including the raw survey. If a completed
+call is supplied, also check its field effects. `objects` lists operations with all objects
+available, not object ids. The six primitive bits are read independently of the result. -/
+def rawControlReply (j : Json) : Except String Json := do
+  let rows ← j.getObjValAs? (Array (Array Nat)) "parents"
+  let parents := rows.toList.map Array.toList
+  if !(parents.zipIdx.all fun (ps, i) => ps.all (fun p => p < i)) then
+    throw "raw control parents must be older than their operation"
+  let par := fun x => (parents[x]?).getD []
+  let raw ← getNats j "rawClosure"
+  let images ← getNats j "images"
+  let H ← getNat j "known"
+  let before ← j.getObjVal? "before" >>= controlState
+  let prims ← j.getObjVal? "primitives"
+  let q : EarlyEntry.Control.Prims := ⟨← prims.getObjValAs? Bool "announced",
+    ← prims.getObjValAs? Bool "dropHead", ← prims.getObjValAs? Bool "differ",
+    ← prims.getObjValAs? Bool "pending", ← prims.getObjValAs? Bool "headIsKnown",
+    ← prims.getObjValAs? Bool "newIsKnown"⟩
+  let choice := EarlyEntry.Control.rawControl raw images par (ancB par) H before q
+  let fields := [("ok", toJson true), ("choice", toJson (controlChoiceName choice))]
+  match j.getObjValAs? String "kind" with
+  | .error _ => pure (Json.mkObj fields)
+  | .ok kind =>
+    let k ← match kind with
+      | "realize" => pure (.burst (.realize (← getNat j "opId")))
+      | "merge" => pure (.burst .merge)
+      | "advance" => pure (.burst .advance)
+      | "fetch" => pure EarlyEntry.Control.CallKind.fetch
+      | "objects" => pure EarlyEntry.Control.CallKind.objects
+      | other => throw s!"unknown raw control call kind {other}"
+    let after ← j.getObjVal? "after" >>= controlState
+    pure (Json.mkObj (fields ++ [("matches", toJson
+      (EarlyEntry.Control.callB raw images (ancB par) k before after))]))
+
+/-- `Push::answer` on raw ids, for the hub at `(seq, head)`, given its checks of the push
+(`RawPublish.rawPush`): `recordsMatch`, the caller's own comparison of the push's records with
+the hub's, count and digest, and its storage's answers. The outcome, by `CasOutcome`'s name,
+and the hub's `(seq, head)` after. -/
+def rawPushReply (j : Json) : Except String Json := do
+  let h : RawPublish.Hub := ⟨← getNat j "seq", ← getNat j "head"⟩
+  let p : RawPublish.Push := ⟨← getNat j "expected", ← getNat j "new", ← getNats j "dropped"⟩
+  let c : RawPublish.Checks := ⟨← j.getObjValAs? Bool "recordsMatch",
+    ← j.getObjValAs? Bool "isDropped", ← j.getObjValAs? Bool "isClosed",
+    ← j.getObjValAs? Bool "descends"⟩
+  let (outcome, after) := RawPublish.rawPush h p c
+  pure (Json.mkObj [("ok", toJson true), ("outcome", toJson outcome.name),
+    ("seq", toJson after.seq), ("head", toJson after.head)])
 
 /-! ## Request handling -/
 
@@ -588,6 +769,44 @@ def handle (sess : Session) (line : String) : Json × Session :=
       | none, _, _ => (errReply "bad request: upload before reset", sess)
       | _, .error e, _ | _, _, .error e => (errReply s!"bad request: {e}", sess)
       | some (_, ses), .ok n, .ok new => (uploadReply ses.es n new, sess)
+    | .ok "pushSnapshot" =>
+      match sess with
+      | none => (errReply "bad request: pushSnapshot before reset", sess)
+      | some (N, s) =>
+        match pushSnapshotReply N s j with
+        | .error error => (errReply s!"bad request: {error}", sess)
+        | .ok reply => (reply, sess)
+    | .ok "headControl" =>
+      match headControlReply j with
+      | .error error => (errReply s!"bad request: {error}", sess)
+      | .ok reply => (reply, sess)
+    | .ok "hubRead" =>
+      match hubReadReply j with
+      | .error error => (errReply s!"bad request: {error}", sess)
+      | .ok reply => (reply, sess)
+    | .ok "nodeGrow" =>
+      match nodeGrowReply j with
+      | .error error => (errReply s!"bad request: {error}", sess)
+      | .ok reply => (reply, sess)
+    | .ok "localBurst" =>
+      match sess with
+      | none => (errReply "bad request: localBurst before reset", sess)
+      | some (_, s) =>
+        match burstReply s j with
+        | .error error => (errReply s!"bad request: {error}", sess)
+        | .ok reply => (reply, sess)
+    | .ok "rawBurst" =>
+      match rawBurstReply j with
+      | .error error => (errReply s!"bad request: {error}", sess)
+      | .ok reply => (reply, sess)
+    | .ok "rawPush" =>
+      match rawPushReply j with
+      | .error error => (errReply s!"bad request: {error}", sess)
+      | .ok reply => (reply, sess)
+    | .ok "rawControl" =>
+      match rawControlReply j with
+      | .error error => (errReply s!"bad request: {error}", sess)
+      | .ok reply => (reply, sess)
     | .ok "presence" =>
       match j.getObjValAs? (Array Json) "ops" >>= fun ops => ops.toList.mapM decodeEOp with
       | .error e => (errReply s!"bad request: {e}", sess)

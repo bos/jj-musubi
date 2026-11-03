@@ -80,16 +80,22 @@ A further model lets the hub go back to an earlier state, as a power cut makes i
 the hub and each machine still have everything their state needs, taking in work creates no echo,
 and once the hub stops going back, the machines fill it in again and reach the same history.
 What no longer holds is the rule against duplicate merges, which is why a power cut can leave
-a change divergent. That lost or late messages only delay the sync, rather than stop it, is
-argued and tested, not proved.
+a change divergent. A separate retry model proves that lost or late replies and recovery
+eventually lead to agreement too, under explicit assumptions: errors and outside changes
+eventually stop, the remaining machines keep running, their calls finish, and musubi's own
+housekeeping stops writing new operations. The proof assumes each repository call behaves as
+specified, with focused tests checking those boundaries. It does not prove that housekeeping
+stops by itself.
 
-That last is the subtle one: why can't machines keep turning each other away forever? Every
-step of the sync lowers a measure with five parts, compared in order: how many machines have
-work the hub hasn't taken, how far behind each is, what each is missing, and how many updates
-and merges each has pending. A machine that loses a race learns the newer state from the
+At the level of successful exchanges, each progress step lowers a measure with five parts,
+compared in order: how many machines have work the hub hasn't taken, how far behind each is,
+what each is missing, and how many updates and merges each has pending. A machine that loses
+a race learns the newer state from the
 reply, so it is less far behind; and the hub's state moves at most once for each machine with
 work to send. The measure can't fall forever, so the sync ends, and the proof shows it ends
-with everyone the same.
+with everyone the same. The retry proof separately bounds the effects of obsolete replies
+and interrupted recovery, then proves the remaining work reaches agreement; it does not
+assume every message or retry lowers that measure.
 
 Separate models cover the rest of what could go wrong: how each machine's git refs and jj's
 import and export of them interact, including `jj undo` and `jj op restore`; which machines'

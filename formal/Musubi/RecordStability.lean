@@ -323,4 +323,27 @@ theorem node_drop_sets_eventually_stabilize (N B : Nat) (run : Nat → SEState)
     · exact (hk i (by omega) n (by omega) x).trans
         (hk (max k j) (by omega) n (by omega) x).symm
 
+/-- The record and original-drop cut needs only their own field effects. Local raw
+realization may contract parents, so it need not simulate an original-history `cexecAction`
+to use this cut. An implementation supplies record append/prune effects and persistent
+original-drop custody independently of how its raw repository operations are represented. -/
+theorem record_and_drop_sets_stabilize (N B : Nat) (run : Nat → SEState)
+    (hs : ∀ i, (run (i + 1)).recs = (run i).recs ∨
+      ∃ D, (run (i + 1)).recs = (run i).takeRecs D)
+    (hp : ∀ i, (run i).pruned ≤ (run (i + 1)).pruned)
+    (hl : ∀ i, (run i).pruned ≤ (run i).recs.length)
+    (hm : ∀ i n, n < N → ∀ x, x ∈ (run i).nodeDF n → x ∈ (run (i + 1)).nodeDF n)
+    (hhub : ∀ i x, x ∈ (run i).hubDL → x < B)
+    (hnode : ∀ i n, n < N → ∀ x, x ∈ (run i).nodeDF n → x < B) :
+    ∃ k, ∀ i, k ≤ i →
+      ((run i).recs, (run i).pruned) = ((run k).recs, (run k).pruned) ∧
+      ∀ n, n < N → ∀ x, x ∈ (run i).nodeDF n ↔ x ∈ (run k).nodeDF n := by
+  obtain ⟨r, hr⟩ := record_prefix_eventually_stabilizes B run hs hhub hp hl
+  obtain ⟨d, hd⟩ := node_drop_sets_eventually_stabilize N B run hm hnode
+  refine ⟨max r d, fun i hi => ?_⟩
+  constructor
+  · exact (hr i (by omega)).trans (hr (max r d) (by omega)).symm
+  · intro n hn x
+    exact (hd i (by omega) n hn x).trans (hd (max r d) (by omega) n hn x).symm
+
 end Musubi.Exec

@@ -274,8 +274,9 @@ impl HubStore {
         self.named.contains(op) || self.superseded.contains_key(op)
     }
 
-    /// What `op` is now: itself, or what the records superseded it with. Never an operation
-    /// the records superseded.
+    /// Composes the cached renamings of `op`, returning it unchanged when none names it.
+    /// A drop outside the accepted head's closure has no cached image; `is_superseded`
+    /// still recognizes it as dropped.
     pub fn current(&self, op: &OperationId) -> Vec<OperationId> {
         musubi_jj::canonical::current(&self.superseded, op)
     }

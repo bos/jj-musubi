@@ -18,9 +18,34 @@ structure Inbox where
 def Inbox.start (s : Inbox) : Inbox × Nat :=
   (⟨s.next + 1, s.next :: s.pending⟩, s.next)
 
+/-- Another driver or a subscription allocates from the shared transport counter. It creates
+no live slot in this driver's projection, but still advances its next observed request id. -/
+def Inbox.reserve (s : Inbox) : Inbox := ⟨s.next + 1, s.pending⟩
+
+def Inbox.project (s : Inbox) (owns : Nat → Bool) : Inbox :=
+  ⟨s.next, s.pending.filter owns⟩
+
+theorem project_reserve (s : Inbox) (owns : Nat → Bool) :
+    s.reserve.project owns = (s.project owns).reserve := rfl
+
+theorem project_own_start (s : Inbox) (owns : Nat → Bool) (h : owns s.next = true) :
+    s.start.1.project owns = (s.project owns).start.1 := by
+  simp [Inbox.start, Inbox.project, h]
+
+theorem project_other_start (s : Inbox) (owns : Nat → Bool) (h : owns s.next = false) :
+    s.start.1.project owns = (s.project owns).reserve := by
+  simp [Inbox.start, Inbox.project, Inbox.reserve, h]
+
 /-- Both delivery and timeout retire a slot. Delivery succeeds only for a live slot. -/
 def Inbox.finish (s : Inbox) (id : Nat) : Inbox × Bool :=
   (⟨s.next, s.pending.filter (· != id)⟩, s.pending.contains id)
+
+theorem project_finish (s : Inbox) (owns : Nat → Bool) (id : Nat) :
+    (s.finish id).1.project owns = ((s.project owns).finish id).1 ∧
+      ((s.project owns).finish id).2 = ((s.finish id).2 && owns id) := by
+  constructor
+  · simp [Inbox.finish, Inbox.project, List.filter_filter, Bool.and_comm]
+  · simp [Inbox.finish, Inbox.project]
 
 def Inbox.disconnect (s : Inbox) : Inbox := ⟨s.next, []⟩
 
@@ -62,6 +87,7 @@ theorem finish_old_decreases (s : Inbox) (id cut : Nat)
 
 inductive InboxStep (cut : Nat) : Inbox → Inbox → Bool → Prop
   | start (s : Inbox) : InboxStep cut s s.start.1 false
+  | reserve (s : Inbox) : InboxStep cut s s.reserve false
   | finish (s : Inbox) (id : Nat) :
       InboxStep cut s (s.finish id).1 ((s.finish id).2 && decide (id < cut))
   | disconnect (s : Inbox) : InboxStep cut s s.disconnect false
@@ -69,13 +95,14 @@ inductive InboxStep (cut : Nat) : Inbox → Inbox → Bool → Prop
 
 theorem inbox_next_monotone {cut : Nat} {s t : Inbox} {old : Bool}
     (h : InboxStep cut s t old) : s.next ≤ t.next := by
-  cases h <;> simp [Inbox.start, Inbox.finish, Inbox.disconnect]
+  cases h <;> simp [Inbox.start, Inbox.reserve, Inbox.finish, Inbox.disconnect]
 
 theorem inbox_old_credit {cut : Nat} {s t : Inbox} {old : Bool}
     (hc : cut ≤ s.next) (h : InboxStep cut s t old) :
     t.old cut + (if old then 1 else 0) ≤ s.old cut := by
   cases h with
   | start => simp [start_fresh _ _ hc]
+  | reserve => simp [Inbox.reserve, Inbox.old]
   | finish id =>
     by_cases hm : (s.finish id).2 = true
     · by_cases hi : id < cut
@@ -224,7 +251,12 @@ structure Publication where
   deriving Repr, DecidableEq
 
 /-- The second and third results distinguish restoring work from a neutral publication tip.
-Either creates a new child, so the resulting head differs from the previously known head. -/
+Either writes a child of the head, and the result reads the head as no longer the known one
+(`headKnown` false). That is this abstract model's reading, not a fact of the actual state
+after: canonical content has no nonce, so a restoring fix-up can be identical to the known head
+(NodeSettle's `write_known`), leaving the head known, and the next write is then a neutral tip
+with no new learned head. NodeSettle reads only the decision and the cache (`pubOf`), not this
+field. -/
 def Publication.write (s : Publication) : Publication × Bool × Bool :=
   let (cache, restoring) := s.cache.write
   let tip := !restoring && !cache.pending.isEmpty && s.headKnown
@@ -241,8 +273,22 @@ theorem publication_progress (s : Publication) (hp : s.cache.pending ≠ [])
       | cons x xs =>
         cases written <;> simp_all [Publication.write, Fixup.write]
 
-/-- Retrying the same state without a new learned head or adoption repeats neither work.
-This is not a bound on tips across arbitrarily many changes of knowledge. -/
+/-- Once an eligible node has the hub's current ordered records, its empty pending set
+disables both kinds of core publication write, regardless of its current known head. -/
+theorem publication_empty_pending (s : Publication) (hp : s.cache.pending = []) :
+    s.write = (s, false, false) := by
+  cases s with
+  | mk cache headKnown =>
+    cases cache with
+    | mk pending written aligned =>
+      simp only at hp
+      subst pending
+      cases headKnown <;> simp [Publication.write, Fixup.write]
+
+/-- Retrying the result state (`s.write.1`, whose head reads as not known) repeats neither work.
+This is not a bound on tips across arbitrarily many changes of knowledge, nor a claim about the
+actual state after a write: a restoring fix-up identical to the known head leaves it known, and a
+neutral tip follows (`Publication.write`'s doc). -/
 theorem publication_retry (s : Publication) :
     s.write.1.write.2 = (false, false) := by
   cases s with

@@ -305,6 +305,14 @@ theorem parLt_cpar (hlt : ParLt par) : ParLt (cpar par D) := by
   obtain ⟨-, hA, hne⟩ := mem_cpar hlt hq
   exact Anc.lt_of_ne hlt hA hne
 
+/-- The whole contracted closure of a survivor contains only survivors. This includes its
+head, unlike the fact that each contracted parent survives. -/
+theorem anc_cpar_survives (hlt : ParLt par) {x y : Nat} (hx : D x = false)
+    (ha : Anc (cpar par D) y x) : D y = false := by
+  induction ha with
+  | refl => exact hx
+  | step hp _ ih => exact ih (mem_cpar hlt hp).1
+
 /-- Among survivors, contraction keeps ancestry exactly. -/
 theorem anc_cpar_iff (hlt : ParLt par) {a x : Nat} (ha : D a = false) :
     Anc (cpar par D) a x ↔ Anc par a x := by
@@ -326,6 +334,12 @@ theorem anc_cpar_iff (hlt : ParLt par) {a x : Nat} (ha : D a = false) :
 
 /-- Dropping both sets at once. -/
 def union (D₁ D₂ : Nat → Bool) : Nat → Bool := fun x => D₁ x || D₂ x
+
+/-- Adding a subset does not change the dropped set. -/
+theorem union_absorbs_subset {larger smaller : Nat → Bool}
+    (hsub : ∀ x, smaller x = true → larger x = true) : union larger smaller = larger := by
+  funext x
+  cases hl : larger x <;> cases hs : smaller x <;> simp_all [union]
 
 /-- Each operation's expansion under `D₁`, expanded again under `D₂` in what `D₁` left, is
 its expansion under both at once, up to duplicates. -/
@@ -362,6 +376,13 @@ theorem cpar_union (hlt : ParLt par) (D₁ D₂ : Nat → Bool) (x : Nat) :
     exact Eqv.flatMap (fun p _ => exp_union hlt D₁ D₂ p)
   simp only [cpar, dd]
   exact e []
+
+/-- A history already contracted by a larger set keeps its parents when a subset is dropped
+again. This does not compare the two contractions of the original, uncontracted history. -/
+theorem cpar_absorbs_subset (hlt : ParLt par) {larger smaller : Nat → Bool}
+    (hsub : ∀ x, smaller x = true → larger x = true) (x : Nat) :
+    cpar (cpar par larger) smaller x = cpar par larger x := by
+  rw [cpar_union hlt, union_absorbs_subset hsub]
 
 /-! ## Ids -/
 
@@ -429,6 +450,53 @@ theorem cid_union (hlt : ParLt par) (D₁ D₂ : Nat → Bool) (x : Nat) :
     apply List.map_congr_left
     intro q hq
     exact ih q ((parLt_cpar hlt) x q hq)
+
+/-- A body written under a larger dropped set keeps its canonical id when a subset is dropped
+again. Native correspondence must supply this body construction, not an incomplete lookup's
+fallback to the input id. -/
+theorem cid_absorbs_subset (hlt : ParLt par) {larger smaller : Nat → Bool}
+    (hsub : ∀ x, smaller x = true → larger x = true) (x : Nat) :
+    cid content (cpar par larger) smaller x = cid content par larger x := by
+  rw [cid_union hlt, union_absorbs_subset hsub]
+
+/-- The complete images a contraction writes, in their canonical ids. This is a body
+construction; an incomplete lookup that returns its input is not such an image. -/
+def image (content : Nat → Nat) (par : Nat → List Nat) (D : Nat → Bool) (x : Nat) :
+    List CId := (dd (exp par D x)).map (cid content par D)
+
+/-- A surviving body already written under a larger dropped set is a fixed point when a
+subset is contracted again. Survival is essential: unchanged parents alone do not prevent
+the head itself from being dropped. -/
+theorem image_absorbs_subset (hlt : ParLt par) {larger smaller : Nat → Bool}
+    (hsub : ∀ y, smaller y = true → larger y = true) {x : Nat} (hx : larger x = false) :
+    image content (cpar par larger) smaller x = [cid content par larger x] := by
+  have hs : smaller x = false := by
+    cases h : smaller x
+    · rfl
+    · exact False.elim (Bool.noConfusion (hx.symm.trans (hsub x h)))
+  rw [image, exp_eq (parLt_cpar hlt), hs]
+  simp only [Bool.false_eq_true, ite_false, dd, ddAux, List.not_mem_nil, ite_false,
+    List.map_cons, List.map_nil]
+  rw [cid_absorbs_subset hlt hsub]
+
+/-- When drops name originals, every image has a surviving original. No global injectivity
+of immutable content is needed: different raw versions may have the same original. -/
+theorem image_original_survives (hlt : ParLt par) (dropped : Nat → Bool) {x : Nat} {id : CId}
+    (hi : id ∈ image content par (fun y => dropped (content y)) x) :
+    dropped id.content = false := by
+  obtain ⟨y, hy, rfl⟩ := List.mem_map.1 hi
+  simpa only [content_cid] using (mem_exp hlt (mem_dd.1 hy)).1
+
+/-- An image cannot be any historical version of a dropped original. This compares
+originals, rather than assuming a raw name occurs in only one history. -/
+theorem image_ne_dropped_original (hlt : ParLt par) (dropped : Nat → Bool)
+    {x : Nat} {id old : CId}
+    (hi : id ∈ image content par (fun y => dropped (content y)) x)
+    (hold : dropped old.content = true) : id ≠ old := by
+  intro he
+  have hs := image_original_survives hlt dropped hi
+  rw [he, hold] at hs
+  cases hs
 
 /-- Hence the order of two drops doesn't matter. -/
 theorem cid_comm (hlt : ParLt par) (D₁ D₂ : Nat → Bool) (x : Nat) :

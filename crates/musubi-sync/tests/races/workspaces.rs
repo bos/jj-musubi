@@ -305,6 +305,10 @@ fn forgotten_working_copies_follow_a_moved_parent() {
 /// later operation did.
 #[test]
 fn forgotten_working_copies_can_be_abandoned() {
+    use musubi_core::hub::HubStorage as _;
+    use musubi_core::node::{LocalRepo as _, Step};
+    use musubi_jj::op_id::CanonicalOp;
+
     let mut hive = Fixture::new(&["alpha", "beta"]);
     hive.commit(1, "a", "base on beta");
     hive.repo(1).write_file("work", "beta's work");
@@ -313,6 +317,42 @@ fn forgotten_working_copies_can_be_abandoned() {
     let beta_wc = working_copy(&hive, 1);
     hive.repo(0).jj(&["workspace", "forget", "beta/beta"]);
     hive.repo(0).jj(&["abandon", &beta_wc]);
+    hive.hive.sync(0).unwrap();
+    let target = hive.hive.hub_head();
+    hive.hive.fetch(1).unwrap();
+    // Advancing to one head may also write working-copy cleanup. It is an automatic write
+    // inside the busy call, not an idle-maintenance call or a merge of concurrent heads.
+    let mut advanced = false;
+    for _ in 0..24 {
+        let member = &mut hive.hive.members[1];
+        assert_eq!(member.core.known().1, target);
+        let before = member.adapter.heads_for(&target).unwrap();
+        assert_eq!(before.len(), 1);
+        assert!(member.adapter.pending().unwrap().is_empty());
+        assert_eq!(member.adapter.records().unwrap(), hive.hive.hub.records());
+        match member.core.step(&mut member.adapter).unwrap() {
+            Step::Realized(_) => {}
+            Step::Advanced(_) => {
+                assert!(member.adapter.is_ancestor(&before[0], &target).unwrap());
+                let after = member.adapter.heads_for(&target).unwrap();
+                assert_eq!(after.len(), 1);
+                assert_ne!(after[0], target);
+                let cleanup = member
+                    .adapter
+                    .repo()
+                    .canonical_store()
+                    .read_operation(&CanonicalOp(after[0].clone()))
+                    .unwrap();
+                assert_eq!(cleanup.parents, vec![target.clone()]);
+                assert!(cleanup.metadata.description.contains("new working copy"));
+                assert!(member.adapter.pending().unwrap().is_empty());
+                advanced = true;
+                break;
+            }
+            step => panic!("expected realization or advance, got {step:?}"),
+        }
+    }
+    assert!(advanced, "the fetched head was never advanced to");
     hive.sync();
     hive.sync();
     hive.assert_converged();

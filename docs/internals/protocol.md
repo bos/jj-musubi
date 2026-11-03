@@ -379,9 +379,11 @@ These theorems apply to that relation. `ContractedExec.lean` extends the executa
 with surviving-image advancement, atomic prepared adoption and contracted acceptance.
 The added primitives preserve the common store and frontier facts in `ContractedSafety`,
 but an accepted expected head need not remain below later heads in original ancestry.
-The full union safety and asynchronous convergence refinement remain
-[#78](https://github.com/bos/jj-musubi/issues/78); [conformance](conformance.md) states the
-current executable and native boundary coverage.
+Full union safety is separate from the raw-namespace asynchronous convergence refinement in
+`FineAssembly.hive_converges_observed` ([#78](https://github.com/bos/jj-musubi/issues/78)). The
+latter derives convergence under explicit source, recovery and fairness contracts, including
+finitely many automatic semantic writes. [Conformance](conformance.md) states the executable
+and native boundary coverage and the limits of that correspondence.
 
 ## Translation layer
 

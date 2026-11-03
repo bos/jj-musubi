@@ -161,6 +161,16 @@ theorem sid_union (hlt : ParLt par) (D₁ D₂ : Nat → Bool) (x : Nat) :
   have : cpar (cpar par D₁) D₂ = cpar par (union D₁ D₂) := funext (cpar_union hlt D₁ D₂)
   rw [this]
 
+/-- Contracting a subset after a superset keeps the complete canonical id, including the
+presence stamp. The cumulative dropped set is the same on both sides. -/
+theorem sid_absorbs_subset (hlt : ParLt par) {larger smaller : Nat → Bool}
+    (hsub : ∀ y, smaller y = true → larger y = true) (x : Nat) :
+    sid (scontent (val := val) (step := step) content (cpar (cpar par larger) smaller)
+        (union larger smaller)) (cpar (cpar par larger) smaller) x =
+      sid (scontent (val := val) (step := step) content (cpar par larger) larger)
+        (cpar par larger) x := by
+  rw [sid_union content hlt, union_absorbs_subset hsub]
+
 /-- Hence the order of two drops doesn't matter. -/
 theorem sid_comm (hlt : ParLt par) (D₁ D₂ : Nat → Bool) (x : Nat) :
     sid (scontent (val := val) (step := step) content (cpar (cpar par D₁) D₂) (union D₁ D₂))

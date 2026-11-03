@@ -300,6 +300,14 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         None,
     ),
     ("taking_an_abandon_resumes_where_it_stopped", None),
+    // This correspondence case fixes identical operation metadata on different copies;
+    // generated commands advance their timestamps instead.
+    ("independent_merges_can_reuse_a_canonical_operation", None),
+    // The generator interrupts driver calls, not Git export's physical head replacement.
+    (
+        "interrupted_git_export_can_leave_aliased_operation_heads",
+        None,
+    ),
     // These require a receiver that has only record metadata for a dropped operation,
     // followed by rollback and a different raw version of the same immutable original.
     (

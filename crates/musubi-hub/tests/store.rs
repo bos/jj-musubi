@@ -23,6 +23,47 @@ use musubi_jj::op_id::CanonicalOp;
 use musubi_testutil::TestEnv;
 
 #[test]
+fn a_drop_outside_the_hub_head_is_remembered_without_a_cached_image() {
+    use jj_lib::op_store::{Operation, View};
+    use musubi_jj::records::HubOp;
+
+    let dir = musubi_testutil::tempdir();
+    let path = dir.path().join("hub");
+    let mut hub = HubStore::init(&path, Backend::Simple).unwrap();
+    let root = hub.canonical().root_operation_id().clone();
+    let view = hub
+        .canonical()
+        .write_view(&View::make_root(Backend::Simple.root_commit()))
+        .unwrap();
+    let mut op = Operation::make_root(view);
+    op.parents = vec![root.0.clone()];
+    op.metadata.description = "the lost branch's dropped operation".into();
+    let dropped = hub.canonical().write_operation(&op).unwrap();
+    op.metadata.description = "the surviving publication".into();
+    let new = hub.canonical().write_operation(&op).unwrap();
+    assert!(!hub.canonical().is_ancestor_of(&dropped, &new).unwrap());
+
+    // A lost drop can be published after the hub starts again at its root. Its metadata
+    // arrives with the packet, beside the surviving head's closure.
+    let contracted = hub.contract(&[HubOp(dropped.clone())]).unwrap();
+    assert!(
+        hub.missing_closure_with(&new.0, Some(&contracted))
+            .unwrap()
+            .is_empty()
+    );
+    hub.set_head(1, &new.0, Some(contracted)).unwrap();
+    assert!(hub.is_superseded(&dropped.0));
+    assert_eq!(hub.current(&dropped.0), vec![dropped.0.clone()]);
+    assert!(!hub.missing_closure(&dropped.0).unwrap().is_empty());
+
+    drop(hub);
+    let hub = HubStore::open(&path).unwrap();
+    assert!(hub.is_superseded(&dropped.0));
+    assert_eq!(hub.current(&dropped.0), vec![dropped.0.clone()]);
+    assert!(!hub.missing_closure(&dropped.0).unwrap().is_empty());
+}
+
+#[test]
 fn contraction_keeps_a_survivor_publishable_and_refuses_replayed_origins() {
     use jj_lib::content_hash::blake2b_hash;
     use jj_lib::op_store::{Operation, OperationId, View};

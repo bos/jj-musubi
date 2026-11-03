@@ -132,6 +132,19 @@ Not races: kinds of repository and history a hive carries.
 
 ## Operation history
 
+Independent merges can share a canonical id when their frontier and operation metadata match.
+`independent_merges_can_reuse_a_canonical_operation` fixes the metadata on two copies, then
+checks the first write's new raw vertex and the second write's reuse against the structural
+write model. Another receiver realizes that merge before rollback, then recreates it without
+adding a label. The same case leaves an ancestor beside the merge through the shipping
+head-store update, then checks that the core removes the ancestor without writing a canonical
+operation. The search does not force identical operation metadata on different copies.
+
+`interrupted_git_export_can_leave_aliased_operation_heads` covers a separate physical case:
+an interrupted replacement by a Git-exported copy leaves two physical operations with the
+same canonical id. The next merge writes a new canonical child of that id. The search does
+not interrupt Git export's physical head replacement.
+
 | Race | Outcome | Test |
 | --- | --- | --- |
 | A machine restores an older view, abandons its former fetch base, then runs `jj util gc` | The next sync fetches objects that gc removed. A surviving image of the old operation does not claim the raw view's objects are still here; this works both in the existing daemon and after reopening. | `collected_objects_of_an_abandoned_fetch_base_are_fetched_again` |

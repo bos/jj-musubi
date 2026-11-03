@@ -273,6 +273,14 @@ impl World {
     /// One policy step. Returns whether anything happened.
     pub fn node_step(&mut self, node: usize, merge_objs: usize) -> bool {
         let before = self.storage_begin();
+        let burst_before = self.oracle.as_ref().map(|_| {
+            (
+                self.cores[node].known().1,
+                self.repos[node].applied.clone(),
+                self.repos[node].dropped.clone(),
+                self.burst_state(node),
+            )
+        });
         self.repos[node].merge_objs = merge_objs;
         let heads_before: Vec<Op> = self.repos[node].heads.iter().copied().collect();
         let step = match self.cores[node].step(&mut self.repos[node]) {
@@ -281,6 +289,16 @@ impl World {
                 self.storage_failed(Some(node), before, error, vec![]);
                 return false;
             }
+        };
+        let burst_kind = match &step {
+            Step::Merged => Some(("merge", None)),
+            Step::Realized(op) => Some(("realize", Some(*op))),
+            Step::Advanced(_)
+                if !matches!(self.repos[node].last_advance, Some(Advanced::Prepared(_))) =>
+            {
+                Some(("advance", None))
+            }
+            _ => None,
         };
         match step {
             Step::Idle => return false,
@@ -316,7 +334,28 @@ impl World {
                 self.send_request(node, push);
             }
         }
+        if let (Some((known, applied, dropped, before)), Some((kind, op))) =
+            (burst_before, burst_kind)
+            && self.repos[node].applied == applied
+            && self.repos[node].dropped == dropped
+        {
+            let after = self.burst_state(node);
+            let reply = self.oracle.as_mut().unwrap().call(&json!({
+                "op": "localBurst", "node": node, "known": known,
+                "kind": kind, "opId": op, "before": before, "after": after,
+            }));
+            assert_eq!(reply["ok"], true, "local burst query failed: {reply}");
+            assert_eq!(reply["matches"], true, "local burst fields differ: {reply}");
+        }
         true
+    }
+
+    fn burst_state(&self, node: usize) -> Value {
+        json!({
+            "local": sorted(self.repos[node].lops.iter().copied()),
+            "heads": sorted(self.repos[node].heads.iter().copied()),
+            "plan": self.cores[node].planned().copied().collect::<Vec<_>>(),
+        })
     }
 
     fn send_request(&mut self, node: usize, request: Req) {
@@ -354,8 +393,20 @@ impl World {
                 objects,
                 expected,
                 new,
+                records,
+                dropped,
                 ..
             } => {
+                // Keep the one actual packet tied to its send-time source, rather than
+                // reconstructing an unrelated supersede that merely names the same head.
+                assert_eq!(univ.records_of(records), Some(sup.0.as_slice()));
+                let applied = flat(&sup.0);
+                let pending: BTreeSet<_> = dropped.iter().copied().collect();
+                assert_eq!(
+                    repo.dropped,
+                    applied.union(&pending).copied().collect::<BTreeSet<_>>()
+                );
+                assert!(applied.is_disjoint(&pending));
                 let (ops, objs) = (sorted(ops.iter().copied()), sorted(objects.iter().copied()));
                 (
                     vec![
@@ -377,18 +428,42 @@ impl World {
         self.act_all(actions);
     }
 
-    /// A policy `Push` uploads exactly what the model's policy step does, `upOps` and
-    /// `upObjs`, as the liveness proofs assume (`Merged.lean`).
+    /// A policy `Push` uses its actual send-time snapshot and uploads exactly the model's
+    /// `upOps` and `upObjs`. The separate rogue-push rule deliberately bypasses policy.
     fn check_upload(&mut self, node: usize, request: &Req) {
-        let (
-            Some(oracle),
-            Request::Push {
-                ops, objects, new, ..
-            },
-        ) = (&mut self.oracle, request)
+        let Request::Push {
+            ops,
+            objects,
+            expected,
+            new,
+            records,
+            dropped,
+            ..
+        } = request
         else {
             return;
         };
+        assert_eq!(*expected, self.cores[node].known().1);
+        assert_eq!(self.repos[node].heads, BTreeSet::from([*new]));
+        let Some(oracle) = &mut self.oracle else {
+            return;
+        };
+        let applied = self.univ.borrow().records_of(records).unwrap().to_vec();
+        let reply = oracle.call(&json!({
+            "op": "pushSnapshot", "node": node,
+            "ops": sorted(ops.iter().copied()), "objs": sorted(objects.iter().copied()),
+            "expected": expected, "new": new, "knownSeq": self.cores[node].known().0,
+            "applied": records_json(&applied), "pending": dropped,
+        }));
+        assert_eq!(reply["ok"], true, "push snapshot failed: {reply}");
+        assert_eq!(
+            reply["matches"], true,
+            "packet differs from its source: {reply}"
+        );
+        assert_eq!(
+            reply["allDropped"],
+            json!(sorted(self.repos[node].dropped.iter().copied()))
+        );
         let (up_ops, up_objs) = oracle.upload(node, *new);
         assert_eq!(
             (sorted(ops.iter().copied()), sorted(objects.iter().copied())),
@@ -679,6 +754,11 @@ impl World {
     fn node_handle(&mut self, node: usize, reply: Rep, own: bool) {
         let before = self.storage_begin();
         let known_before = *self.cores[node].known();
+        let incoming = match &reply {
+            Reply::Head { seq, head, .. } | Reply::Fetched { seq, head, .. } => Some((*seq, *head)),
+            Reply::Objects { .. } | Reply::Refused { .. } => None,
+        };
+        let restarted = own && self.cores[node].hub_went_back(&reply);
         let head_kind = match &reply {
             Reply::Head { kind, .. } => *kind,
             _ => HeadKind::Head,
@@ -709,6 +789,16 @@ impl World {
                 return;
             }
         };
+        if let (Some(oracle), Some(incoming)) = (&mut self.oracle, incoming) {
+            let expected = oracle.call(&json!({
+                "op": "headControl", "root": ROOT,
+                "known": known_before, "incoming": incoming,
+                "own": own, "notify": head_kind == HeadKind::Notify,
+            }));
+            assert_eq!(expected["ok"], true, "head control failed: {expected}");
+            assert_eq!(expected["restart"], json!(restarted));
+            assert_eq!(expected["known"], json!(self.cores[node].known()));
+        }
         match handled {
             Handled::Learned { kind, seq, head } => {
                 actions.push(json!({"kind": "learn", "node": node, "headKind": kind_name(kind), "seq": seq, "head": head}));

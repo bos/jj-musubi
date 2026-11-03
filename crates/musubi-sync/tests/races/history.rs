@@ -1328,6 +1328,845 @@ fn original_history(
     (order, parents)
 }
 
+/// The finite local-work model reads the raw hub closure and the node's raw images as
+/// different vertices, including when a pending drop rewrites the known operation.
+#[test]
+fn local_burst_conforms_across_a_pending_namespace() {
+    use jj_lib::object_id::ObjectId as _;
+    use musubi_core::hub::HubStorage as _;
+    use musubi_core::node::LocalRepo as _;
+    use musubi_core::node::Step;
+    use musubi_jj::canonical::CanonicalStore;
+    use musubi_jj::op_id::CanonicalOp;
+    use musubi_jj::records::HubOp;
+    use serde_json::json;
+
+    use crate::oracle::Oracle;
+
+    fn check_reads(hive: &mut Fixture, oracle: &mut Oracle) {
+        use musubi_core::hub;
+        use musubi_core::message::RecordState;
+        use musubi_sync::{Attachment, OpId};
+
+        type HubSnapshot = (u64, OpId, RecordState);
+        fn hub_snapshot(hive: &Fixture) -> HubSnapshot {
+            let (seq, head) = hive.hive.hub.store().head();
+            (seq, head.clone(), hive.hive.hub.records())
+        }
+        let member = &hive.hive.members[1];
+        let requests = [
+            member.adapter.poll(&member.core).unwrap(),
+            Request::GetObjects {
+                for_ops: vec![hive.hive.hub_head()],
+                base: member.adapter.root().clone(),
+                haves: Attachment::None,
+            },
+        ];
+        for request in requests {
+            let call = match &request {
+                Request::Fetch { .. } => "fetch",
+                Request::GetObjects { .. } => "objects",
+                Request::Push { .. } => unreachable!(),
+            };
+            let before = hub_snapshot(hive);
+            // Observe the read handler itself; pruning and node callbacks are other events.
+            let handled = hub::handle(&mut hive.hive.hub, request).unwrap();
+            assert!(handled.publish.is_none(), "a read must not publish a head");
+            let after = hub_snapshot(hive);
+            let (kind, reply_snap, reply_records) = match &handled.reply {
+                Reply::Fetched {
+                    seq, head, records, ..
+                } => ("fetched", Some((*seq, head.clone(), records.clone())), None),
+                Reply::Objects { .. } => ("objects", None, None),
+                Reply::Head {
+                    seq, head, records, ..
+                } => ("head", Some((*seq, head.clone(), records.clone())), None),
+                Reply::Refused { records } => ("refused", None, Some(records.clone())),
+            };
+            let mut heads = vec![before.1.clone(), after.1.clone()];
+            let mut records = vec![before.2.clone(), after.2.clone()];
+            if let Some(snap) = &reply_snap {
+                heads.push(snap.1.clone());
+                records.push(snap.2.clone());
+            }
+            if let Some(state) = &reply_records {
+                records.push(state.clone());
+            }
+            // Intern full identities by equality: a changed digest with the same count gets
+            // another label, as does a changed raw head. No bits of either are truncated.
+            let record_id = |state: &RecordState| records.iter().position(|s| s == state).unwrap();
+            let encode = |s: &HubSnapshot| {
+                json!({
+                    "seq": s.0, "head": heads.iter().position(|h| h == &s.1).unwrap(),
+                    "recs": record_id(&s.2),
+                })
+            };
+            let observed = json!({
+                "op": "hubRead", "call": call,
+                "before": encode(&before), "after": encode(&after), "kind": kind,
+                "replySnap": reply_snap.as_ref().map(encode),
+                "replyRecs": reply_records.as_ref().map(record_id),
+            });
+            let checked = oracle.call(&observed);
+            assert_eq!(checked["ok"], true, "{observed}: {checked}");
+            assert_eq!(checked["matches"], true, "{observed}: {checked}");
+        }
+    }
+
+    struct Snapshot {
+        local: Vec<CanonicalOp>,
+        heads: Vec<CanonicalOp>,
+        plan: Vec<CanonicalOp>,
+        images: Vec<CanonicalOp>,
+    }
+    fn snapshot(hive: &Fixture, raw: &[CanonicalOp]) -> Snapshot {
+        let member = &hive.hive.members[1];
+        let known = member.core.known().1.clone();
+        let repo = member.adapter.repo();
+        let heads = repo
+            .local_heads()
+            .unwrap()
+            .iter()
+            .map(|op| repo.canonical_of(op).expect("the core mapped its head"))
+            .collect();
+        Snapshot {
+            local: raw
+                .iter()
+                .filter(|op| member.adapter.is_local(&op.0).unwrap())
+                .cloned()
+                .collect(),
+            heads,
+            plan: member.core.planned().cloned().map(CanonicalOp).collect(),
+            images: member
+                .adapter
+                .repo()
+                .to_node(&HubOp(CanonicalOp(known)))
+                .unwrap()
+                .into_iter()
+                .map(|op| op.0)
+                .collect(),
+        }
+    }
+    fn graph(stores: [&CanonicalStore; 2], tops: Vec<CanonicalOp>) -> Vec<CanonicalOp> {
+        let mut order = vec![];
+        let mut seen = std::collections::HashSet::new();
+        let mut stack: Vec<_> = tops.into_iter().map(|op| (op, false)).collect();
+        while let Some((op, expanded)) = stack.pop() {
+            if expanded {
+                order.push(op);
+            } else if seen.insert(op.clone()) {
+                let store = stores.iter().find(|s| s.has_operation(&op)).unwrap();
+                stack.push((op.clone(), true));
+                stack.extend(store.parents(&op).unwrap().into_iter().map(|p| (p, false)));
+            }
+        }
+        order
+    }
+
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(0, "a", "ancestor beta will drop");
+    hive.sync();
+    let a = hive.hive.hub_head();
+    let a_beta = hive.node(1).local_of(&CanonicalOp(a)).unwrap();
+    hive.commit(0, "b", "descendant beta has not received");
+    hive.hive.sync(0).unwrap();
+    let known = hive.hive.hub_head();
+    hive.commit(1, "own", "beta's unpublished work above the ancestor");
+    hive.repo(1).jj(&["op", "abandon", &a_beta.0.hex()]);
+    hive.hive.fetch(1).unwrap();
+    hive.hive.members[1].adapter.before_sync().unwrap();
+    hive.hive.members[1].adapter.heads_for(&known).unwrap();
+    let raw = hive
+        .hive
+        .hub
+        .store()
+        .canonical()
+        .ancestors_until(&[CanonicalOp(known.clone())], |_| false)
+        .unwrap();
+    let mut oracle = Oracle::spawn();
+    check_reads(&mut hive, &mut oracle);
+    let mut realized = false;
+    let mut advanced = false;
+    let mut pushed = false;
+    for _ in 0..24 {
+        let before = snapshot(&hive, &raw);
+        assert!(!before.images.contains(&CanonicalOp(known.clone())));
+        let step = {
+            let member = &mut hive.hive.members[1];
+            member.core.step(&mut member.adapter).unwrap()
+        };
+        let (kind, op) = match step {
+            Step::Realized(op) => {
+                realized = true;
+                ("realize", Some(CanonicalOp(op)))
+            }
+            Step::Merged => ("merge", None),
+            Step::Advanced(_) => {
+                advanced = true;
+                ("advance", None)
+            }
+            Step::Superseded { push, .. } => {
+                let Request::Push {
+                    expected,
+                    new,
+                    records,
+                    dropped,
+                    ..
+                } = &push
+                else {
+                    unreachable!("a supersede carries a push");
+                };
+                assert_eq!(expected, hive.hive.hub.store().head().1);
+                assert_eq!(*records, hive.hive.hub.records());
+                let count = hive.hive.hub.store().record_count();
+                let effective: BTreeSet<_> = dropped
+                    .iter()
+                    .filter(|p| !hive.hive.hub.store().is_superseded(p))
+                    .cloned()
+                    .collect();
+                // This packet names unpublished originals in the current hub namespace:
+                // none is merely an obsolete rewritten alias that contraction ignores.
+                let node = &hive.hive.members[1].adapter;
+                let applied = node.applied_records().unwrap();
+                assert_eq!(
+                    applied.base.count, 0,
+                    "this fixture has its whole record list"
+                );
+                let canonical = node.repo().canonical_store();
+                let recorded: std::collections::HashSet<_> = applied
+                    .records
+                    .iter()
+                    .flatten()
+                    .map(|p| canonical.original_id(&CanonicalOp(p.clone())).unwrap())
+                    .collect();
+                let mut all_dropped = recorded.clone();
+                for p in dropped {
+                    let original = canonical.original_id(&CanonicalOp(p.clone())).unwrap();
+                    assert!(!recorded.contains(&original));
+                    assert!(effective.contains(p) || recorded.contains(&original));
+                    all_dropped.insert(original);
+                }
+                assert!(!effective.is_empty());
+                // Check the actual post-write head sent by this call, including its root,
+                // rather than only the parents used to construct the fix-up.
+                let sent = CanonicalOp(new.clone());
+                let closure = canonical
+                    .record_operations(std::slice::from_ref(&sent))
+                    .unwrap();
+                assert!(closure.contains(&sent));
+                for op in closure {
+                    assert!(!all_dropped.contains(&canonical.original_id(&op).unwrap()));
+                }
+                let handled = hive.hive.handle(push).unwrap();
+                assert!(handled.publish.is_some());
+                assert_eq!(hive.hive.hub.store().record_count(), count + 1);
+                let appended: BTreeSet<_> = hive
+                    .hive
+                    .hub
+                    .store()
+                    .records()
+                    .last()
+                    .unwrap()
+                    .ops()
+                    .iter()
+                    .map(|p| p.0.0.clone())
+                    .collect();
+                assert_eq!(appended, effective);
+                let member = &mut hive.hive.members[1];
+                member
+                    .core
+                    .handle_reply(&mut member.adapter, handled.reply)
+                    .unwrap();
+                pushed = true;
+                break;
+            }
+            other => panic!("unexpected step in the complete-metadata burst: {other:?}"),
+        };
+        let after = snapshot(&hive, &raw);
+        assert_eq!(before.images, after.images);
+        let stores = [
+            hive.hive.members[1].adapter.repo().canonical_store(),
+            hive.hive.hub.store().canonical(),
+        ];
+        let mut tops = raw.clone();
+        for state in [&before, &after] {
+            tops.extend(
+                state
+                    .heads
+                    .iter()
+                    .chain(&state.plan)
+                    .chain(&state.images)
+                    .cloned(),
+            );
+        }
+        let order = graph(stores, tops);
+        let number = |op: &CanonicalOp| order.iter().position(|id| id == op).unwrap();
+        let numbers = |ops: &[CanonicalOp]| ops.iter().map(number).collect::<Vec<_>>();
+        let encode = |s: &Snapshot| {
+            json!({
+                "local": numbers(&s.local), "heads": numbers(&s.heads), "plan": numbers(&s.plan),
+            })
+        };
+        let parents: Vec<Vec<usize>> = order
+            .iter()
+            .map(|op| {
+                let store = stores.iter().find(|s| s.has_operation(op)).unwrap();
+                store.parents(op).unwrap().iter().map(number).collect()
+            })
+            .collect();
+        let reply = oracle.call(&json!({
+            "op": "rawBurst", "parents": parents, "rawClosure": numbers(&raw),
+            "images": numbers(&before.images), "kind": kind, "opId": op.as_ref().map(number),
+            "before": encode(&before), "after": encode(&after),
+        }));
+        assert_eq!(reply["ok"], true, "{reply}");
+        assert_eq!(reply["matches"], true, "{kind}: {reply}");
+    }
+    assert!(realized && advanced && pushed);
+    check_reads(&mut hive, &mut oracle);
+    hive.sync();
+    hive.assert_converged();
+}
+
+/// An interrupted replacement by a Git-exported copy leaves two physical heads with one
+/// canonical id. jj merges those aliases into a new child; canonical-set deduplication would
+/// hide that write. The fine suffix must start after physical normalization completes.
+#[test]
+fn interrupted_git_export_can_leave_aliased_operation_heads() {
+    use futures::executor::block_on;
+    use jj_lib::object_id::ObjectId as _;
+    use jj_lib::op_store::OperationId;
+    use musubi_core::node::{LocalRepo as _, Step};
+    use musubi_jj::op_id::LocalOp;
+    use std::io::{BufRead as _, BufReader, Write as _};
+    use std::process::Stdio;
+
+    let mut fixture = Fixture::new(&["alpha"]);
+    let commit = fixture
+        .repo(0)
+        .jj(&["log", "--no-graph", "-r", "@", "-T", "commit_id"]);
+    let base = fixture.node(0).local_heads().unwrap()[0].clone();
+    // Use a real prepared git transaction, so jj's export of p encounters a held ref lock.
+    // Its operation is still published; this supported export failure leaves recorded git
+    // state behind the bookmark. Abort before native merge retries the export.
+    let mut git = fixture
+        .repo(0)
+        .program(Path::new("git"))
+        .args(["update-ref", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = git.stdin.take().unwrap();
+    let mut output = BufReader::new(git.stdout.take().unwrap());
+    writeln!(
+        input,
+        "start\ncreate refs/heads/p {}\nprepare",
+        commit.trim()
+    )
+    .unwrap();
+    input.flush().unwrap();
+    for expected in ["start: ok", "prepare: ok"] {
+        let mut line = String::new();
+        output.read_line(&mut line).unwrap();
+        assert_eq!(line.trim(), expected);
+    }
+    fixture.repo(0).jj(&[
+        "--ignore-working-copy",
+        "bookmark",
+        "create",
+        "p",
+        "-r",
+        "@",
+    ]);
+    writeln!(input, "abort").unwrap();
+    input.flush().unwrap();
+    drop(input);
+    let mut response = String::new();
+    output.read_line(&mut response).unwrap();
+    assert_eq!(response.trim(), "abort: ok");
+    assert!(git.wait().unwrap().success());
+    fixture.repo(0).jj(&[
+        "--ignore-working-copy",
+        "--at-op",
+        &base.0.hex(),
+        "bookmark",
+        "create",
+        "q",
+        "-r",
+        "@",
+    ]);
+    let repo_path = fixture.repo(0).repo_path();
+    let operation_ids = || -> BTreeSet<OperationId> {
+        std::fs::read_dir(repo_path.join("op_store/operations"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter_map(|name| OperationId::try_from_hex(&name))
+            .collect()
+    };
+    let member = &mut fixture.hive.members[0];
+    let initial_heads = member.adapter.heads().unwrap();
+    assert_eq!(initial_heads.len(), 2);
+    let before = operation_ids();
+    let first = member.core.step(&mut member.adapter).unwrap();
+    assert!(matches!(first, Step::Merged));
+    let repo = member.adapter.repo_mut();
+    let exported = repo.local_heads().unwrap();
+    assert_eq!(exported.len(), 1);
+    let exported = exported[0].clone();
+    let ebody = block_on(repo.loader().op_store().read_operation(&exported.0)).unwrap();
+    let canonical = repo.canonical_heads().unwrap();
+    assert_eq!(canonical.len(), 1);
+    let canonical = canonical[0].clone();
+    let mut originals = vec![];
+    for id in operation_ids().difference(&before) {
+        if *id == exported.0 {
+            continue;
+        }
+        let body = block_on(repo.loader().op_store().read_operation(id)).unwrap();
+        if body.parents == ebody.parents
+            && body.metadata == ebody.metadata
+            && body.commit_predecessors == ebody.commit_predecessors
+            && body.view_id != ebody.view_id
+        {
+            let local = LocalOp(id.clone());
+            assert_eq!(repo.canonicalize(&local).unwrap(), canonical);
+            originals.push(local);
+        }
+    }
+    assert_eq!(
+        originals.len(),
+        1,
+        "native merge must have produced an actual export replacement"
+    );
+    let original = originals.pop().unwrap();
+    assert_ne!(original, exported);
+    // Recreate only the lost removal: the actual old and new shipping bodies are untouched.
+    block_on(
+        repo.loader()
+            .op_heads_store()
+            .update_op_heads(&[], &original.0),
+    )
+    .unwrap();
+    let known = member.core.known().1.clone();
+    let heads = member.adapter.heads_for(&known).unwrap();
+    assert_eq!(heads, vec![canonical.0.clone(), canonical.0.clone()]);
+    let second = member.core.step(&mut member.adapter).unwrap();
+    assert!(matches!(second, Step::Merged));
+    let after = member.adapter.repo_mut().canonical_heads().unwrap();
+    assert_eq!(after.len(), 1);
+    assert_ne!(after[0], canonical);
+    let parents = member
+        .adapter
+        .repo()
+        .canonical_store()
+        .parents(&after[0])
+        .unwrap();
+    assert_eq!(parents, vec![canonical]);
+}
+
+/// Identical ordinary merges on different copies are one canonical operation. The structural
+/// write projection must allow the second copy to reuse the raw vertex the first wrote.
+#[test]
+fn independent_merges_can_reuse_a_canonical_operation() {
+    use crate::oracle::Oracle;
+    use jj_lib::config::{ConfigLayer, ConfigSource};
+    use musubi_core::hub::HubStorage as _;
+    use musubi_core::node::{LocalRepo as _, Step};
+    use musubi_jj::node::NodeRepo;
+    use musubi_jj::objects::Backend;
+    use musubi_jj::op_id::CanonicalOp;
+    use musubi_sync::hive::Hive;
+    use musubi_sync::node::SystemClock;
+    use musubi_testutil::TestEnv;
+
+    let env = TestEnv::new();
+    let repos: Vec<_> = ["alpha", "beta", "gamma", "delta"]
+        .into_iter()
+        .map(|name| env.init_simple_repo(name))
+        .collect();
+    let mut hive = Hive::new(&env.root().join("hub"), Backend::Simple).unwrap();
+    hive.pruning = false;
+    for repo in &repos {
+        let mut node = NodeRepo::open(&repo.repo_path(), &repo.settings()).unwrap();
+        node.create_join_operation(&format!("musubi: {} joins", repo.machine()))
+            .unwrap();
+        add_node(&mut hive, &env, node);
+    }
+    hive.sync_all().unwrap();
+    let (sseq, s) = hive.hub.store().head();
+    let (sseq, s) = (sseq, s.clone());
+
+    // Gamma keeps the old physical S while the other copies hold P.
+    repos[0].jj(&[
+        "--ignore-working-copy",
+        "bookmark",
+        "create",
+        "p",
+        "-r",
+        "root()",
+    ]);
+    hive.sync(0).unwrap();
+    hive.sync(1).unwrap();
+    hive.sync(3).unwrap();
+    hive.sync(0).unwrap();
+    let p = hive.hub_head();
+    for n in [0, 1, 3] {
+        assert_eq!(hive.members[n].adapter.heads().unwrap(), vec![p.clone()]);
+        assert!(hive.members[n].adapter.pending().unwrap().is_empty());
+    }
+    assert_eq!(hive.members[2].adapter.heads().unwrap(), vec![s.clone()]);
+
+    hive.hub_goes_back(sseq).unwrap();
+    repos[2].jj(&[
+        "--ignore-working-copy",
+        "bookmark",
+        "create",
+        "q",
+        "-r",
+        "root()",
+    ]);
+    hive.sync(2).unwrap();
+    let q = hive.hub_head();
+    let qseq = hive.hub.store().head().0;
+    let store = hive.hub.store().canonical();
+    assert!(
+        !store
+            .is_ancestor_of(&CanonicalOp(p.clone()), &CanonicalOp(q.clone()))
+            .unwrap()
+    );
+    assert!(
+        !store
+            .is_ancestor_of(&CanonicalOp(q.clone()), &CanonicalOp(p.clone()))
+            .unwrap()
+    );
+    assert_eq!(hive.hub.records().count, 0);
+
+    fn closure(
+        store: &musubi_jj::canonical::CanonicalStore,
+        roots: &[CanonicalOp],
+    ) -> Vec<CanonicalOp> {
+        let mut order = vec![];
+        let mut seen = std::collections::HashSet::new();
+        let mut stack: Vec<_> = roots.iter().cloned().map(|op| (op, false)).collect();
+        while let Some((op, expanded)) = stack.pop() {
+            if expanded {
+                order.push(op);
+            } else if seen.insert(op.clone()) {
+                stack.push((op.clone(), true));
+                stack.extend(store.parents(&op).unwrap().into_iter().map(|p| (p, false)));
+            }
+        }
+        order
+    }
+    let mut oracle = Oracle::spawn();
+    let mut global = vec![];
+    let mut merged = vec![];
+    for n in [0, 1, 3] {
+        // Supported jj metadata settings, held fixed through the shipping initial Fetch and
+        // ordinary advance. The system clock's tick deliberately leaves settings alone.
+        let mut config = repos[n].settings().config().clone();
+        config.remove_layers(ConfigSource::CommandArg);
+        config.add_layer(
+            ConfigLayer::parse(
+                ConfigSource::CommandArg,
+                r#"
+operation.hostname = "the-same-host"
+operation.username = "the-same-user"
+debug.operation-timestamp = "2020-01-01T00:00:00Z"
+debug.commit-timestamp = "2020-01-01T00:00:00Z"
+"#,
+            )
+            .unwrap(),
+        );
+        let settings = repos[n].settings().with_new_config(config).unwrap();
+        let node = NodeRepo::open(&repos[n].repo_path(), &settings).unwrap();
+        let member = &mut hive.members[n];
+        member.adapter = musubi_sync::node::NodeAdapter::new(node).unwrap();
+        member.adapter.set_clock(Box::new(SystemClock));
+        member.core.restart();
+        hive.fetch(n).unwrap();
+        if n == 3 {
+            // Alpha publishes M. Delta realizes it detached, then the hub goes back to Q:
+            // delta's physical head is still P, but its labels and local store already hold M.
+            let member = &mut hive.members[0];
+            let Step::Send(mut requests) = member.core.step(&mut member.adapter).unwrap() else {
+                panic!("alpha must publish its merge")
+            };
+            assert_eq!(requests.len(), 1);
+            let handled = hive.handle(requests.pop().unwrap()).unwrap();
+            assert!(handled.publish.is_some());
+            let member = &mut hive.members[0];
+            member
+                .core
+                .handle_reply(&mut member.adapter, handled.reply)
+                .unwrap();
+            hive.fetch(n).unwrap();
+            let m: &CanonicalOp = &merged[0];
+            for _ in 0..32 {
+                let member = &mut hive.members[n];
+                if member.adapter.is_local(&m.0).unwrap() {
+                    break;
+                }
+                assert!(matches!(
+                    member.core.step(&mut member.adapter).unwrap(),
+                    Step::Realized(_)
+                ));
+            }
+            let member = &mut hive.members[n];
+            assert!(member.adapter.is_local(&m.0).unwrap());
+            assert_eq!(member.adapter.heads().unwrap(), vec![p.clone()]);
+            hive.hub_goes_back(qseq).unwrap();
+            hive.fetch(n).unwrap();
+        }
+        // Structural labels expose the two heads' ancestry; they make no claim about which
+        // operations have been realized. Raw ids are shared across both observed writes.
+        let roots = if n == 3 {
+            vec![merged[0].clone()]
+        } else {
+            vec![CanonicalOp(p.clone()), CanonicalOp(q.clone())]
+        };
+        let old = closure(hive.members[n].adapter.repo().canonical_store(), &roots);
+        if global.is_empty() {
+            global = old.clone();
+        }
+        let global_before = global.clone();
+        let mut did_advance = false;
+        for _ in 0..32 {
+            let member = &mut hive.members[n];
+            match member.core.step(&mut member.adapter).unwrap() {
+                Step::Realized(_) | Step::Adopted => {}
+                Step::Advanced(_) => {
+                    did_advance = true;
+                    break;
+                }
+                other => panic!("unexpected step before ordinary advance: {other:?}"),
+            }
+        }
+        assert!(did_advance);
+        let member = &mut hive.members[n];
+        let heads = member.adapter.repo_mut().canonical_heads().unwrap();
+        assert_eq!(heads.len(), 1);
+        let m = heads[0].clone();
+        let body = member
+            .adapter
+            .repo()
+            .canonical_store()
+            .read_operation(&m)
+            .unwrap();
+        let mut parents = body.parents.clone();
+        parents.sort();
+        let mut expected = vec![p.clone(), q.clone()];
+        expected.sort();
+        assert_eq!(parents, expected);
+        assert_eq!(old.contains(&m), n == 3);
+        let mut new_labels = old.clone();
+        if !new_labels.contains(&m) {
+            new_labels.push(m.clone());
+        }
+        if !global.contains(&m) {
+            global.push(m.clone());
+        }
+        assert_eq!(global.len() - global_before.len(), usize::from(n == 0));
+        let store = member.adapter.repo().canonical_store();
+        let encode = |raw: &[CanonicalOp], labels: &[CanonicalOp]| {
+            let number =
+                |ids: &[CanonicalOp], op: &CanonicalOp| ids.iter().position(|id| id == op).unwrap();
+            let parents = |ids: &[CanonicalOp]| {
+                ids.iter()
+                    .map(|op| {
+                        store
+                            .parents(op)
+                            .unwrap()
+                            .iter()
+                            .map(|p| number(ids, p))
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>()
+            };
+            serde_json::json!({
+                "rawParents": parents(raw), "parents": parents(labels),
+                "embedding": labels.iter().map(|op| number(raw, op)).collect::<Vec<_>>(),
+            })
+        };
+        let query = serde_json::json!({
+            "op": "nodeGrow", "before": encode(&global_before, &old),
+            "after": encode(&global, &new_labels),
+        });
+        let checked = oracle.call(&query);
+        assert_eq!(checked["ok"], true, "{query}: {checked}");
+        assert_eq!(checked["matches"], true, "{query}: {checked}");
+        assert_eq!(hive.hub_head(), q, "each checked write starts from Q");
+        merged.push(m);
+    }
+    assert_eq!(
+        merged[0], merged[1],
+        "same bytes must reuse the global canonical id"
+    );
+    assert_eq!(merged[0], merged[2], "delta reuses its existing label too");
+
+    // Publication adds the child head before removing its parents. Retain P beside M as
+    // interrupted removal can leave it; the next merge only prunes that redundant head.
+    let member = &mut hive.members[3];
+    member.adapter.repo_mut().settle().unwrap();
+    let repo = member.adapter.repo();
+    let local_p = repo.local_of(&CanonicalOp(p.clone())).unwrap();
+    futures::executor::block_on(
+        repo.loader()
+            .op_heads_store()
+            .update_op_heads(&[], &local_p.0),
+    )
+    .unwrap();
+    let bodies_before: BTreeSet<_> = repo
+        .canonical_store()
+        .operation_ids()
+        .unwrap()
+        .into_iter()
+        .collect();
+    let mut heads_before = member.adapter.heads_for(&q).unwrap();
+    heads_before.sort();
+    let mut expected = vec![p, merged[0].0.clone()];
+    expected.sort();
+    assert_eq!(heads_before, expected);
+    let raw = closure(
+        member.adapter.repo().canonical_store(),
+        &[CanonicalOp(q.clone())],
+    );
+    let number = |op: &CanonicalOp| global.iter().position(|id| id == op).unwrap();
+    let parents: Vec<Vec<usize>> = global
+        .iter()
+        .map(|op| {
+            member
+                .adapter
+                .repo()
+                .canonical_store()
+                .parents(op)
+                .unwrap()
+                .iter()
+                .map(number)
+                .collect()
+        })
+        .collect();
+    let snapshot = |member: &musubi_sync::hive::Member, heads: &[musubi_sync::OpId]| {
+        serde_json::json!({
+            "local": raw.iter().filter(|op| member.adapter.is_local(&op.0).unwrap())
+                .map(number).collect::<Vec<_>>(),
+            "heads": heads.iter().cloned().map(CanonicalOp).map(|op| number(&op)).collect::<Vec<_>>(),
+            "plan": member.core.planned().cloned().map(CanonicalOp)
+                .map(|op| number(&op)).collect::<Vec<_>>(),
+        })
+    };
+    let before = snapshot(member, &heads_before);
+    assert!(matches!(
+        member.core.step(&mut member.adapter).unwrap(),
+        Step::Merged
+    ));
+    let heads_after = member.adapter.heads_for(&q).unwrap();
+    assert_eq!(heads_after, vec![merged[0].0.clone()]);
+    let after = snapshot(member, &heads_after);
+    let bodies_after: BTreeSet<_> = member
+        .adapter
+        .repo()
+        .canonical_store()
+        .operation_ids()
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert_eq!(
+        bodies_before, bodies_after,
+        "pruning writes no canonical body"
+    );
+    let query = serde_json::json!({
+        "op": "rawBurst", "kind": "merge", "opId": null, "parents": parents,
+        "rawClosure": raw.iter().map(number).collect::<Vec<_>>(),
+        "images": [number(&CanonicalOp(q.clone()))], "before": before, "after": after,
+    });
+    let checked = oracle.call(&query);
+    assert_eq!(checked["ok"], true, "{query}: {checked}");
+    assert_eq!(checked["matches"], true, "{query}: {checked}");
+    assert_eq!(hive.hub_head(), q);
+}
+
+/// Preparing an incoming record writes rewrites beside the old heads. A core merge still
+/// has those raw heads as parents, until the later advance takes the record. This is the
+/// merge law used by the raw entry argument before current records have been applied.
+#[test]
+fn prepared_records_preserve_raw_merge_parents() {
+    use jj_lib::object_id::ObjectId as _;
+    use musubi_core::node::{LocalRepo as _, Step};
+    use musubi_jj::op_id::CanonicalOp;
+    use musubi_jj::records::HubOp;
+
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    let before_a = op_log(hive.repo(1))[0].0.clone();
+    hive.commit(0, "a", "head the next record drops");
+    hive.sync();
+    let a = hive.hive.hub_head();
+    let a_alpha = hive.node(0).local_of(&CanonicalOp(a.clone())).unwrap();
+    hive.hive.members[1].adapter.before_sync().unwrap();
+    hive.commit(0, "b", "surviving descendant");
+    hive.repo(0).jj(&["op", "abandon", &a_alpha.0.hex()]);
+    hive.hive.sync(0).unwrap();
+    // Receive through the actual handlers, before any between-round upkeep can merge the
+    // two heads this old-operation command is about to create.
+    let request = {
+        let member = &hive.hive.members[1];
+        member.core.poll(&member.adapter).unwrap()
+    };
+    let reply = hive.hive.handle(request).unwrap().reply;
+    {
+        let member = &mut hive.hive.members[1];
+        member
+            .core
+            .handle_reply(&mut member.adapter, reply)
+            .unwrap();
+    }
+    hive.repo(1).jj(&[
+        "--ignore-working-copy",
+        "--at-op",
+        &before_a,
+        "describe",
+        "-m",
+        "private branch beside the dropped head",
+    ]);
+    let known = hive.hive.hub_head();
+    let member = &mut hive.hive.members[1];
+    let old = member.adapter.heads_for(&known).unwrap();
+    assert!(old.len() >= 2);
+    assert!(old.contains(&a));
+    let images = member
+        .adapter
+        .repo()
+        .to_node(&HubOp(CanonicalOp(known.clone())))
+        .unwrap();
+    assert!(matches!(
+        member.core.step(&mut member.adapter).unwrap(),
+        Step::Merged
+    ));
+    assert_eq!(member.adapter.records().unwrap().count, 0);
+    assert!(member.adapter.repo().has_record_custody());
+    // Canonicalize the merge as the next normal head read does. This does not invoke the
+    // adapter's pending-name reconciliation or advance/take the prepared records.
+    let local = member.adapter.repo().local_heads().unwrap();
+    assert_eq!(local.len(), 1);
+    let merged = member.adapter.repo_mut().canonicalize(&local[0]).unwrap();
+    let store = member.adapter.repo().canonical_store();
+    for parent in old {
+        assert!(store.is_ancestor_of(&CanonicalOp(parent), &merged).unwrap());
+    }
+    assert_eq!(
+        member
+            .adapter
+            .repo()
+            .to_node(&HubOp(CanonicalOp(known)))
+            .unwrap(),
+        images
+    );
+    hive.sync();
+    hive.assert_converged();
+}
+
 /// The local helper contract for what a machine waiting on a dropped hub head would do,
 /// which the policy doesn't take yet (it still waits there): advancing to what survives of
 /// the operation, as the Lean model's `survivorAdvance` works it out over the original
@@ -2832,6 +3671,11 @@ fn abandoning_three_times_before_publishing_publishes_all() {
 /// record before its second abandon or after. It names both drops as the hub does.
 #[test]
 fn abandoning_twice_around_another_machines_record_publishes_all() {
+    use musubi_core::hub::HubStorage as _;
+    use musubi_core::node::LocalRepo as _;
+    use musubi_jj::canonical::Contraction;
+    use musubi_jj::op_id::CanonicalOp;
+
     for take_between in [false, true] {
         let mut hive = Fixture::new(&["alpha", "beta"]);
         hive.commit(1, "z", "beta's");
@@ -2863,6 +3707,89 @@ fn abandoning_twice_around_another_machines_record_publishes_all() {
             assert_eq!(hive.node(0).record_state().0, 1);
             assert!(!hive.node(0).pending_drops().ops().is_empty());
             assert_eq!(hive.hive.hub.store().record_count(), 1);
+            // Equal applied records do not make the normalizers equal: alpha also drops
+            // its own unpublished original. Its complete head closure is already written
+            // without either original, so contracting just the hub's drops keeps its id.
+            let member = &mut hive.hive.members[0];
+            let heads = member.adapter.heads_for(&member.core.known().1).unwrap();
+            assert!(!heads.is_empty());
+            assert_eq!(member.adapter.records().unwrap(), hive.hive.hub.records());
+            let applied = member.adapter.applied_records().unwrap();
+            let pending = member.adapter.pending().unwrap();
+            assert!(!applied.records.is_empty() && !pending.is_empty());
+            let store = member.adapter.repo().canonical_store();
+            let hub_drops: Vec<_> = applied
+                .records
+                .iter()
+                .flatten()
+                .cloned()
+                .map(CanonicalOp)
+                .collect();
+            let hub_originals: BTreeSet<_> = hub_drops
+                .iter()
+                .map(|op| store.original_id(op).unwrap())
+                .collect();
+            let mut node_originals = hub_originals.clone();
+            node_originals.extend(
+                pending
+                    .into_iter()
+                    .map(|op| store.original_id(&CanonicalOp(op)).unwrap()),
+            );
+            assert!(hub_originals.len() < node_originals.len());
+            let mut hub_contraction = Contraction::new(store, hub_drops).unwrap();
+            assert!(!hub_contraction.is_empty());
+            for head in heads.into_iter().map(CanonicalOp) {
+                // ancestors_until skips missing bodies; this strict traversal first reads
+                // every body and view, including parents absent from that tolerant walk.
+                store
+                    .record_operations(std::slice::from_ref(&head))
+                    .unwrap();
+                let closure = store
+                    .ancestors_until(std::slice::from_ref(&head), |_| false)
+                    .unwrap();
+                assert!(closure.contains(&head));
+                for op in closure {
+                    // Reading the full body excludes an incomplete metadata lookup's
+                    // fallback to its input as an explanation for identity.
+                    store.read_operation(&op).unwrap();
+                    assert!(!node_originals.contains(&store.original_id(&op).unwrap()));
+                }
+                assert_eq!(
+                    hub_contraction.images(store, &head).unwrap(),
+                    vec![head.clone()]
+                );
+                assert_eq!(hive.hive.hub.store().current(&head.0), vec![head.0.clone()]);
+                assert!(!hive.hive.hub.store().is_superseded(&head.0));
+            }
+            // Every actual remembered name or cached key has a dropped original in its
+            // immutable raw closure. Include a non-named key, so the cache case is exercised.
+            let hub = hive.hive.hub.store();
+            let named: BTreeSet<_> = hub
+                .records()
+                .iter()
+                .flat_map(|record| record.ops().iter().map(|op| op.0.0.clone()))
+                .collect();
+            assert!(!named.is_empty());
+            let canonical = hub.canonical();
+            let mut cached_keys = 0;
+            for key in canonical.operation_ids().unwrap() {
+                if !hub.is_superseded(&key.0) {
+                    continue;
+                }
+                let closure = canonical
+                    .record_operations(std::slice::from_ref(&key))
+                    .unwrap();
+                assert!(closure.contains(&key));
+                assert!(
+                    closure
+                        .iter()
+                        .any(|op| { hub_originals.contains(&canonical.original_id(op).unwrap()) })
+                );
+                if !named.contains(&key.0) {
+                    cached_keys += 1;
+                }
+            }
+            assert!(cached_keys > 0);
         }
         hive.repo(0)
             .jj(&["op", "abandon", &op_described(hive.repo(0), second)]);
@@ -4272,6 +5199,10 @@ fn received_records_survive_departure_and_drop_local_aliases() {
     }));
     assert_eq!(fetched["ok"], true, "{fetched}");
     assert_eq!(fetched["announced"], 0);
+    assert_eq!(
+        fetched["needsRecords"], true,
+        "equal records still have receipt work"
+    );
     hive.hive.fetch(1).unwrap();
     let adopted = oracle.call(&json!({
         "op": "recordEpoch", "current": 0, "applied": 0,
@@ -4279,6 +5210,8 @@ fn received_records_survive_departure_and_drop_local_aliases() {
         "receipts": true, "action": "adopt", "records": 0
     }));
     assert_eq!(adopted["ok"], true, "{adopted}");
+    assert_eq!(adopted["beforeNeedsRecords"], true);
+    assert_eq!(adopted["needsRecords"], false);
     {
         let member = &mut hive.hive.members[1];
         assert!(matches!(

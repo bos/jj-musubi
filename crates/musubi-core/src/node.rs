@@ -281,6 +281,11 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
         &self.known
     }
 
+    /// The operations left in the current realization plan, in order.
+    pub fn planned(&self) -> impl ExactSizeIterator<Item = &O> {
+        self.plan.iter()
+    }
+
     /// What a node sends when it connects, and on every poll: a `Fetch` of the hub's head,
     /// with whatever is new since this node's accepted base.
     pub fn poll<R>(&self, repo: &R) -> Result<Request<O, R::Attachment>, R::Error>

@@ -6,6 +6,19 @@ change the protocol, so run the same release on the hub and every machine (see
 
 ## Unreleased
 
+- A machine keeps received abandonment records before writing the history they explain,
+  even when it cannot apply them yet. If the producer leaves and the hub later loses the
+  records, the receiving machine can republish them after a restart. Applying a record also
+  removes another name of the same abandoned operation from its local history.
+
+- After a hub rollback, a machine keeps an abandonment when another abandonment has changed
+  the operation's name, including when it never held the older operation. Previously it
+  could repeatedly push without publishing the abandonment, or repeatedly fail to sync.
+
+- After a hub rollback, a machine takes an abandonment even when its old operation already
+  descends from the hub's surviving operation. Previously it could stay idle with the
+  abandonment untaken after another machine republished a cached recovery operation.
+
 - After a hub rollback, an active machine can republish an abandonment after the machine
   that made it has left. It keeps its own work and all surviving branches of the abandoned
   history. Previously it could wait forever for the departed machine to sync again.

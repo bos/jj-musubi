@@ -11,6 +11,7 @@ import Musubi.Chunks
 import Musubi.Names
 import Musubi.RefsExec
 import Musubi.RetryControl
+import Musubi.RecordEpoch
 import Musubi.ContractOrder
 import Musubi.SurvivorAdvance
 import Musubi.ContractedExec
@@ -512,6 +513,28 @@ def retryPublicationReply (j : Json) : Except String Json := do
     ("written", toJson t.cache.written), ("aligned", toJson t.cache.aligned),
     ("headKnown", toJson t.headKnown), ("restoring", toJson restoring), ("tip", toJson tip)])
 
+def recordEpochReply (j : Json) : Except String Json := do
+  let R ← getNat j "current"
+  let s : Retry.Records.State := {
+    applied := ← getNat j "applied"
+    announced := ← j.getObjValAs? (Option Nat) "announced"
+    stalePlan := ← j.getObjValAs? Bool "stalePlan"
+    receipts := ← j.getObjValAs? Bool "receipts" }
+  let a : Retry.Records.Action ← match ← j.getObjValAs? String "action" with
+    | "fetched" => pure Retry.Records.Action.fetched
+    | "keepReceipt" => pure (.keepReceipt (← getNat j "records"))
+    | "adopt" => pure (.adopt (← getNat j "records"))
+    | "staleFailure" => pure .staleFailure
+    | "clearPlan" => pure .clearPlan
+    | "wait" => pure .wait
+    | _ => throw "unknown record control action"
+  let some (t, adopts, fails) := Retry.Records.exec R s a
+    | throw "record control action is not enabled"
+  pure (Json.mkObj [("ok", toJson true), ("applied", toJson t.applied),
+    ("announced", toJson t.announced), ("receipts", toJson t.receipts),
+    ("stalePlan", toJson t.stalePlan), ("adopts", toJson adopts), ("fails", toJson fails),
+    ("beforeCredit", toJson (s.credit R)), ("credit", toJson (t.credit R))])
+
 /-- The session state's measures, and whether it has converged. -/
 def measureReply (N : Nat) (ses : SEState) : Json :=
   let es := ses.es
@@ -608,6 +631,10 @@ def handle (sess : Session) (line : String) : Json × Session :=
       | .ok reply => (reply, sess)
     | .ok "retryPublication" =>
       match retryPublicationReply j with
+      | .error e => (errReply s!"bad request: {e}", sess)
+      | .ok reply => (reply, sess)
+    | .ok "recordEpoch" =>
+      match recordEpochReply j with
       | .error e => (errReply s!"bad request: {e}", sess)
       | .ok reply => (reply, sess)
     | .ok "survivorAdvance" =>

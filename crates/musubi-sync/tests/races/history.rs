@@ -569,6 +569,11 @@ fn pending_drops_get_a_new_tip_when_the_hub_already_has_the_cached_fixup() {
     assert_eq!(saved["fixup_written"], true);
     assert_eq!(hive.hive.members[0].adapter.records().unwrap().count, 0);
 
+    // A power cut may lose the recent custody write while jj's later operation writes
+    // survive. Keep this older recovery case reachable without bypassing the new receipt
+    // rule: restore the actual record state from before receiving F.
+    let before_receipt =
+        std::fs::read(hive.repo(1).repo_path().join("musubi/records.json")).unwrap();
     hive.hive.fetch(1).unwrap();
     for _ in 0..16 {
         let member = &mut hive.hive.members[1];
@@ -583,6 +588,11 @@ fn pending_drops_get_a_new_tip_when_the_hub_already_has_the_cached_fixup() {
     hive.node(1).settle().unwrap();
     let f_beta = hive.node(1).local_of(&CanonicalOp(f)).unwrap();
     assert_eq!(hive.hive.members[1].adapter.records().unwrap().count, 0);
+    std::fs::write(
+        hive.repo(1).repo_path().join("musubi/records.json"),
+        before_receipt,
+    )
+    .unwrap();
     hive.reopen(1);
     hive.repo(1).jj(&[
         "--ignore-working-copy",
@@ -1380,7 +1390,9 @@ fn advancing_to_what_survives_of_a_dropped_head() {
                 .ops()
                 .iter()
                 .chain(node.applied_records().iter().flat_map(|r| r.ops()))
-                .flat_map(|op| node.current(&op.0).into_iter().map(|n| n.0))
+                // The model drops the original, not the surviving parents its current name
+                // may already expand to after taking the record.
+                .map(|op| op.0.clone())
                 .filter(|op| store.has_operation(op))
                 .collect();
             let known = CanonicalOp(kept.clone());
@@ -2126,7 +2138,11 @@ fn taking_an_abandon_resumes_where_it_stopped() {
         );
         assert_eq!(hive.node(1).is_dropped(&followed_hub), held, "{case}");
         for head in heads {
-            assert_eq!(hive.node(1).current(&head), [NodeOp(head)], "{case}");
+            assert_eq!(
+                hive.node(1).current(&head).unwrap(),
+                [NodeOp(head)],
+                "{case}"
+            );
         }
         let beta = history(hive.repo(1));
         if held {
@@ -2169,8 +2185,9 @@ fn taking_an_abandon_resumes_where_it_stopped() {
             })
             .unwrap();
         assert!(taken < 8, "{case}: {pushes:?}");
-        if held && lose {
-            // It publishes the drop it took on the head the hub went back to.
+        if lose {
+            // It republishes a taken record, or one retained in custody before the failed
+            // hold, on the head the hub went back to.
             assert_eq!(
                 pushes,
                 [(HeadKind::Accepted, followed.clone(), true, before + 1)],
@@ -3780,4 +3797,848 @@ fn a_machine_that_joined_after_a_prune_carries_on_when_the_hive_is_made_again() 
         );
     }
     assert_eq!(hive.hive.hub.store().record_count(), 1);
+}
+
+/// A cached fix-up can be below an operation its packet drops after a remake. A receiver
+/// still at that dropped operation must take the records even though its head already
+/// descends from the hub's surviving head.
+#[test]
+fn a_receiver_takes_records_that_drop_its_head_above_a_cached_fixup() {
+    use jj_lib::object_id::ObjectId as _;
+    use musubi_core::hub::HubStorage as _;
+    use musubi_core::node::LocalRepo as _;
+    use musubi_core::node::Step;
+    use musubi_jj::op_id::CanonicalOp;
+
+    let mut hive = Fixture::new(&["alpha", "beta", "gamma"]);
+    let base = hive.hive.hub.store().head().0;
+
+    // Alpha publishes p, which beta holds as its head, then a on top.
+    hive.commit(0, "p", "alpha's drop");
+    let p = op_log(hive.repo(0)).swap_remove(0);
+    hive.hive.sync(0).unwrap();
+    hive.hive.sync(1).unwrap();
+    hive.commit(0, "a", "alpha keeps this");
+    hive.hive.sync(0).unwrap();
+
+    // Alpha abandons p and pushes its fix-up F, stopping before it takes its own record.
+    hive.repo(0).jj(&["op", "abandon", &p.0]);
+    hive.hive.sync_steps(0, 1, &mut |_, reply| reply).unwrap();
+    let f = hive.hive.hub_head();
+    assert!(!hive.node(0).pending_drops().is_empty());
+
+    // Beta fetches F. The records drop its head p, so it realizes F without taking them; a
+    // user integrates F as an op head and commits d on it.
+    let before_receipt =
+        std::fs::read(hive.repo(1).repo_path().join("musubi/records.json")).unwrap();
+    hive.hive.fetch(1).unwrap();
+    for _ in 0..32 {
+        let member = &mut hive.hive.members[1];
+        if member.adapter.is_local(&f).unwrap() {
+            break;
+        }
+        let step = member.core.step(&mut member.adapter).unwrap();
+        assert!(matches!(step, Step::Realized(_)), "{step:?}");
+    }
+    assert!(hive.hive.members[1].adapter.is_local(&f).unwrap());
+    hive.node(1).settle().unwrap();
+    let f_beta = hive.node(1).local_of(&CanonicalOp(f.clone())).unwrap();
+    hive.repo(1)
+        .jj(&["--ignore-working-copy", "op", "integrate", &f_beta.0.hex()]);
+    hive.commit(1, "d", "beta's later drop");
+    let d = op_log(hive.repo(1)).swap_remove(0);
+    // Lose the recent custody write as a power cut can, while keeping jj's operation writes.
+    std::fs::write(
+        hive.repo(1).repo_path().join("musubi/records.json"),
+        before_receipt,
+    )
+    .unwrap();
+    hive.reopen(1);
+
+    // The hub loses F and alpha's record. Beta publishes d, gamma holds exactly d, and beta
+    // abandons d, publishing the record {d}.
+    hive.hive.hub_goes_back(base).unwrap();
+    hive.hive.sync(1).unwrap();
+    let d_hub = hive.hive.hub_head();
+    hive.hive.sync(2).unwrap();
+    assert_eq!(hive.hive.members[2].core.known().1, d_hub);
+    hive.commit(1, "e", "beta keeps this");
+    hive.repo(1).jj(&["op", "abandon", &d.0]);
+    hive.hive.sync(1).unwrap();
+
+    // Alpha takes {d} without its own record, keeping its fix-up written, then crashes.
+    hive.hive.sync_steps(0, 1, &mut |_, reply| reply).unwrap();
+    let saved: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(hive.repo(0).repo_path().join("musubi/records.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(saved["fixup_written"], true);
+    assert!(!hive.node(0).pending_drops().is_empty());
+    hive.reopen(0);
+
+    // The hub loses {d}. Alpha re-adopts and pushes.
+    hive.hive.hub_goes_back(base).unwrap();
+    let mut pushed = vec![];
+    hive.hive
+        .sync_through(0, &mut |request, reply| {
+            if let Request::Push {
+                expected,
+                new,
+                dropped,
+                ..
+            } = request
+            {
+                pushed.push((expected.clone(), new.clone(), dropped.clone()));
+                assert!(matches!(
+                    reply,
+                    Reply::Head {
+                        kind: HeadKind::Accepted,
+                        ..
+                    }
+                ));
+            }
+            reply
+        })
+        .unwrap();
+    assert_eq!(pushed.len(), 1);
+    assert_eq!(pushed[0].1, f);
+    assert!(pushed[0].2.contains(&d_hub));
+    assert_eq!(hive.hive.hub_head(), f);
+
+    // Gamma still has d. Its head descends from F, but taking the records must replace it.
+    assert_ne!(d_hub, f);
+    assert_eq!(
+        hive.hive.members[2].adapter.heads().unwrap(),
+        vec![d_hub.clone()]
+    );
+    assert!(
+        hive.hive.members[2]
+            .adapter
+            .is_ancestor(&f, &d_hub)
+            .unwrap()
+    );
+    assert!(hive.hive.sync(2).unwrap() > 0);
+    let records = hive.hive.hub.records();
+    let current_head = hive.hive.hub_head();
+    let member = &mut hive.hive.members[2];
+    assert_eq!(member.adapter.records().unwrap(), records);
+    assert_eq!(member.core.known().1, current_head);
+    assert!(matches!(
+        member.core.step(&mut member.adapter).unwrap(),
+        Step::Idle
+    ));
+}
+
+#[test]
+fn record_bodies_keep_pending_drops_named_after_hub_rollback() {
+    use jj_lib::object_id::ObjectId as _;
+    use musubi_core::hub::HubStorage as _;
+    use musubi_core::node::LocalRepo as _;
+    use musubi_jj::op_id::CanonicalOp;
+
+    let mut hive = Fixture::new(&["alpha", "beta", "gamma"]);
+    let before_a = hive.hive.hub.store().head().0;
+    hive.commit(0, "a", "first drop rewrites the pending name");
+    hive.hive.sync(0).unwrap();
+    let a = hive.hive.hub_head();
+    hive.commit(0, "p", "dropped history beta never realizes");
+    let p_local = op_log(hive.repo(0))[0].0.clone();
+    hive.hive.sync(0).unwrap();
+    let p0 = hive.hive.hub_head();
+    hive.hive.sync(2).unwrap();
+    let a_gamma = hive.node(2).local_of(&CanonicalOp(a.clone())).unwrap();
+    assert_eq!(hive.hive.members[2].adapter.records().unwrap().count, 0);
+    hive.commit(0, "q", "alpha retains work above the later drop");
+    hive.hive.sync(0).unwrap();
+    hive.repo(0).jj(&["op", "abandon", &p_local]);
+    hive.hive.sync(0).unwrap();
+    assert!(
+        hive.hive
+            .hub
+            .store()
+            .records()
+            .iter()
+            .any(|r| r.ops().iter().any(|op| op.0.0 == p0))
+    );
+    hive.hive.sync(1).unwrap();
+    assert_eq!(
+        hive.hive.members[1].adapter.records().unwrap(),
+        hive.hive.hub.records()
+    );
+    assert!(hive.node(1).pending_drops().is_empty());
+    hive.hive.hub_goes_back(before_a).unwrap();
+    hive.hive.sync(2).unwrap();
+    assert_eq!(hive.hive.hub_head(), p0);
+    assert_eq!(hive.hive.hub.store().record_count(), 0);
+    hive.repo(2).jj(&["op", "abandon", &a_gamma.0.hex()]);
+    hive.hive.sync(2).unwrap();
+    let current_p = hive.hive.hub.store().current(&p0);
+    assert_eq!(current_p.len(), 1);
+    let p1 = current_p[0].clone();
+    assert_ne!(p1, p0);
+    assert_eq!(
+        hive.hive
+            .hub
+            .store()
+            .canonical()
+            .original_id(&CanonicalOp(p0.clone()))
+            .unwrap(),
+        hive.hive
+            .hub
+            .store()
+            .canonical()
+            .original_id(&CanonicalOp(p1.clone()))
+            .unwrap()
+    );
+    assert!(hive.hive.hub.store().is_superseded(&p0));
+    assert!(
+        hive.hive
+            .hub
+            .store()
+            .records()
+            .iter()
+            .all(|r| r.ops().iter().all(|op| op.0.0 != p0))
+    );
+    let record_count = hive.hive.hub.store().record_count();
+    // Beta must rename the old record's p0 to p1 before writing its supersede. Merely
+    // accepting p0 as already superseded leaves it pending and p1 alive forever.
+    let taken = hive.hive.sync_steps(1, 24, &mut |_, reply| reply).unwrap();
+    assert!(taken < 24, "beta did not finish republishing its lost drop");
+    assert!(hive.node(1).pending_drops().is_empty());
+    assert_eq!(hive.hive.hub.store().record_count(), record_count + 1);
+    assert!(
+        hive.hive
+            .hub
+            .store()
+            .records()
+            .last()
+            .unwrap()
+            .ops()
+            .iter()
+            .any(|op| op.0.0 == p1)
+    );
+    assert_eq!(
+        hive.hive.members[1].adapter.records().unwrap(),
+        hive.hive.hub.records()
+    );
+    assert!(!hive.hive.hub.store().is_accepted(&p1));
+    assert!(
+        hive.node(1)
+            .canonical_store()
+            .has_operation(&CanonicalOp(p0))
+    );
+}
+
+/// Receiving a drop of an already rewritten operation must preserve its older name for a
+/// rollback, even when this receiver never fetched that older operation.
+#[test]
+fn lost_records_follow_an_older_name_the_receiver_never_held() {
+    use jj_lib::object_id::ObjectId as _;
+    use musubi_core::hub::HubStorage as _;
+    use musubi_core::node::LocalRepo as _;
+    use musubi_jj::op_id::CanonicalOp;
+
+    let mut hive = Fixture::new(&["alpha", "beta", "gamma"]);
+    hive.hive.pruning = false;
+    let before_a = hive.hive.hub.store().head().0;
+    hive.commit(0, "a", "ancestor abandoned before the later drop");
+    let a_local = op_log(hive.repo(0))[0].0.clone();
+    hive.hive.sync(0).unwrap();
+    let a = hive.hive.hub_head();
+    hive.commit(0, "p", "operation whose two aliases are dropped");
+    hive.hive.sync(0).unwrap();
+    let p0 = hive.hive.hub_head();
+    hive.hive.sync(2).unwrap();
+    assert_eq!(hive.hive.members[2].adapter.records().unwrap().count, 0);
+    hive.commit(0, "q", "work retained above both abandons");
+    hive.hive.sync(0).unwrap();
+
+    hive.repo(0).jj(&["op", "abandon", &a_local]);
+    hive.hive.sync(0).unwrap();
+    let current = hive.hive.hub.store().current(&p0);
+    assert_eq!(current.len(), 1);
+    let p1 = current[0].clone();
+    assert_ne!(p0, p1);
+    let p1_local = hive.node(0).local_of(&CanonicalOp(p1.clone())).unwrap();
+    hive.repo(0).jj(&["op", "abandon", &p1_local.0.hex()]);
+    hive.hive.sync(0).unwrap();
+    let records = hive.hive.hub.store().records();
+    assert_eq!(records.len(), 2);
+    assert!(records[0].ops().iter().any(|op| op.0.0 == a));
+    assert!(records[1].ops().iter().any(|op| op.0.0 == p1));
+
+    // Beta sees neither p0 nor p1 as a live hub operation. Only record metadata supplies p1.
+    assert!(
+        !hive
+            .node(1)
+            .canonical_store()
+            .has_operation(&CanonicalOp(p0.clone()))
+    );
+    hive.hive.sync(1).unwrap();
+    assert!(
+        hive.node(1)
+            .canonical_store()
+            .has_operation(&CanonicalOp(p1.clone()))
+    );
+    assert!(
+        !hive
+            .node(1)
+            .canonical_store()
+            .has_operation(&CanonicalOp(p0.clone()))
+    );
+    assert!(hive.node(1).pending_drops().is_empty());
+    assert_eq!(
+        hive.hive.members[1].adapter.records().unwrap(),
+        hive.hive.hub.records()
+    );
+
+    hive.hive.hub_goes_back(before_a).unwrap();
+    hive.hive.sync(2).unwrap();
+    assert_eq!(hive.hive.hub_head(), p0);
+    assert_eq!(hive.hive.hub.store().record_count(), 0);
+    let steps = hive.hive.sync_steps(1, 24, &mut |_, reply| reply).unwrap();
+    assert!(
+        steps < 24,
+        "beta did not finish republishing the two lost drops"
+    );
+    assert!(hive.node(1).pending_drops().is_empty());
+    assert!(!hive.hive.hub.store().is_accepted(&p0));
+    assert!(!hive.hive.hub.store().is_accepted(&p1));
+    assert!(
+        hive.hive
+            .hub
+            .store()
+            .records()
+            .last()
+            .unwrap()
+            .ops()
+            .iter()
+            .any(|op| op.0.0 == p0)
+    );
+
+    // A replacement hub has none of the drop bodies. Republishing must carry them too,
+    // although they are absent from the operation history the machine publishes.
+    hive.hive.remake_hub().unwrap();
+    hive.hive.sync(1).unwrap();
+    assert!(hive.node(1).pending_drops().is_empty());
+    assert!(
+        hive.hive
+            .hub
+            .store()
+            .canonical()
+            .has_operation(&CanonicalOp(p0.clone()))
+    );
+    assert!(!hive.hive.hub.store().is_accepted(&p0));
+}
+
+/// A receiver writes rewritten operations before taking their records. The producer leaves,
+/// then the hub loses the records twice. Receiving the operations must preserve record
+/// custody, and taking a later record must drop every physical alias of its original.
+#[test]
+fn received_records_survive_departure_and_drop_local_aliases() {
+    use crate::oracle::Oracle;
+    use jj_lib::object_id::ObjectId as _;
+    use musubi_core::hub::HubStorage as _;
+    use musubi_core::node::LocalRepo as _;
+    use musubi_core::node::Step;
+    use musubi_jj::op_id::CanonicalOp;
+    use serde_json::json;
+
+    let mut hive = Fixture::new(&["alpha", "beta", "gamma"]);
+    hive.commit(0, "base", "common base before the two names");
+    hive.sync();
+    let (base_seq, base) = hive.hive.hub.store().head();
+    let (base_seq, base) = (base_seq, base.clone());
+    let beta_base = hive.node(1).local_of(&CanonicalOp(base.clone())).unwrap();
+    let alpha_base = hive.node(0).local_of(&CanonicalOp(base.clone())).unwrap();
+    hive.commit(0, "a", "rewrite the future pending operation");
+    let a_alpha = op_log(hive.repo(0))[0].0.clone();
+    hive.hive.sync(0).unwrap();
+    let a = hive.hive.hub_head();
+    hive.hive.fetch(1).unwrap();
+    for _ in 0..16 {
+        let member = &mut hive.hive.members[1];
+        if member.adapter.is_local(&a).unwrap() {
+            break;
+        }
+        assert!(matches!(
+            member.core.step(&mut member.adapter).unwrap(),
+            Step::Realized(_)
+        ));
+    }
+    hive.node(1).settle().unwrap();
+    let a_beta = hive.node(1).local_of(&CanonicalOp(a.clone())).unwrap();
+    hive.repo(1)
+        .jj(&["--ignore-working-copy", "op", "integrate", &a_beta.0.hex()]);
+    assert_eq!(hive.hive.members[1].adapter.accepted_base().unwrap(), base);
+    hive.commit(0, "p", "the two aliases later dropped twice");
+    hive.hive.sync(0).unwrap();
+    let p0 = hive.hive.hub_head();
+    hive.hive.sync(2).unwrap();
+    let p0_gamma = hive.node(2).local_of(&CanonicalOp(p0.clone())).unwrap();
+    hive.commit(0, "q", "work retained above the rewritten operation");
+    hive.hive.sync(0).unwrap();
+    hive.repo(0).jj(&[
+        "op",
+        "abandon",
+        &format!("{}..{}", alpha_base.0.hex(), a_alpha),
+    ]);
+    let mut accepted = false;
+    hive.hive
+        .sync_steps(0, 1, &mut |request, reply| {
+            if let (
+                Request::Push { dropped, .. },
+                Reply::Head {
+                    kind: HeadKind::Accepted,
+                    ..
+                },
+            ) = (request, &reply)
+            {
+                assert!(dropped.contains(&a));
+                accepted = true;
+            }
+            reply
+        })
+        .unwrap();
+    assert!(accepted);
+    let f = hive.hive.hub_head();
+    let received_state = hive.hive.hub.records();
+    let p1s = hive.hive.hub.store().current(&p0);
+    assert_eq!(p1s.len(), 1);
+    let p1 = p1s[0].clone();
+    assert_ne!(p0, p1);
+    hive.hive.fetch(1).unwrap();
+    for _ in 0..16 {
+        let member = &mut hive.hive.members[1];
+        if member.adapter.is_local(&f).unwrap() {
+            break;
+        }
+        assert!(matches!(
+            member.core.step(&mut member.adapter).unwrap(),
+            Step::Realized(_)
+        ));
+    }
+    hive.node(1).settle().unwrap();
+    let f_beta = hive.node(1).local_of(&CanonicalOp(f)).unwrap();
+    assert_eq!(hive.hive.members[1].adapter.records().unwrap().count, 0);
+    // As `musubi leave` does: publish the departure, verify it took, and restore the local
+    // workspaces. Alpha never syncs again, so it cannot republish the lost record for beta.
+    let removed = hive.node(0).forget_self().unwrap().unwrap();
+    hive.hive.sync(0).unwrap();
+    let key = hive.node(0).machine().key().to_owned();
+    let (_, presence) = hive.node(0).present_copies().unwrap();
+    assert!(!presence.is_present(&key));
+    hive.node(0).restore_workspaces(&removed).unwrap();
+    hive.reopen(1);
+    hive.repo(1).jj(&[
+        "--ignore-working-copy",
+        "--at-op",
+        &f_beta.0.hex(),
+        "describe",
+        "-m",
+        "blind child retaining P1",
+    ]);
+    hive.repo(1).jj(&[
+        "--ignore-working-copy",
+        "--at-op",
+        &a_beta.0.hex(),
+        "describe",
+        "-m",
+        "child of the old A head",
+    ]);
+    hive.repo(1).jj(&[
+        "--ignore-working-copy",
+        "op",
+        "abandon",
+        &format!("{}..{}", beta_base.0.hex(), a_beta.0.hex()),
+    ]);
+    assert!(!hive.node(1).check_abandon().unwrap());
+    assert!(hive.node(1).pending_drops().is_empty());
+    hive.hive.hub_goes_back(base_seq).unwrap();
+    assert!(hive.node(1).has_record_custody());
+    assert!(
+        hive.hive.members[1]
+            .adapter
+            .held(&received_state)
+            .unwrap()
+            .is_none()
+    );
+    // The equal-record receipt recovery is also checked against the executable control
+    // model: fetched keeps an announcement, and taking it spends the persistent debt.
+    let mut oracle = Oracle::spawn();
+    let fetched = oracle.call(&json!({
+        "op": "recordEpoch", "current": 0, "applied": 0, "announced": null,
+        "stalePlan": false, "receipts": true, "action": "fetched"
+    }));
+    assert_eq!(fetched["ok"], true, "{fetched}");
+    assert_eq!(fetched["announced"], 0);
+    hive.hive.fetch(1).unwrap();
+    let adopted = oracle.call(&json!({
+        "op": "recordEpoch", "current": 0, "applied": 0,
+        "announced": fetched["announced"], "stalePlan": false,
+        "receipts": true, "action": "adopt", "records": 0
+    }));
+    assert_eq!(adopted["ok"], true, "{adopted}");
+    {
+        let member = &mut hive.hive.members[1];
+        assert!(matches!(
+            member.core.step(&mut member.adapter).unwrap(),
+            Step::Adopted
+        ));
+    }
+    assert_eq!(
+        hive.hive.members[1].adapter.records().unwrap().count,
+        adopted["applied"].as_u64().unwrap()
+    );
+    assert_eq!(
+        hive.node(1).has_record_custody(),
+        adopted["receipts"].as_bool().unwrap()
+    );
+    assert_eq!(adopted["adopts"], true);
+    assert!(adopted["credit"].as_u64().unwrap() < adopted["beforeCredit"].as_u64().unwrap());
+    let held = hive.hive.members[1]
+        .adapter
+        .held(&received_state)
+        .unwrap()
+        .unwrap();
+    assert!(held.records.iter().flatten().any(|op| *op == a));
+    let mut republished = false;
+    let taken = hive
+        .hive
+        .sync_steps(1, 24, &mut |request, reply| {
+            if let (
+                Request::Push { dropped, .. },
+                Reply::Head {
+                    kind: HeadKind::Accepted,
+                    ..
+                },
+            ) = (request, &reply)
+                && dropped.contains(&a)
+            {
+                republished = true;
+            }
+            reply
+        })
+        .unwrap();
+    assert!(taken < 24);
+    assert!(republished, "the received abandonment was not republished");
+    assert_eq!(hive.hive.hub.store().record_count(), 1);
+    assert_eq!(
+        hive.hive.members[1].adapter.accepted_base().unwrap(),
+        hive.hive.hub_head()
+    );
+    let recovered_head = hive.hive.hub_head();
+    assert!(
+        hive.node(1)
+            .canonical_store()
+            .is_ancestor_of(&CanonicalOp(p1.clone()), &CanonicalOp(recovered_head))
+            .unwrap()
+    );
+
+    hive.hive.hub_goes_back(base_seq).unwrap();
+    hive.hive.sync(2).unwrap();
+    assert_eq!(hive.hive.hub_head(), p0);
+    hive.commit(2, "r", "gamma retains work after dropping P0");
+    hive.repo(2).jj(&["op", "abandon", &p0_gamma.0.hex()]);
+    hive.hive.sync(2).unwrap();
+    assert!(
+        hive.hive
+            .hub
+            .store()
+            .records()
+            .iter()
+            .any(|r| r.ops().iter().any(|op| op.0.0 == p0))
+    );
+    hive.hive.fetch(1).unwrap();
+    {
+        let member = &mut hive.hive.members[1];
+        assert!(matches!(
+            member.core.step(&mut member.adapter).unwrap(),
+            Step::Adopted
+        ));
+    }
+    let applied = hive.hive.members[1].adapter.applied_records().unwrap();
+    assert!(applied.records.iter().flatten().any(|op| *op == p0));
+    assert_eq!(
+        hive.hive.members[1].adapter.records().unwrap(),
+        hive.hive.hub.records()
+    );
+    assert!(
+        hive.node(1)
+            .pending_drops()
+            .ops()
+            .iter()
+            .any(|op| op.0.0 == a),
+        "the second rollback lost beta's recovered abandonment"
+    );
+    let heads = hive.node(1).canonical_heads().unwrap();
+    let store = hive.node(1).canonical_store();
+    let original_p = store.original_id(&CanonicalOp(p0.clone())).unwrap();
+    assert_eq!(
+        store.original_id(&CanonicalOp(p1.clone())).unwrap(),
+        original_p
+    );
+    let history = store.ancestors_until(&heads, |_| false).unwrap();
+    assert!(
+        history
+            .iter()
+            .all(|op| store.original_id(op).unwrap() != original_p),
+        "taking the record left another raw version of the dropped original in local history"
+    );
+    // The off-frontier record name needs its durable image too, even though only P1 was
+    // physically reachable when the record was taken.
+    hive.reopen(1);
+    for old in [p0, p1] {
+        let images = hive.node(1).current(&CanonicalOp(old)).unwrap();
+        assert!(!images.is_empty());
+        let store = hive.node(1).canonical_store();
+        assert!(
+            images
+                .iter()
+                .all(|op| store.original_id(&op.0).unwrap() != original_p)
+        );
+    }
+    let steps = hive.hive.sync_steps(1, 24, &mut |_, reply| reply).unwrap();
+    assert!(
+        steps < 24,
+        "beta could not publish after taking the aliased drop"
+    );
+    assert!(hive.node(1).pending_drops().is_empty());
+    let final_records = hive.hive.members[1].adapter.applied_records().unwrap();
+    assert_eq!(final_records.records.len(), applied.records.len() + 1);
+    assert!(final_records.records.last().unwrap().contains(&a));
+    assert_eq!(
+        hive.hive.members[1].adapter.records().unwrap(),
+        hive.hive.hub.records()
+    );
+}
+
+#[test]
+fn an_operation_first_received_after_rollback_uses_the_applied_namespace() {
+    use jj_lib::object_id::ObjectId as _;
+    use musubi_core::node::LocalRepo as _;
+    use musubi_jj::node::NodeOp;
+    use musubi_jj::op_id::CanonicalOp;
+
+    let mut hive = Fixture::new(&["alpha", "beta", "gamma"]);
+    hive.commit(0, "base", "base before the eager image namespaces");
+    hive.sync();
+    let (before_a, base) = hive.hive.hub.store().head();
+    let (before_a, base) = (before_a, base.clone());
+    let alpha_base = hive.node(0).local_of(&CanonicalOp(base)).unwrap();
+    hive.commit(0, "a", "ancestor dropped before beta learns P");
+    let a_local = op_log(hive.repo(0))[0].0.clone();
+    hive.hive.sync(0).unwrap();
+    let a = hive.hive.hub_head();
+    // No new files: P is an immediate child of A, without a pre-command snapshot.
+    hive.repo(0).jj(&[
+        "--ignore-working-copy",
+        "describe",
+        "-m",
+        "P directly above old A",
+    ]);
+    hive.hive.sync(0).unwrap();
+    let p0 = hive.hive.hub_head();
+    assert_eq!(
+        hive.hive
+            .hub
+            .store()
+            .canonical()
+            .read_operation(&CanonicalOp(p0.clone()))
+            .unwrap()
+            .parents
+            .as_slice(),
+        std::slice::from_ref(&a)
+    );
+    hive.hive.sync(2).unwrap();
+    let p0_gamma = hive.node(2).local_of(&CanonicalOp(p0.clone())).unwrap();
+    hive.repo(0)
+        .jj(&["--ignore-working-copy", "describe", "-m", "Q kept above P"]);
+    hive.hive.sync(0).unwrap();
+    hive.repo(0).jj(&[
+        "op",
+        "abandon",
+        &format!("{}..{}", alpha_base.0.hex(), a_local),
+    ]);
+    hive.hive.sync(0).unwrap();
+    let p1 = hive.hive.hub.store().current(&p0);
+    assert_eq!(p1.len(), 1);
+    assert_ne!(p1[0], p0);
+    hive.hive.sync(1).unwrap();
+    assert!(hive.node(1).pending_drops().is_empty());
+    assert!(
+        !hive
+            .node(1)
+            .canonical_store()
+            .has_operation(&CanonicalOp(p0.clone()))
+    );
+    assert_ne!(
+        hive.node(1).current(&CanonicalOp(a.clone())).unwrap(),
+        [NodeOp(CanonicalOp(a.clone()))]
+    );
+    assert!(
+        hive.hive.members[1]
+            .adapter
+            .applied_records()
+            .unwrap()
+            .records
+            .iter()
+            .flatten()
+            .any(|id| *id == a)
+    );
+
+    hive.hive.hub_goes_back(before_a).unwrap();
+    hive.hive.sync(2).unwrap();
+    assert_eq!(hive.hive.hub_head(), p0);
+    hive.repo(2).jj(&[
+        "--ignore-working-copy",
+        "describe",
+        "-m",
+        "gamma keeps a child after P",
+    ]);
+    hive.repo(2)
+        .jj(&["--ignore-working-copy", "op", "abandon", &p0_gamma.0.hex()]);
+    hive.hive.sync(2).unwrap();
+    assert!(
+        hive.hive
+            .hub
+            .store()
+            .records()
+            .iter()
+            .any(|r| r.ops().iter().any(|op| op.0.0 == p0))
+    );
+    hive.hive.fetch(1).unwrap();
+    assert!(hive.node(1).pending_drops().is_empty());
+    assert_eq!(
+        hive.node(1).current(&CanonicalOp(p0.clone())).unwrap(),
+        [NodeOp(CanonicalOp(p1[0].clone()))]
+    );
+    let member = &mut hive.hive.members[1];
+    assert!(matches!(
+        member.core.step(&mut member.adapter).unwrap(),
+        musubi_core::node::Step::Adopted
+    ));
+    let steps = hive.hive.sync_steps(1, 24, &mut |_, reply| reply).unwrap();
+    assert!(steps < 24);
+    assert!(hive.node(1).pending_drops().is_empty());
+}
+
+/// Recovering a received drop must preserve its latest-work timestamp when the receiver
+/// realized a rewritten descendant but never the publisher's work-restoring fix-up.
+#[test]
+fn lost_received_records_preserve_work_before_the_fixup_arrives() {
+    use jj_lib::object_id::ObjectId as _;
+    use musubi_core::node::LocalRepo as _;
+    use musubi_core::node::Step;
+    use musubi_jj::op_id::CanonicalOp;
+
+    let mut hive = Fixture::new(&["alpha", "beta", "gamma"]);
+    hive.hive.pruning = false;
+    let base = hive.hive.hub_head();
+    hive.commit(2, "g", "gamma's latest work before the abandon");
+    hive.hive.sync(2).unwrap();
+    let a = hive.hive.hub_head();
+    let restore_seq = hive.hive.hub.store().head().0;
+    let gamma = hive.machine_key(2);
+    hive.hive.sync(0).unwrap();
+    let a_alpha = hive.node(0).local_of(&CanonicalOp(a.clone())).unwrap();
+    let expected = hive
+        .node(0)
+        .activity()
+        .unwrap()
+        .into_iter()
+        .find(|copy| copy.key == gamma)
+        .unwrap()
+        .last_work;
+
+    // Beta has A as a physical head but has not advanced its accepted base to it.
+    hive.hive.fetch(1).unwrap();
+    for _ in 0..16 {
+        if hive.hive.members[1].adapter.is_local(&a).unwrap() {
+            break;
+        }
+        let member = &mut hive.hive.members[1];
+        assert!(matches!(
+            member.core.step(&mut member.adapter).unwrap(),
+            Step::Realized(_)
+        ));
+    }
+    hive.node(1).settle().unwrap();
+    let a_beta = hive.node(1).local_of(&CanonicalOp(a.clone())).unwrap();
+    hive.repo(1)
+        .jj(&["--ignore-working-copy", "op", "integrate", &a_beta.0.hex()]);
+    assert_eq!(hive.hive.members[1].adapter.accepted_base().unwrap(), base);
+
+    hive.commit(0, "q", "rewritten descendant before the publisher's fix-up");
+    hive.hive.sync(0).unwrap();
+    let q = hive.hive.hub_head();
+    hive.repo(0).jj(&["op", "abandon", &a_alpha.0.hex()]);
+    hive.hive.sync(0).unwrap();
+    let f = hive.hive.hub_head();
+    let rewritten = hive.hive.hub.store().current(&q);
+    assert_eq!(rewritten.len(), 1);
+    let q_rewritten = rewritten[0].clone();
+    assert_ne!(q_rewritten, q);
+    let publisher = hive
+        .node(0)
+        .activity()
+        .unwrap()
+        .into_iter()
+        .find(|copy| copy.key == gamma)
+        .unwrap()
+        .last_work;
+    assert_eq!(
+        publisher, expected,
+        "the normal fix-up preserves gamma's work time"
+    );
+
+    hive.hive.fetch(1).unwrap();
+    for _ in 0..24 {
+        if hive.hive.members[1].adapter.is_local(&q_rewritten).unwrap() {
+            break;
+        }
+        let member = &mut hive.hive.members[1];
+        assert!(matches!(
+            member.core.step(&mut member.adapter).unwrap(),
+            Step::Realized(_)
+        ));
+    }
+    assert!(hive.hive.members[1].adapter.is_local(&q_rewritten).unwrap());
+    assert!(!hive.hive.members[1].adapter.is_local(&f).unwrap());
+    hive.node(1).settle().unwrap();
+    assert!(hive.node(1).has_record_custody());
+    let orphan = hive.node(1).local_of(&CanonicalOp(q_rewritten)).unwrap();
+
+    // Alpha completes the same successful departure as musubi leave, then never runs again.
+    let removed = hive.node(0).forget_self().unwrap().unwrap();
+    hive.hive.sync(0).unwrap();
+    let alpha = hive.machine_key(0);
+    assert!(!hive.node(0).present_copies().unwrap().1.is_present(&alpha));
+    hive.node(0).restore_workspaces(&removed).unwrap();
+    hive.reopen(1);
+    hive.repo(1).jj(&[
+        "--ignore-working-copy",
+        "--at-op",
+        &orphan.0.hex(),
+        "describe",
+        "-m",
+        "child of the partial orphan before the publisher's work restoration",
+    ]);
+    hive.hive.hub_goes_back(restore_seq).unwrap();
+    let steps = hive.hive.sync_steps(1, 24, &mut |_, reply| reply).unwrap();
+    assert!(steps < 24, "custody recovery must finish");
+    assert!(hive.node(1).pending_drops().is_empty());
+    assert!(!hive.node(1).has_record_custody());
+    let recovered = hive
+        .node(1)
+        .activity()
+        .unwrap()
+        .into_iter()
+        .find(|copy| copy.key == gamma)
+        .unwrap()
+        .last_work;
+    assert_eq!(
+        recovered, expected,
+        "custody recovery lost gamma's original work timestamp"
+    );
 }

@@ -30,6 +30,13 @@ pub trait LocalRepo {
     /// The canonical forms of the local op heads (canonicalizing any new local operations).
     fn heads(&mut self) -> Result<Vec<Self::Op>, Self::Error>;
 
+    /// Reads the heads and names pending drops against the known hub history, after
+    /// noticing any local abandonment. This renames bookkeeping, not local history.
+    /// A backend whose ids are immutable identities needs no separate name reconciliation.
+    fn heads_for(&mut self, _known: &Self::Op) -> Result<Vec<Self::Op>, Self::Error> {
+        self.heads()
+    }
+
     /// Whether `op` is present locally, as an original or a realization; or, if this node
     /// dropped it, whether all its history has in place of it is.
     fn is_local(&self, op: &Self::Op) -> Result<bool, Self::Error>;
@@ -70,6 +77,17 @@ pub trait LocalRepo {
         attachment: &Self::Attachment,
     ) -> Result<(), Self::Error>;
 
+    /// Stores the canonical bodies and parent closure of whole records without staging
+    /// them as ancestors of the current head. A backend whose ids already describe its
+    /// immutable operations needs no separate metadata storage.
+    fn store_record_ops(
+        &mut self,
+        _records: &[Vec<Self::Op>],
+        _attachment: &Self::Attachment,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
     /// Stores received objects for `for_ops`.
     fn stage_objects(
         &mut self,
@@ -94,6 +112,8 @@ pub trait LocalRepo {
     /// the operations below it that survive the drop. A real repository may also merge that
     /// head set, as `merge_heads` would: model this as advance followed by an environment
     /// merge, not as a sync step that creates a canonical operation.
+    /// Advancing while records are prepared takes them and replaces any heads they drop
+    /// with their surviving images, even if `op` was already below an old head.
     fn advance(&mut self, op: &Self::Op) -> Result<(), Self::Error>;
 
     /// A local operation the hub has accepted, reachable from the op heads, used as the
@@ -105,6 +125,13 @@ pub trait LocalRepo {
 
     /// The hub's records this node took last.
     fn applied_records(&self) -> Result<Records<Self::Op>, Self::Error>;
+
+    /// Whether received records still need reconciliation. A backend may retain them before
+    /// realizing their history, so it can recover them even when the hub announces the same
+    /// records this node already applied.
+    fn has_record_receipts(&self) -> Result<bool, Self::Error> {
+        Ok(false)
+    }
 
     /// The state of [`Self::applied_records`].
     fn records(&self) -> Result<RecordState, Self::Error>;
@@ -273,16 +300,18 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
     where
         R: LocalRepo<Op = O>,
     {
-        let heads = repo.heads()?;
-        // Take the hub's records first, once none drops a head: a head they drop waits for
-        // the hub's head, which comes after it, so that taking them leaves nothing to merge.
+        let heads = repo.heads_for(&self.known.1)?;
+        // Take the hub's records first. Where they drop a head, advancing finishes taking
+        // them even if the hub's head is already below that old, dropped head.
+        let mut records_drop_head = false;
         if let Some(records) = self.announced.take()
-            && records != repo.applied_records()?
+            && (records != repo.applied_records()? || repo.has_record_receipts()?)
         {
             if !repo.prepare_records(&records)? {
                 repo.adopt(&records)?;
                 return Ok(Step::Adopted);
             }
+            records_drop_head = true;
             self.announced = Some(records);
         }
         if heads.len() >= 2 {
@@ -308,7 +337,7 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
         for head in &heads {
             descends |= repo.is_ancestor(&known, head)?;
         }
-        if !descends {
+        if records_drop_head || !descends {
             // Never to a head this node dropped, but to what its history has in place of it,
             // which the hub accepted too: the drop is then this node's to publish, beside its
             // own work, rather than waiting for another machine to move the hub past it.
@@ -531,6 +560,9 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
                     (seq, head.clone())
                 });
                 if seq == self.known.0 && head == self.known.1 {
+                    if !new_records.is_empty() {
+                        repo.store_record_ops(&new_records, &ops_attachment)?;
+                    }
                     self.note_announced(repo, records, records_from, new_records, pruned)?;
                 }
                 // Stage only operations in `anc*(known.head)`: the guard Locality, and so
@@ -664,7 +696,7 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
             }
             return Err(repo.lacks_pruned());
         };
-        self.announced = (all != mine).then_some(all);
+        self.announced = (all != mine || repo.has_record_receipts()?).then_some(all);
         self.hub_records = Some(records);
         Ok(())
     }

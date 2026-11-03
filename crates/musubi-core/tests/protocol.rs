@@ -564,6 +564,39 @@ fn lost_acceptance_and_delayed_fetch_make_progress() {
     world.check_invariants();
 }
 
+/// A peer can publish a surviving ancestor while dropping a later operation. A follower
+/// still at that dropped head must take the records without waiting for another push.
+#[test]
+fn records_dropping_a_head_are_taken_when_the_hub_is_its_ancestor() {
+    use std::collections::BTreeSet;
+
+    let mut world = World::new(2, Some(Oracle::spawn()));
+    world.user_op(0, 0, 0);
+    world.quiesce();
+    world.user_op(0, 1, 0);
+    world.quiesce();
+    assert_eq!(world.heads(1), &BTreeSet::from([2]));
+
+    world.user_op(0, 2, 0);
+    world.op_abandon(0, vec![2]);
+    world.hub_goes_back(0);
+    let request = world.net_len();
+    world.rogue_push(0, 0, 1);
+    world.deliver(request);
+    assert_eq!(world.hub_head(), 1);
+    assert_eq!(world.hub_records(), &[vec![2]]);
+
+    world.poll_now(1);
+    assert!(
+        world.node_step(1, 0),
+        "the dropped head must not block adoption"
+    );
+    assert_eq!(world.applied(1), &[vec![2]]);
+    assert_eq!(world.heads(1), &BTreeSet::from([1]));
+    assert!(!world.node_step(1, 0));
+    world.check_invariants();
+}
+
 /// The trait endpoint recorded by the real-repository orphan-realization regression:
 /// equal head and records, a cached restoring payload, and a pending collateral drop.
 /// This is a local write-boundary test, not a full-state original-ancestry projection.

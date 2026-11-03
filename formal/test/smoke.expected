@@ -99,3 +99,5 @@
 {"error":"bad request: current heads must be nonempty and survive","ok":false}
 {"heads":[1],"images":[1],"merge":false,"ok":true}
 {"heads":[4],"images":[0,0],"merge":false,"ok":true}
+{"adopts":false,"announced":0,"applied":0,"beforeCredit":2,"credit":2,"fails":false,"ok":true,"receipts":true,"stalePlan":false}
+{"adopts":true,"announced":null,"applied":0,"beforeCredit":2,"credit":1,"fails":false,"ok":true,"receipts":false,"stalePlan":true}

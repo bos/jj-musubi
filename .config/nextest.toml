@@ -36,6 +36,12 @@ slow-timeout = { period = "60s", terminate-after = 10 }
 filter = "test(=e2e_dropped_merge)"
 slow-timeout = { period = "60s", terminate-after = 6 }
 
+# These six four-repository cases, with separate git directories and fetched histories,
+# exceed the two-minute default on Windows while the rest of the suite runs.
+[[profile.ci.overrides]]
+filter = "test(=history::advancing_to_what_survives_of_a_dropped_head)"
+slow-timeout = { period = "60s", terminate-after = 6 }
+
 # Each case of the per-machine refs conformance test runs real `jj`, `git` and syncs. It is
 # the next longest, so it starts next; and shrinking a failure takes minutes, so it has long
 # enough for Hegel to report one, which it does when it gives up shrinking at five.

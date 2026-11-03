@@ -80,6 +80,9 @@ pub struct NodeAdapter {
     /// The operations whose objects were staged last, with every commit they require:
     /// what checking that those objects are all here asks about next.
     staged_commits: Option<(HashSet<OpId>, Vec<CommitId>)>,
+    /// A complete immutable known-head closure already used to name these pending drops.
+    /// Repeating a realization step needs no second walk of that same history.
+    pending_named: Option<(OpId, Record)>,
 }
 
 impl NodeAdapter {
@@ -98,6 +101,7 @@ impl NodeAdapter {
             staged: HashMap::new(),
             staged_children: HashMap::new(),
             staged_commits: None,
+            pending_named: None,
         })
     }
 
@@ -199,6 +203,61 @@ impl NodeAdapter {
         {
             write_op(&self.accepted_push_path, &pushed)?;
         }
+        Ok(())
+    }
+
+    fn read_heads(&mut self, known: Option<&OpId>) -> anyhow::Result<Vec<OpId>> {
+        let base = self.accepted_base()?;
+        self.repo.settle()?;
+        // This discovers local abandons before pending names are reconciled.
+        let heads = op_ids(self.repo.canonical_heads()?);
+        if self.repo.take_abandon_noticed() {
+            self.forget_staged();
+        }
+        if let Some(known) = known {
+            self.reconcile_pending(known)?;
+        }
+        let mut reachable = false;
+        for NodeOp(base) in self.repo.to_node(&hub(&base))? {
+            for head in &heads {
+                reachable |= self.canonical_is_ancestor(&base.0, head)?;
+            }
+        }
+        if !reachable {
+            return Err(NodeError::UnreachableHistory.into());
+        }
+        Ok(heads)
+    }
+
+    fn reconcile_pending(&mut self, known: &OpId) -> anyhow::Result<()> {
+        if self.repo.pending_drops().is_empty()
+            || self.pending_named.as_ref().is_some_and(|(head, pending)| {
+                head == known && pending == self.repo.pending_drops()
+            })
+        {
+            return Ok(());
+        }
+        let store = self.repo.canonical_store();
+        let canonical = canonical(known);
+        if !store.has_operation(&canonical) {
+            return Ok(());
+        }
+        let ops = store.ancestors_until(&[canonical], |_| false)?;
+        let mut complete = self
+            .repo
+            .pending_drops()
+            .ops()
+            .iter()
+            .all(|op| store.has_operation(&op.0));
+        for op in &ops {
+            complete &= store.parents(op)?.iter().all(|p| store.has_operation(p));
+        }
+        if self.repo.name_pending_as(&ops)? {
+            self.forget_staged();
+        }
+        // Missing bodies may arrive at the next fetch. Cache only a complete immutable
+        // closure, whose original identities cannot change when more metadata arrives.
+        self.pending_named = complete.then(|| (known.clone(), self.repo.pending_drops().clone()));
         Ok(())
     }
 
@@ -423,23 +482,11 @@ impl LocalRepo for NodeAdapter {
         // jj never makes an operation the hub accepted unreachable from the op heads except
         // through `jj op abandon`, which this node then publishes (docs/internals/design.md,
         // "Abandoning operations").
-        let base = self.accepted_base()?;
-        self.repo.settle()?;
-        let heads = op_ids(self.repo.canonical_heads()?);
-        // Noticed here, or by whatever read the op heads since, as reconciling settings does.
-        if self.repo.take_abandon_noticed() {
-            self.forget_staged();
-        }
-        let mut reachable = false;
-        for NodeOp(base) in self.repo.to_node(&hub(&base))? {
-            for head in &heads {
-                reachable |= self.canonical_is_ancestor(&base.0, head)?;
-            }
-        }
-        if !reachable {
-            return Err(NodeError::UnreachableHistory.into());
-        }
-        Ok(heads)
+        self.read_heads(None)
+    }
+
+    fn heads_for(&mut self, known: &OpId) -> anyhow::Result<Vec<OpId>> {
+        self.read_heads(Some(known))
     }
 
     fn is_local(&self, op: &OpId) -> anyhow::Result<bool> {
@@ -479,9 +526,18 @@ impl LocalRepo for NodeAdapter {
 
     fn ops_attachment(&self, ops: &[OpId]) -> anyhow::Result<Attachment> {
         let bundle = temp_bundle(&self.tmp)?;
-        self.repo
-            .canonical_store()
-            .export_operations(&canonicals(ops), &bundle)?;
+        let record_ops: Vec<CanonicalOp> = self
+            .repo
+            .pending_drops()
+            .ops()
+            .iter()
+            .map(|op| op.0.clone())
+            .collect();
+        self.repo.canonical_store().export_operations_with_records(
+            &canonicals(ops),
+            &record_ops,
+            &bundle,
+        )?;
         Ok(Attachment::bundle(bundle))
     }
 
@@ -501,6 +557,20 @@ impl LocalRepo for NodeAdapter {
         let mut have_ops = self.local_frontier(ops)?;
         have_ops.extend(self.canonical_heads()?);
         self.haves_beyond_base(&have_ops)
+    }
+
+    fn store_record_ops(
+        &mut self,
+        records: &[Vec<OpId>],
+        attachment: &Attachment,
+    ) -> anyhow::Result<()> {
+        let store = self.repo.canonical_store();
+        store.import_operations(attachment.bundle_path()?)?;
+        // A lost record can become pending after rollback. Renaming that name requires its
+        // body and ancestors even when none is in the current accepted history.
+        let names: Vec<CanonicalOp> = records.iter().flatten().cloned().map(CanonicalOp).collect();
+        store.record_operations(&names)?;
+        Ok(())
     }
 
     fn stage_ops(&mut self, ops: &[OpEntry<OpId>], attachment: &Attachment) -> anyhow::Result<()> {
@@ -705,6 +775,10 @@ impl LocalRepo for NodeAdapter {
             base: state_of(prefix.count, &prefix.digest),
             records: ops_of(self.repo.applied_records()),
         })
+    }
+
+    fn has_record_receipts(&self) -> anyhow::Result<bool> {
+        Ok(self.repo.has_record_custody())
     }
 
     fn records(&self) -> anyhow::Result<RecordState> {

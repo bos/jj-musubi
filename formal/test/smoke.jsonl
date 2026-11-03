@@ -99,3 +99,5 @@
 {"op":"survivorAdvance","parents":[[],[0],[1]],"dropped":[2],"heads":[2],"known":2}
 {"op":"survivorAdvance","parents":[[],[0],[1]],"dropped":[2],"heads":[1],"known":2}
 {"op":"survivorAdvance","parents":[[],[0],[0],[1,2],[1]],"dropped":[1,2,3],"heads":[4],"known":3}
+{"action":"fetched","announced":null,"applied":0,"current":0,"op":"recordEpoch","receipts":true,"stalePlan":false}
+{"action":"adopt","announced":0,"applied":0,"current":0,"op":"recordEpoch","receipts":true,"records":0,"stalePlan":false}

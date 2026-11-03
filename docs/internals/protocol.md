@@ -335,8 +335,27 @@ Steps:
   or was made again and has pruned nothing, takes the hub's records, all whole, in their
   place.
 
+Whole records also carry canonical metadata for the operations they name, with their parent
+operation closure and views. These bodies travel as extra operation-bundle material, outside
+the `OpEntry` list of the current head's history. A receiver stores them before holding a
+record, even when that history list is empty, without staging or realizing them. A supersede
+uploads the same metadata for its pending names, so a replacement hub can send the record
+again. Missing record metadata prevents publication, rather than leaving an unexportable
+record at the hub. Pruning drops names, not these canonical bodies.
+
+Before reading its heads, a node with pending drops names them against the raw known hub
+history by immutable original identity. It does this again after adopting records: adoption
+can turn lost records into pending drops after the fetch has already staged the hub's history.
+A record clears a pending drop of the same original even when its raw name differs. These
+name changes write no local operation. Historical inverse-name caches alone are insufficient:
+a node that first saw a survivor after an abandon may never have held its older name.
+
 Policy, before the steps above: if a record the node lacks drops none of its heads, adopt; if
-it has pending drops and the hub's records, supersede, instead of an ordinary push.
+it drops a head, prepare it and advance once the known head is local, even if an old head
+already descends from it. That advance atomically takes the prepared records and replaces the
+dropped heads. A cached fix-up accepted after rollback can be an ancestor of a dropped
+operation, so ancestry alone cannot make this advance unnecessary. If the node has pending
+drops and the hub's records, supersede, instead of an ordinary push.
 
 Properties of the original-ancestry relation in `formal/Musubi/Supersede.lean`:
 

@@ -55,13 +55,23 @@ The crates, from the bottom up:
   knows nothing of jj, storage, or networks.
 - [musubi-transport](../../crates/musubi-transport/src/lib.rs) carries messages: in memory,
   for the hub and tests, or over a byte stream, for local sockets and ssh.
+  [stream.rs](../../crates/musubi-transport/src/stream.rs) manages client connections and pending
+  requests; its submodules own the [frames](../../crates/musubi-transport/src/stream/frame.rs),
+  [greeting](../../crates/musubi-transport/src/stream/greeting.rs), and
+  [server relay](../../crates/musubi-transport/src/stream/server.rs).
 - [musubi-jj](../../crates/musubi-jj/src/lib.rs) is everything that touches jj-lib.
   [canonical.rs](../../crates/musubi-jj/src/canonical.rs) is the canonical store, the log of
-  canonical operations that the hub and each machine keep. The
+  canonical operations that the hub and each machine keep. Its
+  [transfer](../../crates/musubi-jj/src/canonical/transfer.rs) module imports and exports bundles;
+  [validate](../../crates/musubi-jj/src/canonical/validate.rs) checks their encodings against what
+  jj decodes. The
   [node](../../crates/musubi-jj/src/node.rs) module translates between local and canonical
   operations ([translate](../../crates/musubi-jj/src/node/translate.rs),
   [realize](../../crates/musubi-jj/src/node/realize.rs)), joins hives, and reconciles hive
-  settings. [objects](../../crates/musubi-jj/src/objects/mod.rs) moves commits and trees, and
+  settings. Its [supersede](../../crates/musubi-jj/src/node/supersede.rs) module holds record
+  state and naming; submodules handle persistence, normalization, detecting abandons, rewriting
+  local operations, receiving records, and fix-ups.
+  [objects](../../crates/musubi-jj/src/objects/mod.rs) moves commits and trees, and
   [format_guard.rs](../../crates/musubi-jj/src/format_guard.rs) refuses operations from a
   newer jj.
 - [musubi-hub](../../crates/musubi-hub/src/lib.rs) stores hives:
@@ -72,9 +82,18 @@ The crates, from the bottom up:
 - [musubi-sync](../../crates/musubi-sync/src/lib.rs) binds the core to real repositories and
   hub stores, and defines the [wire format](../../crates/musubi-sync/src/wire.rs). Its tests
   hold the race catalogue and the generated end-to-end search.
-- [musubi](../../crates/musubi/src/main.rs) is the command-line tool:
+- [musubi](../../crates/musubi/src/main.rs) starts the command-line tool and dispatches commands.
+  [cli.rs](../../crates/musubi/src/cli.rs) defines arguments and help. Workflow modules own
+  [joining and cloning](../../crates/musubi/src/join.rs),
+  [leaving and forgetting](../../crates/musubi/src/leave.rs),
+  [listing](../../crates/musubi/src/list.rs), and [syncing](../../crates/musubi/src/sync.rs);
+  [repo.rs](../../crates/musubi/src/repo.rs) locates and validates the copy a command acts on.
   [hub.rs](../../crates/musubi/src/hub.rs) serves a hub,
-  [daemon.rs](../../crates/musubi/src/daemon.rs) is the per-machine daemon,
+  [daemon.rs](../../crates/musubi/src/daemon.rs) is the per-machine daemon, with shared hub
+  connections in [connections.rs](../../crates/musubi/src/daemon/connections.rs).
+  [top.rs](../../crates/musubi/src/top.rs) handles terminal interaction, with separate
+  [sampling](../../crates/musubi/src/top/sample.rs) and
+  [rendering](../../crates/musubi/src/top/view.rs) modules.
   [ssh.rs](../../crates/musubi/src/ssh.rs) reaches hubs over ssh and sets up keys, and
   [login.rs](../../crates/musubi/src/login.rs) starts the daemon at login.
 - [musubi-testutil](../../crates/musubi-testutil/src/lib.rs) makes hermetic jj repositories

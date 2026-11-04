@@ -6,12 +6,17 @@
 //! received from peers are verified by decoding and re-hashing before they enter the
 //! store; this works because every canonical one was written by the same pinned jj-lib, so
 //! decoding and re-hashing round-trips exactly.
+//!
+//! Opening, reading, and walking the store live here. `transfer` exchanges histories in
+//! bundles; `validate` normalizes their bytes and checks their meaning against jj's decoding.
 
 mod codec;
 mod contract;
 mod log;
 mod origin;
 mod presence;
+mod transfer;
+mod validate;
 
 use std::io;
 use std::path::Path;
@@ -35,8 +40,6 @@ use jj_lib::op_store::OpStoreError;
 use jj_lib::op_store::OpStoreResult;
 use jj_lib::op_store::Operation;
 use jj_lib::op_store::OperationId;
-use jj_lib::op_store::RemoteRef;
-use jj_lib::op_store::RemoteView;
 use jj_lib::op_store::View;
 use jj_lib::op_store::ViewId;
 use pollster::FutureExt as _;
@@ -49,12 +52,19 @@ use self::log::Log;
 pub use self::presence::PresenceMemo;
 pub use self::presence::Work;
 pub use self::presence::merge as merge_presence;
+pub use self::transfer::Imported;
+use self::validate::Admitted;
+use self::validate::admit;
+use self::validate::each_field;
+use self::validate::encoded_op_commits;
+use self::validate::encoded_view_commits;
+use self::validate::encoded_view_id;
+use self::validate::names_decoded_commits;
+use self::validate::normal_view;
+use self::validate::op_commit_ids;
+use self::validate::view_commit_ids;
 use crate::objects::ObjectError;
-use crate::objects::bundle;
-use crate::objects::bundle::BundleWriter;
-use crate::objects::bundle::Record;
 use crate::op_id::CanonicalOp;
-use crate::protobuf::next_field;
 
 #[derive(Debug, Error)]
 pub enum CanonicalError {
@@ -99,173 +109,12 @@ impl CanonicalError {
     }
 }
 
-/// What an operation or view arriving in a bundle turned out to be, once decoded.
-struct Admitted {
-    kind: &'static str,
-    /// The error for one whose encoding names other commits than its decoding does.
-    malformed: fn(String) -> CanonicalError,
-    expected: String,
-    actual: String,
-    /// Whether its encoding names exactly the commits its decoding does.
-    names_its_commits: bool,
-}
-
-/// `work` done on each of `items`, by as many workers as are worth it, each numbered and
-/// given a share in order, with the results in order. A panic in a worker is passed on as it
-/// is: jj-lib and jj-core panic on some malformed views.
-fn in_parallel<T: Sync, R: Send>(items: &[T], work: impl Fn(usize, &T) -> R + Sync) -> Vec<R> {
-    let workers = std::thread::available_parallelism()
-        .map_or(1, |n| n.get())
-        .min(MAX_WORKERS)
-        .min(items.len().div_ceil(MIN_PER_WORKER))
-        .max(1);
-    if workers == 1 {
-        return items.iter().map(|item| work(0, item)).collect();
-    }
-    let share = items.len().div_ceil(workers);
-    let work = &work;
-    std::thread::scope(|scope| {
-        let workers: Vec<_> = items
-            .chunks(share)
-            .enumerate()
-            .map(|(worker, items)| {
-                scope.spawn(move || {
-                    items
-                        .iter()
-                        .map(|item| work(worker, item))
-                        .collect::<Vec<_>>()
-                })
-            })
-            .collect();
-        workers
-            .into_iter()
-            .flat_map(|worker| {
-                worker
-                    .join()
-                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
-            })
-            .collect()
-    })
-}
-
-/// How many views an import verifies, in parallel, before appending them: few in tests and
-/// fuzzing, so that they cross batches.
-const IMPORT_BATCH: usize = if cfg!(any(test, fuzzing)) { 2 } else { 512 };
-
-/// How many records, of operations and views, an import takes in before appending them.
-const IMPORT_ITEMS: usize = 4096;
-
-/// How many bytes of views and operations an import takes in before appending them, so
-/// that a bundle of many large views is taken in a part at a time. A single view may still
-/// be as large as a record may be.
-const IMPORT_BYTES: usize = 64 << 20;
-
-/// The most workers an import verifies views with.
-const MAX_WORKERS: usize = 16;
-
-/// The fewest views worth a worker of their own.
-const MIN_PER_WORKER: usize = 16;
-
-/// A view an import is to store, with the delta it came as, if any, and its base.
-struct Pending {
-    id: ViewId,
-    contents: Vec<u8>,
-    delta: Option<Delta>,
-}
-
-/// A delta a view came as, with its base, and the bytes of the base it was applied to.
-struct Delta {
-    base: ViewId,
-    bytes: Vec<u8>,
-    applied_to: Applied,
-}
-
-/// The bytes of its base a delta was applied to.
-enum Applied {
-    /// The store's: in normal form.
-    Stored,
-    /// Those of the view at this index in [`Batch::views`], as received.
-    Batch(usize),
-    /// Those of a view received in an earlier batch, as received.
-    Earlier,
-}
-
-enum Item {
-    /// The view at this index in [`Batch::views`].
-    View(usize),
-    Operation(OperationId, Vec<u8>),
-}
-
-/// What an import has taken in, in the order the bundle had it, and not yet stored.
-#[derive(Default)]
-struct Batch {
-    items: Vec<Item>,
-    views: Vec<Pending>,
-    /// Each view's index in `views`.
-    by_id: HashMap<ViewId, usize>,
-    /// What the views and operations take, roughly.
-    bytes: usize,
-}
-
-impl Batch {
-    fn push_view(&mut self, id: ViewId, contents: Vec<u8>, delta: Option<Delta>) {
-        self.bytes += contents.len() + delta.as_ref().map_or(0, |delta| delta.bytes.len());
-        self.by_id.insert(id.clone(), self.views.len());
-        self.items.push(Item::View(self.views.len()));
-        self.views.push(Pending {
-            id,
-            contents,
-            delta,
-        });
-    }
-
-    /// A view taken in, as received.
-    fn view(&self, id: &ViewId) -> Option<&[u8]> {
-        self.by_id
-            .get(id)
-            .map(|&i| self.views[i].contents.as_slice())
-    }
-
-    /// Whether to store what it holds before taking in more.
-    fn full(&self) -> bool {
-        self.views.len() >= IMPORT_BATCH
-            || self.items.len() >= IMPORT_ITEMS
-            || self.bytes >= IMPORT_BYTES
-    }
-}
-
-/// Whether an operation or view is what it says it is, and may be stored.
-fn admit(checked: Admitted) -> Result<(), CanonicalError> {
-    let Admitted {
-        kind,
-        malformed,
-        expected,
-        actual,
-        names_its_commits,
-    } = checked;
-    if expected != actual {
-        Err(CanonicalError::HashMismatch {
-            kind,
-            expected,
-            actual,
-        })
-    } else if !names_its_commits {
-        Err(malformed(expected))
-    } else {
-        Ok(())
-    }
-}
-
 fn io_err(path: &Path) -> impl FnOnce(io::Error) -> CanonicalError + '_ {
     move |source| CanonicalError::Io {
         path: path.to_owned(),
         source,
     }
 }
-
-/// An operation [`CanonicalStore::import_operations`] took in, with its parents if it stored
-/// it, or `None` if it was stored already.
-pub type Imported = (CanonicalOp, Option<Vec<CanonicalOp>>);
 
 pub struct CanonicalStore {
     shared: Arc<Shared>,
@@ -906,343 +755,6 @@ impl CanonicalStore {
         }
         Ok(order)
     }
-
-    /// Writes `ops` and their views to a bundle, compressed, in the given order, which must
-    /// put ancestors first (as [`Self::ancestors_until`] does).
-    ///
-    /// The reader must have the parents of `ops` that are not among them, as it does when
-    /// `ops` is `anc*(head) \ anc*(base)` and it has `base`. Then it has every parent's view
-    /// by the time it reads an operation, so a view a parent has is not sent at all, and
-    /// any other view goes as a delta against the first parent's: consecutive views
-    /// usually differ in a few bookmarks, however large they are. A delta is between the two
-    /// views' normal forms (see `normal_view_bytes`), as the reader assumes when it
-    /// takes the view one delta made as the base of the next.
-    pub fn export_operations(&self, ops: &[CanonicalOp], out: &Path) -> Result<(), CanonicalError> {
-        let mut writer = BundleWriter::create(out)?;
-        writer.begin_compressed()?;
-        let mut sent = HashSet::new();
-        // The views of the operations written so far, which are usually the next ones'
-        // parents.
-        let mut views: HashMap<CanonicalOp, ViewId> = HashMap::new();
-        // The last view a delta went to, in normal form: usually the next delta's base.
-        let mut last: Option<(ViewId, Vec<u8>)> = None;
-        for id in ops {
-            let encoded = self.operation_bytes(id)?;
-            let view_id = encoded_view_id(&encoded)
-                .ok_or_else(|| CanonicalError::MalformedOperation(id.0.hex()))?;
-            let view_id = ViewId::from_bytes(view_id);
-            let mut parent_views = vec![];
-            for parent in self.parents(id)? {
-                parent_views.push(match views.get(&parent) {
-                    Some(view) => view.clone(),
-                    None => self.read_operation(&parent)?.view_id,
-                });
-            }
-            let view = &view_id;
-            if !is_root_view(view) && !parent_views.contains(view) && sent.insert(view.clone()) {
-                let base = parent_views.first().filter(|base| !is_root_view(base));
-                let stored = match base {
-                    Some(base) => self
-                        .shared
-                        .log
-                        .stored_delta_against(view, base)
-                        .map_err(self.shared.log_err())?,
-                    None => None,
-                };
-                match base {
-                    // Stored against the base the reader has: sent as it is.
-                    Some(base) if stored.is_some() => {
-                        let delta = stored.expect("matched");
-                        writer.view_delta_made(view.as_bytes(), base.as_bytes(), &delta)?;
-                        last = None;
-                    }
-                    Some(base) => {
-                        let base_bytes = match last.take() {
-                            Some((last_id, bytes)) if last_id == *base => bytes,
-                            _ => self.normal_view_bytes(base)?,
-                        };
-                        let view_bytes = self.normal_view_bytes(view)?;
-                        writer.view_delta(
-                            view.as_bytes(),
-                            base.as_bytes(),
-                            &base_bytes,
-                            &view_bytes,
-                        )?;
-                        last = Some((view.clone(), view_bytes));
-                    }
-                    None => writer.view(view.as_bytes(), &self.view_bytes(view)?)?,
-                }
-            }
-            writer.operation(id.0.as_bytes(), &encoded)?;
-            views.insert(id.clone(), view_id);
-        }
-        Ok(writer.finish()?)
-    }
-
-    /// Exports operations with the canonical bodies needed to rename record names later.
-    /// The extra bodies are metadata, including their parents and views; receivers must
-    /// not stage or realize them merely because they occur in the bundle.
-    pub fn export_operations_with_records(
-        &self,
-        ops: &[CanonicalOp],
-        record_ops: &[CanonicalOp],
-        out: &Path,
-    ) -> Result<(), CanonicalError> {
-        if record_ops.is_empty() {
-            return self.export_operations(ops, out);
-        }
-        let mut exported = self.record_operations(record_ops)?;
-        let mut seen: HashSet<CanonicalOp> = exported.iter().cloned().collect();
-        exported.extend(ops.iter().filter(|op| seen.insert((*op).clone())).cloned());
-        self.export_operations(&exported, out)
-    }
-
-    /// The complete operation ancestry of record names, parents first. Unlike
-    /// `ancestors_until`, missing bodies or views are errors: a record holder must be able
-    /// to rename every name after a later rollback, without realizing its old history.
-    pub fn record_operations(
-        &self,
-        record_ops: &[CanonicalOp],
-    ) -> Result<Vec<CanonicalOp>, CanonicalError> {
-        let ops = self.ancestors_until(record_ops, |_| false)?;
-        for id in record_ops.iter().chain(&ops) {
-            let op = self.read_operation(id)?;
-            if !self.has_view(&op.view_id) {
-                self.read_view(&op.view_id)?;
-            }
-            for parent in &op.parents {
-                self.read_operation(&CanonicalOp(parent.clone()))?;
-            }
-        }
-        Ok(ops)
-    }
-
-    /// Verifies and stores the views and operations of a bundle written by
-    /// [`Self::export_operations`]. Returns the operations in bundle order, each with its
-    /// parents if this stored it, or `None` if it was stored already.
-    pub fn import_operations(&self, bundle_path: &Path) -> Result<Vec<Imported>, CanonicalError> {
-        let mut ops = vec![];
-        let mut batch = Batch::default();
-        // The last view a delta made, in normal form (see `normal_view_bytes`): usually the
-        // next delta's base, since consecutive operations' views go as deltas against each
-        // other.
-        let mut last: Option<(ViewId, Vec<u8>)> = None;
-        bundle::read(bundle_path, |record| {
-            match record {
-                Record::View { id, contents } => {
-                    let id = ViewId::new(id);
-                    if !self.has_view(&id) && batch.view(&id).is_none() {
-                        batch.push_view(id, contents, None);
-                    }
-                }
-                Record::ViewDelta { id, base, delta } => {
-                    let (id, base) = (ViewId::new(id), ViewId::new(base));
-                    if !self.has_view(&id) && batch.view(&id).is_none() {
-                        let in_batch = batch.by_id.get(&base).copied();
-                        let (base_contents, applied_to) = match last.take() {
-                            Some((last_id, bytes)) if last_id == base => {
-                                (bytes, in_batch.map_or(Applied::Earlier, Applied::Batch))
-                            }
-                            _ => match in_batch {
-                                Some(at) => (batch.views[at].contents.clone(), Applied::Batch(at)),
-                                None if self.has_view(&base) => {
-                                    (self.normal_view_bytes(&base)?, Applied::Stored)
-                                }
-                                None => {
-                                    return Err(CanonicalError::MissingDeltaBase {
-                                        view: id.hex(),
-                                        base: base.hex(),
-                                    });
-                                }
-                            },
-                        };
-                        let contents = bundle::apply_view_delta(&base_contents, &delta)?;
-                        last = Some((id.clone(), contents.clone()));
-                        let delta = Delta {
-                            base,
-                            bytes: delta,
-                            applied_to,
-                        };
-                        batch.push_view(id, contents, Some(delta));
-                    }
-                }
-                Record::Operation { id, contents } => {
-                    batch.bytes += contents.len();
-                    batch
-                        .items
-                        .push(Item::Operation(OperationId::new(id), contents));
-                }
-                _ => {
-                    return Err(ObjectError::MalformedBundle(
-                        "unexpected record in an operation bundle".to_owned(),
-                    )
-                    .into());
-                }
-            }
-            if batch.full() {
-                self.store_batch(std::mem::take(&mut batch), &mut ops)?;
-            }
-            Ok(())
-        })?;
-        self.store_batch(batch, &mut ops)?;
-        Ok(ops)
-    }
-
-    /// Verifies the views and operations of `batch`, the views in parallel, then appends
-    /// them all, in order, under one lock. Adds the operations to `ops`, as
-    /// [`Self::import_operations`] returns them.
-    fn store_batch(&self, batch: Batch, ops: &mut Vec<Imported>) -> Result<(), CanonicalError> {
-        let normal = self.verify_views(&batch.views)?;
-        // Which views came in normal form.
-        let normal_form: Vec<bool> = batch
-            .views
-            .iter()
-            .zip(&normal)
-            .map(|(view, normal)| view.contents == *normal)
-            .collect();
-        // The operations to store, each once: not those stored already.
-        let mut seen = HashSet::new();
-        let new: Vec<(usize, &OperationId, &[u8])> = batch
-            .items
-            .iter()
-            .enumerate()
-            .filter_map(|(at, item)| match item {
-                Item::Operation(id, bytes) => Some((at, id, bytes.as_slice())),
-                Item::View(_) => None,
-            })
-            .filter(|(_, id, _)| {
-                !self.has_operation(&CanonicalOp((*id).clone())) && seen.insert((*id).clone())
-            })
-            .collect();
-        let verified = in_parallel(&new, |_, (_, id, bytes)| self.verify_operation(id, bytes));
-        let mut stored: Vec<Option<Vec<OperationId>>> = vec![None; batch.items.len()];
-        for ((at, _, _), parents) in new.iter().zip(verified) {
-            stored[*at] = Some(parents?);
-        }
-        #[cfg(test)]
-        if let Some(meanwhile) = self
-            .meanwhile
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
-        {
-            meanwhile();
-        }
-        self.shared
-            .log
-            .append(|appender| {
-                // Which views this append wrote, with the bytes this batch has for them.
-                let mut written = vec![false; batch.views.len()];
-                for (item, parents) in batch.items.iter().zip(&stored) {
-                    match item {
-                        Item::View(index) => {
-                            let Pending {
-                                id,
-                                contents,
-                                delta,
-                            } = &batch.views[*index];
-                            let normal = &normal[*index];
-                            // The delta made the bytes received from those of its base it was
-                            // applied to. Stored, it makes, from the bytes the log holds for the
-                            // base, the view's: so only if both are what the log holds. For a
-                            // base in this batch, the log holds its bytes only if they were in
-                            // normal form and this append wrote them: another process may have
-                            // appended it first, in bytes of its own.
-                            let in_normal_form = |at: usize| normal_form[at] && written[at];
-                            let delta = delta
-                                .as_ref()
-                                .filter(|delta| {
-                                    normal == contents
-                                        && match delta.applied_to {
-                                            Applied::Stored => true,
-                                            Applied::Batch(at) => in_normal_form(at),
-                                            Applied::Earlier => false,
-                                        }
-                                })
-                                .map(|delta| (&delta.base, delta.bytes.as_slice()));
-                            written[*index] = appender.view(id, normal, delta)?;
-                        }
-                        Item::Operation(id, bytes) => {
-                            if parents.is_some() {
-                                appender.operation(id, bytes)?;
-                            }
-                        }
-                    }
-                }
-                Ok(())
-            })
-            .map_err(self.shared.log_err())?;
-        for (item, parents) in batch.items.into_iter().zip(stored) {
-            if let Item::Operation(id, _) = item {
-                let parents = parents.map(|parents| parents.into_iter().map(CanonicalOp).collect());
-                ops.push((CanonicalOp(id), parents));
-            }
-        }
-        Ok(())
-    }
-
-    /// Checks each view, decoded, against its id, as [`Self::import_view`] does, and returns
-    /// its normal form. Decoding takes most of an import's time, so workers share it, each
-    /// with a scratch store of its own.
-    fn verify_views(&self, views: &[Pending]) -> Result<Vec<Vec<u8>>, CanonicalError> {
-        self.shared
-            .views
-            .with_workers(|| in_parallel(views, |worker, view| self.verify_view(worker, view)))
-            .into_iter()
-            .collect()
-    }
-
-    fn verify_view(&self, worker: usize, view: &Pending) -> Result<Vec<u8>, CanonicalError> {
-        let Pending { id, contents, .. } = view;
-        let normal =
-            normal_view(contents).ok_or_else(|| CanonicalError::MalformedView(id.hex()))?;
-        let decoded = self.shared.views.decode_in(worker, id, &normal)?;
-        admit(Admitted {
-            kind: "view",
-            malformed: CanonicalError::MalformedView,
-            expected: id.hex(),
-            actual: ViewId::new(blake2b_hash(&decoded).to_vec()).hex(),
-            names_its_commits: names_decoded_commits(
-                &normal,
-                encoded_view_commits,
-                view_commit_ids(&decoded),
-            ),
-        })?;
-        Ok(normal)
-    }
-
-    /// A stored view in normal form (see `normal_view`), which is how the store holds
-    /// it.
-    fn normal_view_bytes(&self, id: &ViewId) -> Result<Vec<u8>, CanonicalError> {
-        self.view_bytes(id)
-    }
-}
-
-/// A view's bytes as a function of its content alone, which view deltas are between, and
-/// which the store holds. jj encodes `head_ids`, a set, and `wc_commit_ids`, a map, in
-/// hash order, so two stores can be given different bytes for one view. Sorting the
-/// top-level fields, and the entries of those two among them, leaves nothing to chance,
-/// without decoding the view. The result is a valid encoding of the same view, for any
-/// encoding this jj-lib writes. `None` if `encoded` isn't a protobuf message.
-fn normal_view(encoded: &[u8]) -> Option<Vec<u8>> {
-    /// `head_ids` and `wc_commit_ids`.
-    const UNORDERED: [u32; 2] = [1, 8];
-    let mut fields = top_level_fields(encoded)?;
-    // Stable, so other repeated fields keep their order.
-    fields.sort_by(|(number, bytes), (other_number, other_bytes)| {
-        number.cmp(other_number).then_with(|| {
-            if UNORDERED.contains(number) {
-                bytes.cmp(other_bytes)
-            } else {
-                std::cmp::Ordering::Equal
-            }
-        })
-    });
-    let mut normal = Vec::with_capacity(encoded.len());
-    for (_, bytes) in fields {
-        normal.extend_from_slice(bytes);
-    }
-    Some(normal)
 }
 
 /// Adds the stored `kind` named `name` to `torn` if `read`, its hash once read, isn't
@@ -1268,227 +780,6 @@ fn is_root_view(id: &ViewId) -> bool {
     id.as_bytes().iter().all(|&b| b == 0)
 }
 
-/// Calls `each` with the number and payload of every length-delimited field of an encoded
-/// message, in order; fields of other wire types hold no id or message. `None` if the
-/// message, or `each`, finds it malformed.
-fn each_field<'a>(
-    mut bytes: &'a [u8],
-    mut each: impl FnMut(u32, &'a [u8]) -> Option<()>,
-) -> Option<()> {
-    while !bytes.is_empty() {
-        let (key, payload) = next_field(&mut bytes)?;
-        if key & 7 == 2 {
-            each(u32::try_from(key >> 3).ok()?, payload)?;
-        }
-    }
-    Some(())
-}
-
-/// The last field `number` of an encoded message, which is what prost decodes a singular
-/// field as, if there is one.
-fn last_field(bytes: &[u8], number: u32) -> Option<Option<&[u8]>> {
-    let mut last = None;
-    each_field(bytes, |n, payload| {
-        if n == number {
-            last = Some(payload);
-        }
-        Some(())
-    })?;
-    Some(last)
-}
-
-/// An encoded operation's view id.
-fn encoded_view_id(op: &[u8]) -> Option<&[u8]> {
-    last_field(op, 1)?
-}
-
-/// Where [`encoded_op_commits`] and [`encoded_view_commits`] report each id they find,
-/// which ends the walk by returning `None`.
-type Found<'a, 'f> = dyn FnMut(&'a [u8]) -> Option<()> + 'f;
-
-fn id<'a>(bytes: &'a [u8], found: &mut Found<'a, '_>) -> Option<()> {
-    found(bytes)
-}
-
-/// A singular id field of the message `bytes`, which prost decodes as empty when absent,
-/// and jj then takes for a commit.
-fn required_id<'a>(bytes: &'a [u8], number: u32, found: &mut Found<'a, '_>) -> Option<()> {
-    id(last_field(bytes, number)?.unwrap_or_default(), found)
-}
-
-/// In the message `bytes`, each field `number`, through `each`.
-fn field<'a>(
-    bytes: &'a [u8],
-    number: u32,
-    found: &mut Found<'a, '_>,
-    each: fn(&'a [u8], &mut Found<'a, '_>) -> Option<()>,
-) -> Option<()> {
-    each_field(bytes, |n, payload| {
-        if n == number {
-            each(payload, found)?;
-        }
-        Some(())
-    })
-}
-
-/// `RefConflict.Term` and `RefTargetTerm`: an id, if present.
-fn term<'a>(bytes: &'a [u8], found: &mut Found<'a, '_>) -> Option<()> {
-    field(bytes, 1, found, id)
-}
-
-/// `RefTarget`: an id (legacy), a `RefConflictLegacy` of ids, or a `RefConflict` of terms,
-/// its removes and adds alike.
-fn target<'a>(bytes: &'a [u8], found: &mut Found<'a, '_>) -> Option<()> {
-    each_field(bytes, |number, payload| match number {
-        1 => id(payload, found),
-        2 => each_field(payload, |number, payload| match number {
-            1 | 2 => id(payload, found),
-            _ => Some(()),
-        }),
-        3 => each_field(payload, |number, payload| match number {
-            1 | 2 => term(payload, found),
-            _ => Some(()),
-        }),
-        _ => Some(()),
-    })
-}
-
-/// Calls `found` with every commit id an encoded operation holds: its recorded predecessors
-/// (`CommitPredecessors`), with the fields this jj-lib's `simple_op_store.proto` gives them.
-/// An id is reported as jj decodes it, so an absent one that jj decodes as empty is reported
-/// empty, for the caller to refuse.
-fn encoded_op_commits<'a>(op: &'a [u8], found: &mut Found<'a, '_>) -> Option<()> {
-    each_field(op, |number, payload| match number {
-        4 => {
-            required_id(payload, 1, found)?;
-            field(payload, 2, found, id)
-        }
-        _ => Some(()),
-    })
-}
-
-/// [`encoded_op_commits`] for an encoded view, with legacy fields included: every commit
-/// that jj's decoding of it refers to, and none it doesn't in what this jj-lib writes (see
-/// the test `encoded_commits_are_referenced_commits`).
-fn encoded_view_commits<'a>(view: &'a [u8], found: &mut Found<'a, '_>) -> Option<()> {
-    each_field(view, |number, payload| match number {
-        // `head_ids`.
-        1 => id(payload, found),
-        // The legacy `wc_commit_id` and `git_head_legacy`, which jj reads only if not empty.
-        2 | 7 if !payload.is_empty() => id(payload, found),
-        // `wc_commit_ids`, a map entry with the id as its value.
-        8 => required_id(payload, 2, found),
-        // `Bookmark`: its local target, and its `RemoteBookmark`s' (legacy).
-        5 => each_field(payload, |number, payload| match number {
-            2 => target(payload, found),
-            3 => field(payload, 2, found, target),
-            _ => Some(()),
-        }),
-        // `Tag`, and `GitHead`.
-        6 | 13 => field(payload, 2, found, target),
-        // `RemoteView`: its bookmarks' and tags' `RemoteRef`s, each with its terms.
-        11 => each_field(payload, |number, payload| match number {
-            2 | 3 => field(payload, 2, found, term),
-            _ => Some(()),
-        }),
-        // `GitRef`: a target, or without one its id (legacy).
-        3 => match last_field(payload, 3)? {
-            Some(_) => field(payload, 3, found, target),
-            None => required_id(payload, 2, found),
-        },
-        // The legacy `git_head`.
-        9 => target(payload, found),
-        _ => Some(()),
-    })
-}
-
-/// Every commit a view refers to, as jj decodes it. It is taken apart field by field, so that
-/// a jj-lib with more of them fails to build here, and whoever upgrades it checks
-/// [`encoded_view_commits`] against the new schema.
-fn view_commit_ids(view: &View) -> impl Iterator<Item = &CommitId> {
-    let View {
-        head_ids,
-        local_bookmarks,
-        local_tags,
-        remote_views,
-        git_refs,
-        git_heads,
-        wc_commit_ids,
-    } = view;
-    let remote_targets = remote_views
-        .values()
-        .flat_map(|RemoteView { bookmarks, tags }| {
-            bookmarks
-                .values()
-                .chain(tags.values())
-                .map(|RemoteRef { target, state: _ }| target)
-        });
-    let targets = local_bookmarks
-        .values()
-        .chain(local_tags.values())
-        .chain(git_refs.values())
-        .chain(git_heads.values())
-        .chain(remote_targets);
-    head_ids
-        .iter()
-        .chain(targets.flat_map(|target| target.iter().flatten()))
-        .chain(wc_commit_ids.values())
-}
-
-/// [`view_commit_ids`] for an operation: its recorded predecessors.
-fn op_commit_ids(op: &Operation) -> impl Iterator<Item = &CommitId> {
-    let Operation {
-        view_id: _,
-        parents: _,
-        metadata: _,
-        commit_predecessors,
-    } = op;
-    commit_predecessors
-        .iter()
-        .flatten()
-        .flat_map(|(commit, predecessors)| std::iter::once(commit).chain(predecessors))
-}
-
-/// Whether `encoded`, walked by `walk`, names exactly the commits that jj's decoding of it
-/// refers to, as everything this jj-lib encodes does. Reading stored views' and operations'
-/// commits from their encodings (see [`CanonicalStore::required_commits`]) relies on it, so
-/// nothing else is stored: a peer's encoding that jj reads differently, such as one with a
-/// legacy field contradicting its replacement, would otherwise stand for the view's id.
-fn names_decoded_commits<'a, 'b>(
-    encoded: &'a [u8],
-    walk: fn(&'a [u8], &mut Found<'a, '_>) -> Option<()>,
-    decoded: impl Iterator<Item = &'b CommitId>,
-) -> bool {
-    let mut named = vec![];
-    if walk(encoded, &mut |id| {
-        named.push(id);
-        Some(())
-    })
-    .is_none()
-    {
-        return false;
-    }
-    let mut decoded: Vec<&[u8]> = decoded.map(|id| id.as_bytes()).collect();
-    for ids in [&mut named, &mut decoded] {
-        ids.sort_unstable();
-        ids.dedup();
-    }
-    named == decoded
-}
-
-/// The top-level fields of a protobuf message, each with its number and its encoding,
-/// key included, in order.
-fn top_level_fields(mut bytes: &[u8]) -> Option<Vec<(u32, &[u8])>> {
-    let mut fields = vec![];
-    while !bytes.is_empty() {
-        let start = bytes;
-        let (key, _) = next_field(&mut bytes)?;
-        let number = u32::try_from(key >> 3).ok()?;
-        fields.push((number, &start[..start.len() - bytes.len()]));
-    }
-    Some(fields)
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -1504,7 +795,12 @@ mod tests {
     use jj_lib::op_store::RemoteRefState;
     use prost::Message as _;
 
+    use jj_lib::op_store::RemoteRef;
+    use jj_lib::op_store::RemoteView;
+
     use super::*;
+    use crate::objects::bundle;
+    use crate::objects::bundle::BundleWriter;
 
     /// What the walker must find: every commit that jj's decoding of an operation and its
     /// view refers to.

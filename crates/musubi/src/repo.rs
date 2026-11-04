@@ -1,12 +1,24 @@
 //! Locating and opening the repository a command runs in.
 
+use std::io::Write as _;
 use std::path::Path;
 use std::path::PathBuf;
+
+use std::time::Duration;
 
 use anyhow::Context as _;
 use musubi_jj::node::NodeRepo;
 
+use crate::block_on;
+use crate::config::Entry;
+use crate::config::HiveConfig;
+use crate::config::UserState;
+use crate::control;
+use crate::copy;
+use crate::daemon;
 use crate::settings;
+use crate::socket::Socket;
+use crate::ui::Ui;
 
 /// A jj workspace and the repository it belongs to.
 #[derive(Clone)]
@@ -52,4 +64,69 @@ impl Located {
         let repo_config = settings::existing_repo_config_path(&self.repo_path)?;
         Ok(NodeRepo::open(&self.repo_path, &settings)?.with_repo_config(repo_config))
     }
+}
+
+/// The repository at `start`, its record and its entry, if it is the copy of its key here
+/// ([`copy`]); else fails, saying what it is. A copy whose entry is at a path that no longer
+/// holds it moved here: its entry follows it, and the daemon serves it here.
+pub fn the_copy(
+    ui: &Ui,
+    start: &Path,
+    socket: &Socket,
+) -> anyhow::Result<(Located, HiveConfig, Entry)> {
+    let located = Located::find(start)?;
+    copy::check_owner(&located.repo_path)?;
+    let found = copy::Found::resolve(&located)?;
+    let state = UserState::load()?;
+    let entry = found.key.as_deref().and_then(|key| state.entry(key));
+    let standing = copy::standing_of(&located, &found, entry);
+    let (copy::Standing::Copy, Some(record), Some(entry)) = (standing, &found.record, entry) else {
+        anyhow::bail!(
+            "{}",
+            copy::not_the_copy(standing, found.record.as_ref(), entry)
+        );
+    };
+    let entry = follow_move(ui, &located, entry, socket)?;
+    Ok((located, record.clone(), entry))
+}
+
+/// Moves `entry` to `located`, the copy it names, if its path no longer holds it, and has
+/// the daemon serve it there. Returns the entry as it is now.
+pub fn follow_move(
+    ui: &Ui,
+    located: &Located,
+    entry: &Entry,
+    socket: &Socket,
+) -> anyhow::Result<Entry> {
+    if entry.path == located.workspace_root || copy::holds(entry, &entry.path) {
+        return Ok(entry.clone());
+    }
+    let moved = Entry {
+        path: located.workspace_root.clone(),
+        ..entry.clone()
+    };
+    // Unless the daemon, or another command, changed it first, which may have made another
+    // repository the copy.
+    anyhow::ensure!(
+        UserState::move_entry(entry, moved.path.clone())?,
+        "this machine's record of this repository changed meanwhile; run the command again"
+    );
+    // Not with what the command prints, as `musubi list -T` prints only its lines.
+    writeln!(
+        ui.stderr(),
+        "This repository moved here from {}; it syncs from here now",
+        entry.path.display()
+    )?;
+    // The daemon starts serving it here at once, and syncs in its own time: the command
+    // needn't wait for that.
+    block_on(async {
+        if let Some(client) = daemon::running(socket).await? {
+            client
+                .add(control::context(Duration::from_secs(2)), moved.key.clone())
+                .await
+                .ok();
+        }
+        Ok::<_, anyhow::Error>(())
+    })?;
+    Ok(moved)
 }

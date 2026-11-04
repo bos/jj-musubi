@@ -488,6 +488,19 @@ impl Search {
         self.note(&tc);
     }
 
+    /// A full trim removes an accepted forget beneath new unpublished work.
+    #[rule]
+    fn trim_below_accepted_forget(&mut self, tc: TestCase) {
+        let m = self.machine(&tc);
+        let mut world = self.world.borrow_mut();
+        let others: Vec<usize> = (0..world.nodes()).filter(|&o| o != m).collect();
+        let other = others[pick(&tc, others.len())];
+        fired("trim_below_accepted_forget");
+        world.trim_below_accepted_forget(m, other);
+        drop(world);
+        self.note(&tc);
+    }
+
     /// Any `jj` command: snapshots, imports git refs, merges concurrent operations, and,
     /// with auto-update-stale as the tests set it, updates a stale working copy.
     #[rule]

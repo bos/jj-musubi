@@ -330,10 +330,13 @@ This checks `advance_to` with supplied valid canonical survivor inputs; it does 
 
 `check_mergeable` refuses an unsafe merge before publishing the realization. The race
 `root_parent_merge_bug_is_explained` checks both the refusal and that the affected machine's
-raw heads stay unchanged. If the later unpublished merge fails (a store error, a jj bug, or
-record-taking changing the merge base), `advance` publishes the advanced head set instead,
-and its working-copy cleanup tries the normal merge path. That path may fail and return an
-error after the advance; it must not be described as an atomic rollback.
+raw heads stay unchanged. In an ordinary advance, if the later unpublished merge fails
+(a store error, a jj bug, or record-taking changing the merge base), `advance` publishes the
+advanced head set instead, and its working-copy cleanup tries the normal merge path. That
+path may fail and return an error after the advance; it is not an atomic rollback.
+Root-based transitions that merge before the first export instead return that later merge
+error without this separate-head fallback. The fault test below has no prepared records;
+it does not establish error-path coverage for that root-based branch.
 
 `node::realize::advance_tests::late_merge_store_errors_preserve_heads_and_recover` runs this
 later boundary with real repositories. Its test-only op-store wrapper delegates reads and
@@ -1319,6 +1322,29 @@ other copy's acknowledgement before pruning. Reverting combined-frontier discove
 the presence check. `PresenceContract.pres_eq` assumes the correct survivor has been selected;
 it does not prove this native discovery. The protocol pruning model's participants are fixed;
 it does not prove that native presence selects the correct set of copies to wait for.
+
+`history::a_trim_below_an_accepted_forget_keeps_the_copy_forgotten` covers the complementary
+case with only unpublished work surviving. A full trim removes both accepted frontiers:
+either the saved base predates this copy's newer accepted forget, or a later remote forget
+became its saved base beyond its older own push. That older push is seeded after all three
+copies are present, so selecting it must observably restore the forgotten copy. The native
+fallback selects a maximal accepted descendant, preserving the forget in either order.
+Reinstating first-base selection fails the regression. The generated
+`trim_below_accepted_forget` rule and `e2e_trim_below_accepted_forget` retain independent
+import and history checks. This is another obligation to select the state that
+`PresenceContract.pres_eq` preserves; it adds no model transition or durability assumption.
+
+The first changed-branch mutation campaign exposed a gap: `&&` to `||` survived the
+newer-own-push case. The complementary newer-saved-base case catches it: the mutated loop
+replaces that newer state with the older own push. The final campaign caught all three
+executable mutants; returning a default `CanonicalOp` was unviable, and none survived.
+It selected `NodeRepo::standing_for` and its changed lines with `--in-diff`, excluding
+unrelated field deletions, and ran these tests in `musubi-sync`: the new regression,
+`adapter::pruning_waits_for_a_copy_whose_work_was_abandoned`, and
+`history::a_trim_below_an_accepted_push_keeps_the_other_copy_present`. The command used
+`--package musubi-jj --test-tool nextest --timeout 40 -- -p musubi-sync -E <selection>`.
+The native regression also failed under a separate hand-written first-frontier mutant.
+All defects were restored before validation.
 
 When the prepared base becomes the root, native publication must also retain the current
 physical heads' per-machine Git fields. `e2e_trim_below_accepted_push` checks the unchanged

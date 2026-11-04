@@ -6,6 +6,10 @@ change the protocol, so run the same release on the hub and every machine (see
 
 ## Unreleased
 
+- A full history trim keeps a copy forgotten when its forget was accepted during a sync
+  that is still finishing. Previously new work above that forget could bring the copy
+  back into the hive.
+
 - Trimming all previously shared operation history beneath new work keeps the other machines
   in the hive. Previously the hub could forget a machine and discard an abandonment before
   it had taken it, leaving that machine unable to sync. Repair also keeps the surviving

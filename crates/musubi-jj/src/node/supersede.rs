@@ -2039,12 +2039,16 @@ impl NodeRepo {
                 return Ok(Some(c.clone()));
             }
             if let Some(c) = self.canonical_of(&id) {
+                // The saved base may precede a push accepted since it. When a full trim
+                // leaves unpublished work on the root, preserve the newer accepted state,
+                // including forgets, rather than whichever watched base came first.
+                let mut standing = c;
                 for base in bases {
-                    if *base != c && self.canonical.is_ancestor_of(&c, base)? {
-                        return Ok(Some(base.clone()));
+                    if *base != standing && self.canonical.is_ancestor_of(&standing, base)? {
+                        standing = base.clone();
                     }
                 }
-                return Ok(Some(c));
+                return Ok(Some(standing));
             }
             let op = self.loader.op_store().read_operation(&id.0).block_on()?;
             stack.extend(LocalOp::parents_of(&op));

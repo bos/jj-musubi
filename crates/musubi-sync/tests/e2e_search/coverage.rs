@@ -36,6 +36,7 @@ pub const RULES: &[&str] = &[
     "at_op",
     "op_abandon",
     "trim_below_accepted_push",
+    "trim_below_accepted_forget",
     "abandon_while_forgotten",
     "status",
     "workspace_add",
@@ -295,6 +296,14 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
             "sync_partial",
             "bookmark_delete",
         ]),
+    ),
+    (
+        "a_trim_below_an_accepted_forget_keeps_the_copy_forgotten",
+        Some(&["trim_below_accepted_forget"]),
+    ),
+    (
+        "e2e_trim_below_accepted_forget",
+        Some(&["trim_below_accepted_forget"]),
     ),
     // The search interleaves whole policy steps, not a command inside adapter.advance.
     (

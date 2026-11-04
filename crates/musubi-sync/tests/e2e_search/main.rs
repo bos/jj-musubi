@@ -251,6 +251,19 @@ fn e2e_trim_below_accepted_push() {
     world.converge();
 }
 
+/// The generated forget/trim rule retains the independent import and history checks.
+#[test]
+fn e2e_trim_below_accepted_forget() {
+    let mut world = World::new(Setup {
+        nodes: 2,
+        naming: Naming::Own,
+        prejoin: false,
+        secondary: false,
+    });
+    world.trim_below_accepted_forget(0, 1);
+    world.converge();
+}
+
 #[test]
 fn e2e_git_change_while_taking_a_trim() {
     for forward in [false, true] {

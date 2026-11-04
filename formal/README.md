@@ -438,6 +438,9 @@ above a saved fetch base that a trim drops in full. Discovery must match against
 accepted histories together before `pres_eq` applies to the survivor. The pruning model
 waits for its fixed participants; it does not prove the native presence-based wait set is
 correct. The regression checks that set and that pruning waits for the other copy.
+For unpublished surviving work, selecting its pre-trim state is another native obligation:
+`history::a_trim_below_an_accepted_forget_keeps_the_copy_forgotten` checks a maximal accepted
+frontier in both orders of saved base and own push. `pres_eq` does not select that frontier.
 
 Root-based native publication also selects current local Git state independently of the
 contracted shared ancestry. `Refs.lean` preserves supplied local slots, and

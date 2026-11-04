@@ -921,6 +921,7 @@ impl Refs {
             .path()
             .join(".git/refs/heads/x.lock");
         if locked {
+            std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
             std::fs::write(&lock, "").unwrap();
         }
         self.fixture.hive.sync(HERE).unwrap();

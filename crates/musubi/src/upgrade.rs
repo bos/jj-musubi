@@ -97,6 +97,11 @@ fn newer(release: &str) -> Option<Version> {
 /// Upgrades musubi, in the background, if a hub that answered runs `release`, a newer one,
 /// and no upgrade has been tried for it or a newer one.
 pub fn consider(release: &str) {
+    consider_with_wait(release, |child| wait(child, TIMEOUT));
+}
+
+/// The worker's wait is replaceable so process tests can expire a running command on cue.
+fn consider_with_wait(release: &str, wait: fn(&mut Child) -> anyhow::Result<ExitStatus>) {
     let Some(release) = newer(release) else {
         return;
     };
@@ -133,7 +138,7 @@ pub fn consider(release: &str) {
     let spawned = std::thread::Builder::new()
         .name("upgrade".to_owned())
         .spawn(move || {
-            if let Err(err) = upgrade(&release, &command) {
+            if let Err(err) = upgrade(&release, &command, wait) {
                 let why = format!("{err:#}");
                 tracing::warn!("upgrading to musubi {release}: {why}");
                 if let Ok(path) = failure_path()
@@ -152,11 +157,15 @@ pub fn consider(release: &str) {
 
 /// Runs the upgrade command for `release`, and once the binary the daemon started from is
 /// that release, has the daemon stop to start again from it.
-fn upgrade(release: &Version, command: &str) -> anyhow::Result<()> {
+fn upgrade(
+    release: &Version,
+    command: &str,
+    wait: fn(&mut Child) -> anyhow::Result<ExitStatus>,
+) -> anyhow::Result<()> {
     let exe = EXE.get().context("this daemon's binary is unknown")?;
-    // The command holds it, as its standard input, until it and whatever it starts exit: a
-    // daemon stopped meanwhile leaves the command running, and the next must not start
-    // another beside it.
+    // The command inherits the lock as standard input. A daemon stopped meanwhile leaves
+    // the command running, and the next must not start another beside it. The installer
+    // must preserve that input and stay in the foreground (see the upgrade guide).
     let state = config::state_dir()?;
     let Some(lock) = crate::lock::try_lock(&state.join("upgrade.lock"))? else {
         tracing::info!("an earlier daemon's upgrade command still runs");
@@ -176,7 +185,7 @@ fn upgrade(release: &Version, command: &str) -> anyhow::Result<()> {
         .stderr(output)
         .spawn()
         .context("starting musubi.upgrade-command")?;
-    let status = wait(&mut child, TIMEOUT)?;
+    let status = wait(&mut child)?;
     anyhow::ensure!(
         status.success(),
         "musubi.upgrade-command failed ({status}); its output is in {}",
@@ -216,6 +225,13 @@ fn shell(command: &str) -> Command {
         shell
     };
     shell.arg(command);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        // Timeout must stop the foreground installer too, not just the shell waiting for
+        // it. A separate group also keeps stopping it from signaling the daemon.
+        shell.process_group(0);
+    }
     shell
 }
 
@@ -227,8 +243,21 @@ fn wait(child: &mut Child, timeout: Duration) -> anyhow::Result<ExitStatus> {
             return Ok(status);
         }
         if Instant::now() >= deadline {
-            child.kill().ok();
-            child.wait().ok();
+            #[cfg(unix)]
+            {
+                use rustix::process::Pid;
+                use rustix::process::Signal;
+                use rustix::process::kill_process_group;
+                match kill_process_group(Pid::from_child(child), Signal::KILL) {
+                    Ok(()) | Err(rustix::io::Errno::SRCH) => (),
+                    Err(err) => return Err(err).context("stopping musubi.upgrade-command"),
+                }
+            }
+            #[cfg(windows)]
+            child.kill().context("stopping musubi.upgrade-command")?;
+            child
+                .wait()
+                .context("waiting for musubi.upgrade-command to stop")?;
             anyhow::bail!(
                 "musubi.upgrade-command ran for over {} minutes, so it was stopped",
                 timeout.as_secs() / 60
@@ -312,3 +341,6 @@ mod tests {
         assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{order:?}");
     }
 }
+
+#[cfg(all(test, unix))]
+mod process_tests;

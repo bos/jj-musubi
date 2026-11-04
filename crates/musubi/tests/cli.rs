@@ -828,17 +828,21 @@ fn the_daemon_picks_up_new_repositories() {
     let introduction = help.split("\nUsage:").next().unwrap();
     insta::assert_snapshot!(introduction, @"
     Run the daemon that keeps this machine's repositories in sync, or control it.
-    
+
     Without a subcommand, it runs the daemon in the foreground, logging to standard error. Other
     commands start it in the background when they need it, logging to `daemon.log` in musubi's state
     directory, or under systemd, to the journal.
-    
+
     After detecting that the machine has woken, it ends old ssh connections and clears the delay from
     failed ssh attempts.
-    
+
     When a hub runs a newer release of musubi, or a newer build deployed from source, the daemon runs
     the command `musubi.upgrade-command` names, if set, with `MUSUBI_UPGRADE_TO` set to it, and once the
-    `musubi` it started from is that, starts again from it.
+    `musubi` it started from is that, starts again from it. Keep the installer in the foreground and
+    preserve its standard input, which on Unix holds the upgrade lock across daemon restarts. While the
+    daemon that launched it runs, the command may run for up to an hour; a timeout stops its process
+    group on Unix, or the command process on Windows. A command surviving its daemon has no timeout
+    monitor.
     ");
     logs.daemon_of(&env, &alpha);
     logs.daemon_of(&env, &beta);
@@ -1326,6 +1330,54 @@ chmod +x "{exe}.new" && mv "{exe}.new" "{exe}"
     run(&env, &logs, create);
     let state = state_dir(&env, &alpha);
     let pid = daemon_pid(&state).unwrap();
+    let help = musubi_in(&env, &logs, &alpha, &["daemon", "--help"]);
+    insta::assert_snapshot!(help, @"
+    Run the daemon that keeps this machine's repositories in sync, or control it.
+
+    Without a subcommand, it runs the daemon in the foreground, logging to standard error. Other
+    commands start it in the background when they need it, logging to `daemon.log` in musubi's state
+    directory, or under systemd, to the journal.
+
+    After detecting that the machine has woken, it ends old ssh connections and clears the delay from
+    failed ssh attempts.
+
+    When a hub runs a newer release of musubi, or a newer build deployed from source, the daemon runs
+    the command `musubi.upgrade-command` names, if set, with `MUSUBI_UPGRADE_TO` set to it, and once the
+    `musubi` it started from is that, starts again from it. Keep the installer in the foreground and
+    preserve its standard input, which on Unix holds the upgrade lock across daemon restarts. While the
+    daemon that launched it runs, the command may run for up to an hour; a timeout stops its process
+    group on Unix, or the command process on Windows. A command surviving its daemon has no timeout
+    monitor.
+
+    Usage: musubi daemon [OPTIONS] [COMMAND]
+
+    Commands:
+      start      Start the daemon in the background, unless it is running
+      stop       Stop the running daemon
+      restart    Stop the running daemon, if any, and start a new one in the background
+      install    Start the daemon at login from now on (a launchd agent on macOS, a systemd user unit on
+                 Linux, a Run registry entry on Windows), and now
+      uninstall  Stop starting the daemon at login, and stop it
+      help       Print this message or the help of the given subcommand(s)
+
+    Options:
+      -h, --help
+              Print help (see a summary with '-h')
+
+    Global options:
+          --socket <SOCKET>
+              The daemon's control socket, in place of the usual one
+
+          --log <FILTER>
+              What to log, as a filter in `RUST_LOG`'s syntax: `debug`, or `info,musubi_sync=debug`. It
+              applies to this command, not to a daemon it starts, which uses `musubi.daemon.log` in jj's
+              config
+
+          --color <WHEN>
+              When to colour what it prints, as jj's `--color` does [default: as jj's `ui.color` says]
+              
+              [possible values: always, never, debug, auto]
+    ");
     hub.kill();
     let _newer = serve_newer_hub(&hub.dir);
     musubi_fails(&env, &logs, &alpha, &["sync"]);

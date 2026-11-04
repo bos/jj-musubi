@@ -1335,6 +1335,16 @@ source gives, after its release, when it was deployed and its commit, as semver 
 (`crates/musubi-sync/build.rs`), which the daemon orders releases by too, so that a build
 deployed later is newer, without a version of its own.
 
+On Unix, the upgrade command inherits `upgrade.lock` as standard input, so it can outlive a
+stopped daemon without a new daemon starting an upgrade beside it. A worker that encounters a busy
+lock leaves that release eligible for a later sync to try; a failed command consumes its
+attempt until the daemon restarts. Installers must preserve that input and remain in the
+foreground. Unix upgrade commands have their own process group, which the one-hour timeout
+kills before reaping the shell; Windows timeouts stop the command process. The timeout runs
+only in the launching daemon: if that daemon stops, a surviving command has no monitor.
+Detached installers are outside that cleanup. `upgrade::process_tests` checks these Unix OS
+boundaries rather than modeling them in Lean; Windows lock inheritance is not tested here.
+
 ## Testing
 
 The hub logic and the node sync logic are sans-IO state machines (`crates/musubi-core`): they do

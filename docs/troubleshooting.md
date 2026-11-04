@@ -163,6 +163,17 @@ running it yourself with `MUSUBI_UPGRADE_TO` set to the release or build the mes
 then run `musubi daemon restart` for the daemon to try again. If the command installs
 `musubi` somewhere else now, run `musubi daemon install` too.
 
+On Unix, restarting the daemon leaves an upgrade already running with its lock. The new
+daemon waits for the lock, then tries again on a later sync. The surviving command has no
+timeout monitor once the daemon that launched it stops. If it stalls, inspect `upgrade.log`
+and stop the installer before retrying; leave `upgrade.lock` in place so that retries cannot
+overlap it.
+
+Keep the installer in the foreground and preserve its standard input, which carries the lock.
+While the launching daemon runs, a timeout stops the command and children in its process
+group on Unix, or the command process on Windows. Detached installers are outside that
+cleanup, so check for and stop any yourself before retrying.
+
 If `upgrade.log` ends `upgrade-from-source: no tag ... in ...` or `no commit ... in ...`, this
 machine's clone of musubi's source can't fetch the release's tag, or the commit of the build
 deployed from source, that the hub runs. Push it to where that clone fetches from, then run

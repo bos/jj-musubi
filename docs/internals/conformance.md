@@ -933,6 +933,51 @@ cargo mutants --in-place --no-config --cap-lints false -p jj-musubi \
   -- --bin musubi -E 'test(/^ssh::supervisor_tests::/)'
 ```
 
+## Upgrade process boundary
+
+The upgrade worker's OS contracts are outside the protocol models. Unix tests in
+`upgrade::process_tests` exercise the production worker, shell and file lock in disposable
+processes. On 2026-11-03, each of these hand-written defects failed its named regression;
+the source was restored after each run:
+
+| Defect | Regression that fails |
+| --- | --- |
+| Drop the upgrade lock instead of passing it as the command's standard input | Lifetime |
+| Leave `Tried.release` set when the upgrade lock is busy | Lifetime |
+| On timeout, kill only the shell instead of its process group | Timeout |
+| Keep the command in the daemon's process group | Timeout |
+| Omit writing `upgrade-failed` after a nonzero command exit | Exit |
+| Omit removing `upgrade-failed` when a retry takes the lock | Exit |
+
+Lifetime is `an_upgrade_outlives_its_daemon_and_contention_can_retry`, timeout is
+`timeout_stops_the_command_and_its_child_before_retry`, and exit is
+`a_failed_command_is_reported_and_a_fresh_daemon_can_retry`.
+
+The shell-only timeout is also the pre-fix regression: after the worker reported a timeout,
+the installer's socket remained open and its inherited lock prevented retry. The fixed test
+finishes in under a second locally. These checks require an ordinary foreground installer
+that preserves standard input; they do not establish cleanup of detached processes or
+Windows process trees.
+
+A targeted generated campaign uses:
+
+```sh
+cargo mutants --in-place --no-config --package jj-musubi \
+  --file crates/musubi/src/upgrade.rs \
+  --re '(upgrade ->|wait|failure ->|failure_path|log_path|shell ->)' \
+  --exclude-re 'replace != with == in consider_with_wait' \
+  --test-tool nextest --timeout 40 -- -E 'test(/^upgrade::/)'
+```
+
+On 2026-11-03 this selected 17 mutants: 14 caught, three unviable, none surviving. The
+unviable changes introduced an invalid `let` chain, `Command::default()`, or
+`Instant * Duration`; none represents an executable defect. All six hand-written controls
+above failed their tests as intended. Both campaigns restored the source before validation.
+
+Run `--in-place` only in an isolated workspace. This selects the attempt gate, command,
+wait, and failure-reporting code; it excludes the unrelated once-only notice about an unset
+upgrade command. The CLI test covers the public entry point and actual daemon restart.
+
 ## Wire format
 
 The oracle reads one JSON object per line on stdin and writes one per line on stdout. Every

@@ -317,6 +317,21 @@ once the repository has a remote, a deploy of a revision the remote lacks. The s
 with musubi's own build script, which names the build. It doesn't fetch a commit or tag from a
 remote.
 
+`upgrade::process_tests` in the binary's Unix unit tests runs the real upgrade worker in
+separate disposable processes, without a repository, hub, service manager, or installed
+daemon. A shell waits for an installer controlled through a local socket. The tests kill
+one worker while its command runs, check that the inherited lock still excludes a new
+worker, and let that same worker retry after the command exits. Other cases expire the
+wait only after the installer has acknowledged starting, or have it exit unsuccessfully;
+they check the failure reason, saved command output, once-per-lifetime attempt gate, and a
+successful retry that removes the failure and requests a restart. The timeout test fails
+before the Unix process-group fix: the shell stops but its foreground child keeps its
+socket and lock. Socket handshakes bound synchronization; the wait callback is the only
+production seam, and supplies an already-expired timeout instead of waiting an hour.
+These tests cover ordinary foreground children preserving standard input, not detached
+installers, children that close or redirect the lock, Windows processes, or login services.
+The CLI test above still covers the command, daemon restart and status output.
+
 `copies_leave_a_removed_hive` checks that copies leave a hive removed from the hub, keeping
 their work. Before taking its final listing snapshot, it waits for both the saved membership
 and the daemon's reported repository count: the daemon saves membership before it finishes

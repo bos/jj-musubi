@@ -784,6 +784,13 @@ Where the two differ, as for a branch of the operation log that forks inside the
 merges after it, musubi rewrites the abandoning machine's local operations again to match
 contraction.
 
+A workspace's recorded operation is its snapshot basis: its view must still name the exact
+working-copy commit whose tree the files were based on. musubi chooses a surviving operation
+with the same workspace and commit, preferring the contracted image. If none exists, it keeps
+the old record so jj can snapshot local edits against the correct tree. A later native stale
+recovery can bring back old operation history, as described under known jj limitations in
+[races.md](races.md).
+
 ### Presence through an abandon
 
 Contraction keeps every surviving operation's view, but presence ([Presence](#presence)) is

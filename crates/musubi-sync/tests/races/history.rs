@@ -4130,6 +4130,44 @@ fn op_abandon_moves_every_workspace() {
     hive.assert_converged();
 }
 
+/// A full trim drops a secondary workspace's recorded operation. Its new snapshot basis
+/// must still describe its actual working-copy commit, so later stale recovery preserves
+/// edits instead of loading the empty root view and panicking.
+#[test]
+fn a_trim_keeps_a_secondary_workspaces_snapshot_basis() {
+    use jj_lib::object_id::ObjectId as _;
+
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    let second = hive.repo(0).path().with_file_name("alpha-second");
+    hive.repo(0)
+        .jj(&["workspace", "add", second.to_str().unwrap()]);
+    let workspace = "alpha-second";
+    let old =
+        hive.load(0).view().wc_commit_ids()[jj_lib::ref_name::WorkspaceName::new(workspace)].hex();
+    std::fs::write(second.join("local"), "unsnapshotted work").unwrap();
+    hive.commit(0, "upstream", "upstream work");
+    hive.sync();
+    let upstream = hive.commit_id(0, "upstream work");
+    hive.repo(1).jj(&["new", "-m", "before trim"]);
+    trim(hive.repo(1));
+    hive.sync();
+    hive.repo(1).jj(&["rebase", "-r", &old, "-o", &upstream]);
+    hive.sync();
+    hive.repo(0).jj(&["-R", second.to_str().unwrap(), "status"]);
+    // A snapshot beside a rebase can diverge, as jj's does. The edit must survive in
+    // that snapshot even if jj selects the rebased side for the working copy.
+    let saved = hive
+        .repo(0)
+        .jj(&["file", "show", "local", "-r", "heads(all() & files(local))"]);
+    assert_eq!(saved, "unsnapshotted work");
+    assert_eq!(
+        std::fs::read_to_string(second.join("upstream")).unwrap(),
+        "upstream work"
+    );
+    hive.sync();
+    hive.assert_converged();
+}
+
 /// Abandoning only history from before a machine joined rewrites the operations since
 /// into ones that canonicalize as before, so replication carries on, even once garbage
 /// collection has removed the original join point.

@@ -6,6 +6,10 @@ change the protocol, so run the same release on the hub and every machine (see
 
 ## Unreleased
 
+- Trimming history preserves each workspace's snapshot basis, including secondary workspaces
+  with unsnapshotted edits. A later stale update can no longer load the empty operation root
+  as that workspace's previous snapshot and panic.
+
 - musubi now supports jj 0.47.0. Upgrade jj on every machine, and upgrade the hub and every
   machine together, then restart their daemons (protocol 10). Builds using jj 0.46.0 cannot
   sync with this build.

@@ -255,6 +255,19 @@ Every push the policy sends must upload what the liveness proofs assume ([confor
 These pin down jj-specific behavior with real repositories made by the `jj` CLI in
 `musubi-testutil`'s hermetic environment.
 
+`translation::failed_realization_writes_forget_the_batch` blocks one real op-store view or
+operation destination with a directory. It checks that a successful child can name the missing
+parent, but `settle` returns the write error, forgets every translation in the failed batch in
+both directions, and appends none to the translation file. Published history stays readable.
+After removing the obstacle, one retry on the same handle, or after reopening, reproduces a
+healthy copy's operations and publishes history containing the old head and every batch entry.
+The healthy copy runs the shipping realization path; a separate walk checks closure directly
+through jj's store. A recorded fixture shares setup among the three failure/recovery cases.
+This reaches actual background write errors, unlike `crash_with_writes_in_flight`, which removes
+files after writes have finished. It does not inject a writer panic: the pinned simple op store's
+explicit write panic requires an operation without parents, which realization never submits.
+It makes no claim about a panic inside jj, translation-file append errors, or power-cut durability.
+
 ### The hub and the CLI
 
 `musubi-sync/tests/it/server.rs` runs one hub serving several hives over the in-memory

@@ -1060,6 +1060,164 @@ fn crash_with_writes_in_flight() {
     b.jj(&["status"]);
 }
 
+/// A failed view or operation write invalidates its whole unpublished batch, including
+/// successful children whose parent never made it to the store. Both a retry on the same
+/// handle and reopening must reproduce the healthy realizations, then publish closed history.
+#[test]
+fn failed_realization_writes_forget_the_batch() {
+    let fixture = musubi_testutil::recorded(
+        Path::new(env!("CARGO_TARGET_TMPDIR")),
+        "realization-write-failure",
+        |dir| {
+            let env = TestEnv::new();
+            let a = env.init_repo("alpha");
+            let b = env.init_repo("beta");
+            commit(&a, "f", "published");
+            let mut a_node = open(&a);
+            let mut b_node = open(&b);
+            let first = single_canonical_head(&mut a_node);
+            sync(&a_node, &mut b_node, &first);
+            for i in 0..4 {
+                a.jj(&["describe", "-m", &format!("unpublished {i}")]);
+            }
+            let head = single_canonical_head(&mut a_node);
+            ship_objects(&a_node, &b_node, &head);
+            ship_operations(&a_node, &b_node, &head);
+            drop((a_node, b_node));
+            env.save(dir);
+        },
+    );
+    for (fail_view, reopen) in [(true, false), (false, false), (false, true)] {
+        let env = TestEnv::restore(&fixture);
+        let (a, b) = (env.repo_handle("alpha"), env.repo_handle("beta"));
+        let head = single_canonical_head(&mut open(&a));
+        let mut node = open(&b);
+        let published = node.local_heads().unwrap();
+        let published_canonical = node.canonical_heads().unwrap();
+        let ops = node
+            .canonical_store()
+            .ancestors_until(std::slice::from_ref(&head), |id| {
+                node.local_of(id).is_some()
+            })
+            .unwrap();
+        assert_eq!(ops.len(), 4);
+
+        // Get exact expected operations from the shipping path in a healthy copy, rather
+        // than duplicating realization or its hashing. Leave one hinted view prepared.
+        let control_path = env.root().join("control");
+        musubi_testutil::copy_tree(b.path(), &control_path);
+        let mut control = NodeRepo::open(&control_path.join(".jj/repo"), &b.settings()).unwrap();
+        let expected: Vec<_> = ops
+            .iter()
+            .enumerate()
+            .map(|(i, op)| control.realize_pending(op, &ops[i + 1..]).unwrap())
+            .collect();
+        control.settle().unwrap();
+        let store = control.loader().op_store();
+        let contents: Vec<_> = expected
+            .iter()
+            .map(|local| pollster::block_on(store.read_operation(&local.0)).unwrap())
+            .collect();
+        assert_eq!(contents[2].parents, vec![expected[1].0.clone()]);
+        assert_ne!(contents[0].view_id, contents[1].view_id);
+        assert_ne!(contents[2].view_id, contents[1].view_id);
+
+        // A directory at one content-addressed destination makes jj's real tempfile
+        // persistence fail, without preventing the other writers from completing. No
+        // permissions, timing, production hooks, or replacement OpStore are involved.
+        let (directory, id) = if fail_view {
+            ("views", contents[1].view_id.hex())
+        } else {
+            ("operations", expected[1].0.hex())
+        };
+        let blocked = b.repo_path().join("op_store").join(directory).join(id);
+        std::fs::create_dir(&blocked).unwrap();
+        let translation_path = b.repo_path().join("musubi/translation");
+        let before = std::fs::read(&translation_path).unwrap();
+        for (i, op) in ops[..3].iter().enumerate() {
+            assert_eq!(
+                node.realize_pending(op, &ops[i + 1..]).unwrap(),
+                expected[i]
+            );
+            assert_eq!(node.local_of(op), Some(expected[i].clone()));
+        }
+        assert_eq!(std::fs::read(&translation_path).unwrap(), before);
+        let err = node.settle().unwrap_err();
+        let musubi_jj::node::NodeError::OpStore(jj_lib::op_store::OpStoreError::WriteObject {
+            object_type,
+            source,
+        }) = err
+        else {
+            panic!("unexpected write error: {err:?}");
+        };
+        assert_eq!(object_type, if fail_view { "view" } else { "operation" });
+        assert!(source.to_string().contains(blocked.to_str().unwrap()));
+        let store = node.loader().op_store();
+        assert!(pollster::block_on(store.read_operation(&expected[1].0)).is_err());
+        for i in [0, 2] {
+            assert_eq!(
+                pollster::block_on(store.read_operation(&expected[i].0)).unwrap(),
+                contents[i]
+            );
+        }
+        for (op, local) in ops[..3].iter().zip(&expected) {
+            assert_eq!(node.local_of(op), None, "batch entry still mapped: {op:?}");
+            assert_eq!(node.canonical_of(local), None);
+        }
+        assert_eq!(std::fs::read(&translation_path).unwrap(), before);
+        assert_eq!(node.local_heads().unwrap(), published);
+        assert_eq!(node.canonical_heads().unwrap(), published_canonical);
+        // No outstanding writer or stale mapping can escape a second settle or Drop.
+        node.settle().unwrap();
+        if reopen {
+            drop(node);
+            node = open(&b);
+            for op in &ops[..3] {
+                assert_eq!(node.local_of(op), None);
+            }
+        }
+        std::fs::remove_dir(&blocked).unwrap();
+
+        // One bounded replay repairs the missing parent, reuses the successful writes,
+        // and consumes the hinted fourth view with the same result as a healthy run.
+        assert_eq!(node.realize(&head).unwrap(), expected[3]);
+        for ((op, local), content) in ops.iter().zip(&expected).zip(&contents) {
+            assert_eq!(node.local_of(op), Some(local.clone()));
+            assert_eq!(node.canonical_of(local), Some(op.clone()));
+            let store = node.loader().op_store();
+            assert_eq!(
+                pollster::block_on(store.read_operation(&local.0)).unwrap(),
+                *content
+            );
+            assert!(pollster::block_on(store.read_view(&content.view_id)).is_ok());
+        }
+        node.advance(&head).unwrap();
+        let published_after = node.local_heads().unwrap();
+        assert_eq!(published_after.len(), 1);
+        // Independently walk the real store: every published operation and view loads,
+        // the failed batch is reachable, and the previous published work still is too.
+        let store = node.loader().op_store();
+        let mut seen = BTreeSet::new();
+        let mut stack = published_after.clone();
+        while let Some(local) = stack.pop() {
+            if !seen.insert(local.clone()) {
+                continue;
+            }
+            let op = pollster::block_on(store.read_operation(&local.0)).unwrap();
+            pollster::block_on(store.read_view(&op.view_id)).unwrap();
+            stack.extend(LocalOp::parents_of(&op));
+        }
+        assert!(expected.iter().all(|local| seen.contains(local)));
+        assert!(published.iter().all(|local| seen.contains(local)));
+        drop(node);
+        let node = open(&b);
+        for (op, local) in ops.iter().zip(&expected) {
+            assert_eq!(node.local_of(op), Some(local.clone()));
+        }
+        b.jj(&["status"]);
+    }
+}
+
 /// jj makes a keep ref for each commit it imports, the last step of an import, after the
 /// commit's objects have arrived. A lock that a process killed partway through left on one
 /// would fail the import, and the commit, no longer missing, would never get its keep ref.

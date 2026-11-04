@@ -175,6 +175,17 @@ such effect; no atomic rollback or successful full head change on error is inven
 adapter fault injection is still needed for those boundaries. It adds no hub durability or
 power-cut recovery guarantee.
 
+`translation::failed_realization_writes_forget_the_batch` covers a native asynchronous-write
+boundary outside that logical projection. A filesystem obstacle makes the pinned jj simple op
+store fail to persist one view or operation while earlier and dependent later operations succeed.
+The test checks the error, both directions of the discarded batch mappings, no translation-file
+append, unchanged published heads, and closed history after same-handle retry or reopening. A
+healthy repository copy supplies exact realization identities; a direct store walk independently
+checks closure and retention. The fourth hinted view also goes through recovery after a partially
+realized batch. These are runtime obligations of the translation layer, not new model transitions
+or panic, append-error, or durability guarantees. [testing.md](testing.md#example-tests) describes
+the fixture and fault.
+
 ## How Rust events map to model actions
 
 A "test rule" is something the test's state machine does to the system, not something the
@@ -763,6 +774,22 @@ Deliberately broken versions of the core, each caught:
 | Hub accepts a `Push` with its records to a head it dropped, or that the push drops | `a_push_to_a_dropped_head_is_refused`; rarely conformance, for the second, through `rogue_push` |
 | Node advances to a head it dropped | `a_node_never_advances_to_a_head_it_dropped`, through the oracle (`HeadsOK`) |
 | Hub ignores a `set_head` error and reports acceptance | `storage_boundaries::every_storage_boundary_recovers`: a successful reply/publication must match the actual store; the infallible tests cannot enter this boundary |
+| `settle` suppresses a background write error after joining the batch | `translation::failed_realization_writes_forget_the_batch`: the selected write must return `OpStoreError::WriteObject` for the blocked destination |
+| `settle` forgets only unreadable batch entries, retaining a written child of the missing parent | The same test: every batch entry must lose both mapping directions, including the successful child |
+| `settle` appends batch translations before returning its write error | The same test: the translation file must remain byte-for-byte unchanged after the failure |
+
+The native realization experiment on 2026-11-03 ran those three hand-written mutants separately
+through the new test; each failed its intended assertion. A targeted `cargo mutants --in-place
+--package musubi-jj --file crates/musubi-jj/src/node/realize.rs --file
+crates/musubi-jj/src/translation_map.rs --re '(NodeRepo::settle|TranslationMap::forget)'
+--test-tool nextest --timeout 120 -- -E
+'test(=translation::failed_realization_writes_forget_the_batch)'` caught all four generated
+mutants. The three `forget` mutants fail the mapping assertions. Replacing all of `settle` with
+`Ok(())` fails earlier while setting up or reading the healthy repository; the separate
+hand-written error-suppression mutant establishes sensitivity at the actual failing write.
+All intentional defects were restored and the unmutated test passed afterward. This campaign
+does not independently test each cache reset: after the batch mappings are forgotten, retry
+rebuilds its ancestors and caches together. It claims no coverage of the writer-panic branch.
 
 The storage-error experiment on 2026-11-02 changed only `hub::Push::answer` in a scratch
 copy: replace `storage.set_head(...)?` with `let _ = storage.set_head(...)`. The countdown

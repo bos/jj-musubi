@@ -1,8 +1,10 @@
 # Set up a hub and machines
 
-This guide sets up musubi from nothing. One machine runs a **hub**, which every other machine
-reaches over ssh. Each repository you share becomes a **hive** on the hub, and a **daemon**
-on each machine keeps that machine's copies in sync with it. [How musubi
+Choose the hub's machine, share a repository, and add the other machines over ssh.
+
+One machine runs a **hub**, which every other machine reaches over ssh. Each repository you
+share becomes a **hive** on the hub, and a **daemon** on each machine keeps that machine's copies
+in sync with it. [How musubi
 works](../how-it-works.md) says more, and the [README](../../README.md#quick-start) has the
 short version of this guide.
 

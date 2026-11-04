@@ -1,5 +1,7 @@
 # Troubleshooting
 
+Messages musubi prints, and what to do about each.
+
 Start with `musubi status` in the repository. It shows whether the daemon is running and
 serving the repository, when it last synced or the error its last sync failed with, and
 whether the hub has this machine's latest work. `musubi list` shows whether each hub is

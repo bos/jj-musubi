@@ -3,8 +3,8 @@
 musubi keeps your [jj](https://jj-vcs.dev) repositories in sync across machines. Work on your
 laptop, then pick up on your devbox: the change you were working on is already there.
 
-musubi is for jj, the git-compatible version control system, and all it needs is ssh to one
-machine that's usually on.
+jj is a git-compatible version control system. To sync its repositories with musubi, you need ssh
+to one machine that's usually on.
 
 Engineers at Meta get this from Sapling's Commit Cloud, which uploads every commit as soon as
 it's made, and engineers at Google have something like it in an internal jj server that keeps
@@ -13,30 +13,26 @@ own machines, over plain ssh, with no service to sign up for.
 
 ## What you get
 
-- **Run agents on several machines.** Run Claude Code or Codex on your laptop and a couple of
-  devboxes, each in its own jj workspace. `jj log` shows each agent's working-copy commit as
-  `devbox/default@` or `laptop/agent-2@`, updated after its latest `jj` command. You can review
-  or build on that commit from any machine, or hand it to another agent with
-  `jj new devbox/default@`. A [skill for agents](skills/jj-musubi/SKILL.md) helps them work
-  alongside each other.
-- **Pick up on another machine.** Each machine receives every commit, bookmark and change
-  within a second or so of the `jj` command that made it. Shut your laptop halfway through a
-  change, and the devbox has your work as `laptop/default@`. Run `jj new laptop/default@`
-  there to carry on. The laptop catches up within seconds of waking.
-- **Fetch and push once.** `jj git fetch` on one machine and every machine has the new
-  `main@origin`. `jj git push` from the devbox and the laptop shows it pushed.
-- **Undo that follows you.** jj records every command you run, so that `jj undo` can take any
-  of them back. musubi shares that record, so a mistake made on one machine can be put right
-  from any other.
-- **Your files stay yours.** musubi never writes to your working copy. When another machine
-  rewrites the commit you're on, jj says so, and `jj workspace update-stale` brings your files
-  up to date when you're ready.
-- **Offline is fine.** jj never needs the hub. Work on a plane, and the laptop catches up when
-  it lands.
-- **Proofs and tests check the sync.** The sync protocol is modelled and proved correct in the
-  Lean theorem prover, the Rust code is checked against that model step by step, and a search
-  runs jj commands on repositories through crashes, lost connections and power cuts.
-  [How musubi keeps your work safe](docs/safety.md) explains what each check covers.
+- Run Claude Code or Codex on your laptop and a couple of devboxes, each in its own jj workspace.
+  `jj log` shows each agent's working-copy commit as `devbox/default@` or `laptop/agent-2@`,
+  updated after its latest `jj` command. You can review or build on that commit from any machine,
+  or hand it to another agent with `jj new devbox/default@`. A [skill for
+  agents](skills/jj-musubi/SKILL.md) helps them work alongside each other.
+- Each machine receives every commit, bookmark and change within a second or so of the `jj`
+  command that made it. Shut your laptop halfway through a change, and the devbox has your work as
+  `laptop/default@`. Run `jj new laptop/default@` there to carry on. The laptop catches up within
+  seconds of waking.
+- `jj git fetch` on one machine and every machine has the new `main@origin`. `jj git push` from
+  the devbox and the laptop shows it pushed.
+- jj records every command you run, so that `jj undo` can take any of them back. musubi shares
+  that record, so a mistake made on one machine can be put right from any other.
+- musubi never writes to your working copy. When another machine rewrites the commit you're on, jj
+  says so, and `jj workspace update-stale` brings your files up to date when you're ready.
+- jj never needs the hub. Work on a plane, and the laptop catches up when it lands.
+- The sync protocol is modelled and proved correct in the Lean theorem prover, the Rust code is
+  checked against that model step by step, and a search runs jj commands on repositories through
+  crashes, lost connections and power cuts. [How musubi keeps your work safe](docs/safety.md)
+  explains what each check covers.
 
 Here a change described on the laptop shows up on the devbox a second later:
 
@@ -54,6 +50,8 @@ devbox:~/src/app$ jj log
 ```
 
 ## Install
+
+Install jj-musubi, start a hub, and share a repository between your machines.
 
 Install musubi on every machine, the hub's included. Download the archive for your platform
 from the [latest release](https://github.com/bos/jj-musubi/releases/latest) and put the

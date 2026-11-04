@@ -89,6 +89,19 @@ struct Summary {
     refs: BTreeMap<String, Terms>,
 }
 
+#[derive(Clone, Default)]
+struct WorkspaceCertificate {
+    keys: BTreeMap<String, CommitId>,
+    merged: BTreeSet<String>,
+    dormant: BTreeSet<String>,
+}
+
+struct WorkspaceReplay {
+    view: View,
+    parents: Vec<View>,
+    private: Option<(String, View)>,
+}
+
 pub struct Reference {
     _dir: TempDir,
     loader: RepoLoader,
@@ -111,6 +124,9 @@ pub struct Reference {
     pub unexplained: Vec<String>,
     /// The hive's history, but for the root.
     history: Vec<CanonicalOp>,
+    workspace_certificates: HashMap<CanonicalOp, WorkspaceCertificate>,
+    workspace_copies: HashMap<CanonicalOp, Operation>,
+    pub workspace_unmapped: BTreeSet<(String, OperationId)>,
 }
 
 /// Settings for the reference's merges. The user is the tests' user; a seed of its own for
@@ -221,6 +237,9 @@ impl Reference {
             rewrites: vec![],
             unexplained: vec![],
             history: order.iter().map(|(.., id)| id.clone()).collect(),
+            workspace_certificates: HashMap::new(),
+            workspace_copies: HashMap::new(),
+            workspace_unmapped: BTreeSet::new(),
         };
         let root_view = canonical
             .read_operation_view(canonical.root_operation_id())
@@ -596,6 +615,540 @@ impl Reference {
             }
         }
         differ
+    }
+
+    /// Extra logical names need an independent native birth witness. Plain commands may
+    /// preserve an injected name, so only their actual additions authorize new keys.
+    pub fn witnessed_workspace_names(&mut self, world: &World) -> BTreeSet<String> {
+        let head = CanonicalOp(world.fx.hive.hub.store().head().1.clone());
+        self.workspace_certificate(world, &head).merged
+    }
+
+    fn workspace_source(world: &World, id: &CanonicalOp) -> Option<op_store::Operation> {
+        world.fx.hive.members.iter().find_map(|member| {
+            let store = member.adapter.repo().canonical_store();
+            store
+                .has_operation(id)
+                .then(|| store.read_operation(id).ok())
+                .flatten()
+        })
+    }
+
+    fn workspace_copy(&mut self, world: &World, id: &CanonicalOp) -> Option<Operation> {
+        if id
+            == world.fx.hive.members[0]
+                .adapter
+                .repo()
+                .canonical_store()
+                .root_operation_id()
+        {
+            return Some(block_on(self.loader.root_operation()));
+        }
+        if let Some(copied) = self.workspace_copies.get(id) {
+            return Some(copied.clone());
+        }
+        let mut op = Self::workspace_source(world, id)?;
+        let view = world.fx.hive.members.iter().find_map(|member| {
+            member
+                .adapter
+                .repo()
+                .canonical_store()
+                .read_view(&op.view_id)
+                .ok()
+        })?;
+        for parent in CanonicalOp::parents_of(&op) {
+            self.workspace_copy(world, &parent)?;
+        }
+        let store = self.loader.op_store();
+        op.view_id = block_on(store.write_view(&view)).ok()?;
+        let copied = block_on(store.write_operation(&op)).ok()?;
+        if copied != id.0 {
+            return None;
+        }
+        let copied = block_on(self.loader.load_operation(&copied)).ok()?;
+        self.workspace_copies.insert(id.clone(), copied.clone());
+        Some(copied)
+    }
+
+    /// Replay an authenticated local merge with only independently certified private own
+    /// bindings added. Membership forgets omit these slots centrally; jj keeps them locally.
+    fn workspace_private_replays(
+        &mut self,
+        world: &World,
+        id: &CanonicalOp,
+        parents: &[CanonicalOp],
+        inputs: &[WorkspaceCertificate],
+    ) -> Vec<WorkspaceReplay> {
+        if parents.len() != 2 {
+            return vec![];
+        }
+        let mut replays = vec![];
+        for member in &world.fx.hive.members {
+            let node = member.adapter.repo();
+            let maker = node.machine().key();
+            let store = node.loader().op_store();
+            let Ok(files) = fs::read_dir(node.repo_path().join("op_store/operations")) else {
+                continue;
+            };
+            for file in files.flatten() {
+                let Some(local) = file
+                    .file_name()
+                    .to_str()
+                    .and_then(OperationId::try_from_hex)
+                    .map(LocalOp)
+                else {
+                    continue;
+                };
+                if node.canonical_of(&local).as_ref() != Some(id) {
+                    continue;
+                }
+                let Ok(operation) = block_on(store.read_operation(&local.0)) else {
+                    continue;
+                };
+                if operation
+                    .metadata
+                    .attributes
+                    .contains_key(musubi_jj::node::CANONICAL_ATTRIBUTE)
+                    || operation.parents.len() != 2
+                {
+                    continue;
+                }
+                let mapped: Option<Vec<_>> = operation
+                    .parents
+                    .iter()
+                    .map(|p| node.canonical_of(&LocalOp(p.clone())))
+                    .collect();
+                if mapped.as_deref() != Some(parents) {
+                    continue;
+                }
+                let Ok(local_op) = block_on(node.loader().load_operation(&local.0)) else {
+                    continue;
+                };
+                let Ok(local_parents) = block_on(local_op.parents()) else {
+                    continue;
+                };
+                let Ok(bases) = block_on(jj_lib::op_walk::closest_common_ancestors(
+                    vec![local_parents[0].clone()],
+                    [local_parents[1].clone()],
+                )) else {
+                    continue;
+                };
+                let [base] = bases.as_slice() else {
+                    continue;
+                };
+                let Some(base_id) = node.canonical_of(&LocalOp(base.id().clone())) else {
+                    continue;
+                };
+                if base_id == *id {
+                    continue;
+                }
+                let base_certificate = self.workspace_certificate(world, &base_id);
+                let mut views = vec![];
+                let mut valid = true;
+                for (source, canonical_id, certificate) in [
+                    (base, &base_id, &base_certificate),
+                    (&local_parents[0], &parents[0], &inputs[0]),
+                    (&local_parents[1], &parents[1], &inputs[1]),
+                ] {
+                    let Some(canonical) = Self::workspace_source(world, canonical_id) else {
+                        valid = false;
+                        break;
+                    };
+                    let Some(mut view) = world.fx.hive.members.iter().find_map(|member| {
+                        member
+                            .adapter
+                            .repo()
+                            .canonical_store()
+                            .read_view(&canonical.view_id)
+                            .ok()
+                    }) else {
+                        valid = false;
+                        break;
+                    };
+                    let Ok(raw) = block_on(source.view()) else {
+                        valid = false;
+                        break;
+                    };
+                    let Ok(presence) = node.presence(canonical_id) else {
+                        valid = false;
+                        break;
+                    };
+                    for (key, target) in &certificate.keys {
+                        let Some((owner, workspace)) = key.split_once('/') else {
+                            continue;
+                        };
+                        let private = !presence.is_present(owner)
+                            || (canonical.metadata.workspace_name.is_none()
+                                && canonical
+                                    .metadata
+                                    .attributes
+                                    .get("musubi.work")
+                                    .is_some_and(|copy| copy == owner));
+                        if owner == maker
+                            && certificate.dormant.contains(key)
+                            && private
+                            && !view.wc_commit_ids.contains_key(WorkspaceName::new(key))
+                            && raw.wc_commit_ids().get(WorkspaceName::new(workspace))
+                                == Some(target)
+                        {
+                            view.wc_commit_ids
+                                .insert(key.clone().into(), target.clone());
+                        }
+                    }
+                    views.push(view);
+                }
+                if !valid || views.len() != 3 {
+                    continue;
+                }
+                let root = block_on(self.loader.root_operation());
+                let base_copy = self.write_like(&root, &views[0], vec![root.id().clone()]);
+                let left =
+                    self.write_like(&local_parents[0], &views[1], vec![base_copy.id().clone()]);
+                let right =
+                    self.write_like(&local_parents[1], &views[2], vec![base_copy.id().clone()]);
+                let merged = self.merge(vec![&left, &right]).view;
+                let Ok(made) = block_on(local_op.view()) else {
+                    continue;
+                };
+                replays.push(WorkspaceReplay {
+                    view: merged,
+                    parents: views[1..].to_vec(),
+                    private: Some((maker.to_owned(), made.store_view().clone())),
+                });
+            }
+        }
+        replays
+    }
+
+    fn workspace_certificate(&mut self, world: &World, id: &CanonicalOp) -> WorkspaceCertificate {
+        if let Some(known) = self.workspace_certificates.get(id) {
+            return known.clone();
+        }
+        let Some(op) = Self::workspace_source(world, id) else {
+            return WorkspaceCertificate::default();
+        };
+        let Some(view) = world.fx.hive.members.iter().find_map(|member| {
+            member
+                .adapter
+                .repo()
+                .canonical_store()
+                .read_view(&op.view_id)
+                .ok()
+        }) else {
+            return WorkspaceCertificate::default();
+        };
+        let Some(presence) = world
+            .fx
+            .hive
+            .members
+            .iter()
+            .find_map(|member| member.adapter.repo().presence(id).ok())
+        else {
+            return WorkspaceCertificate::default();
+        };
+        let private_at = |key: &str| {
+            let Some((owner, _)) = key.split_once('/') else {
+                return false;
+            };
+            !presence.is_present(owner)
+                || (op.metadata.workspace_name.is_none()
+                    && op
+                        .metadata
+                        .attributes
+                        .get("musubi.work")
+                        .is_some_and(|copy| copy == owner))
+        };
+        // Contraction preserves the original parent identities. Use those source parents
+        // to certify a retained operation, including a merge now represented on root.
+        let parents = match op.metadata.attributes.get("musubi.original-parents") {
+            Some(text) => {
+                let Some(parents) = text
+                    .split_whitespace()
+                    .map(OperationId::try_from_hex)
+                    .map(|id| id.map(CanonicalOp))
+                    .collect::<Option<Vec<_>>>()
+                else {
+                    return WorkspaceCertificate::default();
+                };
+                parents
+            }
+            None => CanonicalOp::parents_of(&op),
+        };
+        let inputs: Vec<_> = parents
+            .iter()
+            .map(|parent| self.workspace_certificate(world, parent))
+            .collect();
+        let command = world.commands.get(&merge_key(&op));
+        let rewritten = |target: &CommitId| {
+            op.commit_predecessors
+                .iter()
+                .flat_map(|preds| preds.values())
+                .chain(command.into_iter().flat_map(|command| {
+                    command.predecessors.iter().flat_map(|preds| preds.values())
+                }))
+                .any(|old| old.contains(target))
+        };
+        let mut result = WorkspaceCertificate::default();
+        for input in &inputs {
+            for (key, target) in &input.keys {
+                let live = !input.dormant.contains(key)
+                    && view.wc_commit_ids.get(WorkspaceName::new(key)) == Some(target);
+                let dormant = !view.wc_commit_ids.contains_key(WorkspaceName::new(key))
+                    && private_at(key)
+                    && !inputs.is_empty()
+                    && inputs
+                        .iter()
+                        .all(|other| other.keys.get(key) == Some(target))
+                    && !rewritten(target);
+                if live || dormant {
+                    result.keys.insert(key.clone(), target.clone());
+                    if dormant {
+                        result.dormant.insert(key.clone());
+                    }
+                    if input.merged.contains(key) {
+                        result.merged.insert(key.clone());
+                    }
+                }
+            }
+        }
+        if world.baseline_operation(&merge_key(&op)) {
+            for key in &world.initial_workspace_keys {
+                if let Some(target) = view.wc_commit_ids.get(WorkspaceName::new(key)) {
+                    result.keys.insert(key.clone(), target.clone());
+                }
+            }
+        }
+        if let Some(command) = command {
+            if op
+                .metadata
+                .workspace_name
+                .as_ref()
+                .and_then(|key| musubi_jj::workspaces::split_key(key.as_str()))
+                .is_some_and(|(owner, _)| owner == command.copy)
+            {
+                let mut command_inputs = inputs.clone();
+                if let Some(input) = &command.input {
+                    command_inputs.push(self.workspace_certificate(world, input));
+                }
+                if command.input.is_none() {
+                    self.workspace_unmapped
+                        .insert((command.copy.clone(), command.parent.clone()));
+                }
+                // Map an already-certified key to one unambiguous raw source alias. The
+                // copy history is captured with the command, including departed copies.
+                let alias_for =
+                    |key: &str, base: &CommitId| -> Option<jj_lib::ref_name::WorkspaceNameBuf> {
+                        let (owner, workspace) = key.split_once('/')?;
+                        let candidates: Vec<_> = command
+                            .base
+                            .wc_commit_ids
+                            .iter()
+                            .filter(|(name, target)| {
+                                if *target != base {
+                                    return false;
+                                }
+                                if owner == command.copy {
+                                    return name.as_str() == workspace;
+                                }
+                                let Some((prefix, name)) = name.as_str().split_once('/') else {
+                                    return false;
+                                };
+                                name == workspace
+                                    && command
+                                        .copies
+                                        .iter()
+                                        .filter(|copy| {
+                                            musubi_jj::workspaces::could_be_shown_as(copy, prefix)
+                                        })
+                                        .count()
+                                        == 1
+                                    && musubi_jj::workspaces::could_be_shown_as(owner, prefix)
+                            })
+                            .map(|(name, _)| name.clone())
+                            .collect();
+                        match candidates.as_slice() {
+                            [name] => Some(name.clone()),
+                            _ => None,
+                        }
+                    };
+                for input in &command_inputs {
+                    for (key, base) in &input.keys {
+                        let Some(alias) = alias_for(key, base) else {
+                            // A native command by another copy cannot remove a dormant
+                            // owner's namespace. Carry only this already-certified absent
+                            // binding, without authorizing a live payload or a new name.
+                            let owner = key.split_once('/').unwrap().0;
+                            let untouched = command.made.wc_commit_ids.keys().all(|name| {
+                                !name.as_str().split_once('/').is_some_and(|(prefix, _)| {
+                                    musubi_jj::workspaces::could_be_shown_as(owner, prefix)
+                                })
+                            });
+                            if owner != command.copy
+                                && input.dormant.contains(key)
+                                && untouched
+                                && !rewritten(base)
+                                && private_at(key)
+                                && !view.wc_commit_ids.contains_key(WorkspaceName::new(key))
+                            {
+                                result.keys.insert(key.clone(), base.clone());
+                                result.dormant.insert(key.clone());
+                                if input.merged.contains(key) {
+                                    result.merged.insert(key.clone());
+                                }
+                            }
+                            continue;
+                        };
+                        let owner = key.split_once('/').unwrap().0;
+                        let target = command.made.wc_commit_ids.get(&alias);
+                        if let Some(target) = target {
+                            if view.wc_commit_ids.get(WorkspaceName::new(key)) == Some(target) {
+                                result.keys.insert(key.clone(), target.clone());
+                                result.dormant.remove(key);
+                                if input.merged.contains(key) {
+                                    result.merged.insert(key.clone());
+                                }
+                            } else {
+                                result.keys.remove(key);
+                                result.merged.remove(key);
+                            }
+                        } else if owner == command.copy {
+                            result.keys.remove(key);
+                            result.merged.remove(key);
+                        }
+                    }
+                }
+                let removed: Vec<_> = result
+                    .keys
+                    .keys()
+                    .filter(|key| {
+                        let (owner, name) = key.split_once('/').unwrap();
+                        owner == command.copy
+                            && !command
+                                .made
+                                .wc_commit_ids
+                                .contains_key(WorkspaceName::new(name))
+                    })
+                    .cloned()
+                    .collect();
+                for key in removed {
+                    result.keys.remove(&key);
+                    result.merged.remove(&key);
+                    result.dormant.remove(&key);
+                }
+                for (name, target) in &command.made.wc_commit_ids {
+                    if name.as_str().contains('/') || command.base.wc_commit_ids.contains_key(name)
+                    {
+                        continue;
+                    }
+                    let key = format!("{}/{}", command.copy, name.as_str());
+                    if world.workspace_births.contains(&key)
+                        && view.wc_commit_ids.get(WorkspaceName::new(&key)) == Some(target)
+                    {
+                        result.merged.remove(&key);
+                        result.dormant.remove(&key);
+                        result.keys.insert(key, target.clone());
+                    }
+                }
+            }
+        } else if parents.len() > 1 {
+            // The source graph's ordered parents are replayed by jj, rather than accepting
+            // the merge payload as evidence of its own additions or moves.
+            let copies: Option<Vec<_>> = parents
+                .iter()
+                .map(|parent| self.workspace_copy(world, parent))
+                .collect();
+            result = WorkspaceCertificate::default();
+            if let Some(copies) = copies {
+                let parent_views: Vec<_> = copies
+                    .iter()
+                    .map(|source| block_on(source.view()).unwrap().store_view().clone())
+                    .collect();
+                let mut replays = vec![WorkspaceReplay {
+                    view: self.merge(copies.iter().collect()).view,
+                    parents: parent_views,
+                    private: None,
+                }];
+                replays.extend(self.workspace_private_replays(world, id, &parents, &inputs));
+                for WorkspaceReplay {
+                    view: native,
+                    parents: source_views,
+                    private,
+                } in replays
+                {
+                    let mut known = self.changes_of(copies.iter());
+                    for source in &source_views {
+                        for target in source.wc_commit_ids.values() {
+                            known.insert(self.facts(target).change.clone());
+                        }
+                    }
+                    let private_made = private.as_ref().map(|(_, made): &(String, View)| made);
+                    let named: Vec<_> = native
+                        .wc_commit_ids
+                        .values()
+                        .chain(view.wc_commit_ids.values())
+                        .chain(
+                            private_made
+                                .into_iter()
+                                .flat_map(|made| made.wc_commit_ids.values()),
+                        )
+                        .cloned()
+                        .collect();
+                    let structural = self.keys(&named, &|change| known.contains(change));
+                    for (key, target) in &native.wc_commit_ids {
+                        let name = key.as_str();
+                        if !world.workspace_births.contains(name)
+                            || !inputs.iter().zip(&source_views).any(|(input, source)| {
+                                input.keys.get(name).is_some_and(|certified| {
+                                    source.wc_commit_ids.get(key) == Some(certified)
+                                })
+                            })
+                        {
+                            continue;
+                        }
+                        if let Some(actual) = view.wc_commit_ids.get(key) {
+                            if structural[actual] == structural[target] {
+                                result.keys.insert(name.to_owned(), actual.clone());
+                                result.merged.insert(name.to_owned());
+                            }
+                        } else if private_at(name)
+                            && let Some((maker, made)) = &private
+                            && let Some((owner, workspace)) = name.split_once('/')
+                            && owner == maker
+                            && let Some(actual) =
+                                made.wc_commit_ids.get(WorkspaceName::new(workspace))
+                            && structural[actual] == structural[target]
+                        {
+                            result.keys.insert(name.to_owned(), actual.clone());
+                            result.merged.insert(name.to_owned());
+                            result.dormant.insert(name.to_owned());
+                        }
+                    }
+                }
+                // A membership-forgotten owner retains its private names, but an absent
+                // certificate on any branch vetoes opaque dormant carry.
+                for (key, target) in inputs.iter().flat_map(|input| &input.keys) {
+                    if private_at(key)
+                        && !rewritten(target)
+                        && !view.wc_commit_ids.contains_key(WorkspaceName::new(key))
+                        && inputs
+                            .iter()
+                            .all(|input| input.keys.get(key) == Some(target))
+                    {
+                        result
+                            .keys
+                            .entry(key.clone())
+                            .or_insert_with(|| target.clone());
+                        result.dormant.insert(key.clone());
+                        if inputs.iter().any(|input| input.merged.contains(key)) {
+                            result.merged.insert(key.clone());
+                        }
+                    }
+                }
+            }
+        }
+        self.workspace_certificates
+            .insert(id.clone(), result.clone());
+        result
     }
 
     /// jj's merge of `parents`, in their order.

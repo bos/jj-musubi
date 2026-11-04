@@ -128,6 +128,11 @@ pub struct Workspace {
 pub struct CommandSnapshot {
     /// The native operation, before contraction or a per-machine export changes it.
     pub id: jj_lib::op_store::OperationId,
+    pub copy: String,
+    pub copies: BTreeSet<String>,
+    pub parent: jj_lib::op_store::OperationId,
+    pub input: Option<CanonicalOp>,
+    pub predecessors: Option<BTreeMap<jj_lib::backend::CommitId, Vec<jj_lib::backend::CommitId>>>,
     pub base: jj_lib::op_store::View,
     pub made: jj_lib::op_store::View,
 }
@@ -159,12 +164,18 @@ pub struct World {
     dirty: Vec<bool>,
     /// Each machine's workspaces; the first is the primary.
     pub workspaces: Vec<Vec<Workspace>>,
+    /// Names actually created in each copy, independent of the resulting hive namespace.
+    pub workspace_births: BTreeSet<String>,
+    pub initial_workspace_keys: BTreeSet<String>,
+    /// Logical names with a live independent merge witness, without physical directories.
+    pub logical_extras: Vec<BTreeSet<String>>,
     /// Each machine's operation ids and keys once the hive was set up.
     baseline_ids: Vec<BTreeSet<String>>,
     pub baseline_keys: Vec<BTreeSet<String>>,
     /// The keys of every machine's operations once the hive was set up: what a copy made
     /// later has of them is its baseline too.
     hive_baseline: BTreeSet<String>,
+    baseline_merge_keys: BTreeSet<String>,
     /// The key of each operation a `jj op abandon` dropped, with the machine that ran it and
     /// its `merge_key`: none comes back, unless jj brings it back there.
     pub abandoned: Vec<(usize, String, String)>,
@@ -233,7 +244,7 @@ impl World {
             Naming::Own => machine.to_owned(),
             Naming::Default | Naming::SharedHostname => "default".to_owned(),
         };
-        let workspaces = machines
+        let workspaces: Vec<Vec<Workspace>> = machines
             .iter()
             .zip(&repos)
             .map(|(machine, repo)| {
@@ -259,7 +270,20 @@ impl World {
             })
             .collect();
         let fx = Fixture::join(env, repos);
+        let workspace_births: BTreeSet<String> = workspaces
+            .iter()
+            .enumerate()
+            .flat_map(|(m, workspaces)| {
+                workspaces
+                    .iter()
+                    .map(|ws| format!("{}/{}", fx.machine_key(m), ws.name))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
         let mut world = Self {
+            initial_workspace_keys: workspace_births.clone(),
+            workspace_births,
+            logical_extras: vec![BTreeSet::new(); setup.nodes],
             fx,
             origin,
             naming: setup.naming,
@@ -268,6 +292,7 @@ impl World {
             baseline_ids: vec![],
             baseline_keys: vec![],
             hive_baseline: BTreeSet::new(),
+            baseline_merge_keys: BTreeSet::new(),
             abandoned: vec![],
             forgot: BTreeMap::new(),
             kept_operations: BTreeMap::new(),
@@ -298,6 +323,9 @@ impl World {
         // Each machine's history from before it joined is its own, and a later copy has none
         // of it; and its join is its own last operation from then, under its own key there.
         world.hive_baseline = world.baseline_keys.iter().flatten().cloned().collect();
+        world.baseline_merge_keys = (0..world.nodes())
+            .flat_map(|m| world.merge_keys(m))
+            .collect();
         let view = world.view_at_head(0);
         world.ledger.reset(&view);
         world.start_imports();
@@ -305,6 +333,10 @@ impl World {
             world.observe_operation_sources(m);
         }
         world
+    }
+
+    pub fn baseline_operation(&self, key: &str) -> bool {
+        self.baseline_merge_keys.contains(key)
     }
 
     pub fn nodes(&self) -> usize {
@@ -770,9 +802,32 @@ impl World {
                 continue;
             }
             let snapshot = futures::executor::block_on(async {
-                let parent = store.read_operation(parent).await.unwrap();
+                let parent_id = parent.clone();
+                let parent = store.read_operation(&parent_id).await.unwrap();
+                let input = self.fx.hive.members[m]
+                    .adapter
+                    .repo()
+                    .canonical_of(&musubi_jj::op_id::LocalOp(parent_id.clone()))
+                    .filter(|input| {
+                        self.fx.hive.members[m]
+                            .adapter
+                            .repo()
+                            .canonical_store()
+                            .read_operation(input)
+                            .is_ok_and(|canonical| merge_key(&canonical) == merge_key(&parent))
+                            || self.baseline_operation(&merge_key(&parent))
+                    });
                 CommandSnapshot {
+                    parent: parent_id,
+                    input,
+                    predecessors: op.commit_predecessors.clone(),
                     id: id.clone(),
+                    copy: self.fx.machine_key(m),
+                    copies: self
+                        .workspace_births
+                        .iter()
+                        .filter_map(|key| key.split_once('/').map(|(copy, _)| copy.to_owned()))
+                        .collect(),
                     base: store.read_view(&parent.view_id).await.unwrap(),
                     made: store.read_view(&op.view_id).await.unwrap(),
                 }
@@ -1765,6 +1820,14 @@ impl World {
             self.baseline_ids.push(BTreeSet::new());
             self.baseline_keys.push(BTreeSet::new());
         }
+        self.logical_extras.resize_with(self.nodes(), BTreeSet::new);
+        self.logical_extras[m].clear();
+        for ws in &self.workspaces[m] {
+            let key = format!("{}/{}", self.fx.machine_key(m), ws.name);
+            self.workspace_births.insert(key.clone());
+            self.initial_workspace_keys.insert(key);
+        }
+        self.baseline_merge_keys.extend(self.merge_keys(m));
         self.operation_sources.retain(|(copy, _), _| *copy != m);
         self.operation_seen.resize_with(self.nodes(), BTreeSet::new);
         self.operation_seen[m].clear();
@@ -2108,7 +2171,9 @@ impl World {
     pub fn working_copies(&self, m: usize) -> BTreeMap<String, String> {
         self.workspaces[m]
             .iter()
-            .map(|ws| {
+            .map(|ws| ws.name.clone())
+            .chain(self.logical_extras[m].iter().cloned())
+            .map(|name| {
                 let id = self.raw_jj(
                     m,
                     &[
@@ -2116,12 +2181,12 @@ impl World {
                         "--ignore-working-copy",
                         "--no-graph",
                         "-r",
-                        &format!("{}@", ws.name),
+                        &format!("{name}@"),
                         "-T",
                         "commit_id",
                     ],
                 );
-                (ws.name.clone(), id)
+                (name, id)
             })
             .collect()
     }
@@ -2130,8 +2195,20 @@ impl World {
     pub fn free_workspace_names(&self, m: usize) -> Vec<String> {
         let mut pool: Vec<String> = WORKSPACES.iter().map(|w| (*w).to_owned()).collect();
         pool.push(self.machine(m).to_owned());
+        // Operation preconditions use jj's actual occupied names. Certification of those
+        // names remains a separate invariant, so this never authorizes a spurious name.
+        let occupied = self.raw_jj(
+            m,
+            &[
+                "workspace",
+                "list",
+                "--ignore-working-copy",
+                "-T",
+                "name ++ \"\\n\"",
+            ],
+        );
         pool.into_iter()
-            .filter(|name| !self.workspaces[m].iter().any(|ws| ws.name == *name))
+            .filter(|name| !occupied.lines().any(|used| used == name))
             .collect()
     }
 
@@ -2154,6 +2231,8 @@ impl World {
     }
 
     pub fn add_workspace(&mut self, m: usize, name: &str) {
+        self.workspace_births
+            .insert(format!("{}/{name}", self.fx.machine_key(m)));
         let n = self.next();
         let path = self
             .fx
@@ -2171,6 +2250,9 @@ impl World {
     }
 
     pub fn rename_workspace(&mut self, m: usize, ws: usize, name: &str) {
+        self.workspace_births
+            .insert(format!("{}/{name}", self.fx.machine_key(m)));
+        self.logical_extras[m].remove(&self.workspaces[m][ws].name);
         self.jj_in(m, ws, &["workspace", "rename", name]);
         self.workspaces[m][ws].name = name.to_owned();
     }
@@ -2178,6 +2260,7 @@ impl World {
     pub fn forget_workspace(&mut self, m: usize, ws: usize) {
         let name = self.workspaces[m][ws].name.clone();
         self.jj(m, &["workspace", "forget", &name]);
+        self.logical_extras[m].remove(&name);
         self.workspaces[m].remove(ws);
     }
 }

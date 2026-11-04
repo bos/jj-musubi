@@ -1996,9 +1996,9 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "hegeltest"
-version = "0.50.2"
+version = "0.51.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0957d17d80ddf0c50046e8c521cea13b31b9a0eb055bd0af8d745aaddec67a8"
+checksum = "e943e465ed0cc8ad09b916b803a5955e02a124fad09bcb8799e1a77efc2bff69"
 dependencies = [
  "hegeltest-macros",
  "parking_lot",
@@ -2006,9 +2006,9 @@ dependencies = [
 
 [[package]]
 name = "hegeltest-macros"
-version = "0.50.2"
+version = "0.51.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80c279a70cae8cf660f947d4cb2203cd63d69c174e285fe18e2aaa0c8a851f9f"
+checksum = "0379b413f89425fa144429ebe3b344fb277d394c6c7242f4546b414cd16af5b9"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4205,7 +4205,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys",

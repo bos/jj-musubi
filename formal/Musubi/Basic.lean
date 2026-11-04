@@ -36,13 +36,7 @@ theorem cnt_congr {B : Nat} {P Q : Nat → Prop} (h : ∀ x, x < B → (P x ↔ 
   | zero => rfl
   | succ B ih =>
     simp only [cnt]
-    rw [ih (fun x hx => h x (Nat.lt_succ_of_lt hx))]
-    have := h B (Nat.lt_succ_self B)
-    by_cases hP : P B
-    · have hQ : Q B := this.1 hP
-      simp [hP, hQ]
-    · have hQ : ¬ Q B := fun hq => hP (this.2 hq)
-      simp [hP, hQ]
+    rw [ih (fun x hx => h x (Nat.lt_succ_of_lt hx)), h B (Nat.lt_succ_self B)]
 
 theorem cnt_le {B : Nat} {P Q : Nat → Prop} (h : ∀ x, x < B → Q x → P x) :
     cnt B Q ≤ cnt B P := by
@@ -52,16 +46,12 @@ theorem cnt_le {B : Nat} {P Q : Nat → Prop} (h : ∀ x, x < B → Q x → P x)
     simp only [cnt]
     have ih' := ih (fun x hx => h x (Nat.lt_succ_of_lt hx))
     have hB := h B (Nat.lt_succ_self B)
-    by_cases hQ : Q B
-    · simp [hQ, hB hQ]; omega
-    · by_cases hP : P B
-      · simp [hQ, hP]; omega
-      · simp [hQ, hP]; omega
+    grind only
 
 theorem cnt_lt {B : Nat} {P Q : Nat → Prop} (h : ∀ x, x < B → Q x → P x)
     (w : ∃ x, x < B ∧ P x ∧ ¬ Q x) : cnt B Q < cnt B P := by
   induction B with
-  | zero => obtain ⟨x, hx, -⟩ := w; exact absurd hx (Nat.not_lt_zero _)
+  | zero => obtain ⟨x, hx, -⟩ := w; omega
   | succ B ih =>
     simp only [cnt]
     have hle := cnt_le (B := B) (P := P) (Q := Q) (fun x hx => h x (Nat.lt_succ_of_lt hx))
@@ -72,11 +62,7 @@ theorem cnt_lt {B : Nat} {P Q : Nat → Prop} (h : ∀ x, x < B → Q x → P x)
     · have hlt : x < B := by omega
       have ih' := ih (fun y hy => h y (Nat.lt_succ_of_lt hy)) ⟨x, hlt, hPx, hQx⟩
       have hB := h B (Nat.lt_succ_self B)
-      by_cases hQ : Q B
-      · simp [hQ, hB hQ]; omega
-      · by_cases hP : P B
-        · simp [hQ, hP]; omega
-        · simp [hQ, hP]; omega
+      grind only
 
 /-! ## Sums over `n < N` -/
 
@@ -96,7 +82,7 @@ theorem sumN_congr {N : Nat} {f g : Nat → Nat} (h : ∀ n, n < N → f n = g n
 theorem sumN_lt {N : Nat} {f g : Nat → Nat} {i : Nat} (hi : i < N)
     (hlt : f i < g i) (heq : ∀ n, n < N → n ≠ i → f n = g n) : sumN N f < sumN N g := by
   induction N with
-  | zero => exact absurd hi (Nat.not_lt_zero _)
+  | zero => omega
   | succ N ih =>
     simp only [sumN]
     by_cases h : i = N
@@ -104,8 +90,7 @@ theorem sumN_lt {N : Nat} {f g : Nat → Nat} {i : Nat} (hi : i < N)
       have := sumN_congr (N := i) (f := f) (g := g)
         (fun n hn => heq n (Nat.lt_succ_of_lt hn) (Nat.ne_of_lt hn))
       omega
-    · have hi' : i < N := by omega
-      have := ih hi' (fun n hn hne => heq n (Nat.lt_succ_of_lt hn) hne)
+    · have := ih (by omega) (fun n hn hne => heq n (Nat.lt_succ_of_lt hn) hne)
       have := heq N (Nat.lt_succ_self N) (Ne.symm h)
       omega
 

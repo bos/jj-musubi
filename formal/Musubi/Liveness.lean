@@ -257,11 +257,7 @@ theorem lex5_of {a b c d e a' b' c' d' e' : Nat}
 
 theorem ite_iff {P Q : Prop} [Decidable P] [Decidable Q] (h : P ↔ Q) {a b : Nat} :
     (if P then a else b) = (if Q then a else b) := by
-  by_cases hp : P
-  · have hq := h.1 hp
-    simp only [hp, hq, ↓reduceIte]
-  · have hq : ¬ Q := fun hq => hp (h.2 hq)
-    simp only [hp, hq, ↓reduceIte]
+  simp only [h]
 
 /-! ### Framing: steps that touch only node `n` and keep the universe and hub head/seq -/
 
@@ -422,9 +418,7 @@ theorem merge_tail {s : State} {n : Nat} {L O : List Nat} (hn : n < N)
     have hxl : x < s.U.next := by have := hhead; omega
     by_cases hi : i = n
     · subst hi; rw [hlops, T hhead]
-      constructor
-      · rintro ⟨h1, h2⟩; exact ⟨h1, fun h => h2 (Or.inl h)⟩
-      · rintro ⟨h1, h2⟩; exact ⟨h1, fun h => h.elim h2 (fun e => by omega)⟩
+      simp [Nat.ne_of_lt hxl]
     · rw [hother i hi, T hhead]
   · apply sumN_congr; intro i _
     unfold mAdv; rw [hpar]
@@ -450,12 +444,10 @@ theorem merge_tail {s : State} {n : Nat} {L O : List Nat} (hn : n < N)
       exact ite_iff this
   · apply sumN_lt hn
     · unfold mMulti; rw [hheads]
-      have h1 : ¬ ∃ a b, a = s.U.next ∧ b = s.U.next ∧ a ≠ b := by
-        rintro ⟨a, b, rfl, rfl, h⟩; exact h rfl
       have h2 : ∃ a b, (s.node n).heads a ∧ (s.node n).heads b ∧ a ≠ b :=
         ⟨a, b, (hL a).1 ha, (hL b).1 hb, hab⟩
-      simp only [h1, h2, ↓reduceIte]
-      omega
+      simp only [h2, ↓reduceIte]
+      simp
     · intro i _ hi
       unfold mMulti; rw [hother i hi]
 
@@ -621,9 +613,8 @@ noncomputable def headsList (s : State) (n : Nat) : List Nat :=
 theorem mem_headsList_of {s : State} {n x : Nat}
     (hlt : ∀ y, (s.node n).heads y → y < s.U.next) :
     x ∈ headsList s n ↔ (s.node n).heads x := by
-  unfold headsList
-  simp only [List.mem_filter, List.mem_range, decide_eq_true_eq]
-  exact ⟨fun h => h.2, fun h => ⟨hlt x h, h⟩⟩
+  simp only [headsList, List.mem_filter, List.mem_range, decide_eq_true_eq]
+  exact and_iff_right_of_imp (hlt x)
 
 theorem mem_headsList {s : State} (hI : Inv N s) {n x : Nat} :
     x ∈ headsList s n ↔ (s.node n).heads x :=
@@ -634,11 +625,8 @@ enabled. -/
 theorem progress {s : State} (h : Reachable N s) (hc : ¬ Converged N s) :
     ∃ s', PStep N s s' := by
   have hI := inv_reachable h
-  unfold Converged at hc
-  rw [Classical.not_forall] at hc
-  obtain ⟨n, hc⟩ := hc
-  rw [Classical.not_imp] at hc
-  obtain ⟨hn, hc⟩ := hc
+  simp only [Converged, Classical.not_forall] at hc
+  obtain ⟨n, hn, hc⟩ := hc
   -- 1. merge
   by_cases hmulti : ∃ a b, (s.node n).heads a ∧ (s.node n).heads b ∧ a ≠ b
   · obtain ⟨a, b, ha, hb, hab⟩ := hmulti

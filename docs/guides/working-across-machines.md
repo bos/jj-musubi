@@ -219,6 +219,9 @@ the repository stays as it was at each operation that's left, and the operations
 abandoned ones get new ids: ids you noted from `jj op log` on any machine no longer work.
 musubi adds an operation to the log saying so, `musubi: pass on jj op abandon`.
 
+Trimming all earlier history keeps the other copies in the hive and each copy's own Git
+refs and HEAD as they were, including when a sync is finishing as you trim.
+
 The hub remembers an abandon until every machine still in the hive has taken it, so a machine
 that's offline delays this until it syncs. Then the hub forgets it, so trimming old history
 with `jj op abandon ..<operation>` doesn't leave the hub remembering every abandoned operation,

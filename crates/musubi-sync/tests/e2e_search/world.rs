@@ -150,6 +150,14 @@ pub struct CommandSnapshot {
 /// How many operations a sequence may revert to get past jj failing to merge operations.
 const MAX_UNMERGEABLE_REVERTS: usize = 10;
 
+/// A merge observed before replication can reparent it, independently of the eventual
+/// canonical view. Its source view remains the oracle for a later contraction's survivor.
+struct MergeSource {
+    operation: jj_lib::op_store::Operation,
+    view: jj_lib::op_store::View,
+    realized: bool,
+}
+
 pub struct World {
     pub fx: Fixture,
     pub origin: Origin,
@@ -176,6 +184,8 @@ pub struct World {
     /// replaced, which jj keeps as it keeps every operation's, and whether that was a
     /// realization: no longer, perhaps, jj's merge of their parents, or a merge at all.
     pub kept_merges: BTreeMap<String, (jj_lib::op_store::View, bool)>,
+    merge_sources: BTreeMap<(usize, String), Option<MergeSource>>,
+    merge_seen: Vec<BTreeSet<jj_lib::op_store::OperationId>>,
     pub commands: BTreeMap<String, CommandSnapshot>,
     /// The object and jj metadata stores of command sources, including copies later
     /// replaced. The fixture retains their directories until the case ends.
@@ -273,6 +283,8 @@ impl World {
             abandoned: vec![],
             forgot: BTreeMap::new(),
             kept_merges: BTreeMap::new(),
+            merge_sources: BTreeMap::new(),
+            merge_seen: vec![],
             commands: BTreeMap::new(),
             command_sources: BTreeMap::new(),
             seen: vec![None; setup.nodes],
@@ -301,6 +313,9 @@ impl World {
         let view = world.view_at_head(0);
         world.ledger.reset(&view);
         world.start_imports();
+        for m in 0..world.nodes() {
+            world.observe_merge_sources(m);
+        }
         world
     }
 
@@ -342,12 +357,19 @@ impl World {
             let line = line.replace(&root, "<root>");
             let words: Vec<String> = line
                 .split(' ')
-                .map(|word| match self.change_of.get(word) {
-                    Some(change) => change.clone(),
-                    None if word.len() >= 12 && word.chars().all(|c| c.is_ascii_hexdigit()) => {
-                        "<id>".to_owned()
-                    }
-                    None => word.to_owned(),
+                .map(|word| {
+                    word.split("..")
+                        .map(|part| match self.change_of.get(part) {
+                            Some(change) => change.clone(),
+                            None if part.len() >= 12
+                                && part.chars().all(|c| c.is_ascii_hexdigit()) =>
+                            {
+                                "<id>".to_owned()
+                            }
+                            None => part.to_owned(),
+                        })
+                        .collect::<Vec<_>>()
+                        .join("..")
                 })
                 .collect();
             out.push_str(&words.join(" "));
@@ -998,6 +1020,7 @@ impl World {
         let after = self.seen(m);
         let what = format!("{}: merge own op heads before sync", self.machine(m));
         self.ledger.record(m, &what, &before, &after, false);
+        self.observe_merge_sources(m);
     }
 
     /// Lets node `m` poll the hub and run its policy until idle.
@@ -1008,6 +1031,7 @@ impl World {
 
     /// Syncs node `m` until idle and returns how many steps it took.
     pub fn sync_counted(&mut self, m: usize) -> usize {
+        self.observe_merge_sources(m);
         self.touched.insert(m);
         self.merge_local_heads(m);
         let pruned = self.fx.hive.hub.store().pruned();
@@ -1138,8 +1162,74 @@ impl World {
         .collect()
     }
 
+    /// Observe recipient merges before and after receipt too. A publisher cannot observe
+    /// an offline copy's old merge, but a received trim keeps its view while reparenting it.
+    fn observe_merge_sources(&mut self, m: usize) {
+        self.merge_seen.resize_with(self.nodes(), BTreeSet::new);
+        let store = self.fx.hive.members[m]
+            .adapter
+            .repo()
+            .loader()
+            .op_store()
+            .clone();
+        let mut pending = self.op_heads(m);
+        let mut found = BTreeMap::<String, Vec<jj_lib::op_store::Operation>>::new();
+        while let Some(hex) = pending.pop() {
+            let id = jj_lib::op_store::OperationId::try_from_hex(&hex).unwrap();
+            if !self.merge_seen[m].insert(id.clone()) {
+                continue;
+            }
+            let op = futures::executor::block_on(store.read_operation(&id)).unwrap();
+            pending.extend(op.parents.iter().map(jj_lib::object_id::ObjectId::hex));
+            let key = merge_key(&op);
+            if op.parents.len() > 1 || self.merge_sources.contains_key(&(m, key.clone())) {
+                found.entry(key).or_default().push(op);
+            }
+        }
+        for (key, versions) in found {
+            let [op] = versions.as_slice() else {
+                self.merge_sources.insert((m, key), None);
+                continue;
+            };
+            let source_key = (m, key.clone());
+            match self.merge_sources.get(&source_key) {
+                Some(Some(source)) if source.operation.parents != op.parents => {
+                    let strip = |mut op: jj_lib::op_store::Operation| {
+                        op.parents.clear();
+                        op.metadata
+                            .attributes
+                            .remove(musubi_jj::node::CANONICAL_ATTRIBUTE);
+                        op
+                    };
+                    if strip(source.operation.clone()) == strip(op.clone()) {
+                        self.kept_merges
+                            .entry(key)
+                            .or_insert_with(|| (source.view.clone(), source.realized));
+                    } else {
+                        // Equal time/description alone does not identify an original.
+                        self.merge_sources.insert(source_key, None);
+                    }
+                }
+                Some(_) => {}
+                None => {
+                    let view = futures::executor::block_on(store.read_view(&op.view_id)).unwrap();
+                    let realized = realized(op, self.fx.hive.members[m].adapter.repo());
+                    self.merge_sources.insert(
+                        source_key,
+                        Some(MergeSource {
+                            operation: op.clone(),
+                            view,
+                            realized,
+                        }),
+                    );
+                }
+            }
+        }
+    }
+
     /// Records the commits node `m`'s merges made, after a sync.
     pub fn record_merges(&mut self, m: usize) {
+        self.observe_merge_sources(m);
         let after = self.seen(m);
         let what = format!("{}: merge by its node", self.machine(m));
         self.ledger.record_sync(m, &what, &after);
@@ -1149,6 +1239,7 @@ impl World {
     /// request but losing the reply to request number `lose`: progress that stops partway,
     /// possibly after an upload but before the push.
     pub fn sync_partial(&mut self, m: usize, steps: usize, lose: Option<usize>) {
+        self.observe_merge_sources(m);
         self.touched.insert(m);
         self.record(format!(
             "{}: sync {steps} step(s){}",
@@ -1179,6 +1270,7 @@ impl World {
     /// Lets node `m` sync until it has realized `count` operations, or has nothing more to
     /// realize, and stops there, with what it realized perhaps still being written.
     pub fn sync_realizing(&mut self, m: usize, count: usize) {
+        self.observe_merge_sources(m);
         self.touched.insert(m);
         self.record(format!(
             "{}: sync until {count} operation(s) realized",
@@ -1196,6 +1288,7 @@ impl World {
     /// Lets node `m` sync until it has taken the hub's records and realized its head, and
     /// stops there, before advancing to it.
     pub fn sync_taking(&mut self, m: usize) {
+        self.observe_merge_sources(m);
         self.touched.insert(m);
         self.record(format!(
             "{}: sync until the hub's records are taken and its head realized",
@@ -1663,6 +1756,9 @@ impl World {
             self.baseline_ids.push(BTreeSet::new());
             self.baseline_keys.push(BTreeSet::new());
         }
+        self.merge_sources.retain(|(copy, _), _| *copy != m);
+        self.merge_seen.resize_with(self.nodes(), BTreeSet::new);
+        self.merge_seen[m].clear();
         self.sync_counted(m);
         // The hive's history from before it was set up, and its own from before it joined,
         // are its baseline, as each machine's are. It may have only some of the hive's yet,
@@ -1768,6 +1864,33 @@ impl World {
     /// afterwards.
     pub fn op_abandon(&mut self, m: usize, op: &str) {
         self.abandon_ops(m, op, &[op.to_owned()]);
+    }
+
+    /// Publishes new work, pauses before advancing the base to that push, then trims all
+    /// history below it. Unlike single-operation abandonment, this can drop the old base
+    /// and every join while keeping an accepted operation outside the base's ancestry.
+    pub fn trim_below_accepted_push(&mut self, m: usize) {
+        self.sync(m);
+        let history = self.op_ids_and_keys(m, None);
+        let base = history[0].0.clone();
+        let root = self.fx.hive.members[m]
+            .adapter
+            .repo()
+            .loader()
+            .op_store()
+            .root_operation_id()
+            .hex();
+        let dropped: Vec<String> = history
+            .into_iter()
+            .map(|(id, _)| id)
+            .filter(|id| *id != root)
+            .collect();
+        let description = self.message(m);
+        // A fresh child works even when a cloned workspace is at an immutable commit.
+        self.jj(m, &["new", "-m", &description]);
+        self.sync_partial(m, 1, None);
+        self.abandon_ops(m, &format!("..{base}"), &dropped);
+        self.sync(m);
     }
 
     /// `jj op abandon` of `spec` on machine `m`: one operation, or a range `x..y`, which drops

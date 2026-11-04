@@ -2452,6 +2452,42 @@ fn op_abandon_syncs_but_history_otherwise_lost_stops_syncing() {
     // Stopped before the hub.
     let mut daemons = Daemons::default();
     let (alpha, beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
+    insta::assert_snapshot!(musubi_in(&env, &logs, &alpha, &["sync", "--help"]), @r"
+    Sync the repository in the current directory now.
+    
+    The daemon syncs by itself whenever the repository or its hive changes, so this is rarely needed,
+    except to see at once how a sync goes. It asks the daemon to sync, if the daemon serves the
+    repository, and otherwise syncs in this process, saying if that's because the daemon isn't running.
+    
+    If a hub reply leaves needed data missing, the sync fails. If the daemon serves this copy, it
+    retries from the hub's current state. Run `musubi sync` again to retry at once.
+    
+    Trimming earlier history with `jj op abandon` keeps the other copies in the hive and preserves each
+    copy's own Git state.
+    
+    If jj made the result of an operation abandon ambiguous, syncing stops and gives a `jj op integrate`
+    command to restore the missing history before trying again.
+    
+    Usage: musubi sync [OPTIONS]
+    
+    Options:
+      -h, --help
+              Print help (see a summary with '-h')
+    
+    Global options:
+          --socket <SOCKET>
+              The daemon's control socket, in place of the usual one
+    
+          --log <FILTER>
+              What to log, as a filter in `RUST_LOG`'s syntax: `debug`, or `info,musubi_sync=debug`. It
+              applies to this command, not to a daemon it starts, which uses `musubi.daemon.log` in jj's
+              config
+    
+          --color <WHEN>
+              When to colour what it prints, as jj's `--color` does [default: as jj's `ui.color` says]
+              
+              [possible values: always, never, debug, auto]
+    ");
     alpha.write_file("b", "b");
     alpha.jj(&["commit", "-m", "second"]);
     let accepted = alpha.jj(&["op", "log", "--no-graph", "-n1", "-T", "id"]);

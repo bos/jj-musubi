@@ -429,6 +429,24 @@ work at what every kept operation becomes with `PresenceExec.lean`'s at the oper
 `dropping_twice_is_dropping_both` all of presence with presence worked out before the drops
 ([conformance.md, "Presence"](../docs/internals/conformance.md#presence)).
 
+Selecting the surviving original from native jj history is also a test obligation.
+`history::a_trim_below_an_accepted_push_keeps_the_other_copy_present` covers an accepted push
+above a saved fetch base that a trim drops in full. Discovery must match against both
+accepted histories together before `pres_eq` applies to the survivor. The pruning model
+waits for its fixed participants; it does not prove the native presence-based wait set is
+correct. The regression checks that set and that pruning waits for the other copy.
+
+Root-based native publication also selects current local Git state independently of the
+contracted shared ancestry. `Refs.lean` preserves supplied local slots, and
+`AbandonRefs.publish_refines` uses its normalized common-base slot; neither proves this
+native source selection, cache refresh, or Git HEAD handling. The trim, concurrent bookmark
+change and cached-root regressions described in
+[conformance](../docs/internals/conformance.md#presence)
+check those boundaries against real repositories and the independent import checker.
+The within-step forward-bookmark regression also compares immediate native publication with
+the existing `realizeLocal` and `exportLocal` functions through the oracle. This covers the
+root transition's current-state ref input; it does not extend the normalized-base theorem.
+
 ### Chunked blobs (`Chunks.lean`)
 
 Each theorem assumes `hash` injective.

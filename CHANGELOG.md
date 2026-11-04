@@ -6,6 +6,12 @@ change the protocol, so run the same release on the hub and every machine (see
 
 ## Unreleased
 
+- Trimming operation history while a sync is finishing keeps the other copies in the hive.
+  Previously an accepted push not yet saved as the sync base could make another copy appear
+  forgotten, letting the hub discard the trim before that copy received it and permanently
+  stopping its sync. A trim that removes all of a copy's earlier operations also preserves
+  its own Git state, so an unchanged Git HEAD is not imported as a move.
+
 - If a recreated hub cannot supply objects requested from its old history, the machine
   retries from the hub's current state. Previously one sync could keep asking for the same
   missing objects until another machine restored them, without checking the hub again.

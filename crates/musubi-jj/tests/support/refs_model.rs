@@ -249,6 +249,13 @@ impl RefsModel {
         self.slot_reply("merge", &[("b", b), ("v", v), ("w", w)])
     }
 
+    /// `Refs.realizeLocal`: replace the shared bookmark with `c`, keeping its local record.
+    #[allow(dead_code)] // Used by the races binary, which shares this support module.
+    pub fn realize_local(&mut self, s: &Slot, c: &RefTarget) -> Slot {
+        let reply = self.call("realizeLocal", &[("s", s)], &[("c", c)], &[]);
+        self.slot_of(&reply["slot"])
+    }
+
     fn exported(
         &mut self,
         function: &str,

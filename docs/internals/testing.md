@@ -462,7 +462,14 @@ branch jj hasn't imported, a node can stop halfway through a sync.
 - **Local work**, through the `jj` CLI on a chosen machine: commit, edit without snapshotting,
   describe, new (including merges), rebase, squash, abandon, resolve, bookmark and tag changes,
   undo, `jj op abandon`, and commands at an older operation (`--at-op`), which create
-  concurrent operations.
+  concurrent operations. `trim_below_accepted_push` publishes a new child, pauses before
+  advancing the saved base, and trims the earlier history, including the joins: this reaches
+  accepted-frontier discovery and loss of all local parents without waiting for a sequence
+  of independent rules to line up. `e2e_trim_below_accepted_push` exercises that rule with
+  the independent import and history checks. The reference captures recipient merges before
+  receipt, including setup and pre-sync local merges: a trim published elsewhere may
+  reparent them while keeping their views. Only an independently captured operation with
+  unchanged nonparent content qualifies; a replacement copy starts its capture afresh.
 - **Workspaces**: add, rename and forget them; forget another machine's; and rewrite or abandon
   another machine's working-copy commit.
 - **Copies**: forget another machine's copy, with `musubi forget` or once it has gone unused

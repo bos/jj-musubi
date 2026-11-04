@@ -84,6 +84,8 @@ the last sync couldn't reach it. Where the message gives a reason after the colo
 to devbox failed: ...", that reason's own entry above says more.
 Daemons reconnect by themselves: within a few seconds to a hub on the same machine, and within
 about a minute over ssh, which waits longer between tries after each failure.
+After detecting that the machine has woken, the daemon ends old ssh connections and clears
+that delay.
 
 If the hub runs with `--dir`, other machines can't find it: the `musubi hub connect` they run
 over ssh finds the hub that `musubi hub` last served without `--dir`. Add `--dir <dir>` to the

@@ -6,6 +6,9 @@ change the protocol, so run the same release on the hub and every machine (see
 
 ## Unreleased
 
+- Waking a machine also ends ssh connections already waiting to close or drain stderr.
+  An old connection's failure can no longer restore the retry delay that waking cleared.
+
 - Canceled requests release their reply bookkeeping immediately. Previously a long-lived
   connection could retain it until the hub replied or the connection ended.
 

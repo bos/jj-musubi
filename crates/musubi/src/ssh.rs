@@ -136,6 +136,16 @@ struct State {
     problem: Option<String>,
 }
 
+impl State {
+    fn failed(&mut self, problem: String) {
+        self.failures += 1;
+        let backoff = Duration::from_secs(1) * 2u32.saturating_pow(self.failures - 1);
+        self.retry_at = Some(Instant::now() + backoff.min(MAX_BACKOFF));
+        tracing::warn!("{problem}");
+        self.problem = Some(problem);
+    }
+}
+
 /// How a link's ssh connections are going.
 #[derive(Clone, Default)]
 pub struct Health(Arc<Mutex<State>>);
@@ -151,12 +161,22 @@ impl Health {
     }
 
     fn failed(&self, problem: String) {
+        self.lock().failed(problem);
+    }
+
+    fn failed_unless_woke(&self, problem: String, woke: &watch::Receiver<u64>) {
         let mut state = self.lock();
-        state.failures += 1;
-        let backoff = Duration::from_secs(1) * 2u32.saturating_pow(state.failures - 1);
-        state.retry_at = Some(Instant::now() + backoff.min(MAX_BACKOFF));
-        tracing::warn!("{problem}");
-        state.problem = Some(problem);
+        if !woke.has_changed().unwrap_or(true) {
+            state.failed(problem);
+        }
+    }
+
+    fn woke(&self, woke: &watch::Sender<u64>) {
+        // Publish the wake and clear failures under the same lock that records failures:
+        // an old supervisor must not restore its error after this reset on another thread.
+        let mut state = self.lock();
+        *state = State::default();
+        woke.send_modify(|n| *n += 1);
     }
 
     fn worked(&self) {
@@ -209,17 +229,14 @@ impl Link {
     pub fn health(&self) -> Health {
         self.health.clone()
     }
-}
 
-#[async_trait]
-impl Connector for Link {
-    async fn connect(&self) -> io::Result<(Reader, Writer)> {
+    async fn connect_using(&self, mut command: Command) -> io::Result<(Reader, Writer)> {
         // After failures, trying again at once would run ssh, and maybe a login prompt in a
         // browser, every few seconds.
         if self.health.refusing() {
             return Err(io::Error::other("waiting to try ssh again"));
         }
-        let mut child = connect_command(&self.dest, &self.key)
+        let mut child = command
             .spawn()
             .inspect_err(|err| self.health.failed(format!("cannot run ssh: {err}")))?;
         let (Some(stdin), Some(stdout), Some(stderr)) =
@@ -247,6 +264,14 @@ impl Connector for Link {
             _closed: closed,
         };
         Ok((Box::new(output), Box::new(stdin)))
+    }
+}
+
+#[async_trait]
+impl Connector for Link {
+    async fn connect(&self) -> io::Result<(Reader, Writer)> {
+        self.connect_using(connect_command(&self.dest, &self.key))
+            .await
     }
 
     fn not_hub(&self, why: &io::Error) {
@@ -281,8 +306,7 @@ async fn watch_for_waking(dest: String, health: Health, woke: watch::Sender<u64>
                 "woke after about {}s asleep; reconnecting to {dest}",
                 slept.as_secs()
             );
-            health.worked();
-            woke.send_modify(|n| *n += 1);
+            health.woke(&woke);
         }
         (wall, clock) = (now_wall, now_clock);
     }
@@ -344,47 +368,44 @@ struct Ssh {
 async fn supervise(mut ssh: Ssh) {
     let said = Arc::new(Mutex::new(vec![]));
     let mut reading = tokio::spawn(read_stderr(ssh.stderr, said.clone()));
-    enum Ended {
-        Exited(Option<ExitStatus>),
-        LetGo,
-        Woke,
-    }
-    let ended = tokio::select! {
-        status = ssh.child.wait() => Ended::Exited(status.ok()),
-        _ = ssh.let_go => Ended::LetGo,
-        _ = ssh.woke.changed() => Ended::Woke,
-    };
-    let status = match ended {
-        Ended::Exited(status) => status,
-        // Its standard input closed with the connection, so it should finish by itself; one
-        // still going is one the machine's sleeping broke.
-        Ended::LetGo => {
-            match tokio::time::timeout(Duration::from_secs(1), ssh.child.wait()).await {
-                Ok(status) => status.ok(),
-                Err(_) => {
-                    ssh.child.start_kill().ok();
-                    ssh.child.wait().await.ok();
-                    None
-                }
-            }
-        }
-        Ended::Woke => {
+    let connected_before_wake = ssh.woke.clone();
+    tokio::select! {
+        biased;
+        _ = ssh.woke.changed() => {
             ssh.child.start_kill().ok();
             ssh.child.wait().await.ok();
-            reading.abort();
-            return;
         }
-    };
-    if ssh.settled.load(Ordering::Relaxed) {
-        reading.abort();
-        return;
+        () = async {
+            let status = tokio::select! {
+                status = ssh.child.wait() => status.ok(),
+                _ = ssh.let_go => {
+                    // stdin closed with the connection. Give ssh a moment to finish,
+                    // then kill and reap one that stays alive after EOF.
+                    match tokio::time::timeout(Duration::from_secs(1), ssh.child.wait()).await {
+                        Ok(status) => status.ok(),
+                        Err(_) => {
+                            ssh.child.start_kill().ok();
+                            ssh.child.wait().await.ok();
+                            None
+                        }
+                    }
+                }
+            };
+            if !ssh.settled.load(Ordering::Relaxed) {
+                let said = said_so_far(&mut reading, &said).await;
+                // A greeting or wake can arrive while stderr drains. The wake stays
+                // selectable throughout cleanup; its health reset also excludes a stale
+                // failure racing with it on another runtime thread.
+                if !ssh.settled.load(Ordering::Relaxed) {
+                    ssh.health.failed_unless_woke(
+                        describe_failure(&ssh.dest, status, &said),
+                        &connected_before_wake,
+                    );
+                }
+            }
+        } => {}
     }
-    let said = said_so_far(&mut reading, &said).await;
-    // Settled meanwhile, perhaps by a greeting read just as ssh exited.
-    if !ssh.settled.load(Ordering::Relaxed) {
-        ssh.health
-            .failed(describe_failure(&ssh.dest, status, &said));
-    }
+    reading.abort();
 }
 
 /// Reads ssh's stderr into `said` as it comes, so that a chatty ssh never blocks on a full
@@ -606,3 +627,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, unix))]
+mod supervisor_tests;

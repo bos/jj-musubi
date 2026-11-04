@@ -814,6 +814,60 @@ and a hub that goes back to a head a node dropped, so fixed tests make them. `ju
 cargo-mutants over `hub.rs` and `node.rs`; the property and conformance tests should kill every
 mutant it makes.
 
+## SSH process boundary
+
+The SSH supervisor's process and pipe behavior is outside the Lean transport assumptions.
+The Unix tests in `crates/musubi/src/ssh/supervisor_tests.rs` run controlled local children
+through the shipping supervisor, stderr reader and output wrapper. They inject wakes;
+real sleep detection, ssh authentication, remote hosts and the daemon's sync scheduling
+remain outside these tests. The stream reconnection test uses the real client and relay,
+not an imitation of their framing or retry loop.
+
+The two `waking_during_*` regressions fail against the old supervisor: after either the
+EOF grace wait or the inherited-stderr wait, it restores a failure that the wake cleared.
+The health test separately checks that an already published wake excludes an old failure,
+while allowing failures from a connection opened after that wake. Resetting health and
+publishing the wake share the failure-recording lock, including across runtime threads.
+
+Hand-written negative controls were run individually, with these results:
+
+- Do not kill an active connection on wake:
+  `a_wake_reconnects_the_real_transport_and_notifies_its_users`.
+- Do not kill a child that ignores EOF: `letting_go_kills_and_reaps_a_child_that_ignores_eof`.
+- Skip the explicit reap and leak the owned child instead of dropping it:
+  `letting_go_kills_and_reaps_a_child_that_ignores_eof`, at its `waitpid` assertion.
+- Wait for inherited stderr without a deadline:
+  `inherited_stderr_does_not_hold_up_failure_reporting`.
+- Keep stderr without trimming it: `chatty_stderr_is_drained_and_keeps_the_last_diagnostic`.
+- Record an old failure after the wake reset:
+  `ssh_backoff_is_bounded_and_a_wake_retires_old_failures`.
+- Leave a transport-rejected connection unsettled:
+  `settled_connections_keep_the_transport_diagnostic`.
+- Clear failures on a banner before the greeting: `only_a_greeting_clears_failures`.
+- Omit the stream transport's reconnection notification:
+  `a_wake_reconnects_the_real_transport_and_notifies_its_users`.
+
+Removing only the explicit post-kill wait survived: Tokio's child-drop cleanup still
+reaped the child in that run. That control does not establish that every scheduling of
+the shortened path reaps before the supervisor returns. The leaked-ownership control
+above removes that fallback too and is caught; production retains its explicit wait.
+
+A targeted cargo-mutants campaign also caught all ten selected function-replacement
+mutants: `State::failed`, `Health::failed`, `Health::failed_unless_woke`, `Health::worked`,
+both constant results of `Health::refusing`, `supervise`, `read_stderr`, and both constant
+strings from `said_so_far`. The unmutated baseline passed; none survived, timed out or
+failed to compile. This is a selected campaign, not exhaustive mutation coverage of ssh.
+It ran with the following selection (the package's other test binaries are not run):
+
+```sh
+selection='replace (State|Health)::(failed|worked|refusing).* with|'
+selection="${selection}replace (read_stderr|supervise|said_so_far).* with"
+cargo mutants --in-place --no-config --cap-lints false -p jj-musubi \
+  -f crates/musubi/src/ssh.rs -F "$selection" \
+  --test-tool nextest --timeout 25 --build-timeout 120 \
+  -- --bin musubi -E 'test(/^ssh::supervisor_tests::/)'
+```
+
 ## Wire format
 
 The oracle reads one JSON object per line on stdin and writes one per line on stdout. Every

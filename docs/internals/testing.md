@@ -428,6 +428,22 @@ and saves failures; a paused Tokio clock makes waits deterministic. These tests 
 ssh, socket readiness, the daemon supervisor or a repository sync; the transport contracts
 cover reconnection and subscription reuse, and the sync fault tests cover lost calls.
 
+The Unix process tests in `crates/musubi/src/ssh/supervisor_tests.rs` exercise the shipping
+ssh supervisor, stderr reader, output wrapper and health tracking with controlled children
+of the test binary. Pipe messages signal readiness and EOF; no test sleeps to arrange a
+race. A child that ignores EOF is killed and reaped, and a descendant holding stderr open
+cannot hold up failure reporting. A megabyte of stderr must drain without blocking the
+child, retain a bounded tail and preserve its final diagnostic. Wake notifications during
+both cleanup waits must retire the old connection without restoring a stale failure; a
+separate health test checks the same exclusion after a wake has already been published.
+The greeting test distinguishes shell output from the hub answering, and a settled
+connection must preserve the transport's diagnostic without counting it twice.
+`a_wake_reconnects_the_real_transport_and_notifies_its_users` runs the real stream client
+and relay through those process pipes, forces a wake, awaits the reconnection notification,
+and exchanges requests before and after it. These tests inject the notification; they do
+not suspend the machine, detect real sleep, run ssh, authenticate, or reach a remote host.
+The bounded cleanup tests use the production one-second limits and run concurrently.
+
 ## Fuzzing
 
 The fuzz targets in `fuzz/` make malformed input from nothing, where the fault tests make it

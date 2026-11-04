@@ -824,6 +824,22 @@ fn the_daemon_picks_up_new_repositories() {
     let mut daemons = Daemons::default();
     let alpha = env.init_repo("alpha");
     let beta = env.init_repo("beta");
+    let help = musubi_in(&env, &logs, &alpha, &["daemon", "--help"]);
+    let introduction = help.split("\nUsage:").next().unwrap();
+    insta::assert_snapshot!(introduction, @"
+    Run the daemon that keeps this machine's repositories in sync, or control it.
+    
+    Without a subcommand, it runs the daemon in the foreground, logging to standard error. Other
+    commands start it in the background when they need it, logging to `daemon.log` in musubi's state
+    directory, or under systemd, to the journal.
+    
+    After detecting that the machine has woken, it ends old ssh connections and clears the delay from
+    failed ssh attempts.
+    
+    When a hub runs a newer release of musubi, or a newer build deployed from source, the daemon runs
+    the command `musubi.upgrade-command` names, if set, with `MUSUBI_UPGRADE_TO` set to it, and once the
+    `musubi` it started from is that, starts again from it.
+    ");
     logs.daemon_of(&env, &alpha);
     logs.daemon_of(&env, &beta);
     daemons.of(&alpha);

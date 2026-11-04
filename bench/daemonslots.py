@@ -13,7 +13,6 @@ $WORK/results/daemonslots-REPO.json.
 
 import json
 import os
-import shutil
 import signal
 import sys
 import time
@@ -32,18 +31,7 @@ def packs(repo):
 
 def main():
     repo, iterations = sys.argv[1], int(sys.argv[2])
-    run = f"{WORK}/runs/daemonslots-{repo}"
-    if os.path.exists(run):
-        shutil.rmtree(run)
-    os.makedirs(run)
-    bench.RUN = run
-    bench.LOG = open(f"{run}/log.txt", "w")
-    start(["git", "daemon", "--reuseaddr", "--listen=127.0.0.1", f"--port={PORT_GIT}",
-           f"--base-path={run}", "--export-all", run], name="gitdaemon")
-    hub = f"{run}/hub"
-    bench.start_hub(hub)
-    bench.wait_port(PORT_GIT)
-    shutil.copytree(f"{WORK}/srv/{repo}.git", f"{run}/srv/{repo}.git")
+    run, hub = bench.start_local_run(repo, "daemonslots", proxy=False)
     Am, Bm = f"{run}/Am", f"{run}/Bm"
     sh(["jj", "git", "clone", "--colocate", f"git://127.0.0.1:{PORT_GIT}/srv/{repo}.git", Am], cwd=run)
     sh(["jj", "bookmark", "track", "feature@origin"], cwd=Am)

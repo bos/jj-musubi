@@ -236,27 +236,10 @@ impl Hive {
         node: usize,
         through: &mut Through<'_>,
     ) -> anyhow::Result<usize> {
-        // Polled first, as the daemon does (`Driver::sync`).
-        let member = &mut self.members[node];
-        let poll = member.adapter.poll(&member.core)?;
-        self.request(node, poll, through)?;
-        self.members[node].adapter.before_sync()?;
+        self.begin_sync(node, through)?;
         for steps in 0..10_000 {
-            let member = &mut self.members[node];
-            match member.core.step(&mut member.adapter)? {
-                Step::Idle => {
-                    if member.adapter.when_idle()? {
-                        continue;
-                    }
-                    return Ok(steps);
-                }
-                Step::Send(requests) => {
-                    for request in requests {
-                        self.request(node, request, through)?;
-                    }
-                }
-                Step::Superseded { push, .. } => self.request(node, push, through)?,
-                Step::Merged | Step::Realized(_) | Step::Advanced(_) | Step::Adopted => {}
+            if !self.step_through(node, through)? && !self.members[node].adapter.when_idle()? {
+                return Ok(steps);
             }
         }
         anyhow::bail!("node {node} did not settle")
@@ -271,22 +254,10 @@ impl Hive {
         steps: usize,
         through: &mut Through<'_>,
     ) -> anyhow::Result<usize> {
-        // Polled first, as the daemon does (`Driver::sync`).
-        let member = &mut self.members[node];
-        let poll = member.adapter.poll(&member.core)?;
-        self.request(node, poll, through)?;
-        self.members[node].adapter.before_sync()?;
+        self.begin_sync(node, through)?;
         for taken in 0..steps {
-            let member = &mut self.members[node];
-            match member.core.step(&mut member.adapter)? {
-                Step::Idle => return Ok(taken),
-                Step::Send(requests) => {
-                    for request in requests {
-                        self.request(node, request, through)?;
-                    }
-                }
-                Step::Superseded { push, .. } => self.request(node, push, through)?,
-                Step::Merged | Step::Realized(_) | Step::Advanced(_) | Step::Adopted => {}
+            if !self.step_through(node, through)? {
+                return Ok(taken);
             }
         }
         Ok(steps)
@@ -295,10 +266,32 @@ impl Hive {
     /// Polls the hub, as a sync starts by doing, and takes in what it sends, staging the
     /// operations and objects it fetches, without realizing them.
     pub fn fetch(&mut self, node: usize) -> anyhow::Result<()> {
+        self.begin_sync(node, &mut |_, reply| reply)
+    }
+
+    /// Polls first, then prepares the node, as the daemon does (`Driver::sync`).
+    fn begin_sync(&mut self, node: usize, through: &mut Through<'_>) -> anyhow::Result<()> {
         let member = &mut self.members[node];
         let poll = member.adapter.poll(&member.core)?;
-        self.request(node, poll, &mut |_, reply| reply)?;
+        self.request(node, poll, through)?;
         self.members[node].adapter.before_sync()
+    }
+
+    /// Takes one policy step and delivers its requests. Returns false if the core is idle;
+    /// the caller decides whether to reconcile idle state or stop at this boundary.
+    fn step_through(&mut self, node: usize, through: &mut Through<'_>) -> anyhow::Result<bool> {
+        let member = &mut self.members[node];
+        match member.core.step(&mut member.adapter)? {
+            Step::Idle => return Ok(false),
+            Step::Send(requests) => {
+                for request in requests {
+                    self.request(node, request, through)?;
+                }
+            }
+            Step::Superseded { push, .. } => self.request(node, push, through)?,
+            Step::Merged | Step::Realized(_) | Step::Advanced(_) | Step::Adopted => {}
+        }
+        Ok(true)
     }
 
     /// Has the node record its settings changes, as a sync starts by doing, without reaching

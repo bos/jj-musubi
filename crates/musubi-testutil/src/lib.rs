@@ -118,40 +118,33 @@ impl TestEnv {
 
     /// Creates a colocated repository for `machine`, whose workspace is named after it.
     pub fn init_repo(&self, machine: &str) -> TestRepo {
-        let repo = self.repo_handle(machine);
-        fs::write(&repo.config_path, machine_config(machine)).unwrap();
-        repo.run_jj_at(self.root(), &["git", "init", "--colocate", machine]);
-        repo.jj(&["workspace", "rename", machine]);
-        repo
+        self.init_repo_with_command(machine, machine, &["git", "init", "--colocate", machine])
     }
 
     /// Creates a repository for `machine` that isn't colocated, whose git store is inside
     /// `.jj` and whose workspace is named after it.
     pub fn init_non_colocated_repo(&self, machine: &str) -> TestRepo {
-        let repo = self.repo_handle(machine);
-        fs::write(&repo.config_path, machine_config(machine)).unwrap();
-        repo.run_jj_at(self.root(), &["git", "init", "--no-colocate", machine]);
-        repo.jj(&["workspace", "rename", machine]);
-        repo
+        self.init_repo_with_command(machine, machine, &["git", "init", "--no-colocate", machine])
     }
 
     /// Creates a colocated repository in directory `machine` whose workspace is named
     /// `workspace`, for provoking name collisions.
     pub fn init_repo_with_workspace(&self, machine: &str, workspace: &str) -> TestRepo {
-        let repo = self.repo_handle(machine);
-        fs::write(&repo.config_path, machine_config(machine)).unwrap();
-        repo.run_jj_at(self.root(), &["git", "init", "--colocate", machine]);
-        repo.jj(&["workspace", "rename", workspace]);
-        repo
+        self.init_repo_with_command(machine, workspace, &["git", "init", "--colocate", machine])
     }
 
     /// Creates a repository using jj's simple backend, whose workspace is named after
     /// `machine`.
     pub fn init_simple_repo(&self, machine: &str) -> TestRepo {
+        self.init_repo_with_command(machine, machine, &["debug", "init-simple", machine])
+    }
+
+    /// Initializes a repository and names its first workspace.
+    fn init_repo_with_command(&self, machine: &str, workspace: &str, args: &[&str]) -> TestRepo {
         let repo = self.repo_handle(machine);
         fs::write(&repo.config_path, machine_config(machine)).unwrap();
-        repo.run_jj_at(self.root(), &["debug", "init-simple", machine]);
-        repo.jj(&["workspace", "rename", machine]);
+        repo.run_jj_at(self.root(), args);
+        repo.jj(&["workspace", "rename", workspace]);
         repo
     }
 

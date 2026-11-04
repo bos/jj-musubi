@@ -413,12 +413,7 @@ impl NodeRepo {
             let mut nothing = Contraction::new(&self.canonical, std::iter::empty())?;
             let locals = self.rewrite_locals(&mut nothing, &heads, &counterparts, &unmapped)?;
             self.add_step(HashMap::new(), &HashSet::new(), &counterparts)?;
-            self.save_records()?;
-            self.move_heads(&heads, &locals, None, None)?;
-            self.move_workspaces(&locals)?;
-            self.records.moving = false;
-            self.save_records()?;
-            self.forget_local_caches();
+            self.finish_local_move(&heads, &locals)?;
             return Ok(true);
         }
         // jj op abandon rewrites what was above what it abandoned. Where nothing was, the
@@ -449,12 +444,7 @@ impl NodeRepo {
             // identities established here.
             self.add_step(HashMap::new(), &HashSet::new(), &counterparts)?;
             self.records.moving = true;
-            self.save_records()?;
-            self.move_heads(&heads, &locals, None, None)?;
-            self.move_workspaces(&locals)?;
-            self.records.moving = false;
-            self.save_records()?;
-            self.forget_local_caches();
+            self.finish_local_move(&heads, &locals)?;
             return Ok(true);
         }
         if dropped.is_empty() {
@@ -534,12 +524,23 @@ impl NodeRepo {
         let dropped_here = contraction.dropped().clone();
         self.add_step(contraction.into_images(), &dropped_here, &counterparts)?;
         self.records.moving = true;
+        self.finish_local_move(&heads, &locals)?;
+        Ok(true)
+    }
+
+    /// Finishes a recorded local rewrite, or resumes it after a restart. Keep its state on
+    /// disk until both the op heads and the workspaces have moved.
+    fn finish_local_move(
+        &mut self,
+        heads: &[LocalOp],
+        locals: &HashMap<LocalOp, Vec<LocalOp>>,
+    ) -> Result<(), NodeError> {
         self.save_records()?;
-        self.move_heads(&heads, &locals, None, None)?;
-        self.move_workspaces(&locals)?;
+        self.move_heads(heads, locals, None, None)?;
+        self.move_workspaces(locals)?;
         self.records.moving = false;
         self.save_records()?;
         self.forget_local_caches();
-        Ok(true)
+        Ok(())
     }
 }

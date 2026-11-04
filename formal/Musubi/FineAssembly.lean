@@ -13,7 +13,9 @@ What stays primitive on the way to `hive_converges_observed`, by where it is sta
   `noteHead`, `notesOld`, `doneIn`, `quietKnown`, `clock`, `maintBind`, `noteBind`, `replyBind`,
   `freshOwn`, `rootSeq`, the `latch` laws, `hubSeqStep`, `histBind`, `answer`, `readyKeep`,
   `readyFail`); the environment (`envFinal`, `failFinal`, `autoWritesStop`, `userFinal`); and
-  scheduling (`schedMono`, `idleStart`, `startCore`).
+  scheduling (`schedMono`, `idleStart`, `startCore`). The sampled laws also assume completion:
+  `doneIn` bounds a batch by the next sample, `answer` supplies a later handling time, and
+  `EntryLaws.hobjects`/`hstart` require eventual restarts.
 - `hive_converges_observed`'s record bindings: the native records' identity and custody
   (`views`, `NativeEvents.RecordView`), the hub's records at the cut (`hubRecs`), and, past the
   cut, quiet and with no environment loss, the `Sys` hub's records changing only with the native

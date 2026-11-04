@@ -57,6 +57,11 @@ import Musubi.FineAssembly
 
 open Musubi
 
+-- Shared run facts; the first two are axiom-free.
+#print axioms Musubi.acc_no_infinite_chain
+#print axioms Musubi.no_infinite_run_of_invariant
+#print axioms Musubi.terminal_iff_of_progress
+
 #print axioms NativeEvents.nodeOK_of_filt
 #print axioms NativeEvents.BoundEvent.step
 #print axioms NativeEvents.Event.bound

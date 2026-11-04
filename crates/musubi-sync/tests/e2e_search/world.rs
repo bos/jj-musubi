@@ -97,15 +97,6 @@ pub fn merge_key(op: &jj_lib::op_store::Operation) -> String {
     )
 }
 
-// Keep the search's existing root-child boundary. Expanding it to mutable initial
-// working copies and automatic Git abandonment exposes history-trimming bugs; that
-// investigation is separate from the jj dependency update.
-const JJ_CONFIG: &str = "
-git.abandon-unreachable-commits = false
-[revset-aliases]
-\"immutable_heads()\" = \"builtin_immutable_heads() | root()+\"
-";
-
 #[derive(Clone, Copy, Debug)]
 pub enum Naming {
     /// Each machine names its workspace after itself.
@@ -135,6 +126,8 @@ pub struct Workspace {
 /// What an actual jj command read and wrote, before canonicalization or abandonment can
 /// expand its parent. This is independent source evidence for the reference replay.
 pub struct CommandSnapshot {
+    /// The native operation, before contraction or a per-machine export changes it.
+    pub id: jj_lib::op_store::OperationId,
     pub base: jj_lib::op_store::View,
     pub made: jj_lib::op_store::View,
 }
@@ -221,10 +214,6 @@ impl World {
                     Naming::Default => env.init_repo_with_workspace(machine, "default"),
                     Naming::SharedHostname => env.init_repo_with_hostname(machine, "mac"),
                 };
-                let config = env.root().join(format!("config-{machine}.toml"));
-                let mut text = fs::read_to_string(&config).unwrap();
-                text.push_str(JJ_CONFIG);
-                fs::write(&config, text).unwrap();
                 repo.jj(&[
                     "git",
                     "remote",
@@ -783,6 +772,7 @@ impl World {
             let snapshot = futures::executor::block_on(async {
                 let parent = store.read_operation(parent).await.unwrap();
                 CommandSnapshot {
+                    id: id.clone(),
                     base: store.read_view(&parent.view_id).await.unwrap(),
                     made: store.read_view(&op.view_id).await.unwrap(),
                 }
@@ -1721,12 +1711,7 @@ impl World {
                 Naming::SharedHostname => "mac",
                 Naming::Own | Naming::Default => machine,
             };
-            let repo = self.fx.env.init_repo_with_hostname(machine, hostname);
-            let config = self.fx.env.root().join(format!("config-{machine}.toml"));
-            let mut text = fs::read_to_string(&config).unwrap();
-            text.push_str(JJ_CONFIG);
-            fs::write(&config, text).unwrap();
-            repo
+            self.fx.env.init_repo_with_hostname(machine, hostname)
         } else {
             let path = self
                 .fx

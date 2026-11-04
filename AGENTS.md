@@ -33,6 +33,8 @@ minutes, so each check runs once, by whoever owns it:
 
 ## Tests
 
+For Lean models and proofs, read [Working on Lean proofs](docs/internals/lean.md).
+
 Before adding, changing, removing, or reviewing a test, read
 [docs/internals/testing-philosophy.md](docs/internals/testing-philosophy.md). Write new tests as
 [docs/internals/efficient-tests.md](docs/internals/efficient-tests.md) says. Restructure an

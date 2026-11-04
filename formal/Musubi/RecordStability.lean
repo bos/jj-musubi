@@ -280,27 +280,21 @@ theorem bounded_drop_set_stabilizes (B : Nat) (run : Nat → List Nat)
     (hm : ∀ i x, x ∈ run i → x ∈ run (i + 1))
     (hb : ∀ i x, x ∈ run i → x < B) :
     ∃ k, ∀ i, k ≤ i → ∀ x, x ∈ run i ↔ x ∈ run k := by
+  have mono {i j : Nat} (hij : i ≤ j) : ∀ x, x ∈ run i → x ∈ run j := by
+    induction hij with
+    | refl => exact fun _ hx => hx
+    | step _ ih => exact fun x hx => hm _ x (ih x hx)
   let unseen := fun i => cnt B (fun x => x ∉ run i)
-  have hle : ∀ i, unseen (i + 1) ≤ unseen i :=
-    fun i => cnt_le (fun x _ hn hx => hn (hm i x hx))
-  obtain ⟨k, hk⟩ := Musubi.nat_trace_stabilizes unseen hle
-  have he : ∀ i, k ≤ i → ∀ x, x ∈ run (i + 1) ↔ x ∈ run i := by
-    intro i hi x
-    refine ⟨fun hx => ?_, hm i x⟩
-    apply Classical.byContradiction
-    intro hn
-    have hlt : unseen (i + 1) < unseen i :=
-      cnt_lt (fun y _ hnt hy => hnt (hm i y hy))
-        ⟨x, hb (i + 1) x hx, hn, fun h => h hx⟩
-    rw [hk (i + 1) (by omega), hk i hi] at hlt
-    exact Nat.lt_irrefl _ hlt
-  refine ⟨k, fun i hi => ?_⟩
-  obtain ⟨d, rfl⟩ := Nat.exists_eq_add_of_le hi
-  induction d with
-  | zero => exact fun _ => Iff.rfl
-  | succ d ih =>
-    intro x
-    exact (he (k + d) (by omega) x).trans (ih (by omega) x)
+  obtain ⟨k, hk⟩ := Musubi.nat_trace_stabilizes unseen
+    (fun i => cnt_le (fun x _ hn hx => hn (hm i x hx)))
+  refine ⟨k, fun i hi x => ⟨fun hx => ?_, mono hi x⟩⟩
+  apply Classical.byContradiction
+  intro hn
+  have hlt : unseen i < unseen k :=
+    cnt_lt (fun y _ hnt hy => hnt (mono hi y hy))
+      ⟨x, hb i x hx, hn, fun h => h hx⟩
+  rw [hk i hi] at hlt
+  exact Nat.lt_irrefl _ hlt
 
 /-- A finite set of participating nodes has a common cut after which none learns a new
 original drop. This is independent of their applied record boundaries and cache flags. -/

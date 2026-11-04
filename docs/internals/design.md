@@ -3,8 +3,8 @@
 jj-musubi keeps one jj repository in sync across several machines. A daemon on each machine
 watches the repository's operation log, publishes new operations, and the objects they refer to,
 to a hub, and applies the operations that other machines published. A commit, rebase or abandon on
-one machine shows up in `jj op log` on the others within a second or so, and a machine that was
-offline catches up when it reconnects.
+one machine reaches the others through the hub, and a machine that was offline catches up when
+it reconnects.
 
 This document gives musubi's design rules and the reasons for them. [protocol.md](protocol.md)
 specifies the messages between nodes and the hub and the properties they guarantee, and
@@ -243,21 +243,12 @@ only the parents where it is present: a parent where it isn't lacks its workspac
 forget saw its work, not because the machine removed them. The hub counts the machines with
 workspaces in its head's view, which are therefore the present ones.
 
-Each machine keeps, for each copy present at a canonical operation, the copy's latest work there
-that no forget saw, named by its original identity ([Presence through an
-abandon](#presence-through-an-abandon)), and computes an operation's from its parents'
-(`Presence::merge` and `apply`,
-whose rules the model proves in `umax_merge`, `umax_work` and `umax_forget`): a copy's work
-becomes its latest; a forget leaves the copies it forgets nothing; a merge keeps each latest work
-its parents keep, unless a parent whose history has that work doesn't keep it. Only merges need an
-ancestry test, which generation numbers bound (the root's is 0, and any other operation's one more
-than its largest parent's). An open repository remembers presence at the 256 canonical operations
-it computed last, so an operation reads the history below it only down to one it remembers. The
-first one asked about reads all of it, as computing generation numbers does anyway: when a daemon
-starts, and in each `musubi list`, `forget` and `leave`. Realizing a run of operations computes
-presence at the run's first before its threads start, so that each thread reads only the run below
-its own. [conformance.md, "Presence"](conformance.md#presence) describes the test that checks the
-Rust against the model.
+Presence is computed from an operation's parents and its work or forget marker. A merge keeps
+each parent's latest work unless another parent has seen and forgotten it. Work is named by its
+original identity so contraction cannot change the answer ([Presence through an
+abandon](#presence-through-an-abandon)). Generation numbers bound the ancestry queries, and a
+cache avoids walking the whole history on each sync.
+[conformance.md, "Presence"](conformance.md#presence) describes the check against the model.
 
 ### Which workspaces are this machine's own
 
@@ -367,9 +358,6 @@ The hub takes no part.
   copy's, so that one machine's forget usually reaches the others before their own time comes.
   Duplicate forgets are harmless anyway.
 
-The generated end-to-end tests set forget-after values and run `expire_idle` on a clock they move
-on two hours, with no delay.
-
 ## Hive settings
 
 Some settings must agree across the hive but live outside jj's operations. Remote bookmarks
@@ -448,11 +436,12 @@ When two machines make concurrent operations, someone has to merge them. Suppose
 merged independently. A's operation rewrites commit X; B's concurrent operation adds a child Y of
 X. A's merge rebases Y onto the rewritten X, giving Y'. B's merge does the same, giving Y''. Y'
 and Y'' have different committer timestamps, so they are different commits, and the hive ends up
-with a spurious divergent change. That is unacceptable for a tool whose point is to make several
-machines feel like one.
+with a spurious divergent change.
 
-So the hub keeps a single canonical head and accepts only fast-forward updates. A node pushes by
-uploading what the hub lacks and asking it to compare-and-swap the canonical head from H to H',
+The hub keeps a single canonical head. Ordinary pushes are fast-forward updates; an operation
+abandon contracts the history as described in [Abandoning operations](#abandoning-operations).
+A node pushes by uploading what the hub lacks and asking it to compare-and-swap the canonical
+head from H to H',
 which the hub does only if H' descends from H and everything H' refers to is stored. A node pulls
 by fetching the operations between its last-known canonical head and the current one, realizing
 them in topological order, and publishing the realization of the new head. If the node has local
@@ -475,9 +464,8 @@ merges, and pushes, the same path as any concurrent update.
 
 A hub is just a store. Every node holds every operation it has seen, so a new, empty hive fills up
 as soon as nodes connect: the first node fast-forwards it to its head, and the others fast-forward
-or merge as usual. So a hub needn't be durable, and it syncs nothing to disk: one that loses its
-state, to a power cut say, is deleted and made again, and the machines' repositories fill the new
-one.
+or merge as usual. A hub makes no synchronous fsyncs: one that loses its state is deleted and
+made again, and the machines' repositories fill the new one.
 
 A new hub doesn't have the hive id the nodes know, so it answers their requests "no hive", and
 their syncs fail, saying so. `musubi join` in one copy then makes the hive again (a join with
@@ -521,15 +509,12 @@ working-copy entries, plus `commit_predecessors`, with all ancestors, trees, and
 refuses a head whose closure is incomplete, and a node realizes only complete operations, so
 uploads and downloads can be interrupted at any point without anyone seeing a dangling reference.
 
-An empty object reply must satisfy the requested operations too. A remade hub may no longer
-know an operation from an earlier reply and return no objects for it. If the node still lacks
-any required commit, `stage_objects` fails, just as an incomplete bundle import does. The
-daemon reopens and starts with a new `Fetch`; it does not repeat `GetObjects` against the old
-known head until another machine restores the data. Empty replies for operations whose
-objects are already present still succeed. The native regression
-`objects::an_empty_object_reply_retries_from_the_remade_hub` reaches this after interrupted
-receipt, a rejected push, and a hub remake between requests, then completes the receiver's
-retry before the other machine publishes again.
+Object replies are checked for completeness even when empty: after a hub remake, the hub may
+no longer know the requested operations. A node still missing required commits restarts from a
+fresh fetch rather than retrying object requests against the old head. An accepted fetch base is
+usable only while its required commits remain locally available; otherwise the node fetches
+from the root. This matters after `jj util gc`, which can collect objects from an abandoned
+base's original view even when its surviving local image is present.
 
 ### git backend
 
@@ -594,17 +579,6 @@ a thread of its own, one repository at a time, and only with over 1,000 extras f
 keep refs to clean up, a week after it last ran (even if that run failed partway), with one op
 head, not on battery, and not while another process runs it. The hub never runs it: there, what
 git can't reach from the head is history the hive still needs.
-
-After a restore and abandonment, the saved accepted base can still name an operation whose raw
-view's objects jj has collected, even when its surviving local image is present. Before using
-that base, `NodeAdapter` checks that its required commits are present, once per round and base.
-The driver and native harnesses invalidate the check before polling, ahead of the initial fetch
-and its import; head discovery still waits for that reply. If any required commit is missing, it
-advertises the root for both operation and object transfer: the hub must not omit objects merely
-because the saved base used to hold them. The saved candidate is retained;
-setting the same candidate writes nothing. A new round rechecks it, so a user's gc between
-rounds cannot leave retries permanently claiming the old objects. The native regression is
-`fetch_base::collected_objects_of_an_abandoned_fetch_base_are_fetched_again`.
 
 A process killed partway through updating refs, musubi, git or jj alike, leaves behind the lock
 file git takes on a ref, `<ref>.lock` or `packed-refs.lock`, and every later update of that ref
@@ -691,16 +665,15 @@ the history since the join, as the next `jj` command does, and the merge's canon
 out the parents from before the join, whose work its view has merged (`canonicalize`). Until then
 the node syncs the rest of its history.
 
-A repository that was part of a hive before, and left it, writes no join operation when it joins
-again, if its head descends from the history it shared (an operation canonicalized already, a
-realization, or a join point): that history is canonical already, and the head is canonicalized on
-top of it as any operation is. A join operation on the root would hide that history from the head.
-The head the old hub last accepted, which the node keeps, would no longer be reachable from it,
-which musubi takes for an op abandon, and would publish as one ([Abandoning
-operations](#abandoning-operations)), whichever hive the repository joins; and other machines' workspaces, no longer recognized as theirs, would
-come back as this machine's own. So joining a different hive brings the old hive's shared history
-with it, its machines' workspaces included, which show on every machine of the new hive, as a
-machine's workspaces do once it stops syncing.
+A repository that previously shared canonical history carries that history when it joins
+again, even into another hive. Replacing it with a join on the root would make its accepted
+base unreachable, falsely indicating an op abandon, and lose the ownership of other machines'
+workspaces. Joining records fresh work if needed to make this copy present again.
+
+Carrying history does not bring every old member into a different hive. The join forgets copies
+absent from the target hive, except the joining copy itself; copies already present or joining
+there stay present. Joining the same hive, including one remade on another hub, forgets none.
+[copies.md](copies.md#rules) specifies the membership and duplicate checks.
 
 Merging needs no special machinery. Every jj repository's operation log starts at the same root
 operation, so a joining node's history and the hive's meet there. The joining node pulls the
@@ -786,26 +759,15 @@ caller-supplied value. Contraction preserves that attribute verbatim. The origin
 hash is recomputed by removing the attribute and restoring those parents; the original parents
 are identity material and need not remain stored or reachable after an abandon.
 
-Contraction checks that its input history contains at most one version of each original,
-including below the generation at which it can stop rewriting. Different versions may exist
-elsewhere in the store. A received attribute must be a nonempty list of lowercase full parent
-ids separated by single spaces. The hub indexes original identities as it accepts operations,
-rejects duplicate originals in proposed history, and remembers the originals explicitly dropped
-by its records. An imported alternate version of a dropped original cannot evade rejection by
-choosing new current parents. The attribute is not proof of a peer's historical provenance;
-the protocol's model describes fresh creation and contraction, not arbitrary reparenting.
-This validation reads each input head's full ancestry once, even when only recent operations
-need rewriting. Tips are checked before their prefixes to avoid rescanning every growing
-prefix in a linear history; subsequent queries on that contraction reuse the validation.
-Every rewritten local survivor also records its canonical image in `musubi.canonical`, so
-rebuilding the disposable translation cache preserves its original identity and local jj ids
-cannot coalesce when a remote abandon is taken.
-An unmarked rewrite made by jj can still be the parent of a command that loaded it before
-the sync. The local renaming step therefore records its established canonical identity as a
-forward-only source alias, in the same counted block as the contraction and before moving
-heads. It survives losing the translation cache and never replaces a preferred marked local
-realization. A partial counted block is damage; during recovery, a reachable source alias is
-still physically rewritten before the pending head move is considered complete.
+Contraction requires at most one version of each original in its input history, even in the
+ancestry it need not rewrite. The hub enforces this when accepting a history and rejects an
+alternate version of a dropped original. The original-parent attribute preserves identity; it
+is not proof that a peer followed the protocol.
+
+A local survivor carries its canonical identity through rewriting. Unmarked jj rewrites whose
+identity musubi has established are retained as source aliases too: an in-flight command may
+still write on them. These facts must survive loss of the disposable translation cache, so a
+restart cannot mistake a renamed operation for new work.
 
 The hive's history drops a set of canonical operations. Each surviving operation's parent list
 has every dropped parent replaced, where it stands, by that parent's own parents, themselves so
@@ -853,25 +815,17 @@ couldn't be worked out. Of two works an abandon dropped, neither counts as befor
 
 ### Publishing an abandon
 
-jj's own reparenting can also recreate an earlier local id. Where a surviving local operation
-has the same view and metadata as a missing one, or two missing originals share that content,
-musubi cannot infer which survived. It refuses before recording drops or moving op heads. The
-error gives `jj op integrate <operation>` to restore the published history; `jj op restore`
-would restore only a view, leaving the missing ancestry missing.
-Equal time metadata never establishes identity: distinct operations can have the same
-timestamps, author and description but different views or command arguments. Before a native
-operation, join point or realization is available for publication, `musubi/originals` records
-its full local nonparent fingerprint against the immutable canonical original. Several local
-forms may have the same canonical original because canonicalization strips per-machine
-fields. Every fingerprint is retained, and a fingerprint shared by distinct originals stays
-ambiguous. This local evidence is not accepted from peers and is not part of the disposable
-translation cache. It preserves inference across jj gc, cache loss and restart without
-reconstructing fields canonicalization discarded. An original with missing evidence is
-refused before any drops; timestamp equality cannot fill that gap. Recording evidence for
-an operation that a crash never publishes is harmless: detection considers only originals
-in the history below the established published base.
+jj's own reparenting can also recreate an earlier local id. When the surviving local history
+cannot distinguish which published original was dropped, musubi refuses before recording drops
+or moving heads. The error names `jj op integrate <operation>` to restore the missing history;
+`jj op restore` restores only a view.
 
-A machine notices an abandon as before: canonical operations it had published are no longer
+Inference uses the operation's full nonparent content, recorded against its immutable canonical
+original before publication. Equal timestamps alone cannot establish identity. This evidence is
+kept separately from the translation cache and survives jj gc; missing or ambiguous evidence
+causes a refusal rather than a guessed drop.
+
+A machine notices an abandon when canonical operations it had published are no longer
 reachable from its op heads. It watches the operation it fetches from, and its own last push from
 the moment it learns that the hub took it, from a reply that names it or among what it fetches: it
 moves the base to the push only at its next step, which a sync cut short or a lost reply delays. A
@@ -916,9 +870,10 @@ they had before it. A machine that lacks some of the hub's records applies them 
 rewrites the history it has from the hub, and its own operations the hub lacks, by contraction.
 It reparents each local operation, which keeps the operation's view and per-machine fields, so
 nothing is exported to `.git` and no ref moves; and it renames its own pending drops. It applies
-a record only once none of its heads is dropped by it. A machine whose head a record drops, as
-one that stood still at an operation another machine abandoned, first fetches and advances to the
-hub's head, which descends from it. So applying a record never leaves a machine two heads to
+a record only once none of its heads is dropped by it. When a record drops a head, the machine
+prepares the record and fetches the hub's current history. Advancing to its surviving images
+takes the record as part of the head move. This also handles a hub rollback to a head the
+machine has dropped locally. So applying a record never leaves a machine two heads to
 merge, and never repeats a merge another machine made. The hub never takes a head it has
 dropped, and a machine never advances to one.
 
@@ -933,38 +888,21 @@ refuses its push, its records not being the hub's, and the machine takes them ba
 hub's ([What an abandon costs the hub](#what-an-abandon-costs-the-hub)). So the records a hub
 appends are bounded by new drops and what a hub that went back lost.
 
-Before preparation writes any local operation, the machine saves the new records in custody
-in `records.json`. Custody is separate from the records it applied: it neither acknowledges
-them to the hub nor makes a pruned prefix readable as applied history. Taking the next full
-announcement consumes custody in the same write as its renaming: matching records become
-applied, and lost ones become pending. This reconciliation also runs when the announcement
-equals the already applied list, as when both are empty after a rollback. Any local version of
-an original a lost record drops is contracted as part of that move.
+Taking records has three ordering requirements:
 
-A machine works out how records rename its history, and writes the rewrites of its local
-operations, before it takes them, from the op heads as they are then. A `jj` command can write
-in between, and the sync's next step gives its operation a canonical form, on the history the
-records rename, which nothing would rename once they are taken: pushed, it would bring back
-what they drop. So a machine works the rewrites out again whenever the op heads moved before it
-takes the records. Where the command's operation is beside the realization of the hub's head,
-the realization is merged with its rewrite, as with any realization beside a machine's own
-heads ([Local integration](#local-integration)), and the merge goes where the heads move.
+- Before preparing any local rewrite, save the received records in custody. Custody is not an
+  acknowledgement that they have been applied. If the hub loses them, the machine remains
+  responsible for publishing their drops again.
+- Recheck the op heads before applying the prepared rewrite. A concurrent jj command may have
+  added work on the old history; that work must be renamed too before it can be published.
+- Save the applied records, renamings, pending drops and head-move intent together before
+  moving heads. Recovery must finish a partially published move and update workspace records,
+  even after another crash or translation-cache loss, while retaining newer jj work.
 
-Before moving the op heads, the machine saves the records it is taking in the same
-`records.json` write that counts their renaming, with the renamed pending drops and fix-up
-state. Otherwise a stop after the renaming left a machine that had dropped the operations
-without holding their records or having them pending; if the hub lost those records, it
-retried a push carrying no drops, which the hub kept rejecting. This save makes it responsible
-for publishing the drops again. A failed save restores the previous in-memory bookkeeping;
-the appended logs count only once the save succeeds. A saved move intent keeps the exact old
-heads and their images, the target heads, and the local-to-canonical facts needed after losing
-the disposable translation cache. Recovery finishes partial publication and moves workspace
-records, keeping newer heads a `jj` command made and detecting any further abandonment. The
-intent remains until the affected heads are physically normalized and the workspace pass is
-complete, so a second crash and cache loss can resume too. Taking the
-records can therefore finish during `advance`, without a later `Adopted` core step; the
-adapter invalidates its staged graph and ancestry cache when that changes its record state,
-including when the advance subsequently returns an error.
+These requirements keep every locally removed operation accounted for by an applied record or a
+pending drop. They also let record adoption finish as part of advancing the repository; callers
+must then discard plans based on the old record state. [conformance.md](conformance.md) describes
+the adapter and native recovery checks.
 
 Each machine keeps, for every id a record superseded, the id or ids it became, and translation
 renames through it. An operation that a `jj` command wrote on a superseded operation, having
@@ -1127,191 +1065,107 @@ What this means for a machine:
 
 ## Transport
 
-The transport is a small trait. Every message goes to a subject, a dotted name that requests and
-subscriptions address. Request/response carries messages up to the negotiated size limit, and
-subscriptions carry hub notifications. Requests about a hive go to `musubi.<id>.rpc`, where `<id>`
-is the hive's id, and notifications to `musubi.<id>.head`. Requests about the hub as a whole
-(join, list, resolve a name, rename, remove, a daemon's report on a sync, and `musubi top`'s
-request for activity) go to `musubi.hub.rpc`. The hub takes all of them on one subscription,
-`musubi.*.rpc`. Each hive's requests go to a thread of its own, which opens the hive's store on
-its first request and answers one request at a time: that is what makes each push atomic, while
-different hives don't wait for each other. A request for a hive the hub doesn't have is answered
-"no hive", or "removed" for a hive `musubi hub remove` removed: only a join creates a hive, or
-makes one again. Every operation and object is verified against its content hash on receipt, so a
-misbehaving peer can't inject data under a false id.
+The transport provides bounded request/response messages and subscriptions for head
+notifications. Each hive has its own worker, which opens its store on demand and answers one
+request at a time. This serializes a push's checks and head update without making unrelated
+hives wait. Only joining creates a hive or makes a missing one again; an ordinary sync cannot
+silently create a hive on the wrong hub. Operations and objects are checked against their
+content hashes on receipt.
 
-- **In-memory**: an in-process network, on which the hub's service and the connections it serves
-  meet. Tests run nodes and hubs over one too, which can drop, delay, duplicate, and reorder
-  messages, and disconnect peers.
-- **Streams** carry the same subjects over a byte stream: the hub's local socket, and over ssh,
-  the standard input and output of `musubi hub connect`. Each frame is its length, a kind, and its
-  fields: `SUB`, `PUB` and `REQ` from the client; `MSG` for its subscriptions, and `REPLY` or
-  `FAIL` for its requests, from the hub, which relays each connection through its own in-memory
-  network, every request as it comes. A frame the connection ends partway through is never
-  delivered. The client subscribes on the hub once a subject, however many subscriptions it makes
-  to it: there is no unsubscribing there, so one that nobody reads any more stays until the
-  connection ends, for the next subscription to the subject to take up. It opens a new connection
-  whenever one ends, subscribing again to what it still reads; requests in flight on the old one
-  fail at once, and those made in between wait for the new one, up to their timeout. The
-  daemon's wait only for the next attempt to connect, failing if it fails, so that the daemon
-  says at once why the hub is out of reach, and syncs as soon as the connection is back. Either side ends a connection that falls 1024 frames behind, as it
-  would one whose other side vanished. If a hub greets the client wrongly (another version, too
-  much noise first, or an implausible payload limit), the first connection fails at once, and
-  after that the client tries again only after a minute.
-- Over ssh, the hub's machine may print something before the hub greets: some shells' startup
-  files print for every shell, a banner in ASCII art, say. The client passes over up to 64 KiB of
-  it; past that, it fails, quoting the first thing printed. The greeting starts with a NUL, which
-  is never part of text, so that a banner can't be mistaken for it. The client greets the hub only
-  after the hub has greeted it, so that nothing that runs there first can read the greeting.
+The hub's in-memory network and stream connections carry the same subjects and messages. Tests
+can interrupt or reorder delivery on the in-memory network. Streams connect through a local
+socket or the standard input and output of `musubi hub connect` over ssh. An incomplete frame
+is never delivered.
+
+A disconnected stream fails its in-flight requests and reconnects with its subscriptions
+restored. Calls have bounded waits, and a peer that cannot keep up with queued frames is
+disconnected rather than allowed to accumulate unbounded work. Reconnection triggers a sync,
+since notifications may have been missed. Invalid greetings and repeated connection failures
+back off; only a valid hub greeting counts as a successful connection. A bounded shell banner
+may precede that greeting, whose unambiguous prefix prevents mistaking shell output for the
+protocol.
 
 ### Running a hub
 
-A hub is meant for one person's machines, or a team whose members trust each other: anyone who can
-reach it can read and write every hive on it. `musubi hub` serves a directory holding one
-subdirectory per hive, named by the hive's id, each with the hive's store (`canonical/`,
-`backend`, `git/` and `extras/` or `simple/`, `heads`, `blobs/`, `tmp/`), its `hive.toml` (name
-and backend), and its index. Removed hives move to `removed/`, as do corrupt stores ([Replacing
-the hub](#replacing-the-hub)). A removed hive's store is emptied a day later, and its directory,
-`<id>-<time>`, stays for good, empty, as its tombstone: the hub answers the hive's machines
-"removed", and they leave it, keeping what they have. A lost hive, which has no tombstone, can be
-made again. Corrupt stores' directories end in `.corrupt`, and their hives are still there.
+A hub is for one person's machines or a team whose members trust each other: anyone who can
+reach it can read and write every hive. Its local socket is accessible only to its owner and
+lives with the hub, so a temporary-file cleaner or the end of a login does not remove it.
+Directory locks prevent two processes from serving the same store; the default-hub lock also
+prevents accidentally starting a second default hub. Explicit directories allow separate hubs.
 
-Without `--dir` the hub serves the current directory if it is a hub's, or else `~/musubi-hub`,
-and takes a lock in the user's state directory, so that a second hub started the same way says
-where the first one is instead of starting. `--dir` runs more hubs on purpose, and a lock in each
-hub's directory stops two hubs serving the same one.
+Each hive has its own stored history, objects and membership metadata. Removing a hive leaves a
+tombstone after its data is deleted, so its machines leave rather than recreate it. A corrupt
+store is set aside without that tombstone: its hive can be filled again by the machines
+([Replacing the hub](#replacing-the-hub)). The
+[file reference](../reference/configuration.md#files-and-directories) lists the layout.
 
-The hub listens on a local socket that only its owner can reach, `run/hub.sock` in its directory,
-in a subdirectory only its owner can open (on Windows, a named pipe named after the directory),
-where neither a temp cleaner nor the end of the login that started the hub removes it. `musubi hub
-connect`, and commands on its machine, find it there. It prints the commands other machines run,
-with this machine's host name, or the name `--advertise` gave it, which it keeps in `hub.toml`
-too, since a machine doesn't always know a name others can reach it by. It also saves its
-directory as the machine's default hub, unless the machine has one, so that commands on the hub's
-machine need no `--hub`.
-
-For `musubi top`, the hub keeps account in memory, per hive, of the bytes each hive's requests and
-replies carry, the heads it accepts and what they bring (operations, and the commits their
-`commit_predecessors` say they wrote), pushes it turns away, requests it fails, and the latest
-report of each machine's daemon (`musubi_hub::activity`). A daemon reports after every sync that
-ran, without waiting for an answer: the hub's head as the sync left it knowing it, its error if it
-failed, and its release. The hub tells that a machine is behind from when it accepted the first
-head the machine's report lacks. None of this is persisted: a hub that restarts knows nothing of
-what came before, and needn't.
+The hub keeps activity counters and the latest daemon reports in memory for `musubi top`.
+Reports identify the head a machine knows, its sync result and its release; reporting does not
+hold up a sync. None of this is durable, and a restart begins a fresh observation period.
 
 ### Reaching a hub over ssh
 
-Often ssh is the only way one machine can reach another, as when a laptop reaches a devbox through
-a zero-trust tunnel, and since the protocol trusts whoever can reach the hub, the hub can't simply
-be exposed. A `--hub` that isn't an absolute path is an ssh destination, passed to the user's own
-`ssh` (or `$MUSUBI_SSH`), so `~/.ssh/config` applies: aliases, `ProxyCommand`, and the rest.
+An ssh destination uses the user's ssh configuration, including aliases and proxy commands.
+Joining installs a machine-specific key restricted to `musubi hub connect`, using the user's
+ordinary ssh access while interactive authentication is possible. The daemon then connects
+without prompting or requiring an ssh agent for that key. The restricted command reaches the
+hub's local socket; the hub itself needs no exposed network listener.
 
-- Each machine has a key of its own, `hub_key` in its state directory. Joining a hub over ssh
-  first tries it, and if ssh refuses it (or there's no key yet, when it creates one), adds it to
-  `~/.ssh/authorized_keys` on the hub's machine, through the user's ordinary ssh, which can prompt
-  then, since the user is at the terminal: `restrict,command="musubi hub connect"`, so a stolen
-  key reaches the hub and nothing else. The daemon needs no ssh agent to reach the hub, and never
-  prompts (`BatchMode=yes`), which a process started at login couldn't answer.
-- `musubi hub connect` relays its stdin and stdout to the socket of the user's hub (the one
-  `musubi hub` last served without `--dir`).
-- On the other machine, the daemon keeps one connection to each hub, which every copy it serves
-  there shares, so that a machine with many repositories on a hub runs one ssh, and the hub's
-  machine one `musubi hub connect`, not one for each. The connection runs on the daemon's own
-  runtime, rather than any copy's, and ends once no copy holds it. Copies that ask for it while
-  it connects wait for that attempt, and hear how it went, rather than each running ssh. A call
-  that moves two windows of chunks or more, 16 MiB, opens a connection of its own for them, which
-  ends with the call, unless `musubi.daemon.connections` is `one`: so that a large transfer
-  neither holds up the small requests of the copies sharing the connection nor waits behind
-  theirs, and transfers at once each have a connection, as they had before it was shared. A
-  call that can't open one moves its chunks on the shared connection.
-- Each connection is an ssh of its own, and the stream transport speaks through its stdin and
-  stdout. Nothing outlives a connection: an `ssh -L` forward that lasts goes dead when the
-  machine sleeps, while here, connecting again is a new ssh. ssh's `ServerAliveInterval` gives
-  up on a dead link within half a minute, and musubi ends every connection at once when it sees
-  that the machine has slept (its monotonic clock stops during sleep and the wall clock
-  doesn't), so the transport connects again within seconds of waking.
-- Once the transport reconnects, over ssh or not, the daemon syncs at once, since it missed the
-  hub's announcements while it was away, even if it was waiting to retry a sync that failed (only
-  once per run of failures, in case the sync is what loses the connection). A request in flight
-  when the connection dropped fails at once, so a sync it was part of starts again.
-- ssh doesn't compress (`Compression=no`): musubi already compresses what it sends.
-- A failing ssh backs off, up to a minute, and the transport's attempts to connect meanwhile fail
-  at once: otherwise they would run ssh, and perhaps a tunnel's login page in a browser, every few
-  seconds. Only the hub's greeting coming through counts as ssh working, not whatever the shell
-  printed first. What ssh said, or that `musubi` isn't on the `PATH` there (exit status 127),
-  becomes part of the error `musubi list` shows.
+Copies on one machine share the daemon's connection to each hub. The connection belongs to the
+daemon's runtime and lasts while any copy needs it, so one repository stopping does not break
+the others. Large transfers can use a separate connection to avoid delaying small requests,
+falling back to the shared one if it cannot be opened. The
+[connection setting](../reference/configuration.md) controls this policy.
+
+Every reconnect starts a fresh ssh process. Keepalives and sleep detection discard dead
+connections, while backoff prevents repeated ssh failures from launching processes or tunnel
+login prompts continuously. ssh's errors remain available in the copy's sync status.
 
 ## Local integration
 
-- Each user runs one daemon, which serves every repository listed in its state file (`state.toml`
-  in musubi's state directory, the source of truth), one thread each. Commands reach it over a
-  control socket: tarpc (a Rust RPC library), with JSON messages, over a Unix domain socket
-  (`$XDG_RUNTIME_DIR/musubi/daemon.sock` on Linux, `$TMPDIR/musubi/daemon.sock` on macOS) or a
-  Windows named pipe (`\\.\pipe\musubi-<user>`). It answers `version`, `add` (start serving a
-  repository now, and reply after its first sync), `remove`, `sync`, `progress` (what a
-  repository's sync is doing: asking the hub, bytes sent or received of how many, importing, or
-  operations applied), `status`, and `stop`. `musubi create`, `join`, and `clone` write the
-  repository's membership and the state file, then ask the daemon to add it, starting the daemon
-  in the background first if none is running; on a terminal, they and `musubi sync` show the
-  sync's `progress` while they wait.
-- Only the user can reach the daemon. A Unix socket's directory must be theirs and writable by no
-  one else, as tmux and ssh-agent check, or the daemon won't listen there and commands won't
-  connect. A named pipe admits only its owner, and the daemon creates it as the first instance, so
-  it can't start if another user took the name. A lock file in the state directory, named after
-  the socket, keeps a second daemon from starting; the daemon holding it removes a socket a
-  crashed daemon left behind. Commands check the daemon's version first, and suggest `musubi
-  daemon restart` when it differs.
-- `musubi daemon install` hands the daemon to the platform's service manager, to start at login: a
-  launchd agent on macOS and a systemd user unit on Linux, which restart it after a crash but not
-  after `musubi daemon stop`, and an entry in the user's `Run` registry key on Windows, which runs
-  `musubi daemon start`. Where launchd or systemd runs it, commands that need the daemon ask the
-  service manager to start it rather than starting one themselves, so there is never a second. The
-  service gets the installing shell's `PATH` (the daemon runs `git`), and the variables that say
-  where jj's config (which holds the daemon's own settings too) and musubi's state are:
-  `JJ_CONFIG`, `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, and `MUSUBI_*` settings. A marker in the state
-  directory records the installation, so commands with another `MUSUBI_STATE_DIR` (tests) leave it
-  alone. `musubi hub install` does the same for a hub, on macOS and Linux only: the service runs
-  `musubi hub` in the hub's directory, which install makes a hub's first, so that it is served as
-  the user's one hub, taking the lock and recording its path for `musubi hub connect`.
-- A daemon that a command starts outlives it, so it takes nothing from the command's environment
-  that only says where the command ran. git's variables naming a repository (`git rev-parse
-  --local-env-vars`), which a git hook has, reach neither the daemon nor any git musubi runs, and
-  that git runs no hooks, as jj runs none when it writes `.git`. The daemon's `SSH_AUTH_SOCK`, for
-  signing with a key an agent holds or for a `ProxyJump` host, names `ssh-agent` in the state
-  directory: a link that every command points at its own agent when that answers. So the daemon
-  uses the agent of the latest session to run musubi, and outlives the session it started in, such
-  as an ssh login with a forwarded agent. The systemd unit names the link too, since a user's
-  service manager rarely has an agent; launchd has one of its own.
-- Commands change `state.toml` holding a lock beside it, and write it whole, so that concurrent
-  joins keep each other's changes and a crash never leaves half a file.
-- The daemon watches `.jj/repo/op_heads/heads` with filesystem notifications, and also polls
-  slowly. It also watches where jj records the repository's path, which jj rewrites when it
-  finds the repository moved: on macOS, notifications follow paths, so the op heads of a moved
-  copy go unwatched. It reads operations through jj-lib's op store and never parses jj files
-  itself.
-- Loads and merges go through jj-lib's repo loader, which takes jj's op heads lock, so musubi
-  merges concurrent heads exactly once per machine even while `jj` commands run.
-- In colocated repositories, realization holds `.jj/repo/git_import_export.lock`, the lock the jj
-  CLI holds around its own import and export, so the two never interleave. A realization beside
-  the machine's own concurrent op heads is merged with them and exported under that lock, and
-  only the merge published: a `jj` command that merged them itself wouldn't export, and its
-  import would take `.git` as the realization alone left it. Those heads are read again under
-  the lock, which `jj` commands in the colocated workspace hold to publish, so none of theirs
-  published meanwhile is left out. While the machine takes records that drop its head, the
-  heads the realization is beside are those that moving the heads where the records name the
-  history leaves beside it.
-- Merges that musubi makes rebase commits, which needs the user's jj config (identity, and signing
-  if enabled). musubi loads the same system, user, repo, and workspace config that `jj` does. The
-  merge operation looks like one `jj` would write ("reconcile divergent operations"), with this
-  machine's hostname.
-- musubi's own settings are jj's too, under `musubi.`, so `jj config` shows and changes them, and
-  musubi has no config file. Those that are a machine's rather than a repository's (`musubi.hub`,
-  `musubi.daemon.*`) come from the user config alone: the daemon serves every repository from one
-  socket, and commands must find that socket wherever they run.
-- Operations reach the op store in dependency order: objects, then views, then operations,
-  ancestors first, then the op head. A jj process can therefore never see a reference to something
-  missing.
-- musubi never replicates `index/`, `config-id`, `workspace_store/`, or `store/git_target`.
+Each user runs one daemon, with an independent worker for each repository in its state file.
+`musubi create`, `join` and `clone` record membership and ask the daemon to serve the copy,
+starting it if necessary, then wait for its first sync. The local control connection exposes
+status and sync progress while that work runs.
+
+Only the owner may reach the control socket. musubi refuses unsafe socket directories or a
+named pipe another user has claimed, and a lock prevents a second daemon from taking over the
+endpoint. Commands check the daemon's version before using it. Installation delegates startup
+to the platform's login service where supported; commands use that service too, rather than
+starting a competing daemon. The service retains the installing environment needed to find
+programs, jj configuration and musubi state. The
+[command reference](../reference/commands.md#run-the-daemon) describes daemon installation.
+
+A daemon outlives the command and login session that started it. Repository-specific git
+environment variables therefore reach neither the daemon nor the git processes musubi runs,
+and those processes run no git hooks. Signing and proxy hops may still need an ssh agent: a
+stable link in musubi's state directory follows the latest responsive agent supplied by a
+command, so the daemon can use a later session's agent after its original session ends.
+
+Commands update the state file under a lock and publish the complete replacement together,
+protecting concurrent joins and process-crash recovery. There is no power-loss durability
+guarantee ([AGENTS.md, "Resilience"](../../AGENTS.md#resilience)). The daemon watches op heads
+and jj's record of repository moves, with polling as a fallback; [copies.md](copies.md) gives
+the checks that keep moved or replaced repositories from syncing under the wrong identity.
+
+Repository loads and merges use jj-lib's repo loader and op-heads lock, so concurrent jj
+commands participate in the same reconciliation. In colocated repositories, realization also
+holds jj's import/export lock while rereading the local heads, merging, exporting and
+publishing. Publishing only the exported merge prevents a later jj import from mistaking
+musubi's ref update for a git change. When taking abandonment records, this merge uses the
+heads as the rewritten history names them. Commands in secondary workspaces do not all take
+the colocated import/export lock; [races.md](races.md#remotes) records that limitation.
+
+Merges load the same system, user, repo and workspace configuration as jj, including identity
+and signing settings. musubi's own settings live under `musubi.` in jj's config. Machine-wide
+settings come from user config alone so every repository finds the same daemon. Local indexes,
+repository identity and working-copy state stay local
+([What is replicated](#what-is-replicated)).
+
+Publication follows dependency order: objects, views, operations with their ancestors, and only
+then the op head. Together with the record-taking order in [Taking the hub's](#taking-the-hubs),
+this keeps published history readable across interruption and restart.
+[Conformance](conformance.md) states which native boundaries are checked against the models.
 
 ## Compatibility
 

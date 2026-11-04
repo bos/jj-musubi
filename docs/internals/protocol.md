@@ -1,8 +1,9 @@
 # Sync protocol
 
-The exact protocol between nodes and the hub, and the properties it guarantees. The Lean model
-in [formal/](../../formal/README.md) and the state machines in `crates/musubi-core`, which do
-no I/O themselves, both follow it: a change here changes both. [design.md](design.md) explains
+This specification describes the protocol state and transitions shared by the Lean model in
+[formal/](../../formal/README.md) and the state machines in `crates/musubi-core`. The core does
+no I/O itself; adapters implement storage, translation and transport. A change to a protocol
+rule must update both model and implementation. [design.md](design.md) explains
 why the protocol has this shape, and defines its terms ("Vocabulary"): a *hive* is one
 replicated repository, a *node* is one machine's copy of it with musubi's daemon, and the
 *hub* stores the hive and orders its updates.
@@ -260,8 +261,8 @@ under reliable delivery ([formal/README.md](../../formal/README.md) says why tha
 real network). `formal/Musubi/Regress.lean` proves what still holds of a hub that goes back: its
 head stays closed, its history a chain from the root, each node's repository closed, and the
 nodes converge once it stops going back, whatever order they take their steps in. The proofs pin
-down several requirements in this document: the `Cas` order, the `Fetch` guard, what must be
-durable, and keying chunk sessions by blob id.
+down the `Cas` order, the `Fetch` guard, what a normal crash retains, and keying chunk sessions
+by blob id. Power-loss rollback is the separate case described above.
 [formal/README.md](../../formal/README.md) lists the theorems, and
 [conformance.md](conformance.md) describes how the Rust implementation is checked against
 the model.
@@ -359,8 +360,9 @@ drops and the hub's records, supersede, instead of an ordinary push.
 
 Properties of the original-ancestry relation in `formal/Musubi/Supersede.lean`:
 
-- Every safety property above holds as stated, MergeOwnership and no duplicate merges
-  included: renaming creates no operation, and so performs no merge.
+- Without hub rollback, every safety property above holds in the original-ancestry model,
+  MergeOwnership and no duplicate merges included: renaming creates no operation, and so
+  performs no merge.
 - **DroppedGrows**: `D_node` only grows; `D_hub` too while the hub doesn't go back.
 - **SupersededGone**: an id that a node's dropped set has superseded is never again the id of an
   operation that node shows; on the hub, while it doesn't go back.
@@ -406,11 +408,13 @@ and native boundary coverage and the limits of that correspondence.
 Requirements:
 
 - `canon(realize(C)) = C`.
-- `canon` is injective on the operations reachable from one node's op heads: distinct
-  reachable local operations have distinct canonical forms. Each node's local graph
-  therefore embeds the canonical graph, which is what lets the properties above be stated
-  over canonical ids. A crash can leave a second, unreachable realization of the same
-  canonical operation behind. It is harmless garbage, and `jj util gc` removes it.
+- Once local history is normalized, `canon` is injective on its replicated portion: distinct
+  reachable local operations, down to the join points, have distinct canonical forms and
+  their parents correspond. This lets properties over canonical ids describe the local
+  graph. History before a join point stays local. An interrupted head move or a delayed jj
+  command can temporarily leave two reachable local versions of one canonical operation;
+  recovery and reparenting must normalize them before that graph correspondence applies.
+  Unreachable realizations are garbage that `jj util gc` can remove.
 - Realizations of non-head operations are deterministic: each carries its parent realization's
   per-machine fields, or for a merge the parents' fields merged three-way as jj merges them
   ([design.md, "Translation"](design.md#translation)). Only the realization that becomes an op

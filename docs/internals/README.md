@@ -5,32 +5,42 @@ Start with [CONTRIBUTING.md](../../CONTRIBUTING.md) for setup and checks, and
 the [user guide](../README.md). These documents use the terms defined in the design's
 [Vocabulary](design.md#vocabulary): hive, node, hub, canonical operation, realization.
 
-Each document answers a different question:
+## Architecture
 
 - [Design](design.md): What does musubi replicate, how do machines agree, including on
   remotes and shared config, and why? Read it before changing what musubi does.
 - [Sync protocol](protocol.md): What exactly do nodes and the hub say to each other, and what
-  properties does that guarantee?
+  properties does that guarantee? This owns the state machines and their invariants.
 - [Race catalogue](races.md): What happens when machines change the same thing at once, and
   which test pins each outcome?
+- [Duplicates, moves and keys](copies.md): How does musubi distinguish copies, moves and
+  reused machine names, and which cases does it refuse?
+
+## Verification and testing
+
 - [Testing philosophy](testing-philosophy.md): What must a test protect, what evidence does
-  each kind of change need, and how do you know a test works?
+  each kind of change need, and how do you know a test works? This owns testing policy.
 - [Testing](testing.md): Which layers of tests are there, what does each guard against, and
   where does a new test belong?
 - [Efficient tests](efficient-tests.md): How should a new test be written so that the suite
   stays fast?
-- [Code reviews](code-reviews.md): What does a review look for, in what musubi does and in
-  what users see?
 - [Conformance](conformance.md): How are the Rust protocol core, and which copies a hive
-  shows, checked against the Lean model?
+  shows, checked against the Lean model? This owns the correspondence, assumptions and gaps.
+- [Bounded storage verification](bounded-verification.md): What does the Kani harness check
+  about storage failures and retries, and within which bounds?
 - [The Lean model](../../formal/README.md): What does the model prove, and how does it
   correspond to the protocol?
 - [Working on Lean proofs](lean.md): How do you state a proof boundary, check its source
   assumptions, develop the proof and connect it to the code?
-- [Releasing](releasing.md): How is a release made?
 - [Benchmarks](../../bench/README.md): How does musubi compare with git and jj's own clone,
   fetch and push, in time and bytes on the wire? How does the canonical store keep up with a
   long operation log?
+
+## Review and release
+
+- [Code reviews](code-reviews.md): What does a review look for, in what musubi does and in
+  what users see?
+- [Releasing](releasing.md): How is a release made?
 
 Keep each rule in the document that owns it, and link to it from others. Describe the
 current system; jj's history records how it got here.

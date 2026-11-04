@@ -8,15 +8,15 @@ search. It does not establish unbounded implementation refinement or asynchronou
 
 ## What this adds
 
-The four earlier [Kani proofs](testing.md#kani-proofs) check arithmetic helpers: blob chunk
+The four other [Kani proofs](testing.md#kani-proofs) check arithmetic helpers: blob chunk
 overlap, envelope capacity, download completion, and transfer windows. Their inputs range
 over machine integers, but they exercise no storage failures or retries.
 
 The Lean protocol models prove safety over arbitrary reachable histories. Conformance runs
-the production core with generated histories against their executable oracle. The storage-call
-fault work in [issue #91](https://github.com/bos/jj-musubi/issues/91) targets errors and their
-permitted effects through those same storage traits.
-The bounded harness instead exhausts the choices below through the Rust handler itself,
+the production core with generated histories against their executable oracle. The
+[storage-error tests](conformance.md#storage-errors) target errors and their permitted effects
+through those same storage traits. The bounded harness exhausts the choices below through
+the Rust handler itself,
 including independently failing calls on consecutive attempts and content retained by a
 failed import. It needs no oracle process or real repositories.
 
@@ -35,7 +35,8 @@ Five `kani::cover!` checks also require reachable paths for retained objects aft
 an incomplete upload, a rejection, a new acceptance and an idempotent retry.
 
 These are bounded safety and retry-completion checks, not a fairness claim about whether a
-driver sends that retry. The asynchronous reply/retry proof in issue #78 is separate.
+driver sends that retry. [Asynchronous liveness](conformance.md#liveness) has separate
+source contracts and environmental assumptions.
 
 ## Bounds and adapter assumptions
 
@@ -107,26 +108,20 @@ made verification fail:
 | Remove `storage.set_head(seq + 1, self.new, self.dropped)?` | The reply's `(seq, head)` equals storage's: acceptance reports a head it never installed. |
 | Replace the same `set_head(...)?` with `let _ = set_head(...)` | The reply's `(seq, head)` equals storage's: a failed head write is wrongly reported as accepted. |
 
-The experiment copied `crates/musubi-core/src`, its manifest, the workspace manifest and
-lockfile, and `justfile` to a scratch directory, restricting workspace members to
-`crates/musubi-core`. It ran `just kani --harness push_storage_retries --output-format terse`
-once on the unchanged copy, then once per mutation, replacing only the stated expression or
-statement. The shared checkout was never mutated. Each mutant exited 1 with the assertion
-above; the baseline exited 0. This checks sensitivity to actual core changes, not just to a
-broken assertion in the harness.
+Each mutant changed only the stated production expression or statement in an isolated
+scratch copy. The unmodified harness passed, all five cover properties were reached, and each
+mutant failed its intended assertion. This checks sensitivity to the core, rather than only
+to a broken assertion in the harness.
 
-Ignoring the head-write error is invisible to the existing infallible conformance adapter;
-here it fails when that call returns an error. All five cover properties still passed for
-that mutant, so its failure comes from the safety assertion rather than lost reachability.
+The success-only `FakeHub` cannot expose an ignored head-write error. Both this bounded
+adapter and the [fallible conformance wrappers](conformance.md#storage-errors) can. All five
+cover properties still passed for that mutant, so its failure comes from the safety assertion
+rather than lost reachability.
 
-In that macOS arm64 experiment, CBMC took 10.0 seconds for the baseline and 8.6–11.8 seconds
-per mutant. The unchanged core-only run took 18.0 seconds including compilation; warm mutant
-runs took 9.9–14.2 seconds each. A warm full `just kani` run verified all five harnesses in
-25.9 seconds, 11.3 of them in this harness's solver. Every run used the existing 4096 MiB
-memory cap. A first workspace-wide run also compiles dependencies of the other crates, so its
-build cost is much higher than this proof's solver cost. These bounds make this a useful opt-in
-check; larger
-graphs or retry depths need new cost measurements before expanding it.
+On macOS arm64, that run took about 10 seconds in the solver and 18 seconds including
+compilation; a warm full `just kani` took about 26 seconds under the 4096 MiB memory cap.
+A first workspace-wide run also compiles the other crates' dependencies. Larger graphs or
+retry depths need new cost measurements before expanding this opt-in check.
 
 ## Running and maintaining it
 
@@ -142,7 +137,3 @@ Use the `just` recipe, which enforces `KANI_MEMORY_MB` (4096 by default), rather
 Kani directly. The proof is opt-in; `just check` does not compile `cfg(kani)` modules.
 Changes to this proof or the push handler it covers need `just kani` as well as the relevant
 ordinary checks. Keep unwinding assertions enabled.
-
-No new tool or dependency is required. Kani can express this finite adapter and run the real
-handler without stubs or alternate production logic, so there is no specific limitation
-that warrants installing or maintaining Soteria for this boundary.

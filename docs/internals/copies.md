@@ -1,8 +1,9 @@
 # Duplicates, moves and keys
 
 Users duplicate, move, delete, restore and replace repositories with ordinary file commands.
-This page says which of those cases musubi handles and how, which it leaves out, and which
-test pins each. The code is `crates/musubi/src/copy.rs`.
+musubi uses jj's config-id and its own local records to distinguish a moved copy from a
+duplicate that must not sync under the same key. The implementation is
+`crates/musubi/src/copy.rs`.
 
 ## Terms
 
@@ -10,8 +11,8 @@ test pins each. The code is `crates/musubi/src/copy.rs`.
 - A **duplicate** is a repository made from a copy's files without musubi: `cp -a`, `rsync`,
   or a backup restored. The copy it was made from is the **original**.
 - A copy's **key** identifies it to the hive. It is kept in `.jj/repo/musubi/machine` (the
-  file name is historical). Every operation that is the copy's work carries its key, and the
-  hive uses the key to decide which workspaces are whose.
+  key is per copy, even when a machine holds several). Every operation that is the copy's
+  work carries its key, and the hive uses the key to decide which workspaces are whose.
 - A repository's **config-id** is jj's name for it, in `.jj/repo/config-id`. jj keeps, in the
   user's jj config directory, the path at which it last saw each config-id. When it finds a
   repository at a different path, it decides as follows (`handle_metadata_path` in jj's
@@ -121,7 +122,7 @@ it's worth. Each says what happens if it occurs anyway.
 
 - **Giving a duplicate a key of its own.** A duplicate shares the original's working-copy
   commits, and the hive's names for its earlier operations depend on the original's key. So
-  it would need fresh working-copy commits and a durable record of when its key changed.
+  it would need fresh working-copy commits and a persistent record of when its key changed.
   `musubi clone` gives a new copy without either.
 - **Starting a new hive from a duplicate.** It is refused like any other command (R1), even
   a duplicate of a copy that left, or the copy itself if it was moved by copying, and jj ran
@@ -162,9 +163,6 @@ it's worth. Each says what happens if it occurs anyway.
 - **Moving or deleting a repository on Windows while the daemon has its files open.** Windows
   may refuse. Untested.
 - **A power cut.** AGENTS.md: surviving one isn't a goal.
-- **Display problems:** two machines given the same name, one hub reached by several names,
-  a removed hive listed beside a live one of the same name, and `join --hive` not saying which
-  settings it took. Each is worth fixing on its own.
 
 ## Catalogue
 

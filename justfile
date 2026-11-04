@@ -1,4 +1,4 @@
-# The full local check. Run before finishing any change.
+# The full local check. AGENTS.md says when to run it.
 check: fmt-check lint oracle test docs deny machete typos fuzz-runner-test
 
 # Build musubi: target/debug/musubi.

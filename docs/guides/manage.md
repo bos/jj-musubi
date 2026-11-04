@@ -227,10 +227,22 @@ To upgrade, then:
 
 The command runs through `sh -c` (`cmd /C` on Windows), in the state directory, with no
 terminal and the daemon's environment: where launchd or systemd starts the daemon, the `PATH`
-that `musubi daemon install` saw. It may run for up to an hour, as `cargo install` can, and
-its output goes to `upgrade.log` in the state directory. It must install exactly
+that `musubi daemon install` saw. Its output goes to `upgrade.log` in the state directory.
+It must install exactly
 `$MUSUBI_UPGRADE_TO`, where the daemon started `musubi` from: if the path changes, run
-`musubi daemon install` again. A script that builds musubi with cargo:
+`musubi daemon install` again.
+
+Keep the installer in the foreground and preserve its standard input. On Unix, this holds
+the upgrade lock across daemon restarts: restarting leaves a running upgrade alone, and the
+new daemon waits for the lock to be released before trying again.
+
+While the daemon that launched it remains running, the command may run for up to an hour,
+as `cargo install` can. On Unix, the timeout stops the command and children in its process
+group; on Windows it stops the command process. An installer must not detach itself or start
+background installers. If its daemon stops, the surviving command has no timeout monitor;
+see [troubleshooting](../troubleshooting.md#upgrade-upgrading-to-musubi--failed-) if it stalls.
+
+A script that builds musubi with cargo:
 
 ```sh
 #!/bin/sh

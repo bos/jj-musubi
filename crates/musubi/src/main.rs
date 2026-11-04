@@ -328,6 +328,11 @@ enum Command {
     /// When a hub runs a newer release of musubi, or a newer build deployed from source, the
     /// daemon runs the command `musubi.upgrade-command` names, if set, with `MUSUBI_UPGRADE_TO`
     /// set to it, and once the `musubi` it started from is that, starts again from it.
+    /// Keep the installer in the foreground and preserve its standard input, which on
+    /// Unix holds the upgrade lock across daemon restarts. While the daemon that launched
+    /// it runs, the command may run for up to an hour; a timeout stops its process group on
+    /// Unix, or the command process on Windows. A command surviving its daemon has no
+    /// timeout monitor.
     Daemon {
         #[command(subcommand)]
         action: Option<DaemonAction>,

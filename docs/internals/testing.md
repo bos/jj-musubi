@@ -596,7 +596,10 @@ branch jj hasn't imported, a node can stop halfway through a sync.
   advancing the saved base, and trims the earlier history, including the joins: this reaches
   accepted-frontier discovery and loss of all local parents without waiting for a sequence
   of independent rules to line up. `e2e_trim_below_accepted_push` exercises that rule with
-  the independent import and history checks. The reference captures recipient merges before
+  the independent import and history checks. `trim_below_accepted_forget` instead leaves
+  unpublished work above an accepted forget and trims both watched accepted frontiers;
+  `e2e_trim_below_accepted_forget` runs that rule through the same independent checks.
+  The reference captures recipient merges before
   receipt, including setup and pre-sync local merges: a trim published elsewhere may
   reparent them while keeping their views. Only an independently captured operation with
   unchanged nonparent content qualifies; a replacement copy starts its capture afresh.

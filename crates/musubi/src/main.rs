@@ -310,8 +310,8 @@ enum Command {
     /// this copy, it retries from the hub's current state. Run `musubi sync` again to retry
     /// at once.
     ///
-    /// Trimming earlier history with `jj op abandon` keeps the other copies in the hive
-    /// and preserves each copy's own Git state.
+    /// Trimming earlier history with `jj op abandon` preserves each copy's own Git state.
+    /// Other copies remain in the hive or forgotten as they were.
     ///
     /// If jj made the result of an operation abandon ambiguous, syncing stops and gives a
     /// `jj op integrate` command to restore the missing history before trying again.

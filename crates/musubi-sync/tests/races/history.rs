@@ -5826,3 +5826,64 @@ fn a_forward_bookmark_survives_a_command_inside_a_trim_advance() {
         "advance must leave Git matching the forward bookmark before any import"
     );
 }
+
+/// A full trim must preserve the maximal accepted frontier, whether the newer forget is
+/// this copy's accepted push beyond its saved base, or its saved base beyond an older push.
+#[test]
+fn a_trim_below_an_accepted_forget_keeps_the_copy_forgotten() {
+    use musubi_core::node::LocalRepo as _;
+
+    for publisher in [0, 1] {
+        let mut hive = Fixture::new(&["alpha", "beta", "gamma"]);
+        hive.sync();
+        let initial = hive.hive.hub_head();
+        // Alpha's saved own push must already know gamma present; otherwise replacing a
+        // later remote forget with that push could coincidentally leave gamma absent.
+        hive.commit(
+            0,
+            "accepted",
+            "alpha's accepted work with all three copies present",
+        );
+        hive.hive.sync(0).unwrap();
+        let before = hive.hive.hub_head();
+        assert_ne!(before, initial);
+        assert_eq!(
+            hive.hive.members[0].adapter.accepted_base().unwrap(),
+            before
+        );
+        let gamma = hive.machine_key(2);
+        assert!(hive.hive.hub.store().presence().unwrap().is_present(&gamma));
+        assert!(hive.node(publisher).forget_copy(&gamma, "gamma").unwrap());
+        if publisher == 0 {
+            // The newer accepted push has not yet replaced the older saved fetch base.
+            hive.hive.sync_steps(0, 1, &mut |_, reply| reply).unwrap();
+            assert_eq!(
+                hive.hive.members[0].adapter.accepted_base().unwrap(),
+                before
+            );
+        } else {
+            // A later remote forget becomes the saved base, beyond alpha's last own push.
+            hive.hive.sync(1).unwrap();
+            hive.hive.sync(0).unwrap();
+            assert_eq!(
+                hive.hive.members[0].adapter.accepted_base().unwrap(),
+                hive.hive.hub_head()
+            );
+        }
+        assert_ne!(hive.hive.hub_head(), before);
+        assert!(!hive.hive.hub.store().presence().unwrap().is_present(&gamma));
+        let accepted = op_log(hive.repo(0))[0].0.clone();
+        hive.repo(0).jj(&[
+            "describe",
+            "-m",
+            "unpublished work after the accepted forget",
+        ]);
+        hive.repo(0)
+            .jj(&["op", "abandon", &format!("..{accepted}")]);
+        hive.hive.sync(0).unwrap();
+        assert!(
+            !hive.hive.hub.store().presence().unwrap().is_present(&gamma),
+            "publisher {publisher}: a full trim restored presence from an older accepted frontier"
+        );
+    }
+}

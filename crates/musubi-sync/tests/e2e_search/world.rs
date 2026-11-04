@@ -1871,6 +1871,30 @@ impl World {
     /// and every join while keeping an accepted operation outside the base's ancestry.
     pub fn trim_below_accepted_push(&mut self, m: usize) {
         self.sync(m);
+        let (base, dropped) = self.trim_range(m);
+        let description = self.message(m);
+        // A fresh child works even when a cloned workspace is at an immutable commit.
+        self.jj(m, &["new", "-m", &description]);
+        self.sync_partial(m, 1, None);
+        self.abandon_ops(m, &format!("..{base}"), &dropped);
+        self.sync(m);
+    }
+
+    /// Accept a forget, keep the old saved base, then trim both beneath unpublished work.
+    /// If the other copy is already forgotten, this also reaches a newer saved base with
+    /// an older accepted own push, without manufacturing adapter state.
+    pub fn trim_below_accepted_forget(&mut self, m: usize, other: usize) {
+        self.sync(m);
+        self.forget_copy(m, other);
+        self.sync_partial(m, 1, None);
+        let (base, dropped) = self.trim_range(m);
+        let description = self.message(m);
+        self.jj(m, &["new", "-m", &description]);
+        self.abandon_ops(m, &format!("..{base}"), &dropped);
+        self.sync(m);
+    }
+
+    fn trim_range(&self, m: usize) -> (String, Vec<String>) {
         let history = self.op_ids_and_keys(m, None);
         let base = history[0].0.clone();
         let root = self.fx.hive.members[m]
@@ -1880,17 +1904,12 @@ impl World {
             .op_store()
             .root_operation_id()
             .hex();
-        let dropped: Vec<String> = history
+        let dropped = history
             .into_iter()
             .map(|(id, _)| id)
             .filter(|id| *id != root)
             .collect();
-        let description = self.message(m);
-        // A fresh child works even when a cloned workspace is at an immutable commit.
-        self.jj(m, &["new", "-m", &description]);
-        self.sync_partial(m, 1, None);
-        self.abandon_ops(m, &format!("..{base}"), &dropped);
-        self.sync(m);
+        (base, dropped)
     }
 
     /// `jj op abandon` of `spec` on machine `m`: one operation, or a range `x..y`, which drops

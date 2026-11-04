@@ -878,7 +878,10 @@ moves the base to the push only at its next step, which a sync cut short or a lo
 sync polls the hub before it reads the op heads, so that it knows by then. It matches surviving
 operations against both accepted histories together: a push may contain a survivor above a
 base dropped in full. Matching against the older base first and stopping there mistakes that
-survivor for new work, losing its original identity and presence. It looks before
+survivor for new work, losing its original identity and presence. Where the surviving head
+is unpublished work and all accepted history was trimmed, its pre-trim state comes from a
+maximal accepted descendant of the surviving mapped ancestor. The older saved base must not
+shadow a newer accepted push, whose forgets and settings are the state to preserve. It looks before
 anything else reads the op heads, to merge or canonicalize them, since an op head read before may
 be one of jj's rewrites that musubi then replaces. What was dropped is each canonical operation it
 had that no reachable local operation now stands for. A realization stands for the canonical

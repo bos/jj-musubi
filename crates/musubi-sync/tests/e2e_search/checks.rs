@@ -77,8 +77,8 @@ impl World {
         self.check_translation();
         self.check_operations();
         self.check_tags();
-        self.check_workspaces(&views);
         let mut reference = Reference::build(self);
+        self.check_workspaces(&views, &mut reference);
         self.check_history(&mut reference);
         let beyond = reference.beyond_jj();
         self.check_divergence(&views[0], &mut reference, &beyond);
@@ -237,7 +237,8 @@ impl World {
     /// machine the hive has forgotten, whose working copy can stay on the hidden commit its
     /// forget abandoned until its next work. (It shows the other machines' too, as
     /// `machine/workspace`: `check_other_workspaces`.)
-    fn check_workspaces(&self, views: &[View]) {
+    fn check_workspaces(&mut self, views: &[View], reference: &mut Reference) {
+        let witnessed = reference.witnessed_workspace_names(self);
         let shown = self.fx.shown_machines();
         for (m, view) in views.iter().enumerate() {
             let listed: BTreeSet<String> = self
@@ -246,14 +247,27 @@ impl World {
                 .filter(|name| !name.contains('/'))
                 .map(str::to_owned)
                 .collect();
-            let expected: BTreeSet<String> = self.workspaces[m]
+            let physical: BTreeSet<String> = self.workspaces[m]
                 .iter()
                 .map(|ws| ws.name.clone())
                 .collect();
+            let owner = self.fx.machine_key(m);
+            self.logical_extras[m] = witnessed
+                .iter()
+                .filter_map(|key| {
+                    let (copy, name) = key.split_once('/')?;
+                    (copy == owner && !name.contains('/') && !physical.contains(name))
+                        .then(|| name.to_owned())
+                })
+                .collect();
+            let expected: BTreeSet<String> = physical
+                .into_iter()
+                .chain(self.logical_extras[m].iter().cloned())
+                .collect();
             if listed != expected {
                 self.fail(&format!(
-                    "{} lists workspaces {listed:?}, expected {expected:?}",
-                    self.machine(m)
+                    "{} lists workspaces {listed:?}, expected {expected:?}; unmapped native source inputs: {:?}",
+                    self.machine(m), reference.workspace_unmapped
                 ));
             }
             if !shown.contains(&self.fx.machine_key(m)) {

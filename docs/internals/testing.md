@@ -631,6 +631,14 @@ and the test checks that:
   ledger (`e2e_search/ledger.rs`) of which machine's commands rewrote what tells this apart
   from rewrites that commands make alike.
 
+Workspace names have a separate logical ledger from the directories used for edits. Native
+merges can restore a name whose directory was renamed or forgotten. The checker certifies a
+name only from independently recorded workspace births, the actual native command's before
+and after views, or jj's replay of authenticated source parents. A forgotten copy's private
+bindings require matching source views and an independent native merge witness; shared
+metadata naming a workspace is never its own certificate. Rewriting a dormant binding's
+commit revokes opaque inheritance unless independent replay certifies its result.
+
 The reference (`e2e_search/reference.rs`) is a jj repository of the test's own that replays
 the hub's history, operation by operation, with the same parents:
 

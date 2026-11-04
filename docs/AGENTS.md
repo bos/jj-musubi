@@ -55,7 +55,7 @@ needs.
 ## Help and guides
 
 Built-in `--help` is the reference for flags; its text is in the doc comments of
-`crates/musubi/src/main.rs`. A command's first paragraph is its summary, for `-h` and the
+`crates/musubi/src/cli.rs`. A command's first paragraph is its summary, for `-h` and the
 command list; further paragraphs show only with `--help`. Guides explain when and why to use
 a command, rather than repeating its flags.
 

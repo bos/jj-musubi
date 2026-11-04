@@ -8,7 +8,7 @@ use std::time::Duration;
 use clap::CommandFactory as _;
 use clap_complete::CompletionCandidate;
 
-use crate::Cli;
+use crate::cli::Cli;
 use crate::config::UserState;
 use crate::ui::Ui;
 
@@ -113,13 +113,14 @@ pub fn hives() -> Vec<CompletionCandidate> {
     let Some(hub) = &state.default_hub().ok().flatten() else {
         return vec![];
     };
-    let answer =
-        crate::block_on(async { tokio::time::timeout(HUB_LIMIT, crate::list_hub(hub)).await? });
+    let answer = crate::block_on(async {
+        tokio::time::timeout(HUB_LIMIT, crate::list::list_hub(hub)).await?
+    });
     match answer {
         Ok(infos) => infos
             .iter()
             .map(|info| {
-                CompletionCandidate::new(&info.name).help(Some(crate::machines(info).into()))
+                CompletionCandidate::new(&info.name).help(Some(crate::list::machines(info).into()))
             })
             .collect(),
         Err(_) => state

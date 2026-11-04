@@ -21,7 +21,6 @@ use jj_lib::git_backend::GitBackend;
 use jj_lib::git_backend::JJ_TREES_COMMIT_HEADER;
 use jj_lib::git_backend::synthetic_change_id_from_git_commit_id;
 use jj_lib::object_id::ObjectId as _;
-use jj_lib::protos::git_store;
 use jj_lib::stacked_table::TableSegment as _;
 use jj_lib::stacked_table::TableStore;
 use prost::Message as _;
@@ -32,6 +31,7 @@ use super::bundle;
 use super::bundle::BundleWriter;
 use super::bundle::PackRecord;
 use super::bundle::Record;
+use super::git_extras::CommitExtras;
 use super::power;
 use crate::files;
 use crate::git_command::GitError;
@@ -700,7 +700,7 @@ pub(crate) struct ExtrasEntry {
 /// decodes them as it reads the commit, takes the change id as one of the length its index
 /// asserts, and the root tree's terms as a merge, which has an odd number of them.
 fn readable(value: &[u8]) -> bool {
-    let Ok(extras) = git_store::Commit::decode(value) else {
+    let Ok(extras) = CommitExtras::decode(value) else {
         return false;
     };
     (extras.change_id.is_empty() || extras.change_id.len() == CHANGE_ID_LENGTH)
@@ -730,8 +730,8 @@ pub(crate) fn extras_to_ship(
         let Some(value) = table.get_value(commit.as_bytes()) else {
             continue;
         };
-        let extras = git_store::Commit::decode(value)
-            .map_err(|_| ObjectError::MalformedExtras(commit.hex()))?;
+        let extras =
+            CommitExtras::decode(value).map_err(|_| ObjectError::MalformedExtras(commit.hex()))?;
         let oid = gix::ObjectId::try_from(commit.as_bytes()).map_err(read_err(commit))?;
         let object = git_repo.find_object(oid).map_err(read_err(commit))?;
         let git_commit = object.try_to_commit_ref().map_err(read_err(commit))?;

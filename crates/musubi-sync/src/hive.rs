@@ -1,6 +1,10 @@
 //! A hub and nodes in one process, delivering every message directly: the real protocol
 //! core over real repositories and hub storage, without a transport. For tests.
 
+use musubi_core::hub::HubStorage as _;
+use musubi_core::message::RecordState;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::path::Path;
 
 use musubi_core::hub;
@@ -30,6 +34,15 @@ pub struct Member {
     pub downloaded: u64,
 }
 
+/// Independent observations at the moment a real prune takes place, before a later
+/// request can make an offline copy present again.
+pub struct PruneObservation {
+    pub records: RecordState,
+    pub present: BTreeSet<String>,
+    pub known: BTreeSet<String>,
+    pub reported: BTreeMap<String, RecordState>,
+}
+
 pub struct Hive {
     pub hub: HubAdapter,
     pub members: Vec<Member>,
@@ -38,6 +51,7 @@ pub struct Hive {
     /// copy the hive hasn't forgotten has taken them, as a hub does. On unless a test turns
     /// it off.
     pub pruning: bool,
+    pub prunes: Vec<PruneObservation>,
     /// The `heads` log as it was before the hub's latest prune wrote it again, until the hub
     /// restarts or accepts another head: what a power cut just after that write leaves
     /// (`Self::hub_loses_prune`).
@@ -55,6 +69,7 @@ impl Hive {
             members: vec![],
             hub_dir: hub_dir.to_owned(),
             pruning: true,
+            prunes: vec![],
             before_prune: None,
             pruned_at: None,
         })
@@ -68,6 +83,7 @@ impl Hive {
             members: vec![],
             hub_dir: hub_dir.to_owned(),
             pruning: true,
+            prunes: vec![],
             before_prune: None,
             pruned_at: None,
         })
@@ -214,7 +230,25 @@ impl Hive {
             } else {
                 Some(std::fs::read(&path)?)
             };
+            let presence = before
+                .as_ref()
+                .map(|_| self.hub.store().presence())
+                .transpose()?;
             if self.hub.prune()?.is_some() {
+                let presence = presence.expect("records existed before the prune");
+                self.prunes.push(PruneObservation {
+                    records: self.hub.pruned(),
+                    present: presence.copies().map(str::to_owned).collect(),
+                    known: presence.known().clone(),
+                    reported: self
+                        .members
+                        .iter()
+                        .filter_map(|member| {
+                            let key = member.adapter.repo().machine().key();
+                            Some((key.to_owned(), self.hub.reported(key)?))
+                        })
+                        .collect(),
+                });
                 self.before_prune = before;
                 self.pruned_at = Some(self.hub.store().head().0);
             }

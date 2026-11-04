@@ -152,6 +152,17 @@ for _sig in (signal.SIGTERM, signal.SIGHUP):
         signal.signal(_sig, killed)
 
 
+def begin_run(name):
+    """Prepare a fresh run directory and the log used by commands and services."""
+    global RUN, LOG
+    RUN = f"{WORK}/runs/{name}"
+    if os.path.exists(RUN):
+        shutil.rmtree(RUN)
+    os.makedirs(RUN)
+    LOG = open(f"{RUN}/log.txt", "w")
+    return RUN
+
+
 def wait_port(port, timeout=20):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -248,6 +259,22 @@ def start_hub(hub, **extra):
             raise RuntimeError(f"the hub never listened; see {RUN}/hub.log")
         time.sleep(0.05)
     wait_port(PORT_SSHD)
+
+
+def start_local_run(repo, name, *, proxy=True):
+    """Start a hub and git server for one scenario, with a byte-counting proxy if needed."""
+    run = begin_run(f"{name}-{repo}")
+    start(["git", "daemon", "--reuseaddr", "--listen=127.0.0.1", f"--port={PORT_GIT}",
+           f"--base-path={run}", "--export-all", run], name="gitdaemon")
+    if proxy:
+        start(["/usr/bin/python3", "-I", f"{B}/proxy.py", str(CONTROL)]
+              + [f"{n}:{lp}:{tp}" for n, (lp, tp) in ROUTES.items()], name="proxy")
+    hub = f"{run}/hub"
+    start_hub(hub)
+    for port in (PORT_GIT, CONTROL) if proxy else (PORT_GIT,):
+        wait_port(port)
+    shutil.copytree(f"{WORK}/srv/{repo}.git", f"{run}/srv/{repo}.git")
+    return run, hub
 
 
 def hub_route(route):
@@ -410,7 +437,6 @@ def work_day(repo, d, commits, describes):
 
 
 def main():
-    global RUN, LOG
     ap = argparse.ArgumentParser()
     ap.add_argument("repo")
     ap.add_argument("reps", type=int)
@@ -436,11 +462,7 @@ def main():
             sys.exit(
                 f"srv/{R}.git holds back no week for the week phase; run setup_sources.sh again"
             )
-    RUN = f"{WORK}/runs/{tag}"
-    if os.path.exists(RUN):
-        shutil.rmtree(RUN)
-    os.makedirs(RUN)
-    LOG = open(f"{RUN}/log.txt", "w")
+    begin_run(tag)
     res = {"repo": R, "reps": args.reps, "delay_ms": args.delay_ms, "started": time.time()}
 
     def save():

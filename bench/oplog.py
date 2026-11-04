@@ -16,33 +16,13 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bench  # noqa: E402
-from bench import B, MUSUBI, WORK, PORT_GIT, ROUTES, CONTROL, hub_route, machine, measure, member, sh, start
+from bench import MUSUBI, WORK, PORT_GIT, ROUTES, hub_route, machine, measure, member, sh
 
 
 def main():
     repo = sys.argv[1]
     checkpoints = [int(x) for x in sys.argv[2:]]
-    run = f"{WORK}/runs/oplog-{repo}"
-    if os.path.exists(run):
-        shutil.rmtree(run)
-    os.makedirs(run)
-    bench.RUN = run
-    bench.LOG = open(f"{run}/log.txt", "w")
-    start(
-        ["git", "daemon", "--reuseaddr", "--listen=127.0.0.1", f"--port={PORT_GIT}",
-         f"--base-path={run}", "--export-all", run],
-        name="gitdaemon",
-    )
-    start(
-        ["/usr/bin/python3", "-I", f"{B}/proxy.py", str(CONTROL)]
-        + [f"{n}:{lp}:{tp}" for n, (lp, tp) in ROUTES.items()],
-        name="proxy",
-    )
-    hub = f"{run}/hub"
-    bench.start_hub(hub)
-    for port in (PORT_GIT, CONTROL):
-        bench.wait_port(port)
-    shutil.copytree(f"{WORK}/srv/{repo}.git", f"{run}/srv/{repo}.git")
+    run, hub = bench.start_local_run(repo, "oplog")
     Am = f"{run}/Am"
     sh(["jj", "git", "clone", "--colocate", f"git://127.0.0.1:{PORT_GIT}/srv/{repo}.git", Am], cwd=run)
     cfgA = machine("A")

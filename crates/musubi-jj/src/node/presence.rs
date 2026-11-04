@@ -10,6 +10,7 @@ use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::View;
 use jj_lib::ref_name::WorkspaceNameBuf;
+use jj_lib::repo::ReadonlyRepo;
 use jj_lib::repo::Repo as _;
 use pollster::FutureExt as _;
 
@@ -132,18 +133,7 @@ impl NodeRepo {
             .filter(|(_, key)| workspaces::split_key(key.as_str()).is_some_and(|(m, _)| m == copy))
             .map(|(name, _)| name)
             .collect();
-        let mut tx = repo.start_transaction();
-        for name in &names {
-            if tx.repo().view().get_wc_commit_id(name).is_some() {
-                tx.repo_mut()
-                    .remove_workspace(name)
-                    .block_on()
-                    .map_err(index_err)?;
-            }
-        }
-        tx.repo_mut().rebase_descendants().block_on()?;
-        tx.set_attribute(FORGET_ATTRIBUTE.to_owned(), copy.to_owned());
-        tx.commit(format!("musubi: forget {display}")).block_on()?;
+        forget_workspaces(&repo, &names, copy, &format!("musubi: forget {display}"))?;
         Ok(true)
     }
 
@@ -176,19 +166,12 @@ impl NodeRepo {
             })
             .map(|(name, _)| name)
             .collect();
-        let mut tx = repo.start_transaction();
-        for name in &names {
-            if tx.repo().view().get_wc_commit_id(name).is_some() {
-                tx.repo_mut()
-                    .remove_workspace(name)
-                    .block_on()
-                    .map_err(index_err)?;
-            }
-        }
-        tx.repo_mut().rebase_descendants().block_on()?;
-        tx.set_attribute(FORGET_ATTRIBUTE.to_owned(), forgotten.join(" "));
-        tx.commit("musubi: forget copies of another hive")
-            .block_on()?;
+        forget_workspaces(
+            &repo,
+            &names,
+            &forgotten.join(" "),
+            "musubi: forget copies of another hive",
+        )?;
         Ok(forgotten)
     }
 
@@ -248,7 +231,7 @@ impl NodeRepo {
     /// This machine's own workspaces in `repo`'s view, whose canonical form is `canonical`.
     pub(super) fn own_workspaces(
         &self,
-        repo: &jj_lib::repo::ReadonlyRepo,
+        repo: &ReadonlyRepo,
         canonical: &CanonicalOp,
     ) -> Result<BTreeMap<WorkspaceNameBuf, CommitId>, NodeError> {
         self.own_of_view(repo.view().wc_commit_ids().clone(), canonical)
@@ -366,4 +349,26 @@ impl NodeRepo {
             .map(|(key, name)| (name, key))
             .collect())
     }
+}
+
+/// Removes the selected workspaces and records the copies forgotten, in one operation.
+fn forget_workspaces(
+    repo: &Arc<ReadonlyRepo>,
+    names: &[WorkspaceNameBuf],
+    copies: &str,
+    description: &str,
+) -> Result<(), NodeError> {
+    let mut tx = repo.start_transaction();
+    for name in names {
+        if tx.repo().view().get_wc_commit_id(name).is_some() {
+            tx.repo_mut()
+                .remove_workspace(name)
+                .block_on()
+                .map_err(index_err)?;
+        }
+    }
+    tx.repo_mut().rebase_descendants().block_on()?;
+    tx.set_attribute(FORGET_ATTRIBUTE.to_owned(), copies.to_owned());
+    tx.commit(description).block_on()?;
+    Ok(())
 }

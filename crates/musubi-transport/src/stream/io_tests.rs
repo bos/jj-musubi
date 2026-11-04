@@ -46,6 +46,251 @@ async fn connection() -> (StreamTransport, tokio::io::DuplexStream) {
     (client.unwrap(), peer)
 }
 
+/// A raw client, so malformed sequences cannot be refused by the client API first.
+async fn relay(
+    capacity: usize,
+) -> (
+    tokio::io::DuplexStream,
+    tokio::task::JoinHandle<io::Result<()>>,
+    crate::MemoryTransport,
+) {
+    let network = crate::MemoryNetwork::new(1, 1024);
+    let transport = network.connect();
+    let (mut peer, stream) = tokio::io::duplex(capacity);
+    let (read, write) = tokio::io::split(stream);
+    let server = tokio::spawn(serve(Arc::new(transport.clone()), read, write));
+    let mut greeting = [0; GREETING.len()];
+    peer.read_exact(&mut greeting).await.unwrap();
+    assert_eq!(&greeting, GREETING);
+    assert_eq!(peer.read_u32().await.unwrap(), 1024);
+    peer.write_all(GREETING).await.unwrap();
+    (peer, server, transport)
+}
+
+#[test]
+fn a_peer_cannot_accumulate_silent_subscriptions() {
+    runtime().block_on(async {
+        let (mut peer, server, _) = relay(1024).await;
+        for sid in 0..=MAX_SUBSCRIPTIONS as u64 {
+            // No traffic on these subjects: an output queue limit cannot catch this.
+            let sent = peer
+                .write_all(
+                    &Frame::Sub {
+                        sid,
+                        subject: format!("silent.{sid}"),
+                    }
+                    .encode(),
+                )
+                .await;
+            if sent.is_err() {
+                break;
+            }
+        }
+        let err = tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .expect("hub retained unlimited silent subscriptions")
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("subscriptions"), "{err}");
+    });
+}
+
+#[test]
+fn a_peer_cannot_repeat_a_subscription_id() {
+    runtime().block_on(async {
+        let (mut peer, server, _) = relay(1024).await;
+        for subject in ["silent.one", "silent.two"] {
+            peer.write_all(
+                &Frame::Sub {
+                    sid: 1,
+                    subject: subject.into(),
+                }
+                .encode(),
+            )
+            .await
+            .unwrap();
+        }
+        let err = tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .expect("hub retained duplicate subscription ids")
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("subscription id"), "{err}");
+    });
+}
+
+#[test]
+fn a_peer_cannot_accumulate_unanswered_requests() {
+    runtime().block_on(async {
+        let (mut peer, server, transport) = relay(1024).await;
+        // The responder exists but never answers, so calls stay in flight.
+        let _requests = transport.subscribe("rpc").await.unwrap();
+        for id in 0..=MAX_REQUESTS as u64 {
+            let sent = peer
+                .write_all(
+                    &Frame::Req {
+                        id,
+                        timeout: Duration::from_secs(3600),
+                        subject: "rpc".into(),
+                        payload: Bytes::new(),
+                    }
+                    .encode(),
+                )
+                .await;
+            if sent.is_err() {
+                break;
+            }
+        }
+        let err = tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .expect("hub retained unlimited unanswered requests")
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("requests"), "{err}");
+    });
+}
+
+#[test]
+fn a_client_refuses_excess_subjects_but_keeps_sharing_subscriptions() {
+    runtime().block_on(async {
+        let (client, _peer) = connection().await;
+        let mut subscriptions = vec![];
+        for sid in 0..MAX_SUBSCRIPTIONS {
+            subscriptions.push(client.subscribe(&format!("silent.{sid}")).await.unwrap());
+        }
+        let _shared = client.subscribe("silent.0").await.unwrap();
+        assert!(client.subscribe("excess").await.is_err());
+        assert_eq!(client.shared.lock().subscriptions.len(), MAX_SUBSCRIPTIONS);
+        // There is no unsubscribe frame: the hub still holds these until disconnect.
+        drop(subscriptions);
+        assert!(client.subscribe("excess").await.is_err());
+        for _ in 0..3 {
+            drop(client.subscribe("silent.0").await.unwrap());
+        }
+        assert_eq!(client.shared.lock().subscriptions[&1].to.len(), 2);
+    });
+}
+
+#[test]
+fn a_peer_cannot_repeat_an_unanswered_request_id() {
+    runtime().block_on(async {
+        let (mut peer, server, transport) = relay(1024).await;
+        let _requests = transport.subscribe("rpc").await.unwrap();
+        for _ in 0..2 {
+            peer.write_all(
+                &Frame::Req {
+                    id: 1,
+                    timeout: Duration::from_secs(3600),
+                    subject: "rpc".into(),
+                    payload: Bytes::new(),
+                }
+                .encode(),
+            )
+            .await
+            .unwrap();
+        }
+        let err = tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .expect("hub retained duplicate request ids")
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("request id"), "{err}");
+    });
+}
+
+#[test]
+fn answered_requests_release_their_id_and_slot() {
+    runtime().block_on(async {
+        // A one-byte pipe makes writing half a frame wait for the relay to consume it.
+        let (mut peer, server, transport) = relay(1).await;
+        let mut requests = transport.subscribe("rpc").await.unwrap();
+        let request = |id| {
+            Frame::Req {
+                id,
+                timeout: Duration::from_secs(3600),
+                subject: "rpc".into(),
+                payload: Bytes::copy_from_slice(&id.to_be_bytes()),
+            }
+            .encode()
+        };
+        for id in 0..MAX_REQUESTS as u64 {
+            peer.write_all(&request(id)).await.unwrap();
+        }
+        // Drain the requests, but answer just one: only its slot becomes available.
+        let first = requests.next().await.unwrap();
+        for _ in 1..MAX_REQUESTS {
+            requests.next().await.unwrap();
+        }
+        // Start reading the next frame before a reply is ready. Completing the call must
+        // send that reply without canceling the partial read or losing its bytes.
+        let expected_id = u64::from_be_bytes(first.payload[..].try_into().unwrap());
+        let next_frame = request(expected_id);
+        let split = next_frame.len() / 2;
+        peer.write_all(&next_frame[..split]).await.unwrap();
+        transport
+            .publish(first.reply.as_deref().unwrap(), Bytes::new())
+            .await
+            .unwrap();
+        let Some(Frame::Reply { id, .. }) =
+            tokio::time::timeout(Duration::from_secs(1), read_frame(&mut peer, 2048))
+                .await
+                .expect("completing a call did not reply while the next frame was partial")
+                .unwrap()
+        else {
+            panic!("expected the answered request's reply");
+        };
+        assert_eq!(id, expected_id);
+        peer.write_all(&next_frame[split..]).await.unwrap();
+        let next = tokio::time::timeout(Duration::from_secs(1), requests.next())
+            .await
+            .expect("completing a call lost the partially read frame")
+            .unwrap();
+        transport
+            .publish(next.reply.as_deref().unwrap(), Bytes::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            read_frame(&mut peer, 2048).await.unwrap(),
+            Some(Frame::Reply {
+                id,
+                payload: Bytes::new()
+            })
+        );
+        drop(peer);
+        server.await.unwrap().unwrap();
+    });
+}
+
+#[test]
+fn a_client_bounds_its_unanswered_calls() {
+    runtime().block_on(async {
+        let (client, _peer) = connection().await;
+        let mut calls = vec![];
+        for _ in 0..MAX_REQUESTS {
+            let mut call = tokio_test::task::spawn(client.request(
+                "rpc",
+                Bytes::new(),
+                Duration::from_secs(60),
+            ));
+            assert_pending!(call.poll());
+            calls.push(call);
+        }
+        assert!(matches!(
+            client
+                .request("rpc", Bytes::new(), Duration::from_secs(60))
+                .await,
+            Err(TransportError::Other(_))
+        ));
+        assert_eq!(client.shared.lock().pending.len(), MAX_REQUESTS);
+        drop(calls);
+        assert!(client.shared.lock().pending.is_empty());
+    });
+}
+
 #[hegel::test(test_cases = 80)]
 fn requests_release_their_inbox_at_every_end(tc: TestCase) {
     let end = tc.draw(gs::integers::<u8>().max_value(3));

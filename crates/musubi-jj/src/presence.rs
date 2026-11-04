@@ -346,33 +346,6 @@ impl<Op: Clone + Ord> Presence<Op> {
         (presence.to_stamp(name) == text).then_some(presence)
     }
 
-    /// The same presence, each operation as `f` maps it, which must keep their order.
-    pub fn map_ops<O: Clone + Ord>(&self, f: impl Fn(&Op) -> O) -> Presence<O> {
-        Presence {
-            latest: self
-                .latest
-                .iter()
-                .map(|(copy, ops)| (copy.clone(), ops.iter().map(&f).collect()))
-                .collect(),
-            known: self.known.clone(),
-            worked: Arc::new(
-                self.worked
-                    .iter()
-                    .map(|(copy, ops)| (copy.clone(), ops.iter().map(&f).collect()))
-                    .collect(),
-            ),
-            forget_after: Arc::new(
-                self.forget_after
-                    .iter()
-                    .map(|(copy, records)| {
-                        let records = records.iter().map(|(op, after)| (f(op), *after));
-                        (copy.clone(), records.collect())
-                    })
-                    .collect(),
-            ),
-        }
-    }
-
     /// Every operation this presence names for `copy`.
     pub fn ops_of<'a>(&'a self, copy: &'a str) -> impl Iterator<Item = &'a Op> {
         self.latest

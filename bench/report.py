@@ -3,7 +3,6 @@
 import json
 import os
 import statistics
-import sys
 
 B = os.path.dirname(os.path.abspath(__file__))
 WORK = os.environ.get("MUSUBI_BENCH_DIR") or f"{B}/work"

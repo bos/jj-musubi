@@ -354,21 +354,21 @@ def scenario(name, repo, i):
             f.write(f"small change {i}\n" * 5)
         t += jj(repo, "commit", "-m", f"bench: small commit {i}")
         t += jj(repo, "bookmark", "set", "feature", "-r", "@-")
-        return t, "feature"
+        return t
     if name == "describe":
         t += jj(repo, "describe", "feature", "-m", f"bench: reworded {i}")
-        return t, "feature"
+        return t
     if name == "rebase":
         dest = "main" if i % 2 == 0 else "main-"
         t += jj(repo, "rebase", "-s", "roots(::feature ~ ::main)", "-o", dest)
-        return t, "feature"
+        return t
     if name == "bookmark_move":
         target = "feature-" if i % 2 == 0 else "feature--"
         t += jj(repo, "bookmark", "set", "marker", "-r", target, "--allow-backwards")
-        return t, "marker"
+        return t
     if name == "abandon":
         t += jj(repo, "abandon", "--retain-bookmarks", "feature")
-        return t, "feature"
+        return t
     raise ValueError(name)
 
 
@@ -624,7 +624,7 @@ def main():
             for s in SCENARIOS:
                 row = {"rep": i}
                 # git world
-                row["local_git"], bm = scenario(s, A, i)
+                row["local_git"] = scenario(s, A, i)
                 row["git_push"] = measure(
                     "gitA", lambda: sh(["jj", "git", "push", "--tracked"], cwd=A)[0]
                 )
@@ -634,7 +634,7 @@ def main():
                 )
                 git_world_agrees()
                 # musubi world
-                row["local_musubi"], bm = scenario(s, Am, i)
+                row["local_musubi"] = scenario(s, Am, i)
                 h0 = hub_stats(hub)
                 row["musubi_push"] = measure(
                     "hubA",

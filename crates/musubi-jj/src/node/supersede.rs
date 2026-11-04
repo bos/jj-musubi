@@ -1232,12 +1232,6 @@ impl NodeRepo {
         self.save_records()
     }
 
-    /// The record state once the hub takes `record` after this node's records.
-    pub fn record_state_with(&self, record: &Record) -> (u64, RecordDigest) {
-        let (count, digest) = self.record_state();
-        (count + 1, digest.then(record))
-    }
-
     /// What this node dropped that the hub hasn't, as the hub names it.
     pub fn pending_drops(&self) -> &Record {
         &self.records.pending

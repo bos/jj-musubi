@@ -240,12 +240,9 @@ impl Reference {
             let op = &ops[&id];
             let op_parents = CanonicalOp::parents_of(op);
             let view = canonical.read_view(&op.view_id).unwrap();
-            // A command's single local parent may expand to several canonical parents.
-            // Its observed payload is still a command, not a new reconciliation of those
-            // parents. Only source-pinned commands get this treatment.
-            let command = (op_parents.len() > 1)
-                .then(|| world.commands.get(&merge_key(op)))
-                .flatten();
+            // A drop can expand a command's parent frontier or contract it to the root.
+            // Judge its payload against the actual input, whatever its new parent count.
+            let command = world.commands.get(&merge_key(op));
             let is_merge = op_parents.len() > 1 && command.is_none();
             if is_merge {
                 for (new, predecessors) in op.commit_predecessors.iter().flatten() {
@@ -254,20 +251,54 @@ impl Reference {
                         .push((id.clone(), new.clone(), predecessors.clone()));
                 }
             }
-            // One a `jj op abandon` rewrote keeps the view of the merge it replaced, as jj keeps
-            // every operation's, whatever its parents are now: it must be that view, as the
+            // A `jj op abandon` survivor keeps its original view, whatever its parents
+            // are now: it must be that source view, as the
             // realizations are held to theirs (`check_realizations`).
-            let kept = world.kept_merges.get(&merge_key(op));
+            let kept = world.kept_operations.get(&merge_key(op));
             if let Some(replaced) = kept
-                && let Some(why) = reference.unlike_replaced(replaced, &view)
+                && let Some(why) =
+                    reference.unlike_replaced(&replaced.view, replaced.realized, &view)
             {
                 reference.unexplained.push(format!(
                     "{}, which jj op abandon rewrote, keeping its view: {why}",
                     describe(&id, op)
                 ));
             }
+            if let Some(source) = kept
+                && let Some(parent) = &source.parent
+                && command.is_none()
+                && !source.realized
+                && !explained(op)
+            {
+                let made: Vec<String> = reference
+                    .made_divergent_or_conflicted(parent, &source.view)
+                    .iter()
+                    .map(Made::to_string)
+                    .collect();
+                if !made.is_empty() {
+                    reference.unexplained.push(format!(
+                        "{} introduced in its original source: {}",
+                        describe(&id, op),
+                        made.join(", ")
+                    ));
+                }
+            }
+            if let Some(source) = kept {
+                let made: Vec<String> = reference
+                    .made_divergent_or_conflicted(&source.view, &view)
+                    .iter()
+                    .map(Made::to_string)
+                    .collect();
+                if !made.is_empty() {
+                    reference.unexplained.push(format!(
+                        "{} differs from its retained source: {}",
+                        describe(&id, op),
+                        made.join(", ")
+                    ));
+                }
+            }
             if let Some(command) = command
-                && let Some(why) = reference.unlike_replaced(&(command.made.clone(), false), &view)
+                && let Some(why) = reference.unlike_replaced(&command.made, false, &view)
             {
                 reference.unexplained.push(format!(
                     "{}, which is a source-recorded command: {why}",
@@ -301,6 +332,7 @@ impl Reference {
                 }
             }
             if let [parent] = op_parents.as_slice()
+                && command.is_none()
                 && !explained(op)
                 && kept.is_none()
             {
@@ -736,19 +768,18 @@ impl Reference {
         &self.facts[id]
     }
 
-    /// How `view`, the hive's, differs from `replaced`, a machine's view of the merge an
+    /// How `view`, the hive's, differs from `replaced`, a machine's view of the operation an
     /// operation replaced, exactly as `check_realizations` holds a machine's operation to the
     /// hive's: a realization has the same heads; an operation of the machine's own has no
     /// commit visible that the hive's hides; either has the same bookmarks and tags.
-    fn unlike_replaced(&mut self, replaced: &(View, bool), view: &View) -> Option<String> {
-        let (replaced, realized) = replaced;
+    fn unlike_replaced(&mut self, replaced: &View, realized: bool, view: &View) -> Option<String> {
         let short = |ids: &mut Vec<String>| {
             ids.sort();
             ids.clone()
         };
         let mut why = vec![];
         let theirs = self.visible(view);
-        if *realized {
+        if realized {
             if replaced.head_ids != view.head_ids {
                 why.push("the heads differ".to_owned());
             }

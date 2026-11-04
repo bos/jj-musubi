@@ -319,6 +319,9 @@ fn e2e_command_above_dropped_merge() {
         out.contains("conflict"),
         "expected both commands' targets: {out}"
     );
+    // Trimming to the root preserves the inherited conflict in the surviving command.
+    world.trim_below_accepted_push(0);
+    world.converge();
 }
 
 /// The reference needs operations written before the requested command, and a read that

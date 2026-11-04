@@ -23,9 +23,11 @@ minutes, so each check runs once, by whoever owns it:
 - While working, run only what the change touches: typically one test, one test file
   (`cargo nextest run -p musubi-jj -E 'test(/^join::/)'`), or one crate
   (`cargo nextest run -p musubi-jj`).
+- For documentation-only changes, review accuracy and consistency, and check affected links,
+  spelling and formatting. Do not run builds, tests or `just check`.
 - Fix any failing check before asking for a review.
-- Once the change is final, its author runs `just check`. A request for review says that all
-  checks passed, or, if only a subset ran, exactly which passed.
+- Once a change to code, tests, proofs, dependencies or build/check behavior is final, its
+  author runs `just check`. A request for review says which checks passed.
 - A reviewer doesn't run the checks again, not even `cargo check`, but reads the diff and
   reasons about it. Run one targeted test only when a specific finding depends on its result,
   and say so.

@@ -7,11 +7,13 @@ on crates.io, all at one version.
 
 1. Check that `CHANGELOG.md`'s Unreleased section says what the release breaks and what a
    user must do on upgrading ([AGENTS.md, "Compatibility"](../../AGENTS.md#compatibility)).
-2. If anything machines and hubs must agree on changed since the latest `v*` tag (`jj tag
-   list`), check that `PROTOCOL_VERSION` changed too, so that machines and hubs of the two
-   releases refuse each other, saying so.
-3. In `Cargo.toml`, set the workspace's `version` and the exact versions (`=0.1.0`) its
-   crates require of each other, and run `cargo update --workspace` to put it in `Cargo.lock`.
+2. Review changes since the latest `v*` tag (`jj tag list`) against
+   [AGENTS.md, "Compatibility"](../../AGENTS.md#compatibility). Each change to what machines
+   and hubs must agree on needs its own `PROTOCOL_VERSION` bump, including changes between
+   releases.
+3. In `Cargo.toml`, set the workspace's `version` and the exact versions its crates require
+   of each other to the release version, and run `cargo update --workspace` to put it in
+   `Cargo.lock`.
    The version must be above the one the workspace gives now, which every build deployed
    from source since the last release follows, so that machines on those builds take the
    release as newer. Until 1.0, a release that changes `PROTOCOL_VERSION`, or breaks anything
@@ -23,11 +25,12 @@ on crates.io, all at one version.
 
 ## Tag and build
 
-Push a tag matching the version:
+Push a tag matching the version. These examples use `0.6.0`; substitute the version chosen
+above:
 
 ```sh
-jj tag set v0.1.0 -r main
-jj git push --remote origin --tag v0.1.0
+jj tag set v0.6.0 -r main
+jj git push --remote origin --tag v0.6.0
 ```
 
 `.github/workflows/release.yml` checks that the tag matches the workspace's version, builds
@@ -45,6 +48,6 @@ Once the release has built, publish the crates from the tagged commit, with a cr
 token (`cargo login`). A published version can't be replaced, only yanked:
 
 ```sh
-jj new v0.1.0
+jj new v0.6.0
 cargo publish --workspace --locked
 ```

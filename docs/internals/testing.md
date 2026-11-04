@@ -29,66 +29,24 @@ on the next run. *The search* is the generated end-to-end tests below, run with 
 | Kani proofs | `#[cfg(kani)]` modules | Arithmetic on sizes and offsets, and bounded hub pushes across storage failures and retries | Arithmetic under a second each; storage solver ~11 s on macOS arm64; opt-in |
 | Generated end-to-end tests | `crates/musubi-sync/tests/e2e_search` | Everything interacting: real `jj` commands, real repositories, faults | Seconds per case; opt-in |
 
-Costs are for one test running among the rest of the suite, on 32 Linux cores. When a change
-moves them, update them.
+Costs are approximate measurements, mostly on 32 Linux cores; the Kani storage figure is from
+macOS arm64. Use them as a rough guide; performance work needs fresh measurements alongside
+the suite ([efficient-tests.md](efficient-tests.md#when-making-tests-faster)).
 
-The translation example `advance_with_concurrent_heads_refines_advance_then_merge` reads real
-published operation heads and replays their canonical graphs through the Lean oracle. It checks
-advance plus merge with multiple concurrent heads in colocated and non-colocated repositories;
-the core harness's fake advance cannot reach that composite behavior. The abandonment race
-`realization_beside_a_fetch_keeps_the_fetch_while_taking_an_abandon` also checks the exact merge
-parents after contraction, saved expected values, unpublished realization and immediate
-translation against the combined `AbandonRefs` boundary. `root_parent_merge_bug_is_explained`
-checks that refusing a merge
-leaves the affected machine's published heads alone. [Conformance and
-limits](conformance.md#a-repository-advance-that-also-merges) explains what these observations
-connect to the proofs.
-
-The inline native regression
-`node::realize::advance_tests::late_merge_store_errors_preserve_heads_and_recover` denies real
-simple-op-store writes after advance's successful merge preflight. It observes separate raw
-heads after the late merge and cleanup fail, and checks retained history, reopening and retry,
-convergence with the source, and ref export when merging rebases a local bookmark. A one-time
-fault also checks cleanup succeeding inside the original call. Its wrapper needs private
-loader access, so it lives beside `realize`, with no production fault hook. It runs on Unix
-where directory mode bits deny writes. The
-[conformance description](conformance.md#a-repository-advance-that-also-merges) states the
-exact boundary and limits.
-
-`translation::prepared_advance_merges_each_survivor_once` checks a prepared record that drops
-an ancestor and a merge head, leaving two renamed survivors. One survivor appears in both
-merge-input lists; the raw published parent list must contain it once. This small real jj
-fixture runs on every platform and complements the ordinary and store-failure advance cases.
-
-`a_sync_stopped_while_taking_an_abandon_the_hub_then_loses` requires the affected machine to
-republish a drop after an interrupted adoption and hub rollback, before any other machine
-syncs. `taking_an_abandon_resumes_where_it_stopped` stops the shipping path at its hold save,
-head publication (including its partial effects) and workspace move, then checks held metadata,
-published heads and workspace
-records before resuming bounded syncs. These tests cover repository effects the core fake
-makes atomic; they do not prove the full asynchronous convergence bridge.
-
-`pending_drops_get_a_new_tip_when_the_hub_already_has_the_cached_fixup` drives receipt without
-adoption, restart, ordinary jj commands and hub rollback to equal heads and ordered records
-with a pending drop the hub lacks. It requires a fresh publication child, cached reuse after
-a lost request and restart, then convergence including the dropped sets and driver idle work.
-`cached_restoration_still_publishes_a_pending_drop_at_the_known_head` pins that recorded trait
-endpoint in the core package, against `Retry.Publication`. The generated core model otherwise
-uses eager restoring writes; it does not generate the real prefix or model the production
-cache. The existing conflicted-ref abandonment test checks that creating a neutral child keeps
-the current refs and presence, then checks ref/Git values and settings after sync and reopening.
-
-The core's `head_replies_update_records_only_for_the_known_pair` and
-`fetched_replies_mark_only_new_heads_and_take_only_current_records` check how older replies and
-equal sequences from another history affect publication and record adoption, including whether
-a fetch marks a head accepted in storage. They call `handle` directly, before the separate
-`handle_reply` path that can restart on rollback and learn the older pair. They distinguish
-effects the generated projection does not observe.
+The core harness uses abstract operations and storage. Native tests cover repository effects it
+cannot represent: advancing while merging concurrent heads, partial adoption of abandonment
+records, cached restoration after rollback, and replies whose storage effects differ despite
+an equal projected state. [Conformance](conformance.md) owns the correspondence to the models,
+the tests at each boundary, and the limits of those checks.
 
 ## Running the tests
 
+Documentation-only changes need review, link, spelling and formatting checks, without builds
+or tests ([AGENTS.md, "Checks"](../../AGENTS.md#checks)).
+
 `just test` runs the default suite and `just property` the search. `just check` runs formatting,
-clippy, the Lean proofs, the default suite, the doc build, cargo-deny, cargo-machete and typos;
+clippy, the Lean proofs and oracle smoke tests, the default suite, the rustdoc build, cargo-deny,
+cargo-machete, typos and the fuzz runner's unit tests;
 [testing-philosophy.md, "Beyond `just check`"](testing-philosophy.md#beyond-just-check) says when
 to run the rest.
 
@@ -175,22 +133,20 @@ The Search workflow runs the search nightly on Linux, each shard on a runner of 
 seed that changes from run to run. A failing shard uploads its example database; its output
 gives the seed and a `reproduce_failure` attribute for replaying the failure locally.
 
-The jj main workflow builds musubi and jj from jj's main branch nightly and runs the default
-suite with the workflow's filter, so that changes to jj-lib that will break musubi show up
-before a release brings them. To do the same locally against a checkout of jj outside this
-workspace:
+The jj main workflow rebases `jj-next` onto the musubi revision under test, then builds it
+against jj's main branch and runs the default suite with the workflow's filter. The filter
+excludes pinned-jj behavior that main has already changed.
+[AGENTS.md](../../AGENTS.md#building-against-jjs-main-branch) says what belongs on `jj-next`.
+
+To test against a checkout of jj outside this workspace, use a clean, disposable musubi
+workspace with the appropriate `jj-next` changes:
 
 1. Run `.github/scripts/use-jj-checkout.sh <jj checkout>`.
 2. From this workspace, build the matching jj with `cargo build -p jj-cli --bin jj`, which the
    script has pointed at the checkout, and put `target/debug` on `PATH`.
 3. Run the tests with the workflow's filter.
-4. Afterwards, `jj restore` the files the script rewrote, and `Cargo.lock`.
-
-Tests of policy helpers, such as gc's thresholds or the refs test's expected-value choice,
-need no repository. Tests of construction, such as the adapters' abandoned-bundle cleanup,
-need no sync. Checks that do need joined repositories share an existing test's setup where
-possible, as fresh-copy gc eligibility does. Old musubi-format upgrade scenarios are outside
-the pre-1.0 compatibility promise; the encoding checks stay.
+4. Afterwards, discard only the script's edits and its `Cargo.lock` changes, or remove the
+   disposable workspace.
 
 ## Protocol property tests
 
@@ -235,9 +191,9 @@ faults disabled and the usual convergence/retention checks.
 
 `storage_boundaries::every_storage_boundary_recovers` sweeps every countdown in a fixed
 schedule of concurrent work, fetching, missing-object recovery, pruning and held-record
-adoption. Its coverage assertion requires 39 reachable fallible trait methods, nine complete-effect
-error
-boundaries and four proper import-prefix boundaries; none needs a real repository fixture.
+adoption. Its coverage assertion requires 39 reachable fallible trait methods, nine
+complete-effect error boundaries and four proper import-prefix boundaries; none needs a real
+repository fixture.
 The sweep takes about a second on macOS. Both generated oracle tests use
 `MUSUBI_CONFORMANCE_CASES`. The oracle checks prefixes it can represent; partial
 merged uploads or partial bundle receipt explicitly retire it for that case while the Rust
@@ -264,7 +220,8 @@ the exchange changes the node, including its ordered applied records. The refine
 appends the number of record mismatches to the eight set-based components.
 `regrouped_records_conformance` reaches a remake and republication that preserves the dropped
 union but changes record grouping, then checks the record-only adoption's strict decrease.
-Every push the policy sends must upload what the liveness proofs assume ([conformance.md, "Liveness"](conformance.md#liveness)).
+Every push the policy sends must upload what the
+[liveness proofs assume](conformance.md#liveness).
 
 ## Example tests
 
@@ -272,17 +229,10 @@ These pin down jj-specific behavior with real repositories made by the `jj` CLI 
 `musubi-testutil`'s hermetic environment.
 
 `translation::failed_realization_writes_forget_the_batch` blocks one real op-store view or
-operation destination with a directory. It checks that a successful child can name the missing
-parent, but `settle` returns the write error, forgets every translation in the failed batch in
-both directions, and appends none to the translation file. Published history stays readable.
-After removing the obstacle, one retry on the same handle, or after reopening, reproduces a
-healthy copy's operations and publishes history containing the old head and every batch entry.
-The healthy copy runs the shipping realization path; a separate walk checks closure directly
-through jj's store. A recorded fixture shares setup among the three failure/recovery cases.
-This reaches actual background write errors, unlike `crash_with_writes_in_flight`, which removes
-files after writes have finished. It does not inject a writer panic: the pinned simple op store's
-explicit write panic requires an operation without parents, which realization never submits.
-It makes no claim about a panic inside jj, translation-file append errors, or power-cut durability.
+operation destination with a directory, reaching a background write error rather than deleting
+files after writes finish. A recorded fixture shares setup among the three failure/recovery
+cases. [Conformance](conformance.md#storage-errors) describes the batch invalidation, recovery
+and publication checks and their limits.
 
 ### The hub and the CLI
 
@@ -783,32 +733,25 @@ cannot change an observable result rather than adding implementation-shaped asse
 kill them. These campaigns sample particular assumptions; they do not replace the proofs,
 conformance tests, faults, fuzzing or generated search.
 
-#### Selected campaign replay
+#### Interpreting the adapter survivor
 
-On 2026-11-03, cargo-mutants 27.1.0 produced 12 stream mutants: 11 caught and one unviable
-(`Instant * Duration`). The adapter campaign produced 13: ten caught, two unviable (`OpId`
-has no `Default`), and one survivor. Neither completed campaign timed out. Before the new
-assertions, removing the stream's `TIMED_OUT` arm survived; so did making `history_lost`
-constant, or making native ancestry always true. Native ancestry always false previously
-only timed out. The new direct checks turn each into an assertion failure, without depending
-on a generated schedule or running the broken protocol to build the ancestry fixture.
+The selected adapter campaign has a known survivor: inverting the cached-base equality filter
+in `accepted_base`. The adapter clears the cache when polling or changing the saved base, so
+in its supported lifecycle the entry is absent or tagged with that base. Inverting the filter
+recomputes completeness. With stable repository contents it gives the same answer; extra I/O
+can fail or notice concurrent collection sooner. This loses an optimization without returning
+an incorrect cached answer. With this generator the adapter recipe exits 2 for that survivor;
+inspect any other survivor separately.
 
-The remaining survivor inverts the cached-base equality filter in `accepted_base`. The
-adapter clears this cache when polling or changing the saved base, so in its supported
-lifecycle the cached entry is either absent or tagged with that base. Inverting the filter
-misses the cache and recomputes completeness. With stable repository contents the result is
-equivalent; extra I/O can fail, or notice concurrent collection sooner. It introduces no
-incorrect cached answer. This is a loss of the optimization, not a missing safety assertion.
-Keep it visible: with this generator the adapter recipe exits 2 for that survivor. Do not
-interpret that exit as a clean campaign or automatically dismiss a different survivor.
+Two hand-made controls check assumptions the generator does not mutate:
 
-Two hand-made mutations cover assumptions the generator does not change: limiting
-`history_lost` to the outermost error must fail
-`node::tests::permanent_history_loss_survives_error_context`; replacing the object-store
-completeness check in `accepted_base` with `true` must fail
-`fetch_base::collected_objects_of_an_abandoned_fetch_base_are_fetched_again`. To replay, make
-one change in a disposable workspace, run the corresponding selected test, then restore the
-source:
+- Limiting `history_lost` to the outermost error must fail
+  `node::tests::permanent_history_loss_survives_error_context` on a wrapped error.
+- Replacing the object-store completeness check in `accepted_base` with `true` must fail
+  `fetch_base::collected_objects_of_an_abandoned_fetch_base_are_fetched_again` on the poll
+  that would omit collected objects.
+
+Make one mutation at a time in a disposable workspace, then run its selected test:
 
 ```sh
 cargo nextest run -p musubi-sync --lib \
@@ -817,36 +760,6 @@ cargo nextest run -p musubi-sync --test races \
     -E 'test(=fetch_base::collected_objects_of_an_abandoned_fetch_base_are_fetched_again)'
 ```
 
-The first must fail on the wrapped error; the second on the poll that
-would otherwise omit collected objects. The full local check then runs on the restored code.
-
-The full local check also exposed premature native pruning after a trim removed the whole
-accepted base below an unpublished operation. The abstract core's presence and pruning rules
-were sound; the native repair omitted copies whose presence had no surviving operation to
-stamp. `adapter::pruning_waits_for_a_copy_whose_work_was_abandoned` reproduces this without a
-daemon race: alpha trims, beta stays offline, and alpha finishes its repair and subsequent
-polls. It requires beta to remain present, the record to stay unpruned, alpha's surviving
-work time to stay unchanged, and later convergence. Replacing the union of old and new known
-copies with only the new known copies reproduces the failure. Omitting the preference for
-surviving work's time makes the independent harness-clock assertion fail.
-
-### Advance and merge campaign
-
-For the native advance boundary, the 2026-11-03 targeted run selected five generated mutants
-of `advance_to`'s input filter and merge guard, with these tests:
-
-```sh
-advance_tests='test(prepared_advance_merges_each_survivor_once)'
-advance_tests="$advance_tests | test(late_merge_store_errors_preserve_heads_and_recover)"
-advance_tests="$advance_tests | test(advance_with_concurrent_heads_refines_advance_then_merge)"
-cargo mutants --in-place --package musubi-jj \
-  --file crates/musubi-jj/src/node/realize.rs \
-  --re ':(707|725):.*(replace &&|replace != with ==|with false|delete !)' \
-  --test-tool nextest --timeout 120 -- -E "$advance_tests"
-```
-
-The line numbers select that snapshot's five mutants; inspect `cargo mutants --list` before
-repeating this on changed source. All five were caught, and the unchanged baseline passed.
-The [advance and merge](conformance.md#a-repository-advance-that-also-merges) section also
-records the five hand-written failure-path controls and the two initial survivors that
-the final selection catches.
+Restore the source before running normal checks. The native advance campaign's coverage and
+failure-path controls are recorded with its
+[conformance boundary](conformance.md#a-repository-advance-that-also-merges).

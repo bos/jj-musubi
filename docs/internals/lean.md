@@ -3,7 +3,7 @@
 [The formal guide](../../formal/README.md) lists the models and their assumptions.
 [Conformance](conformance.md) describes their implementation checks. The
 [testing philosophy](testing-philosophy.md) and [working agreement](../../AGENTS.md) cover
-validation and review. The pitfalls below arose in the recent proof work.
+validation and review.
 
 ## Check source assumptions before building on them
 
@@ -14,15 +14,16 @@ Expand bundled premises and distinguish derived facts, native contracts and envi
 fairness assumptions. Watch for a premise that already assumes the intended progress;
 `#print axioms` does not expose that mistake.
 
-Read entire native calls before assigning them model steps. `advance` can merge heads and
-replace an abandoned working copy, writing above a singleton target. Prelude and idle work
-can write too. Errors can retain completed effects, and a fetch can update knowledge before
-its object call completes. A completed-batch observation must account for those callbacks.
-Use a small native trace to challenge these contracts before extending dependent proofs.
+Read entire native calls before assigning them model steps, including cleanup, callbacks and
+completed effects retained after an error. An observation after a call returns cannot establish
+its internal publication order.
+[Conformance](conformance.md#a-repository-advance-that-also-merges) records the native advance
+boundary. Challenge source contracts with small native traces before extending dependent proofs.
 
-In [#78](https://github.com/bos/jj-musubi/issues/78), `autoWritesStop` remains an assumption
-covering inline cleanup, prelude and idle writes. Their termination from finite user and
-configuration changes is unproved. Resolve that scope before building a proof around it.
+`autoWritesStop` remains an assumption covering inline cleanup, prelude and idle writes. Their
+termination from finite user and configuration changes is unproved. Resolve that scope before
+building a proof around it ([asynchronous
+bridge](../../formal/README.md#the-asynchronous-liveness-bridge)).
 
 ## Preserve the identities and ordering the implementation observes
 
@@ -31,10 +32,9 @@ A content-addressed write may create a body, make an existing body local, or reu
 local. Different physical operations can have one canonical form. Count label allocation and
 raw body creation separately; include every hash-visible field, such as presence attributes.
 
-[Contraction identity, #73](https://github.com/bos/jj-musubi/issues/73), exposed a hidden
-injectivity assumption: collision resistance does not make original-operation content
-injective. Test equal nonparent fields and timestamps under different histories; unique
-fixture descriptions concealed the counterexample.
+Collision resistance does not make original-operation content injective. Test equal nonparent
+fields and timestamps under different histories; unique fixture descriptions can conceal
+identity collisions ([contraction identity](conformance.md#contraction-identity)).
 Check identity correspondence through cache loss, garbage collection, restart and commands
 still running during sync.
 
@@ -62,11 +62,8 @@ sender can acquire new drops, and the hub can handle it after its reply slot is 
 `SysFreshCuts.lean` and `NotificationControl.lean` give the credit arguments. Compose facts
 about the same actual run, packet and handling event throughout the proof.
 
-A graph read after a call returns includes its cleanup. It cannot establish internal
-publication order; that needs its own observation or code/lock argument
-([#74](https://github.com/bos/jj-musubi/issues/74)). Count target transitions reached as well
-as generated cases. If ordinary runs miss the boundary, seed a reachable hard prefix and
-continue the ordinary generator from there.
+Count target transitions reached as well as generated cases. If ordinary runs miss the boundary,
+seed a reachable hard prefix and continue the ordinary generator from there.
 
 For jj-owned behavior, use actual jj observations. `RefsExec.lean` takes a table of jj merge
 results because symbolic merging can miss resolution by commit ancestry. Require every
@@ -109,6 +106,5 @@ formal package. Before parallel consumers, build the oracle once and supply its 
 through `MUSUBI_ORACLE`, as CI does. The Rust helper's `OnceLock` is per process. Rebuild after
 Lean changes before reusing an explicitly supplied binary.
 
-Check that edits succeeded before trusting a build: one failed path lookup was followed by a
-successful build of the unchanged file. For parallel proof work, assign an integration owner
-for `ExecJson.lean`, `Axioms.lean` and aggregate imports to avoid conflicting handoffs.
+For parallel proof work, assign an integration owner for `ExecJson.lean`, `Axioms.lean` and
+aggregate imports to avoid conflicting handoffs.

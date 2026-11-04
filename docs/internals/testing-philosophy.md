@@ -4,9 +4,6 @@ What musubi's tests and proofs must cover, and what evidence each kind of change
 [testing.md](testing.md) describes each layer of tests and what a test of each costs, and
 [efficient-tests.md](efficient-tests.md) how to keep a test cheap.
 
-Terms are those of [design.md, "Vocabulary"](design.md#vocabulary); [testing.md](testing.md)
-describes Hegel, and "the search", the generated end-to-end tests.
-
 ## What a test must protect
 
 A user-visible behavior, what musubi prints included; a property of the protocol ([protocol.md,
@@ -24,9 +21,9 @@ time, networks and crashes produce every interleaving. musubi can reach:
 - messages lost, duplicated, delayed or reordered, links failing partway through a call, and any
   process crashing at any point ([protocol.md, "Network and
   failures"](protocol.md#network-and-failures));
-- what a power cut leaves, since musubi makes no synchronous fsyncs: recent writes lost, a
-  line torn as it was appended, a new file left empty, and so a hub back at an older head or
-  with a store it must make again;
+- detecting what a power cut leaves, since musubi makes no synchronous fsyncs: lost recent
+  writes, a torn appended line or an empty new file. A hub may resume at an older head or
+  discard a corrupt store and make it again;
 - whatever a buggy peer, or a peer of another release, sends;
 - any jj command on any machine, concurrently, at an older operation or in a stale workspace,
   and git moving refs that jj hasn't imported;
@@ -42,7 +39,9 @@ These need no test:
 - data from earlier releases, until 1.0 ([AGENTS.md,
   "Compatibility"](../../AGENTS.md#compatibility)), beyond a message from another release being
   refused as such;
-- not losing recent writes to a power cut. Test that damage is detected, and what follows.
+- preserving recent writes through a power cut, or repairing a hub's torn files. The hub is
+  disposable ([AGENTS.md, "Resilience"](../../AGENTS.md#resilience)); test detection and
+  recreation rather than adding durability.
 
 ## Proof or test
 

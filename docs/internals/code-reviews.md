@@ -62,9 +62,10 @@ Run through the commands the change touches as a user would, from the
 [setup guide](../guides/setup.md): read what each prints, in the snapshots of
 `crates/musubi/tests/cli.rs` or in the code that prints it. Look for:
 
-- output nobody asked for: progress, narration, or settings, defaults and hints the user
-  needn't act on, against [docs/AGENTS.md, "What commands
-  print"](../AGENTS.md#what-commands-print);
+- output nobody asked for: narration, settings, defaults and hints the user needn't act on,
+  against [docs/AGENTS.md, "What commands print"](../AGENTS.md#what-commands-print);
+- missing progress while a command waits on a sync in a terminal, or progress left behind
+  afterwards or printed to a non-terminal;
 - an error longer than a line and a hint, or one that explains musubi rather than saying what
   went wrong and the command to run;
 - a step that doesn't work as the guide says, or that depends on something the guide doesn't
@@ -76,8 +77,9 @@ Run through the commands the change touches as a user would, from the
   with each other or with what the code does;
 - a message a user acts on that the troubleshooting page doesn't list.
 
-A change to what a new user meets updates `the_quick_start_works_as_written` with it. Its
-snapshot is the first session as a user sees it, so read a change to it as one.
+Read changes to `the_quick_start_works_as_written` as a first session, checking the commands
+and their output against the quick start.
+[Testing philosophy](testing-philosophy.md#what-each-kind-of-change-needs) says when to update it.
 
 ## Tests
 

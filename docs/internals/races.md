@@ -8,7 +8,8 @@ machine ends up with what jj would make of the same operations from concurrent p
 machine. Where jj would silently do something harmful only because the operations came from
 different machines, musubi detects it and stops.
 
-Each entry below is pinned by a test. Most are in `crates/musubi-sync/tests/races/`, which runs
+The tables name the tests that pin each outcome; known limitations without a dedicated test
+are marked accordingly. Most tests are in `crates/musubi-sync/tests/races/`, which runs
 real repositories, colocated unless the entry says otherwise, through the real protocol core
 and hub storage; a few that need the binary are in `crates/musubi/tests/cli.rs`, and a few that
 test one layer are beside that layer's other tests. Most tests in `races/` end with
@@ -122,7 +123,7 @@ own work brings it back ([design.md, "Copies that go away"](design.md#copies-tha
 
 ## Kinds of repository
 
-Not races: kinds of repository and history a hive carries.
+These cases check backend and object-transfer behavior alongside the races.
 
 | Kind | Outcome | Test |
 | --- | --- | --- |

@@ -17,6 +17,12 @@ This is a jj repository: use jj, never git.
 
 ## Checks
 
+Prefer a large EC2 devbox for coverage collection, mutation campaigns, fuzzing and other heavy
+computation. Budget total concurrency across all work on a machine, including nested campaign
+workers, compiler jobs, test threads and child processes. Use the allocated CPUs on a dedicated
+devbox, and leave headroom on shared machines such as the laptop. Bound nested parallelism to
+the machine's capacity; a limit on outer workers alone does not bound the load.
+
 `just check` runs every local check (see the justfile). The test suite alone takes about two
 minutes, so each check runs once, by whoever owns it:
 

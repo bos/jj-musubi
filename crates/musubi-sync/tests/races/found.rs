@@ -30,7 +30,7 @@ fn bookmark_moved_by_a_node_merge_is_exported() {
 }
 
 /// Two machines rebase concurrently so that their rebases form a loop: alpha moves X, and
-/// Y on it, onto Z, while beta moves Z onto Y. jj 0.46 panics merging such operations
+/// Y on it, onto Z, while beta moves Z onto Y. jj 0.47 panics merging such operations
 /// ("graph has cycle"), and again on every load, which would leave every `jj` command on
 /// alpha panicking. So musubi doesn't apply beta's operation on alpha: alpha's sync fails,
 /// naming alpha's rebase as the operation to revert, and jj keeps working there. Here alpha

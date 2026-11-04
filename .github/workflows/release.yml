@@ -77,8 +77,16 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - run: cargo build --profile dist --locked -p jj-musubi --target ${{ matrix.target }}
       - if: ${{ !matrix.cross }}
+        name: Smoke test the release binary
         shell: bash
-        run: '"$BIN" --version'
+        run: |
+          "$BIN" --version
+          # --version doesn't parse templates, so it misses a false stack limit in musl.
+          "$BIN" --color never --socket "$RUNNER_TEMP/no-daemon.sock" status -T '"ok"' \
+            > "$RUNNER_TEMP/smoke.out" 2> "$RUNNER_TEMP/smoke.err"
+          printf ok > "$RUNNER_TEMP/smoke.expected"
+          cmp "$RUNNER_TEMP/smoke.expected" "$RUNNER_TEMP/smoke.out"
+          test ! -s "$RUNNER_TEMP/smoke.err"
       - name: Package
         if: runner.os != 'Windows'
         run: |

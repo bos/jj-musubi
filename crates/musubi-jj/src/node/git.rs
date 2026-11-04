@@ -415,23 +415,16 @@ impl Colocation {
 }
 
 /// Writes the expected value of each conflicted remote bookmark ([`expected`]) to this
-/// machine's `.git`, which jj's export leaves alone. Every `jj` command imports
-/// `refs/remotes/<remote>/<name>` and resolves a conflicted remote bookmark to what it finds
-/// there, so every machine must find the same, or their imports merge to a value none of them
-/// had (docs/internals/races.md, "Remotes"). After concurrent fetches, a machine that made
-/// neither fetch still has an older one, and one that made a fetch has its own side. After
-/// `jj op restore` of a conflict, the machine that restored it exported nothing for it, so
-/// has the value from before the restore, which the others must keep too. So the write
-/// compares against what `.git` holds, not jj's record of it, and replaces any value the hive
-/// already knows of: a term of the conflict, absent included, or the record. That includes a
-/// `git fetch` that happens to match a term; the next fetch after the conflict resolves
-/// corrects it. Any other value, absent included, was put there by git since, and the import
-/// takes it, as it would without musubi. A ref that can't be read or written is left alone, as
-/// jj's export leaves a failed ref (Refs.lean, `exportConflicted`). Nor is a ref written where
-/// `.git` holds the value an op head `beside` the realization records and the realization
-/// doesn't: that head put it there, as by a fetch, and the merge of the two, exported next and
-/// published in the realization's place, can keep it, which a write for the realization alone
-/// would undo.
+/// machine's `.git`, which jj's export leaves alone, and records the same value in
+/// `git_refs`. Ordinary commands therefore leave the conflict unchanged; a fetch imports its
+/// explicit result. After concurrent fetches, the expected value is one conflict side. After
+/// a restore, it is the value from before the restore, which the restoring machine kept.
+/// The write compares against `.git` itself and replaces only a value the hive knows of:
+/// a term of the conflict, absent included, or the record. Any other value was put there by
+/// git since, and the next import takes it. An unreadable or unwritable ref is left alone.
+/// Nor is a ref written where `.git` holds the value an op head `beside` the realization
+/// records and the realization doesn't: that head put it there, as by a fetch, and the merge
+/// of the two, exported next, can keep it, which writing for the realization would undo.
 /// Returns the expected values, by git ref, and the git refs it failed to write.
 fn export_conflicted_remote_bookmarks(
     mut_repo: &mut MutableRepo,

@@ -11,7 +11,7 @@ short version of this guide.
 You need, on every machine:
 
 - `musubi`. See [Install](../../README.md#install).
-- `jj` 0.46.0, and `git`. musubi runs the `git` that jj's `git.executable-path` names; the
+- `jj` 0.47.0, and `git`. musubi runs the `git` that jj's `git.executable-path` names; the
   hub runs the `git` on its `PATH`.
 - ssh access to the hub's machine: if `ssh devbox` works, so does musubi. Your
   `~/.ssh/config` applies, with its aliases, `ProxyCommand` and `ProxyJump`.
@@ -19,6 +19,9 @@ You need, on every machine:
 You also need a repository with at least one commit and all of its history. musubi refuses a
 shallow or partial clone, since it couldn't send other machines everything they need. A
 `jj git clone` without `--depth` is fine.
+
+If jj 0.47.0 on Linux reports `stack limit reached` for its built-in aliases, use a native
+build of that release: see [Troubleshooting](../troubleshooting.md#jj-reports-stack-limit-reached).
 
 ## Choose the hub's machine
 

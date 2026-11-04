@@ -1414,7 +1414,7 @@ chmod +x "{exe}.new" && mv "{exe}.new" "{exe}"
     ");
     insta::assert_snapshot!(stderr, @"
     Hint: Once that's fixed, `musubi daemon restart` tries again.
-    Warning: Syncing fails: incompatible peer: protocol N with jj-lib 0.46.0 (musubi 99.0.0+20991231235959.ffffffffffff), but this is protocol N with jj-lib 0.46.0 (musubi [this release]); run the same release of musubi on the hub and every machine
+    Warning: Syncing fails: incompatible peer: protocol N with jj-lib 0.47.0 (musubi 99.0.0+20991231235959.ffffffffffff), but this is protocol N with jj-lib 0.47.0 (musubi [this release]); run the same release of musubi on the hub and every machine
     Hint: The daemon keeps trying. Its log: $ROOT/home/musubi-alpha/daemon.log
     ");
 }

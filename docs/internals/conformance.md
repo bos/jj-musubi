@@ -303,7 +303,7 @@ The native checks read raw heads before any subsequent jj command or head-mergin
 | `realization_beside_a_fetch_keeps_the_fetch_while_taking_an_abandon` | After record adoption, the merge uses `max(images(old heads) ∪ {incoming})`, with no dropped ancestor, and keeps the fetched ref. [Abandonment and refs](#abandonment-and-refs) covers its combined graph/ref projection. |
 | `translation::prepared_advance_merges_each_survivor_once` | A prepared multi-image advance publishes each survivor exactly once. It supplies valid canonical survivors; it does not check `NodeAdapter` deriving that frontier while records remain prepared. |
 | `advancing_to_what_survives_of_a_dropped_head` | The full surviving frontier agrees with `SurvivorAdvance`, including physical parent count so duplicate parents cannot hide behind a set comparison. |
-| `root_parent_merge_bug_is_explained` | `check_mergeable` refuses the unsafe merge before publishing the realization, leaving raw heads unchanged. |
+| `abandoning_a_root_child_beside_a_merge_converges` | Concurrently abandoning a root child and merging it with another commit converges. |
 
 In an ordinary advance, a later unpublished merge can fail after preflight succeeds. The
 colocated path then publishes the advanced head set, and working-copy cleanup tries the normal
@@ -1189,15 +1189,19 @@ keeps it, which lets a forget's merge bring the copy back, fails within a few hi
 ## Per-machine refs
 
 In a colocated repository, each view records what jj last saw in this machine's `.git` (`git_refs`
-and the `git` remote, such as `x@git`), and every `jj` command imports any difference as a change
-made with git. musubi keeps that record per-machine ([design.md, "Per-machine state in a
-replicated view"](design.md#per-machine-state-in-a-replicated-view)). `formal/Musubi/Refs.lean`
-proves that an import changes a bookmark only if git moved the ref, whatever musubi realizes,
-assuming jj's ref merge obeys three laws (`RefAlg`); that musubi realizes a merge as jj merges it;
-that once musubi writes a conflicted remote bookmark's expected value, every machine's import
-resolves it alike, a restore of the conflict included; and that `jj undo` and `jj op restore` keep
-the invariant where jj's export can write what they restore, or restore a conflicted remote
-bookmark ([formal/README.md, "Per-machine refs
+and the `git` remote, such as `x@git`). With jj 0.47, an ordinary command imports a ref
+only when its physical Git value differs from `git_refs`; an unchanged ref is an identity step,
+including a conflicted remote bookmark. An explicit fetch still imports its returned target even
+when the physical ref has not moved. The conformance harness uses the executable model's import
+for those actual imports and checks every resulting slot and invariant, including identity steps.
+musubi keeps the record per-machine ([design.md, "Per-machine state in a replicated
+view"](design.md#per-machine-state-in-a-replicated-view)).
+
+`formal/Musubi/Refs.lean` proves properties of the import and export functions, assuming jj's ref
+merge obeys three laws (`RefAlg`). Its result that importing a conflicted remote bookmark's
+expected value resolves the conflict applies when that import runs; an ordinary command on
+jj 0.47 leaves an unchanged physical ref alone. The restore and realization checks still use the
+model's slot functions ([formal/README.md, "Per-machine refs
 (`Refs.lean`)"](../../formal/README.md#per-machine-refs-refslean) lists the theorems).
 
 The model's functions are executable already, over any `RefAlg`, but the tests' targets are
@@ -1234,7 +1238,7 @@ links:
    | Real action | Model steps |
    | --- | --- |
    | `git update-ref` moves or deletes `refs/heads/x`, `refs/tags/t` or `refs/remotes/origin/y` | `gitMove` |
-   | A `jj` command moves `x`, `y` or `t` (`jj bookmark set`, `jj bookmark delete`, `jj tag set`, `jj tag delete`), or changes nothing (`jj status`) | `jjImport` of every ref; `jjExport` of every ref if that changed the view; then, if the command moves a bookmark, `set` and `jjExport` of every ref |
+   | A `jj` command moves `x`, `y` or `t` (`jj bookmark set`, `jj bookmark delete`, `jj tag set`, `jj tag delete`), or changes nothing (`jj status`) | `jjImport` of each ref whose physical value differs from `git_refs`; `jjExport` of every ref even when importing changed nothing; then, if the command moves a bookmark, `set` and `jjExport` of every ref |
    | `y` moves in `origin`, and `jj git fetch` fetches it | as a `jj` command, whose change is `RStep.fetch` |
    | A `jj` command at the operation before the latest action (`--at-op`) moves `x` or `y`, and `jj status` follows | on the older operation's slots, `set` and `jjExport` of every ref (it imports nothing); then `TSlot.merge` of the head with them against the older operation's, in the order of the merge operation's parents, then as a `jj` command that changes nothing |
    | `jj undo`, or `jj op restore` to the operation before the latest action or to the one both machines last synced at | as a `jj` command that imports; then, if it restored an operation, which its description names, every ref's slot but `K` from that operation's view (`restoreLocal`, `restoreRemote`), the expected value the head's (`restoreC`), and `jjExport` of every ref |
@@ -1244,26 +1248,24 @@ links:
 
    The mapping follows what jj does. jj imports `x@git`, `y@git` and `y@origin` in that
    order, and the two refs of `y` share the bookmark, so an import of one that sets the
-   bookmark is a `set` of the other. jj exports only a transaction with changes, which is
-   why a `jj` command that imports nothing exports nothing, and a failed export waits for a
-   command that changes something.
+   bookmark is a `set` of the other. An integrated command exports after its import phase
+   even when importing changed nothing. This completes pending exports after native op-head
+   merges; the command's own transaction still exports only if it changes the view.
+   `an_unchanged_import_exports_a_bookmark_selected_by_a_merge` pins this jj 0.47 behavior
+   with concurrent fetches followed by a bookmark command at an older operation.
 
    After every action the test requires, for each ref, the bookmark, the remote bookmark
    and its tracking state, its `git_refs` entry and the git ref to be the model's, `LInv`
    (`CInv` for `y@origin`) to hold, and the repository to have one op head. A restore that
    isn't `Restorable` may leave a record behind `.git` until the next import, which only it
-   may (the ghost `restored`). The test also checks that the other machine's command left its
-   bookmarks and tag as the model says, its import resolving a conflicted `y@origin` as this
-   machine's would (`conflicted_import_agrees`), so that its own refs reverted nothing
-   either, and that its `.git` has the same expected value of a conflicted `y@origin`. Beside
-   it, `undo_of_an_unexportable_bookmark_conflicts_it` shows `restore_reverts` with jj alone,
-   and `restore_of_a_conflicted_remote_bookmark_resolves_alike` drives the state machine
-   through `restore_import_agrees`: concurrent fetches conflict `y@origin`, a fetch here
-   settles it, this machine restores the conflict, and both machines' commands resolve it to
-   the fetched value. `realization_beside_a_fetch_keeps_the_fetch` is a run Hegel found:
-   the other machine fetches a term of a restored conflict before realizing the restore,
-   and the merge keeps its fetch, so musubi must not write the conflict's expected value to
-   that machine's `.git` for the realization alone.
+   may (the ghost `restored`). The test also checks that the other machine's command left
+   its bookmarks and tag as the model says, and that both `.git`s keep the same expected
+   value for a conflicted `y@origin`. `undo_of_an_unexportable_bookmark_keeps_it` shows that
+   a restored root bookmark stays there through an ordinary command, since `git_refs`
+   still matches `.git`. `restore_of_a_conflicted_remote_bookmark_waits_for_a_fetch` checks
+   that a restored remote-bookmark conflict survives ordinary commands and resolves after
+   an explicit fetch whose physical ref is unchanged. `realization_beside_a_fetch_keeps_the_fetch`
+   checks that a concurrent fetch wins the merge without musubi overwriting its physical ref.
    `realization_beside_a_fetch_here_keeps_the_fetch` is the same on this machine, against the
    model (`beside_keeps_fetch`): the other machine merges its own operation with this one's
    restore of a conflict, keeping it, while this machine fetches a term of it.
@@ -1323,24 +1325,17 @@ What the test relies on of jj, and what it leaves out:
   (`concurrent_records_revert`). jj does this too, with or without musubi, and the test
   expects it.
 - **Restores.** `jj undo` and `jj op restore` restore `x@git` with the bookmark but keep
-  `git_refs`. Where jj's export can't write the restored bookmark, as for the root commit or
-  a conflicted local bookmark, the record stays behind `.git`, and the next import takes the difference for a
-  move made with git, though jj itself made it: a bookmark at the root, moved and undone,
-  becomes a conflict (`restore_reverts`, and the test
-  `undo_of_an_unexportable_bookmark_conflicts_it`, which runs only jj). That is jj's
-  behaviour: no musubi step takes part, and other machines, which realize only the restored
-  bookmark, keep their records. `jj undo` also refuses to undo a merge operation, or a
-  realization of another machine's operation, which jj attributes to that machine's
-  workspace.
-- **Conflicted remote bookmarks.** Two machines' fetches merge to a conflicted `y@origin`,
-  whose expected value is a side, which musubi writes to `.git`; a machine's next import
-  resolves it to that side, as every other machine's does. A restore that brings such a
-  conflict back writes nothing, so the restoring machine's `.git` keeps the value from before
-  it, which is the restore's expected value, and every other machine keeps or writes that
-  instead of the side. The slot model takes the expected value as given with each operation;
-  this test computes it from the parents' as `export_conflicted_remote_bookmarks` does, and
-  checks that both machines' `.git`s have it, but makes no joins. The separate history
-  conformance below checks the shipping computation, including its join boundaries.
+  `git_refs`. Where the restored bookmark can't be exported, an ordinary command leaves it
+  alone if the physical ref still matches `git_refs`. The model's unconditional import
+  counterexample `restore_reverts` is not an ordinary jj command in that state. The native
+  regression is `undo_of_an_unexportable_bookmark_keeps_it`. jj also refuses to undo a merge
+  operation or a realization attributed to another machine's workspace.
+- **Conflicted remote bookmarks.** musubi writes and records the expected value in `.git`:
+  one conflict side after concurrent fetches, or the value from before a restore. Ordinary
+  commands leave the conflict alone; an explicit fetch imports its result even if the
+  physical ref is unchanged. The slot model takes the expected value as given with each
+  operation. This test computes it from the parents and checks both machines' physical refs;
+  the history conformance below also checks the shipping computation at join boundaries.
 - **Not covered.** The state machine makes no merges of more than two heads and no
   criss-cross merges. It runs a command beside a realization only while every local
   bookmark's record agrees with itself, as `LStep.beside` assumes of the operation the

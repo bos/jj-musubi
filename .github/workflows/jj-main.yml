@@ -98,26 +98,4 @@ jobs:
         run: |
           lake build oracle
           echo "MUSUBI_ORACLE=$PWD/.lake/build/bin/oracle" >> "$GITHUB_ENV"
-      # The test of a jj 0.46 bug fails as it should once jj fixes it (jj-vcs/jj#8076, fixed
-      # after 0.46), so it's left out until musubi moves past 0.46 and drops it.
-      #
-      # jj's main branch imports a ref only where `.git` differs from jj's record of it, where
-      # 0.46 imported one wherever it differed from the remote bookmark (jj-vcs/jj@095c1ca).
-      # So a conflicted remote bookmark whose expected value musubi records no longer resolves
-      # to it, and a restored one stays conflicted until a fetch, which these tests and
-      # Refs.lean don't expect. They're left out until musubi follows that change, so that the
-      # job shows what else breaks.
-      - run: >-
-          cargo nextest run --workspace
-          -E "not (test(=history::root_parent_merge_bug_is_explained)
-          | test(=refs::undo_of_an_unexportable_bookmark_conflicts_it)
-          | test(=refs::realization_beside_a_fetch_keeps_the_fetch)
-          | test(=refs::restore_of_a_conflicted_remote_bookmark_resolves_alike)
-          | test(=remotes::conflicted_remote_bookmark_resolves_to_a_fetched_side)
-          | test(=remotes::conflicted_remote_bookmark_resolves_despite_a_stale_record)
-          | test(=restore::restoring_a_conflicted_remote_bookmark_keeps_the_fetched_value)
-          | test(=restore::restoring_a_conflicted_remote_bookmark_keeps_a_fetched_term)
-          | test(=restore::abandoning_the_fetch_under_a_restore_keeps_the_fetched_term)
-          | test(=restore::realizing_work_on_the_restore_before_the_fix_up_keeps_the_fetched_term)
-          | test(=restore::abandoning_again_before_the_fix_up_keeps_the_fetched_term)
-          | test(=restore::taking_another_abandon_before_the_fix_up_keeps_the_fetched_term))"
+      - run: cargo nextest run --workspace

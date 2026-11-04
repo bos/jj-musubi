@@ -9,6 +9,12 @@ models one ref. jj's ref merge is an abstract three-way merge that obeys the tri
 resolution laws of `merge_ref_targets`, and git is an adversary that can move the ref at any
 time. Commit graphs, rebases and jj's conflict algebra are not modeled.
 
+The import functions below update one selected ref. jj 0.47 selects a ref for an ordinary
+command only if its physical value differs from `git_refs`, and otherwise performs an
+identity step. An explicit fetch selects its returned target even if that ref did not move.
+The conformance harness applies this selection. Statements about unconditional imports,
+including `restore_reverts`, do not assert that an ordinary command selects such a ref.
+
 For a local bookmark `x`, whose record (`x@git` and `git_refs`) is per-machine:
 
 - an import changes the bookmark only if git moved `refs/heads/x` since jj last imported
@@ -58,8 +64,9 @@ can write the restored bookmark, or there is nothing to write, the invariant hol
 `CInv`, since `.git` keeps the expected value (`restoreRemote_cinv`); where the export can't
 write the restored bookmark, as for the root commit or a conflicted local bookmark, the record
 stays behind `.git`, and the next import moves the bookmark with no `git` command having run
-(`restore_reverts`). That is jj's: no musubi step takes part, and other machines realize only
-the restored shared fields.
+(`restore_reverts`) if the ref is selected. With an unchanged physical ref, an ordinary
+command selects no import, so it preserves the restored bookmark. Other machines realize
+only the restored shared fields.
 
 Concurrent op heads, which a `jj` command at an older operation makes, or one that loaded the
 head before musubi published, are merged as jj merges views (`Slot.merge3`, `TSlot.merge`):
@@ -96,9 +103,9 @@ head before musubi published, are merged as jj merges views (`Slot.merge3`, `TSl
   above about `LReach` and `CReach` holds of runs with the step; `RStep`, which `CStep`
   extends, doesn't have it. Writing the expected value for the realization alone moves the
   bookmark back after a fetch (`beside_keeps_fetch`), and publishing the realization for the
-  next `jj` command to merge, which doesn't export, has that machine import a value other than
-  the merge's expected value (`beside_published_apart_disagrees`), which every machine that
-  realizes the merge imports (`conflicted_import_agrees`).
+  next `jj` command to merge, without exporting before its import, has that machine import
+  a value other than the merge's expected value (`beside_published_apart_disagrees`), which
+  every machine that realizes the merge imports (`conflicted_import_agrees`).
 
 What the model still leaves out, as testing it against jj showed
 (`crates/musubi-sync/tests/races/refs.rs`, docs/internals/conformance.md, "Per-machine refs"):
@@ -568,7 +575,7 @@ theorem remoteNoSpuriousRevert {s : Machine T} (h : RReach s) (hm : s.moved = fa
 /-- **A remote bookmark published without its export is reset.** Machine B is in sync with
 its `.git`, and realizes a canonical operation that moves `x@origin` to `c`, a value export
 can't write (a conflict, say). jj skips the export and the realization is published
-anyway, as musubi did for conflicts before it wrote one of their sides itself. Then B's next import sets `x@origin` to B's `.git` value and merges that change into
+anyway. An explicit import can set `x@origin` to B's `.git` value and merge that change into
 `x`, although no `git` command ran. (A ref update that fails for another reason leaves the
 state the same, so ends the same way.) The import's operation is an ordinary local
 operation, which musubi replicates; that is not modeled here. -/
@@ -669,19 +676,17 @@ theorem restoreRemote_inv {o : Slot T} {s : Machine T} (hs : RInv s)
 /-! ## Conflicted remote bookmarks
 
 Concurrent fetches on two machines merge to a conflicted remote bookmark, and `jj op restore`
-can bring one back; jj's export skips it, and every `jj` command resolves it to what `.git`
-holds. So each operation has an *expected* value of `refs/remotes/origin/x`, `E`, which every
-machine's `.git` should hold while the operation is its op head. It is the remote bookmark if
-that is resolved. Otherwise it depends only on the operation's history, so it is shared like
-the remote bookmark: where a parent has the same conflict, that parent's (the first such);
-where one parent doesn't, as for `jj op restore` of a conflict, the parent's, since the `jj`
-command that made it exported nothing for the conflict and left its machine's `.git` as it
-was; and where a merge made the conflict, or at a join, whose history before it only the
-joining machine has, one of its sides, chosen the same way on every machine (`Sides.side`). After jj's export of each realization, musubi writes `E` to
-`refs/remotes/origin/x` itself (`export_conflicted_remote_bookmarks` in `node/git.rs`), where
-`.git` holds a value the hive knows of: a term of the conflict, or the record. Then every
-machine's next import resolves the conflict to it, the machine that made the operation
-included, which needn't run musubi's export. -/
+can bring one back. jj's export skips it. Ordinary commands preserve it while the physical
+ref matches `git_refs`; an explicit fetch can resolve it even if that ref did not move.
+Each operation has an *expected* value of `refs/remotes/origin/x`, `E`, which every machine's
+`.git` should hold while the operation is its op head. It is the remote bookmark if that is
+resolved. Otherwise it depends only on the operation's history, so it is shared like the
+remote bookmark: where a parent has the same conflict, that parent's (the first such); where
+one parent doesn't, as for a restore, the parent's, since the command exported nothing for
+the conflict and left its machine's `.git` as it was; and where a merge made the conflict,
+or at a join, one of its sides, chosen alike everywhere (`Sides.side`). musubi writes and
+records `E` after jj's export where `.git` holds a value the hive knows of: a conflict term
+or the record. An explicit import of `E` resolves the conflict to it. -/
 
 /-- The side musubi chooses for a conflict a merge makes: the one committed last, then the
 greatest commit id, the same on every machine, and none if no side is present; and whether a
@@ -1747,8 +1752,8 @@ while another moves the remote bookmark from `1` to `2`, and musubi realizes tha
 fetch: the merge is a conflict, whose expected value is its side, `2`, which musubi writes,
 so that this machine's import resolves the conflict to it, as every machine that realizes the
 merge does (`conflicted_import_agrees`). Published apart, as musubi once did, the two heads
-are merged by the next `jj` command, which doesn't export, so its import resolves the
-conflict to the fetch, `3`, instead. -/
+are merged by the next `jj` command, without exporting before its import, so the import
+resolves the conflict to the fetch, `3`, instead. -/
 theorem beside_published_apart_disagrees :
     let b : Slot Tgt := ⟨.commit 1, .commit 1, .commit 1⟩
     let s : CMachine Tgt := ⟨⟨b.import (.commit 3), .commit 3, false⟩, .commit 3⟩

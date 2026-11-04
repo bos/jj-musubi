@@ -50,7 +50,7 @@ cargo-machete, typos and the fuzz runner's unit tests;
 [testing-philosophy.md, "Beyond `just check`"](testing-philosophy.md#beyond-just-check) says when
 to run the rest.
 
-The tests need `jj` 0.46.0 and `git` on `PATH`. They don't read your own git config:
+The tests need `jj` 0.47.0 and `git` on `PATH`. They don't read your own git config:
 `.cargo/config.toml` hides the global and system config from the git they start, and the `jj`
 and `git` they run as commands get a home directory of their own.
 
@@ -591,15 +591,12 @@ bookmark back with no git command run. The search makes every move git makes of 
 outside `jj` itself, so it records, per machine, which refs git moved since jj last imported
 there, and what `.git` had before. Each operation that imports (jj's "import git refs") may
 change a bookmark, remote bookmark or tag only through a ref git moved in that time, from the
-value jj's record had, or where jj does the same in one repository: it resolves a conflicted
-remote bookmark, which its export never writes, to the side in `.git`
-(`remote_reset_without_export`), or, where `jj op restore` put the conflict back, to the value
-from before the restore, which musubi writes everywhere as the restoring machine's `.git` kept
-it (the expected value in `Refs.lean`); an undo, redo, `jj op restore` or `jj op revert` on that
-machine restored a record its export couldn't then write over, such as a conflicted bookmark's;
-or jj's merge of two op heads that both changed the record, each as jj does
-(`concurrent_records_revert`). Otherwise the check walks back from the import to the operation
-that left the record differing from `.git`, and the failure names it. Imports of git's HEAD
+value `git_refs` had, or where jj's merge of two op heads that both changed `git_refs`
+left the record different from the physical ref (`concurrent_records_revert`). A conflicted
+remote bookmark or a restored bookmark alone is not an explanation: jj 0.47 imports only
+physical refs that differ from `git_refs`. Otherwise the check walks back from the import to
+the operation that left the record differing from `.git`, and the failure names it. Imports of
+git's HEAD
 ("import git head"), which move a workspace's working copy onto what HEAD has, are checked the
 same way against jj's record of each workspace's HEAD (`git_heads`). git moves HEAD only where
 it is still a symbolic ref to the branch git moves, as in a new repository until jj first writes

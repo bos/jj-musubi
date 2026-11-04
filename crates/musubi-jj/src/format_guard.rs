@@ -2,7 +2,7 @@
 //!
 //! jj-lib decodes op store files with prost, which silently drops unknown fields. A file
 //! written by a newer `jj` could therefore lose data when musubi canonicalizes it. Walking
-//! the protobuf encoding against the schema of `simple_op_store.proto` (jj-lib 0.46) turns
+//! the protobuf encoding against the schema of `simple_op_store.proto` (jj-lib 0.47) turns
 //! that into an error instead.
 
 use std::fmt::Write as _;
@@ -69,7 +69,7 @@ enum Msg {
 
 impl Msg {
     /// The kind of each field this message defines. Reserved fields count as known: they
-    /// appear only in files from older versions, which jj-lib 0.46 reads by ignoring them.
+    /// appear only in files from older versions, which jj-lib 0.47 reads by ignoring them.
     fn field(self, number: u32) -> Option<Kind> {
         use Kind::*;
         let kind = match (self, number) {

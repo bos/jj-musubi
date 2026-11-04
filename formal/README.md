@@ -485,6 +485,13 @@ The model covers one git ref of a colocated repository: jj's import and export, 
 adversary that can move the ref at any time, and jj's ref merge an abstract three-way merge
 obeying three laws (`RefAlg`), which the test `ref_laws` checks against jj-lib.
 
+The model's import is the update of a selected ref. jj 0.47 selects it for an ordinary
+command only when the physical ref differs from `git_refs`; otherwise it is an identity
+step. An explicit fetch selects its returned target even when the physical ref is unchanged.
+Thus the theorems about resolving a conflicted remote bookmark or `restore_reverts` describe
+an actual import, not an unconditional effect of the next ordinary command. The conformance
+harness applies that selection and tests unchanged refs too.
+
 - `noSpuriousRevert`: an import changes a local bookmark only if git moved its ref, whatever
   musubi realizes and whether or not its export succeeds. `remoteNoSpuriousRevert`: the same
   for a remote bookmark, as long as every realization is exported before a `jj` command can
@@ -496,13 +503,15 @@ obeying three laws (`RefAlg`), which the test `ref_laws` checks against jj-lib.
   restore, which the restoring machine's `.git` kept. Then an import changes nothing unless
   git moved the ref, or resolves the conflict to that value (not vacuously:
   `conflicted_resolves`), and every machine with the same expected value imports the same,
-  the restoring machine included (`restore_import_agrees`), so a bookmark restored with its remote bookmark to a conflict
-  goes back where it was (`restore_conflict_resolves_back`, `conflicted_restore_resolves`).
+  the restoring machine included (`restore_import_agrees`). An explicit import of the expected
+  value resolves a restored conflict (`restore_conflict_resolves_back`,
+  `conflicted_restore_resolves`).
 - `restoreLocal_inv`, `restoreRemote_inv`, `restoreRemote_cinv`: `jj undo` and `jj op restore`
   keep the invariant where jj's export can write the restored bookmark, or it restores a
   conflicted remote bookmark. Where it can't, as for the root commit or a conflicted local
   bookmark, the next import moves the bookmark with no `git` command
-  having run (`restore_reverts`): jj's behaviour, in which no musubi step takes part.
+  having run (`restore_reverts`) if that ref is selected for import. An ordinary command
+  leaves it alone when `git_refs` still matches the physical ref.
 - `verbatim_reverts`: replicating the per-machine record verbatim instead reverts another
   machine's move of a bookmark with no git move at all.
 - `fork_merge_inv`, `fork_noSpuriousRevert`: a merge of concurrent op heads keeps the
@@ -520,8 +529,8 @@ obeying three laws (`RefAlg`), which the test `ref_laws` checks against jj-lib.
   alone where `.git` holds the head's record and the realization's differs
   (`exportConflictedBeside`); writing the expected value there moves the bookmark back after a
   fetch of a term of the conflict (`beside_keeps_fetch`). Published apart, the realization
-  would be merged by a `jj` command, which doesn't export, and that machine would import a
-  value other than the merge's expected value (`beside_published_apart_disagrees`).
+  would be merged by a `jj` command without exporting before its import, so that machine
+  would import a value other than the merge's expected value (`beside_published_apart_disagrees`).
 
 Commit graphs, rebases and jj's conflict algebra are not modeled. The file's header lists
 what else it leaves out: tracking in the linear steps; the tracking state of an absent

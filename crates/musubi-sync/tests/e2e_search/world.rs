@@ -97,17 +97,9 @@ pub fn merge_key(op: &jj_lib::op_store::Operation) -> String {
     )
 }
 
-/// jj 0.46 cannot merge concurrent operations when one abandons (or moves away) a child of
-/// the root that the other made a parent of a merge commit: the rebased merge would have
-/// the root as a parent, which the git backend refuses, and every later command fails with
-/// "Failed to load the repo" until the operations are dealt with by hand. That is jj's
-/// behavior with or without musubi (`--at-op` on one machine reproduces it), so the search
-/// stays clear of it:
-///
-/// - commits directly on the root are immutable, so every machine's work starts above its
-///   initial working-copy commit;
-/// - importing git refs does not abandon commits that became unreachable, which would
-///   abandon root children (origin's first commit, pre-join work) regardless.
+// Keep the search's existing root-child boundary. Expanding it to mutable initial
+// working copies and automatic Git abandonment exposes history-trimming bugs; that
+// investigation is separate from the jj dependency update.
 const JJ_CONFIG: &str = "
 git.abandon-unreachable-commits = false
 [revset-aliases]

@@ -1162,14 +1162,8 @@ theorem pstepR_wf : WellFounded (fun s' s => RReachable N s ∧ PStepR N s s') :
 /-- **Termination** once the hub stops going back: no infinite sequence of policy steps
 starts from a state of the extended system, whatever the scheduling. -/
 theorem no_infinite_policy_runR {s : State} (h : RReachable N s) :
-    ¬ ∃ f : Nat → State, f 0 = s ∧ ∀ i, PStepR N (f i) (f (i + 1)) := by
-  rintro ⟨f, hf0, hf⟩
-  have hreach : ∀ i, RReachable N (f i) := by
-    intro i
-    induction i with
-    | zero => exact hf0 ▸ h
-    | succ i ih => exact pstepR_reachable ih (hf i)
-  exact no_infinite_run_aux (pstepR_wf.apply s) f hf0 (fun i => ⟨hreach i, hf i⟩)
+    ¬ ∃ f : Nat → State, f 0 = s ∧ ∀ i, PStepR N (f i) (f (i + 1)) :=
+  no_infinite_run_of_invariant pstepR_wf pstepR_reachable h
 
 /-! ### Progress -/
 
@@ -1248,14 +1242,8 @@ theorem converged_quiescentR {s : State} (h : RReachable N s) (hc : Converged N 
 /-- A state of the extended system with no enabled policy step is converged, and
 conversely. -/
 theorem terminal_iff_convergedR {s : State} (h : RReachable N s) :
-    (∀ s', ¬ PStepR N s s') ↔ Converged N s := by
-  constructor
-  · intro ht
-    refine Classical.byContradiction fun hc => ?_
-    obtain ⟨s', hs'⟩ := progressR h hc
-    exact ht s' hs'
-  · intro hc s'
-    exact converged_quiescentR h hc
+    (∀ s', ¬ PStepR N s s') ↔ Converged N s :=
+  terminal_iff_of_progress (progressR h) (fun hc _ => converged_quiescentR h hc)
 
 /-- **A remade hive fills from its machines**: once converged, every operation any node
 created is in `anc*(hub.head)`, however much the hub lost on the way. -/

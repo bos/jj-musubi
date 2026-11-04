@@ -1,6 +1,6 @@
 /-
 Basic utilities: sets as predicates, point updates of functions, and finite counting
-over `Nat` ranges (used by the liveness measure).
+over `Nat` ranges (used by the liveness measure), and termination of runs.
 -/
 
 namespace Musubi
@@ -93,6 +93,41 @@ theorem sumN_lt {N : Nat} {f g : Nat → Nat} {i : Nat} (hi : i < N)
     · have := ih (by omega) (fun n hn hne => heq n (Nat.lt_succ_of_lt hn) hne)
       have := heq N (Nat.lt_succ_self N) (Ne.symm h)
       omega
+
+/-! ## Runs -/
+
+/-- An accessible state cannot start an infinite descending chain. -/
+theorem acc_no_infinite_chain {α : Sort u} {r : α → α → Prop} {a : α} (ha : Acc r a) :
+    ∀ f : Nat → α, f 0 = a → ¬ ∀ i, r (f (i + 1)) (f i) := by
+  induction ha with
+  | intro a _ ih =>
+    intro f hf hall
+    exact ih (f 1) (hf ▸ hall 0) (fun i => f (i + 1)) rfl (fun i => hall (i + 1))
+
+/-- A well-founded step relation on an invariant admits no infinite run from that invariant.
+The relation is reversed in `wf` because each forward step descends. -/
+theorem no_infinite_run_of_invariant {α : Sort u} {step : α → α → Prop} {inv : α → Prop}
+    (wf : WellFounded (fun t s => inv s ∧ step s t))
+    (preserve : ∀ {s t}, inv s → step s t → inv t) {s : α} (hs : inv s) :
+    ¬ ∃ f : Nat → α, f 0 = s ∧ ∀ i, step (f i) (f (i + 1)) := by
+  rintro ⟨f, hf0, hf⟩
+  have hinv : ∀ i, inv (f i) := by
+    intro i
+    induction i with
+    | zero => exact hf0 ▸ hs
+    | succ i ih => exact preserve ih (hf i)
+  exact acc_no_infinite_chain (wf.apply s) f hf0 (fun i => ⟨hinv i, hf i⟩)
+
+/-- Progress and quiescence characterize terminal states. -/
+theorem terminal_iff_of_progress {α : Sort u} {step : α → α → Prop} {s : α} {done : Prop}
+    (progress : ¬ done → ∃ t, step s t) (quiescent : done → ∀ t, ¬ step s t) :
+    (∀ t, ¬ step s t) ↔ done := by
+  constructor
+  · intro ht
+    refine Classical.byContradiction fun hd => ?_
+    obtain ⟨t, hst⟩ := progress hd
+    exact ht t hst
+  · exact quiescent
 
 /-! ## Minimal elements -/
 

@@ -569,6 +569,7 @@ impl NodeRepo {
         if !same(workspace.repo_path(), &self.repo_path) {
             return Ok(());
         }
+        let name = workspace.workspace_name().to_owned();
         // Read under the lock, so that a `jj` command that records another meanwhile isn't
         // moved back.
         let mut locked = workspace.start_working_copy_mutation().block_on()?;
@@ -596,7 +597,31 @@ impl NodeRepo {
         let Some(rewrite) = rewrite.filter(|rewrite| *rewrite != recorded) else {
             return Ok(());
         };
-        locked.finish(rewrite.0).block_on()?;
+        let store = self.loader.op_store();
+        let old_op = store.read_operation(&recorded.0).block_on()?;
+        let old_view = store.read_view(&old_op.view_id).block_on()?;
+        let Some(commit) = old_view.wc_commit_ids.get(&name) else {
+            return Ok(());
+        };
+        // A dropped operation can map to an ancestor, even the empty root. That isn't a
+        // snapshot basis for these files. Prefer its image only if it preserves the actual
+        // working-copy commit; otherwise find a surviving operation that still records it.
+        // Never tell jj that the files belong to another commit, or to no workspace at all.
+        let mut pending = self.local_heads()?;
+        pending.push(rewrite);
+        let mut seen = HashSet::new();
+        while let Some(candidate) = pending.pop() {
+            if !seen.insert(candidate.clone()) {
+                continue;
+            }
+            let op = store.read_operation(&candidate.0).block_on()?;
+            let view = store.read_view(&op.view_id).block_on()?;
+            if view.wc_commit_ids.get(&name) == Some(commit) {
+                locked.finish(candidate.0).block_on()?;
+                return Ok(());
+            }
+            pending.extend(LocalOp::parents_of(&op));
+        }
         Ok(())
     }
 }

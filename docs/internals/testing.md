@@ -409,6 +409,10 @@ and saves failures; a paused Tokio clock makes waits deterministic. These tests 
 ssh, socket readiness, the daemon supervisor or a repository sync; the transport contracts
 cover reconnection and subscription reuse, and the sync fault tests cover lost calls.
 
+The CLI's existing clone scenario refuses both an occupied directory and an existing Git
+directory before either gains jj state or joins the hive. The ssh scenario also fills the
+destination while a clone contacts the hub, which must refuse it on returning.
+
 The Unix process tests in `crates/musubi/src/ssh/supervisor_tests.rs` exercise the shipping
 ssh supervisor, stderr reader, output wrapper and health tracking with controlled children
 of the test binary. Pipe messages signal readiness and EOF; no test sleeps to arrange a

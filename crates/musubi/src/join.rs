@@ -399,6 +399,7 @@ pub fn clone(
     machine: Option<&str>,
     socket: &Socket,
 ) -> anyhow::Result<()> {
+    check_clone_destination(destination)?;
     let hub = UserState::hub(hub)?;
     configured_forget_after(&settings::user_config()?)?;
     let reply = block_on(ask_preparing(
@@ -422,6 +423,8 @@ pub fn clone(
     }
     let mut jj = Process::new("jj");
     musubi_jj::git_command::without_repository_env(&mut jj);
+    // Contacting the hub may have taken long enough for another process to fill it.
+    check_clone_destination(destination)?;
     // Its "Initialized repo in" names the directory relative to wherever this runs, ahead of
     // what musubi says, so it shows only if init fails.
     let output = jj.args(init).arg(dest).output()?;
@@ -453,6 +456,23 @@ pub fn clone(
             "Couldn't check out the hive's trunk ({err:#})."
         )?;
         writeln!(ui.hint(), "`jj new 'trunk()'` checks it out.")?;
+    }
+    Ok(())
+}
+
+/// `jj git init` adopts an existing Git repository and its files, which a clone must not share.
+fn check_clone_destination(destination: &Path) -> anyhow::Result<()> {
+    match std::fs::read_dir(destination) {
+        Ok(mut entries) => anyhow::ensure!(
+            entries.next().transpose()?.is_none(),
+            "destination {} is not empty; choose a new or empty directory",
+            destination.display()
+        ),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("checking destination {}", destination.display()));
+        }
     }
     Ok(())
 }

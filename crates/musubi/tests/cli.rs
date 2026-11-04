@@ -881,6 +881,32 @@ fn the_daemon_picks_up_new_repositories() {
     Daemon: running, serving 2 repositories; doesn't start at login; `musubi daemon install` makes it
     ");
 
+    // Cloning must not adopt another directory's files or Git history into this hive.
+    let occupied = env.root().join("occupied");
+    fs::create_dir(&occupied).unwrap();
+    fs::write(occupied.join("private.txt"), "not for this hive").unwrap();
+    for with_git in [false, true] {
+        if with_git {
+            musubi_testutil::copy_tree(&alpha.path().join(".git"), &occupied.join(".git"));
+        }
+        let err = musubi_fails(
+            &env,
+            &logs,
+            &alpha,
+            &["clone", "alpha", occupied.to_str().unwrap()],
+        );
+        insta::allow_duplicates! {
+            insta::assert_snapshot!(err, @"Error: destination $ROOT/occupied is not empty; choose a new or empty directory");
+        }
+        assert!(!occupied.join(".jj").exists());
+        assert_eq!(
+            fs::read_to_string(occupied.join("private.txt")).unwrap(),
+            "not for this hive"
+        );
+    }
+
+    // An existing empty destination is safe to use too.
+    fs::create_dir(env.root().join("beta-second")).unwrap();
     let mut clone = beta.program(musubi());
     clone.args([
         "clone",
@@ -2836,6 +2862,42 @@ fn machines_reach_the_hub_over_ssh() {
         &logs,
         "beta's daemon to fetch alpha's commit over ssh",
         || try_log(&beta).is_some_and(|log| log.contains("over ssh")),
+    );
+
+    // Another process fills a clone destination while the command is contacting the hub.
+    // The ssh wrapper makes that ordering deterministic, without a delay or a second hub.
+    let raced = env.root().join("raced");
+    let racing_ssh = env.root().join("racing-ssh");
+    fs::write(
+        &racing_ssh,
+        format!(
+            "#!/bin/sh\nmkdir -p '{dest}'\nprintf private > '{dest}/private.txt'\nexec '{ssh}' \"$@\"\n",
+            dest = raced.display(),
+            ssh = ssh.display(),
+        ),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&racing_ssh, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut clone = alpha.program(musubi());
+    clone
+        .args([
+            "clone",
+            "alpha",
+            raced.to_str().unwrap(),
+            "--hub",
+            "hubhost",
+        ])
+        .env("MUSUBI_SSH", &racing_ssh);
+    let (ok, _, err) = try_run(&logs, &env, clone);
+    assert!(!ok);
+    insta::assert_snapshot!(err, @"Error: destination $ROOT/raced is not empty; choose a new or empty directory");
+    assert!(!raced.join(".jj").exists());
+    assert_eq!(
+        fs::read_to_string(raced.join("private.txt")).unwrap(),
+        "private"
     );
 
     // The daemon shares one connection to a hub, and so one ssh, among every copy it serves

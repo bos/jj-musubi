@@ -4269,6 +4269,59 @@ fn a_trim_does_not_reserve_a_forgotten_copys_workspace_name() {
     assert!(hive.workspace_names(1).contains("alpha/beta/default"));
 }
 
+/// A command between deciding to take a full trim and advancing must be translated on
+/// its observed native parents before contraction removes their namespace evidence.
+#[test]
+fn a_command_inside_a_full_trim_keeps_workspace_owners() {
+    use musubi_core::node::LocalRepo as _;
+    use musubi_core::node::Step;
+    use musubi_jj::records::RecordPrefix;
+
+    let mut hive = default_workspaces();
+    hive.commit(0, "a", "shared work");
+    hive.sync();
+    let base = op_log(hive.repo(0))[0].0.clone();
+    hive.repo(0).jj(&["describe", "-m", "surviving tip"]);
+    hive.hive.sync_steps(0, 1, &mut |_, reply| reply).unwrap();
+    hive.repo(0).jj(&["op", "abandon", &format!("..{base}")]);
+    hive.hive.sync(0).unwrap();
+    hive.hive.fetch(1).unwrap();
+    for _ in 0..64 {
+        let member = &mut hive.hive.members[1];
+        if member.adapter.is_local(&member.core.known().1).unwrap() {
+            break;
+        }
+        let step = member.core.step(&mut member.adapter).unwrap();
+        assert!(matches!(step, Step::Realized(_)), "{step:?}");
+    }
+    let known = hive.hive.members[1].core.known().1.clone();
+    hive.node(1).settle().unwrap();
+    let records = hive.hive.hub.store().records().to_vec();
+    assert!(
+        hive.node(1)
+            .prepare_records(&RecordPrefix::none(), &records)
+            .unwrap()
+    );
+    hive.repo(1).jj(&["new", "-m", "inside trim"]);
+    let delayed = op_log(hive.repo(1))[0].0.clone();
+    hive.hive.members[1].adapter.advance(&known).unwrap();
+    std::fs::remove_file(hive.repo(1).repo_path().join("musubi/translation")).unwrap();
+    hive.reopen(1);
+    hive.repo(1).jj(&[
+        "--at-op", &delayed, "bookmark", "create", "delayed", "-r", "@-",
+    ]);
+    hive.sync();
+    hive.assert_converged();
+    assert_eq!(
+        hive.workspace_names(0),
+        BTreeSet::from(["default".to_owned(), "beta/default".to_owned()])
+    );
+    assert_eq!(
+        hive.workspace_names(1),
+        BTreeSet::from(["default".to_owned(), "alpha/default".to_owned()])
+    );
+}
+
 /// Abandoning only history from before a machine joined rewrites the operations since
 /// into ones that canonicalize as before, so replication carries on, even once garbage
 /// collection has removed the original join point.

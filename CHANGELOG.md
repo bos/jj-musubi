@@ -6,6 +6,10 @@ change the protocol, so run the same release on the hub and every machine (see
 
 ## Unreleased
 
+- Commands that finish while a machine takes a history trim keep their original workspace
+  ownership and operation identity, including after cache loss or a delayed command at the
+  old operation.
+
 - Trimming all shared history below unpublished work preserves which machine owns each
   workspace. The trim records workspace-name bindings and restores each copy's workspaces
   along with its last use. Upgrade the hub and all machines together and restart their

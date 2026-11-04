@@ -165,8 +165,17 @@ impl NodeRepo {
         // Before anything below, or anything named as they name the history, writes a local
         // operation.
         self.keep_custody(prefix, records, common)?;
-        let store = &self.canonical;
+        self.check_abandon()?;
         let heads = self.local_heads()?;
+        // A command can publish after the policy read heads_for. Translate this exact
+        // captured history on its actual parents before contracting away their views.
+        for head in &heads {
+            match self.canonicalize_unchecked(head) {
+                Ok(_) | Err(NodeError::BeforeJoin(_)) => {}
+                Err(err) => return Err(err),
+            }
+        }
+        let store = &self.canonical;
         let (mapped, unmapped) = self.local_walk(&heads)?;
         // Records in custody that these lack: the hub lost them, and this node publishes what
         // they drop, as of records it took that the hub lost. It never took them, so its
@@ -515,7 +524,34 @@ impl NodeRepo {
             taking.common,
             &taking.hub_renamings,
         )?;
-        let step = self.append_step(taking.renaming.clone(), &taking.dropped, &HashMap::new())?;
+        // Delayed commands can still name an unmarked native source after cache loss.
+        // The held step must preserve its observed pre-contraction identity too.
+        let sources: HashMap<LocalOp, CanonicalOp> = realign
+            .canonical
+            .iter()
+            .filter(|(local, _)| {
+                taking
+                    .locals
+                    .get(local)
+                    .is_some_and(|now| now.as_slice() != [(*local).clone()])
+            })
+            .filter_map(|(local, canonical)| {
+                let op = self.loader.op_store().read_operation(&local.0).block_on();
+                match op {
+                    Ok(op)
+                        if !op
+                            .metadata
+                            .attributes
+                            .contains_key(crate::node::CANONICAL_ATTRIBUTE) =>
+                    {
+                        Some(Ok((local.clone(), canonical.clone())))
+                    }
+                    Ok(_) => None,
+                    Err(err) => Some(Err(err)),
+                }
+            })
+            .collect::<Result<_, _>>()?;
+        let step = self.append_step(taking.renaming.clone(), &taking.dropped, &sources)?;
         let checkpoint = self.records.checkpoint();
         // Its own drops published, the fix-up goes with them.
         if taking.pending.is_empty() {

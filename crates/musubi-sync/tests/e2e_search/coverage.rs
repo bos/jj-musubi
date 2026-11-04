@@ -299,6 +299,8 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         "a_trim_does_not_reserve_a_forgotten_copys_workspace_name",
         None,
     ),
+    // This requires a native command inside one adapter advance, between policy calls.
+    ("a_command_inside_a_full_trim_keeps_workspace_owners", None),
     (
         "a_trim_keeps_a_secondary_workspaces_snapshot_basis",
         Some(&["op_abandon", "edit_unsnapshotted", "rewrite_under_other_wc"]),

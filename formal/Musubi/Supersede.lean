@@ -1316,11 +1316,8 @@ theorem smeasure_decreases {S S' : SState} (hS : SRReachable N S) (hA : AllPrune
 /-! ### Termination -/
 
 theorem no_infinite_run_auxS {r : SState → SState → Prop} {a : SState} (ha : Acc r a) :
-    ∀ f : Nat → SState, f 0 = a → ¬ ∀ i, r (f (i + 1)) (f i) := by
-  induction ha with
-  | intro a _ ih =>
-    intro f hf hall
-    exact ih (f 1) (hf ▸ hall 0) (fun i => f (i + 1)) rfl (fun i => hall (i + 1))
+    ∀ f : Nat → SState, f 0 = a → ¬ ∀ i, r (f (i + 1)) (f i) :=
+  acc_no_infinite_chain ha
 
 theorem spstepR_wf :
     WellFounded (fun S' S => (SRReachable N S ∧ AllPruned N S) ∧ SPStepR N S S') :=
@@ -1330,14 +1327,9 @@ theorem spstepR_wf :
 /-- **Termination** with supersedes, once the hub stops going back, from a state where every
 node has what the hub pruned: no infinite sequence of policy steps, whatever the scheduling. -/
 theorem no_infinite_policy_runS {S : SState} (h : SRReachable N S) (hA : AllPruned N S) :
-    ¬ ∃ f : Nat → SState, f 0 = S ∧ ∀ i, SPStepR N (f i) (f (i + 1)) := by
-  rintro ⟨f, hf0, hf⟩
-  have hreach : ∀ i, SRReachable N (f i) ∧ AllPruned N (f i) := by
-    intro i
-    induction i with
-    | zero => exact hf0 ▸ ⟨h, hA⟩
-    | succ i ih => exact ⟨spstepR_reachable ih.1 ih.2 (hf i), allPruned_spstep ih.2 (hf i)⟩
-  exact no_infinite_run_auxS (spstepR_wf.apply S) f hf0 (fun i => ⟨hreach i, hf i⟩)
+    ¬ ∃ f : Nat → SState, f 0 = S ∧ ∀ i, SPStepR N (f i) (f (i + 1)) :=
+  no_infinite_run_of_invariant spstepR_wf
+    (fun ⟨h, hA⟩ hp => ⟨spstepR_reachable h hA hp, allPruned_spstep hA hp⟩) ⟨h, hA⟩
 
 /-! ### Progress -/
 
@@ -1509,14 +1501,8 @@ theorem converged_quiescentS {S : SState} (h : SRReachable N S) (hc : SConverged
 
 /-- A state with no enabled policy step is converged, and conversely. -/
 theorem terminal_iff_convergedS {S : SState} (h : SRReachable N S) :
-    (∀ S', ¬ SPStepR N S S') ↔ SConverged N S := by
-  constructor
-  · intro ht
-    refine Classical.byContradiction fun hc => ?_
-    obtain ⟨S', hS'⟩ := progressS h hc
-    exact ht S' hS'
-  · intro hc S'
-    exact converged_quiescentS h hc
+    (∀ S', ¬ SPStepR N S S') ↔ SConverged N S :=
+  terminal_iff_of_progress (progressS h) (fun hc _ => converged_quiescentS h hc)
 
 theorem SPStepsR.head {S T U : SState} (h1 : SPStepR N S T) (h2 : SPStepsR N T U) :
     SPStepsR N S U := by

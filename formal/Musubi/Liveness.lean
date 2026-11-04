@@ -585,23 +585,14 @@ theorem pstep_wf : WellFounded (fun s' s => Reachable N s ∧ PStep N s s') :=
   Subrelation.wf (fun ⟨h, hp⟩ => measure_decreases h hp) (InvImage.wf (measure N) lex5_wf)
 
 theorem no_infinite_run_aux {r : State → State → Prop} {a : State} (ha : Acc r a) :
-    ∀ f : Nat → State, f 0 = a → ¬ ∀ i, r (f (i + 1)) (f i) := by
-  induction ha with
-  | intro a _ ih =>
-    intro f hf hall
-    exact ih (f 1) (hf ▸ hall 0) (fun i => f (i + 1)) rfl (fun i => hall (i + 1))
+    ∀ f : Nat → State, f 0 = a → ¬ ∀ i, r (f (i + 1)) (f i) :=
+  acc_no_infinite_chain ha
 
 /-- **Termination**: no infinite sequence of policy steps starts from a reachable state,
 whatever the scheduling (in particular despite contention for the hub). -/
 theorem no_infinite_policy_run {s : State} (h : Reachable N s) :
-    ¬ ∃ f : Nat → State, f 0 = s ∧ ∀ i, PStep N (f i) (f (i + 1)) := by
-  rintro ⟨f, hf0, hf⟩
-  have hreach : ∀ i, Reachable N (f i) := by
-    intro i
-    induction i with
-    | zero => exact hf0 ▸ h
-    | succ i ih => exact pstep_reachable ih (hf i)
-  exact no_infinite_run_aux (pstep_wf.apply s) f hf0 (fun i => ⟨hreach i, hf i⟩)
+    ¬ ∃ f : Nat → State, f 0 = s ∧ ∀ i, PStep N (f i) (f (i + 1)) :=
+  no_infinite_run_of_invariant pstep_wf pstep_reachable h
 
 /-! ## Progress -/
 
@@ -723,14 +714,8 @@ theorem converged_quiescent {s : State} (h : Reachable N s) (hc : Converged N s)
 
 /-- A state with no enabled policy step is converged, and conversely. -/
 theorem terminal_iff_converged {s : State} (h : Reachable N s) :
-    (∀ s', ¬ PStep N s s') ↔ Converged N s := by
-  constructor
-  · intro ht
-    refine Classical.byContradiction fun hc => ?_
-    obtain ⟨s', hs'⟩ := progress h hc
-    exact ht s' hs'
-  · intro hc s'
-    exact converged_quiescent h hc
+    (∀ s', ¬ PStep N s s') ↔ Converged N s :=
+  terminal_iff_of_progress (progress h) (fun hc _ => converged_quiescent h hc)
 
 /-- In a converged state every operation any node created is in `anc*(hub.head)`. -/
 theorem converged_all_accepted {s : State} (h : Reachable N s) (hc : Converged N s)

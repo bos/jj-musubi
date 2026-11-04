@@ -150,12 +150,20 @@ pub struct CommandSnapshot {
 /// How many operations a sequence may revert to get past jj failing to merge operations.
 const MAX_UNMERGEABLE_REVERTS: usize = 10;
 
-/// A merge observed before replication can reparent it, independently of the eventual
+/// An operation observed before replication can reparent it, independently of the eventual
 /// canonical view. Its source view remains the oracle for a later contraction's survivor.
-struct MergeSource {
+struct OperationSource {
     operation: jj_lib::op_store::Operation,
-    view: jj_lib::op_store::View,
-    realized: bool,
+    retained: RetainedOperation,
+}
+
+/// Independent source data for a native operation whose parents later change.
+#[derive(Clone)]
+pub struct RetainedOperation {
+    pub view: jj_lib::op_store::View,
+    pub realized: bool,
+    /// The original input, when the operation had one parent.
+    pub parent: Option<jj_lib::op_store::View>,
 }
 
 pub struct World {
@@ -180,12 +188,11 @@ pub struct World {
     /// drop the forget from the history, but not its effect (docs/internals/design.md,
     /// "Presence through an abandon").
     forgot: BTreeMap<String, String>,
-    /// Merges a `jj op abandon` rewrote, by `merge_key`, with the view of the merge each
-    /// replaced, which jj keeps as it keeps every operation's, and whether that was a
-    /// realization: no longer, perhaps, jj's merge of their parents, or a merge at all.
-    pub kept_merges: BTreeMap<String, (jj_lib::op_store::View, bool)>,
-    merge_sources: BTreeMap<(usize, String), Option<MergeSource>>,
-    merge_seen: Vec<BTreeSet<jj_lib::op_store::OperationId>>,
+    /// Operations a `jj op abandon` rewrote, by `merge_key`, with their preserved views
+    /// and whether each was a realization. Their new parents need not explain those views.
+    pub kept_operations: BTreeMap<String, RetainedOperation>,
+    operation_sources: BTreeMap<(usize, String), Option<OperationSource>>,
+    operation_seen: Vec<BTreeSet<jj_lib::op_store::OperationId>>,
     pub commands: BTreeMap<String, CommandSnapshot>,
     /// The object and jj metadata stores of command sources, including copies later
     /// replaced. The fixture retains their directories until the case ends.
@@ -282,9 +289,9 @@ impl World {
             hive_baseline: BTreeSet::new(),
             abandoned: vec![],
             forgot: BTreeMap::new(),
-            kept_merges: BTreeMap::new(),
-            merge_sources: BTreeMap::new(),
-            merge_seen: vec![],
+            kept_operations: BTreeMap::new(),
+            operation_sources: BTreeMap::new(),
+            operation_seen: vec![],
             commands: BTreeMap::new(),
             command_sources: BTreeMap::new(),
             seen: vec![None; setup.nodes],
@@ -314,7 +321,7 @@ impl World {
         world.ledger.reset(&view);
         world.start_imports();
         for m in 0..world.nodes() {
-            world.observe_merge_sources(m);
+            world.observe_operation_sources(m);
         }
         world
     }
@@ -1020,7 +1027,7 @@ impl World {
         let after = self.seen(m);
         let what = format!("{}: merge own op heads before sync", self.machine(m));
         self.ledger.record(m, &what, &before, &after, false);
-        self.observe_merge_sources(m);
+        self.observe_operation_sources(m);
     }
 
     /// Lets node `m` poll the hub and run its policy until idle.
@@ -1031,7 +1038,7 @@ impl World {
 
     /// Syncs node `m` until idle and returns how many steps it took.
     pub fn sync_counted(&mut self, m: usize) -> usize {
-        self.observe_merge_sources(m);
+        self.observe_operation_sources(m);
         self.touched.insert(m);
         self.merge_local_heads(m);
         let pruned = self.fx.hive.hub.store().pruned();
@@ -1162,10 +1169,10 @@ impl World {
         .collect()
     }
 
-    /// Observe recipient merges before and after receipt too. A publisher cannot observe
-    /// an offline copy's old merge, but a received trim keeps its view while reparenting it.
-    fn observe_merge_sources(&mut self, m: usize) {
-        self.merge_seen.resize_with(self.nodes(), BTreeSet::new);
+    /// Observe operations before and after receipt too. A publisher cannot observe an
+    /// offline copy's old operation, but a received trim keeps its view while reparenting it.
+    fn observe_operation_sources(&mut self, m: usize) {
+        self.operation_seen.resize_with(self.nodes(), BTreeSet::new);
         let store = self.fx.hive.members[m]
             .adapter
             .repo()
@@ -1176,23 +1183,21 @@ impl World {
         let mut found = BTreeMap::<String, Vec<jj_lib::op_store::Operation>>::new();
         while let Some(hex) = pending.pop() {
             let id = jj_lib::op_store::OperationId::try_from_hex(&hex).unwrap();
-            if !self.merge_seen[m].insert(id.clone()) {
+            if !self.operation_seen[m].insert(id.clone()) {
                 continue;
             }
             let op = futures::executor::block_on(store.read_operation(&id)).unwrap();
             pending.extend(op.parents.iter().map(jj_lib::object_id::ObjectId::hex));
             let key = merge_key(&op);
-            if op.parents.len() > 1 || self.merge_sources.contains_key(&(m, key.clone())) {
-                found.entry(key).or_default().push(op);
-            }
+            found.entry(key).or_default().push(op);
         }
         for (key, versions) in found {
             let [op] = versions.as_slice() else {
-                self.merge_sources.insert((m, key), None);
+                self.operation_sources.insert((m, key), None);
                 continue;
             };
             let source_key = (m, key.clone());
-            match self.merge_sources.get(&source_key) {
+            match self.operation_sources.get(&source_key) {
                 Some(Some(source)) if source.operation.parents != op.parents => {
                     let strip = |mut op: jj_lib::op_store::Operation| {
                         op.parents.clear();
@@ -1202,24 +1207,21 @@ impl World {
                         op
                     };
                     if strip(source.operation.clone()) == strip(op.clone()) {
-                        self.kept_merges
-                            .entry(key)
-                            .or_insert_with(|| (source.view.clone(), source.realized));
+                        let retained = source.retained.clone();
+                        self.remember_retained(key, retained);
                     } else {
                         // Equal time/description alone does not identify an original.
-                        self.merge_sources.insert(source_key, None);
+                        self.operation_sources.insert(source_key, None);
                     }
                 }
                 Some(_) => {}
                 None => {
-                    let view = futures::executor::block_on(store.read_view(&op.view_id)).unwrap();
-                    let realized = realized(op, self.fx.hive.members[m].adapter.repo());
-                    self.merge_sources.insert(
+                    let retained = self.retained_source(m, op);
+                    self.operation_sources.insert(
                         source_key,
-                        Some(MergeSource {
+                        Some(OperationSource {
                             operation: op.clone(),
-                            view,
-                            realized,
+                            retained,
                         }),
                     );
                 }
@@ -1227,9 +1229,38 @@ impl World {
         }
     }
 
+    fn remember_retained(&mut self, key: String, source: RetainedOperation) {
+        // A later trim must not replace the original input with an already-reparented one.
+        // An own operation knows that input; a received realization has a different parent.
+        self.kept_operations
+            .entry(key)
+            .and_modify(|before| {
+                if before.realized && !source.realized {
+                    *before = source.clone();
+                }
+            })
+            .or_insert(source);
+    }
+
+    fn retained_source(&self, m: usize, op: &jj_lib::op_store::Operation) -> RetainedOperation {
+        let repo = self.fx.hive.members[m].adapter.repo();
+        let store = repo.loader().op_store();
+        let parent = if let [id] = op.parents.as_slice() {
+            let parent = futures::executor::block_on(store.read_operation(id)).unwrap();
+            Some(futures::executor::block_on(store.read_view(&parent.view_id)).unwrap())
+        } else {
+            None
+        };
+        RetainedOperation {
+            view: futures::executor::block_on(store.read_view(&op.view_id)).unwrap(),
+            realized: realized(op, repo),
+            parent,
+        }
+    }
+
     /// Records the commits node `m`'s merges made, after a sync.
     pub fn record_merges(&mut self, m: usize) {
-        self.observe_merge_sources(m);
+        self.observe_operation_sources(m);
         let after = self.seen(m);
         let what = format!("{}: merge by its node", self.machine(m));
         self.ledger.record_sync(m, &what, &after);
@@ -1239,7 +1270,7 @@ impl World {
     /// request but losing the reply to request number `lose`: progress that stops partway,
     /// possibly after an upload but before the push.
     pub fn sync_partial(&mut self, m: usize, steps: usize, lose: Option<usize>) {
-        self.observe_merge_sources(m);
+        self.observe_operation_sources(m);
         self.touched.insert(m);
         self.record(format!(
             "{}: sync {steps} step(s){}",
@@ -1270,7 +1301,7 @@ impl World {
     /// Lets node `m` sync until it has realized `count` operations, or has nothing more to
     /// realize, and stops there, with what it realized perhaps still being written.
     pub fn sync_realizing(&mut self, m: usize, count: usize) {
-        self.observe_merge_sources(m);
+        self.observe_operation_sources(m);
         self.touched.insert(m);
         self.record(format!(
             "{}: sync until {count} operation(s) realized",
@@ -1288,7 +1319,7 @@ impl World {
     /// Lets node `m` sync until it has taken the hub's records and realized its head, and
     /// stops there, before advancing to it.
     pub fn sync_taking(&mut self, m: usize) {
-        self.observe_merge_sources(m);
+        self.observe_operation_sources(m);
         self.touched.insert(m);
         self.record(format!(
             "{}: sync until the hub's records are taken and its head realized",
@@ -1756,9 +1787,9 @@ impl World {
             self.baseline_ids.push(BTreeSet::new());
             self.baseline_keys.push(BTreeSet::new());
         }
-        self.merge_sources.retain(|(copy, _), _| *copy != m);
-        self.merge_seen.resize_with(self.nodes(), BTreeSet::new);
-        self.merge_seen[m].clear();
+        self.operation_sources.retain(|(copy, _), _| *copy != m);
+        self.operation_seen.resize_with(self.nodes(), BTreeSet::new);
+        self.operation_seen[m].clear();
         self.sync_counted(m);
         // The hive's history from before it was set up, and its own from before it joined,
         // are its baseline, as each machine's are. It may have only some of the hive's yet,
@@ -1929,15 +1960,11 @@ impl World {
                 (self.op_key(m, op), merge_key(&op_store))
             })
             .collect();
-        // The merges whose parents it changes, keeping their views as it keeps every
-        // operation's: those above what it abandons, and those above the operations beside it,
-        // which it moves onto the abandoned operation's parent, one of them perhaps left a
-        // merge of one parent. Each with the view of the merge it replaced, which the
-        // reference holds the hive's to.
-        let before = self.ops_by_key(m, false);
-        let merges = self.ops_by_key(m, true);
+        // Every survivor keeps its view when jj changes its parents, including commands
+        // and internal fix-ups with one parent. Pin that independent source for the reference.
+        let before = self.ops_by_key(m);
         self.jj(m, &["op", "abandon", spec]);
-        let after = self.ops_by_key(m, false);
+        let after = self.ops_by_key(m);
         for (key, old) in &before {
             // Only a key one operation had before, and has after: operations sharing a key,
             // as two merges a node makes at one tick of its clock can, can't be told apart,
@@ -1945,31 +1972,23 @@ impl World {
             let (Some(old), Some(new)) = (single(Some(old)), single(after.get(key))) else {
                 continue;
             };
-            if old == new || merges.get(key).is_none_or(|ids| !ids.contains(old)) {
+            if old == new {
                 continue;
             }
             let id = jj_lib::op_store::OperationId::try_from_hex(old).unwrap();
-            let replaced = futures::executor::block_on(async {
-                let op = store.read_operation(&id).await.unwrap();
-                let realized = realized(&op, self.fx.hive.members[m].adapter.repo());
-                (store.read_view(&op.view_id).await.unwrap(), realized)
-            });
-            self.kept_merges.insert(key.clone(), replaced);
+            let op = futures::executor::block_on(store.read_operation(&id)).unwrap();
+            let replaced = self.retained_source(m, &op);
+            self.remember_retained(key.clone(), replaced);
         }
         for (key, merge) in dropped {
             self.abandoned.push((m, key, merge));
         }
     }
 
-    /// Machine `m`'s operations, or only its merges, by `merge_key`, with their ids: more
-    /// than one where operations share a key, as two merges a node makes at one tick of its
-    /// clock can.
-    fn ops_by_key(&self, m: usize, merges: bool) -> BTreeMap<String, BTreeSet<String>> {
-        let template = if merges {
-            format!(r#"if(parents.len() > 1, {MERGE_KEY_TEMPLATE} ++ "\t" ++ id ++ "\n")"#)
-        } else {
-            format!(r#"{MERGE_KEY_TEMPLATE} ++ "\t" ++ id ++ "\n""#)
-        };
+    /// Machine `m`'s operations by `merge_key`, with their ids: more than one where
+    /// operations share a key, as two merges a node makes at one tick of its clock can.
+    fn ops_by_key(&self, m: usize) -> BTreeMap<String, BTreeSet<String>> {
+        let template = format!(r#"{MERGE_KEY_TEMPLATE} ++ "\t" ++ id ++ "\n""#);
         self.raw_jj(
             m,
             &[

@@ -815,6 +815,13 @@ so ordinary canonicalization and contraction preserve their namespace and presen
 held renaming also records their undropped native source identities, keeping delayed commands
 on those original ids consistent after translation-cache loss.
 
+Accepted base and push can both have contracted to root while later materialized operations
+still name stored canonical sources. Those immutable source tips remain anchors for noticing
+native trims after cache loss. Unchanged markers map back exactly; a marker whose parents jj
+changed enters the same counterpart and contraction path. Even if another branch still reaches
+the original tip, the changed marker is inspected: the surviving branch then prevents a drop,
+and the out-of-place physical operation is repaired on its original canonical parents.
+
 ### Presence through an abandon
 
 Contraction keeps every surviving operation's view, but presence ([Presence](#presence)) is

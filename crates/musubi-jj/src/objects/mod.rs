@@ -20,6 +20,7 @@ use crate::git_command::GitError;
 
 pub mod bundle;
 mod git;
+pub mod git_extras;
 mod power;
 mod simple;
 

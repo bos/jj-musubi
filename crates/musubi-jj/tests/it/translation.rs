@@ -8,7 +8,6 @@ use std::path::Path;
 use std::time::SystemTime;
 
 use jj_lib::object_id::ObjectId as _;
-use jj_lib::protos::git_store;
 use musubi_jj::node::NodeRepo;
 use musubi_jj::objects::CHANGE_ID_LENGTH;
 use musubi_jj::objects::GitObjects;
@@ -16,6 +15,7 @@ use musubi_jj::objects::GitStore;
 use musubi_jj::objects::ObjectError;
 use musubi_jj::objects::ObjectStore;
 use musubi_jj::objects::bundle::BundleWriter;
+use musubi_jj::objects::git_extras::CommitExtras;
 use musubi_jj::op_id::CanonicalOp;
 use musubi_jj::op_id::LocalOp;
 use musubi_jj::ref_locks;
@@ -987,7 +987,7 @@ fn malformed_extras_are_refused() {
     assert_eq!(node.loader().store().change_id_length(), CHANGE_ID_LENGTH);
     let stores: [Box<dyn ObjectStore + '_>; 2] = [node.object_store().unwrap(), Box::new(hub)];
     let extras = |change_id: usize, terms: usize| {
-        git_store::Commit {
+        CommitExtras {
             change_id: vec![1; change_id],
             root_tree: vec![vec![1; 20]; terms],
             uses_tree_conflict_format: true,

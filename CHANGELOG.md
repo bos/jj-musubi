@@ -1,8 +1,9 @@
 # Changelog
 
-What changes in each release of musubi, and what to do on upgrading. Until 1.0, a release may
-change the protocol, so run the same release on the hub and every machine (see
-[Upgrading](README.md#upgrading)).
+What changes in each release, and what to do on upgrading.
+
+Until 1.0, a release may change the protocol, so run the same release on the hub and every
+machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 

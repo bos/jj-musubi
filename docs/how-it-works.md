@@ -1,55 +1,81 @@
 # How musubi works
 
-musubi lets you pick up work on another machine, run agents on several machines, and fetch or
-push once for all of them. Each machine has its own copy of the repository, and shows the
-others' work as jj workspaces: separate checkouts that share a repository's history. This page
-explains what moves between machines and what happens when they change the same thing at once.
-For the design behind it, see
-[docs/internals/design.md](internals/design.md), and for how it's checked, [How musubi keeps
-your work safe](safety.md).
+What moves between machines, what stays on each, and what happens when machines make changes
+concurrently.
+
+musubi lets you pick up work on another machine, run agents on several machines, and fetch or push
+once for all of them. Each machine has its own copy of the repository, and shows the others' work
+as jj workspaces: separate checkouts that share a repository's history. For the design, see
+[docs/internals/design.md](internals/design.md), and for how it's checked, [How musubi keeps your
+work safe](safety.md).
 
 ## The short version
 
-- **Every machine has the whole repository.** Each machine's copy is an ordinary jj
-  repository, with every commit, bookmark and change from every machine. You can unplug any of
-  them and keep working. Other machines' working copies show up in it as workspaces, such as
-  `laptop/default@`. These name the commit each working copy is on. Pushing to a git remote
-  still requires a bookmark and an explicit push.
-- **Your work moves when jj records it.** jj records your edits each time you run a `jj`
-  command, and musubi sends each record to the other machines within a second or so. Edits
-  you've made since your last `jj` command stay on that machine until the next one, or until
-  [jj records them by itself](guides/working-across-machines.md#pick-up-on-another-machine).
-- **Your files are never touched.** musubi never writes to your working copy. When another
-  machine rewrites the commit you're on, jj says so, and you update your files when you choose.
-- **You still push and fetch.** musubi never talks to GitHub or any other remote for you. When
-  you push or fetch on one machine, though, every machine sees the result.
-- **The hub passes work between machines.** It keeps a copy of each repository it serves,
-  in its directory on its machine, and decides the order in which machines' work lands. Other
-  machines reach it over ssh, with a key that can reach the hub and nothing else on its
-  machine. The machines also keep everything the hub holds. Anyone who can reach the hub can
-  read and write every repository it serves, so treat it as you would any machine with your
-  repositories on it.
-- **Leaving keeps your work.** `musubi leave` takes a repository out of its hive, and it keeps
-  everything it has, its working copy included.
+- The copies of one repository form a _hive_, managed by a _hub_. A hub can serve several hives.
+  Each machine runs a daemon that keeps its copies in sync.
+- Each machine's copy is an ordinary jj repository, with every commit, bookmark and change from
+  every machine.
+- You can unplug or suspend any machine and keep working.
+- Each machine's working copy shows up as a workspace, such as `laptop/default@`. This
+  identifies the commit its working copy is on. And if you have multiple workspaces on each
+  machine, that's no problem.
+- jj records your edits each time you run a `jj` command, and musubi sends each record to your
+  other machines within a second or so. Edits you've made since your last `jj` command stay on
+  that machine until the next one, or until [jj records them by
+  itself](guides/working-across-machines.md#pick-up-on-another-machine).
+- musubi never writes to your working copy. When another machine rewrites the commit you're on, jj
+  says so (your working copy is stale), and you update your files when you choose.
+- musubi never talks to GitHub or any other remote for you. When you push or fetch on one machine,
+  though, every machine sees the result.
+- The hub keeps a copy of each repository it serves. Your other machines reach it over ssh, with
+  a special ssh key that can talk to the hub and nothing else on its machine. Each machine also
+  keeps everything the hub holds. Anyone who can reach the hub can read and write every
+  repository it serves, so treat it as you would any machine with your repositories on it.
+- `musubi leave` takes a repository out of its hive, and it keeps everything it has, its working
+  copy included.
 
 ## Hubs, hives, and machines
 
 ```mermaid
-flowchart LR
-  subgraph devbox["devbox"]
-    H["musubi hub"]
-    D1["daemon"] --- R1["~/src/app"]
-  end
-  subgraph laptop["laptop"]
-    D2["daemon"] --- R2["~/src/app"]
-  end
-  subgraph gpu["gpu"]
-    D3["daemon"] --- R3["~/src/app"]
-  end
-  D1 <-->|local socket| H
-  D2 <-->|ssh| H
-  D3 <-->|ssh| H
+---
+config:
+  flowchart:
+    nodeSpacing: 12
+    rankSpacing: 16
+    padding: 6
+    diagramPadding: 4
+    useMaxWidth: false
+  themeVariables:
+    fontSize: 13px
+---
+flowchart TB
+  accTitle: One hive, three machines
+  accDescr {
+    A hub on the devbox exchanges app's history with daemons on the laptop, devbox, and GPU.
+    Each daemon keeps that machine's own jj repository in sync.
+  }
+  H{{"musubi hub<br/>devbox · app hive"}}:::hub
+  L("Laptop daemon"):::daemon
+  D("Devbox daemon"):::daemon
+  G("GPU daemon"):::daemon
+  LR[("app repository")]:::repository
+  DR[("app repository")]:::repository
+  GR[("app repository")]:::repository
+
+  H <-->|ssh| L
+  H <-->|local| D
+  H <-->|ssh| G
+  L --- LR
+  D --- DR
+  G --- GR
+
+  classDef hub fill:#fde5d9,stroke:#b95a34,color:#512d1e,stroke-width:2px
+  classDef daemon fill:#e8eddf,stroke:#526b35,color:#26351c
+  classDef repository fill:#f7eed8,stroke:#9c7b2f,color:#40331b
 ```
+
+Each cylinder is a separate jj repository for the same project, `app`. The daemons share its
+history through the hub; working-copy files stay on their own machines.
 
 - A **hub** is a `musubi hub` process on a machine that is usually on. It keeps a full copy of
   each repository it serves and decides the order in which updates are accepted. It never makes

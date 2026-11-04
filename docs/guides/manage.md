@@ -1,7 +1,6 @@
 # Manage hives, machines, and hubs
 
-This guide covers the changes you make now and then: checking on syncing, renaming and
-removing hives, taking a machine out, upgrading musubi, and replacing a hub.
+Check on syncing, rename or remove hives, take machines out, upgrade, and replace a hub.
 
 ## Check on syncing
 

@@ -59,6 +59,9 @@ Built-in `--help` is the reference for flags; its text is in the doc comments of
 command list; further paragraphs show only with `--help`. Guides explain when and why to use
 a command, rather than repeating its flags.
 
+Each page starts with a short introduction beneath its heading. Keep that prose in the guide: the
+website displays it and uses the opening paragraph for search and index descriptions.
+
 ## Where to edit
 
 - [README.md](../README.md): what musubi is, installing, and the quick start.

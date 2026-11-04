@@ -1,193 +1,202 @@
-# How musubi keeps your work safe
+# Correctness and verification
 
-musubi shares work in progress between machines while keeping each machine's files under your
-control. Its sync protocol has proofs in the Lean theorem prover, its code is checked against
-the model those proofs use, and its tests drive jj repositories through concurrent edits,
-crashes and network failures.
+musubi keeps copies of a jj repository in sync through a hub; together they form a hive. Its
+verification combines proofs of a protocol model with checks of the Rust implementation and tests
+against jj repositories.
 
-This page says what musubi promises, and how each promise is checked. The [contributor
-docs](internals/README.md) have the full detail.
+## Required behavior
 
-## What musubi promises
+A jj operation records a change to repository state, such as creating or rebasing commits, moving
+bookmarks, or updating workspaces.
 
-- **Changes reach every machine.** Every change any machine makes reaches every other machine once
-  they can reach the hub. Even if a power cut makes the hub forget its last few minutes, the
-  machines still have that work, and send it again.
-- **Machines reach the same history.** Once the machines stop changing things and can reach the
-  hub, they all reach the same history, whatever order things happened in.
-- **Concurrent changes combine as jj combines them.** Two machines changing the same thing at
-  once get exactly what jj makes of two commands run at once on one machine: the same
-  divergent change or the same conflicted bookmark.
-- **Concurrent work is merged once.** When two machines' work crosses, one of them merges it,
-  so the hive never ends up with two copies of the same rebase. The one exception is a hub
-  that a power cut sets back, after which two machines can merge the same work; nothing is
-  lost, and at worst a change is left divergent.
-- **Receiving work creates no extra operation.** Taking in another machine's work creates no
-  copy to send back.
-  If it meets this machine's concurrent work, jj merges them and that merge syncs too. Once
-  everyone has the same history, machines don't echo changes at each other.
-- **Your files are never touched.** musubi writes only what jj keeps, never your working copy.
-- **Hub state can be rebuilt.** Each machine keeps the work it sends and receives. A replacement
-  hub fills again from those copies.
-- **Leaving keeps your work.** `musubi leave` takes a repository out, and it keeps everything it
-  has, its working copy included.
+Concurrent edits must resolve as jj resolves concurrent commands in a single repository. musubi
+uses jj's merge implementation and sequences updates through the hub to prevent two machines from
+independently rebasing the same concurrent work. Receiving an operation must not create a
+duplicate to send back; merging concurrent edits creates a new operation.
 
-## Designed so that less can go wrong
+Once edits and failures stop, copies that resume syncing must converge on the same history.
+Repositories retain the work they send and receive, allowing a replacement hub to be rebuilt from
+those copies. Hub rollback permits duplicate merges, which can leave a change divergent, but must
+not prevent eventual convergence after rollback stops.
 
-The hub orders updates, while each machine uses jj to combine them. musubi checks incoming
-data before using it.
+Synchronization must leave working-copy files alone, and leaving a hive must preserve the
+repository. A reconnecting copy must adopt published operation abandonments instead of
+reintroducing the removed history.
 
-- **The hub orders updates.** The hub decides the order in which machines' updates land,
-  with a compare-and-swap: an update is accepted only if it builds on the latest one. When two
-  machines send at once, the second is turned away, merges with the first, and sends again.
-  The order of repository operations is independent of the machines' clocks.
-- **The hub never merges.** It stores and orders; jj, on the machines, does every merge, with
-  the same code that merges concurrent commands on one machine.
-- **Everything is checked by its hash.** Commits, trees and operations are named by the hash of
-  their contents and checked on arrival. A corrupt message is treated as lost, and sent again.
-- **Big transfers resume.** Large objects travel in chunks, and a transfer cut off by a
-  dropped connection picks up where it stopped. The whole is checked against its hash before
-  anything uses it.
-- **Collected objects can be fetched again.** If `jj util gc` removes objects after you restore
-  and abandon history, musubi fetches them again from the hub.
-- **Unknown fields stop the sync.** musubi refuses an operation from a newer jj if it contains
-  fields musubi doesn't know. A machine and a hub that speak different versions of the protocol
-  refuse each other, saying so.
-- **Abandoned history stays abandoned.** A `jj op abandon` of history other machines have
-  reaches every machine, and the abandoned operations never come back, even from a machine
-  that was offline, or after you replace the hub ([Abandoning
-  operations](guides/working-across-machines.md#abandoning-operations)).
-- **Duplicate repositories are kept out of the hive.** musubi detects a repository duplicated
-  by copying its directory, by hand or by a file-syncing tool, and leaves it unsynced. This
-  prevents two repositories from syncing as one and overwriting each other's working copy.
+[Working across machines](guides/working-across-machines.md) explains how concurrent edits and
+operation abandonment appear in jj.
 
-## Proved in Lean
+## Lean proofs
 
-The sync protocol is modelled in [Lean 4](https://lean-lang.org/), a theorem prover. The model
-is a state machine with any number of machines. Its network can lose, duplicate, delay and
-reorder messages, and any machine or the hub can crash at any point. In every reachable state,
-Lean checks proofs that:
+Lean is a theorem prover: it checks mathematical proofs about a model of the protocol. The model
+defines the states a sync can reach and the steps between them. Its safety proofs cover every
+reachable state, for any number of machines, with message loss, duplication, delay and reordering,
+and process crashes. They establish history retention, availability of referenced operations and
+objects, and the absence of feedback and duplicate merges. The hub-rollback model identifies which
+guarantees survive rollback.
 
-- the hub only ever moves forward, and anything it has accepted stays accepted;
-- the hub has everything its latest state needs, and so does each machine;
-- work the hub hasn't accepted is seen only on the machine that made it;
-- no two machines ever make the same merge;
-- taking in another machine's operation creates no new operation on its own; merging
-  concurrent work is a separate step, even when a sync invokes it;
-- and once people stop changing things, and the machines' requests and replies get through,
-  every machine reaches the hub's history, with every change anyone made in it.
+The convergence proofs assume that user edits, hub rollbacks, crashes, transport failures and
+storage errors eventually stop. Machines must resume syncing, and their requests must succeed with
+correct replies. Protocol actions whose prerequisites remain satisfied must eventually run. Old
+replies must eventually stop affecting protocol state. Repository calls must behave as specified,
+and musubi's maintenance routines must eventually stop writing operations. The proofs assume this
+last condition; they do not prove termination of those routines.
 
-A further model lets the hub go back to an earlier state, as a power cut makes it do. There,
-the hub and each machine still have everything their state needs, taking in work creates no echo,
-and once the hub stops going back, the machines fill it in again and reach the same history.
-What no longer holds is the rule against duplicate merges, which is why a power cut can leave
-a change divergent. A separate retry model proves that lost or late replies and recovery
-eventually lead to agreement too, under explicit assumptions: errors and outside changes
-eventually stop, the remaining machines keep running, their calls finish, and musubi's own
-housekeeping stops writing new operations. The proof assumes each repository call behaves as
-specified, with focused tests checking those boundaries. It does not prove that housekeeping
-stops by itself.
+Other models cover operation abandonment, git-ref import and export, distinguishing a joined
+repository from a duplicate of its directory, workspace names, and chunked transfers.
 
-In the main model, the proof that sync finishes uses a measure with five parts. Each progress
-step of a successful exchange lowers it, comparing the parts in order: how many machines have
-work the hub hasn't taken, how far behind each is, what each is missing, and how many updates
-and merges each has pending. A machine that loses a race learns the newer state from the reply,
-so it is less far behind; and the hub's state moves at most once for each machine with work to
-send. The measure can't fall forever, so the sync ends, and the proof shows it ends with
-everyone the same. The retry proof separately bounds the effects of obsolete replies and
-interrupted recovery, then proves the remaining work reaches agreement; it does not assume
-every message or retry lowers that measure.
+## Hegel conformance tests
 
-Separate models cover the rest of what could go wrong: how each machine's git refs and jj's
-import and export of them interact, including `jj undo` and `jj op restore`; which machines'
-copies a hive shows as they come and go; which directory on a machine is the copy, and which a
-duplicate; and the chunked transfers, whose receiver is proved to put together exactly the
-bytes that were sent.
+Hegel is a property-testing framework for Rust. It generates sequences of actions and, when a test
+fails, reduces the sequence while preserving the failure. These tests run the production Rust
+protocol core with test implementations of its storage interfaces and a simulated network. The
+harness creates operations represented by ids, parent links and object sets; it can lose or
+duplicate messages, crash participants, and inject storage errors.
 
-There are more than 400 theorems in all, none left unfinished and no axioms added, and every
-proof is checked again on every change. [The Lean model](../formal/README.md) names each
-theorem, and lists what the models assume of the code.
+For actions the model can represent, the tests compare the Rust state with an executable Lean
+model, called the oracle. The oracle uses the proof definitions or executable definitions proved
+to agree with them. The tests also compare the Rust implementation's progress with the convergence
+models. If a storage failure leaves a state the model cannot represent, that case stops consulting
+the oracle. It continues checking data retention, availability of required operations and objects,
+and convergence after failures stop.
 
-## Checking the code against the proof
+The core harness does not use jj repositories. Conformance tests for jj's ref handling, operation
+abandonment, copy selection and receiving chunked data compare each with its Lean model.
+Repository tests also check effects the core harness cannot represent, such as merging incoming
+history with local edits and retrying updates after hub rollback.
 
-An executable version of the model, proved to agree with it, runs as an oracle in the protocol
-tests. Property tests drive musubi's Rust state machines for the hub and the machines through
-generated sequences of user changes, message deliveries, losses, duplicates, crashes, and a hub
-that misbehaves. After every step, they ask the oracle whether the model allows it. When the
-machines settle, the tests also check, step by step, that the measure from the liveness proof
-fell.
+The proofs do not cover every combination of these behaviors. For history rewritten by operation
+abandonment, individual steps have proofs that they preserve properties such as keeping the
+operations and objects required by the hub's accepted history. Those proofs do not establish that
+the preconditions for every step continue to hold across all possible sequences combining them
+with the rest of the protocol.
 
-The tests also run against deliberately broken versions of the code: a hub that accepts an
-update without checking that it builds on the latest, a machine that applies an operation
-before its parents, a machine that pushes before merging. Each is caught. `cargo-mutants`
-makes many more such changes to the hub's and machines' logic
-automatically, and the tests are expected to catch every one.
-[conformance.md](internals/conformance.md) has the details.
+## Kani checks of Rust code
 
-## Every race, with a test
+Kani is a model checker for Rust. It uses a solver to look for inputs and execution paths that
+violate assertions in the code, covering all choices allowed by a check within its loop bounds.
+The checks for chunk offsets, lengths and message size limits verify that:
 
-Machines in a hive can run into every race that two jj commands on one machine can, plus a few of
-their own: a machine forgets another's workspace while it's building on it, two machines both use
-workspace `default`, a commit is rewritten on one machine while another has unsaved edits on top
-of it. The [race catalogue](internals/races.md) lists more than 70 of them, each with its outcome,
-and each covered by a test that syncs repositories through the protocol and hub storage.
-The rule throughout is that machines resolve a race exactly as jj resolves it on one machine;
-where jj would do something harmful only because the commands came from different machines, musubi
-notices and stops.
+- The chunk-overlap check identifies the first new byte at the end of the received data, or
+  reports that the chunk adds nothing or leaves a gap.
+- At every supported message size, the chunk-size calculation reserves at least as much space for
+  metadata as at the smallest size. A unit test verifies that the metadata fits at that minimum.
+- The end-of-download check cannot overflow and reports completion exactly when the read reaches
+  the end of the data, for any offset and requested length.
+- Each batch of an upload or download starts at the requested offset and advances by the chunk
+  size without overflow. A batch ends after eight chunks or on reaching the end of the data; the
+  next batch continues the transfer.
 
-## Searching with jj commands
+The storage check exercises how the hub accepts pushes. The hub's head is the latest operation it
+has accepted. A push names the head it was built on, called its expected head. A new update must
+extend the accepted history and name the current head as its expectation. A replay of an already
+accepted push must succeed without counting as another update. The hub's sequence number counts
+accepted head changes.
 
-Generated tests search for failures beyond the hand-written cases. A test drives two or three
-repositories with the `jj` command: commits, rebases, squashes, abandons, undos,
-commands run at an older operation, bookmark and tag moves, and workspaces added and forgotten.
-It moves branches behind jj's back with `git`, has someone else push to the remote, and fetches and
-pushes. It crashes machines partway through a sync, restarts the hub, cuts off the last of the
-hub's history as a power cut would, and loses replies.
+The Kani harness runs the production push handler against a three-operation graph. The hub starts
+at `root → A`, and the proposed operation is `B`:
 
-After every step, every repository must still load, and no git import may undo anything. At
-the end, every machine must agree on every commit, change id, bookmark and tag, and every
-operation from any machine must be in every machine's history. To tell musubi's mistakes from
-jj's own behavior, the test keeps a reference: a jj repository of its own that replays the
-hive's history with jj's own merges. Any divergence or conflict the hive has and the reference
-doesn't is musubi's doing, and fails the test, as does any rebase done twice.
+| Proposed history | Expected head | Result |
+| --- | --- | --- |
+| `root → A → B` | `A` | Accept `B` once its dependencies are present |
+| `root → A → B` | `root` | Reject the stale expectation |
+| `root → B`, beside `A` | `A` | Reject a sibling that does not extend `A` |
+| `root → B`, beside `A` | `root` | Reject |
 
-A failing case shrinks to a small one and replays exactly. The search runs every night with a
-new seed.
+Each case sends four pushes with the same expected head. The first two send a possibly incomplete
+upload; each fallible storage call can fail independently. A failed import may retain any subset
+of the uploaded data. The third push supplies all objects with failures disabled; the fourth
+replays it.
 
-## Faults and hostile input
+Kani exhausts these choices. Errors and incomplete uploads must leave the accepted head unchanged.
+The complete retry must install `B` in the first case and leave the hub at `A` in the others.
+Successful replies must report the stored head and sequence. If an earlier push already installed
+`B`, its replay must succeed despite still naming `A` as the expected head, without advancing the
+sequence again.
 
-- **Flaky links.** A recorded session between two machines is cut at every call, in three ways:
-  the request is lost, as when the wifi drops; the request arrives but the reply is lost, as
-  when a laptop lid closes just after it went; or the request arrives an hour late. Once the
-  link is back, every call must finish as it would have, within a bound.
-- **Hostile peers.** The hub is sent requests no honest machine would send: cut short,
-  corrupted, spliced together, with made-up ids, or from another protocol version. It must
-  answer every one without crashing, and its state may only move forward to states it has
-  everything for.
-- **Buggy hubs.** A machine is sent replies no honest hub sends: cut short, corrupted, from
-  another version, or well formed but wrong, about history the hub doesn't have or with
-  another reply's contents. It must not crash, and once the hub answers honestly again, every
-  machine must come to show the same history, everyone's work in it.
-- **Fuzzing.** Coverage-guided fuzzers attack every decoder of what a peer sends: frames,
-  messages, groups of commits, and operations imported from them. A message that decodes must
-  encode back to one that decodes the same. Every stored object's contents must match its hash.
-  Each fuzzer also checks for crashes.
-- **Torn files.** Files musubi appends to are tested cut off anywhere, zero-filled and
-  garbled: each reads back what was written before the damage, or is known to be damaged, and
-  never reads as something else.
+This checks four handler calls with one writer. It excludes crashes, operation abandonment, longer
+histories and the storage implementations used by the hub.
 
-## Keeping up with jj
+## Tests against jj repositories
 
-musubi uses the same jj library as the `jj` command. Every night, CI builds musubi against jj's
-main branch and runs the suite, so a change in jj that would break musubi shows up before a
-release brings it. Every change is tested on Linux, macOS and Windows.
+Regression tests exercise races between machines through the sync protocol and hub storage,
+comparing the result with jj's concurrent-command semantics. Examples include rewriting a change
+while another machine has unsaved edits above it, and forgetting a workspace while another machine
+is using it. Tests also duplicate a repository directory and verify that the two directories
+cannot sync as the same copy.
 
-## Read further
+Hegel end-to-end tests generate command sequences and invoke the `jj` and `git` executables across
+two to four repositories. They interleave edits, rebases, undo, operation abandonment, ref
+changes and workspace changes with interrupted syncs, lost replies, hub restarts and rollback.
+During each sequence, checks ensure that repositories remain readable. The harness tracks external
+git ref changes and jj's own import behavior to detect imports that revert work because musubi
+recorded the refs incorrectly. After synchronization, the repositories must agree on shared
+commits, refs and retained operation history.
 
-- [Design](internals/design.md): what musubi replicates, and why.
-- [Sync protocol](internals/protocol.md): what machines and the hub say to each other, and
-  the properties that guarantees.
-- [The Lean model](../formal/README.md): every theorem, and how the model matches the protocol.
-- [Conformance](internals/conformance.md): how the Rust code is checked against the model.
-- [Race catalogue](internals/races.md): every race between machines, and its outcome.
-- [Testing](internals/testing.md): every layer of tests, and what each guards against.
+A reference repository replays the shared history using jj's own merges. Comparing the
+synchronized repositories with this reference identifies divergence and conflicts introduced by
+musubi. The tests also detect duplicate rebases. Hegel records failing command sequences for
+replay.
+
+CLI tests execute the README's quick start, including commands printed by musubi. On Linux and
+macOS CI runners, service tests install the daemon through systemd or launchd, kill it, and check
+that the service manager restarts it. They also check that `musubi daemon stop` does not trigger a
+restart.
+
+## Fault injection
+
+Transport tests record a session in which two machines push and fetch commits, then replay its
+calls with faults. The payload limit forces transfers to use multiple chunks. A request can be
+lost before reaching the hub, or its reply can be lost after the hub has acted on it. Another case
+delivers the request an hour late, after the hub has deleted expired transfer data. Once the link
+recovers, a retry must complete; the test fails if it sends more than 2,000 requests without
+finishing.
+
+Tests with jj repositories replace the hub's replies with well-formed but false ones: a head the
+hub does not have, operations with changed parents, objects for another operation, or another
+request's reply. Once the hub resumes answering correctly, the repositories must converge without
+losing commits.
+
+Other tests send malformed requests to the hub. After each request, the hub must still serve
+fetches and may advance only to history whose dependencies it has.
+
+Stream tests use pipes with one-byte buffers to exercise cancellation, timeouts, disconnects and
+late replies during transmission. Other tests split frames at different byte offsets and pause
+reads and writes. A hub-worker test panics after accepting a push but before replying; the next
+fetch must reopen the service and find the accepted history intact. Another hive served by the
+same hub must continue syncing.
+
+Each operation refers to a view, which records the visible commits, bookmark targets and each
+workspace's working-copy commit. Hegel tests truncate, zero-fill and garble the logs storing
+operations and views. Each entry must read back exactly as written or be absent; corruption must
+never produce different contents under an existing id. Records before the damaged region must
+remain readable.
+
+## Fuzzing
+
+libFuzzer, through cargo-fuzz, drives the frame, message, bundle and operation-import decoders.
+The message and bundle targets test raw inputs and inputs prefixed with valid version fields or
+headers to reach the parser logic behind those checks.
+
+A decoded frame must encode back to exactly its input bytes. Messages may have multiple encodings,
+so their decode/encode/decode round trips must preserve the decoded value; trailing bytes must be
+rejected. Bundle records must survive rewriting with and without compression.
+
+Import fuzzers submit operations under both incorrect and correct content hashes. They also
+construct histories with duplicate or altered views, missing operations, and views encoded as
+differences from earlier views. Whether an import succeeds or fails, every stored object must have
+the contents its id names.
+
+## Mutation testing
+
+Tests run against implementations that accept stale pushes or apply operations before their
+parents; each violation must be detected. `cargo-mutants` changes production logic and runs tests
+against each variant. Mutations that pass require inspection: they can expose missing coverage or
+preserve observable behavior.
+
+## Continuous checks
+
+CI checks the Lean proofs and runs protocol, repository and CLI tests on Linux, macOS and Windows.
+The Hegel end-to-end search runs nightly with changing seeds. A nightly compatibility job builds
+and tests against jj's main branch to detect upstream changes that would break musubi before a jj
+release.

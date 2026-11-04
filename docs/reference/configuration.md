@@ -1,7 +1,9 @@
 # Configuration
 
+Settings, environment variables, logging, and where musubi keeps its files.
+
 Most setups need no configuration: `musubi hub`, `create`, `join`, and `clone` write what
-musubi needs. This page lists what you can set, and where musubi keeps its files.
+musubi needs.
 
 ## Settings
 

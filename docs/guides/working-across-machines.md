@@ -1,9 +1,9 @@
 # Work across machines
 
-Once a repository is in a hive, keep using `jj` as you always do. This guide covers what
-changes when other machines share it: picking up on another machine, coding agents, seeing
-other machines' work, stale working copies, undo, concurrent changes, and the settings machines
-share.
+See other machines' work, update a stale working copy, undo, and share settings.
+
+Once a repository is in a hive, keep using `jj` as you always do. Its daemon keeps it in sync
+with the other machines.
 
 ## Pick up on another machine
 

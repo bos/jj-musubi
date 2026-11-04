@@ -1,7 +1,8 @@
 # Command reference
 
-Every musubi command, grouped by task. Built-in help is the reference for flags: `-h` gives a
-summary, and `--help` the full text.
+Every musubi command, grouped by task.
+
+Built-in help is the reference for flags: `-h` gives a summary, and `--help` the full text.
 
 ```sh
 musubi --help

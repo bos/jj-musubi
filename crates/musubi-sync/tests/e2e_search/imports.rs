@@ -89,8 +89,9 @@ pub struct Imports {
     setup: Vec<HashSet<OperationId>>,
     /// Each machine's operations already looked at.
     seen: Vec<HashSet<OperationId>>,
-    /// Each machine's imports already judged, by what `jj op abandon` keeps of an operation
-    /// it rewrites onto another parent: its metadata, and its view (`judged_key`).
+    /// Each machine's imports already judged, by their native command metadata. The seeded
+    /// command clock gives each import its own times; contraction and per-machine exports
+    /// can change both parents and views without running another import (`judged_key`).
     judged: Vec<HashSet<String>>,
     /// Each machine's git refs that git moved since jj last imported there, with what `.git`
     /// had before each of those moves.
@@ -264,18 +265,17 @@ fn head(view: &View, ws: &str) -> RefTarget {
         .unwrap_or_else(RefTarget::absent)
 }
 
-/// What identifies an import across `jj op abandon`, which gives the operations after the one
-/// it abandons new parents, and so new ids, keeping their metadata and views: judged again
-/// against its new parent, an import would seem to make what the abandoned operation made.
+/// A native import's identity across contraction and per-machine export. Each command gets
+/// unique seeded times, and its ref and HEAD imports have distinct descriptions. A rewritten
+/// representation can have a different view as well as parents; neither is a new import.
 fn judged_key(op: &op_store::Operation) -> String {
     let metadata = &op.metadata;
     format!(
-        "{} {} {} {} {} {}",
+        "{} {} {} {} {}",
         metadata.time.start.timestamp.0,
         metadata.time.end.timestamp.0,
         metadata.hostname,
         metadata.username,
-        op.view_id.hex(),
         metadata.description,
     )
 }
@@ -643,6 +643,12 @@ impl World {
             new.push(id);
         }
         if !self.imports.started {
+            for id in &new {
+                let op = &log.ops[id];
+                if own_import(&log.owner, op) || own_head_import(&log.owner, op) {
+                    self.imports.judged[m].insert(judged_key(op));
+                }
+            }
             return;
         }
         // Parents first.
@@ -707,6 +713,11 @@ impl World {
     }
 
     fn check_import(&self, m: usize, log: &mut Log, id: &OperationId) -> Result<(), String> {
+        let native = self
+            .commands
+            .get(&crate::world::merge_key(log.op(id)))
+            .map(|source| source.id.clone());
+        let id = native.as_ref().unwrap_or(id);
         let op = log.op(id).clone();
         let [parent] = op.parents.as_slice() else {
             return Err(format!(
@@ -927,6 +938,11 @@ impl World {
     /// where git moved HEAD through the branch it is a symbolic ref to, or where jj's merge of
     /// two op heads that both changed the record left it differing from `.git`.
     fn check_head_import(&self, m: usize, log: &mut Log, id: &OperationId) -> Result<(), String> {
+        let native = self
+            .commands
+            .get(&crate::world::merge_key(log.op(id)))
+            .map(|source| source.id.clone());
+        let id = native.as_ref().unwrap_or(id);
         let op = log.op(id).clone();
         let [parent] = op.parents.as_slice() else {
             return Err(format!(

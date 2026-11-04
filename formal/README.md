@@ -60,7 +60,7 @@ is `formal/.lake/build/bin/oracle`.
 
 | File | Contents |
 | --- | --- |
-| `Musubi/Basic.lean` | Sets as predicates (`OSet`), point update `upd`, counting `cnt`, sums `sumN`. |
+| `Musubi/Basic.lean` | Sets as predicates (`OSet`), point update `upd`, counting `cnt`, sums `sumN`, and shared termination/progress facts. |
 | `Musubi/Contract.lean` | Contracting dropped operations out of a history: parents (`cpar`), ids as terms (`cid`), composition, and when ids agree. |
 | `Musubi/Dag.lean` | `Anc` (`anc*`), `ParLt` (parents have smaller ids, so the graph is acyclic), `maxSet` (`max`), and how `anc*` is preserved when a fresh op is created. |
 | `Musubi/Model.lean` | The asynchronous model: state, messages, transitions, `EnvStep`, `SyncStep`, `Step`, `Reachable`. |
@@ -104,7 +104,13 @@ is `formal/.lake/build/bin/oracle`.
 | `Musubi/HubSuffix.lean` | Hub stabilization in raw graph space, with finite old-packet credit and a derived sender invariant. |
 | `Musubi/HistoryWindow.lean` | Carry the raw accepted-head chain from the record cut to eligible nodes' later entry. |
 | `Musubi/FreshObservation.lean` | Force an honest own response and repair obsolete initial knowledge without a whole-round premise. |
-| `Musubi/EarlyEntry.lean` | Fair finite local bursts reach current records at eligible nodes before the hub settles. |
+| `Musubi/EarlyEntry.lean` | Entry API: imports all six layers below. |
+| `Musubi/EarlyEntry/Abstract.lean` | Abstract local events and eligible entry before hub stabilization. |
+| `Musubi/EarlyEntry/Burst.lean` | Finite bursts with the known pair frozen. |
+| `Musubi/EarlyEntry/Control.lean` | Raw control, choice guards, surveys and progress ranks. |
+| `Musubi/EarlyEntry/FreshHead.lean` | Naming stabilization and a first fresh head-bearing reply. |
+| `Musubi/EarlyEntry/FreshFetch.lean` | Taking current records through a fresh fetch. |
+| `Musubi/EarlyEntry/RawEntry.lean` | Source laws, round restarts and assembled raw entry. |
 | `Musubi/EntryAssembly.lean` | Join eligible entry cuts and exclude core fix-ups/tips before hub stabilization. |
 | `Musubi/NodeSettle.lean` | Finite local control after hub stabilization, from individual calls and local scheduling. |
 | `Musubi/RecoveryBridge.lean` | Compose hub and local stabilization, with packet-specific handling and later response cuts. |
@@ -116,7 +122,13 @@ is `formal/.lake/build/bin/oracle`.
 | `Musubi/FineAssembly.lean` | Assemble the fine system from event replay and source bindings. |
 | `Musubi/NodeSysEntry.lean` | Derive node entry and preserve the joint control invariants under individual-call fairness. |
 | `Musubi/SysFreshCuts.lean` | Derive cutoffs for consumed old replies and processed old notifications without draining queues. |
-| `Musubi/SysAcceptance.lean` | Compose actual hub stabilization and eligible-node settling, including raw head agreement. |
+| `Musubi/SysAcceptance.lean` | Convergence API: imports all six layers below. |
+| `Musubi/SysAcceptance/Acceptance.lean` | Actual request decisions and stable-hub acceptance. |
+| `Musubi/SysAcceptance/Pending.lean` | The raw-control contradiction for a node that stays pending. |
+| `Musubi/SysAcceptance/Eligible.lean` | Filtering and convergence of eligible nodes. |
+| `Musubi/SysAcceptance/Events.lean` | Individual hub and node observations projected into system steps. |
+| `Musubi/SysAcceptance/Contracts.lean` | Observations, record cuts, source laws and completion/fairness assumptions. |
+| `Musubi/SysAcceptance/Convergence.lean` | Derived old-effect/knowledge cuts and final hive convergence. |
 | `Musubi/HubSys.lean` | Read raw hub and node policy fields from that same joint system. |
 | `Musubi/HubLedger.lean` | Retain actual send-time packet fields and prove coverage of outstanding eligible requests. |
 | `Musubi/RawExpansion.lean`, `Musubi/RawMaintenance.lean` | Expand finite raw write batches, counting actual maintenance operations. |
@@ -780,7 +792,10 @@ closure for the proper packet. Upload coverage uses the actual base-image fronti
 server-generated contraction bodies are present; the raw expected-head difference is only
 the no-renaming case. `RecoveryBridge.lean` uses that packet's decision, allows a later local
 response/reopen cut after hub stability, and joins all nodes' convergence cuts. These are
-component theorems; the joint event replay and assembly below supply their common run.
+independent component theorems. The observed assembly below uses the joint-system route through
+`eligible_system_converges` and `node_settles_accepted`; it does not call
+`RecoveryBridge.refined_suffix_converges`. The bridge's generic `finite_common_cut` is shared by
+both routes.
 
 The joint system now supplies per-event refinements. `NodeSys` keeps each node's scoped
 embedding into the same raw graph and retains immutable requests while other nodes run.
@@ -875,6 +890,21 @@ fine node's identity and the original-drop record view. Persistent raw entry fix
 identity; eligibility and custody imply no raw pending names. A local record-effect binding
 then derives stability of the fine hub's record identity from the original-record cut; it
 does not identify different raw encodings of the same dropped-original set.
+
+The assembled dependency path starts at `FineAssembly.hive_converges_observed`, which builds
+`FineAt` from event replay and invokes `SysAcceptance.hive_converges`. Record/drop stabilization,
+record-disturbance and old-effect cuts supply entry; `FineAt.converges` filters the actual run to
+eligible nodes. `eligible_system_converges` then invokes `hub_stabilizes_sys` and
+`node_settles_accepted`. Finally, stable-head knowledge and `PendingLaws.absurd` exclude every
+remaining noneligible participant. The two API modules retain their theorem namespaces;
+`EarlyEntry/` separates the entry stages and `SysAcceptance/` separates decisions, pending
+control, eligible-system transfer, event projection, contracts and convergence.
+
+Completion belongs among the assumptions as well as local effect correspondence: `doneIn`
+requires each sampled call batch to finish before the next sample, `answer` supplies a later
+handling time for the same actual packet, and `EntryLaws.hobjects`/`hstart` require eventual
+round restarts. Together with the explicit scheduling laws, these are obligations of the
+sampled execution; they are not conclusions of the entry or convergence proofs.
 
 The resulting retry/response theorem is conditional on the explicit source contracts and
 environment described below. It derives the progress cuts, eligible-system convergence and

@@ -381,6 +381,7 @@ def decodeCall (j : Json) : Except String Refs.Exec.Call := do
   | "track" => return .track (← slot "s")
   | "import" => return .import (← slot "s") (← getNat j "g")
   | "merge" => return .merge (← slot "b") (← slot "v") (← slot "w")
+  | "realizeLocal" => return .realizeLocal (← slot "s") (← getNat j "c")
   | "exportLocal" => return .exportLocal (← slot "s") (← getNat j "g")
   | "exportRemote" => return .exportRemote (← slot "s") (← getNat j "g")
   | "exportConflicted" => return .exportConflicted (← slot "s") (← getNat j "g") (← getNat j "e")

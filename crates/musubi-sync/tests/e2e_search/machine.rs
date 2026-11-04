@@ -478,6 +478,16 @@ impl Search {
         self.note(&tc);
     }
 
+    /// Trim below a push the hub accepted before its publisher advanced the saved base.
+    /// This includes the joins, which the single-operation rule deliberately leaves alone.
+    #[rule]
+    fn trim_below_accepted_push(&mut self, tc: TestCase) {
+        let m = self.machine(&tc);
+        fired("trim_below_accepted_push");
+        self.world.borrow_mut().trim_below_accepted_push(m);
+        self.note(&tc);
+    }
+
     /// Any `jj` command: snapshots, imports git refs, merges concurrent operations, and,
     /// with auto-update-stale as the tests set it, updates a stale working copy.
     #[rule]

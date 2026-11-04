@@ -808,6 +808,13 @@ machine. Its exact foreign bindings apply only to aliases already in their nativ
 so a new local workspace can reuse a forgotten foreign alias. Other machines consume the
 canonical views and render the canonical keys in their own namespaces.
 
+A receiving machine also captures and canonicalizes the exact native heads that exist when
+it prepares a trim, before contracting them. This covers commands that finished after the
+policy last inspected its heads. These operations still have their actual source parents,
+so ordinary canonicalization and contraction preserve their namespace and presence. The
+held renaming also records their undropped native source identities, keeping delayed commands
+on those original ids consistent after translation-cache loss.
+
 ### Presence through an abandon
 
 Contraction keeps every surviving operation's view, but presence ([Presence](#presence)) is

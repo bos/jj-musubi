@@ -15,8 +15,10 @@ tokio = { workspace = true, features = ["io-util", "macros"] }
 tracing.workspace = true
 
 [dev-dependencies]
+hegeltest.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "process"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "process", "test-util"] }
+tokio-test = "0.4.6"
 
 [lints]
 workspace = true

@@ -431,6 +431,19 @@ struct State {
     pending: HashMap<u64, (String, oneshot::Sender<Result<Bytes, TransportError>>)>,
 }
 
+/// A registered call owns its inbox only while someone is waiting, including when the
+/// request future is dropped before a reply or timeout.
+struct PendingCall<'a> {
+    shared: &'a Shared,
+    id: u64,
+}
+
+impl Drop for PendingCall<'_> {
+    fn drop(&mut self) {
+        self.shared.lock().pending.remove(&self.id);
+    }
+}
+
 /// A subscription on the hub, to `subject`.
 struct Subscribed {
     subject: String,
@@ -849,13 +862,14 @@ impl Transport for StreamTransport {
                 Err(_) => return Err(TransportError::Timeout),
             }
         };
+        let _pending = PendingCall {
+            shared: &self.shared,
+            id,
+        };
         match tokio::time::timeout_at(deadline, replied).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(TransportError::Disconnected),
-            Err(_) => {
-                self.shared.lock().pending.remove(&id);
-                Err(TransportError::Timeout)
-            }
+            Err(_) => Err(TransportError::Timeout),
         }
     }
 }
@@ -1000,6 +1014,9 @@ pub mod fuzzing {
         }
     }
 }
+
+#[cfg(test)]
+mod io_tests;
 
 #[cfg(test)]
 mod tests {

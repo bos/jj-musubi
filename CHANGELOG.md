@@ -6,6 +6,9 @@ change the protocol, so run the same release on the hub and every machine (see
 
 ## Unreleased
 
+- Canceled requests release their reply bookkeeping immediately. Previously a long-lived
+  connection could retain it until the hub replied or the connection ended.
+
 - If a recreated hub cannot supply objects requested from its old history, the machine
   retries from the hub's current state. Previously one sync could keep asking for the same
   missing objects until another machine restored them, without checking the hub again.

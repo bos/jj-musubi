@@ -345,6 +345,17 @@ stream transport frames each message with its length and drops one whose connect
 partway through, so a dropped connection looks like a lost request or reply, which the link
 faults cover.
 
+The async stream boundary has generated tests in
+`musubi-transport/src/stream/io_tests.rs`. One-byte pipes run the real client through
+cancellation before, during and after transmission, timeout, disconnect, late replies and
+bounded writer-queue pressure. Scripted I/O splits consecutive frames, inserts `Pending`,
+and ends or fails reads and writes at generated offsets; writes also cross the buffer size.
+The real hub relay forwards a complete request, then loses the next frame partway through:
+that frame is never published, and the outstanding request future is dropped. Hegel shrinks
+and saves failures; a paused Tokio clock makes waits deterministic. These tests do not run
+ssh, socket readiness, the daemon supervisor or a repository sync; the transport contracts
+cover reconnection and subscription reuse, and the sync fault tests cover lost calls.
+
 ## Fuzzing
 
 The fuzz targets in `fuzz/` make malformed input from nothing, where the fault tests make it

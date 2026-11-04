@@ -37,6 +37,9 @@ protocol.md](#correspondence-with-protocolmd) maps the rest of the notation.
 
 ## Checking
 
+For the contributor workflow, source-contract pitfalls and small Lean iterations, read
+[Working on Lean proofs](../docs/internals/lean.md).
+
 Install Lean (for example, via `elan`) and put `lake` on `PATH`.
 
 ```sh

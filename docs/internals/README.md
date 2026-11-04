@@ -25,6 +25,8 @@ Each document answers a different question:
   shows, checked against the Lean model?
 - [The Lean model](../../formal/README.md): What does the model prove, and how does it
   correspond to the protocol?
+- [Working on Lean proofs](lean.md): How do you state a proof boundary, check its source
+  assumptions, develop the proof and connect it to the code?
 - [Releasing](releasing.md): How is a release made?
 - [Benchmarks](../../bench/README.md): How does musubi compare with git and jj's own clone,
   fetch and push, in time and bytes on the wire? How does the canonical store keep up with a

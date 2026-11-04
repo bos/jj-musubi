@@ -1186,6 +1186,7 @@ impl World {
                         op.metadata
                             .attributes
                             .remove(musubi_jj::node::CANONICAL_ATTRIBUTE);
+                        op.metadata.attributes.remove("musubi.workspace-context");
                         op
                     };
                     if strip(source.operation.clone()) == strip(op.clone()) {

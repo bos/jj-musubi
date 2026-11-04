@@ -13,6 +13,7 @@
 mod codec;
 mod contract;
 mod log;
+pub(crate) mod namespace;
 mod origin;
 mod presence;
 mod transfer;
@@ -582,6 +583,7 @@ impl CanonicalStore {
         })?;
         origin::identity(&op)?;
         presence::check_stamp(&op).map_err(|_| CanonicalError::MalformedOperation(id.hex()))?;
+        namespace::Namespace::read(&op.metadata)?;
         Ok(op.parents)
     }
 

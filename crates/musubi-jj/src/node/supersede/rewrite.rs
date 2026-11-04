@@ -195,6 +195,7 @@ impl NodeRepo {
         heads: &[LocalOp],
         counterparts: &HashMap<LocalOp, CanonicalOp>,
         unmapped: &[(LocalOp, StoreOperation)],
+        context: Option<&str>,
     ) -> Result<HashMap<LocalOp, Vec<LocalOp>>, NodeError> {
         let op_store = self.loader.op_store().clone();
         let canonical = &self.canonical;
@@ -308,11 +309,18 @@ impl NodeRepo {
                     .iter()
                     .flat_map(|p| locals.get(p).cloned().unwrap_or_else(|| vec![p.clone()])),
             );
-            let rewrite = if parents == old_parents {
+            let context = context.filter(|_| parents.as_slice() == [self.root_op_id().clone()]);
+            let rewrite = if parents == old_parents && context.is_none() {
                 id.clone()
             } else {
                 let mut op = op.clone();
                 op.parents = parents.into_iter().map(|parent| parent.0).collect();
+                if let Some(context) = context {
+                    op.metadata.attributes.insert(
+                        crate::canonical::namespace::ATTRIBUTE.to_owned(),
+                        context.to_owned(),
+                    );
+                }
                 LocalOp(op_store.write_operation(&op).block_on()?)
             };
             locals.insert(id.clone(), vec![rewrite]);

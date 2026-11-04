@@ -334,7 +334,8 @@ impl NodeRepo {
             );
         }
         let mut contraction = Contraction::new(store, to_drop)?.sharing(self.presences.clone());
-        let locals = self.rewrite_locals(&mut contraction, &heads, &HashMap::new(), &unmapped)?;
+        let locals =
+            self.rewrite_locals(&mut contraction, &heads, &HashMap::new(), &unmapped, None)?;
         let mut heads = heads;
         heads.sort();
         Ok(Taking {

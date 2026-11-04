@@ -6,12 +6,17 @@ change the protocol, so run the same release on the hub and every machine (see
 
 ## Unreleased
 
+- Trimming all shared history below unpublished work preserves which machine owns each
+  workspace. The trim records workspace-name bindings and restores each copy's workspaces
+  along with its last use. Upgrade the hub and all machines together and restart their
+  daemons (protocol 11); earlier builds cannot interpret the new bindings.
+
 - Trimming history preserves each workspace's snapshot basis, including secondary workspaces
   with unsnapshotted edits. A later stale update can no longer load the empty operation root
   as that workspace's previous snapshot and panic.
 
 - musubi now supports jj 0.47.0. Upgrade jj on every machine, and upgrade the hub and every
-  machine together, then restart their daemons (protocol 10). Builds using jj 0.46.0 cannot
+  machine together, then restart their daemons. Builds using jj 0.46.0 cannot
   sync with this build.
   Ordinary jj commands leave remote-bookmark conflicts unchanged when their Git refs have
   not moved; fetch explicitly to resolve them. They also finish pending Git exports after

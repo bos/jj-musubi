@@ -411,7 +411,8 @@ impl NodeRepo {
         if self.records.moving {
             // A rewrite recorded before a restart: move the op heads it didn't.
             let mut nothing = Contraction::new(&self.canonical, std::iter::empty())?;
-            let locals = self.rewrite_locals(&mut nothing, &heads, &counterparts, &unmapped)?;
+            let locals =
+                self.rewrite_locals(&mut nothing, &heads, &counterparts, &unmapped, None)?;
             self.add_step(HashMap::new(), &HashSet::new(), &counterparts)?;
             self.finish_local_move(&heads, &locals)?;
             return Ok(true);
@@ -439,7 +440,8 @@ impl NodeRepo {
         // came back on one machine.
         if dropped.is_empty() && self.out_of_place(&counterparts, &unmapped)? {
             let mut nothing = Contraction::new(&self.canonical, std::iter::empty())?;
-            let locals = self.rewrite_locals(&mut nothing, &heads, &counterparts, &unmapped)?;
+            let locals =
+                self.rewrite_locals(&mut nothing, &heads, &counterparts, &unmapped, None)?;
             // As below: a restart partway resumes the move, and jj's rewrites keep the
             // identities established here.
             self.add_step(HashMap::new(), &HashSet::new(), &counterparts)?;
@@ -461,7 +463,18 @@ impl NodeRepo {
             Some(old) => contraction.images(&self.canonical, old)?.first().cloned(),
             None => None,
         };
-        let locals = self.rewrite_locals(&mut contraction, &heads, &counterparts, &unmapped)?;
+        let context = old_head
+            .as_ref()
+            .filter(|_| new_head.as_ref() == Some(self.canonical.root_operation_id()))
+            .map(|old| self.workspace_context(old))
+            .transpose()?;
+        let locals = self.rewrite_locals(
+            &mut contraction,
+            &heads,
+            &counterparts,
+            &unmapped,
+            context.as_deref(),
+        )?;
         let mut hub_names = HashMap::new();
         for base in watched {
             hub_names.extend(self.hub_names(&base.0)?);
@@ -522,6 +535,21 @@ impl NodeRepo {
         // Recorded before the op heads move, so that a restart in between resumes the move; a
         // renaming appended without them doesn't count.
         let dropped_here = contraction.dropped().clone();
+        // A concurrent command can still name the unstamped native id. Bind it durably
+        // to the same contextual source before either op heads or workspace records move.
+        if context.is_some() {
+            for (old, _) in &unmapped {
+                if counterparts.contains_key(old) {
+                    continue;
+                }
+                if let Some([now]) = locals.get(old).map(Vec::as_slice) {
+                    let canonical = self.canonicalize_unchecked(now)?;
+                    let original = self.loader.op_store().read_operation(&old.0).block_on()?;
+                    self.remember_original(&canonical, &original)?;
+                    counterparts.insert(old.clone(), canonical);
+                }
+            }
+        }
         self.add_step(contraction.into_images(), &dropped_here, &counterparts)?;
         self.records.moving = true;
         self.finish_local_move(&heads, &locals)?;

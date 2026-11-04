@@ -61,6 +61,10 @@ fn history() -> &'static History {
             let mut op = Operation::make_root(view_id.clone());
             op.parents = vec![parent.0];
             op.metadata.description = format!("operation {i}");
+            if i % 2 == 1 {
+                op.metadata.attributes.insert("musubi.workspace-context".to_owned(),
+                    r#"{"source":"alpha#aaaa","names":{"beta/default":"beta#bbbb/default","default":"alpha#aaaa/default"},"known":["alpha#aaaa","beta#bbbb"]}"#.to_owned());
+            }
             let op_id = store.write_operation(&op).unwrap();
             views.push((view_id.clone(), store.view_bytes(&view_id).unwrap()));
             ops.push((op_id.0.clone(), store.operation_bytes(&op_id).unwrap()));
@@ -181,17 +185,19 @@ fuzz_target!(|data: &[u8]| {
                 let mut decoded = history.decoded[i].clone();
                 let mut encoded = proto::Operation::decode(op.as_slice()).unwrap();
                 let attributes = &mut encoded.metadata.as_mut().unwrap().attributes;
-                decoded
-                    .metadata
-                    .attributes
-                    .remove("musubi.original-parents");
-                attributes.remove("musubi.original-parents");
+                let attribute = if input.byte() % 2 == 0 {
+                    "musubi.original-parents"
+                } else {
+                    "musubi.workspace-context"
+                };
+                decoded.metadata.attributes.remove(attribute);
+                attributes.remove(attribute);
                 if let Some(value) = &value {
                     decoded
                         .metadata
                         .attributes
-                        .insert("musubi.original-parents".to_owned(), value.clone());
-                    attributes.insert("musubi.original-parents".to_owned(), value.clone());
+                        .insert(attribute.to_owned(), value.clone());
+                    attributes.insert(attribute.to_owned(), value.clone());
                 }
                 let id = jj_lib::content_hash::blake2b_hash(&decoded);
                 writer.operation(&id, &encoded.encode_to_vec()).unwrap();

@@ -791,6 +791,23 @@ the old record so jj can snapshot local edits against the correct tree. A later 
 recovery can bring back old operation history, as described under known jj limitations in
 [races.md](races.md).
 
+A full trim can also leave unpublished native operations on the operation root, with none
+of the canonical parents that identified foreign workspace aliases. Before moving those
+heads, musubi records `musubi.workspace-context`: the observed local-name bindings and known
+machine keys from the last accepted namespace, scoped to this machine. It preserves the
+actual root parents, without reconstructing erased native ancestry. The rewritten operations
+carry this evidence, and the counted source records also bind the old unstamped native ids
+so delayed commands and translation-cache loss use the same interpretation.
+
+The first surviving operation above the root uses these bindings to distinguish local
+workspaces from foreign aliases, but presence still comes from its real parents and work.
+Each subsequent fix-up WORK
+restores that copy's workspace bindings from the native view as it restores its last use;
+a following forget removes them again. Descendants inherit the context only on the capturing
+machine. Its exact foreign bindings apply only to aliases already in their native parents,
+so a new local workspace can reuse a forgotten foreign alias. Other machines consume the
+canonical views and render the canonical keys in their own namespaces.
+
 ### Presence through an abandon
 
 Contraction keeps every surviving operation's view, but presence ([Presence](#presence)) is

@@ -170,8 +170,14 @@ impl NodeRepo {
             work: Some(self.machine.key().to_owned()),
             ..Kind::default()
         };
-        let (view, presence) =
-            self.canonical_view(&head, view, std::slice::from_ref(&root), None, &kind)?;
+        let (view, presence) = self.canonical_view(
+            &head,
+            view,
+            std::slice::from_ref(&root),
+            None,
+            &kind,
+            &op.metadata,
+        )?;
         let settings = self.loader.settings();
         let now = settings
             .operation_timestamp()

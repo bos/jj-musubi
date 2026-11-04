@@ -4168,6 +4168,107 @@ fn a_trim_keeps_a_secondary_workspaces_snapshot_basis() {
     hive.assert_converged();
 }
 
+/// Work not yet canonicalized retains foreign workspace bindings when jj reparents it to
+/// root. A native view's `beta/default` must never become alpha's own workspace name.
+#[test]
+fn a_full_trim_below_unpublished_work_keeps_workspace_owners() {
+    let mut hive = default_workspaces();
+    hive.commit(0, "a", "shared work");
+    hive.sync();
+    let base = op_log(hive.repo(0))[0].0.clone();
+    hive.repo(1).jj(&["new", "-m", "unpublished receiver work"]);
+    let abandoned = hive.repo(0).jj(&[
+        "log",
+        "--no-graph",
+        "-r",
+        "beta/default@",
+        "-T",
+        "commit_id",
+    ]);
+    hive.repo(0).jj(&["abandon", &abandoned]);
+    let replacement = hive.repo(0).jj(&[
+        "log",
+        "--no-graph",
+        "-r",
+        "beta/default@",
+        "-T",
+        "commit_id",
+    ]);
+    assert_ne!(replacement, abandoned);
+    hive.repo(0).jj(&["workspace", "forget", "beta/default"]);
+    hive.repo(0).jj(&["new", "-m", "unpublished work"]);
+    hive.repo(0).jj(&["op", "abandon", &format!("..{base}")]);
+    let unstamped = op_log(hive.repo(0))[0].0.clone();
+    assert!(hive.node(0).check_abandon().unwrap());
+    hive.node(0).crash_writing_fixup(1).unwrap();
+    std::fs::remove_file(hive.repo(0).repo_path().join("musubi/translation")).unwrap();
+    hive.reopen(0);
+    hive.hive.sync(0).unwrap();
+    assert!(hive.workspace_names(0).contains("beta/default"));
+    assert_eq!(
+        hive.repo(0).jj(&[
+            "--ignore-working-copy",
+            "log",
+            "--no-graph",
+            "-r",
+            "beta/default@",
+            "-T",
+            "commit_id"
+        ]),
+        replacement
+    );
+    hive.sync();
+    for index in 0..2 {
+        std::fs::remove_file(hive.repo(index).repo_path().join("musubi/translation")).unwrap();
+        hive.reopen(index);
+    }
+    hive.repo(0).jj(&[
+        "--at-op", &unstamped, "bookmark", "create", "delayed", "-r", "@-",
+    ]);
+    hive.sync();
+    hive.assert_converged();
+    assert_eq!(
+        hive.workspace_names(0),
+        BTreeSet::from(["default".to_owned(), "beta/default".to_owned()])
+    );
+    assert_eq!(
+        hive.workspace_names(1),
+        BTreeSet::from(["default".to_owned(), "alpha/default".to_owned()])
+    );
+}
+
+/// Saved trim bindings must not claim a new local workspace after the foreign copy leaves.
+#[test]
+fn a_trim_does_not_reserve_a_forgotten_copys_workspace_name() {
+    let mut hive = default_workspaces();
+    hive.commit(0, "a", "shared work");
+    hive.sync();
+    let base = op_log(hive.repo(0))[0].0.clone();
+    hive.repo(0).jj(&["new", "-m", "unpublished work"]);
+    hive.repo(0).jj(&["op", "abandon", &format!("..{base}")]);
+    hive.sync();
+    let beta = hive.machine_key(1);
+    hive.node(0).forget_copy(&beta, "beta").unwrap();
+    hive.hive.sync(0).unwrap();
+    let second = hive.repo(0).path().with_file_name("alpha-second");
+    hive.repo(0).jj(&[
+        "workspace",
+        "add",
+        "--name",
+        "beta/default",
+        second.to_str().unwrap(),
+    ]);
+    hive.hive.sync(0).unwrap();
+    let workspaces = hive.node(0).machine_workspaces().unwrap();
+    assert!(workspaces.iter().any(|(name, _)| name == "beta/default"));
+    // Bringing beta back must keep the local name and choose a distinct foreign prefix.
+    hive.commit(1, "back", "beta returns");
+    hive.sync();
+    hive.assert_converged();
+    assert!(hive.workspace_names(0).contains("beta/default"));
+    assert!(hive.workspace_names(1).contains("alpha/beta/default"));
+}
+
 /// Abandoning only history from before a machine joined rewrites the operations since
 /// into ones that canonicalize as before, so replication carries on, even once garbage
 /// collection has removed the original join point.

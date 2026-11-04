@@ -145,6 +145,9 @@ checks out a remote's default branch:
 musubi clone app ~/src/app --hub devbox
 ```
 
+The destination must be new or empty. To share a repository you already have, run
+`musubi join` in it instead.
+
 ## The ssh key musubi adds
 
 The first time a machine uses a hub over ssh, musubi creates an ssh key for itself, `hub_key`

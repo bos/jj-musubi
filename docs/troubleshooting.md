@@ -197,6 +197,11 @@ You installed a new musubi, but the daemon still runs the old one. Run
 
 ## Joining a hive
 
+### "destination ... is not empty; choose a new or empty directory"
+
+`musubi clone` needs a new or empty directory. Choose another destination, or run
+`musubi join` in an existing repository to share that copy.
+
 ### Joining is refused
 
 The hub decides which hive a copy belongs in: one that shares some of its history and one of

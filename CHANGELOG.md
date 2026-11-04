@@ -6,6 +6,10 @@ change the protocol, so run the same release on the hub and every machine (see
 
 ## Unreleased
 
+- `musubi clone` refuses a nonempty destination before changing it. Previously it could
+  share that directory's files and Git history with the hive. Choose a new or empty directory,
+  or use `musubi join` to share an existing repository.
+
 - A forgotten copy keeps its own workspace names when another machine trims away their
   entire shared history, including names containing slashes and unsnapshotted edits.
   Interrupted syncs and translation-cache loss preserve that ownership too.

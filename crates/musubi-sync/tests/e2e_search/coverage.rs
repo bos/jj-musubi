@@ -291,6 +291,10 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
     ("empty_repositories_make_a_hive", Some(&["setup:empty"])),
     ("op_abandon_replicates", Some(&["op_abandon"])),
     (
+        "a_trim_above_a_dropped_base_keeps_materialized_work",
+        Some(&["op_abandon", "crash", "trim_below_accepted_push"]),
+    ),
+    (
         "a_full_trim_below_unpublished_work_keeps_workspace_owners",
         Some(&["op_abandon", "new_commit"]),
     ),

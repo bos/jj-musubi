@@ -6,6 +6,9 @@ change the protocol, so run the same release on the hub and every machine (see
 
 ## Unreleased
 
+- A history trim still notices operations materialized before a crash when an earlier trim
+  removed the last accepted base. It keeps new work syncing instead of refusing the copy.
+
 - Commands that finish while a machine takes a history trim keep their original workspace
   ownership and operation identity, including after cache loss or a delayed command at the
   old operation.

@@ -847,6 +847,61 @@ fn op_abandon_below_a_merge_with_concurrent_work_replicates() {
     }
 }
 
+/// A trim can leave the accepted anchors at root while later own operations already have
+/// canonical identities. A native trim must still notice those materialized source bodies.
+#[test]
+fn a_trim_above_a_dropped_base_keeps_materialized_work() {
+    for keep_original_branch in [false, true] {
+        let mut hive = default_workspaces();
+        hive.commit(0, "base", "shared base");
+        hive.sync();
+        let base = op_log(hive.repo(0))[0].0.clone();
+        hive.commit(1, "b", "beta work");
+        hive.repo(0).jj(&["new", "-m", "surviving tip"]);
+        hive.repo(0).jj(&["op", "abandon", &format!("..{base}")]);
+        hive.hive.sync(0).unwrap();
+        hive.hive.sync_steps(1, 1, &mut |_, reply| reply).unwrap();
+        let accepted =
+            std::fs::read_to_string(hive.repo(1).repo_path().join("musubi/accepted_base")).unwrap();
+        assert!(accepted.trim().bytes().all(|b| b == b'0'), "{accepted}");
+        let operations = op_log(hive.repo(1));
+        let original = operations
+            .iter()
+            .find(|(_, description)| description.starts_with("commit "))
+            .unwrap()
+            .0
+            .clone();
+        let snapshot = operations
+            .iter()
+            .find(|(_, description)| description == "snapshot working copy")
+            .unwrap()
+            .0
+            .clone();
+        std::fs::remove_file(hive.repo(1).repo_path().join("musubi/translation")).unwrap();
+        hive.reopen(1);
+        hive.repo(1).jj(&["op", "abandon", &snapshot]);
+        if keep_original_branch {
+            hive.repo(1).jj(&[
+                "--at-op", &original, "bookmark", "create", "side", "-r", "@-",
+            ]);
+        }
+        hive.commit(1, "later", "later beta work");
+        hive.hive
+            .sync_all()
+            .unwrap_or_else(|error| panic!("original branch={keep_original_branch}: {error:?}"));
+        hive.assert_converged();
+        for machine in 0..2 {
+            for work in ["beta work", "later beta work"] {
+                assert!(
+                    hive.visible(machine)
+                        .iter()
+                        .any(|description| description.ends_with(work))
+                );
+            }
+        }
+    }
+}
+
 /// What survives of an operation that is the hub's head when another machine dropped it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Survivors {

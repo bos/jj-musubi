@@ -308,25 +308,62 @@ impl NodeRepo {
     }
 
     fn notice_abandons(&mut self, watched: &[HubOp]) -> Result<bool, NodeError> {
+        if !self.canonical.has_operations()? {
+            return Ok(false);
+        }
         let root = self.canonical.root_operation_id().clone();
+        let heads = self.local_heads()?;
+        let (mut mapped, mut unmapped) = self.local_walk(&heads)?;
         let mut bases = vec![];
         for base in watched {
             bases.extend(self.to_node_ids(&base.0)?);
+        }
+        // A completed realization can outlive its lost cache entry while the accepted
+        // anchors have already contracted to root. Its immutable source body is still an
+        // anchor: jj can trim its parents before the next sync notices that realization.
+        for (_, op) in &unmapped {
+            if let Some(named) = op
+                .metadata
+                .attributes
+                .get(CANONICAL_ATTRIBUTE)
+                .and_then(OperationId::try_from_hex)
+                .map(CanonicalOp)
+                .filter(|id| self.canonical.has_operation(id))
+            {
+                bases.extend(self.current_ids(&named)?);
+            }
         }
         let bases: Vec<CanonicalOp> = dedup(bases).into_iter().filter(|op| *op != root).collect();
         if bases.is_empty() || bases.iter().any(|op| !self.canonical.has_operation(op)) {
             return Ok(false);
         }
-        let heads = self.local_heads()?;
-        let (mut mapped, mut unmapped) = self.local_walk(&heads)?;
+        let marked = |unmapped: &[(LocalOp, StoreOperation)]| {
+            unmapped.iter().any(|(_, op)| {
+                op.metadata
+                    .attributes
+                    .get(CANONICAL_ATTRIBUTE)
+                    .and_then(OperationId::try_from_hex)
+                    .map(CanonicalOp)
+                    .is_some_and(|id| self.canonical.has_operation(&id))
+            })
+        };
+        let mut has_marked = marked(&unmapped);
         let mut reached = self.reaches(&bases, &mapped)?;
-        // So too where the translation cache was lost: look again once what canonicalizes to
-        // an operation the hive has is mapped, as canonicalizing would map it.
-        if !reached && self.map_exactly(&mapped, &unmapped)? {
+        // A valid branch can still reach the base while another branch has a realization
+        // jj reparented. Map unchanged markers first, then inspect any that remain.
+        if (!reached || has_marked) && self.map_exactly(&mapped, &unmapped)? {
             (mapped, unmapped) = self.local_walk(&heads)?;
             reached = self.reaches(&bases, &mapped)?;
+            has_marked = unmapped.iter().any(|(_, op)| {
+                op.metadata
+                    .attributes
+                    .get(CANONICAL_ATTRIBUTE)
+                    .and_then(OperationId::try_from_hex)
+                    .map(CanonicalOp)
+                    .is_some_and(|id| self.canonical.has_operation(&id))
+            });
         }
-        if reached && !self.records.moving {
+        if reached && !self.records.moving && !has_marked {
             return Ok(false);
         }
         let frontier: Vec<CanonicalOp> = mapped.iter().map(|(_, c)| c.clone()).collect();

@@ -742,11 +742,12 @@ fn hub_join_sync_clone_and_list() {
 #[test]
 fn completion_scripts_complete_the_commands() {
     for shell in ["bash", "elvish", "fish", "nushell", "powershell", "zsh"] {
-        let out = Command::new(musubi())
-            .args(["completion", shell])
-            .env_clear()
-            .output()
-            .unwrap();
+        let mut command = Command::new(musubi());
+        command.args(["completion", shell]).env_clear();
+        if let Some(path) = std::env::var_os("LLVM_PROFILE_FILE") {
+            command.env("LLVM_PROFILE_FILE", path);
+        }
+        let out = command.output().unwrap();
         let script = String::from_utf8(out.stdout).unwrap();
         assert!(
             out.status.success(),

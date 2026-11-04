@@ -87,6 +87,65 @@ which makes the suite three times as fast; a bare `cargo nextest run` uses the d
 `MUSUBI_KEEP_TEST_DIRS` keeps the directories after a run, for inspecting a failure, and puts
 them on the disk.
 
+## Coverage reconnaissance
+
+`just coverage` is opt-in diagnostic evidence, with no percentage gate. Install the tool and
+Rust's matching LLVM tools once, alongside the normal test prerequisites:
+
+```sh
+cargo install cargo-llvm-cov --version 0.9.1 --locked
+rustup component add llvm-tools-preview
+just coverage
+```
+
+The recipe builds the Lean oracle, clears old coverage, instruments the workspace, and calls
+`just test`, including its macOS RAM disk and nextest's default filters. It writes a source
+report to `target/llvm-cov/html/index.html` and LLVM JSON to
+`target/llvm-cov/coverage.json`. Profiles and reports stay under the ignored `target/` even
+when `CARGO_TARGET_DIR` is set. It rebuilds the workspace's artifacts there; do not run it
+concurrently with another build in the same workspace. Dependencies are not the subject of
+the report, and the normal suite has no new dependency on the coverage tool.
+
+Package, test, feature and nextest-profile selectors go to nextest just as with `just test`;
+each invocation starts a fresh report. Alternate Cargo profiles, explicit targets, Cargo
+configuration overrides and prebuilt test artifacts are refused, so collection and reporting
+use the same build layout. Pass short options separately:
+
+```sh
+just coverage -p musubi-hub
+just coverage -p musubi-jj -E 'test(/^join::/)'
+just coverage --profile ci       # includes wrong-reply recovery with real repositories
+```
+
+Keep the revision, host target (`rustc -vV`), tool versions and exact command with any
+conclusions. A focused run says nothing about tests it excluded. The default run excludes the
+search and the longer wrong-reply recovery test; it does not run fuzzing, Kani, Lean proofs as
+instrumented Rust, or doctests. The report includes test code, and generic instantiations can
+have different coverage, so compare production source regions, not an aggregate percentage. See
+the [cargo-llvm-cov documentation](https://github.com/taiki-e/cargo-llvm-cov) for report
+formats.
+
+`roots_find_each_history_and_stop_at_known_commits` protects the simple backend's contribution
+to hive matching: all first commits in merged histories are found once, already indexed
+commits stop the walk, and jj's synthetic root is excluded. The simple-backend sync examples
+alone do not exercise this index walk.
+
+Start with unexecuted recovery and refusal paths: reopening stored state, failed publication,
+rollback, malformed input and platform adapters. Read the callers and existing assertions
+before deciding a test is missing. An executed line does not show that its effects were
+asserted: a recovery test must check the retained work and successful retry, not just an error
+or absence of panic. A new test belongs at the narrowest existing layer that protects a
+specific guarantee, and must fail when that guarantee is broken
+([testing-philosophy.md](testing-philosophy.md#showing-that-a-test-works)). Do not add a test
+merely to execute an uncovered line.
+
+Coverage is local to the compiled platform: macOS cannot report uncompiled Linux or Windows
+branches. Collect on those hosts before drawing conclusions about them. Hermetic test
+commands preserve `LLVM_PROFILE_FILE` so instrumented musubi subprocesses contribute too;
+a daemon or hub killed before it flushes its profile can still look unexecuted. Tests that
+skip for missing prerequisites and processes that abort have the same limitation. Check test
+output and process lifetimes before treating a blank region as a missing test.
+
 ## CI
 
 CI runs clippy and the default suite on Linux, macOS and Windows, since each compiles code the

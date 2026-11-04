@@ -43,6 +43,7 @@ lint:
 # On macOS the tests' directories go on a RAM disk made for the run, unless
 # MUSUBI_KEEP_TEST_DIRS keeps them: jj syncs what it writes, and on the SSD the suite takes
 # three times as long.
+[positional-arguments]
 test *args:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -56,7 +57,39 @@ test *args:
         diskutil erasevolume APFS "musubi-test-$$" "$dev" > /dev/null
         export TMPDIR="/Volumes/musubi-test-$$/"
     fi
-    cargo nextest run --workspace {{args}}
+    # The virtual workspace defaults to all members; let -p narrow that selection.
+    cargo nextest run "$@"
+
+# Collect diagnostic coverage with the same nextest filters and RAM disk as `test`.
+[positional-arguments]
+coverage *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # Collection and reporting must use the same build layout. Support test selection,
+    # not alternate builds or prebuilt nextest archives.
+    for arg in "$@"; do
+        case "$arg" in
+            --) break ;;
+            -r*|--release|--cargo-profile*|--target*|--manifest-path*|--config|--config=*|--archive-file*|--binaries-metadata*|--cargo-metadata*|--workspace-remap*|--build-dir-remap*)
+                echo "coverage: alternate build layouts and prebuilt test artifacts are not supported" >&2
+                exit 2 ;;
+            --*|-p*|-E*|-P*|-F*|-j*) ;;
+            -??*)
+                echo "coverage: pass short options separately, not in a group" >&2
+                exit 2 ;;
+        esac
+    done
+    just oracle
+    # Keep reports and profiles local and ignored, even with CARGO_TARGET_DIR set.
+    export CARGO_TARGET_DIR="$PWD/target"
+    export CARGO_LLVM_COV_TARGET_DIR="$CARGO_TARGET_DIR"
+    coverage_env=$(cargo llvm-cov show-env --sh --no-cfg-coverage)
+    eval "$coverage_env"
+    cargo llvm-cov clean --workspace
+    rm -f target/llvm-cov/coverage.json
+    just test "$@"
+    cargo llvm-cov report --html --output-dir target/llvm-cov
+    cargo llvm-cov report --json --output-path target/llvm-cov/coverage.json
 
 docs:
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --quiet

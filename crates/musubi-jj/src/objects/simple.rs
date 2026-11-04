@@ -361,6 +361,56 @@ mod tests {
         path
     }
 
+    /// Hive matching needs every first commit, once each, including separate histories
+    /// joined by a merge. An incremental index must stop at commits it already indexed,
+    /// and never mistake jj's synthetic root for a stored first commit.
+    #[test]
+    fn roots_find_each_history_and_stop_at_known_commits() {
+        let dir = musubi_testutil::tempdir();
+        let backend = SimpleBackend::init(dir.path());
+        let root = backend
+            .read_commit(backend.root_commit_id())
+            .block_on()
+            .unwrap();
+        let write = |parents, description: &str| {
+            backend
+                .write_commit(
+                    jj_lib::backend::Commit {
+                        parents,
+                        change_id: ChangeId::new(vec![7; CHANGE_ID_LENGTH]),
+                        description: description.to_owned(),
+                        ..root.clone()
+                    },
+                    None,
+                )
+                .block_on()
+                .unwrap()
+                .0
+        };
+        let a = write(vec![backend.root_commit_id().clone()], "first history");
+        let b = write(vec![backend.root_commit_id().clone()], "second history");
+        let merge = write(vec![a.clone(), b.clone()], "merge histories");
+        let tip = write(vec![merge], "tip");
+        let store = SimpleStore::new(dir.path());
+        let sorted = |mut ids: Vec<CommitId>| {
+            ids.sort();
+            ids
+        };
+        let wants = [tip, a.clone(), backend.root_commit_id().clone()];
+        assert_eq!(
+            sorted(store.roots(&wants, &[]).unwrap()),
+            sorted(vec![a.clone(), b.clone()])
+        );
+        assert_eq!(
+            store
+                .roots(&wants, std::slice::from_ref(&a))
+                .unwrap()
+                .as_slice(),
+            std::slice::from_ref(&b)
+        );
+        assert!(store.roots(&wants, &[a, b]).unwrap().is_empty());
+    }
+
     /// Objects a buggy or hostile peer can send are refused before they are stored: under an
     /// id of another length, or one their contents don't hash to, which would stand for the
     /// real object for good; or that jj would panic on as it reads or indexes them, though

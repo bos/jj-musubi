@@ -66,6 +66,7 @@ cargo nextest run -p musubi-jj                         # one crate
 Some runs are slow, and not part of `just check`:
 
 ```sh
+just coverage       # diagnostic Rust coverage (needs cargo-llvm-cov and llvm-tools-preview)
 just property       # the generated end-to-end search
 just fuzz           # all fuzz targets across available CPUs (needs cargo-fuzz and nightly Rust)
 just fuzz bundle    # one target across available CPUs, until stopped

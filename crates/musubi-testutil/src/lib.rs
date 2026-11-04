@@ -497,6 +497,9 @@ impl TestRepo {
             "TEMP",
             "TMP",
             "PATHEXT",
+            // Coverage profiles from instrumented child commands belong beside the tests'
+            // profiles, rather than in their temporary repositories.
+            "LLVM_PROFILE_FILE",
         ] {
             if let Some(value) = std::env::var_os(name) {
                 command.env(name, value);

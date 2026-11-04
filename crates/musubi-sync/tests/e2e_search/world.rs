@@ -1680,8 +1680,9 @@ impl World {
 
     /// If `err`, from node `m`'s `what`, is its stop behind records the hub pruned, checks
     /// that it is expected, and recovers from it as a user would, and returns true. It is
-    /// expected only of a copy the hive forgot, which the hub doesn't wait for, that hasn't
-    /// taken as many records as the hub pruned. The user makes a new copy with `musubi clone`,
+    /// expected only of a copy the hub did not wait for at the actual prune and which lacks
+    /// that exact count and digest. A later indirect push can make that copy present again.
+    /// The user makes a new copy with `musubi clone`,
     /// and runs `musubi leave --force` in this one, which tells the hive nothing and keeps all
     /// it has (docs/troubleshooting.md): this one stays on its machine, out of the hive, and
     /// out of the checks. Whatever it did since its last sync never reached the hive, and the
@@ -1696,14 +1697,29 @@ impl World {
         if !stopped {
             return false;
         }
-        let pruned = self.fx.hive.hub.store().pruned() as u64;
-        let (taken, _) = self.fx.hive.members[m].adapter.repo().record_state();
-        let forgotten = self.forgotten(m);
-        if !forgotten || taken >= pruned {
+        let pruned = self.fx.hive.hub.pruned();
+        let key = self.fx.machine_key(m);
+        let observation = self
+            .fx
+            .hive
+            .prunes
+            .iter()
+            .rev()
+            .find(|prune| prune.records == pruned);
+        let excluded = observation.is_some_and(|prune| {
+            !prune.present.contains(&key)
+                && (prune.known.contains(&key) || !prune.reported.contains_key(&key))
+        });
+        let prefix = musubi_jj::records::RecordPrefix {
+            count: pruned.count,
+            digest: musubi_jj::records::RecordDigest::from_bytes(&pruned.digest),
+        };
+        let repo = self.fx.hive.members[m].adapter.repo();
+        let missing = repo.held_records(&prefix).is_none();
+        if !excluded || !missing {
             self.fail(&format!(
-                "{what} of {} stopped behind pruned records, but the hive {} it, and it took {taken} of the {pruned} the hub pruned: {err:#}",
+                "{what} of {} refused pruned records {pruned:?}: excluded at prune={excluded}, lacks exact chain={missing}: {err:#}",
                 self.machine(m),
-                if forgotten { "forgot" } else { "hasn't forgotten" },
             ));
         }
         fired("prune:stopped");
@@ -1726,33 +1742,6 @@ impl World {
             .iter()
             .map(|op| merge_key(&canonical.read_operation(op).unwrap()))
             .collect()
-    }
-
-    /// Whether the hive has forgotten machine `m`'s copy: the hub's head doesn't show it, and
-    /// a machine forgot it, by `musubi forget` or once it went unused: the hub's history has
-    /// the forget, or a machine made one and the copy hasn't worked since (`forgot`), as where
-    /// an abandon dropped the forget, which keeps the copy forgotten.
-    fn forgotten(&self, m: usize) -> bool {
-        let key = self.fx.machine_key(m);
-        if self.fx.shown_machines().contains(&key) {
-            return false;
-        }
-        if self.forgot.contains_key(&key) {
-            return true;
-        }
-        let store = self.fx.hive.hub.store();
-        let canonical = store.canonical();
-        let head = CanonicalOp(store.head().1.clone());
-        let history = canonical.ancestors_until(&[head], |_| false).unwrap();
-        history.iter().any(|op| {
-            canonical
-                .read_operation(op)
-                .unwrap()
-                .metadata
-                .attributes
-                .get(musubi_jj::presence::FORGET_ATTRIBUTE)
-                .is_some_and(|keys| keys.split_whitespace().any(|k| k == key))
-        })
     }
 
     /// A new copy of the hive on machine `m`, as `musubi clone` makes: an empty colocated

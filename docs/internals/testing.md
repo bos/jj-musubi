@@ -575,10 +575,12 @@ branch jj hasn't imported, a node can stop halfway through a sync.
 Every sync step must succeed, but for two stops a user recovers from as the error says. One is jj
 failing to merge a machine's operations with the hive's ([races.md, "Known jj
 limitations"](races.md#known-jj-limitations)), which the test gets past by reverting the operation
-named. The other is a copy behind records the hub pruned, which is expected only of a copy the
-hive forgot, whose work the hub's head no longer shows, whose forget the hub's history has, or a
-machine made and the copy hasn't worked since (an abandon can drop a forget, not its effect), and
-that has taken fewer records than the hub pruned; anywhere else it fails the case. The user then
+named. The other is a copy that lacks the exact chain the hub pruned, identified by count and
+digest. The test records presence, known copies and reports at the actual prune. A refusal is
+expected only if the hub did not wait for that copy then and the copy lacks that exact prefix.
+Holding another chain with the same count does not suffice. A later indirect push can make the
+copy present again, so current presence cannot decide this check. Anywhere else the refusal
+fails the case. The user then
 makes a new copy with `musubi clone`, bringing nothing across, and runs `musubi leave --force` in
 the old one, which tells the hive nothing: the new copy takes the old one's place in the rest of
 the sequence, and the old one, out of the hive, is out of the checks.

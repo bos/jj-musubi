@@ -35,7 +35,7 @@ use crate::Attachment;
 use crate::blobs::BlobId;
 use crate::blobs::BlobStore;
 
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 pub const JJ_LIB_VERSION: &str = "0.47.1";
 /// This release of musubi, as every message says, and `musubi --version`: for a build deployed
 /// from source, followed by when it was deployed and its commit (`build.rs`).

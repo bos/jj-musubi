@@ -1123,6 +1123,13 @@ back off; only a valid hub greeting counts as a successful connection. A bounded
 may precede that greeting, whose unambiguous prefix prevents mistaking shell output for the
 protocol.
 
+Each stream connection admits at most 1024 subscriptions and 1024 requests in flight, with
+distinct ids within each kind. Excess or duplicate live ids close the connection before the
+new work starts. The client checks the same limits before sending; subscriptions to a subject
+already on the connection share its slot. There is no unsubscribe frame, so a client keeps a
+subject's slot until disconnect. Completed relay tasks release their slots. These limits bound
+the relay's tasks, not work a timed-out request has already queued inside the hub.
+
 ### Running a hub
 
 A hub is for one person's machines or a team whose members trust each other: anyone who can

@@ -82,6 +82,11 @@ const INCOMPATIBLE_RETRY_DELAY: Duration = Duration::from_secs(60);
 /// whose other side has stopped reading, as one that vanished without a word has, is ended.
 const MAX_QUEUED: usize = 1024;
 
+/// Per-connection admission limits, checked on both sides. Client subscription slots stay
+/// in use until disconnect, since there is no unsubscribe frame; request slots end with the call.
+const MAX_SUBSCRIPTIONS: usize = 1024;
+const MAX_REQUESTS: usize = 1024;
+
 fn check_subject(subject: &str) -> Result<(), TransportError> {
     if subject.is_empty() || subject.len() > usize::from(u16::MAX) {
         return Err(TransportError::Other(format!(
@@ -466,8 +471,14 @@ impl Transport for StreamTransport {
             .values_mut()
             .find(|subscribed| subscribed.subject == subject)
         {
+            subscribed.to.retain(|to| !to.is_closed());
             subscribed.to.push(sender);
             return Ok(Subscription::new(receiver));
+        }
+        if state.subscriptions.len() >= MAX_SUBSCRIPTIONS {
+            return Err(TransportError::Other(format!(
+                "this connection already has {MAX_SUBSCRIPTIONS} subscriptions"
+            )));
         }
         let sid = state.next_id;
         state.next_id += 1;
@@ -504,6 +515,11 @@ impl Transport for StreamTransport {
             {
                 let mut state = self.shared.lock();
                 if state.out.is_some() {
+                    if state.pending.len() >= MAX_REQUESTS {
+                        return Err(TransportError::Other(format!(
+                            "this connection already has {MAX_REQUESTS} requests in flight"
+                        )));
+                    }
                     let id = state.next_id;
                     state.next_id += 1;
                     let (reply, replied) = oneshot::channel();

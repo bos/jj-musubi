@@ -409,9 +409,14 @@ and saves failures; a paused Tokio clock makes waits deterministic. These tests 
 ssh, socket readiness, the daemon supervisor or a repository sync; the transport contracts
 cover reconnection and subscription reuse, and the sync fault tests cover lost calls.
 
+Focused stream examples also reject excess silent subscriptions, unanswered requests and
+duplicate live ids, and check that an answered request frees its id and slot. Client examples
+keep subject sharing available at the subscription limit and refuse excess subjects and calls.
 The CLI's existing clone scenario refuses both an occupied directory and an existing Git
 directory before either gains jj state or joins the hive. The ssh scenario also fills the
-destination while a clone contacts the hub, which must refuse it on returning.
+destination while a clone contacts the hub, which must refuse it on returning. A relay example
+finishes a request while reading part of the next frame: its reply goes out and the partial
+frame retains its bytes.
 
 The Unix process tests in `crates/musubi/src/ssh/supervisor_tests.rs` exercise the shipping
 ssh supervisor, stderr reader, output wrapper and health tracking with controlled children

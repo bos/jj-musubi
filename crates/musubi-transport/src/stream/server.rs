@@ -1,5 +1,6 @@
 //! Relaying one client's stream to the hub's transport.
 
+use std::collections::HashSet;
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,6 +16,8 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::task::JoinSet;
 
 use super::MAX_QUEUED;
+use super::MAX_REQUESTS;
+use super::MAX_SUBSCRIPTIONS;
 use super::frame::FRAME_OVERHEAD;
 use super::frame::Frame;
 use super::frame::NO_RESPONDERS;
@@ -30,6 +33,32 @@ use crate::TransportError;
 
 /// The longest a request relayed for a client may take, whatever the client asked for.
 const MAX_REQUEST_TIMEOUT: Duration = Duration::from_secs(3600);
+
+enum Finished {
+    Subscription(u64),
+    Request(u64, Frame),
+}
+
+impl Finished {
+    fn apply(
+        self,
+        subscriptions: &mut HashSet<u64>,
+        requests: &mut HashSet<u64>,
+        out: &mpsc::Sender<Vec<u8>>,
+        stopped_reading: &Notify,
+    ) {
+        match self {
+            Self::Subscription(sid) => {
+                subscriptions.remove(&sid);
+            }
+            Self::Request(id, frame) => {
+                // The peer may send another call as soon as it reads this reply.
+                requests.remove(&id);
+                queue(out, stopped_reading, &frame);
+            }
+        }
+    }
+}
 
 /// Serves one connection to the hub, relaying what the other side sends through
 /// `transport`, which reaches the hub's service, until either side closes it. Requests are
@@ -58,12 +87,46 @@ pub async fn serve(
     let (out, frames) = mpsc::channel(MAX_QUEUED);
     let stopped_reading = Arc::new(Notify::new());
     // Subscriptions and requests in progress, which end with the connection.
-    let mut tasks = JoinSet::new();
+    let mut tasks = JoinSet::<Finished>::new();
+    let mut subscriptions = HashSet::new();
+    let mut requests = HashSet::new();
     let relay = async {
-        while let Some(frame) = read_frame(&mut reader, limit + FRAME_OVERHEAD).await? {
-            while tasks.try_join_next().is_some() {}
+        loop {
+            let frame = {
+                // Keep partial reads alive while a call completes: recreating this future
+                // could drop bytes already consumed by read_exact and misread the next frame.
+                let reading = read_frame(&mut reader, limit + FRAME_OVERHEAD);
+                tokio::pin!(reading);
+                loop {
+                    tokio::select! {
+                        frame = &mut reading => break frame?,
+                        Some(done) = tasks.join_next(), if !tasks.is_empty() => {
+                            done.map_err(io::Error::other)?.apply(
+                                &mut subscriptions, &mut requests, &out, &stopped_reading,
+                            );
+                        }
+                    }
+                }
+            };
+            let Some(frame) = frame else { return Ok(()) };
+            while let Some(done) = tasks.try_join_next() {
+                done.map_err(io::Error::other)?.apply(
+                    &mut subscriptions,
+                    &mut requests,
+                    &out,
+                    &stopped_reading,
+                );
+            }
             match frame {
                 Frame::Sub { sid, subject } => {
+                    if subscriptions.len() >= MAX_SUBSCRIPTIONS {
+                        return Err(invalid(format!(
+                            "the client exceeded {MAX_SUBSCRIPTIONS} subscriptions"
+                        )));
+                    }
+                    if !subscriptions.insert(sid) {
+                        return Err(invalid(format!("duplicate subscription id {sid}")));
+                    }
                     let mut subscription = transport
                         .subscribe(&subject)
                         .await
@@ -81,6 +144,7 @@ pub async fn serve(
                                 break;
                             }
                         }
+                        Finished::Subscription(sid)
                     });
                 }
                 // Delivery is best effort: what can't be published is lost, as on the way.
@@ -93,15 +157,22 @@ pub async fn serve(
                     subject,
                     payload,
                 } => {
-                    let (transport, out) = (transport.clone(), out.clone());
-                    let stopped_reading = stopped_reading.clone();
+                    if requests.len() >= MAX_REQUESTS {
+                        return Err(invalid(format!(
+                            "the client exceeded {MAX_REQUESTS} requests in flight"
+                        )));
+                    }
+                    if !requests.insert(id) {
+                        return Err(invalid(format!("duplicate request id {id}")));
+                    }
+                    let transport = transport.clone();
                     tasks.spawn(async move {
                         let timeout = timeout.min(MAX_REQUEST_TIMEOUT);
                         let frame = match transport.request(&subject, payload, timeout).await {
                             Ok(payload) => Frame::Reply { id, payload },
                             Err(err) => failure(id, err),
                         };
-                        queue(&out, &stopped_reading, &frame);
+                        Finished::Request(id, frame)
                     });
                 }
                 frame => {
@@ -112,7 +183,6 @@ pub async fn serve(
                 }
             }
         }
-        Ok(())
     };
     tokio::select! {
         result = relay => result,

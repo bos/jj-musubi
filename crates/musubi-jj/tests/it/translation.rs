@@ -604,6 +604,75 @@ fn model_history(
         .collect()
 }
 
+/// Dropping the ancestor too renames both survivors: unlike literal parents of the old head,
+/// they pass left_beside, and the other realization is also among taken_beside's heads.
+#[test]
+fn prepared_advance_merges_each_survivor_once() {
+    use musubi_jj::canonical::Contraction;
+    use musubi_jj::records::{HubOp, Record, RecordPrefix};
+    use pollster::FutureExt as _;
+
+    let env = TestEnv::new();
+    let repo = env.init_repo("beta");
+    let mut node = open(&repo);
+    let x = node.local_heads().unwrap().pop().unwrap();
+    let canonical_x = node.canonicalize(&x).unwrap();
+    for name in ["p", "q"] {
+        repo.jj(&[
+            "--ignore-working-copy",
+            "--at-op",
+            &x.0.hex(),
+            "bookmark",
+            "create",
+            name,
+            "-r",
+            "@",
+        ]);
+    }
+    assert_eq!(node.local_heads().unwrap().len(), 2);
+    let merged = node.merge_heads().unwrap();
+    let canonical = node.canonicalize(&merged).unwrap();
+    let old_parents = node.canonical_store().parents(&canonical).unwrap();
+    let drops = [canonical_x, canonical.clone()];
+    let mut contraction = Contraction::new(node.canonical_store(), drops.clone()).unwrap();
+    let survivors = contraction
+        .images(node.canonical_store(), &canonical)
+        .unwrap();
+    let record = Record::new(drops.into_iter().map(HubOp));
+    assert!(
+        node.prepare_records(&RecordPrefix::none(), &[record])
+            .unwrap()
+    );
+    assert_eq!(
+        survivors.len(),
+        2,
+        "old parents: {old_parents:?}; survivors: {survivors:?}"
+    );
+    assert!(survivors.iter().all(|op| !old_parents.contains(op)));
+    assert_eq!(node.local_heads().unwrap(), vec![merged]);
+    node.advance_to(&survivors).unwrap();
+    // No head-merging helper or jj command may hide the actual published parent list.
+    let heads = node.local_heads().unwrap();
+    assert_eq!(heads.len(), 1);
+    let raw = node
+        .loader()
+        .op_store()
+        .read_operation(&heads[0].0)
+        .block_on()
+        .unwrap();
+    assert_eq!(
+        raw.parents.len(),
+        2,
+        "each survivor must be merged exactly once"
+    );
+    let parents: BTreeSet<_> = raw
+        .parents
+        .into_iter()
+        .map(|id| node.canonicalize(&LocalOp(id)).unwrap())
+        .collect();
+    assert_eq!(parents, survivors.into_iter().collect());
+}
+
 /// Unlike the core's fake, this observes the real op-head store before any jj command can
 /// merge it after advance returns. Dropping a concurrent parent or losing an old operation
 /// must disagree with the oracle's advance followed by merge. This observes the final graph,

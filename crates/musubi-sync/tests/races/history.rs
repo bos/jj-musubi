@@ -2304,8 +2304,13 @@ fn advancing_to_what_survives_of_a_dropped_head() {
         let reached: BTreeSet<usize> = if merge {
             // A new operation, merging exactly that frontier.
             assert!(!before.contains(head), "{case}");
-            read(head)
-                .parents
+            let parents = read(head).parents;
+            assert_eq!(
+                parents.len(),
+                frontier.len(),
+                "{case}: duplicate merge parents"
+            );
+            parents
                 .iter()
                 .map(|p| number(&node.canonical_of(&LocalOp(p.clone())).unwrap()).unwrap())
                 .collect()

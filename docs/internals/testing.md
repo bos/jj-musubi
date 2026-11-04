@@ -44,6 +44,22 @@ leaves the affected machine's published heads alone. [Conformance and
 limits](conformance.md#a-repository-advance-that-also-merges) explains what these observations
 connect to the proofs.
 
+The inline native regression
+`node::realize::advance_tests::late_merge_store_errors_preserve_heads_and_recover` denies real
+simple-op-store writes after advance's successful merge preflight. It observes separate raw
+heads after the late merge and cleanup fail, and checks retained history, reopening and retry,
+convergence with the source, and ref export when merging rebases a local bookmark. A one-time
+fault also checks cleanup succeeding inside the original call. Its wrapper needs private
+loader access, so it lives beside `realize`, with no production fault hook. It runs on Unix
+where directory mode bits deny writes. The
+[conformance description](conformance.md#a-repository-advance-that-also-merges) states the
+exact boundary and limits.
+
+`translation::prepared_advance_merges_each_survivor_once` checks a prepared record that drops
+an ancestor and a merge head, leaving two renamed survivors. One survivor appears in both
+merge-input lists; the raw published parent list must contain it once. This small real jj
+fixture runs on every platform and complements the ordinary and store-failure advance cases.
+
 `a_sync_stopped_while_taking_an_abandon_the_hub_then_loses` requires the affected machine to
 republish a drop after an interrupted adoption and hub rollback, before any other machine
 syncs. `taking_an_abandon_resumes_where_it_stopped` stops the shipping path at its hold save,
@@ -788,3 +804,24 @@ polls. It requires beta to remain present, the record to stay unpruned, alpha's 
 work time to stay unchanged, and later convergence. Replacing the union of old and new known
 copies with only the new known copies reproduces the failure. Omitting the preference for
 surviving work's time makes the independent harness-clock assertion fail.
+
+### Advance and merge campaign
+
+For the native advance boundary, the 2026-11-03 targeted run selected five generated mutants
+of `advance_to`'s input filter and merge guard, with these tests:
+
+```sh
+advance_tests='test(prepared_advance_merges_each_survivor_once)'
+advance_tests="$advance_tests | test(late_merge_store_errors_preserve_heads_and_recover)"
+advance_tests="$advance_tests | test(advance_with_concurrent_heads_refines_advance_then_merge)"
+cargo mutants --in-place --package musubi-jj \
+  --file crates/musubi-jj/src/node/realize.rs \
+  --re ':(707|725):.*(replace &&|replace != with ==|with false|delete !)' \
+  --test-tool nextest --timeout 120 -- -E "$advance_tests"
+```
+
+The line numbers select that snapshot's five mutants; inspect `cargo mutants --list` before
+repeating this on changed source. All five were caught, and the unchanged baseline passed.
+The [advance and merge](conformance.md#a-repository-advance-that-also-merges) section also
+records the five hand-written failure-path controls and the two initial survivors that
+the final selection catches.

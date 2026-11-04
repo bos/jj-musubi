@@ -316,14 +316,62 @@ It also checks the fetched ref in git and subsequent convergence. This is a conc
 normalization boundary, not a proof combining contraction, refs and the protocol; that remains
 [#77](https://github.com/bos/jj-musubi/issues/77).
 
+`translation::prepared_advance_merges_each_survivor_once` checks the prepared multihead
+boundary separately. Real jj operations form `X -> {P, Q} -> M`; contracting both `X` and
+`M` makes two renamed survivors `P'` and `Q'`. The test builds these canonical inputs with
+`Contraction`, prepares the record while `M` remains the physical head, and advances to both
+survivors. It reads the raw published parent list before any repairing command, requiring
+exactly two entries and the two survivors' canonical identities. The second survivor can occur
+both among the renamed old heads and among the other realizations, so deduplication before
+merging matters. The existing survivor-advance race also checks physical parent count against
+the oracle's frontier size, so a set comparison cannot hide duplicate entries.
+This checks `advance_to` with supplied valid canonical survivor inputs; it does not check
+`NodeAdapter` deriving that frontier from an announced head while records remain prepared.
+
 `check_mergeable` refuses an unsafe merge before publishing the realization. The race
 `root_parent_merge_bug_is_explained` checks both the refusal and that the affected machine's
 raw heads stay unchanged. If the later unpublished merge fails (a store error, a jj bug, or
 record-taking changing the merge base), `advance` publishes the advanced head set instead,
 and its working-copy cleanup tries the normal merge path. That path may fail and return an
-error after the advance; it must not be described as an atomic rollback. The fallback's
-store-error branch is not fault-injected by these tests. A later working-copy repair, when
-needed, is another operation-creating action, not part of this two-step lemma.
+error after the advance; it must not be described as an atomic rollback.
+
+`node::realize::advance_tests::late_merge_store_errors_preserve_heads_and_recover` runs this
+later boundary with real repositories. Its test-only op-store wrapper delegates reads and
+writes to jj's simple op store. After the two successful preflight merge writes, it removes
+write permission from the operations directory only during selected merge writes, restoring
+permissions before returning the actual `WriteObject` / `PermissionDenied` error. It covers:
+
+- a colocated unpublished merge failing once, followed by successful cleanup inside `advance`;
+- that merge and cleanup both failing, leaving the exported incoming realization beside both
+  old concurrent heads, although `advance` returns an error;
+- a non-colocated cleanup merge failing after the same separate-head publication.
+
+The test reads raw heads immediately after the call, before any head-merging helper or jj
+command. It walks their stored parents and reads their views, requiring every old operation
+and the incoming realization to remain reachable. The successful fallback's merge has exactly
+the two old heads and the returned incoming realization as parents. After reopening without
+the wrapper, a retry merges the heads and the result is transferred back to the source, where
+both canonical heads agree. The incoming rewrite rebases a local child: after successful
+cleanup and after recovery, its bookmark must have moved in `.git` to match the merged view,
+and a subsequent explicit jj git import must create no operation or revert a bookmark.
+
+The oracle trace and proof do not cover these intermediate store effects. The native fault
+regression runs on Unix and skips with a reason if mode bits cannot deny a write, as
+when run as root. It does not inject view-write or read failures, partial op-head writes,
+crashes, concurrent commands during the failed call, or record-taking changes to merge bases.
+A later working-copy repair, when needed, is another operation-creating action, not part of
+the two-step lemma.
+
+Mutation evidence, 2026-11-03: five hand-written defects fail the late-error regression:
+returning the unpublished merge's error instead of falling back; replacing concurrent heads
+without a successful merge; ignoring the cleanup error; skipping the cleanup merge's ref
+export; and returning the final merge instead of the incoming realization. Five generated
+mutants of `advance_to`'s merge-input filter and merge guard are also caught by the late-error,
+ordinary advance, and prepared-survivor tests together. The fault-only selection initially
+missed two: the forced fallback masked a wrong dedup comparison, which the ordinary advance
+test catches, and `&&` changed to `||` needs the prepared-survivor case above. In that case
+the mutant writes three physical parents instead of two. A diagnostic timeout before adding
+that case is not counted as a kill. All deliberate defects were restored before validation.
 
 `noFeedback` says that a modeled sync step, realization included, leaves the operation universe
 unchanged. It does not say that every call made during a sync is such a step. jj's legitimate

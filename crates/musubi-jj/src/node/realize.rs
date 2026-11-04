@@ -1185,6 +1185,9 @@ impl NodeRepo {
     }
 }
 
+#[cfg(all(test, unix))]
+mod advance_tests;
+
 /// The operations that those of `ops` that `jj op revert` wrote reverted, by hex id: it
 /// describes what it writes so.
 fn reverted_by(ops: &[Operation]) -> HashSet<String> {

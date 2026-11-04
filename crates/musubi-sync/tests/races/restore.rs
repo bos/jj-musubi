@@ -37,16 +37,13 @@ fn y(fixture: &Fixture, index: usize) -> (RefTarget, RefTarget, String, String) 
     )
 }
 
-/// After concurrent fetches of `two` and `three` conflict `y@origin` (and `y`, which tracks
-/// it), and musubi wrote their side `three` to both `.git`s, this machine fetches `settled`,
-/// then restores the conflicted operation. jj's export skips the conflicted `y@origin`, so
-/// this machine's `.git` keeps `settled`, and its next command imports it. The restore's
-/// expected value is its parent's `y@origin`, `settled`, so the other machine, realizing the
-/// restore, keeps `settled` in its `.git` too, rather than writing the side, and imports the
-/// same (Refs.lean, `restore_import_agrees`). Then nothing is conflicted and nothing moved
-/// back: `y` and `y@origin` are where the fetch put them, everywhere, `.git` included
-/// (`restore_conflict_resolves_back`). Had the other machine written `three`, the hive would
-/// have merged the two imports, from the conflict of `two` and `three` over `one`, to `one`.
+/// Concurrent fetches of `two` and `three` conflict `y@origin` and its tracking bookmark
+/// `y`. After a fetch of `settled` resolves them, a restore brings back the conflict. Both
+/// machines keep `settled` in the remote Git ref and its per-machine record, so ordinary
+/// commands leave the remote-bookmark conflict unchanged. A further explicit fetch resolves
+/// both bookmarks to `settled`.
+/// The expected value kept through the restore prevents musubi from writing a different
+/// physical ref on the other machine.
 ///
 /// With an [`Abandon`], this machine then abandons the fetch and what followed it up to the
 /// restore, so the restore's parent is conflicted too and the rewritten history would expect
@@ -185,11 +182,28 @@ fn restore_a_conflicted_remote_bookmark(settled: &str, abandon: Abandon) {
         );
     }
 
-    // Each machine's next command imports the same, and nothing moves back.
+    // The remote ref still matches git_refs, so ordinary commands leave its conflict alone.
     for index in [HERE, THERE] {
+        let before = y(&f, index);
         f.repo(index).jj(&["status"]);
-        assert_eq!(y(&f, index), synced, "imported on {index}");
+        let (local, remote, git_local, git_remote) = y(&f, index);
+        assert_eq!(remote, before.1, "remote conflict unchanged on {index}");
+        assert_eq!((git_local, git_remote), (before.2, before.3));
+        // These fix-ups merge a different local branch record on the other machine.
+        // Its import can settle y while leaving the unchanged remote ref conflicted.
+        let expected_local = if index == THERE
+            && matches!(abandon, Abandon::Fetch | Abandon::FetchThenAnEarlierOne)
+        {
+            normal(&settled)
+        } else {
+            before.0
+        };
+        assert_eq!(local, expected_local, "local bookmark on {index}");
     }
+    f.assert_converged();
+    // A fetch imports its result even though the physical ref is unchanged.
+    f.repo(HERE).jj(&["git", "fetch"]);
+    f.sync();
     f.assert_converged();
     for index in [HERE, THERE] {
         assert_eq!(y(&f, index), synced, "merged on {index}");

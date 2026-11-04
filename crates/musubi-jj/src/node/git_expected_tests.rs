@@ -42,7 +42,7 @@ impl HistoryTest {
             &default_backend_factories(),
         )
         .unwrap();
-        let repo = block_on(loader.load_at_head()).unwrap();
+        let repo = block_on(loader.load_at_head(None)).unwrap();
         let tree = repo.store().empty_merged_tree();
         let mut tx = repo.start_transaction();
         let commits = std::array::from_fn(|i| {

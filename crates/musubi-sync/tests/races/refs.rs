@@ -375,12 +375,20 @@ impl Model {
     fn import(&mut self, alg: &Alg, refs: &[Ref]) -> bool {
         let before = self.slots();
         for &r in refs {
-            if self.at(r).jj_import(alg) {
-                let l = self.at(r).v.l.clone();
-                self.set(alg, r, l);
+            // Since jj's 095c1ca, unchanged physical refs do not update remote bookmarks.
+            if self.get(r).g != self.get(r).v.k {
+                self.import_ref(alg, r);
             }
         }
         self.slots() != before
+    }
+
+    /// A fetch imports its explicit result even if the physical ref did not change.
+    fn import_ref(&mut self, alg: &Alg, r: Ref) {
+        if self.at(r).jj_import(alg) {
+            let l = self.at(r).v.l.clone();
+            self.set(alg, r, l);
+        }
     }
 
     /// jj's export of every ref, `x`'s update failing if `x_locked`, then, if `musubi`
@@ -414,13 +422,11 @@ impl Model {
         })
     }
 
-    /// A `jj` command: an import, exported if it changed the view, since jj exports only a
-    /// transaction with changes, then the command's own transaction, `change`, exported if it
-    /// changed the view.
+    /// An integrated `jj` command imports, then exports even when importing changed
+    /// nothing. Its own transaction, `change`, exports only if that changed the view.
     fn jj(&mut self, alg: &Alg, change: impl FnOnce(&mut Self)) {
-        if self.import(alg, &Ref::ALL) {
-            self.export(alg, false, false);
-        }
+        self.import(alg, &Ref::ALL);
+        self.export(alg, false, false);
         let before = self.slots();
         change(self);
         if self.slots() != before {
@@ -778,9 +784,8 @@ impl Refs {
     /// A `jj` command at the operation before the latest action (`--at-op`) moves `bookmark`
     /// to `l`, which must be somewhere else there. It imports nothing, but exports, against
     /// that operation's record. The next `jj` command merges its operation with the head,
-    /// against the older operation, as `TSlot.merge`, then imports, and exports if that
-    /// changed anything. If the latest action made no operation, the command's operation is
-    /// simply the next.
+    /// against the older operation, as `TSlot.merge`, then imports and exports. If the latest
+    /// action made no operation, the command's operation is simply the next.
     fn jj_sets_at_older_op(&mut self, bookmark: Ref, l: RefTarget) {
         let (old, base) = self.older.clone();
         let head = self.head();
@@ -828,7 +833,7 @@ impl Refs {
         self.fixture.repo(HERE).jj(&["git", "fetch"]);
         self.model.jj(&self.alg, |model| {
             model.at(Ref::Origin).g = upstream;
-            model.import(&self.alg, &[Ref::Origin]);
+            model.import_ref(&self.alg, Ref::Origin);
         });
         self.check();
     }
@@ -879,7 +884,8 @@ impl Refs {
         let canonical = shared(|r| slot(view, r));
         let mut expected = base.clone();
         // The other machine's command imports first, and resolves a conflicted `y@origin` to
-        // the expected value its `.git` holds, as this machine's import would
+        // the expected value its `.git` holds if that physical ref changed, as this
+        // machine's import would
         // (`conflicted_import_agrees`, `restore_import_agrees`).
         if let Some(e) = conflicted_expected(&expected) {
             expected.at(Ref::Origin).g = e;
@@ -1178,12 +1184,10 @@ fn bookmarks_conform_to_refs_model(tc: TestCase) {
     hegel::stateful::machine(Refs::new()).steps(10).run(tc);
 }
 
-/// `restore_reverts`, as jj does it, with no sync: `x` at the root commit, which jj can't
-/// export, then moved to `two` and exported, then `jj undo`, which restores `x` to the root
-/// and `x@git` to `one`, but keeps `git_refs` at `two`. The next `jj` command takes `.git`'s
-/// `two` for a move made with git, and makes `x` a conflict.
+/// Undoing a move from the root restores `x` there even though jj can't export it.
+/// `git_refs` still matches `.git`, so the next ordinary command imports nothing.
 #[test]
-fn undo_of_an_unexportable_bookmark_conflicts_it() {
+fn undo_of_an_unexportable_bookmark_keeps_it() {
     let mut refs = Refs::new();
     refs.jj_sets(Ref::X, RefTarget::normal(refs.commits[0].clone()));
     refs.jj_sets(Ref::X, RefTarget::normal(refs.commits[3].clone()));
@@ -1191,17 +1195,17 @@ fn undo_of_an_unexportable_bookmark_conflicts_it() {
     assert!(refs.model.get(Ref::X).restored);
     let y = refs.imported(Ref::Y);
     refs.jj_sets(Ref::Y, y);
-    assert!(!refs.model.get(Ref::X).v.l.is_resolved());
+    assert_eq!(
+        refs.model.get(Ref::X).v.l,
+        RefTarget::normal(refs.commits[0].clone())
+    );
 }
 
-/// `restore_import_agrees`, the case of `restore.rs`, which Hegel reaches only now and then:
-/// this machine fetches `two` while the other fetches `three`, so that the merge conflicts
-/// `y@origin`, and musubi writes its side to both `.git`s; this machine fetches `base`, then
-/// restores the conflicted operation. The restore's expected value is `base`, so the other
-/// machine's command, as it moves `x`, resolves the conflict to `base`, as this machine's
-/// then does.
+/// Concurrent fetches conflict `y@origin`; a fetch here settles it, then a restore brings
+/// back the conflict. Both machines keep the fetched value in `.git`. Ordinary commands
+/// keep the conflict; an explicit fetch resolves it even though the physical ref is unchanged.
 #[test]
-fn restore_of_a_conflicted_remote_bookmark_resolves_alike() {
+fn restore_of_a_conflicted_remote_bookmark_waits_for_a_fetch() {
     let mut refs = Refs::new();
     let [base, _, two, three] = [1, 2, 3, 4].map(|i| RefTarget::normal(refs.commits[i].clone()));
     refs.jj_fetches_from(two);
@@ -1218,6 +1222,10 @@ fn restore_of_a_conflicted_remote_bookmark_resolves_alike() {
     refs.musubi_realizes_with(Some((Ref::X, moved)), base.clone(), false, false, None);
     let y = refs.imported(Ref::Y);
     refs.jj_sets(Ref::Y, y);
+    let origin = refs.model.get(Ref::Origin);
+    assert!(!origin.v.l.is_resolved() && !origin.v.r.is_resolved());
+    assert_eq!(origin.g, base);
+    refs.jj_fetches_from(base.clone());
     let origin = refs.model.get(Ref::Origin);
     assert_eq!((&origin.v.l, &origin.v.r), (&base, &base));
 }
@@ -1280,7 +1288,7 @@ fn a_resolved_merge_is_its_own_expected_value() {
 }
 
 /// A fetch here beside a realization of a conflict, `beside_keeps_fetch` as musubi does it:
-/// `y@origin` conflicts as in `restore_of_a_conflicted_remote_bookmark_resolves_alike`, a
+/// `y@origin` conflicts as in `restore_of_a_conflicted_remote_bookmark_waits_for_a_fetch`, a
 /// fetch of `base` here resolves it, and both machines sync. This machine then restores the
 /// conflict, whose expected value is `base`, and while the other machine, behind, moves `t` and
 /// merges that with the restore, keeping the conflict, this machine fetches `two`, a term of
@@ -1765,4 +1773,21 @@ fn refs_cases() -> u64 {
         .ok()
         .and_then(|cases| cases.parse().ok())
         .unwrap_or(12)
+}
+
+/// jj exports a bookmark selected by the native merge even when physical refs match the
+/// merged import records. Its ordinary import phase has no changes to publish first.
+#[test]
+fn an_unchanged_import_exports_a_bookmark_selected_by_a_merge() {
+    let mut refs = Refs::new();
+    let three = RefTarget::normal(refs.commits[4].clone());
+    let base = RefTarget::normal(refs.commits[1].clone());
+    refs.musubi_realizes_with(
+        None,
+        three,
+        false,
+        false,
+        Some(Beside::Fetches(base.clone())),
+    );
+    refs.jj_sets_at_older_op(Ref::Y, RefTarget::normal(refs.commits[2].clone()));
 }

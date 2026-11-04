@@ -8,7 +8,7 @@ it reconnects.
 
 This document gives musubi's design rules and the reasons for them. [protocol.md](protocol.md)
 specifies the messages between nodes and the hub and the properties they guarantee, and
-[races.md](races.md) the outcome of each race. musubi pins jj-lib 0.46.0.
+[races.md](races.md) the outcome of each race. musubi pins jj-lib 0.47.0.
 
 ## Vocabulary
 
@@ -189,7 +189,7 @@ Translation keeps per-machine fields per-machine:
     holds jj's `git_import_export.lock` from the export until it has published the op head, so a
     concurrent `jj` command never sees the operation before `.git` matches it.
   - Before publishing it, musubi merges it with this machine's own concurrent operations as jj
-    will, in jj's order and the reverse, since the result can depend on the order. jj 0.46 can't
+    will, in jj's order and the reverse, since the result can depend on the order. jj 0.47 can't
     merge some concurrent operations ([races.md, "Known jj
     limitations"](races.md#known-jj-limitations)), and publishing them would leave every `jj`
     command here failing. So if the merge fails, musubi publishes nothing, and the sync fails,
@@ -1175,7 +1175,7 @@ never verifies them on read. Two consequences:
 
 - An older jj-lib decoding an operation written by a newer `jj` silently drops the fields it
   doesn't know, and canonicalizing it would lose them. So before canonicalizing a local operation
-  or view, musubi walks its protobuf encoding and refuses any field number that jj-lib 0.46
+  or view, musubi walks its protobuf encoding and refuses any field number that jj-lib 0.47
   doesn't define. A newer `jj` CLI writing to the repository is therefore a clear error, not
   silent data loss.
 - Canonical operations are always written by musubi's pinned jj-lib, so a receiver can verify each

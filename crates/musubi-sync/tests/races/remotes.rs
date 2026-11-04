@@ -701,10 +701,10 @@ fn recorded_main_at_origin(hive: &Fixture, index: usize) -> String {
 
 /// Two machines fetch while origin is force-pushed between their fetches, so the hive's
 /// `main@origin` is conflicted. A third machine's `.git` still has the
-/// `refs/remotes/origin/main` of its own earlier fetch, and every `jj` command resolves a
-/// conflicted remote bookmark to what `.git` has. musubi writes one of the conflict's sides
-/// there, the same on every machine, so the hive settles on one of the two fetches rather
-/// than on the older commit. With `stale_record`, the third machine's `.git` has the fetch
+/// `refs/remotes/origin/main` of its own earlier fetch. musubi writes one of the conflict's
+/// sides there, the same on every machine. Ordinary commands keep the conflict; an explicit
+/// fetch resolves it, including when the physical ref is unchanged. With `stale_record`,
+/// the third machine's `.git` has the fetch
 /// of that machine instead, disagreeing with jj's record of it, as after `jj op restore`.
 fn conflicted_fetches(stale_record: Option<usize>) {
     let mut hive = Fixture::new(&["alpha", "beta", "gamma"]);
@@ -755,8 +755,21 @@ fn conflicted_fetches(stale_record: Option<usize>) {
     for index in 0..3 {
         assert_eq!(git_main(index), side, "git on {index}");
         hive.repo(index).jj(&["status"]);
-        assert_eq!(recorded_main_at_origin(&hive, index), side, "on {index}");
+        assert_eq!(
+            recorded_main_at_origin(&hive, index),
+            "conflict",
+            "on {index}"
+        );
     }
+    let origin = hive.env.root().join("origin.git");
+    hive.repo(0).git(&[
+        "--git-dir",
+        origin.to_str().unwrap(),
+        "update-ref",
+        "refs/heads/main",
+        &side,
+    ]);
+    hive.repo(0).jj(&["git", "fetch"]);
     hive.sync();
     hive.assert_converged();
     for index in 0..3 {

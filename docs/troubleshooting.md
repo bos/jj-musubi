@@ -15,6 +15,20 @@ on macOS, and to `journalctl --user -u musubi-hub` on Linux. To log more, see
 Messages below use `devbox` for the hub's machine, `app` for a hive, and `laptop` for a
 machine.
 
+## jj reports "stack limit reached"
+
+jj 0.47.0's static Linux binary can report `stack limit reached` for its built-in aliases and
+then panic, even in a new repository. Build the same release with a GNU/glibc Rust toolchain
+on Linux instead:
+
+```sh
+cargo install --locked --version 0.47.0 --force jj-cli
+```
+
+Put Cargo's binary directory (usually `~/.cargo/bin`) first on your `PATH`, then rerun the
+command that failed. Both binaries report 0.47.0, so `jj --version` alone cannot distinguish
+them. Building for a musl target can retain the problem.
+
 ## Reaching the hub
 
 ### "no hub given; pass --hub <host>, ..."
@@ -295,7 +309,7 @@ command again.
 
 ### "jj cannot merge this machine's operations with the hive's (...)"
 
-jj 0.46 can't merge some combinations of concurrent operations, such as rebases on two
+jj 0.47 can't merge some combinations of concurrent operations, such as rebases on two
 machines that form a loop. So that every `jj` command here doesn't fail, musubi holds back the
 hive's latest operations on this machine. The message names the operation to revert, one of
 this machine's that the hive doesn't have yet. Revert it, and musubi catches up:
@@ -313,13 +327,6 @@ conflicts with the hive's.
 
 [Known jj limitations](internals/races.md#known-jj-limitations) describes the cases jj can't
 merge.
-
-### "jj cannot merge this machine's concurrent operations: ... merge commit on the root commit"
-
-A bug in jj 0.46 keeps two concurrent operations on this machine from merging, and every `jj`
-command fails. For each operation id in `.jj/repo/op_heads/heads`, run
-`jj --at-op <head> op log -n1` to find the one that made the merge commit, then run
-`jj --at-op <head> op revert @` at that head.
 
 ### "cannot tell which operations jj abandoned"
 
@@ -379,8 +386,8 @@ since its last sync, then run `musubi leave --force` in this one.
 
 ### "unknown field ... (written by a newer jj?)"
 
-A `jj` newer than 0.46.0, the version musubi supports, wrote an operation with fields musubi
-doesn't know, and musubi won't drop them by syncing it. Use jj 0.46.0 with this release of
+A `jj` newer than 0.47.0, the version musubi supports, wrote an operation with fields musubi
+doesn't know, and musubi won't drop them by syncing it. Use jj 0.47.0 with this release of
 musubi, and upgrade the two together.
 
 ### "the hub did not supply the objects this machine needs"

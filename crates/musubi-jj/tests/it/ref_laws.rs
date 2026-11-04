@@ -31,7 +31,7 @@ fn merge(a: &RefTarget, b: &RefTarget, c: &RefTarget) -> RefTarget {
             &default_backend_factories(),
         )
         .unwrap();
-        let loaded = loader.load_at_head().block_on().unwrap();
+        let loaded = loader.load_at_head(None).block_on().unwrap();
         (env, loaded)
     });
     REPO.with(|(_, repo)| merge_ref_targets(repo.index(), a, b, c).block_on().unwrap())

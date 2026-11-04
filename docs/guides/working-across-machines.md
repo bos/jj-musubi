@@ -242,7 +242,7 @@ they can after `jj op abandon` on one machine: set them again with `jj bookmark 
 
 ## Things to avoid
 
-- **A newer `jj`** than the one musubi supports, 0.46.0. Operations with unknown fields stop
+- **A newer `jj`** than the one musubi supports, 0.47.0. Operations with unknown fields stop
   the sync. [Upgrade jj and musubi
   together](manage.md#upgrade-musubi).
 - **Copying a repository's directory** to make another machine's copy. Use `musubi clone`, or

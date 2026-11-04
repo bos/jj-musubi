@@ -20,7 +20,7 @@ design, the protocol, testing, and releasing.
 You need:
 
 - Rust 1.97.1 or later, and `just`.
-- `jj` 0.46.0 and `git` on `PATH`: the tests run them.
+- `jj` 0.47.0 and `git` on `PATH`: the tests run them.
 - `cargo-nextest`, `cargo-deny`, `cargo-machete`, and `typos`, for `just check`.
 - Python 3.11 or newer as `python3`, for the fuzz runner and assurance checks in `just check`.
 - Lean, with `lake`, on `PATH`, for the proofs and the conformance oracle. `elan` installs

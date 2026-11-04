@@ -634,8 +634,8 @@ impl NodeRepo {
     /// it. There, too, a realization beside this machine's own concurrent op heads is
     /// published merged with them, as jj would merge them, and that merge exported first:
     /// published apart, the heads would be merged by whichever `jj` command loaded them
-    /// first, which doesn't export, and whose import takes `.git` as the realization alone
-    /// left it. While records are being taken, the heads it is published beside are those
+    /// first, without exporting before its import, which takes `.git` as the realization
+    /// alone left it. While records are being taken, the heads it is published beside are those
     /// moving the op heads where the records name the history leaves beside it. Returns the
     /// realization as exported, which `canonical` translates to, not the merge.
     ///
@@ -690,9 +690,10 @@ impl NodeRepo {
         // A `jj` command in the colocated workspace publishes only while holding the lock, so
         // none can until this publishes. One may have published since the op heads were read,
         // though, which the export and the merge must take in: published beside the merge, it
-        // would be merged by the next `jj` command, which doesn't export. The heads are
-        // checked again only if they changed, so that the first check, whose search for an
-        // operation to revert where jj can't merge them can take a while, keeps `jj` commands
+        // would be merged by the next `jj` command without exporting before its import.
+        // The heads are checked again only if they changed, so that the first check, whose
+        // search for an operation to revert where jj can't merge them can take a while, keeps
+        // `jj` commands
         // waiting for the lock only in that rare case. Which are left goes by the same heads.
         if colocated {
             let mut now = self.local_heads()?;

@@ -89,7 +89,7 @@ in sync with the hub.
 
 You need:
 
-- `jj` 0.46.0 and `git` on every machine;
+- `jj` 0.47.0 and `git` on every machine;
 - a repository with at least one commit and all of its history (musubi refuses shallow and
   partial clones);
 - ssh access to the hub's machine from every other machine: if `ssh devbox` works, so does

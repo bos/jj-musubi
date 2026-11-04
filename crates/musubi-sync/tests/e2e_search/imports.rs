@@ -12,34 +12,16 @@
 //! makes every move git makes of a machine's refs outside `jj` (`git_set_branch` and
 //! `git_delete_branch`); `jj git fetch` and `jj git push` move refs and record them in the
 //! same operation, and musubi writes `.git` only through jj's export, or with
-//! `export_conflicted_remote_bookmarks`, whose conflicts are excepted below.
+//! `export_conflicted_remote_bookmarks`.
 //!
-//! The ref behind a change is the record the import compared with `.git`: `x@git` for a
-//! bookmark `x` or a tag, `x@origin` for a remote bookmark, and for a bookmark tracking
-//! `x@origin`, that too (`diff_refs_to_import` in jj-lib's `git.rs`). The import's own export
-//! then copies a bookmark that `x@origin` moved to `x@git`, which needs no reason of its own.
-//! A git move explains a change if jj's record matched `.git` before it, as it does unless git
-//! moved the ref (`LInv`). An import may change a ref otherwise only where jj itself would, in
-//! one repository:
-//!
-//! - a conflicted remote bookmark, which it resolves to `.git`'s value: jj's export never
-//!   writes a conflicted target (`collect_changed_refs_to_export`), so `.git` always differs
-//!   from it and every import resets it, as on one machine after concurrent fetches
-//!   (`remote_reset_without_export`), where `.git` has the latest. That is one of the
-//!   conflict's sides, or where `jj op restore` put the conflict back, the value from before
-//!   the restore, which the restoring machine's `.git` kept (`Refs.lean`'s expected value);
-//! - a record that an undo, redo, `jj op restore` or `jj op revert` on this machine put back:
-//!   they restore the remote refs, `x@git` among them, but keep `git_refs`
-//!   (`view_with_desired_portions_restored` in jj-cli's `commands/operation/mod.rs`), so where
-//!   the export can't write the restored bookmark, a conflict or the root commit, the import
-//!   takes `.git`'s value back, as after undoing a move that resolved a conflicted bookmark;
-//! - jj's three-way merge of two op heads that both changed the record since they forked,
-//!   even if one changed it back: the result needn't be `.git`'s (`concurrent_records_revert`).
-//!   Where only one changed it, the merge keeps that one's (`fork_merge_inv`), and the check
-//!   follows it there. Each change either head made must be one jj makes, by an import, a
-//!   restore, an export or a fetch, since the theorem assumes both heads reachable (`FReach`).
-//!   Merges of more heads at once, or with closest common ancestors that disagree, aren't
-//!   modeled, and fail as unexplained.
+//! jj 0.47 selects refs to import by comparing their physical values with `git_refs`.
+//! A conflicted remote bookmark or an undo that changes only a remote bookmark does not
+//! cause an import. A git move explains a change when `git_refs` matched `.git` before it.
+//! With no git move, the only allowed explanation is jj's merge of concurrent op heads
+//! that both changed `git_refs`, even if one changed it back (`concurrent_records_revert`).
+//! Every record along that history must come from a native import, export or fetch, or a
+//! merge of those records. Merges of more heads at once, or with closest common ancestors
+//! that disagree, aren't modeled, and fail as unexplained.
 //!
 //! Anything else is a finding: the operation that left the record differing from `.git`, if
 //! any, is named in the failure.
@@ -342,37 +324,6 @@ impl Log {
         r.record(self.view(id))
     }
 
-    /// Where `.git`'s value for the conflicted remote bookmark `r` at `id` comes from, as
-    /// `Refs.lean`'s expected value has it: back through a parent with the same target, then
-    /// through an operation with one parent, as `jj op restore` of the conflict is, to that
-    /// parent's target, while it is a conflict too. The result is the value from before the
-    /// restore, or else the conflict a merge or a join made, whose sides `.git` may have.
-    /// Unlike musubi, this doesn't stop at a join point on the machine that joined, where
-    /// history before it has no remote bookmarks in the search.
-    fn restored(&mut self, id: &OperationId, r: &Ref) -> RefTarget {
-        let mut at = id.clone();
-        let mut target = self.record(&at, r).0;
-        loop {
-            let parents = self.op(&at).parents.clone();
-            if let Some(same) = parents.iter().find(|p| self.record(p, r).0 == target) {
-                at = same.clone();
-                continue;
-            }
-            let [parent] = parents.as_slice() else {
-                return target;
-            };
-            if self.op(parent).parents.is_empty() {
-                return target;
-            }
-            let was = self.record(parent, r).0;
-            if was.is_resolved() {
-                return was;
-            }
-            at = parent.clone();
-            target = was;
-        }
-    }
-
     /// Whether any operation after `before` (the bases and their ancestors) up to `op`
     /// (included) records `r` other than as `base`: whether that head changed the record since
     /// the fork, as `touch` has it in `Refs.lean`, even if it changed it back. Every one that
@@ -393,7 +344,7 @@ impl Log {
             if before.contains(&id) || !visited.insert(id.clone()) {
                 continue;
             }
-            touched |= self.record(&id, r) != *base;
+            touched |= self.record(&id, r).1 != base.1;
             if setup.contains(&id) {
                 continue;
             }
@@ -851,8 +802,7 @@ impl World {
                 ));
             }
             for r in refs {
-                let taken = r.record(&after).0;
-                if let Err(why) = self.justify(m, log, parent, &r, &taken) {
+                if let Err(why) = self.justify(m, log, parent, &r) {
                     failures.push(format!(
                         "{} changed {what}: {why}",
                         describe(&log.owner, id, &op)
@@ -874,7 +824,6 @@ impl World {
         log: &mut Log,
         parent: &OperationId,
         r: &Ref,
-        taken: &RefTarget,
     ) -> Result<(), String> {
         let target = log.record(parent, r);
         // Unless git moved the ref, jj's record matches `.git` (`LInv`). After a move, an
@@ -882,28 +831,10 @@ impl World {
         // value, so the record matches what `.git` had before one of git's moves since the
         // last import, and the import takes git's move.
         if let Some(values) = self.imports.moved[m].get(&r.git_ref())
-            && values
-                .iter()
-                .any(|value| target == Record(value.clone(), value.clone()))
+            && values.contains(&target.1)
         {
             fired("import:git_move");
             return Ok(());
-        }
-        // `.git` has one side of a conflicted remote bookmark: the latest fetch, or the side
-        // musubi writes (`export_conflicted_remote_bookmarks`). Where `jj op restore` put the
-        // conflict back, the restoring machine's `.git` kept the value from before the restore,
-        // and musubi writes that on every other machine.
-        if r.kind == Kind::Remote && !target.0.is_resolved() {
-            let from = log.restored(parent, r);
-            let side = |id: &CommitId| from.adds().any(|side| side.as_ref() == Some(id));
-            if from == *taken || taken.as_normal().is_some_and(side) {
-                fired(if from == target.0 {
-                    "import:conflicted_remote"
-                } else {
-                    "import:restored_conflict"
-                });
-                return Ok(());
-            }
         }
         // Back from `parent` to the operation that made the record what it is.
         let mut at = parent.clone();
@@ -926,15 +857,9 @@ impl World {
             if let [before] = op.parents.as_slice() {
                 let was = log.record(before, r);
                 let now = log.record(&at, r);
-                if was == now {
+                if was.1 == now.1 {
                     at = before.clone();
                     continue;
-                }
-                // jj's export after the restore wrote whatever it could, so only a value it
-                // can't write leaves the record differing from `.git`.
-                if own(&log.owner, &op) && restore(&op) && !exportable(&r.local(log.view(&at))) {
-                    fired("import:undo");
-                    return Ok(());
                 }
                 return Err(format!(
                     "git didn't move {}, and {} changed jj's record of {r} from {was} to {now}",
@@ -951,7 +876,7 @@ impl World {
                 ));
             };
             let now = log.record(&at, r);
-            if base_records.iter().any(|b| b != base) {
+            if base_records.iter().any(|b| b.1 != base.1) {
                 return Err(format!(
                     "the merge {}, whose closest common ancestors record {r} differently, made \
                      jj's record of it {now}; criss-cross merges aren't modeled",
@@ -975,7 +900,7 @@ impl World {
                     ));
                 };
                 let merged = log.merge(&at, r, left, base, right);
-                if merged == now {
+                if merged.1 == now.1 {
                     fired("import:concurrent_records");
                     return Ok(());
                 }
@@ -987,7 +912,7 @@ impl World {
                 ));
             }
             let next = touched.first().unwrap_or(&bases[0]).clone();
-            if log.record(&next, r) != now {
+            if log.record(&next, r).1 != now.1 {
                 return Err(format!(
                     "the merge {} made jj's record of {r} {now}, which neither the one parent \
                      that changed it nor their common ancestor have",

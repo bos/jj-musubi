@@ -1256,13 +1256,14 @@ fn assert_dropped_head_settled(
     let beside_own_work = matches!(survivors, Survivors::Apart | Survivors::Fetches);
     assert_eq!(three, beside_own_work, "{merges}");
     if matches!(survivors, Survivors::Fetches | Survivors::FetchedHere) {
-        // Every `.git` holds the same side of the conflict, which the import of each `jj`
-        // command above took alike.
+        // Every `.git` holds the same fetched side. Since jj's 095c1ca, an ordinary
+        // command leaves the remote bookmark conflicted when that Git ref has not moved;
+        // an explicit fetch, rather than an ordinary import, updates the remote bookmark.
         let sides: BTreeSet<String> = participants
             .iter()
             .map(|&n| {
                 let side = git_main_at_origin(hive, n);
-                assert_eq!(recorded_main_at_origin(hive, n), side, "{n}");
+                assert_eq!(recorded_main_at_origin(hive, n), "conflict", "{n}");
                 side
             })
             .collect();
@@ -4303,13 +4304,10 @@ fn empty_repositories_make_a_hive() {
     hive.assert_converged();
 }
 
-/// jj 0.46 bug: one machine abandons a commit directly on the root while another makes it a
-/// parent of a merge commit. Reconciling them would rebase the merge onto the root, which
-/// jj's git backend refuses, so every jj command on the merging machine would fail. musubi
-/// doesn't apply the other machine's operation there: its sync error names the problem and
-/// the recovery, and jj keeps working. When jj fixes this, this test fails.
+/// Concurrently abandoning a child of the root and merging it with another commit
+/// converges: jj drops the root parent when rebasing the merge.
 #[test]
-fn root_parent_merge_bug_is_explained() {
+fn abandoning_a_root_child_beside_a_merge_converges() {
     let mut hive = Fixture::new(&["alpha", "beta"]);
     for message in ["x", "y"] {
         hive.repo(0).jj(&["new", "root()"]);
@@ -4319,21 +4317,8 @@ fn root_parent_merge_bug_is_explained() {
     let (x, y) = (hive.commit_id(0, "x"), hive.commit_id(0, "y"));
     hive.repo(0).jj(&["abandon", &x]);
     hive.repo(1).jj(&["new", &x, &y, "-m", "merge"]);
-    let before = hive.node(1).local_heads().unwrap();
-    let err = hive.try_sync().unwrap_err();
-    let message = format!("{err:#}");
-    assert!(
-        message.contains("root commit as one of the parents") && message.contains("op revert"),
-        "{message}"
-    );
-    assert_eq!(
-        hive.node(1).local_heads().unwrap(),
-        before,
-        "an unmergeable realization must not replace or join the published heads"
-    );
-    for machine in [0, 1] {
-        hive.repo(machine).jj(&["status"]);
-    }
+    hive.sync();
+    hive.assert_converged();
 }
 
 /// The size of the hub's `heads` log, in bytes.

@@ -79,9 +79,6 @@ pub const EVENTS: &[&str] = &[
     "crash:writes_in_flight",
     // Imports of git refs, by what explains each ref they changed (`imports`).
     "import:git_move",
-    "import:conflicted_remote",
-    "import:restored_conflict",
-    "import:undo",
     "import:concurrent_records",
     // Imports of git's HEAD, by what explains each.
     "import:head_git_move",
@@ -222,6 +219,10 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
     (
         "two_machines_sharing_a_hostname_show_each_other_qualified",
         Some(&["setup:shared_hostname"]),
+    ),
+    (
+        "an_unchanged_import_exports_a_bookmark_selected_by_a_merge",
+        Some(&["fetch", "at_op"]),
     ),
     (
         "same_bookmark_moved_to_different_commits",

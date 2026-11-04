@@ -6,6 +6,15 @@ change the protocol, so run the same release on the hub and every machine (see
 
 ## Unreleased
 
+- musubi now supports jj 0.47.0. Upgrade jj on every machine, and upgrade the hub and every
+  machine together, then restart their daemons (protocol 10). Builds using jj 0.46.0 cannot
+  sync with this build.
+  Ordinary jj commands leave remote-bookmark conflicts unchanged when their Git refs have
+  not moved; fetch explicitly to resolve them. They also finish pending Git exports after
+  merging operation heads. Timestamp templates now use jiff's formatting,
+  and JSON timestamps use `+00:00` for UTC. See
+  [jj 0.47.0's release notes](https://github.com/jj-vcs/jj/releases/tag/v0.47.0) for format changes.
+
 - A full history trim keeps a copy forgotten when its forget was accepted during a sync
   that is still finishing. Previously new work above that forget could bring the copy
   back into the hive.

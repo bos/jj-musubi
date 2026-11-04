@@ -39,16 +39,6 @@ pub enum NodeError {
     OpHeads(#[from] OpHeadsStoreError),
     #[error(transparent)]
     RepoLoader(#[from] RepoLoaderError),
-    /// A jj 0.46 bug, until jj fixes it: jj cannot merge concurrent operations when the
-    /// merge would rebase a merge commit onto the root commit, and until then every jj
-    /// command fails to load the repository (docs/internals/races.md, "Known jj limitations").
-    #[error(
-        "jj cannot merge this machine's concurrent operations: the merge would create a merge \
-         commit on the root commit (a jj bug). On this machine, run `jj --at-op <head> op log \
-         -n1` for each head in .jj/repo/op_heads/heads, then `jj --at-op <head> op revert @` \
-         at the head whose operation made the merge commit"
-    )]
-    RootParentMerge(#[source] RepoLoaderError),
     #[error(transparent)]
     Canonical(#[from] CanonicalError),
     #[error("operation {op}: {source}")]
@@ -76,7 +66,7 @@ pub enum NodeError {
     #[error("bad hive settings in {op}: {message}")]
     Settings { op: String, message: String },
     /// jj cannot merge this machine's concurrent operations with the hive's, as when two
-    /// machines' rebases form a loop: jj 0.46 then panics ("graph has cycle").
+    /// machines' rebases form a loop: jj 0.47 then panics ("graph has cycle").
     #[error(
         "jj cannot merge this machine's operations with the hive's ({reason}). musubi has not \
          applied the hive's latest operations here, so jj keeps working. {advice}"
@@ -87,8 +77,7 @@ pub enum NodeError {
         /// The operation to revert: the newest of this machine's that the hive doesn't have
         /// whose revert lets jj merge the hive's operation, or failing one, the oldest whose
         /// own change jj panics merging with it. `None` where none is found, as when the
-        /// failing merge is of this machine's own operations, or for a merge commit on the
-        /// root. `advice` then lists them.
+        /// failing merge is of this machine's own operations, in which case `advice` lists them.
         culprit: Option<LocalOp>,
         advice: String,
         reason: String,

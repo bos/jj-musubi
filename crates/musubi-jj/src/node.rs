@@ -446,12 +446,9 @@ impl NodeRepo {
 
     /// Loads the repository at its op head, letting jj merge concurrent heads.
     fn load_at_head(&self) -> Result<Arc<ReadonlyRepo>, NodeError> {
-        let loaded = catch_jj_panic(|| Ok(self.loader.load_at_head().block_on()));
+        let loaded = catch_jj_panic(|| Ok(self.loader.load_at_head(None).block_on()));
         match loaded {
             Ok(Ok(repo)) => Ok(repo),
-            Ok(Err(err)) if format!("{err:?}").contains("root commit as one of the parents") => {
-                Err(NodeError::RootParentMerge(err))
-            }
             Ok(Err(err)) => Err(err.into()),
             Err(reason) => Err(self.unmergeable(&self.local_heads()?, None, reason)),
         }
@@ -525,7 +522,7 @@ thread_local! {
     static CATCHING_JJ_PANIC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Runs `f`, turning a panic in jj-lib into an error with the panic's message. jj 0.46
+/// Runs `f`, turning a panic in jj-lib into an error with the panic's message. jj 0.47
 /// panics, rather than failing, when it merges concurrent operations whose rebases form a
 /// loop ("graph has cycle"). The panic isn't printed: the error carries its message, and a
 /// sync stuck there would otherwise print several at every retry.

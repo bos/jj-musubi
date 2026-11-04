@@ -35,6 +35,7 @@ pub const RULES: &[&str] = &[
     "undo",
     "at_op",
     "op_abandon",
+    "trim_below_accepted_push",
     "abandon_while_forgotten",
     "status",
     "workspace_add",
@@ -287,6 +288,32 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
     ),
     ("empty_repositories_make_a_hive", Some(&["setup:empty"])),
     ("op_abandon_replicates", Some(&["op_abandon"])),
+    (
+        "e2e_git_change_while_taking_a_trim",
+        Some(&[
+            "trim_below_accepted_push",
+            "sync_partial",
+            "bookmark_delete",
+        ]),
+    ),
+    // The search interleaves whole policy steps, not a command inside adapter.advance.
+    (
+        "a_forward_bookmark_survives_a_command_inside_a_trim_advance",
+        None,
+    ),
+    // This needs two range trims retaining an independently cached root branch.
+    (
+        "a_second_trim_keeps_git_state_with_a_cached_root_realization",
+        None,
+    ),
+    (
+        "a_trim_below_an_accepted_push_keeps_the_other_copy_present",
+        Some(&["trim_below_accepted_push"]),
+    ),
+    (
+        "e2e_trim_below_accepted_push",
+        Some(&["trim_below_accepted_push"]),
+    ),
     // The search does not run jj's object-pruning gc after restoring and abandoning a base.
     (
         "collected_objects_of_an_abandoned_fetch_base_are_fetched_again",

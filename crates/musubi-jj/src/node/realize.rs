@@ -575,6 +575,30 @@ impl NodeRepo {
         merged_by_jj(&self.loader, first_op, rest)
     }
 
+    /// A local representation with the same shared view and parents, carrying `fields`
+    /// and an explicit canonical identity. Written before publication, as an export is.
+    fn with_per_machine(
+        &self,
+        local: &LocalOp,
+        fields: &PerMachine,
+        canonical: &CanonicalOp,
+    ) -> Result<LocalOp, NodeError> {
+        let store = self.loader.op_store();
+        let mut op = store.read_operation(&local.0).block_on()?;
+        let mut view = store.read_view(&op.view_id).block_on()?;
+        if PerMachine::of(&view) == *fields {
+            return Ok(local.clone());
+        }
+        fields.apply_to(&mut view);
+        op.view_id = store.write_view(&view).block_on()?;
+        // This may be a local original rather than a received realization. Keep its
+        // identity explicit across translation-cache loss and a later jj op abandon.
+        op.metadata
+            .attributes
+            .insert(CANONICAL_ATTRIBUTE.to_owned(), canonical.0.hex());
+        Ok(LocalOp(store.write_operation(&op).block_on()?))
+    }
+
     /// The per-machine fields of `first_op` and `rest` merged three-way, if at most one of
     /// them differs from its base, which the merge then takes: another machine's join
     /// operation's are its base's, the root's, as, usually, are those of other machines'
@@ -682,6 +706,19 @@ impl NodeRepo {
                 (superseded, concurrent) = self.check_mergeable(&left, &realized, &now)?;
             }
         }
+        // Recheck the source under the colocated lock, after all realization work. A
+        // root-based cached realization may have no Git fields, or ones from before a
+        // concurrent command. Taking a trim must change neither this copy's record of Git
+        // nor its physical Git state merely because that record's old ancestry disappeared.
+        let root_base = self.taking_root_base()?;
+        if root_base {
+            let sources = self.local_heads()?;
+            let fields = self.inherited_per_machine(&sources)?;
+            for (canonical, local) in left.iter().zip(&mut realized) {
+                *local = self.with_per_machine(local, &fields, canonical)?;
+                self.insert_map(local.clone(), canonical.clone())?;
+            }
+        }
         let (canonical, primary) = (left[0].clone(), realized[0].clone());
         // The others, merged with the first as op heads beside it would be.
         let others: Vec<Operation> = realized[1..]
@@ -710,16 +747,20 @@ impl NodeRepo {
         }
         let colocation = self.colocation();
         let pending = self.pending_expected();
-        // Exported beside all it is merged with next, as one realization beside the op heads.
+        // A root-based transition carries the current heads' Git records, rather than a
+        // shared ancestor's. Merge its shared payload before exporting: exporting the
+        // incoming tip first could move Git backward, then merge its record forward without
+        // writing Git again. Other realizations export beside the heads as usual.
+        let merge_before_export = root_base && !merging.is_empty();
         let head = match colocation {
-            Some(colocation) => colocation.export_refs(
+            Some(colocation) if !merge_before_export => colocation.export_refs(
                 &self.loader,
                 &primary,
                 &|op| self.is_join_point(op),
                 &merging,
                 &pending,
             )?,
-            None => primary,
+            _ => primary,
         };
         let merged = match colocation {
             Some(colocation) if !merging.is_empty() => {
@@ -736,6 +777,9 @@ impl NodeRepo {
                     // but changes what they merge against: the heads are published apart, for
                     // `replace_abandoned_working_copies` to merge as it would any others.
                     Err(reason) => {
+                        if merge_before_export {
+                            return Err(self.unmergeable(&self.local_heads()?, None, reason));
+                        }
                         tracing::warn!("merging a realization with this machine's heads: {reason}");
                         None
                     }

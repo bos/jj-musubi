@@ -4432,6 +4432,137 @@ fn an_offline_machine_holds_pruning_back() {
     assert!(!has_operation(hive.repo(2), &abandoned.1));
 }
 
+/// A trim below an accepted push, before the publishing sync advances its base: the push's
+/// surviving rewrite keeps its identity and presence. Looking below the older base alone
+/// mistook it for new work, whose merge with the correctly renamed push forgot beta; the hub
+/// then pruned the trim's record before beta took it, permanently stopping beta's sync.
+#[test]
+fn a_trim_below_an_accepted_push_keeps_the_other_copy_present() {
+    use musubi_core::node::LocalRepo as _;
+
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(0, "a", "second");
+    hive.sync();
+    let accepted = op_log(hive.repo(0))[0].0.clone();
+    let abandoned = op_log(hive.repo(0))
+        .into_iter()
+        .find(|(_, d)| d.starts_with("commit "))
+        .unwrap();
+    let before = hive.hive.hub_head();
+    let copies: BTreeSet<String> = hive
+        .hive
+        .hub
+        .store()
+        .presence()
+        .unwrap()
+        .copies()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(copies.len(), 2);
+    hive.repo(0).jj(&["describe", "-m", "third"]);
+    let kept = op_log(hive.repo(0))[0].1.clone();
+    // The hub accepts the push, but the next policy step hasn't advanced the fetch base.
+    hive.hive.sync_steps(0, 1, &mut |_, reply| reply).unwrap();
+    assert_ne!(hive.hive.hub_head(), before);
+    assert_eq!(
+        hive.hive.members[0].adapter.accepted_base().unwrap(),
+        before
+    );
+    hive.hive.fetch(1).unwrap();
+    hive.repo(0)
+        .jj(&["op", "abandon", &format!("..{accepted}")]);
+    hive.hive.sync(0).unwrap();
+    let after: BTreeSet<String> = hive
+        .hive
+        .hub
+        .store()
+        .presence()
+        .unwrap()
+        .copies()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(after, copies);
+    assert_eq!(hive.hive.hub.store().pruned(), 0);
+    hive.hive.sync(1).unwrap();
+    hive.sync();
+    hive.assert_converged();
+    for machine in 0..2 {
+        let ops = op_log(hive.repo(machine));
+        assert_eq!(ops.iter().filter(|(_, d)| d == &kept).count(), 1, "{ops:?}");
+        assert!(!has_operation(hive.repo(machine), &abandoned.1));
+    }
+    assert!(hive.visible(1).iter().any(|c| c.ends_with("third")));
+    hive.sync();
+    assert_eq!(hive.hive.hub.store().pruned(), 1);
+}
+
+/// A detached root realization made while another branch survives must inherit the
+/// receiving copy's Git state if a later trim drops that last physical branch too.
+#[test]
+fn a_second_trim_keeps_git_state_with_a_cached_root_realization() {
+    use musubi_core::node::Step;
+    use musubi_jj::node::NodeRepo;
+    use musubi_jj::op_id::LocalOp;
+    use musubi_jj::records::HubOp;
+
+    let fields = |node: &NodeRepo| {
+        let heads = node.local_heads().unwrap();
+        assert_eq!(heads.len(), 1);
+        let store = node.loader().op_store();
+        let op = futures::executor::block_on(store.read_operation(&heads[0].0)).unwrap();
+        futures::executor::block_on(store.read_view(&op.view_id))
+            .unwrap()
+            .git_heads
+    };
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    let joined = op_log(hive.repo(0))[0].0.clone();
+    hive.commit(0, "a", "alpha's surviving branch");
+    let alpha =
+        LocalOp(jj_lib::op_store::OperationId::try_from_hex(&op_log(hive.repo(0))[0].0).unwrap());
+    let snapshot = {
+        let store = hive.node(0).loader().op_store().clone();
+        LocalOp(
+            futures::executor::block_on(store.read_operation(&alpha.0))
+                .unwrap()
+                .parents[0]
+                .clone(),
+        )
+    };
+    hive.commit(1, "b", "beta's branch dropped by the second trim");
+    let beta_description = op_log(hive.repo(1))[0].1.clone();
+    hive.hive.sync(1).unwrap();
+    hive.hive.sync(0).unwrap();
+    let snapshot = hive.node(0).canonicalize(&snapshot).unwrap();
+    hive.repo(0).jj(&["op", "abandon", &format!("..{joined}")]);
+    hive.hive.sync(0).unwrap();
+    let snapshot = hive.node(0).to_node(&HubOp(snapshot)).unwrap()[0].0.clone();
+
+    // Take the first trim, then realize alpha's root child without advancing to it.
+    // Beta's branch survives this trim, so its root child can be cached with empty Git fields.
+    hive.hive.fetch(1).unwrap();
+    for _ in 0..64 {
+        if hive.node(1).local_of(&snapshot).is_some() {
+            break;
+        }
+        let member = &mut hive.hive.members[1];
+        let step = member.core.step(&mut member.adapter).unwrap();
+        assert!(
+            matches!(step, Step::Adopted | Step::Realized(_)),
+            "{step:?}"
+        );
+    }
+    assert!(hive.node(1).local_of(&snapshot).is_some());
+    hive.node(1).settle().unwrap();
+    let before = fields(hive.node(1));
+    assert!(!before.is_empty(), "beta has recorded its Git HEAD");
+
+    let beta = op_described(hive.repo(0), &beta_description);
+    hive.repo(0).jj(&["op", "abandon", &format!("..{beta}")]);
+    hive.hive.sync(0).unwrap();
+    hive.hive.sync(1).unwrap();
+    assert_eq!(fields(hive.node(1)), before);
+}
+
 /// The hub doesn't wait for a copy the hive has forgotten. One that comes back from behind
 /// the records the hub pruned can't take them, and could hold operations they drop: it stops
 /// syncing, with the message for a history that no longer matches the hive's, and the
@@ -5578,5 +5709,120 @@ fn lost_received_records_preserve_work_before_the_fixup_arrives() {
     assert_eq!(
         recovered, expected,
         "custody recovery lost gamma's original work timestamp"
+    );
+}
+
+/// A command publishes after the policy decides a trim drops the head, but before that
+/// same step advances. Refreshing the preparation must keep its exported bookmark forward.
+#[test]
+fn a_forward_bookmark_survives_a_command_inside_a_trim_advance() {
+    use crate::refs_model::RefsModel;
+    use crate::refs_model::Slot;
+    use jj_lib::backend::CommitId;
+    use jj_lib::git::REMOTE_NAME_FOR_LOCAL_GIT_REPO;
+    use jj_lib::object_id::ObjectId as _;
+    use jj_lib::op_store::RefTarget;
+    use jj_lib::op_store::RemoteRefState;
+    use jj_lib::ref_name::GitRefName;
+    use jj_lib::ref_name::RefName;
+    use jj_lib::repo::ReadonlyRepo;
+    use musubi_core::node::LocalRepo as _;
+    use musubi_core::node::Step;
+    use musubi_jj::records::RecordPrefix;
+
+    let slot = |repo: &ReadonlyRepo| {
+        let view = repo.view().store_view();
+        let remote = view
+            .remote_views
+            .get(REMOTE_NAME_FOR_LOCAL_GIT_REPO)
+            .and_then(|r| r.bookmarks.get(RefName::new("x")));
+        Slot {
+            l: view
+                .local_bookmarks
+                .get(RefName::new("x"))
+                .cloned()
+                .unwrap_or_else(RefTarget::absent),
+            r: remote
+                .map(|r| r.target.clone())
+                .unwrap_or_else(RefTarget::absent),
+            k: view
+                .git_refs
+                .get(GitRefName::new("refs/heads/x"))
+                .cloned()
+                .unwrap_or_else(RefTarget::absent),
+            tr: remote.is_some_and(|r| r.state == RemoteRefState::Tracked),
+        }
+    };
+
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(1, "a", "beta's ancestor of its next bookmark");
+    hive.repo(1).jj(&["bookmark", "create", "x", "-r", "@-"]);
+    hive.sync();
+    let old = hive.repo(1).git(&["rev-parse", "refs/heads/x"]);
+    let base = op_log(hive.repo(0))[0].0.clone();
+    hive.repo(0).jj(&["describe", "-m", "surviving trim tip"]);
+    hive.hive.sync_steps(0, 1, &mut |_, reply| reply).unwrap();
+    hive.repo(0).jj(&["op", "abandon", &format!("..{base}")]);
+    hive.hive.sync(0).unwrap();
+
+    // Stop before advance, with the incoming history written and the old heads still
+    // dropped. These are the calls the policy made before the concurrent command lands.
+    hive.hive.fetch(1).unwrap();
+    for _ in 0..64 {
+        let member = &mut hive.hive.members[1];
+        if member.adapter.is_local(&member.core.known().1).unwrap() {
+            break;
+        }
+        let step = member.core.step(&mut member.adapter).unwrap();
+        assert!(matches!(step, Step::Realized(_)), "{step:?}");
+    }
+    let known = hive.hive.members[1].core.known().1.clone();
+    assert!(hive.hive.members[1].adapter.is_local(&known).unwrap());
+    hive.node(1).settle().unwrap();
+    assert_eq!(hive.hive.hub.store().pruned(), 0);
+    let records = hive.hive.hub.store().records().to_vec();
+    assert!(
+        hive.node(1)
+            .prepare_records(&RecordPrefix::none(), &records)
+            .unwrap(),
+        "the policy has decided to defer adoption until advance"
+    );
+
+    hive.repo(1).jj(&["bookmark", "set", "x", "-r", "@"]);
+    let forward = hive.repo(1).git(&["rev-parse", "refs/heads/x"]);
+    assert_ne!(forward, old);
+    // One policy step continues here: another core.step would first adopt the records
+    // around the new head, missing this within-step command race.
+    let before = hive.load(1);
+    let current = slot(&before);
+    let target = RefTarget::normal(CommitId::try_from_hex(forward.trim()).unwrap());
+    assert_eq!(current.r, target);
+    assert_eq!(current.k, target);
+    // Root publication is an advance of the final shared payload from CURRENT local
+    // state, then export, rather than the normalized-base "beside" model transition.
+    let mut model = RefsModel::new(before);
+    let expected = model.realize_local(&current, &target);
+    let (expected, expected_git) = model.export_local(&expected, &target);
+    hive.hive.members[1].adapter.advance(&known).unwrap();
+    let repo = hive.load(1);
+    assert_eq!(
+        slot(&repo),
+        expected,
+        "publication matches Lean advance/export"
+    );
+    assert_eq!(expected_git, target);
+    assert_eq!(
+        repo.view()
+            .get_local_bookmark(RefName::new("x"))
+            .as_normal()
+            .unwrap()
+            .hex(),
+        forward.trim(),
+        "the normalized merge retains the forward bookmark"
+    );
+    assert_eq!(
+        hive.repo(1).git(&["rev-parse", "refs/heads/x"]),
+        forward,
+        "advance must leave Git matching the forward bookmark before any import"
     );
 }

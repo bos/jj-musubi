@@ -875,7 +875,10 @@ A machine notices an abandon as before: canonical operations it had published ar
 reachable from its op heads. It watches the operation it fetches from, and its own last push from
 the moment it learns that the hub took it, from a reply that names it or among what it fetches: it
 moves the base to the push only at its next step, which a sync cut short or a lost reply delays. A
-sync polls the hub before it reads the op heads, so that it knows by then. It looks before
+sync polls the hub before it reads the op heads, so that it knows by then. It matches surviving
+operations against both accepted histories together: a push may contain a survivor above a
+base dropped in full. Matching against the older base first and stopping there mistakes that
+survivor for new work, losing its original identity and presence. It looks before
 anything else reads the op heads, to merge or canonicalize them, since an op head read before may
 be one of jj's rewrites that musubi then replaces. What was dropped is each canonical operation it
 had that no reachable local operation now stands for. A realization stands for the canonical
@@ -893,6 +896,17 @@ machine may have taken the push first, and would push it again. That costs a rec
 [fix-up](#the-fix-up), and only after the hub loses heads.
 
 ### Taking the hub's
+
+If the prepared base is the root, because a trim removed the old base or the hub lost records
+this copy held, publication carries the current physical heads' per-machine Git fields into
+the incoming local tips, merged as jj merges those heads. The root has none of this copy's
+Git state. This happens after realization, under the colocated lock: a realization may be
+cached from before the records arrived, or a jj command may have changed Git state since it
+was made. Shared views and parents stay as the contraction names them. If other heads remain,
+their shared payloads are merged before the first export. Exporting the incoming tip first could
+move Git backward, then merge its record forward without writing Git again. A failed merge
+publishes nothing. The next jj command therefore does not import unchanged Git refs or HEAD
+as moves. Ordinary realization still inherits its parents' per-machine fields.
 
 The hub keeps the dropped sets it took, in order, each a *record* naming operations by the ids
 they had before it. A machine that lacks some of the hub's records applies them in order. It

@@ -37,6 +37,7 @@
 {"names":["mac-aaaa/default","beta-1a2b/default"],"ok":true,"prefixes":["mac-aaaa","mac-aaaa2222","beta-1a2b3c4d"]}
 {"ok":true,"slot":{"K":1,"L":4,"R":1,"tr":true}}
 {"g":2,"ok":true,"slot":{"K":2,"L":2,"R":2,"tr":true}}
+{"ok":true,"slot":{"K":2,"L":0,"R":0,"tr":true}}
 {"holds":true,"ok":true}
 {"g":3,"ok":true,"slot":{"K":1,"L":4,"R":4,"tr":true}}
 {"g":1,"ok":true,"slot":{"K":1,"L":4,"R":4,"tr":true}}

@@ -1632,13 +1632,11 @@ impl NodeRepo {
         }
         let (heads, base, pushed) = checked;
         self.realign_heads(&heads)?;
-        let mut noticed = false;
-        for base in base.iter().chain(pushed.iter()) {
-            if self.notice_abandon(base)? {
-                noticed = true;
-                break;
-            }
-        }
+        // Inspect both accepted histories together. The push may contain a surviving
+        // operation above a base that was dropped in full: treating it as new while
+        // inspecting only the base loses its original identity and presence.
+        let watched: Vec<HubOp> = base.iter().chain(pushed.iter()).cloned().collect();
+        let noticed = self.notice_abandons(&watched)?;
         // Only the op heads checked: a `jj op abandon` that moved them meanwhile, remembered as
         // checked, would go unnoticed, and the sync would fail for good. Moved here, they're
         // checked again next time.
@@ -1782,12 +1780,16 @@ impl NodeRepo {
     /// match, and records the drops to publish, with the fix-up that goes first. Returns
     /// whether it noticed one.
     pub fn notice_abandon(&mut self, base: &HubOp) -> Result<bool, NodeError> {
+        self.notice_abandons(std::slice::from_ref(base))
+    }
+
+    fn notice_abandons(&mut self, watched: &[HubOp]) -> Result<bool, NodeError> {
         let root = self.canonical.root_operation_id().clone();
-        let bases: Vec<CanonicalOp> = self
-            .to_node_ids(&base.0)?
-            .into_iter()
-            .filter(|op| *op != root)
-            .collect();
+        let mut bases = vec![];
+        for base in watched {
+            bases.extend(self.to_node_ids(&base.0)?);
+        }
+        let bases: Vec<CanonicalOp> = dedup(bases).into_iter().filter(|op| *op != root).collect();
         if bases.is_empty() || bases.iter().any(|op| !self.canonical.has_operation(op)) {
             return Ok(false);
         }
@@ -1946,7 +1948,10 @@ impl NodeRepo {
             None => None,
         };
         let locals = self.rewrite_locals(&mut contraction, &heads, &counterparts, &unmapped)?;
-        let hub_names = self.hub_names(&base.0)?;
+        let mut hub_names = HashMap::new();
+        for base in watched {
+            hub_names.extend(self.hub_names(&base.0)?);
+        }
         let pending = self.records.pending.ops().iter().cloned().chain(
             dropped
                 .iter()
@@ -2925,6 +2930,20 @@ impl NodeRepo {
             .taking
             .as_ref()
             .is_some_and(|taking| !taking.switched)
+    }
+
+    /// Whether the prepared base is the root: a trim removed the accepted local base, or
+    /// the hub lost records this copy held. Publication must retain this copy's current
+    /// Git state, including where a root child was realized before these records arrived.
+    pub(super) fn taking_root_base(&mut self) -> Result<bool, NodeError> {
+        self.prepare_again_if_moved()?;
+        Ok(self.records.taking.as_ref().is_some_and(|taking| {
+            !taking.switched
+                && taking
+                    .base
+                    .as_ref()
+                    .is_some_and(|base| base.0 == *self.canonical.root_operation_id())
+        }))
     }
 
     /// The op heads that moving them where the records being taken name them leaves beside

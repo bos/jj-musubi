@@ -1265,6 +1265,34 @@ The test checks the rule, not where it is applied: that `canonical_view` publish
 the present copies' workspaces, and that realizing keeps a forgotten copy's own, is for the
 race catalogue (`crates/musubi-sync/tests/races/forget.rs`) to check.
 
+`history::a_trim_below_an_accepted_push_keeps_the_other_copy_present` checks another native
+application boundary: abandonment discovery must identify survivors across both the saved
+fetch base and the last accepted push before applying the presence-preserving contraction.
+It pauses after acceptance but before advancing the base, trims the earlier history, and
+checks that both copies remain present, the survivor occurs once, and the hub waits for the
+other copy's acknowledgement before pruning. Reverting combined-frontier discovery fails
+the presence check. `PresenceContract.pres_eq` assumes the correct survivor has been selected;
+it does not prove this native discovery. The protocol pruning model's participants are fixed;
+it does not prove that native presence selects the correct set of copies to wait for.
+
+When the prepared base becomes the root, native publication must also retain the current
+physical heads' per-machine Git fields. `e2e_trim_below_accepted_push` checks the unchanged
+HEAD through the independent import checker; `e2e_git_change_while_taking_a_trim` changes a
+bookmark after realization, and
+`history::a_second_trim_keeps_git_state_with_a_cached_root_realization`
+checks a detached cached root child across two trims. An earlier realization-time fallback
+failed the latter two cases.
+`history::a_forward_bookmark_survives_a_command_inside_a_trim_advance` places a real command
+between policy preparation and native advance, without a second policy step that would
+adopt the records first. Before any import or convergence it checks the published bookmark,
+its local Git slots and physical Git against `Refs.realizeLocal` followed by `exportLocal`,
+through the oracle. The target is the command's known forward target; the source slots are
+read before advance. Exporting the incoming tip before the normalized merge fails this case.
+`Refs.lean` preserves the local slots supplied to realization;
+selecting and refreshing that input is native code's obligation. The normalized-base slot
+selection of `AbandonRefs.publish_refines` does not cover this publication of current local
+state, and the one-ref model does not model Git HEAD or its working-copy import.
+
 The oracle's presence request and reply:
 
 ```json

@@ -223,6 +223,9 @@ Trimming every operation already shared with the hive, beneath new work that has
 there yet, keeps the other machines in the hive too. Their next sync takes the abandon as
 usual, even if they were offline while you trimmed the history.
 
+Trimming all earlier history keeps the other copies in the hive and each copy's own Git
+refs and HEAD as they were, including when a sync is finishing as you trim.
+
 The hub remembers an abandon until every machine still in the hive has taken it, so a machine
 that's offline delays this until it syncs. Then the hub forgets it, so trimming old history
 with `jj op abandon ..<operation>` doesn't leave the hub remembering every abandoned operation,

@@ -237,6 +237,43 @@ fn e2e_dropped_merge() {
     dropped_merge_search(Config::smoke());
 }
 
+/// Exercise the trim rule's history bookkeeping and independent jj replay, including the
+/// joins that ordinary generated single-operation abandonment leaves in place.
+#[test]
+fn e2e_trim_below_accepted_push() {
+    let mut world = World::new(Setup {
+        nodes: 2,
+        naming: Naming::Own,
+        prejoin: false,
+        secondary: false,
+    });
+    world.trim_below_accepted_push(0);
+    world.converge();
+}
+
+#[test]
+fn e2e_git_change_while_taking_a_trim() {
+    for forward in [false, true] {
+        let mut world = World::new(Setup {
+            nodes: 2,
+            naming: Naming::Own,
+            prejoin: false,
+            secondary: false,
+        });
+        world.commit(1, 0, 0);
+        world.jj(1, &["bookmark", "create", "x", "-r", "@-"]);
+        world.converge();
+        world.trim_below_accepted_push(0);
+        world.sync_realizing(1, 1);
+        if forward {
+            world.jj(1, &["bookmark", "set", "x", "-r", "@"]);
+        } else {
+            world.jj(1, &["bookmark", "delete", "x"]);
+        }
+        world.converge();
+    }
+}
+
 /// A command above an abandoned merge keeps its own payload when its one parent
 /// expands to two. The later, genuine reconciliation must still merge both commands.
 #[test]

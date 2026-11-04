@@ -74,6 +74,7 @@ inductive Call where
   /-- jj's import, a new remote ref tracked by default, as the test configures `origin`. -/
   | import (s : TSlot Nat) (g : Nat)
   | merge (b v w : TSlot Nat)
+  | realizeLocal (s : TSlot Nat) (c : Nat)
   | exportLocal (s : TSlot Nat) (g : Nat)
   | exportRemote (s : TSlot Nat) (g : Nat)
   | exportConflicted (s : TSlot Nat) (g e : Nat)
@@ -110,6 +111,7 @@ def run (tb : Table) : Call → Answer
   | .import s g =>
     letI := tableAlg tb; .imported (TSlot.import true s g) (TSlot.importSets true s g)
   | .merge b v w => letI := tableAlg tb; .slot (TSlot.merge b v w) none
+  | .realizeLocal s c => .slot (withSlot s (realizeLocal c s.toSlot)) none
   | .exportLocal s g =>
     letI := tableAlg tb
     let (s', g') := TSlot.exportLocal s g

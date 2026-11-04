@@ -97,7 +97,7 @@ impl PerMachine {
     }
 
     /// Gives `view` these fields, in place of any it has.
-    fn apply_to(&self, view: &mut View) {
+    pub(super) fn apply_to(&self, view: &mut View) {
         Self::strip(view);
         view.git_refs = self.git_refs.clone();
         if let Some(remote) = &self.git_remote {

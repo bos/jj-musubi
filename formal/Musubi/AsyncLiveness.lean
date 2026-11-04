@@ -156,28 +156,14 @@ theorem settling_decreases {s t : State} (hr : RReachable N s) (hs : SettlingSte
 does not require a bound on the time between changes. -/
 theorem nat_trace_stabilizes (f : Nat → Nat) (hf : ∀ i, f (i + 1) ≤ f i) :
     ∃ k, ∀ i, k ≤ i → f i = f k := by
-  suffices h : ∀ b, ∀ g : Nat → Nat, g 0 = b → (∀ i, g (i + 1) ≤ g i) →
-      ∃ k, ∀ i, k ≤ i → g i = g k from h (f 0) f rfl hf
-  intro b
-  induction b using Nat.strongRecOn with
-  | ind b ih =>
-    intro g h0 hg
-    by_cases hsm : ∃ j, g j < b
-    · obtain ⟨j, hj⟩ := hsm
-      obtain ⟨k, hk⟩ := ih (g j) hj (fun i => g (j + i)) (by simp)
-        (fun i => by simpa [Nat.add_assoc] using hg (j + i))
-      refine ⟨j + k, fun i hi => ?_⟩
-      obtain ⟨d, rfl⟩ := Nat.exists_eq_add_of_le (show j ≤ i by omega)
-      exact hk d (by omega)
-    · refine ⟨0, fun i _ => ?_⟩
-      have hle : ∀ i, g i ≤ b := by
-        intro i
-        induction i with
-        | zero => omega
-        | succ i ih => exact Nat.le_trans (hg i) ih
-      have hnot : ¬ g i < b := fun h => hsm ⟨i, h⟩
-      have := hle i
-      omega
+  obtain ⟨v, ⟨k, rfl⟩, hmin⟩ := exists_min (fun v => ∃ k, f k = v) ⟨0, rfl⟩
+  refine ⟨k, fun i hi => ?_⟩
+  have hle : f i ≤ f k := by
+    induction hi with
+    | refl => exact Nat.le_refl _
+    | step _ ih => exact Nat.le_trans (hf _) ih
+  have hnot : ¬ f i < f k := fun h => hmin (f i) h ⟨i, rfl⟩
+  omega
 
 /-- On a suffix with no fix-up creation or obsolete-history recovery, hub acceptance
 cannot continue forever. This proves hub stabilization from the primitive acceptance

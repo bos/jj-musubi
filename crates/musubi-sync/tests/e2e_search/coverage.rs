@@ -291,6 +291,15 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
     ("empty_repositories_make_a_hive", Some(&["setup:empty"])),
     ("op_abandon_replicates", Some(&["op_abandon"])),
     (
+        "a_full_trim_below_unpublished_work_keeps_workspace_owners",
+        Some(&["op_abandon", "new_commit"]),
+    ),
+    // The workspace-name pool has no foreign alias containing a slash.
+    (
+        "a_trim_does_not_reserve_a_forgotten_copys_workspace_name",
+        None,
+    ),
+    (
         "a_trim_keeps_a_secondary_workspaces_snapshot_basis",
         Some(&["op_abandon", "edit_unsnapshotted", "rewrite_under_other_wc"]),
     ),

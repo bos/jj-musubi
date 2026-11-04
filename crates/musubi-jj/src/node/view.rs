@@ -24,6 +24,7 @@ use super::NodeRepo;
 use super::is_visible;
 use super::translate::target_of;
 use crate::canonical::Work;
+use crate::canonical::namespace::Namespace;
 use crate::presence::Kind;
 use crate::presence::Presence;
 use crate::workspaces;
@@ -135,6 +136,7 @@ impl NodeRepo {
         canonical_parents: &[CanonicalOp],
         predecessors: Option<&BTreeMap<CommitId, Vec<CommitId>>>,
         kind: &Kind,
+        metadata: &jj_lib::op_store::OperationMetadata,
     ) -> Result<(View, Presence<Work>), NodeError> {
         let parent_presences = canonical_parents
             .iter()
@@ -165,9 +167,56 @@ impl NodeRepo {
                 }
             }
         }
+        // A full native trim can leave unpublished work directly on root. Its captured
+        // namespace identifies foreign aliases without claiming erased source parents.
+        let context =
+            Namespace::read(metadata)?.filter(|context| context.source == self.machine.key());
+        if let Some(context) = &context {
+            let initial = canonical_parents == [self.canonical.root_operation_id().clone()];
+            let fixup = metadata
+                .attributes
+                .contains_key(super::supersede::FIXUP_ATTRIBUTE);
+            let parent_names = if initial || fixup {
+                BTreeSet::new()
+            } else {
+                self.parents_names_and_heads(local_op)?.0
+            };
+            machines.extend(context.known.iter().cloned());
+            for (name, key) in &context.names {
+                let key = WorkspaceNameBuf::from(key.clone());
+                let name = WorkspaceNameBuf::from(name.clone());
+                if self.is_own_key(&key) {
+                    if initial {
+                        own_names.insert(name);
+                    }
+                } else if !own_names.contains(&name)
+                    && (initial || fixup || parent_names.contains(&name))
+                {
+                    others.entry(name).or_insert(key);
+                }
+            }
+        }
         let mut workspaces_by_key = self.present_workspaces(&parent_presences, &present)?;
         workspaces_by_key.retain(|key, _| !self.is_own_key(key));
         let mut local = std::mem::take(&mut view.wc_commit_ids);
+        // Existing fix-up WORK transitions restore each copy's bindings too, where the
+        // entire accepted base left no view from which to inherit them.
+        if metadata
+            .attributes
+            .contains_key(super::supersede::FIXUP_ATTRIBUTE)
+            && let Some(copy) = &kind.work
+        {
+            for (name, key) in &others {
+                if workspaces::split_key(key.as_str()).is_some_and(|(owner, _)| owner == copy)
+                    && present(copy)
+                    && let Some(commit) = local.get(name)
+                {
+                    workspaces_by_key
+                        .entry(key.clone())
+                        .or_insert_with(|| commit.clone());
+                }
+            }
+        }
         let mut moved_here = BTreeSet::new();
         for (name, key) in &others {
             if let Some(commit) = local.remove(name)
@@ -285,6 +334,21 @@ impl NodeRepo {
         PerMachine::strip(&mut view);
         view.wc_commit_ids = workspaces_by_key;
         Ok((view, merged))
+    }
+
+    pub(super) fn workspace_context(&self, at: &CanonicalOp) -> Result<String, NodeError> {
+        let view = self.canonical.read_operation_view(at)?;
+        let presence = self.presence(at)?;
+        Ok(Namespace {
+            source: self.machine.key().to_owned(),
+            names: self
+                .local_names(&view, &presence)?
+                .into_iter()
+                .map(|(key, name)| (name.as_str().to_owned(), key.as_str().to_owned()))
+                .collect(),
+            known: self.machines_of(&view, presence.known()),
+        }
+        .encode())
     }
 
     /// The workspaces of the machines `present` accepts, other than this one's, each machine's
@@ -513,19 +577,26 @@ impl NodeRepo {
         &self,
         parents: &[CanonicalOp],
     ) -> Result<BTreeMap<WorkspaceNameBuf, CommitId>, NodeError> {
+        self.merge_workspace_values(parents, &|op| self.workspaces_of(op))
+    }
+
+    /// jj's workspace merge over supplied bindings, also used for the namespace evidence
+    /// a full trim detached from its accepted parents.
+    pub(super) fn merge_workspace_values(
+        &self,
+        parents: &[CanonicalOp],
+        of: &impl Fn(&CanonicalOp) -> Result<BTreeMap<WorkspaceNameBuf, CommitId>, NodeError>,
+    ) -> Result<BTreeMap<WorkspaceNameBuf, CommitId>, NodeError> {
         let Some((first, rest)) = parents.split_first() else {
             return Ok(BTreeMap::new());
         };
-        let mut merged = self.workspaces_of(first)?;
+        let mut merged = of(first)?;
         let mut merged_parents = vec![first.clone()];
         for other in rest {
-            let base = self.base_of(
-                &merged_parents,
-                other,
-                |op| self.workspaces_of(op),
-                |ops| self.merged_workspaces(ops),
-            )?;
-            let theirs = self.workspaces_of(other)?;
+            let base = self.base_of(&merged_parents, other, of, |ops| {
+                self.merge_workspace_values(ops, of)
+            })?;
+            let theirs = of(other)?;
             let keys: BTreeSet<WorkspaceNameBuf> = merged
                 .keys()
                 .chain(theirs.keys())

@@ -1,8 +1,10 @@
 //! Restoring presence, settings, and expected refs that an abandon dropped.
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::OperationId;
 use jj_lib::ref_name::GitRefNameBuf;
 use jj_lib::repo::ReadonlyRepo;
@@ -20,6 +22,8 @@ use super::WORKED_AT_ATTRIBUTE;
 use crate::canonical;
 use crate::hive_settings;
 use crate::node::git;
+use crate::node::index_err;
+use crate::node::is_visible;
 use crate::op_id::CanonicalOp;
 use crate::op_id::LocalOp;
 use crate::presence::FORGET_AFTER_ATTRIBUTE;
@@ -28,6 +32,8 @@ use crate::presence::Presence;
 use crate::presence::WORK_ATTRIBUTE;
 use crate::presence::format_forget_after;
 use crate::records::HubOp;
+use crate::workspaces;
+use jj_lib::ref_name::WorkspaceNameBuf;
 
 /// What a fix-up writes: work by each copy whose latest work or forget-after an abandon
 /// dropped, then the hive's settings as they were (docs/internals/design.md, "The fix-up").
@@ -367,9 +373,74 @@ impl NodeRepo {
         // The first operation restores them, so that no operation of the fix-up has them as
         // the rewritten history would.
         let mut first = Some((fixup.settings.clone(), self.expected_before(&head)?));
+        let context = canonical::namespace::Namespace::read(
+            &self.canonical.read_operation(&canonical_head)?.metadata,
+        )?
+        .filter(|context| context.source == self.machine.key())
+        .map(|context| context.encode());
+        // A native workspace forget can remove a foreign alias before the full trim.
+        // Its owner and position still come from the accepted namespace. Keep that evidence
+        // in the resulting native fix-up view, so replay needs no mutable local recipe.
+        let bindings = canonical::namespace::Namespace::read(
+            &self.canonical.read_operation(&canonical_head)?.metadata,
+        )?;
+        let mut fallback = BTreeMap::new();
+        if let Some(bindings) = &bindings
+            && context.is_some()
+            && let Some(from) = &self.records.fixup_from
+        {
+            let baseline = self.canonical.read_operation_view(from)?.wc_commit_ids;
+            let mut states: HashMap<
+                CanonicalOp,
+                BTreeMap<WorkspaceNameBuf, jj_lib::backend::CommitId>,
+            > = HashMap::new();
+            for op in self
+                .canonical
+                .ancestors_until(std::slice::from_ref(&canonical_head), |_| false)?
+            {
+                let operation = self.canonical.read_operation(&op)?;
+                let parents = CanonicalOp::parents_of(&operation);
+                let mut state = self.merge_workspace_values(&parents, &|parent| {
+                    if parent == self.canonical.root_operation_id() {
+                        Ok(baseline.clone())
+                    } else {
+                        states.get(parent).cloned().ok_or_else(|| {
+                            NodeError::NotRealizable(
+                                parent.0.hex(),
+                                "its workspace evidence is missing",
+                            )
+                        })
+                    }
+                })?;
+                workspaces::follow_rewrites(&mut state, operation.commit_predecessors.as_ref());
+                // Native abandon can replace a WC with a fresh change, which has no
+                // predecessor link to the old WC. Observe its actual binding before a
+                // later native workspace forget removes the alias.
+                if let Some(local) = self.local_of(&op) {
+                    let raw = self.loader.op_store().read_operation(&local.0).block_on()?;
+                    let view = self.loader.op_store().read_view(&raw.view_id).block_on()?;
+                    let canonical_view = self.canonical.read_view(&operation.view_id)?;
+                    for (name, key) in &bindings.names {
+                        let name = WorkspaceNameBuf::from(name.clone());
+                        let own = workspaces::workspace_key(self.machine.key(), name.as_str());
+                        if canonical_view.wc_commit_ids.contains_key(&own) {
+                            continue;
+                        }
+                        if let Some(commit) = view.wc_commit_ids.get(&name) {
+                            state.insert(WorkspaceNameBuf::from(key.clone()), commit.clone());
+                        }
+                    }
+                }
+                states.insert(op, state);
+            }
+            fallback = states.remove(&canonical_head).unwrap_or(baseline);
+        }
         let mut start = |repo: &Arc<ReadonlyRepo>| {
             let mut tx = repo.start_transaction();
             tx.set_attribute(FIXUP_ATTRIBUTE.to_owned(), "1".to_owned());
+            if let Some(context) = &context {
+                tx.set_attribute(canonical::namespace::ATTRIBUTE.to_owned(), context.clone());
+            }
             if let Some((settings, expected)) = first.take() {
                 if let Some(settings) = settings {
                     tx.set_attribute(hive_settings::ATTRIBUTE.to_owned(), settings);
@@ -387,6 +458,38 @@ impl NodeRepo {
             let repo = self.merged_repo_unchecked()?;
             let mut tx = start(&repo);
             tx.set_attribute(WORK_ATTRIBUTE.to_owned(), work.copy.clone());
+            if let Some(bindings) = &bindings {
+                for (name, key) in &bindings.names {
+                    if !workspaces::split_key(key).is_some_and(|(copy, _)| copy == work.copy)
+                        || work.copy == self.machine.key()
+                    {
+                        continue;
+                    }
+                    let name = WorkspaceNameBuf::from(name.clone());
+                    let key = WorkspaceNameBuf::from(key.clone());
+                    if repo.view().get_wc_commit_id(&name).is_some() {
+                        continue;
+                    }
+                    let Some(commit) = fallback.get(&key) else {
+                        continue;
+                    };
+                    let commit = repo.store().get_commit_async(commit).block_on()?;
+                    // As canonical_view does for a foreign workspace forgotten here: keep
+                    // its empty commit only while all its parents remain visible.
+                    if !is_visible(&repo, commit.id())? {
+                        let mut parents_visible = true;
+                        for parent in commit.parent_ids() {
+                            parents_visible &= is_visible(&repo, parent)?;
+                        }
+                        if parents_visible {
+                            tx.repo_mut().add_head(&commit).block_on()?;
+                        }
+                    }
+                    tx.repo_mut()
+                        .set_wc_commit(name, commit.id().clone())
+                        .map_err(index_err)?;
+                }
+            }
             if let Some(after) = &work.forget_after {
                 tx.set_attribute(FORGET_AFTER_ATTRIBUTE.to_owned(), after.clone());
             }

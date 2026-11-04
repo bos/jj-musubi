@@ -1708,3 +1708,13 @@ and suffix, this machine, `me`, among them, and `own` holds the names of this ma
 `workspaces` are the workspaces to name, each a machine's index and the workspace's name on
 it. The reply has each machine's prefix, in the same order, and each workspace's name here
 (`localName`). A names request leaves the oracle's session as it was.
+
+### Workspace bindings after a full trim
+
+`a_full_trim_below_unpublished_work_keeps_workspace_owners` checks native operations whose
+parents jj erased before musubi saw them. The stored context records namespace evidence, not
+replacement ancestry or a new presence transition. Existing Names conformance checks render
+its canonical keys; existing Presence conformance checks the fix-up WORK and FORGET steps.
+The race checks both machines' resulting workspace ownership after translation-cache loss
+and a delayed command using the unstamped native source. The separate
+`a_trim_does_not_reserve_a_forgotten_copys_workspace_name` checks reuse of a foreign alias.

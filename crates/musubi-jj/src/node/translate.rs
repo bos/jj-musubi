@@ -159,6 +159,14 @@ impl NodeRepo {
         if self.canonical_of(local).is_none() {
             self.check_abandon()?;
         }
+        self.canonicalize_unchecked(local)
+    }
+
+    /// Canonicalizes inside an abandon already being processed, before its heads move.
+    pub(super) fn canonicalize_unchecked(
+        &mut self,
+        local: &LocalOp,
+    ) -> Result<CanonicalOp, NodeError> {
         let op_store = self.loader.op_store().clone();
         // Post-order walk: an operation is canonicalized once all its parents are.
         let mut stack: Vec<(LocalOp, Option<StoreOperation>)> = vec![(local.clone(), None)];
@@ -417,13 +425,51 @@ impl NodeRepo {
         metadata.workspace_name = metadata
             .workspace_name
             .map(|name| workspaces::workspace_key(self.machine.key(), name.as_str()));
+        // Context is local to the machine that captured it. Carry it through native
+        // descendants until their canonical views and presence again describe all aliases.
+        if !metadata
+            .attributes
+            .contains_key(crate::canonical::namespace::ATTRIBUTE)
+        {
+            for parent in &parents {
+                let parent_op = self.canonical.read_operation(parent)?;
+                if let Some(context) =
+                    crate::canonical::namespace::Namespace::read(&parent_op.metadata)?
+                    && context.source == self.machine.key()
+                {
+                    metadata.attributes.insert(
+                        crate::canonical::namespace::ATTRIBUTE.to_owned(),
+                        context.encode(),
+                    );
+                    break;
+                }
+            }
+        }
+        if let Some(context) = crate::canonical::namespace::Namespace::read(&metadata)? {
+            let mut known = std::collections::BTreeSet::new();
+            for parent in &parents {
+                known.extend(self.presence(parent)?.known().iter().cloned());
+            }
+            if context.known.is_subset(&known) {
+                metadata
+                    .attributes
+                    .remove(crate::canonical::namespace::ATTRIBUTE);
+            }
+        }
         let kind = Kind::of(&metadata);
         // A fix-up changes no view: it restores what musubi works out from history alone.
         let (view_id, presence) = match parents.as_slice() {
-            [parent] if metadata.attributes.contains_key(FIXUP_ATTRIBUTE) => (
-                self.canonical.read_operation(parent)?.view_id,
-                (*self.presence(parent)?).clone(),
-            ),
+            [parent]
+                if metadata.attributes.contains_key(FIXUP_ATTRIBUTE)
+                    && !metadata
+                        .attributes
+                        .contains_key(crate::canonical::namespace::ATTRIBUTE) =>
+            {
+                (
+                    self.canonical.read_operation(parent)?.view_id,
+                    (*self.presence(parent)?).clone(),
+                )
+            }
             _ => {
                 let (view, presence) = self.canonical_view(
                     id,
@@ -431,6 +477,7 @@ impl NodeRepo {
                     &parents,
                     op.commit_predecessors.as_ref(),
                     &kind,
+                    &metadata,
                 )?;
                 (view_id(&view)?, presence)
             }

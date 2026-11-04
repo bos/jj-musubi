@@ -6,6 +6,11 @@ change the protocol, so run the same release on the hub and every machine (see
 
 ## Unreleased
 
+- Trimming all previously shared operation history beneath new work keeps the other machines
+  in the hive. Previously the hub could forget a machine and discard an abandonment before
+  it had taken it, leaving that machine unable to sync. Repair also keeps the surviving
+  work's latest-use time.
+
 - Waking a machine also ends ssh connections already waiting to close or drain stderr.
   An old connection's failure can no longer restore the retry delay that waking cleared.
 

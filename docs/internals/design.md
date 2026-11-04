@@ -989,10 +989,13 @@ dropped, whose time can no longer be read, and the rest would change. So the mac
 that publishes a dropped set first writes, on its head, a fix-up that puts it back as it was at
 its head before the abandon:
 
-- work by every copy whose latest work or forget-after the abandon dropped, one operation each,
+- work by every copy whose latest work or forget-after the abandon dropped, including a copy
+  lost entirely when the whole accepted base becomes the root, one operation each,
   recording that work's time and forget-after, then a forget of it again if it is forgotten at
   the op head the fix-up is written on, which may have operations the rewritten history lacks,
-  as a forget not yet published. The machine decides that as the fix-up starts, and saves it
+  as a forget not yet published. A copy absent from that head's known copies keeps its presence
+  from before the abandon; surviving concrete work or forget-after takes precedence over the
+  saved values. The machine decides that as the fix-up starts, and saves it
   before writing anything, keeping it through a fix-up that replaces this one: written again
   after a crash, the fix-up would find its own work at the op head, and the copy present;
 - in the first operation, the hive's settings and the conflicted remote bookmarks' expected

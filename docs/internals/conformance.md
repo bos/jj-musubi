@@ -814,6 +814,23 @@ and a hub that goes back to a head a node dropped, so fixed tests make them. `ju
 cargo-mutants over `hub.rs` and `node.rs`; the property and conformance tests should kill every
 mutant it makes.
 
+The selected native campaigns in [testing.md](testing.md#native-adapter-campaigns) also
+exercise assumptions outside the abstract core. These deliberate changes are checked at the
+production boundary, rather than by changing a protocol fake:
+
+| Change | Caught by |
+| --- | --- |
+| Peer timeout becomes a generic error | [Stream failure classification][stream-failures] |
+| Native ancestry is constant or inverted | [Native ancestry law][native-ancestry] |
+| Every error permanently pauses a copy | [Retryable-error classification][native-recovery] |
+| No error permanently pauses a copy | [Permanent-error classification][native-recovery] |
+| Repair omits copies lost with the whole base | [Offline trim regression][native-ancestry] |
+| Repair replays old time over surviving work | [Offline trim regression][native-ancestry] |
+
+[stream-failures]: ../../crates/musubi-transport/src/stream.rs
+[native-ancestry]: ../../crates/musubi-sync/tests/races/adapter.rs
+[native-recovery]: ../../crates/musubi-sync/src/node/tests.rs
+
 ## SSH process boundary
 
 The SSH supervisor's process and pipe behavior is outside the Lean transport assumptions.

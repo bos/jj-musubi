@@ -936,3 +936,6 @@ fn write_op(path: &Path, op: &OpId) -> anyhow::Result<()> {
     file.set_len(hex.len() as u64)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

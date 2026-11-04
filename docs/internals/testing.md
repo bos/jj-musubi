@@ -699,3 +699,92 @@ To keep the search effective:
 `just mutants` runs `cargo-mutants` over the protocol core's hub and node logic: each surviving
 mutant is a change to the protocol that the property and conformance tests fail to notice.
 [conformance.md](conformance.md) lists hand-made mutants and which check catches each.
+
+### Native adapter campaigns
+
+`just mutants-stream` and `just mutants-adapter` extend the core campaign to selected native
+boundaries. They need `cargo-mutants` and `cargo-nextest`, build the Lean oracle once before
+mutating, and leave `just mutants` and the routine checks unchanged. Neither mutates the whole
+workspace:
+
+- `mutants-stream` selects `Shared::attach`, `detach`, `receive` and the stream transport's
+  `request`: pending-call completion, failure reasons, reconnect subscriptions and request ids.
+  It runs the transport crate's unit and public contract tests.
+- `mutants-adapter` selects the repository adapter's ancestry, missing-object, accepted-base,
+  record-preparation and permanent-history-loss decisions. It runs focused native tests of
+  missing objects, gc of an abandoned base, pruned records and rollback across a cached fix-up,
+  together with the adapter's unit tests. These use real repositories where the core's model
+  uses an abstract `LocalRepo`.
+
+Both accept cargo-mutants options before their fixed test selection:
+
+```sh
+just mutants-stream --list
+just mutants-adapter --list
+just mutants-stream
+just mutants-adapter
+```
+
+Each build is limited to 600 seconds and each test run to 120 seconds. Tests stop on the first
+failure, terminating other tests still running. Runs are serial by default; `--jobs 2` is
+available when memory allows. Output goes to
+`mutants.out-stream/mutants.out` or `mutants.out-adapter/mutants.out`, including each mutant's
+patch and test log. The default runs in a scratch copy. `--in-place` avoids rebuilding
+unchanged dependencies in an isolated workspace, but edits that workspace during the campaign:
+keep editors, reviews and source-control commands away from the mutated files, and run no
+other builds or tests there meanwhile. Do not combine `--in-place` with parallel jobs.
+
+A survivor means the selected tests missed a change, not necessarily that all tests missed it
+or that production is wrong. Inspect each patch and its executed tests. A timeout shows only
+that the mutant did not finish within the budget; prefer a failing assertion as evidence.
+An unviable mutant did not compile. Keep equivalent mutations visible and explain why they
+cannot change an observable result rather than adding implementation-shaped assertions to
+kill them. These campaigns sample particular assumptions; they do not replace the proofs,
+conformance tests, faults, fuzzing or generated search.
+
+#### Selected campaign replay
+
+On 2026-11-03, cargo-mutants 27.1.0 produced 12 stream mutants: 11 caught and one unviable
+(`Instant * Duration`). The adapter campaign produced 13: ten caught, two unviable (`OpId`
+has no `Default`), and one survivor. Neither completed campaign timed out. Before the new
+assertions, removing the stream's `TIMED_OUT` arm survived; so did making `history_lost`
+constant, or making native ancestry always true. Native ancestry always false previously
+only timed out. The new direct checks turn each into an assertion failure, without depending
+on a generated schedule or running the broken protocol to build the ancestry fixture.
+
+The remaining survivor inverts the cached-base equality filter in `accepted_base`. The
+adapter clears this cache when polling or changing the saved base, so in its supported
+lifecycle the cached entry is either absent or tagged with that base. Inverting the filter
+misses the cache and recomputes completeness. With stable repository contents the result is
+equivalent; extra I/O can fail, or notice concurrent collection sooner. It introduces no
+incorrect cached answer. This is a loss of the optimization, not a missing safety assertion.
+Keep it visible: with this generator the adapter recipe exits 2 for that survivor. Do not
+interpret that exit as a clean campaign or automatically dismiss a different survivor.
+
+Two hand-made mutations cover assumptions the generator does not change: limiting
+`history_lost` to the outermost error must fail
+`node::tests::permanent_history_loss_survives_error_context`; replacing the object-store
+completeness check in `accepted_base` with `true` must fail
+`fetch_base::collected_objects_of_an_abandoned_fetch_base_are_fetched_again`. To replay, make
+one change in a disposable workspace, run the corresponding selected test, then restore the
+source:
+
+```sh
+cargo nextest run -p musubi-sync --lib \
+    -E 'test(=node::tests::permanent_history_loss_survives_error_context)'
+cargo nextest run -p musubi-sync --test races \
+    -E 'test(=fetch_base::collected_objects_of_an_abandoned_fetch_base_are_fetched_again)'
+```
+
+The first must fail on the wrapped error; the second on the poll that
+would otherwise omit collected objects. The full local check then runs on the restored code.
+
+The full local check also exposed premature native pruning after a trim removed the whole
+accepted base below an unpublished operation. The abstract core's presence and pruning rules
+were sound; the native repair omitted copies whose presence had no surviving operation to
+stamp. `adapter::pruning_waits_for_a_copy_whose_work_was_abandoned` reproduces this without a
+daemon race: alpha trims, beta stays offline, and alpha finishes its repair and subsequent
+polls. It requires beta to remain present, the record to stay unpruned, alpha's surviving
+work time to stay unchanged, and later convergence. Replacing the union of old and new known
+copies with only the new known copies reproduces the failure. Omitting the preference for
+surviving work's time makes the independent harness-clock assertion fail.

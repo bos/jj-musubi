@@ -71,6 +71,8 @@ just property       # the generated end-to-end search
 just fuzz           # all fuzz targets across available CPUs (needs cargo-fuzz and nightly Rust)
 just fuzz bundle    # one target across available CPUs, until stopped
 just mutants        # mutation testing of the protocol core (needs cargo-mutants)
+just mutants-stream # focused stream correlation and reconnect mutations
+just mutants-adapter # focused native repository recovery mutations
 just kani           # every Kani proof (needs kani-verifier; see testing.md)
 just bench-smoke    # every benchmark script, once (see bench/README.md)
 ```

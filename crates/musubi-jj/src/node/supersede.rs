@@ -3225,8 +3225,10 @@ impl NodeRepo {
         let before = self.presence(old)?;
         let after = self.presence(new)?;
         let mut fixup = Fixup::default();
-        for copy in after.known() {
-            if !after.ops_of(copy).any(|work| work.op.is_none()) {
+        for copy in before.known().union(after.known()) {
+            // If the whole accepted base was abandoned, its image can be the root: there
+            // is then no surviving operation to stamp with the copies it knew.
+            if after.known().contains(copy) && !after.ops_of(copy).any(|work| work.op.is_none()) {
                 continue;
             }
             fixup.work.push(Work {
@@ -3470,10 +3472,42 @@ impl NodeRepo {
             && fixup.work.iter().any(|work| work.forgotten.is_none())
         {
             let presence = self.presence(&canonical_head)?;
-            for work in &mut self.records.fixup.as_mut().expect("matched above").work {
-                work.forgotten
-                    .get_or_insert_with(|| !presence.is_present(&work.copy));
+            let before = self
+                .records
+                .fixup_from
+                .as_ref()
+                .map(|head| self.presence(head))
+                .transpose()?;
+            let mut work = self
+                .records
+                .fixup
+                .as_ref()
+                .expect("matched above")
+                .work
+                .clone();
+            for work in &mut work {
+                if work.forgotten.is_some() {
+                    continue;
+                }
+                // Unpublished work or a forget above the abandon takes precedence. A copy
+                // lost with the entire base instead keeps its previous presence and use.
+                if let Some(at) = self.worked_at(&presence, &work.copy)? {
+                    work.worked_at = Some(at);
+                }
+                if presence.has_forget_after(&work.copy) {
+                    work.forget_after =
+                        Some(format_forget_after(presence.forget_after(&work.copy)));
+                }
+                let present = if presence.known().contains(&work.copy) {
+                    presence.is_present(&work.copy)
+                } else {
+                    before
+                        .as_ref()
+                        .is_some_and(|before| before.is_present(&work.copy))
+                };
+                work.forgotten = Some(!present);
             }
+            self.records.fixup.as_mut().expect("matched above").work = work;
             self.save_records()?;
         }
         let fixup = self.records.fixup.clone().unwrap_or_default();

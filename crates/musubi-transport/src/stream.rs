@@ -1022,26 +1022,30 @@ mod io_tests;
 mod tests {
     use super::*;
 
-    /// Service-side reply inboxes can discard duplicates before they become stream frames.
-    /// Deliver frames here, in a fixed order, to pin the client's own correlation rule.
-    #[test]
-    fn replies_only_complete_the_matching_pending_call_once() {
-        use serde_json::json;
-
-        let shared = Shared {
+    fn empty_shared(next_id: u64) -> Shared {
+        Shared {
             while_disconnected: WhileDisconnected::Wait,
             failed_attempts: watch::channel(0).0,
             state: Mutex::new(State {
                 out: None,
                 stalled: Arc::new(Notify::new()),
                 max_payload: 1024,
-                next_id: 4,
+                next_id,
                 subscriptions: HashMap::new(),
                 pending: HashMap::new(),
             }),
             connected: watch::channel(false).0,
             reconnected: watch::channel(0).0,
-        };
+        }
+    }
+
+    /// Service-side reply inboxes can discard duplicates before they become stream frames.
+    /// Deliver frames here, in a fixed order, to pin the client's own correlation rule.
+    #[test]
+    fn replies_only_complete_the_matching_pending_call_once() {
+        use serde_json::json;
+
+        let shared = empty_shared(4);
         let (abandoned, canceled) = oneshot::channel();
         shared.lock().pending.insert(1, ("rpc".into(), abandoned));
         drop(canceled);
@@ -1077,6 +1081,55 @@ mod tests {
         finish(3, Bytes::from_static(b"current"));
         assert_eq!(waiting.try_recv().unwrap().unwrap(), "current");
         assert!(shared.lock().pending.is_empty());
+    }
+
+    /// A failed call consumes its id as a successful one does, preserving the peer's reason
+    /// and the original subject. Unknown or duplicate failures cannot finish another call.
+    #[test]
+    fn failure_frames_preserve_the_reason_and_only_complete_the_matching_call() {
+        for code in [TIMED_OUT, NO_RESPONDERS, OTHER, 255] {
+            let shared = empty_shared(9);
+            let (reply, mut failed) = oneshot::channel();
+            shared.lock().pending.insert(7, ("rpc".into(), reply));
+            let (reply, mut waiting) = oneshot::channel();
+            shared.lock().pending.insert(8, ("other".into(), reply));
+            let failure = |id| Frame::Fail {
+                id,
+                code,
+                message: "peer failure".into(),
+            };
+            shared.receive(failure(999)).unwrap();
+            assert!(matches!(
+                failed.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+            shared.receive(failure(7)).unwrap();
+            let error = failed.try_recv().unwrap().unwrap_err();
+            match code {
+                TIMED_OUT => assert!(matches!(error, TransportError::Timeout), "{error:?}"),
+                NO_RESPONDERS => assert!(
+                    matches!(&error, TransportError::NoResponders(subject) if subject == "rpc"),
+                    "{error:?}"
+                ),
+                _ => assert!(
+                    matches!(&error, TransportError::Other(message) if message == "peer failure"),
+                    "{error:?}"
+                ),
+            }
+            shared.receive(failure(7)).unwrap();
+            assert!(matches!(
+                waiting.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ));
+            shared
+                .receive(Frame::Reply {
+                    id: 8,
+                    payload: Bytes::from_static(b"current"),
+                })
+                .unwrap();
+            assert_eq!(waiting.try_recv().unwrap().unwrap(), "current");
+            assert!(shared.lock().pending.is_empty());
+        }
     }
 
     fn round_trip(frame: Frame) {

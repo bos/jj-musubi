@@ -185,3 +185,28 @@ mutants: oracle
         cargo mutants --package musubi-core \
         --file crates/musubi-core/src/hub.rs --file crates/musubi-core/src/node.rs \
         --test-tool nextest --timeout 600
+
+# Stream request correlation and reconnect bookkeeping; opt-in, with bounded per-mutant time.
+[positional-arguments]
+mutants-stream *args: oracle
+    MUSUBI_ORACLE=$PWD/formal/.lake/build/bin/oracle cargo mutants \
+        --package musubi-transport --file crates/musubi-transport/src/stream.rs \
+        --re 'Shared::(attach|detach|receive)|StreamTransport>::request' \
+        --test-tool nextest --build-timeout 600 --timeout 120 \
+        --output mutants.out-stream "$@" -- --max-fail 1:immediate
+
+# Repository decisions the protocol model assumes; only the focused native regressions run.
+[positional-arguments]
+mutants-adapter *args: oracle
+    #!/usr/bin/env bash
+    set -euo pipefail
+    filter='test(/^node::tests::/) | test(/^adapter::/) | test(/^objects::/)'
+    filter+=' | test(/^fetch_base::/)'
+    filter+=' | test(=history::a_forgotten_copy_behind_pruned_records_stops)'
+    filter+=' | test(=history::a_receiver_takes_records_that_drop_its_head_above_a_cached_fixup)'
+    MUSUBI_ORACLE=$PWD/formal/.lake/build/bin/oracle cargo mutants \
+        --package musubi-sync --file crates/musubi-sync/src/node.rs \
+        --re 'history_lost|>::(accepted_base|is_ancestor|prepare_records|objects_missing)' \
+        --test-tool nextest --build-timeout 600 --timeout 120 \
+        --output mutants.out-adapter "$@" \
+        -- --max-fail 1:immediate --lib --test races -E "$filter"

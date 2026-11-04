@@ -13,6 +13,7 @@ mod oracle;
 #[path = "../../../musubi-jj/tests/support/refs_model.rs"]
 mod refs_model;
 
+mod adapter;
 mod bookmarks;
 mod changes;
 mod config;

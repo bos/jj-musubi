@@ -22,48 +22,12 @@ accept it (`RawPublish.stable_no_pendingPush`), and the hub would move. No push 
 nothing is read in original ids. -/
 
 open Musubi.EarlyEntry.Control in
-theorem choose_fetch {r : Reads} (h : choose r = .fetch) : r.missOps = true := by
-  unfold choose at h
-  split at h
-  · cases h
-  split at h
-  · cases h
-  split at h
-  · split at h
-    · cases h
-    split at h
-    · assumption
-    split at h <;> cases h
-  split at h
-  · cases h
-  split at h
-  · split at h <;> cases h
-  split at h
-  · split at h <;> cases h
-  split at h <;> cases h
+theorem choose_fetch {r : Reads} (h : choose r = .fetch) : r.missOps = true :=
+  choose_fetch_missOps h
 
 open Musubi.EarlyEntry.Control in
-theorem choose_objects {r : Reads} (h : choose r = .objects) : r.missObjs = true := by
-  unfold choose at h
-  split at h
-  · cases h
-  split at h
-  · cases h
-  split at h
-  · split at h
-    · cases h
-    split at h
-    · cases h
-    split at h
-    · assumption
-    · cases h
-  split at h
-  · cases h
-  split at h
-  · split at h <;> cases h
-  split at h
-  · split at h <;> cases h
-  split at h <;> cases h
+theorem choose_objects {r : Reads} (h : choose r = .objects) : r.missObjs = true :=
+  choose_objects_missObjs h
 
 /-- The hub does not drop the head a push sends: it is no dropped name, no cached renaming key,
 and not among the push's own drops. -/

@@ -18,16 +18,12 @@ machine.
 ## jj reports "stack limit reached"
 
 jj 0.47.0's static Linux binary can report `stack limit reached` for its built-in aliases and
-then panic, even in a new repository. Build the same release with a GNU/glibc Rust toolchain
-on Linux instead:
+then panic, even in a new repository. Upgrade to jj 0.47.1, which fixes this dependency error
+and is the version this musubi requires. The fixed binaries are in
+[jj 0.47.1's release](https://github.com/jj-vcs/jj/releases/tag/v0.47.1).
 
-```sh
-cargo install --locked --version 0.47.0 --force jj-cli
-```
-
-Put Cargo's binary directory (usually `~/.cargo/bin`) first on your `PATH`, then rerun the
-command that failed. Both binaries report 0.47.0, so `jj --version` alone cannot distinguish
-them. Building for a musl target can retain the problem.
+Put the new binary first on your `PATH`, then check that `jj --version` reports 0.47.1 and
+rerun the command that failed.
 
 ## Reaching the hub
 
@@ -386,8 +382,8 @@ since its last sync, then run `musubi leave --force` in this one.
 
 ### "unknown field ... (written by a newer jj?)"
 
-A `jj` newer than 0.47.0, the version musubi supports, wrote an operation with fields musubi
-doesn't know, and musubi won't drop them by syncing it. Use jj 0.47.0 with this release of
+A `jj` newer than 0.47.1, the version musubi supports, wrote an operation with fields musubi
+doesn't know, and musubi won't drop them by syncing it. Use jj 0.47.1 with this release of
 musubi, and upgrade the two together.
 
 ### "the hub did not supply the objects this machine needs"

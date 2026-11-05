@@ -42,7 +42,7 @@ use jj_lib::settings::UserSettings;
 use tempfile::TempDir;
 
 /// The jj version musubi's jj-lib is pinned to.
-pub const JJ_VERSION: &str = "0.47.0";
+pub const JJ_VERSION: &str = "0.47.1";
 
 pub struct TestEnv {
     root: TempDir,
@@ -316,7 +316,7 @@ fn check_jj_version() {
             .output()
             .expect("`jj` is not on PATH");
         let version = String::from_utf8_lossy(&output.stdout);
-        // Release builds append the commit they were built from: `jj 0.47.0-7d382314...`.
+        // Release builds append the commit they were built from: `jj 0.47.1-7d382314...`.
         let number = version
             .split_whitespace()
             .nth(1)

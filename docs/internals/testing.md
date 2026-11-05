@@ -50,7 +50,7 @@ cargo-machete, typos and the fuzz runner's unit tests;
 [testing-philosophy.md, "Beyond `just check`"](testing-philosophy.md#beyond-just-check) says when
 to run the rest.
 
-The tests need `jj` 0.47.0 and `git` on `PATH`. They don't read your own git config:
+The tests need `jj` 0.47.1 and `git` on `PATH`. They don't read your own git config:
 `.cargo/config.toml` hides the global and system config from the git they start, and the `jj`
 and `git` they run as commands get a home directory of their own.
 

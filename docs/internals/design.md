@@ -8,7 +8,7 @@ it reconnects.
 
 This document gives musubi's design rules and the reasons for them. [protocol.md](protocol.md)
 specifies the messages between nodes and the hub and the properties they guarantee, and
-[races.md](races.md) the outcome of each race. musubi pins jj-lib 0.47.0.
+[races.md](races.md) the outcome of each race. musubi pins jj-lib 0.47.1.
 
 ## Vocabulary
 

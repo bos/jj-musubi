@@ -98,4 +98,4 @@ jobs:
         run: |
           lake build oracle
           echo "MUSUBI_ORACLE=$PWD/.lake/build/bin/oracle" >> "$GITHUB_ENV"
-      - run: cargo nextest run --workspace
+      - run: cargo nextest run --workspace --profile ci

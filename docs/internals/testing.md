@@ -134,8 +134,8 @@ seed that changes from run to run. A failing shard uploads its example database;
 gives the seed and a `reproduce_failure` attribute for replaying the failure locally.
 
 The jj main workflow rebases `jj-next` onto the musubi revision under test, then builds it
-against jj's main branch and runs the default suite with the workflow's filter. The filter
-excludes pinned-jj behavior that main has already changed.
+against jj's main branch and runs the `ci` test profile, including its conformance timeouts
+and wrong-reply tests.
 [AGENTS.md](../../AGENTS.md#building-against-jjs-main-branch) says what belongs on `jj-next`.
 
 To test against a checkout of jj outside this workspace, use a clean, disposable musubi
@@ -144,7 +144,7 @@ workspace with the appropriate `jj-next` changes:
 1. Run `.github/scripts/use-jj-checkout.sh <jj checkout>`.
 2. From this workspace, build the matching jj with `cargo build -p jj-cli --bin jj`, which the
    script has pointed at the checkout, and put `target/debug` on `PATH`.
-3. Run the tests with the workflow's filter.
+3. Run `cargo nextest run --workspace --profile ci`.
 4. Afterwards, discard only the script's edits and its `Cargo.lock` changes, or remove the
    disposable workspace.
 

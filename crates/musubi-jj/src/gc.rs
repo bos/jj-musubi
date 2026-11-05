@@ -26,8 +26,8 @@ use jj_lib::default_backend_factories::default_backend_factories;
 use jj_lib::git::GitSubprocessOptions;
 use jj_lib::repo::Repo as _;
 use jj_lib::repo::RepoLoader;
-use jj_lib::repo::StoreLoadError;
 use jj_lib::settings::UserSettings;
+use jj_lib::store_factories::StoreLoadError;
 use pollster::FutureExt as _;
 use thiserror::Error;
 

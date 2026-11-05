@@ -51,14 +51,16 @@ jobs:
         include:
           - name: Linux
             os: ubuntu-latest
+            jj: jj-v0.47.1-x86_64-unknown-linux-musl.tar.gz
+            jj-sha256: d4b657f622ee50929c8916466dfa3d6a6c17a0a32b50e7b2c793707ec9ebcad7
           - name: macOS
             os: macos-latest
-            jj: jj-v0.47.0-aarch64-apple-darwin.tar.gz
-            jj-sha256: 7fa4e94e1c92c08ca62b1156ae29df84da2aad99a56d42c56e2f05045022c981
+            jj: jj-v0.47.1-aarch64-apple-darwin.tar.gz
+            jj-sha256: 50129b527f7cd6aef82aebd4bb2b670bb56766adc509ef3279c4327aa3592255
           - name: Windows
             os: windows-latest
-            jj: jj-v0.47.0-x86_64-pc-windows-msvc.zip
-            jj-sha256: dc9909dcb3c052271894aacdc5207149188143ebc70c4b277c9a4ac60db288de
+            jj: jj-v0.47.1-x86_64-pc-windows-msvc.zip
+            jj-sha256: 72f9f80bc99d07a7f48d5f219cf5bab91f7e906e4b53f6c827948e646cd1152f
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -74,21 +76,10 @@ jobs:
         if: runner.os != 'Linux'
         shell: bash
         run: just lint
-      # The release's static musl binary misdetects its main-thread stack and refuses
-      # even trivial revsets. Build the same pinned jj with the runner's native libc.
-      - name: Build jj
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          cargo build --locked -p jj-cli --bin jj
-          mkdir -p "$RUNNER_TEMP/bin"
-          cp target/debug/jj "$RUNNER_TEMP/bin/"
-          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
       - name: Install jj
-        if: runner.os != 'Linux'
         shell: bash
         run: |
-          .github/scripts/install-release.sh jj-vcs/jj v0.47.0 "${{ matrix.jj }}" "${{ matrix.jj-sha256 }}" jj
+          .github/scripts/install-release.sh jj-vcs/jj v0.47.1 "${{ matrix.jj }}" "${{ matrix.jj-sha256 }}" jj
       - run: jj --version && git --version
       # The Lean toolchain, for the oracle that tests check the code against.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

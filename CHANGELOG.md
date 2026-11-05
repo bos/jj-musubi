@@ -26,9 +26,9 @@ change the protocol, so run the same release on the hub and every machine (see
   with unsnapshotted edits. A later stale update can no longer load the empty operation root
   as that workspace's previous snapshot and panic.
 
-- musubi now supports jj 0.47.0. Upgrade jj on every machine, and upgrade the hub and every
-  machine together, then restart their daemons. Builds using jj 0.46.0 cannot
-  sync with this build.
+- musubi now supports jj 0.47.1. Upgrade jj on every machine, and upgrade the hub and every
+  machine together, then restart their daemons. Builds using jj 0.47.0 or earlier cannot
+  sync with this build. The 0.47.1 release fixes the static Linux binary failure in 0.47.0.
   Ordinary jj commands leave remote-bookmark conflicts unchanged when their Git refs have
   not moved; fetch explicitly to resolve them. They also finish pending Git exports after
   merging operation heads. Timestamp templates now use jiff's formatting,

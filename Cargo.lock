@@ -2317,9 +2317,9 @@ dependencies = [
 
 [[package]]
 name = "jj-cli"
-version = "0.47.0"
+version = "0.47.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5d6c1c821676e6776ec947cbbe58868c3e00aa23716350557b7e756a77f2cc33"
+checksum = "10f2f06511119772183fcb4d3370c439df83139539bef1906d17a73dd3bd715e"
 dependencies = [
  "ansi-to-tui",
  "bstr",
@@ -2378,9 +2378,9 @@ dependencies = [
 
 [[package]]
 name = "jj-core"
-version = "0.47.0"
+version = "0.47.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7af99a1c90b34a85ad70b4bdbe40e9e6be871146346b56dba9864727fef95037"
+checksum = "eba631c4b2a4cb0e7eca54e416eadfd1a61346eaaee96688e8fa6b1260facb57"
 dependencies = [
  "async-trait",
  "blake2",
@@ -2407,9 +2407,9 @@ dependencies = [
 
 [[package]]
 name = "jj-core-proc-macros"
-version = "0.47.0"
+version = "0.47.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3afca7cb19bcb21d8f699539fd0120227ba937437f7e8bdb0c407b188f4f2bfd"
+checksum = "6ac4753be113180892863776c8420d8b53133009781a7891e142cde4933ae23c"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2418,9 +2418,9 @@ dependencies = [
 
 [[package]]
 name = "jj-default-index"
-version = "0.47.0"
+version = "0.47.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "797258445b98fc80cb3bfd2e09406e04df47de59aaf174263b2994f7cc0cb3b2"
+checksum = "0477524efdd0f5a8959b3442129452309354360dadf3565e9482f592464e986d"
 dependencies = [
  "async-trait",
  "blake2",
@@ -2443,9 +2443,9 @@ dependencies = [
 
 [[package]]
 name = "jj-dsl"
-version = "0.47.0"
+version = "0.47.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b013e6b10b26228e1cd7147a0baf554661ea98419361c66592f3dcb6d1858aa"
+checksum = "45dd9b5fd81bcb594aafb87c89eec71d1405ce385143c943f29c6014922546c1"
 dependencies = [
  "itertools 0.15.0",
  "jj-core",
@@ -2457,9 +2457,9 @@ dependencies = [
 
 [[package]]
 name = "jj-frontend"
-version = "0.47.0"
+version = "0.47.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ac56a5664b255305e6ee3dc2d71ad0578b573eef3de4940b5dc3fb3ea5be95e0"
+checksum = "468bab9d56399ba8fa4715c0b64a2ce47dd6ed8cde14b56a61ff4b008e038290"
 dependencies = [
  "jiff",
  "jj-lib",
@@ -2469,9 +2469,9 @@ dependencies = [
 
 [[package]]
 name = "jj-git-backend"
-version = "0.47.0"
+version = "0.47.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "499a40fe37bf7d71b4b002b088939b1cce970d486d13afa6e071958679331587"
+checksum = "a6144feaf22f59dd2c65333c34187a664634d545c216f0242c02a7cf688edd56"
 dependencies = [
  "async-trait",
  "blake2",
@@ -2492,9 +2492,9 @@ dependencies = [
 
 [[package]]
 name = "jj-lib"
-version = "0.47.0"
+version = "0.47.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b35d8ad6f53237ec800eb37f250b2d7fc57ff77f09a5f1ef27b00db7cc855bc"
+checksum = "55cf027ca97220abebfc8c87613f69126730535836a3e8f3968bdf64b3022f17"
 dependencies = [
  "async-trait",
  "blake2",
@@ -2534,9 +2534,9 @@ dependencies = [
 
 [[package]]
 name = "jj-local-util"
-version = "0.47.0"
+version = "0.47.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d3fe0e84560817c2a8170abed956048d7988c5942f766546f34078ec73224fc"
+checksum = "f1d32a882ff2453e9becbbca1dee041d8162240aaf020e11994a4ab88643c2e9"
 dependencies = [
  "blake2",
  "futures",
@@ -3238,21 +3238,20 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "pest"
-version = "2.9.4"
+version = "2.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd47a460a9cbc3b3429c7e22bf0d76653e779319bae45a499ca010c9a990bb23"
+checksum = "a8db75153506001cb36ed924f08cadc862eb3f8c4d0d534139f29074769d7660"
 dependencies = [
  "memchr",
- "psm",
- "stacker",
+ "pest_stack_guard",
  "ucd-trie",
 ]
 
 [[package]]
 name = "pest_derive"
-version = "2.9.4"
+version = "2.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "203e46697708f7519ab1608393cf89239cafb46b8e6d08a8ffe359359b11ef44"
+checksum = "20aa17e11fb35664b67d5214a0afac57a360d231b6ec53d6eba0700b27d933b4"
 dependencies = [
  "pest",
  "pest_generator",
@@ -3260,9 +3259,9 @@ dependencies = [
 
 [[package]]
 name = "pest_generator"
-version = "2.9.4"
+version = "2.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e84ae6340a458d3d6cfc73cf328cf3cfe90b2484cd0de25eb66aa954615ed4d5"
+checksum = "626ec5afccf44ccbfeb2b232316510bb55b4bf34d891afcb0fb07d2b17d7fe9d"
 dependencies = [
  "pest",
  "pest_meta",
@@ -3273,11 +3272,21 @@ dependencies = [
 
 [[package]]
 name = "pest_meta"
-version = "2.9.4"
+version = "2.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b57f92f32b3dbce6598fd8f5cdf1f06a6072570b8103fa21728fa9036923e710"
+checksum = "b3f45b6caa65c1b08186832745159c2529994146340a7bf44168095469720f5d"
 dependencies = [
  "pest",
+]
+
+[[package]]
+name = "pest_stack_guard"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ac6154fd4418b8f0b82532c59c26f303f9ca59a64c883e8ce3971fd82733439"
+dependencies = [
+ "psm",
+ "stacker",
 ]
 
 [[package]]

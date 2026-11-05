@@ -44,13 +44,11 @@ jobs:
       - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2.89.0
         with:
           tool: cargo-nextest
-      # Use the runner's libc: the release's static musl binary misdetects its stack.
-      - name: Build jj
+      - name: Install jj
         run: |
-          cargo build --locked -p jj-cli --bin jj
-          mkdir -p "$RUNNER_TEMP/bin"
-          cp target/debug/jj "$RUNNER_TEMP/bin/"
-          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          .github/scripts/install-release.sh jj-vcs/jj v0.47.1 \
+            jj-v0.47.1-x86_64-unknown-linux-musl.tar.gz \
+            d4b657f622ee50929c8916466dfa3d6a6c17a0a32b50e7b2c793707ec9ebcad7 jj
       - name: Search
         run: |
           echo "MUSUBI_SEARCH_SEED=$MUSUBI_SEARCH_SEED"

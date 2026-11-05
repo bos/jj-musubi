@@ -10,7 +10,7 @@ use jj_lib::lock::FileLockError;
 use jj_lib::op_heads_store::OpHeadsStoreError;
 use jj_lib::op_store::OpStoreError;
 use jj_lib::repo::RepoLoaderError;
-use jj_lib::repo::StoreLoadError;
+use jj_lib::store_factories::StoreLoadError;
 use thiserror::Error;
 
 use crate::canonical::CanonicalError;

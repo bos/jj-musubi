@@ -30,10 +30,10 @@ priority = 100
 filter = "test(=survivor_advance_conformance)"
 slow-timeout = { period = "60s", terminate-after = 10 }
 
-# The four-repository survivor seed also runs a generated walk; leave time for slower
-# platforms without reducing the cases or any independent convergence/import checks.
+# These four-repository survivor cases exceed two minutes on Windows. Leave time for all
+# their steps, including the generated walk and independent convergence/import checks.
 [[profile.ci.overrides]]
-filter = "test(=e2e_dropped_merge)"
+filter = "test(=e2e_dropped_merge) | test(=e2e_command_above_dropped_merge)"
 slow-timeout = { period = "60s", terminate-after = 6 }
 
 # These six four-repository cases, with separate git directories and fetched histories,

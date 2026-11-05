@@ -1718,3 +1718,16 @@ its canonical keys; existing Presence conformance checks the fix-up WORK and FOR
 The race checks both machines' resulting workspace ownership after translation-cache loss
 and a delayed command using the unstamped native source. The separate
 `a_trim_does_not_reserve_a_forgotten_copys_workspace_name` checks reuse of a foreign alias.
+
+`a_full_trim_keeps_a_forgotten_receivers_private_workspaces` checks the receiving side when
+contraction removes every shared basis for its own bindings. It merges actual native heads'
+workspace slots against their actual native bases, using jj's existing slot rule. Local
+ownership evidence reserves private names through fix-up realizations and native descendants;
+it is stripped from canonical operations and never changes Presence. The race checks an
+owned slash name that collides with a peer prefix, interrupted receipt, translation-cache loss,
+unsnapshotted work, publication by the next native command, and explicit workspace removal.
+
+`restoring_an_older_view_does_not_inherit_private_workspace_ownership` restores a real native
+view where the private owned name was still a foreign alias. It checks the canonical binding
+before further native commands and the peer's resulting workspace names. Private-name
+reconstruction follows restore and revert sources and stops at native join boundaries.

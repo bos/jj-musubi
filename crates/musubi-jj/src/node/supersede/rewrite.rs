@@ -274,6 +274,9 @@ impl NodeRepo {
                     .get(CANONICAL_ATTRIBUTE)
                     .is_some_and(|hex| *hex != new.0.hex());
             let rewrite = if changed {
+                let view = op_store.read_view(&op.view_id).block_on()?;
+                let own = self.own_of_view(view.wc_commit_ids, c, &op)?;
+                self.record_private_workspaces(&mut op.metadata, own.into_keys(), &new)?;
                 op.parents = parents;
                 // The translation map is disposable. Without a durable marker, translating
                 // this rewrite after cache loss would mint an origin from its new parents.

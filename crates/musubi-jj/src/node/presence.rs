@@ -234,7 +234,11 @@ impl NodeRepo {
         repo: &ReadonlyRepo,
         canonical: &CanonicalOp,
     ) -> Result<BTreeMap<WorkspaceNameBuf, CommitId>, NodeError> {
-        self.own_of_view(repo.view().wc_commit_ids().clone(), canonical)
+        self.own_of_view(
+            repo.view().wc_commit_ids().clone(),
+            canonical,
+            repo.operation().store_operation(),
+        )
     }
 
     /// This machine's own of `workspaces`, a local view's, whose canonical form is
@@ -244,17 +248,89 @@ impl NodeRepo {
         &self,
         workspaces: BTreeMap<WorkspaceNameBuf, CommitId>,
         canonical: &CanonicalOp,
+        op: &jj_lib::op_store::Operation,
     ) -> Result<BTreeMap<WorkspaceNameBuf, CommitId>, NodeError> {
-        let others = self.other_names(canonical)?;
+        if canonical == self.canonical.root_operation_id() {
+            return Ok(workspaces);
+        }
+        let private = self.private_workspace_names(op, &workspaces)?;
+        let canonical_view = self.canonical.read_operation_view(canonical)?;
+        let prefixes =
+            self.prefixes_with_own(&canonical_view, &*self.presence(canonical)?, &private)?;
+        let others: BTreeSet<_> = self
+            .names_of(&canonical_view, &prefixes)
+            .into_iter()
+            .filter(|(key, _)| !self.is_own_key(key))
+            .map(|(_, name)| name)
+            .collect();
         let machines = self.known_machines(canonical)?;
         let own = self.own_names(canonical)?;
         Ok(workspaces
             .into_iter()
             .filter(|(name, _)| {
-                !others.contains_key(name)
-                    && (own.contains(name) || !self.names_other_machine(name, &machines))
+                !others.contains(name)
+                    && (private.contains(name)
+                        || own.contains(name)
+                        || !self.names_other_machine(name, &machines))
             })
             .collect())
+    }
+
+    /// Merges this copy's bindings over the actual native heads and native merge bases.
+    /// Canonical operations can omit them while the copy is forgotten.
+    pub(super) fn merged_local_workspaces(
+        &self,
+        ops: &[jj_lib::operation::Operation],
+    ) -> Result<BTreeMap<WorkspaceNameBuf, CommitId>, NodeError> {
+        let of = |op: &jj_lib::operation::Operation| {
+            let local = LocalOp(op.id().clone());
+            // A prejoin branch has no shared namespace: as at the join boundary,
+            // its native slots belong to this copy. It must not block taking a trim.
+            let canonical = self
+                .canonical_of(&local)
+                .unwrap_or_else(|| self.canonical.root_operation_id().clone());
+            let view = op.view().block_on()?;
+            self.own_of_view(
+                view.wc_commit_ids().clone(),
+                &canonical,
+                op.store_operation(),
+            )
+        };
+        let Some((first, rest)) = ops.split_first() else {
+            return Ok(BTreeMap::new());
+        };
+        let mut merged = of(first)?;
+        let mut parents = vec![first.clone()];
+        for other in rest {
+            let bases = jj_lib::op_walk::closest_common_ancestors(parents.clone(), [other.clone()])
+                .block_on()?;
+            let base = match bases.as_slice() {
+                [] => BTreeMap::new(),
+                [one] => of(one)?,
+                several => self.merged_local_workspaces(several)?,
+            };
+            let theirs = of(other)?;
+            let keys: BTreeSet<_> = merged
+                .keys()
+                .chain(base.keys())
+                .chain(theirs.keys())
+                .cloned()
+                .collect();
+            merged = keys
+                .into_iter()
+                .filter_map(|key| {
+                    workspaces::merge_working_copy(
+                        merged.get(&key),
+                        base.get(&key),
+                        theirs.get(&key),
+                    )
+                    .cloned()
+                    .map(|value| (key, value))
+                })
+                .collect();
+            parents.push(other.clone());
+        }
+        Ok(merged)
     }
 
     /// The names of this machine's own workspaces as of a canonical operation: those in its
@@ -342,8 +418,16 @@ impl NodeRepo {
             return Ok(BTreeMap::new());
         }
         let view = self.canonical.read_operation_view(canonical)?;
+        let private = if let Some(local) = self.local_of(canonical) {
+            let op = self.loader.op_store().read_operation(&local.0).block_on()?;
+            let local_view = self.loader.op_store().read_view(&op.view_id).block_on()?;
+            self.private_workspace_names(&op, &local_view.wc_commit_ids)?
+        } else {
+            BTreeSet::new()
+        };
+        let prefixes = self.prefixes_with_own(&view, &*self.presence(canonical)?, &private)?;
         Ok(self
-            .local_names(&view, &*self.presence(canonical)?)?
+            .names_of(&view, &prefixes)
             .into_iter()
             .filter(|(key, _)| !self.is_own_key(key))
             .map(|(key, name)| (name, key))

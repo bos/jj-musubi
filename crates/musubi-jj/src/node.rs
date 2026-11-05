@@ -122,6 +122,9 @@ pub struct NodeRepo {
         LocalOp,
         Arc<BTreeMap<jj_lib::ref_name::WorkspaceNameBuf, CommitId>>,
     )>,
+    /// Private ownership reconstructed from immutable native operation views.
+    private_names:
+        Mutex<HashMap<jj_lib::op_store::OperationId, BTreeSet<jj_lib::ref_name::WorkspaceNameBuf>>>,
     /// Presence at the canonical operations asked about lately (see [`Self::presence`]).
     presences: Arc<crate::canonical::PresenceMemo>,
     /// This machine's own workspace names as of its latest work, while the hive has forgotten
@@ -223,6 +226,7 @@ impl NodeRepo {
             heads_mapped: false,
             last_realized: None,
             last_own: None,
+            private_names: Mutex::new(HashMap::new()),
             prepared: None,
             presences: Arc::default(),
             worked_names: Mutex::default(),

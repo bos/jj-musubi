@@ -29,6 +29,9 @@ use crate::presence::Kind;
 use crate::presence::Presence;
 use crate::workspaces;
 
+/// Names retained only in this copy after their shared history was trimmed away.
+pub(super) const LOCAL_WORKSPACES: &str = "musubi.local-workspaces";
+
 /// Per-machine fields of a view that a realization inherits: this machine's record of its
 /// own `.git` (`git_refs`, the `git` pseudo-remote, and each workspace's `git_heads`). The
 /// working copies come from the canonical view instead. See "Per-machine state in a
@@ -153,6 +156,17 @@ impl NodeRepo {
         let mut parent_heads: BTreeSet<CommitId> = BTreeSet::new();
         let mut machines: BTreeSet<String> = BTreeSet::new();
         let mut own_names: BTreeSet<WorkspaceNameBuf> = BTreeSet::new();
+        let raw = self
+            .loader
+            .op_store()
+            .read_operation(&local_op.0)
+            .block_on()?;
+        let private = if self.joins.is_empty() {
+            BTreeSet::new()
+        } else {
+            self.private_workspace_names(&raw, &view.wc_commit_ids)?
+        };
+        own_names.extend(private.iter().cloned());
         for (parent, presence) in &parent_presences {
             if parent == self.canonical.root_operation_id() {
                 continue;
@@ -161,7 +175,8 @@ impl NodeRepo {
             parent_heads.extend(parent_view.head_ids.iter().cloned());
             machines.extend(self.machines_of(&parent_view, presence.known()));
             own_names.extend(self.own_names_in(&parent_view, presence)?);
-            for (key, name) in self.local_names(&parent_view, presence)? {
+            let prefixes = self.prefixes_with_own(&parent_view, presence, &private)?;
+            for (key, name) in self.names_of(&parent_view, &prefixes) {
                 if !self.is_own_key(&key) {
                     others.insert(name, key);
                 }
@@ -351,6 +366,111 @@ impl NodeRepo {
         .encode())
     }
 
+    pub(super) fn private_workspace_names(
+        &self,
+        op: &jj_lib::op_store::Operation,
+        workspaces: &BTreeMap<WorkspaceNameBuf, CommitId>,
+    ) -> Result<BTreeSet<WorkspaceNameBuf>, NodeError> {
+        // Native commands do not copy musubi's attributes. Reconstruct their private
+        // names from the actual native parents, stopping at marked realizations, whose
+        // evidence is self-contained. A removed name is never inherited into a view that
+        // lacks it. Memoizing immutable operations keeps a line of commands linear.
+        let id = jj_lib::op_store::OperationId::new(blake2b_hash(op).to_vec());
+        let mut memo = self
+            .private_names
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut stack = vec![(id.clone(), op.clone(), workspaces.clone(), false)];
+        while let Some((id, op, workspaces, expanded)) = stack.pop() {
+            if memo.contains_key(&id) {
+                continue;
+            }
+            if op
+                .metadata
+                .attributes
+                .contains_key(super::CANONICAL_ATTRIBUTE)
+                || self.joins.contains_key(&super::join::fingerprint(&op))
+                || op.parents.is_empty()
+            {
+                let names = Namespace::read_attribute(&op.metadata, LOCAL_WORKSPACES)?
+                    .filter(|context| context.source == self.machine.key())
+                    .into_iter()
+                    .flat_map(|context| context.names.into_iter())
+                    .filter(|(_, key)| self.is_own_key(&WorkspaceNameBuf::from(key.clone())))
+                    .map(|(name, _)| WorkspaceNameBuf::from(name))
+                    .filter(|name| workspaces.contains_key(name))
+                    .collect();
+                memo.insert(id, names);
+            } else {
+                let sources = match target_of(&op.metadata.description) {
+                    Some((prefix, target)) => {
+                        match self.loader.op_store().read_operation(&target).block_on() {
+                            Ok(target_op) if prefix.contains("revert operation") => {
+                                target_op.parents
+                            }
+                            Ok(_) => vec![target],
+                            // An old undo target may have been collected. It certifies no
+                            // private ownership once its source view is unavailable.
+                            Err(_) => vec![],
+                        }
+                    }
+                    None => op.parents.clone(),
+                };
+                if expanded {
+                    let names = sources
+                        .iter()
+                        .flat_map(|parent| memo.get(parent).into_iter().flatten())
+                        .filter(|name| workspaces.contains_key(*name))
+                        .cloned()
+                        .collect();
+                    memo.insert(id, names);
+                } else {
+                    stack.push((id, op, workspaces, true));
+                    for parent in sources {
+                        if !memo.contains_key(&parent) {
+                            let op = self.loader.op_store().read_operation(&parent).block_on()?;
+                            let view = self.loader.op_store().read_view(&op.view_id).block_on()?;
+                            stack.push((parent, op, view.wc_commit_ids, false));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(memo.get(&id).cloned().unwrap_or_default())
+    }
+
+    pub(super) fn record_private_workspaces(
+        &self,
+        metadata: &mut jj_lib::op_store::OperationMetadata,
+        own: impl IntoIterator<Item = WorkspaceNameBuf>,
+        canonical: &CanonicalOp,
+    ) -> Result<(), NodeError> {
+        metadata.attributes.remove(LOCAL_WORKSPACES);
+        let own: BTreeSet<_> = own.into_iter().collect();
+        if own.is_subset(&self.own_names(canonical)?) {
+            return Ok(());
+        }
+        let context = Namespace {
+            source: self.machine.key().to_owned(),
+            known: BTreeSet::from([self.machine.key().to_owned()]),
+            names: own
+                .into_iter()
+                .map(|name| {
+                    (
+                        name.as_str().to_owned(),
+                        workspaces::workspace_key(self.machine.key(), name.as_str())
+                            .as_str()
+                            .to_owned(),
+                    )
+                })
+                .collect(),
+        };
+        metadata
+            .attributes
+            .insert(LOCAL_WORKSPACES.to_owned(), context.encode());
+        Ok(())
+    }
+
     /// The workspaces of the machines `present` accepts, other than this one's, each machine's
     /// merged three-way over the parents where it is present: a parent where it isn't lacks
     /// its workspaces because a forget saw its work, not because it removed them.
@@ -435,9 +555,19 @@ impl NodeRepo {
         canonical_view: &View,
         presence: &Presence<Work>,
     ) -> Result<BTreeMap<String, String>, NodeError> {
+        self.prefixes_with_own(canonical_view, presence, &BTreeSet::new())
+    }
+
+    pub(super) fn prefixes_with_own(
+        &self,
+        canonical_view: &View,
+        presence: &Presence<Work>,
+        private: &BTreeSet<WorkspaceNameBuf>,
+    ) -> Result<BTreeMap<String, String>, NodeError> {
         let mut machines = self.machines_of(canonical_view, presence.known());
         machines.insert(self.machine.key().to_owned());
-        let own = self.own_names_in(canonical_view, presence)?;
+        let mut own = self.own_names_in(canonical_view, presence)?;
+        own.extend(private.iter().cloned());
         Ok(workspaces::display_names(&machines, |name| {
             own.iter()
                 .any(|workspace| workspace.as_str().starts_with(&format!("{name}/")))
@@ -445,7 +575,7 @@ impl NodeRepo {
     }
 
     /// The local names of a canonical view's workspaces, given the other machines' prefixes.
-    fn names_of(
+    pub(super) fn names_of(
         &self,
         canonical_view: &View,
         prefixes: &BTreeMap<String, String>,

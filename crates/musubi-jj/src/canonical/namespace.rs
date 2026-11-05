@@ -24,7 +24,14 @@ pub(crate) struct Namespace {
 
 impl Namespace {
     pub fn read(metadata: &OperationMetadata) -> Result<Option<Self>, CanonicalError> {
-        let Some(text) = metadata.attributes.get(ATTRIBUTE) else {
+        Self::read_attribute(metadata, ATTRIBUTE)
+    }
+
+    pub fn read_attribute(
+        metadata: &OperationMetadata,
+        attribute: &str,
+    ) -> Result<Option<Self>, CanonicalError> {
+        let Some(text) = metadata.attributes.get(attribute) else {
             return Ok(None);
         };
         let malformed = || CanonicalError::MalformedOperation("workspace context".to_owned());

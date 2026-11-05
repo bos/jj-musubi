@@ -46,6 +46,7 @@ fn snapshot_filters(env: &TestEnv) -> impl Sized {
     }
     if cfg!(windows) {
         settings.add_filter(r"\\", "/");
+        settings.add_filter(r"(?m)^Usage: musubi\.exe ", "Usage: musubi ");
     }
     // This computer's name only where musubi prints a hub's: anywhere else, a computer named
     // `alpha`, say, would hide what it stood for.
@@ -575,6 +576,7 @@ fn hub_join_sync_clone_and_list() {
     // as do the heads that came in, listed last.
     let (top, _heads) = top.split_once("\n\n  AGO").expect(&top);
     let mut settings = insta::Settings::clone_current();
+    settings.add_filter(r"up \d+[smhd](?:\d+[smhd])?,", "up <uptime>,");
     settings.add_filter(r"\d+(\.\d+)?", "N");
     // Whichever, one or more.
     settings.add_filter(r"N operation\b", "N operations");
@@ -585,7 +587,7 @@ fn hub_join_sync_clone_and_list() {
         insta::assert_snapshot!(top, @"
     musubi top: N hub
     This machine's daemon is running, serving N repository.
-    Hub $ROOT/hub: up Ns, musubi N.N, N hive.
+    Hub $ROOT/hub: up <uptime>, musubi N.N, N hive.
     No issues.
 
     HIVE  HEAD  IN/s  OUT/s  OPS  COMMITS  MACHINES  ISSUES

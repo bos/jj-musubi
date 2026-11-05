@@ -1283,6 +1283,10 @@ fn the_daemon_upgrades_towards_a_newer_hub() {
         &regex_escape(&format!("musubi {}", musubi_sync::wire::RELEASE)),
         "musubi [this release]",
     );
+    settings.add_filter(
+        &regex_escape(&format!("jj-lib {}", musubi_sync::wire::JJ_LIB_VERSION)),
+        "jj-lib [this jj version]",
+    );
     settings.add_filter(r"protocol \d+", "protocol N");
     let _release = settings.bind_to_scope();
     let _filters = snapshot_filters(&env);
@@ -1414,7 +1418,7 @@ chmod +x "{exe}.new" && mv "{exe}.new" "{exe}"
     ");
     insta::assert_snapshot!(stderr, @"
     Hint: Once that's fixed, `musubi daemon restart` tries again.
-    Warning: Syncing fails: incompatible peer: protocol N with jj-lib 0.47.0 (musubi 99.0.0+20991231235959.ffffffffffff), but this is protocol N with jj-lib 0.47.0 (musubi [this release]); run the same release of musubi on the hub and every machine
+    Warning: Syncing fails: incompatible peer: protocol N with jj-lib [this jj version] (musubi 99.0.0+20991231235959.ffffffffffff), but this is protocol N with jj-lib [this jj version] (musubi [this release]); run the same release of musubi on the hub and every machine
     Hint: The daemon keeps trying. Its log: $ROOT/home/musubi-alpha/daemon.log
     ");
 }

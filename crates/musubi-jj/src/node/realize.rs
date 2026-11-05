@@ -391,26 +391,51 @@ impl NodeRepo {
                 // It may still be being written.
                 self.settle()?;
                 let op_store = self.loader.op_store();
-                let parent_view = op_store
-                    .read_view(&op_store.read_operation(&parent.0).block_on()?.view_id)
-                    .block_on()?;
+                let parent_op = op_store.read_operation(&parent.0).block_on()?;
+                let parent_view = op_store.read_view(&parent_op.view_id).block_on()?;
                 let parent_canonical = self.canonical_of(parent).expect("parents realized first");
-                self.own_of_view(parent_view.wc_commit_ids, &parent_canonical)?
+                self.own_of_view(parent_view.wc_commit_ids, &parent_canonical, &parent_op)?
             }
         };
+        if own.is_empty() && parents.get(source) == Some(self.root_op_id()) {
+            own = self.own_before_taking().cloned().unwrap_or_default();
+        }
         let own_work = Kind::of(&op.metadata).work.as_deref() == Some(self.machine.key());
+        let fixup = op
+            .metadata
+            .attributes
+            .contains_key(super::supersede::FIXUP_ATTRIBUTE);
         if own.is_empty()
-            || !own_work && self.presence(canonical_id)?.is_present(self.machine.key())
+            || !own_work && !fixup && self.presence(canonical_id)?.is_present(self.machine.key())
         {
             return Ok(local);
         }
         workspaces::follow_rewrites(&mut own, op.commit_predecessors.as_ref());
         let LocalView {
             mut view,
-            names,
-            prefixes,
+            mut names,
+            mut prefixes,
             ..
         } = local;
+        let private = own.keys().cloned().collect();
+        let canonical_view = self.canonical.read_view(&op.view_id)?;
+        let adjusted =
+            self.prefixes_with_own(&canonical_view, &*self.presence(canonical_id)?, &private)?;
+        if adjusted != prefixes {
+            let adjusted_names = self.names_of(&canonical_view, &adjusted);
+            let mut bindings = vec![];
+            for (key, old) in &names {
+                if !self.is_own_key(key)
+                    && let Some(commit) = view.wc_commit_ids.remove(old)
+                    && let Some(name) = adjusted_names.get(key)
+                {
+                    bindings.push((name.clone(), commit));
+                }
+            }
+            view.wc_commit_ids.extend(bindings);
+            prefixes = adjusted;
+            names = adjusted_names;
+        }
         let shown: HashSet<&WorkspaceNameBuf> = names.values().collect();
         for (name, commit) in own {
             if !shown.contains(&name) {
@@ -501,10 +526,12 @@ impl NodeRepo {
         local: LocalView,
         per_machine: Arc<PerMachine>,
     ) -> Result<Realization, NodeError> {
+        let own = self.own_of(&local);
         let LocalView {
             view, id, prefixes, ..
         } = local;
         let mut metadata = op.metadata.clone();
+        self.record_private_workspaces(&mut metadata, own.into_keys(), canonical_id)?;
         if let Some((prefix, target)) = target_of(&metadata.description)
             && let target = CanonicalOp(target)
             && self

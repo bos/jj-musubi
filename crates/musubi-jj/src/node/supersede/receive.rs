@@ -175,6 +175,13 @@ impl NodeRepo {
                 Err(err) => return Err(err),
             }
         }
+        let mut native_heads = heads
+            .iter()
+            .map(|head| self.loader.load_operation(&head.0).block_on())
+            .collect::<Result<Vec<_>, _>>()?;
+        // As jj orders heads before merging their views.
+        native_heads.sort_by_key(|op| op.metadata().time.end.timestamp);
+        let own = self.merged_local_workspaces(&native_heads)?;
         let store = &self.canonical;
         let (mapped, unmapped) = self.local_walk(&heads)?;
         // Records in custody that these lack: the hub lost them, and this node publishes what
@@ -354,6 +361,7 @@ impl NodeRepo {
             hub_renamings: renamings,
             dropped: contraction.dropped().clone(),
             switched: false,
+            own,
             renaming: contraction.into_images(),
             pending: Record::new(mine.into_iter().map(HubOp)),
             locals,

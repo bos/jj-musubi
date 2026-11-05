@@ -6119,3 +6119,116 @@ fn a_trim_below_an_accepted_forget_keeps_the_copy_forgotten() {
         );
     }
 }
+
+/// A forgotten receiver still owns its local workspaces after their entire shared base
+/// is trimmed away, even before a native command makes the copy present again.
+#[test]
+fn a_full_trim_keeps_a_forgotten_receivers_private_workspaces() {
+    for interrupted in [false, true] {
+        let env = TestEnv::new();
+        let alpha_repo = env.init_repo_with_workspace("alpha", "default");
+        let second = alpha_repo.path().with_file_name("alpha-second");
+        alpha_repo.jj(&[
+            "workspace",
+            "add",
+            "--name",
+            "beta/default",
+            second.to_str().unwrap(),
+        ]);
+        let beta_repo = env.init_repo_with_workspace("beta", "default");
+        let mut hive = Fixture::join(env, vec![alpha_repo, beta_repo]);
+        hive.sync();
+        let alpha = hive.machine_key(0);
+        hive.node(1).forget_copy(&alpha, "alpha").unwrap();
+        hive.hive.sync(1).unwrap();
+        let base = op_log(hive.repo(1))[0].0.clone();
+        hive.repo(1)
+            .jj(&["new", "-m", "surviving work after forgetting alpha"]);
+        hive.repo(1).jj(&["op", "abandon", &format!("..{base}")]);
+        hive.hive.sync(1).unwrap();
+        hive.repo(0).write_file("private", "unsnapshotted work");
+        if interrupted {
+            hive.node(0).crash_taking_records(false);
+            assert!(hive.hive.sync(0).is_err());
+            std::fs::remove_file(hive.repo(0).repo_path().join("musubi/translation")).unwrap();
+            hive.reopen(0);
+        }
+        hive.hive.sync(0).unwrap();
+        assert!(hive.workspace_names(0).contains("default"));
+        assert!(hive.workspace_names(0).contains("beta/default"));
+        std::fs::remove_file(hive.repo(0).repo_path().join("musubi/translation")).unwrap();
+        hive.reopen(0);
+        hive.repo(0).jj(&["status"]);
+        hive.sync();
+        hive.assert_converged();
+        assert!(hive.workspace_names(0).contains("beta/default"));
+        assert!(
+            hive.workspace_names(1).contains("alpha/beta/default"),
+            "alpha: {:?}; beta: {:?}",
+            hive.workspace_names(0),
+            hive.workspace_names(1)
+        );
+        assert_eq!(
+            std::fs::read_to_string(hive.repo(0).path().join("private")).unwrap(),
+            "unsnapshotted work"
+        );
+        hive.repo(0).jj(&["workspace", "forget", "beta/default"]);
+        hive.sync();
+        assert!(!hive.workspace_names(1).contains("alpha/beta/default"));
+    }
+}
+
+/// Restoring a view from before a private owned name existed must not claim the foreign
+/// alias that used to occupy the same literal name.
+#[test]
+fn restoring_an_older_view_does_not_inherit_private_workspace_ownership() {
+    let mut hive = default_workspaces();
+    hive.repo(0)
+        .jj(&["describe", "-m", "alpha's retained commit"]);
+    hive.repo(1)
+        .jj(&["describe", "-m", "beta's retained commit"]);
+    hive.sync();
+    let foreign = op_log(hive.repo(0))[0].0.clone();
+    let beta = hive.machine_key(1);
+    hive.node(0).forget_copy(&beta, "beta").unwrap();
+    hive.hive.sync(0).unwrap();
+    let second = hive.repo(0).path().with_file_name("alpha-second");
+    hive.repo(0).jj(&[
+        "workspace",
+        "add",
+        "--name",
+        "beta/default",
+        second.to_str().unwrap(),
+    ]);
+    hive.hive.sync(0).unwrap();
+    hive.repo(1).jj(&["new", "-m", "beta returns"]);
+    hive.sync();
+    assert!(hive.workspace_names(1).contains("alpha/beta/default"));
+    let alpha = hive.machine_key(0);
+    hive.node(1).forget_copy(&alpha, "alpha").unwrap();
+    hive.hive.sync(1).unwrap();
+    let base = op_log(hive.repo(1))[0].0.clone();
+    hive.repo(1).jj(&["new", "-m", "surviving tip"]);
+    hive.repo(1).jj(&["op", "abandon", &format!("..{base}")]);
+    hive.hive.sync(1).unwrap();
+    hive.hive.sync(0).unwrap();
+    assert!(hive.workspace_names(0).contains("beta/default"));
+    hive.repo(0)
+        .jj(&["--ignore-working-copy", "op", "restore", &foreign]);
+    let head = hive.node(0).canonical_heads().unwrap();
+    for head in head {
+        let view = hive
+            .node(0)
+            .canonical_store()
+            .read_operation_view(&head)
+            .unwrap();
+        assert!(
+            !view
+                .wc_commit_ids
+                .keys()
+                .any(|key| key.as_str() == format!("{alpha}/beta/default"))
+        );
+    }
+    hive.sync();
+    assert!(!hive.workspace_names(1).contains("alpha/beta/default"));
+}

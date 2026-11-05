@@ -295,8 +295,17 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         Some(&["op_abandon", "crash", "trim_below_accepted_push"]),
     ),
     (
+        "a_full_trim_keeps_a_forgotten_receivers_private_workspaces",
+        Some(&["trim_below_accepted_forget", "edit_unsnapshotted"]),
+    ),
+    (
         "a_full_trim_below_unpublished_work_keeps_workspace_owners",
         Some(&["op_abandon", "new_commit"]),
+    ),
+    // The search has no owned slash-name rule or operation-restore rule.
+    (
+        "restoring_an_older_view_does_not_inherit_private_workspace_ownership",
+        None,
     ),
     // The workspace-name pool has no foreign alias containing a slash.
     (

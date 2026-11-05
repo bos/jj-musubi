@@ -406,6 +406,7 @@ impl NodeRepo {
         self.check_format(id, op)?;
         let view = self.loader.op_store().read_view(&op.view_id).block_on()?;
         let mut metadata = op.metadata.clone();
+        metadata.attributes.remove(super::view::LOCAL_WORKSPACES);
         if let Some((prefix, target)) = target_of(&metadata.description)
             && let Some(canonical) = self.canonical_of(&LocalOp(target))
             && self.canonical.is_ancestor(&canonical, &parents)?

@@ -195,6 +195,8 @@ struct Taking {
     dropped: HashSet<CanonicalOp>,
     /// Node space now to node space then.
     renaming: HashMap<CanonicalOp, Vec<CanonicalOp>>,
+    /// This copy's private bindings before the trim removes their shared basis.
+    own: std::collections::BTreeMap<jj_lib::ref_name::WorkspaceNameBuf, jj_lib::backend::CommitId>,
     /// Whether the op heads moved there, this node holding them.
     switched: bool,
     /// `pending`, as the records name the history.
@@ -719,6 +721,18 @@ impl NodeRepo {
             .get_mut()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         self.records.forget_normalizer();
+    }
+
+    pub(super) fn own_before_taking(
+        &self,
+    ) -> Option<
+        &std::collections::BTreeMap<jj_lib::ref_name::WorkspaceNameBuf, jj_lib::backend::CommitId>,
+    > {
+        self.records
+            .taking
+            .as_ref()
+            .filter(|taking| !taking.switched)
+            .map(|taking| &taking.own)
     }
 
     /// Forgets what is remembered by local operation id, which a rewrite of local

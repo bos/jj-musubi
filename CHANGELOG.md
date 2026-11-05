@@ -6,6 +6,10 @@ change the protocol, so run the same release on the hub and every machine (see
 
 ## Unreleased
 
+- A forgotten copy keeps its own workspace names when another machine trims away their
+  entire shared history, including names containing slashes and unsnapshotted edits.
+  Interrupted syncs and translation-cache loss preserve that ownership too.
+
 - A history trim still notices operations materialized before a crash when an earlier trim
   removed the last accepted base. It keeps new work syncing instead of refusing the copy.
 
@@ -29,7 +33,8 @@ change the protocol, so run the same release on the hub and every machine (see
   not moved; fetch explicitly to resolve them. They also finish pending Git exports after
   merging operation heads. Timestamp templates now use jiff's formatting,
   and JSON timestamps use `+00:00` for UTC. See
-  [jj 0.47.0's release notes](https://github.com/jj-vcs/jj/releases/tag/v0.47.0) for format changes.
+  [jj 0.47.0's release notes](https://github.com/jj-vcs/jj/releases/tag/v0.47.0) for format
+  changes.
 
 - A full history trim keeps a copy forgotten when its forget was accepted during a sync
   that is still finishing. Previously new work above that forget could bring the copy

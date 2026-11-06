@@ -1,5 +1,5 @@
 //! What a node does only when its backend is git: share the repository's git remotes, and
-//! export its refs to `.git` when it is colocated.
+//! export the jj repository's refs to git when it is colocated.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -50,13 +50,13 @@ pub(super) struct NodeGit {
     config: ConfigCache,
 }
 
-/// A colocated repository's git repository is a working copy's `.git`, so every `jj`
-/// command imports and exports its refs, under jj's lock. musubi exports them too, before an
+/// A colocated repository's git repository is also a working copy's, so every `jj` command
+/// there imports and exports its refs, under jj's lock. musubi exports them too, before an
 /// operation it publishes becomes an op head.
 pub(super) struct Colocation {
     /// jj's lock on importing and exporting refs.
     lock_path: PathBuf,
-    /// The `.git` directory.
+    /// The git repository's directory.
     git_dir: PathBuf,
     /// The expected values of the conflicted remote bookmarks of the operation exported last,
     /// under its realization's id and its exported copy's, where the next export's walk back
@@ -75,13 +75,55 @@ pub(super) const EXPECTED_ATTRIBUTE: &str = "musubi.expected";
 /// A conflicted remote bookmark's git ref, and its expected value.
 type Expectation = (GitRefNameBuf, Option<RefTarget>);
 
+/// Whether the jj repository whose `.jj/repo` directory is `repo_path` is colocated with
+/// `git`, its backend's git repository: whether any of git's working trees, the main one or
+/// one `git worktree add` made, holds one of its workspaces.
+///
+/// jj takes a workspace as colocated when git opens a repository at the workspace's root
+/// whose common directory is the backend's, and imports and exports refs there in every
+/// command; a repository is colocated if any of its workspaces is. Asking from git's side
+/// finds every such workspace without a list of them, which jj's workspace store can't give
+/// and lacks for workspaces older than it. A `.git` set `core.bare` has no working tree to git,
+/// but jj still opens it from the directory it is in, so that directory counts too. This differs
+/// from jj's answer only for a working tree moved without `git worktree repair`, where git's
+/// record of it is stale.
+fn is_colocated(git: &gix::Repository, repo_path: &Path) -> bool {
+    use jj_lib::workspace::WorkspaceLoaderFactory as _;
+    let Ok(repo_path) = repo_path.canonicalize() else {
+        return false;
+    };
+    let linked = git.worktrees().unwrap_or_else(|err| {
+        tracing::warn!("listing git worktrees of {}: {err}", git.path().display());
+        Vec::new()
+    });
+    let beside = (git.path().file_name() == Some(".git".as_ref()))
+        .then(|| git.path().parent())
+        .flatten();
+    let mut roots = git
+        .workdir()
+        .into_iter()
+        .chain(beside)
+        .map(Path::to_owned)
+        .chain(linked.iter().filter_map(|worktree| worktree.base().ok()));
+    roots.any(|root| {
+        jj_lib::workspace::DefaultWorkspaceLoaderFactory
+            .create(&root)
+            .is_ok_and(|loader| {
+                loader
+                    .repo_path()
+                    .canonicalize()
+                    .is_ok_and(|path| path == repo_path)
+            })
+    })
+}
+
 impl NodeGit {
     /// The git repository of the jj repository whose `.jj/repo` directory is `repo_path` and
     /// whose store is `store`, if its backend is git, with `executable` the git to run there.
     pub fn open(executable: &Path, repo_path: &Path, store: &Store) -> Option<Self> {
-        let git_path = jj_lib::git::get_git_backend(store).ok()?.git_repo_path();
-        let colocated = git_path.file_name().is_some_and(|name| name == ".git")
-            && !git_path.starts_with(repo_path.join("store"));
+        let backend = jj_lib::git::get_git_backend(store).ok()?;
+        let git_path = backend.git_repo_path();
+        let colocated = is_colocated(&backend.git_repo(), repo_path);
         Some(Self {
             repo: GitRepo::new(executable, git_path),
             colocation: colocated.then(|| Colocation {
@@ -893,6 +935,51 @@ mod tests {
             spelling("-x:team/x", theirs[1]).as_deref(),
             Some("-x:team/x")
         );
+    }
+
+    /// musubi exports refs to a repository's git repository where jj imports and exports them
+    /// in every command: where a workspace is colocated, as jj says. Not to an external git
+    /// repository named `.git`, but to the store inside `.jj` once a workspace is a git
+    /// worktree of it, and to a `.git` beside `.jj` even if git takes it as bare.
+    #[test]
+    fn colocated_where_jj_says() {
+        let env = musubi_testutil::TestEnv::new();
+        let colocated = env.init_repo("colocated");
+        // Bare to git, which then sees no working tree, but not to jj.
+        let bare = env.init_repo("bare");
+        bare.git(&["config", "core.bare", "true"]);
+        let internal = env.init_non_colocated_repo("internal");
+        let checkout = env.root().join("checkout");
+        internal.git(&["init", "--quiet", checkout.to_str().unwrap()]);
+        let external = internal.another_copy(&env.root().join("external"));
+        internal.jj(&[
+            "git",
+            "init",
+            "--git-repo",
+            checkout.join(".git").to_str().unwrap(),
+            external.path().to_str().unwrap(),
+        ]);
+        let worktree = env.init_non_colocated_repo("worktree");
+        let linked = env.root().join("linked");
+        worktree.jj(&["workspace", "add", "--colocate", linked.to_str().unwrap()]);
+        let linked = worktree.another_copy(&linked);
+        let colocated_by_jj = |workspace: &musubi_testutil::TestRepo| {
+            let status = workspace.jj(&["git", "colocation", "status"]);
+            status.contains("is currently colocated")
+        };
+        let cases = [
+            ("colocated", &colocated, vec![&colocated], true),
+            ("bare", &bare, vec![&bare], true),
+            ("internal", &internal, vec![&internal], false),
+            ("external", &external, vec![&external], false),
+            ("worktree", &worktree, vec![&worktree, &linked], true),
+        ];
+        for (case, repo, workspaces, expected) in cases {
+            let by_jj = workspaces.into_iter().any(colocated_by_jj);
+            assert_eq!(by_jj, expected, "jj, {case}");
+            let node = super::super::NodeRepo::open(&repo.repo_path(), &repo.settings()).unwrap();
+            assert_eq!(node.colocation().is_some(), expected, "musubi, {case}");
+        }
     }
 }
 

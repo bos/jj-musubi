@@ -206,24 +206,29 @@ impl Shared {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Takes on a new connection, which carries the frames sent to `out` and ends when
-    /// `stalled` is notified, subscribing again to everything still subscribed to.
-    fn attach(&self, out: mpsc::Sender<Vec<u8>>, stalled: Arc<Notify>, max_payload: usize) {
+    /// Takes on a new connection, which ends when `stalled` is notified, subscribing again to
+    /// everything still subscribed to. Returns the frames to write to it.
+    fn attach(&self, stalled: Arc<Notify>, max_payload: usize) -> mpsc::Receiver<Vec<u8>> {
         let mut state = self.lock();
         // Only what is still read: the last connection's took the rest with it.
         state.subscriptions.retain(|_, subscribed| {
             subscribed.to.retain(|to| !to.is_closed());
             !subscribed.to.is_empty()
         });
+        // Sized under the same lock as the frames below, with room for every one of them, so
+        // none is dropped and a subscription never silently goes without its messages.
+        let (out, frames) = mpsc::channel(MAX_QUEUED + state.subscriptions.len());
         for (&sid, subscribed) in &state.subscriptions {
             let subject = subscribed.subject.clone();
-            out.try_send(Frame::Sub { sid, subject }.encode()).ok();
+            let sent = out.try_send(Frame::Sub { sid, subject }.encode());
+            debug_assert!(sent.is_ok(), "a new connection has room to subscribe again");
         }
         state.out = Some(out);
         state.stalled = stalled;
         state.max_payload = max_payload;
         drop(state);
         self.connected.send_replace(true);
+        frames
     }
 
     /// Lets go of a connection that ended: requests made on it will get no reply.
@@ -338,11 +343,8 @@ async fn run(
         match open(connector.as_ref()).await {
             Ok((reader, writer, max_payload)) => {
                 failures = 0;
-                // Room for subscribing again to everything, too.
-                let room = MAX_QUEUED + shared.lock().subscriptions.len();
-                let (out, frames) = mpsc::channel(room);
                 let stalled = Arc::new(Notify::new());
-                shared.attach(out, stalled.clone(), max_payload);
+                let frames = shared.attach(stalled.clone(), max_payload);
                 match first.take() {
                     Some(first) => {
                         first.send(Ok(())).ok();
@@ -595,6 +597,38 @@ mod tests {
             connected: watch::channel(false).0,
             reconnected: watch::channel(0).0,
         }
+    }
+
+    /// A connection made with a full subscription table takes a subscription frame for
+    /// every subject and still has its own room for `MAX_QUEUED` more.
+    #[test]
+    fn attach_resubscribes_a_full_table() {
+        let shared = empty_shared(1);
+        let mut held = vec![];
+        for sid in 1..=MAX_SUBSCRIPTIONS as u64 {
+            let (sender, receiver) = mpsc::unbounded_channel();
+            held.push(receiver);
+            let subscribed = Subscribed {
+                subject: format!("musubi.test.{sid}"),
+                to: vec![sender],
+            };
+            shared.lock().subscriptions.insert(sid, subscribed);
+        }
+        let mut frames = shared.attach(Arc::new(Notify::new()), 1024);
+        let out = shared.lock().out.clone().unwrap();
+        assert_eq!(out.capacity(), MAX_QUEUED);
+        let mut sids = vec![];
+        while let Ok(encoded) = frames.try_recv() {
+            match Frame::decode(Bytes::from(encoded[4..].to_vec())).unwrap() {
+                Frame::Sub { sid, subject } => {
+                    assert_eq!(subject, format!("musubi.test.{sid}"));
+                    sids.push(sid);
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        sids.sort_unstable();
+        assert_eq!(sids, (1..=MAX_SUBSCRIPTIONS as u64).collect::<Vec<_>>());
     }
 
     /// Service-side reply inboxes can discard duplicates before they become stream frames.

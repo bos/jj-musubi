@@ -171,6 +171,9 @@ These live outside jj's operation log. The rest of each machine's config stays l
 Adding, renaming or removing a git remote on one machine, or pointing it at a different
 repository, does the same on every machine. Each machine keeps its own spelling of a URL: one
 can reach `origin` over https while another uses ssh, and neither changes the other's.
+Bracketed IPv6 hosts match too: `git@[2001:db8::1]:team/project.git` and
+`ssh://git@[2001:db8::1]/team/project.git` name the same repository, for joining a hive and
+sharing remote settings.
 
 If a machine needs its own identity for a remote, such as an ssh key of its own, keep the
 ordinary URL and rewrite it in that machine's user git config, since other machines wouldn't

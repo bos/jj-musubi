@@ -579,7 +579,7 @@ fn hub_join_sync_clone_and_list() {
         "remote",
         "add",
         "origin",
-        "https://example.com/team/project.git",
+        "ssh://git@[2001:db8::1]:22/team/project.git",
     ]);
     // Joining never starts a hive; creating does.
     let err = musubi_fails(&env, &logs, &alpha, &["join", "--hub", &hub.url]);
@@ -590,13 +590,8 @@ fn hub_join_sync_clone_and_list() {
     // A copy of the same repository, with its remote spelled another way, joins it, and
     // the daemon its join started brings it alpha's work.
     fetch_history(&alpha, &beta);
-    beta.jj(&[
-        "git",
-        "remote",
-        "add",
-        "origin",
-        "git@example.com:team/project",
-    ]);
+    // Git accepts bracketed IPv6 in scp-style URLs; jj's remote command doesn't yet.
+    beta.git(&["remote", "add", "origin", "git@[2001:db8::1]:team/project"]);
     let out = musubi_in(&env, &logs, &beta, &["join", "--hub", &hub.url]);
     insta::assert_snapshot!(out, @"Joined hive project (matched remote origin), 2 machines");
     assert!(log(&beta).contains("from alpha"));

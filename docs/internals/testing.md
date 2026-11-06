@@ -108,6 +108,11 @@ alone do not exercise this index walk.
 while the daemon runs, waits for a sync, and checks that the other machine sees the new
 expiry policy. Keeping the daemon's initial jj settings makes it fail.
 
+`bracketed_ipv6_urls_name_one_repository` checks that scp-style and `ssh://` IPv6 remote URLs
+match without conflating different hosts. `hub_join_sync_clone_and_list` joins real
+repositories using those two forms; splitting at a colon inside the address makes its join
+fail, saying that the repository and hive share history but not a remote.
+
 Start with unexecuted recovery and refusal paths: reopening stored state, failed publication,
 rollback, malformed input and platform adapters. Read the callers and existing assertions
 before deciding a test is missing. An executed line does not show that its effects were

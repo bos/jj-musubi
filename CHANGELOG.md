@@ -7,6 +7,12 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- Bracketed IPv6 remote URLs match in scp-style and `ssh://` forms, so automatic joining
+  recognizes the same repository and each machine keeps its own spelling of its remote.
+  Previously a colon inside the address was mistaken for the path separator. This changes
+  the protocol to 13: upgrade the hub and every machine together, then restart their daemons.
+  No configuration change is needed.
+
 - The daemon reloads changed jj settings before each repository's next sync, including its
   signing configuration and `musubi.forget-after` in user config. Previously it kept the
   settings it opened the repository with, ignoring later user config edits. After changing settings, `musubi sync` waits for a sync with

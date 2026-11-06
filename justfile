@@ -5,6 +5,18 @@ check: fmt-check lint oracle test docs deny machete typos fuzz-runner-test assur
 dev:
     cargo build --locked -p jj-musubi
 
+# Install the workspace-cache tool at the version Dependabot tracks.
+workspace-cache-install:
+    #!/usr/bin/env python3
+    import pathlib, subprocess, tomllib
+    manifest = pathlib.Path("contrib/tool-versions/Cargo.toml")
+    version = tomllib.loads(manifest.read_text())["dependencies"]["cargo-shared-target"]
+    subprocess.run(["cargo", "install", "cargo-shared-target", "--version", version, "--locked"], check=True)
+
+# Optional workspace-cache integration checks; run workspace-cache-install first.
+workspace-cache-test:
+    python3 -m unittest discover -s contrib -p test_seed_target.py
+
 # Build musubi optimized: target/release/musubi.
 release:
     cargo build --locked -p jj-musubi --release

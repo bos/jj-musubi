@@ -333,11 +333,16 @@ fn run(cli: Cli, ui: &Ui) -> anyhow::Result<()> {
         } => block_on(async {
             let socket = socket()?;
             let was = login::uninstall(login::Service::Daemon)?;
-            daemon::stop(&socket).await?;
+            let stopped = daemon::stop(&socket).await?;
             if was {
                 writeln!(
                     ui.stdout(),
                     "The daemon no longer starts at login, and is stopped."
+                )?;
+            } else if stopped {
+                writeln!(
+                    ui.stdout(),
+                    "Stopped the daemon. It wasn't set to start at login."
                 )?;
             } else {
                 writeln!(ui.stdout(), "The daemon wasn't set to start at login.")?;

@@ -780,6 +780,9 @@ and after views, or jj's replay of authenticated source parents. A forgotten cop
 bindings require matching source views and an independent native merge witness; shared
 metadata naming a workspace is never its own certificate. Rewriting a dormant binding's
 commit revokes opaque inheritance unless independent replay certifies its result.
+`e2e_workspace_names_after_trim_match_native_jj` exercises a realized merge whose authenticated
+parents and local base let native jj witness a restored name. A realization's marker neither
+certifies that name nor disqualifies its independently checked replay.
 
 The reference (`e2e_search/reference.rs`) is a jj repository of the test's own that replays
 the hub's history, operation by operation, with the same parents:

@@ -672,6 +672,8 @@ impl Reference {
 
     /// Replay an authenticated local merge with only independently certified private own
     /// bindings added. Membership forgets omit these slots centrally; jj keeps them locally.
+    /// Realizations are eligible too: their marker is no evidence, but their authenticated
+    /// parents and base can independently witness the same merge through native jj.
     fn workspace_private_replays(
         &mut self,
         world: &World,
@@ -705,12 +707,7 @@ impl Reference {
                 let Ok(operation) = block_on(store.read_operation(&local.0)) else {
                     continue;
                 };
-                if operation
-                    .metadata
-                    .attributes
-                    .contains_key(musubi_jj::node::CANONICAL_ATTRIBUTE)
-                    || operation.parents.len() != 2
-                {
+                if operation.parents.len() != 2 {
                     continue;
                 }
                 let mapped: Option<Vec<_>> = operation

@@ -97,10 +97,16 @@ impl NodeRepo {
         }
         let order = self.unrealized(canonical)?;
         for (i, (id, op)) in order.iter().enumerate() {
+            // `unrealized` puts parents first, so a parent missing here is a bug: refuse to
+            // realize the operation rather than panic in the daemon.
             let parents: Vec<LocalOp> = CanonicalOp::parents_of(op)
                 .iter()
-                .map(|parent| self.local_of(parent).expect("parents realized first"))
-                .collect();
+                .map(|parent| {
+                    self.local_of(parent).ok_or_else(|| {
+                        NodeError::NotRealizable(id.0.hex(), "a parent has no local operation")
+                    })
+                })
+                .collect::<Result<_, _>>()?;
             // Realizing it reads its parents from the store, unless its only parent is the
             // operation realized last.
             if !matches!(
@@ -144,7 +150,9 @@ impl NodeRepo {
             self.last_own = Some((realization.id.clone(), Arc::new(own)));
             self.write_later(realization, id.clone())?;
         }
-        Ok(self.local_of(canonical).expect("realized above"))
+        self.local_of(canonical).ok_or_else(|| {
+            NodeError::NotRealizable(canonical.0.hex(), "its local operation is missing")
+        })
     }
 
     /// `first`, and the stored, unrealized operations of `later` that follow it, each with
@@ -383,7 +391,8 @@ impl NodeRepo {
         if local.names.keys().any(|key| self.is_own_key(key)) {
             return Ok(local);
         }
-        let source = self.latest_work_parent(&CanonicalOp::parents_of(op))?;
+        let canonical_parents = CanonicalOp::parents_of(op);
+        let source = self.latest_work_parent(&canonical_parents)?;
         let mut own = match (parents.get(source), &self.last_own) {
             (None, _) => return Ok(local),
             (Some(parent), Some((last, own))) if parent == last => (**own).clone(),
@@ -393,8 +402,12 @@ impl NodeRepo {
                 let op_store = self.loader.op_store();
                 let parent_op = op_store.read_operation(&parent.0).block_on()?;
                 let parent_view = op_store.read_view(&parent_op.view_id).block_on()?;
-                let parent_canonical = self.canonical_of(parent).expect("parents realized first");
-                self.own_of_view(parent_view.wc_commit_ids, &parent_canonical, &parent_op)?
+                // `parents` are the realizations of `canonical_parents`, in the same order.
+                self.own_of_view(
+                    parent_view.wc_commit_ids,
+                    &canonical_parents[source],
+                    &parent_op,
+                )?
             }
         };
         if own.is_empty() && parents.get(source) == Some(self.root_op_id()) {
@@ -538,7 +551,13 @@ impl NodeRepo {
                 .canonical
                 .is_ancestor(&target, &CanonicalOp::parents_of(op))?
         {
-            let local = self.local_of(&target).expect("ancestors realized first");
+            // Realized already, as an ancestor of the parents.
+            let local = self.local_of(&target).ok_or_else(|| {
+                NodeError::NotRealizable(
+                    canonical_id.0.hex(),
+                    "the operation it restores or reverts has no local operation",
+                )
+            })?;
             metadata.description = format!("{prefix}{}", local.0.hex());
         }
         metadata.workspace_name = metadata

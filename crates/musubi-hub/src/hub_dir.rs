@@ -516,28 +516,70 @@ impl HubDir {
         Ok(())
     }
 
-    /// Every hive, as a candidate for `request` to join: whether it shares history with the
-    /// joining repository, or will once its pending joins push, and the repositories its
-    /// remotes name.
-    fn candidates(&self, request: &JoinRequest) -> Result<Vec<Candidate>, Refusal> {
-        let backend = request.backend;
-        let roots: BTreeSet<&String> = request.roots.iter().collect();
+    /// Whether hive `hive` shares a root with the joining repository, or will once its
+    /// pending joins push.
+    fn shares_root(hive: &Hive, request: &JoinRequest) -> bool {
+        let pending_roots = hive.pending.iter().flat_map(|pending| &pending.roots);
+        hive.meta.backend == request.backend
+            && hive
+                .index
+                .roots
+                .iter()
+                .chain(pending_roots)
+                .any(|root| request.roots.contains(root))
+    }
+
+    /// The stores to look in for what `request`'s remotes point at: those of the hives
+    /// [`Self::join`] can't otherwise tell are related. Looking opens each store, so it is
+    /// done with [`Probe::run`], without the hub.
+    pub fn probe(&self, request: &JoinRequest) -> Probe {
         let targets: Vec<CommitId> = request
             .remote_targets
             .iter()
             .filter_map(CommitId::try_from_hex)
             .collect();
+        let hives = if targets.is_empty() {
+            vec![]
+        } else {
+            // By the index's roots alone: a pending join's may lapse before
+            // [`Self::join_probed`], leaving the hive unprobed.
+            self.hives
+                .iter()
+                .filter(|(_, hive)| {
+                    hive.meta.backend == request.backend
+                        && !hive
+                            .index
+                            .roots
+                            .iter()
+                            .any(|root| request.roots.contains(root))
+                })
+                .map(|(id, hive)| (id.clone(), hive.dir.clone()))
+                .collect()
+        };
+        Probe {
+            backend: request.backend,
+            targets,
+            hives,
+        }
+    }
+
+    /// Every hive, as a candidate for `request` to join: whether it shares history with the
+    /// joining repository, or will once its pending joins push, and the repositories its
+    /// remotes name. A hive `probed` lacks, as one made since, has none of the remotes'
+    /// commits.
+    fn candidates(
+        &self,
+        request: &JoinRequest,
+        probed: &Probed,
+    ) -> Result<Vec<Candidate>, Refusal> {
         let mut candidates = vec![];
         for (id, hive) in &self.hives {
-            let pending_roots = hive.pending.iter().flat_map(|pending| &pending.roots);
-            let related = hive.meta.backend == backend
-                && (hive
-                    .index
-                    .roots
-                    .iter()
-                    .chain(pending_roots)
-                    .any(|root| roots.contains(root))
-                    || has_any(backend, &hive.dir, &targets).map_err(refusal)?);
+            let related = Self::shares_root(hive, request)
+                || match probed.0.get(id) {
+                    Some(Ok(found)) => *found,
+                    Some(Err(err)) => return Err(err.clone()),
+                    None => false,
+                };
             let pending_urls = hive.pending.iter().flat_map(|pending| &pending.urls);
             candidates.push(Candidate {
                 id: id.clone(),
@@ -558,7 +600,19 @@ impl HubDir {
 
     /// Decides which hive a repository joins, or creates one if asked to, or makes one
     /// again ([`JoinChoice::Remake`]). See [`crate::matching`].
-    pub fn join(&mut self, request: &JoinRequest) -> Result<Joined, Refusal> {
+    #[cfg(test)]
+    fn join(&mut self, request: &JoinRequest) -> Result<Joined, Refusal> {
+        let probed = self.probe(request).run();
+        self.join_probed(request, &probed)
+    }
+
+    /// Decides which hive a repository joins, as the test-only `join` does, with what
+    /// [`Self::probe`] found in the hives' stores.
+    pub fn join_probed(
+        &mut self,
+        request: &JoinRequest,
+        probed: &Probed,
+    ) -> Result<Joined, Refusal> {
         let backend = request.backend;
         let now = Instant::now();
         for hive in self.hives.values_mut() {
@@ -591,7 +645,7 @@ impl HubDir {
             }
             _ => None,
         };
-        let candidates = self.candidates(request)?;
+        let candidates = self.candidates(request, probed)?;
         let joiner = Joiner {
             has_commits: !request.roots.is_empty(),
             chosen,
@@ -682,6 +736,33 @@ fn display_names(keys: &BTreeSet<String>) -> Vec<String> {
     workspaces::display_names(keys, |_| false)
         .into_values()
         .collect()
+}
+
+/// The hives' stores a join looks in, from [`HubDir::probe`].
+pub struct Probe {
+    backend: Backend,
+    targets: Vec<CommitId>,
+    hives: Vec<(String, PathBuf)>,
+}
+
+/// Whether each probed hive's store has any of the commits a joining repository's remotes
+/// point at, or why it couldn't tell.
+pub struct Probed(BTreeMap<String, Result<bool, Refusal>>);
+
+impl Probe {
+    /// Looks in each store. A store removed meanwhile can't be looked in, but nor can its
+    /// hive be joined, so [`HubDir::join_probed`] never sees the error.
+    pub fn run(self) -> Probed {
+        Probed(
+            self.hives
+                .into_iter()
+                .map(|(id, dir)| {
+                    let found = has_any(self.backend, &dir, &self.targets).map_err(refusal);
+                    (id, found)
+                })
+                .collect(),
+        )
+    }
 }
 
 /// Whether the hive's store in `dir` has any of `commits`.
@@ -865,6 +946,31 @@ mod tests {
         };
         hubs.update_index(&id, pushed).unwrap();
         assert!(hubs.hives[&id].pending.is_empty());
+    }
+
+    /// A join looks in the hives' stores without the hub held, so hives come and go
+    /// meanwhile: one removed is no candidate, and one made since has none of the joining
+    /// repository's commits.
+    #[test]
+    fn hives_come_and_go_while_a_join_looks_in_their_stores() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut hubs = HubDir::open(dir.path()).unwrap();
+        let gone = hubs.create("gone", Backend::Git).unwrap();
+        let kept = hubs.create("kept", Backend::Git).unwrap();
+        let joining = JoinRequest {
+            remote_targets: vec!["22".repeat(20)],
+            ..creating(request("alpha", "https://example.com/a"))
+        };
+        let probe = hubs.probe(&joining);
+        hubs.remove(&gone).unwrap();
+        let made = hubs.create("made", Backend::Git).unwrap();
+        let probed = probe.run();
+        assert_eq!(probed.0.get(&kept), Some(&Ok(false)));
+        assert!(probed.0.contains_key(&gone));
+        assert!(!probed.0.contains_key(&made));
+        let joined = hubs.join_probed(&joining, &probed).unwrap();
+        assert!(joined.created);
+        assert!(![gone, kept, made].contains(&joined.hive.id));
     }
 
     /// A hive created with a name has it, and no second hive can be created with it.

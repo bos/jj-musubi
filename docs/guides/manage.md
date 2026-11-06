@@ -74,9 +74,10 @@ Renaming changes the name that commands take and `musubi list` and `musubi statu
 Copies keep syncing, and each machine picks up the new name as its daemon next syncs, within
 half a minute, or the next time `musubi list` runs there.
 
-`musubi hub remove` requires the hive's whole name or its id. Each
-machine's copy leaves the hive as it next syncs, as with `musubi leave`, keeping everything it
-has. The hub keeps the hive's data in `removed/` for a day, then only an empty directory, as a
+`musubi hub remove` requires the hive's whole name or its id, and waits for the hub to finish
+what it is doing for the hive's machines, such as sending a large fetch; meanwhile the hub
+serves every other hive as usual. Each machine's copy leaves the hive as it next syncs, as with
+`musubi leave`, keeping everything it has. The hub keeps the hive's data in `removed/` for a day, then only an empty directory, as a
 record that the hive was removed, so that no copy brings it back. To share the repository
 again, start a new hive with `musubi create`, and run `musubi join --hive <name>` in the other
 copies. A plain `musubi join` in a copy whose hive was removed refuses to join another hive

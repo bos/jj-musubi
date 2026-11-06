@@ -11,6 +11,7 @@
 //! in memory, for `musubi top` (see `musubi_hub::activity`).
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::path::PathBuf;
@@ -23,8 +24,10 @@ use std::time::Instant;
 use bytes::Bytes;
 use musubi_hub::activity::Activity;
 use musubi_hub::activity::summarize;
+use musubi_hub::hub_dir::HiveInfo;
 use musubi_hub::hub_dir::HubDir;
 use musubi_hub::hub_dir::Opened;
+use musubi_hub::hub_dir::Refusal;
 use musubi_hub::hub_dir::open_whole;
 use musubi_hub::index::HiveIndex;
 use musubi_hub::store::HubStore;
@@ -45,10 +48,23 @@ use crate::wire::head_subject;
 use crate::wire::rpc_subject;
 use crate::wire::rpc_token;
 
+#[derive(Clone)]
 pub struct HubServer {
     hubs: Arc<Mutex<HubDir>>,
     activity: Arc<Mutex<Activity>>,
-    workers: HashMap<String, Worker>,
+    /// Taken before `hubs` when both are held, as a request for a hive is dispatched and a
+    /// hive is taken out of service, so that no thread starts on a hive being removed.
+    workers: Arc<Mutex<Workers>>,
+    #[cfg(test)]
+    hold: Option<Arc<tests::Hold>>,
+}
+
+#[derive(Default)]
+struct Workers {
+    serving: HashMap<String, Worker>,
+    /// The hives being removed: their threads are finishing what they have queued, and
+    /// requests for them are refused until they are gone.
+    removing: HashSet<String>,
 }
 
 struct Worker {
@@ -62,7 +78,9 @@ impl HubServer {
         Ok(Self {
             hubs: Arc::new(Mutex::new(HubDir::open(dir)?)),
             activity: Arc::new(Mutex::new(Activity::new())),
-            workers: HashMap::new(),
+            workers: Arc::default(),
+            #[cfg(test)]
+            hold: None,
         })
     }
 
@@ -78,87 +96,149 @@ impl HubServer {
         lock_activity(&self.activity)
     }
 
+    fn workers(&self) -> std::sync::MutexGuard<'_, Workers> {
+        self.workers.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Serves until the transport's subscription ends, calling `ready` once subscribed.
     /// Needs a multi-threaded runtime: hive threads publish their replies through it.
+    ///
+    /// Requests about the hub as a whole are each answered by a task of their own, since
+    /// some take a while: a removal waits for the hive's thread to finish, and a join looks
+    /// in every hive's store. Meanwhile, every hive's requests go on being dispatched.
     pub async fn run(
-        mut self,
+        self,
         transport: Arc<dyn Transport>,
         ready: impl FnOnce(),
     ) -> anyhow::Result<()> {
         let mut requests = transport.subscribe(&rpc_subject("*")).await?;
         ready();
+        let mut hub_wide = tokio::task::JoinSet::new();
         while let Some(message) = requests.next().await {
+            while hub_wide.try_join_next().is_some() {}
             let Some(reply_to) = message.reply.clone() else {
                 continue;
             };
             let token = rpc_token(&message.subject).unwrap_or_default().to_owned();
             if token == HUB_TOKEN {
-                let reply = self
-                    .handle_hub_wide(&message.payload, transport.max_payload())
+                let server = self.clone();
+                let transport = transport.clone();
+                hub_wide.spawn(async move {
+                    let max_payload = transport.max_payload();
+                    let answered = tokio::task::spawn_blocking(move || {
+                        server.handle_hub_wide(&message.payload, max_payload)
+                    })
                     .await;
-                let reply = Envelope::encode(reply)?;
-                if let Err(err) = transport.publish(&reply_to, Bytes::from(reply)).await {
-                    tracing::warn!("could not reply: {err}");
-                }
+                    let reply = answered.unwrap_or_else(|err| {
+                        let why = if err.is_panic() {
+                            panic_message(err.into_panic().as_ref()).to_owned()
+                        } else {
+                            err.to_string()
+                        };
+                        tracing::error!("answering failed: {why}");
+                        HubWideReply::Error(fit_error(
+                            format!("the hub failed: {why}"),
+                            max_payload,
+                        ))
+                    });
+                    let reply = match Envelope::encode(reply) {
+                        Ok(reply) => reply,
+                        Err(err) => return tracing::error!("could not encode a reply: {err:#}"),
+                    };
+                    if let Err(err) = transport.publish(&reply_to, Bytes::from(reply)).await {
+                        tracing::warn!("could not reply: {err}");
+                    }
+                });
                 continue;
             }
-            let dir = self.lock().hive_dir(&token).map(Path::to_owned);
-            let Some(dir) = dir else {
-                let reply = if self.lock().is_removed(&token) {
-                    HubReply::Removed
-                } else {
-                    HubReply::NoHive
-                };
-                if let Err(err) = transport
+            if let Some(reply) = self.route(&token, message, &transport)
+                && let Err(err) = transport
                     .publish(&reply_to, Bytes::from(Envelope::encode(reply)?))
                     .await
-                {
-                    tracing::warn!("could not reply: {err}");
-                }
-                continue;
-            };
-            let spawn = || {
-                spawn_worker(
-                    token.clone(),
-                    dir.clone(),
-                    self.hubs.clone(),
-                    self.activity.clone(),
-                    transport.clone(),
-                    #[cfg(test)]
-                    None,
-                )
-            };
-            let worker = self.workers.entry(token.clone()).or_insert_with(spawn);
-            if let Err(mpsc::SendError(message)) = worker.requests.send(message) {
-                // Its thread has stopped, which a request's failing, or even panicking, can't
-                // make it do: a fresh one takes the request.
-                tracing::error!("hive {token}'s thread has stopped; starting another");
-                let worker = spawn();
-                if worker.requests.send(message).is_err() {
-                    tracing::error!("hive {token}'s new thread has stopped too");
-                }
-                self.workers.insert(token, worker);
+            {
+                tracing::warn!("could not reply: {err}");
             }
         }
+        while hub_wide.join_next().await.is_some() {}
         Ok(())
     }
 
-    async fn handle_hub_wide(&mut self, bytes: &[u8], max_payload: usize) -> HubWideReply {
+    /// Hands a request for hive `token` to its thread, starting one if need be, or returns
+    /// the answer if the hub doesn't serve the hive.
+    fn route(
+        &self,
+        token: &str,
+        message: Message,
+        transport: &Arc<dyn Transport>,
+    ) -> Option<HubReply> {
+        let mut workers = self.workers();
+        if workers.removing.contains(token) {
+            // Not `Removed` yet, which tells its machines to leave: the removal may fail.
+            return Some(HubReply::Error(
+                "this hive is being removed from the hub".to_owned(),
+            ));
+        }
+        let dir = {
+            let hubs = self.lock();
+            match hubs.hive_dir(token) {
+                Some(dir) => dir.to_owned(),
+                None if hubs.is_removed(token) => return Some(HubReply::Removed),
+                None => return Some(HubReply::NoHive),
+            }
+        };
+        let spawn = || {
+            spawn_worker(
+                token.to_owned(),
+                dir.clone(),
+                self.hubs.clone(),
+                self.activity.clone(),
+                transport.clone(),
+                #[cfg(test)]
+                None,
+                #[cfg(test)]
+                self.hold.clone(),
+            )
+        };
+        let worker = workers
+            .serving
+            .entry(token.to_owned())
+            .or_insert_with(spawn);
+        if let Err(mpsc::SendError(message)) = worker.requests.send(message) {
+            // Its thread has stopped, which a request's failing, or even panicking, can't
+            // make it do: a fresh one takes the request.
+            tracing::error!("hive {token}'s thread has stopped; starting another");
+            let worker = spawn();
+            if worker.requests.send(message).is_err() {
+                tracing::error!("hive {token}'s new thread has stopped too");
+            }
+            workers.serving.insert(token.to_owned(), worker);
+        }
+        None
+    }
+
+    /// Answers a request about the hub as a whole. Blocks, perhaps for long: see
+    /// [`Self::run`].
+    fn handle_hub_wide(&self, bytes: &[u8], max_payload: usize) -> HubWideReply {
         let request = match Envelope::<HubWideRequest>::decode(bytes) {
             Ok(request) => request,
             Err(err) => return HubWideReply::Error(fit_error(format!("{err:#}"), max_payload)),
         };
         let result = match request {
-            HubWideRequest::Join(request) => self.lock().join(&request).map(|joined| {
-                let verb = if joined.created { "created" } else { "joined" };
-                tracing::info!(
-                    "{} {verb} hive {} ({})",
-                    request.machine,
-                    joined.hive.name,
-                    joined.reason
-                );
-                HubWideReply::Joined(joined)
-            }),
+            HubWideRequest::Join(request) => {
+                // Looking in the stores takes a while, and needn't hold up the hub.
+                let probe = self.lock().probe(&request);
+                let probed = probe.run();
+                self.lock().join_probed(&request, &probed).map(|joined| {
+                    let verb = if joined.created { "created" } else { "joined" };
+                    tracing::info!(
+                        "{} {verb} hive {} ({})",
+                        request.machine,
+                        joined.hive.name,
+                        joined.reason
+                    );
+                    HubWideReply::Joined(joined)
+                })
+            }
             HubWideRequest::List => Ok(HubWideReply::Hives(self.lock().list())),
             HubWideRequest::Resolve { name } => {
                 let hubs = self.lock();
@@ -169,29 +249,12 @@ impl HubServer {
                 tracing::info!("renamed hive {name} to {to}");
                 HubWideReply::Hive(info)
             }),
-            HubWideRequest::Remove { name } => {
-                let resolved = self.lock().resolve_exact(&name);
-                match resolved {
-                    Err(err) => Err(err),
-                    Ok(id) => {
-                        // Let the hive's thread finish what it has queued, and close its store.
-                        if let Some(worker) = self.workers.remove(&id) {
-                            drop(worker.requests);
-                            tokio::task::spawn_blocking(move || worker.thread.join().ok())
-                                .await
-                                .ok();
-                        }
-                        self.activity().forget(&id);
-                        self.lock().remove(&id).map(|info| {
-                            tracing::info!("removed hive {}", info.name);
-                            HubWideReply::Hive(info)
-                        })
-                    }
-                }
-            }
+            HubWideRequest::Remove { name } => self.remove(&name).map(HubWideReply::Hive),
             HubWideRequest::Report { hive, report } => {
-                let info = self.lock().info(&hive);
-                match info {
+                // Under the hub, so that a removal can't forget the hive's activity between
+                // the two: nothing takes the hub while holding the activity.
+                let hubs = self.lock();
+                match hubs.info(&hive) {
                     Some(info) => {
                         self.activity().report(&hive, report, Instant::now());
                         Ok(HubWideReply::Hive(info))
@@ -222,6 +285,47 @@ impl HubServer {
         };
         result.unwrap_or_else(|err| HubWideReply::Error(fit_error(err, max_payload)))
     }
+
+    /// Removes the hive whose name or id is exactly `name`, once its thread has finished
+    /// what it has queued and closed its store.
+    fn remove(&self, name: &str) -> Result<HiveInfo, Refusal> {
+        let (id, worker) = {
+            let mut workers = self.workers();
+            let id = self.lock().resolve_exact(name)?;
+            if !workers.removing.insert(id.clone()) {
+                return Err(format!("hive {name} is already being removed"));
+            }
+            let worker = workers.serving.remove(&id);
+            (id, worker)
+        };
+        // However the removal ends: failing, the hive is served again, by a new thread.
+        let _removing = Removing {
+            server: self,
+            id: &id,
+        };
+        if let Some(worker) = worker {
+            drop(worker.requests);
+            worker.thread.join().ok();
+        }
+        let removed = self.lock().remove(&id);
+        if let Ok(info) = &removed {
+            self.activity().forget(&id);
+            tracing::info!("removed hive {}", info.name);
+        }
+        removed
+    }
+}
+
+/// A hive being removed, which stops being so when this is dropped.
+struct Removing<'a> {
+    server: &'a HubServer,
+    id: &'a str,
+}
+
+impl Drop for Removing<'_> {
+    fn drop(&mut self) {
+        self.server.workers().removing.remove(self.id);
+    }
 }
 
 fn lock_activity(activity: &Mutex<Activity>) -> std::sync::MutexGuard<'_, Activity> {
@@ -235,6 +339,7 @@ fn spawn_worker(
     activity: Arc<Mutex<Activity>>,
     transport: Arc<dyn Transport>,
     #[cfg(test)] hooks: Option<Arc<tests::WorkerHooks>>,
+    #[cfg(test)] hold: Option<Arc<tests::Hold>>,
 ) -> Worker {
     let (requests, receiver) = mpsc::channel();
     let runtime = tokio::runtime::Handle::current();
@@ -247,6 +352,10 @@ fn spawn_worker(
             let _span = tracing::error_span!("hive", id = %id).entered();
             let mut service = None;
             while let Ok(message) = receiver.recv() {
+                #[cfg(test)]
+                if let Some(hold) = &hold {
+                    hold.wait(&id);
+                }
                 let limit = transport.max_payload();
                 let started = Instant::now();
                 // Whether the activity has counted the request, as it does once the request

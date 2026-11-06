@@ -705,7 +705,10 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
             if held.is_some() {
                 // Records this node can't complete from those it holds now, as they answer a
                 // request sent before it took others: the reply to its next request starts
-                // from those the hub pruned.
+                // from those the hub pruned. A reply to a request sent since never lands here:
+                // this node digests records as the hub does, so it completes the hub's from
+                // those it held (`Exec.fresh_record_reply_completes`, for a hub that never
+                // goes back; one made again has pruned none, which every node holds).
                 return Ok(());
             }
             return Err(repo.lacks_pruned());

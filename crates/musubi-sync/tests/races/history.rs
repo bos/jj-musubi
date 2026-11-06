@@ -5050,7 +5050,8 @@ fn hub_goes_back_across_a_prune() {
 /// that joined after the prune, knowing them only by their count and digest, can't publish
 /// them again, and the machines that took them whole publish them again as one record, which
 /// it can't match: holding nothing they drop, it takes the hub's records whole in their place,
-/// and carries on.
+/// from the hub's first reply, and carries on. Were it to ignore that reply, it would ask
+/// again, every time.
 #[test]
 fn a_machine_that_joined_after_a_prune_carries_on_when_the_hive_is_made_again() {
     let mut hive = Fixture::new(&["alpha", "beta"]);
@@ -5073,10 +5074,21 @@ fn a_machine_that_joined_after_a_prune_carries_on_when_the_hive_is_made_again() 
     let gamma = hive.env.init_repo("gamma");
     hive.add(gamma);
     hive.sync();
+    assert_eq!(hive.node(2).record_prefix().count, 2);
     hive.hive.remake_hub().unwrap();
     hive.commit(2, "g", "gamma after the hive was made again");
-    hive.hive.sync(2).unwrap();
-    assert_eq!(hive.hive.hub.store().record_count(), 0);
+    let mut fetches = 0;
+    hive.hive
+        .sync_through(2, &mut |request, reply| {
+            fetches += usize::from(matches!(request, Request::Fetch { .. }));
+            reply
+        })
+        .unwrap();
+    assert_eq!(fetches, 1);
+    let store = hive.hive.hub.store();
+    assert_eq!(store.record_count(), 0);
+    let hub_records = (0, store.digest(0).unwrap().clone());
+    assert_eq!(hive.node(2).record_state(), hub_records);
     hive.sync();
     hive.sync();
     hive.assert_converged();

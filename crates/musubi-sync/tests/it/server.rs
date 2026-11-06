@@ -50,6 +50,7 @@ fn join_request(repo: &TestRepo) -> JoinRequest {
     let summary = node.join_summary().unwrap();
     JoinRequest {
         backend: summary.backend,
+        clone_config: Default::default(),
         remote_bindings: summary.remote_snapshot().bindings,
         remotes: summary
             .remotes

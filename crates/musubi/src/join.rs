@@ -18,6 +18,7 @@ use musubi_sync::wire::HubWideRequest;
 
 use crate::block_on;
 use crate::cli::Member;
+use crate::clone_config;
 use crate::config::Entry;
 use crate::config::HiveConfig;
 use crate::config::Membership;
@@ -110,6 +111,7 @@ pub fn join(
     let request = JoinRequest {
         choice,
         backend: summary.backend,
+        clone_config: clone_config::capture(node.loader().settings().config())?,
         remote_bindings: remotes.bindings.clone(),
         remotes: summary
             .remotes
@@ -437,17 +439,26 @@ pub fn clone(
     let HubWideReply::Hive(info) = reply else {
         anyhow::bail!("unexpected reply from the hub: {reply:?}");
     };
+    clone_config::missing(&jj_lib::config::StackedConfig::empty(), &info.clone_config)?;
     let dest = destination.to_str().context("destination is not UTF-8")?;
     let init: &[&str] = match info.backend {
         Backend::Git => &["git", "init", "--colocate"],
         Backend::Simple => &["debug", "init-simple"],
     };
-    // As `jj git clone` does, make the directories it goes in, where `jj git init` wouldn't.
-    if let Some(parent) = destination.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("making {}", parent.display()))?;
-    }
+    // All preflight checks have passed. Make the empty destination too, so jj's conditional
+    // scopes see its actual path, including symlink ancestors and relative `..` components.
+    std::fs::create_dir_all(destination)
+        .with_context(|| format!("making {}", destination.display()))?;
+    let workspace = destination.canonicalize()?;
+    let destination_settings = settings::load(&workspace, &workspace.join(".jj/repo"))?;
+    let defaults = clone_config::missing(destination_settings.config(), &info.clone_config)?;
     let mut jj = Process::new("jj");
     musubi_jj::git_command::without_repository_env(&mut jj);
+    // Use the defaults for the initial working-copy commit too. Arguments are passed
+    // directly to jj; no shell or source machine config file is involved.
+    for (name, value) in defaults {
+        jj.arg("--config").arg(format!("{name}={value}"));
+    }
     // Contacting the hub may have taken long enough for another process to fill it.
     check_clone_destination(destination)?;
     // Its "Initialized repo in" names the directory relative to wherever this runs, ahead of
@@ -464,6 +475,7 @@ pub fn clone(
         String::from_utf8_lossy(&output.stderr).trim()
     );
     let located = Located::find(destination)?;
+    clone_config::seed(&located.workspace_root, &info.clone_config)?;
     set_machine_name(&located, machine)?;
     let joined = Joined {
         hive: info.clone(),

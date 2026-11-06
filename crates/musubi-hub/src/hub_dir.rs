@@ -39,6 +39,7 @@ struct HiveMeta {
     name: String,
     backend: Backend,
     remote_bindings: BTreeMap<String, RemoteBinding>,
+    clone_config: BTreeMap<String, String>,
 }
 
 /// Which hive a joining repository asks for.
@@ -63,6 +64,8 @@ pub enum JoinChoice {
 pub struct JoinRequest {
     pub choice: JoinChoice,
     pub backend: Backend,
+    /// Defaults recorded only when creating a hive, for filling missing clone config.
+    pub clone_config: BTreeMap<String, String>,
     /// Names and URLs of its remotes: a remote's name once for each of its URLs, as git
     /// expands it and as written.
     pub remotes: Vec<(String, String)>,
@@ -85,6 +88,8 @@ pub struct HiveInfo {
     pub id: String,
     pub name: String,
     pub backend: Backend,
+    /// One-time defaults from the copy that created the hive, as TOML values.
+    pub clone_config: BTreeMap<String, String>,
     pub urls: Vec<String>,
     /// Names of the machines with workspaces in the hive.
     pub machines: Vec<String>,
@@ -361,6 +366,7 @@ impl HubDir {
             name: name.to_owned(),
             backend,
             remote_bindings: BTreeMap::new(),
+            clone_config: BTreeMap::new(),
         };
         write_meta(&dir, &meta)?;
         let index = HiveIndex::default();
@@ -445,6 +451,7 @@ impl HubDir {
             id: id.to_owned(),
             name: hive.meta.name.clone(),
             backend: hive.meta.backend,
+            clone_config: hive.meta.clone_config.clone(),
             urls: hive.index.urls.iter().cloned().collect(),
             machines: display_names(&hive.index.machines),
         })
@@ -733,7 +740,11 @@ impl HubDir {
         created: bool,
         reason: String,
     ) -> Result<Joined, Refusal> {
-        self.reserve_remote_bindings(id, &request.remote_bindings)?;
+        self.reserve_remote_bindings(
+            id,
+            &request.remote_bindings,
+            created.then_some(&request.clone_config),
+        )?;
         let now = Instant::now();
         let hive = self.hives.get_mut(id).expect("chosen or created");
         hive.pending.push(Pending {
@@ -770,7 +781,7 @@ impl HubDir {
                 "the hive changed backend during clone; run `musubi clone` again".to_owned(),
             );
         }
-        self.reserve_remote_bindings(&id, incoming)?;
+        self.reserve_remote_bindings(&id, incoming, None)?;
         Ok(self.info(&id).expect("resolved"))
     }
 
@@ -778,13 +789,17 @@ impl HubDir {
         &mut self,
         id: &str,
         incoming: &BTreeMap<String, RemoteBinding>,
+        clone_config: Option<&BTreeMap<String, String>>,
     ) -> Result<(), Refusal> {
         let bindings = self.checked_bindings(id, incoming)?;
         let hive = self.hives.get_mut(id).expect("chosen or created");
         // Approval reserves names even if its first sync is delayed beyond pending expiry.
-        if hive.meta.remote_bindings != bindings {
-            let mut meta = hive.meta.clone();
-            meta.remote_bindings = bindings;
+        let mut meta = hive.meta.clone();
+        meta.remote_bindings = bindings;
+        if let Some(config) = clone_config {
+            meta.clone_config = config.clone();
+        }
+        if hive.meta != meta {
             write_meta(&hive.dir, &meta).map_err(refusal)?;
             hive.meta = meta;
         }
@@ -1005,6 +1020,7 @@ mod tests {
     fn request(machine: &str, url: &str) -> JoinRequest {
         JoinRequest {
             backend: Backend::Git,
+            clone_config: BTreeMap::new(),
             remote_bindings: [(
                 "origin".to_owned(),
                 RemoteBinding {
@@ -1045,6 +1061,9 @@ mod tests {
             push: [target.to_owned()].into(),
         };
         let mut first = creating(request("alpha", "https://example.com/one"));
+        first
+            .clone_config
+            .insert("user.name".to_owned(), "\"Creator\"".to_owned());
         first
             .remote_bindings
             .insert("origin".to_owned(), binding("example.com/one"));
@@ -1101,12 +1120,16 @@ mod tests {
             .remote_bindings
             .insert("origin".to_owned(), pushes_elsewhere);
         assert!(hubs.join(&second).is_err());
+        second
+            .clone_config
+            .insert("user.name".to_owned(), "\"Joining User\"".to_owned());
         second.remote_bindings.clear();
         second.remotes.clear();
         assert!(
             hubs.join(&second).is_ok(),
             "a missing remote makes no claim"
         );
+        assert_eq!(hubs.info(&id).unwrap().clone_config, first.clone_config);
     }
 
     /// A second copy joining before the first has pushed finds the first's hive, but only

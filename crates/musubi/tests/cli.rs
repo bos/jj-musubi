@@ -567,6 +567,15 @@ fn hub_join_sync_clone_and_list() {
     daemons.of(&alpha);
     daemons.of(&beta);
 
+    // The creator can opt another portable setting into the one-time clone defaults.
+    let creator_config = env.root().join("config-alpha.toml");
+    let mut config = fs::read_to_string(&creator_config).unwrap();
+    config.push_str(
+        "\nmusubi.clone-config = ['user.name', 'user.email', 'aliases.pickup']\n\
+         aliases.pickup = ['log', '--no-graph']\n",
+    );
+    fs::write(&creator_config, config).unwrap();
+
     // Nothing to share yet.
     let err = musubi_fails(&env, &logs, &alpha, &["create", "--hub", &hub.url]);
     insta::assert_snapshot!(err, @"Error: this repository has no commits to share yet; commit something first");
@@ -903,6 +912,10 @@ fn hub_join_sync_clone_and_list() {
         "main",
     ]);
     musubi_in(&env, &logs, &alpha, &["sync"]);
+    // No local identity or alias is configured on this machine when clone runs.
+    for key in ["user.name", "user.email", "aliases.pickup"] {
+        alpha.jj(&["config", "unset", "--user", key]);
+    }
     // A new machine clones the hive by a prefix of its name.
     let gamma = env.repo_handle_at("gamma", &env.root().join("src/gamma"));
     let mut clone = alpha.program(musubi());
@@ -922,6 +935,41 @@ fn hub_join_sync_clone_and_list() {
     clone.arg("--color=never");
     let out = run(&env, &logs, clone);
     alpha.jj(&["config", "set", "--user", "ui.color", "never"]);
+    let clone_jj = |args: &[&str]| {
+        let mut command = alpha.program(Path::new("jj"));
+        command.current_dir(gamma.path()).args(args);
+        run(&env, &logs, command)
+    };
+    assert_eq!(
+        clone_jj(&["config", "get", "user.name"]).trim(),
+        "Test User"
+    );
+    assert_eq!(
+        clone_jj(&["config", "get", "user.email"]).trim(),
+        "test@example.com"
+    );
+    let alias: toml::Table = toml::from_str(&format!(
+        "value = {}",
+        clone_jj(&["config", "get", "aliases.pickup"])
+    ))
+    .unwrap();
+    assert_eq!(
+        alias["value"].as_array().unwrap(),
+        &["log", "--no-graph"].map(|s| toml::Value::String(s.to_owned()))
+    );
+    alpha.jj(&["config", "set", "--user", "user.name", "Changed User"]);
+    alpha.jj(&[
+        "config",
+        "set",
+        "--user",
+        "user.email",
+        "changed@example.com",
+    ]);
+    musubi_in(&env, &logs, &alpha, &["sync"]);
+    assert_eq!(
+        clone_jj(&["config", "get", "user.name"]).trim(),
+        "Test User"
+    );
     // As `jj git clone` checks out the remote's default branch.
     let parent = [
         "log",
@@ -1081,8 +1129,10 @@ fn hub_join_sync_clone_and_list() {
     Create a new colocated repository from a hive.
 
     It makes the repository, joins it to the hive, and returns once it has synced, with the daemon
-    keeping it in sync from then on. It checks out `trunk()` using this machine's jj config. Git remote
-    definitions and repo config are not copied.
+    keeping it in sync from then on. It checks out `trunk()` using this machine's jj config. It fills
+    missing settings once from the defaults recorded when the hive was created: `user.name` and
+    `user.email`, unless `musubi.clone-config` chose other keys there. Existing destination settings
+    take precedence; sync never copies config.
 
     Before creating the destination, it checks inherited Git remotes and the hive's recorded names for
     conflicting destinations. It adds no Git remotes; configure one here when you want to fetch or push
@@ -1358,6 +1408,9 @@ fn the_daemon_picks_up_new_repositories() {
         );
     }
 
+    // Existing user settings win, with no repository identity overrides left behind.
+    beta.jj(&["config", "set", "--user", "user.name", "Existing Beta"]);
+    beta.jj(&["config", "set", "--user", "user.email", "beta@example.com"]);
     // An existing empty destination is safe to use too.
     fs::create_dir(env.root().join("beta-second")).unwrap();
     let mut clone = beta.program(musubi());
@@ -1369,6 +1422,19 @@ fn the_daemon_picks_up_new_repositories() {
         &hub.url,
     ]);
     run(&env, &logs, clone);
+    let mut config_path = beta.program(Path::new("jj"));
+    config_path
+        .current_dir(env.root().join("beta-second"))
+        .args(["config", "path", "--repo"]);
+    let config = fs::read_to_string(run(&env, &logs, config_path).trim()).unwrap();
+    assert!(
+        !config.contains("user"),
+        "clone should use beta's existing identity: {config}"
+    );
+    let mut name = beta.program(Path::new("jj"));
+    name.current_dir(env.root().join("beta-second"))
+        .args(["config", "get", "user.name"]);
+    assert_eq!(run(&env, &logs, name).trim(), "Existing Beta");
     let beta_second = env.repo_handle("beta-second");
     assert!(log(&beta_second).contains("second project"));
 

@@ -137,6 +137,16 @@ longest-prefix ties, pushInsteadOf, multiple and explicit push URLs, and credent
 creating the clone's parent. `hub_survives_malformed_clone_preflights` checks the production
 hub-wide handler with truncated and overlong requests and verifies that they reserve nothing.
 
+`selected_defaults_fill_only_missing_values` checks default and custom clone selections,
+TOML arrays, destination precedence, and opting out. `hub_join_sync_clone_and_list` clones
+without an identity, checks the recorded name, email and selected alias are seeded, then
+changes the source and verifies the clone keeps its seeded identity. The quick-start test
+clones with a different existing identity and checks no repository identity override is
+written. Disabling `clone_config::seed` makes the missing-name assertion fail in the binary
+workflow. `remote_bindings_are_checked_before_joining` also pins creation defaults across
+hub restart and a later join with different defaults. The envelope fuzzer includes nonempty
+clone defaults in join requests.
+
 Start with unexecuted recovery and refusal paths: reopening stored state, failed publication,
 rollback, malformed input and platform adapters. Read the callers and existing assertions
 before deciding a test is missing. An executed line does not show that its effects were

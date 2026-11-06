@@ -47,12 +47,14 @@ musubi reads these as `jj` would in the repository, so any of jj's config files 
 | Key | Effect |
 | --- | --- |
 | `musubi.forget-after` | How long this copy may go unused before the hive forgets it: `never`, or a duration of at least a second, such as `30m`, `6h`, `1h 30m`, or `2 days`: numbers with units from `s`, `min` or `m`, `h` or `hours`, `d` or `days`, `w` or `weeks`, and so on (`M` is months, not minutes). `musubi create`, `join`, and `clone` set it unless jj's config sets it already: `6h` when a coding agent (Claude Code or Codex) runs them, `never` otherwise. Not shared across a hive. See [Take a repository or machine out](../guides/manage.md#take-a-repository-or-machine-out). |
+| `musubi.clone-config` | Keys whose effective values are recorded when a hive is created or recreated after hub loss, as one-time defaults for future clones. Defaults to `["user.name", "user.email"]`; set `[]` to record none. A clone fills only settings absent from its destination's explicit config, in its own repo config. Built-in jj defaults do not count as explicit config. Existing values win, even when different. Later edits and joins to an existing hive never update the recorded defaults. `musubi.forget-after` cannot be selected. |
 | `operation.hostname` | This machine's name in a hive, unless `--machine` gives another. |
 | `git.executable-path` | The `git` musubi runs, as jj does. |
 | `snapshot.auto-update-stale` | jj's own: `true` makes every `jj` command update a working copy that another machine made stale. |
 
 jj config stays local, including `trunk()`, `immutable_heads()`, `git.private-commits`, and
-signing settings. Configure each machine explicitly; see
+signing settings. Clone can seed selected missing values once; sync never changes them.
+Configure each machine explicitly; see
 [Configure each machine](../guides/working-across-machines.md#configure-each-machine).
 
 ## Environment variables
@@ -140,7 +142,7 @@ machine out](../guides/manage.md#take-a-repository-or-machine-out).
 | --- | --- |
 | The state directory: `$XDG_STATE_HOME/musubi`, so `~/.local/state/musubi` on Linux and macOS unless you set `XDG_STATE_HOME`; `%APPDATA%\musubi` on Windows; or `$MUSUBI_STATE_DIR` | `state.toml`, which lists the copies the daemon syncs, each with its machine key and where it is, and this machine's default hub; `daemon.log`; `hub_key` and `hub_key.pub`, the machine's ssh key for reaching hubs; `ssh-agent`, a link to the latest ssh agent, for the daemon; `upgrade.log`, the output of `musubi.upgrade-command` when the daemon last ran it, and `upgrade-failed`, why it last failed; `login-service`, while `musubi daemon install` has the daemon start at login; on the hub's machine, `hub.path`, the directory a hub started without `--dir` serves, `hub.log`, the log of a hub launchd runs, and `hub-login-service`, while `musubi hub install` has the hub run at login; the running daemon's process id; locks. |
 | `.jj/repo/musubi/` in each repository | The repository's hive (`hive.toml`, which records its hive, its jj config id, and whether it joined, left, or its hive was removed), this machine's identity in it (`machine`), its last sync (`status.json`), when the daemon last cleaned up after jj in it (`gc`, and `gc.lock` while it does), and musubi's own record of the hive's operations, and of those `jj op abandon` removed. `musubi leave` records in `hive.toml` that the copy left, removes `status.json`, and keeps the rest. Removing it from a repository that syncs, or copying it into another repository, confuses musubi: use `musubi leave` and `musubi clone`. |
-| Each repository's jj repo config | Explicit `musubi join`, `create` and `clone` commands set a default `musubi.forget-after` unless jj's config sets it already. Sync never copies Git remote definitions or jj config from another machine. jj keeps repo config outside the repository; `jj config path --repo` prints where. |
+| Each repository's jj repo config | Explicit `musubi join`, `create` and `clone` commands set a default `musubi.forget-after` unless jj's config sets it already. Clone also fills missing selected defaults once. Sync never copies Git remote definitions or jj config from another machine. jj keeps repo config outside the repository; `jj config path --repo` prints where. |
 | What `musubi daemon install` adds | On macOS, `~/Library/LaunchAgents/io.github.bos.musubi.plist`; on Linux, `~/.config/systemd/user/musubi.service` (in `$XDG_CONFIG_HOME` if set); on Windows, the value `musubi` under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. `musubi daemon uninstall` removes it. |
 | What `musubi hub install` adds | On macOS, `~/Library/LaunchAgents/io.github.bos.musubi.hub.plist`; on Linux, `~/.config/systemd/user/musubi-hub.service` (in `$XDG_CONFIG_HOME` if set). `musubi hub uninstall` removes it. |
 

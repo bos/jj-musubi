@@ -156,6 +156,7 @@ async fn create_hive(server: &HubServer, repo: &TestRepo) -> String {
     let summary = node.join_summary().unwrap();
     let request = HubWideRequest::Join(JoinRequest {
         backend: summary.backend,
+        clone_config: Default::default(),
         remote_bindings: std::collections::BTreeMap::new(),
         remotes: vec![],
         dir_name: repo.machine().to_owned(),

@@ -712,6 +712,9 @@ production boundary, rather than by changing a protocol fake:
 | No error permanently pauses a copy | [Permanent-error classification][native-recovery] |
 | Repair omits copies lost with the whole base | [Offline trim regression][native-ancestry] |
 | Repair replays old time over surviving work | [Offline trim regression][native-ancestry] |
+| The hub finds a record count's digest by an unchecked subtraction of its pruned count | `history::a_forgotten_copy_behind_pruned_records_stops`: a fetch from behind the pruned records underflows in `records_since` |
+| The hub answers a fetch from any count it has, ignoring the digest | `history::record_bodies_keep_pending_drops_named_after_hub_rollback` and six other race tests |
+| An import, on either backend, skips its check that the objects wanted are all present | `translation::an_import_missing_wanted_commits_fails` |
 
 [stream-failures]: ../../crates/musubi-transport/src/stream.rs
 [native-ancestry]: ../../crates/musubi-sync/tests/races/adapter.rs

@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::SystemTime;
 
+use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
 use musubi_jj::node::NodeRepo;
 use musubi_jj::objects::CHANGE_ID_LENGTH;
@@ -1366,6 +1367,45 @@ fn simple_backend_round_trips() {
     assert_eq!(show(&a), "one");
     assert_eq!(show(&b), "one");
     assert_eq!(a.jj(&["file", "show", "-r", "main", "dir/other"]), "two");
+}
+
+/// A bundle that leaves out commits the import wants, as a hub with wrong haves or one
+/// sweeping mid-round can send, fails the import, on either backend. The node relies on that
+/// (`stage_objects`) to fail its sync rather than ask for the same objects again.
+#[test]
+fn an_import_missing_wanted_commits_fails() {
+    let env = TestEnv::new();
+    for (source, dest) in [
+        (env.init_repo("alpha"), env.init_repo("beta")),
+        (env.init_simple_repo("gamma"), env.init_simple_repo("delta")),
+    ] {
+        // Siblings, so that the bundle of one can't be a thin pack against the other.
+        commit(&source, "one", "one");
+        source.jj(&["new", "root()"]);
+        commit(&source, "two", "two");
+        let id = |message: &str| {
+            let hex = source.jj(&[
+                "log",
+                "--no-graph",
+                "-r",
+                &format!("description(substring:{message})"),
+                "-T",
+                "commit_id",
+            ]);
+            CommitId::try_from_hex(hex.trim()).unwrap()
+        };
+        let (one, two) = (id("one"), id("two"));
+        let wants = [one, two.clone()];
+        let (source, dest) = (open(&source), open(&dest));
+        let (from, to) = (source.object_store().unwrap(), dest.object_store().unwrap());
+        let partial = tempfile::NamedTempFile::new().unwrap();
+        from.export(&[two], &[], partial.path()).unwrap();
+        let err = to.import(partial.path(), &wants, &[]).unwrap_err();
+        assert!(matches!(err, ObjectError::NotConnected(_)), "{err:?}");
+        let whole = tempfile::NamedTempFile::new().unwrap();
+        from.export(&wants, &[], whole.path()).unwrap();
+        to.import(whole.path(), &wants, &[]).unwrap();
+    }
 }
 
 fn copy_dir(from: &Path, to: &Path) {

@@ -234,7 +234,7 @@ fn spawn_worker(
     hubs: Arc<Mutex<HubDir>>,
     activity: Arc<Mutex<Activity>>,
     transport: Arc<dyn Transport>,
-    #[cfg(test)] recovery: Option<Arc<tests::PanicAfterAccept>>,
+    #[cfg(test)] hooks: Option<Arc<tests::WorkerHooks>>,
 ) -> Worker {
     let (requests, receiver) = mpsc::channel();
     let runtime = tokio::runtime::Handle::current();
@@ -258,7 +258,7 @@ fn spawn_worker(
                     hubs: &hubs,
                     activity: &activity,
                     #[cfg(test)]
-                    recovery: recovery.as_deref(),
+                    hooks: hooks.as_deref(),
                 };
                 let served = std::panic::catch_unwind(AssertUnwindSafe(|| {
                     serve_one(&hive, &mut service, &message, limit, &mut counted)
@@ -364,7 +364,7 @@ struct Hive<'a> {
     hubs: &'a Mutex<HubDir>,
     activity: &'a Mutex<Activity>,
     #[cfg(test)]
-    recovery: Option<&'a tests::PanicAfterAccept>,
+    hooks: Option<&'a tests::WorkerHooks>,
 }
 
 /// Answers one request for a hive, opening its store first if need be, and updates the
@@ -383,7 +383,7 @@ fn serve_one(
         hubs,
         activity,
         #[cfg(test)]
-        recovery,
+        hooks,
     } = *hive;
     let service = match service {
         Some(service) => service,
@@ -407,8 +407,8 @@ fn serve_one(
             tracing::info!("opened");
             let opened = service.insert(HubService::new(HubAdapter::new(store, dir)?, dir)?);
             #[cfg(test)]
-            if let Some(recovery) = recovery {
-                recovery.opened();
+            if let Some(hooks) = hooks {
+                hooks.opened();
             }
             opened
         }
@@ -416,8 +416,8 @@ fn serve_one(
     let before = service.hub().store().head().1.clone();
     let (reply, notice) = service.handle_bytes(&message.payload, max_payload)?;
     #[cfg(test)]
-    if let Some(recovery) = recovery {
-        recovery.handled(service, notice.as_ref());
+    if let Some(hooks) = hooks {
+        hooks.handled(service, notice.as_ref());
     }
     // Whatever the request was, it may have been the last a machine had to make: one saying
     // it took every record, or the push that made a copy no longer present.

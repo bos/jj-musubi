@@ -8,7 +8,9 @@ use std::time::SystemTime;
 
 use jj_lib::object_id::ObjectId as _;
 use musubi_core::hub;
+use musubi_core::hub::HubStorage as _;
 use musubi_core::message::HeadKind;
+use musubi_core::message::RecordState;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
 use musubi_hub::activity::Outcome;
@@ -25,6 +27,7 @@ use crate::wire::HeadNotice;
 use crate::wire::HubReply;
 use crate::wire::HubRequest;
 use crate::wire::WireAttachment;
+use crate::wire::WireRequest;
 use crate::wire::chunk_size;
 use crate::wire::inline_limit;
 use crate::wire::map_reply;
@@ -33,6 +36,12 @@ use crate::wire::map_request;
 /// How long the hub keeps a blob it prepared for a node that never downloaded all of it,
 /// and an abandoned upload.
 const PREPARED_BLOB_LIFETIME: Duration = Duration::from_secs(3600);
+
+/// How long the hub answers a repeated protocol request with the reply it gave before, and
+/// how many such replies it keeps. A node asks again at once when no reply comes in time, for
+/// about ten minutes, and its daemon starts the sync over within a minute after that.
+const REPLAY_LIFETIME: Duration = Duration::from_secs(600);
+const REPLAYS: usize = 8;
 
 /// How long the hub keeps a prepared blob after serving its last chunk, in case the node
 /// asks for a chunk again because a reply was lost.
@@ -54,6 +63,35 @@ pub struct HubService {
     served_lifetime: Duration,
     /// What the latest request did.
     outcome: Outcome,
+    /// Recent answers to protocol requests, oldest first, to answer a repeat with.
+    answered: Vec<Answered>,
+    /// How many protocol requests the hub has worked out an answer to, rather than replayed.
+    #[cfg(test)]
+    afresh: u64,
+}
+
+/// A protocol request answered, kept to answer the same request with while the hive is as it
+/// was ([`HubService::replay`]).
+struct Answered {
+    /// The id of the request's encoding.
+    key: BlobId,
+    /// The hive as the reply left it.
+    hive: HiveState,
+    max_payload: usize,
+    at: Instant,
+    /// The encoded reply.
+    reply: Vec<u8>,
+    /// The prepared blobs it names.
+    blobs: Vec<BlobId>,
+    outcome: Outcome,
+}
+
+#[derive(PartialEq, Eq)]
+struct HiveState {
+    seq: u64,
+    head: OpId,
+    records: RecordState,
+    pruned: RecordState,
 }
 
 impl HubService {
@@ -70,6 +108,9 @@ impl HubService {
             served: HashMap::new(),
             served_lifetime: SERVED_BLOB_LIFETIME,
             outcome: Outcome::Other,
+            answered: vec![],
+            #[cfg(test)]
+            afresh: 0,
         })
     }
 
@@ -101,6 +142,12 @@ impl HubService {
         self.hub.prune()
     }
 
+    /// How many protocol requests the hub has worked out an answer to, rather than replayed.
+    #[cfg(test)]
+    pub(crate) fn afresh(&self) -> u64 {
+        self.afresh
+    }
+
     /// What the latest request did, for the hub's activity.
     pub fn outcome(&self) -> Outcome {
         self.outcome
@@ -118,22 +165,156 @@ impl HubService {
         if self.handled.is_multiple_of(100) {
             self.sweep();
         }
-        let request = Envelope::<HubRequest>::decode(bytes)?;
-        let (reply, notice) = self.handle(request, max_payload)?;
+        // A protocol request is known by the id of its encoding, whether it came whole or as
+        // an upload, which has that id.
+        let (request, key) = match Envelope::<HubRequest>::decode(bytes)? {
+            HubRequest::Protocol(request) => (request, BlobId::of_bytes(bytes)),
+            HubRequest::Indirect { blob } => (self.uploaded_request(&blob)?, blob),
+            transfer => {
+                let reply = self.transfer(transfer, max_payload)?;
+                return Ok((self.encode_reply(reply, max_payload, &mut vec![])?, None));
+            }
+        };
+        let hive = self.hive_state();
+        if let Some(reply) = self.replay(&key, &hive, max_payload, &request)? {
+            return Ok((reply, None));
+        }
+        let mut blobs = vec![];
+        let (reply, notice) = self.protocol(request, max_payload, &mut blobs)?;
+        // Whether `Incomplete` still holds can change while the head doesn't: a push that the
+        // hub rejects stores its operations and objects all the same.
+        let replayable = !matches!(
+            &reply,
+            HubReply::Protocol(Reply::Head {
+                kind: HeadKind::Incomplete,
+                ..
+            })
+        );
+        let encoded = self.encode_reply(reply, max_payload, &mut blobs)?;
+        if replayable {
+            self.remember(Answered {
+                key,
+                hive: self.hive_state(),
+                max_payload,
+                at: Instant::now(),
+                reply: encoded.clone(),
+                blobs,
+                outcome: self.outcome,
+            });
+        }
+        Ok((encoded, notice))
+    }
+
+    /// `reply`, encoded, as a prepared blob it names if it is too large to send whole.
+    /// Prepared blobs it names are added to `blobs`.
+    fn encode_reply(
+        &mut self,
+        reply: HubReply,
+        max_payload: usize,
+        blobs: &mut Vec<BlobId>,
+    ) -> anyhow::Result<Vec<u8>> {
         let encoded = Envelope::encode(reply)?;
         if encoded.len() <= max_payload {
-            return Ok((encoded, notice));
+            return Ok(encoded);
         }
         let (blob, len) = self.prepared.insert_bytes(&encoded)?;
         self.served.remove(&blob);
-        Ok((Envelope::encode(HubReply::Indirect { blob, len })?, notice))
+        blobs.push(blob);
+        Envelope::encode(HubReply::Indirect { blob, len })
     }
 
-    fn handle(
+    /// The protocol request a node uploaded as `blob`, which it no longer needs.
+    fn uploaded_request(&mut self, blob: &BlobId) -> anyhow::Result<WireRequest> {
+        let path = self
+            .uploads
+            .get(blob)
+            .ok_or_else(|| anyhow::anyhow!("no blob {blob:?}"))?;
+        let inner = Envelope::<HubRequest>::decode(&std::fs::read(path)?)?;
+        self.uploads.remove(blob);
+        match inner {
+            HubRequest::Protocol(request) => Ok(request),
+            _ => anyhow::bail!("nested indirection"),
+        }
+    }
+
+    /// What a protocol request's answer depends on, besides the request: the hive's head and
+    /// records. The operations and objects in `closure(head)` don't change while the head
+    /// doesn't, and the hub only ever adds the rest.
+    fn hive_state(&self) -> HiveState {
+        let (seq, head) = self.hub.head();
+        HiveState {
+            seq,
+            head,
+            records: self.hub.records(),
+            pruned: self.hub.pruned(),
+        }
+    }
+
+    /// The reply the hub gave to the same request, if it gave one recently, the hive is as
+    /// it was then, and the blobs the reply names are still here: what answering again would
+    /// say, without the work. A node sends a request again when the reply didn't come in
+    /// time, as when the hub took longer than that to prepare it. Whatever the repeat
+    /// uploaded is let go, and its machine counts as having reported again.
+    fn replay(
         &mut self,
-        request: HubRequest,
+        key: &BlobId,
+        hive: &HiveState,
         max_payload: usize,
-    ) -> anyhow::Result<(HubReply, Option<HeadNotice>)> {
+        request: &WireRequest,
+    ) -> anyhow::Result<Option<Vec<u8>>> {
+        let now = Instant::now();
+        self.answered
+            .retain(|answered| now.duration_since(answered.at) < REPLAY_LIFETIME);
+        let Some(at) = self.answered.iter().position(|answered| {
+            answered.key == *key && answered.hive == *hive && answered.max_payload == max_payload
+        }) else {
+            return Ok(None);
+        };
+        let answered = self.answered.remove(at);
+        for blob in &answered.blobs {
+            if !self.prepared.renew(blob)? {
+                return Ok(None);
+            }
+            self.served.remove(blob);
+        }
+        let (machine, records) = match request {
+            Request::Fetch {
+                machine, records, ..
+            }
+            | Request::Push {
+                machine, records, ..
+            } => (Some(machine), Some(records)),
+            Request::GetObjects { .. } => (None, None),
+        };
+        if let (Some(machine), Some(records)) = (machine, records) {
+            self.hub.report(machine, records);
+        }
+        for blob in request_blobs(request) {
+            self.uploads.remove(&blob);
+        }
+        tracing::debug!("answered a repeated request as before");
+        // The head moved once, whatever the replies to the push.
+        self.outcome = match answered.outcome {
+            Outcome::Accepted => Outcome::Other,
+            outcome => outcome,
+        };
+        let reply = answered.reply.clone();
+        self.answered.push(answered);
+        Ok(Some(reply))
+    }
+
+    /// Keeps `answered` to replay, in place of any older answer to the same request, and
+    /// forgetting the oldest beyond [`REPLAYS`].
+    fn remember(&mut self, answered: Answered) {
+        self.answered.retain(|old| old.key != answered.key);
+        if self.answered.len() >= REPLAYS {
+            self.answered.remove(0);
+        }
+        self.answered.push(answered);
+    }
+
+    /// Answers a request that moves part of a blob.
+    fn transfer(&mut self, request: HubRequest, max_payload: usize) -> anyhow::Result<HubReply> {
         match request {
             HubRequest::PutChunk {
                 blob,
@@ -146,7 +327,7 @@ impl HubService {
                     Received::Prefix(have) => (have, false),
                     Received::Complete => (total, true),
                 };
-                Ok((HubReply::ChunkAck { received, complete }, None))
+                Ok(HubReply::ChunkAck { received, complete })
             }
             HubRequest::GetChunk { blob, offset, len } => {
                 // Not the whole of a large blob in memory, for a reply that couldn't carry it.
@@ -159,82 +340,85 @@ impl HubService {
                 if reaches_end(offset, data.len(), total) || self.served.contains_key(&blob) {
                     self.served.insert(blob, Instant::now());
                 }
-                Ok((HubReply::Chunk { total, data }, None))
+                Ok(HubReply::Chunk { total, data })
             }
-            HubRequest::Indirect { blob } => {
+            HubRequest::Protocol(_) | HubRequest::Indirect { .. } => {
+                unreachable!("handled as a protocol request")
+            }
+        }
+    }
+
+    /// Answers a protocol request. Prepared blobs the reply names are added to `blobs`.
+    fn protocol(
+        &mut self,
+        request: WireRequest,
+        max_payload: usize,
+        blobs: &mut Vec<BlobId>,
+    ) -> anyhow::Result<(HubReply, Option<HeadNotice>)> {
+        #[cfg(test)]
+        {
+            self.afresh += 1;
+        }
+        let mut uploaded = vec![];
+        let request = map_request(request, OpId::new, |attachment| {
+            attachment.into_attachment(&self.uploads, |blob| {
+                uploaded.push(blob);
                 let path = self
                     .uploads
                     .get(&blob)
-                    .ok_or_else(|| anyhow::anyhow!("no blob {blob:?}"))?;
-                let inner = Envelope::<HubRequest>::decode(&std::fs::read(path)?)?;
-                self.uploads.remove(&blob);
-                anyhow::ensure!(
-                    matches!(inner, HubRequest::Protocol(_)),
-                    "nested indirection"
-                );
-                self.handle(inner, max_payload)
-            }
-            HubRequest::Protocol(request) => {
-                let mut uploaded = vec![];
-                let request = map_request(request, OpId::new, |attachment| {
-                    attachment.into_attachment(&self.uploads, |blob| {
-                        uploaded.push(blob);
-                        let path = self.uploads.get(&blob).ok_or_else(|| {
-                            anyhow::anyhow!("attachment {blob:?} was not uploaded")
-                        })?;
-                        Ok(Attachment::File(path))
-                    })
-                })?;
-                let pushed = log_request(&request);
-                let handled = hub::handle(&mut self.hub, request);
-                // Uploaded bundles are imported (or rejected) now; either way they are done.
-                for blob in uploaded {
-                    self.uploads.remove(&blob);
-                }
-                let handled = handled?;
-                log_reply(&handled.reply);
-                self.outcome = match &handled.reply {
-                    Reply::Head {
-                        kind: HeadKind::Accepted,
-                        ..
-                    } if handled.publish.is_some() => Outcome::Accepted,
-                    Reply::Head {
-                        kind: HeadKind::Rejected,
-                        ..
-                    } => Outcome::Rejected,
-                    Reply::Head {
-                        kind: HeadKind::Incomplete,
-                        ..
-                    } => Outcome::Incomplete,
-                    Reply::Fetched { ops, .. } => Outcome::Sent(ops.len() as u64),
-                    _ => Outcome::Other,
-                };
-                if let Some((seq, head, _)) = &handled.publish {
-                    tracing::info!(
-                        "accepted {pushed} operations; the head is now {seq} ({})",
-                        short(head)
-                    );
-                }
-                let mut inline_left = inline_limit(max_payload);
-                let reply = map_reply(
-                    handled.reply,
-                    |id| id.to_bytes(),
-                    |attachment| {
-                        WireAttachment::of(&attachment, &mut inline_left, |path| {
-                            let (blob, len) = self.prepared.insert_file(path)?;
-                            self.served.remove(&blob);
-                            Ok((blob, len))
-                        })
-                    },
-                )?;
-                let notice = handled.publish.map(|(seq, head, records)| HeadNotice {
-                    seq,
-                    head: head.to_bytes(),
-                    records,
-                });
-                Ok((HubReply::Protocol(reply), notice))
-            }
+                    .ok_or_else(|| anyhow::anyhow!("attachment {blob:?} was not uploaded"))?;
+                Ok(Attachment::File(path))
+            })
+        })?;
+        let pushed = log_request(&request);
+        let handled = hub::handle(&mut self.hub, request);
+        // Uploaded bundles are imported (or rejected) now; either way they are done.
+        for blob in uploaded {
+            self.uploads.remove(&blob);
         }
+        let handled = handled?;
+        log_reply(&handled.reply);
+        self.outcome = match &handled.reply {
+            Reply::Head {
+                kind: HeadKind::Accepted,
+                ..
+            } if handled.publish.is_some() => Outcome::Accepted,
+            Reply::Head {
+                kind: HeadKind::Rejected,
+                ..
+            } => Outcome::Rejected,
+            Reply::Head {
+                kind: HeadKind::Incomplete,
+                ..
+            } => Outcome::Incomplete,
+            Reply::Fetched { ops, .. } => Outcome::Sent(ops.len() as u64),
+            _ => Outcome::Other,
+        };
+        if let Some((seq, head, _)) = &handled.publish {
+            tracing::info!(
+                "accepted {pushed} operations; the head is now {seq} ({})",
+                short(head)
+            );
+        }
+        let mut inline_left = inline_limit(max_payload);
+        let reply = map_reply(
+            handled.reply,
+            |id| id.to_bytes(),
+            |attachment| {
+                WireAttachment::of(&attachment, &mut inline_left, |path| {
+                    let (blob, len) = self.prepared.insert_file(path)?;
+                    self.served.remove(&blob);
+                    blobs.push(blob);
+                    Ok((blob, len))
+                })
+            },
+        )?;
+        let notice = handled.publish.map(|(seq, head, records)| HeadNotice {
+            seq,
+            head: head.to_bytes(),
+            records,
+        });
+        Ok((HubReply::Protocol(reply), notice))
     }
 
     /// Deletes prepared blobs a while after their last chunk was served.
@@ -262,6 +446,26 @@ impl HubService {
 /// download asks for: it ends the blob, or the download asked past the end.
 fn reaches_end(offset: u64, got: usize, total: u64) -> bool {
     offset + got as u64 >= total
+}
+
+/// The uploaded blobs a protocol request names.
+fn request_blobs(request: &WireRequest) -> Vec<BlobId> {
+    let attachments = match request {
+        Request::Fetch { haves, .. } => vec![haves],
+        Request::GetObjects { haves, .. } => vec![haves],
+        Request::Push {
+            ops_attachment,
+            objects,
+            ..
+        } => vec![ops_attachment, objects],
+    };
+    attachments
+        .into_iter()
+        .filter_map(|attachment| match attachment {
+            WireAttachment::Blob { blob, .. } => Some(*blob),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Logs a protocol request, returning how many operations it pushes.

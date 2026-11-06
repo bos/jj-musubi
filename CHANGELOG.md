@@ -18,6 +18,12 @@ machine (see [Upgrading](README.md#upgrading)).
   that after a restart `musubi join` could refuse a copy of the hive's own repository, saying
   no hive on this hub shares history with it.
 
+- A machine can clone or catch up on a hive too large for the hub to prepare a reply in 30
+  seconds, or to take in a push of one. Previously every attempt timed out and the hub started
+  the work over, so it never finished. Now a machine asks again every 30 seconds for about ten
+  minutes, and the hub answers a repeat with the reply it already prepared. Nothing to do on
+  upgrading.
+
 - `musubi clone` refuses a nonempty destination before changing it. Previously it could
   share that directory's files and Git history with the hive. Choose a new or empty directory,
   or use `musubi join` to share an existing repository.

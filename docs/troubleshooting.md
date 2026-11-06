@@ -90,10 +90,13 @@ stuck.
 
 ### "the hub at devbox is out of reach", "no hub is serving ...", or "request timed out"
 
-No hub answered. Check that `musubi hub` is running on the hub's machine, and start it if not;
-`musubi sync` and `musubi list` say why the hub is out of reach, and `musubi status` shows why
-the last sync couldn't reach it. Where the message gives a reason after the colon, such as "ssh
-to devbox failed: ...", that reason's own entry above says more.
+No hub answered. A hub working through a large history can take longer than 30 seconds to
+reply, so a machine asks again every 30 seconds, and gives up with "request timed out" after
+about ten minutes. Check that `musubi hub` is running on the hub's machine, and start it if
+not; `musubi sync` and `musubi list` say why the hub is out of reach, and `musubi status` shows
+why the last sync couldn't reach it. Where the message gives a reason after the colon, such as
+"ssh to devbox failed: ...", that reason's own entry above says more. If the hub is running but
+its machine is idle, see what the hub logs, as above, and restart it if it's stuck.
 Daemons reconnect by themselves: within a few seconds to a hub on the same machine, and within
 about a minute over ssh, which waits longer between tries after each failure.
 After detecting that the machine has woken, the daemon ends old ssh connections and clears

@@ -206,7 +206,11 @@ impl NodeRepo {
     /// The cached fix-up has restored its saved state; this child preserves the state now,
     /// with no work, settings or expected-value instructions to replay. A concurrent command
     /// that already changed the head makes a new marker unnecessary.
-    /// The comparison uses exact ids, as the core does, without translating `expected`.
+    /// The comparison uses exact ids, as the core does, without translating `expected`. The
+    /// core read the head from [`Self::canonical_heads`], so the two differ only if the
+    /// merged head differs from what it read: a command landed since, or an op head from
+    /// before the join, which that skips, was merged in here. Either leaves an op head that
+    /// the core's next read finds, so a decline never repeats on its own.
     pub fn write_drop_tip(&mut self, expected: &HubOp) -> Result<Option<NodeOp>, NodeError> {
         self.check_abandon()?;
         let repo = self.merged_repo_unchecked()?;

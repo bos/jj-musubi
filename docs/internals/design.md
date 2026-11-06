@@ -44,8 +44,13 @@ specifies the messages between nodes and the hub and the properties they guarant
 - **Work**, **forget**, **present**: an operation is work by a copy when the copy chose to make
   it, and a forget when it takes copies out of the hive; a copy is present while it has work that
   no forget saw ([Copies that go away](#copies-that-go-away)).
-- **Colocated**: a git-backed jj repository whose git repository is the `.git` beside `.jj`, which
-  git commands use too. A repository that isn't colocated keeps its git store inside `.jj`.
+- **Colocated**: a git-backed jj repository with a workspace whose root is also a working tree
+  of its git repository, so that git commands there use it too: usually the `.git` beside
+  `.jj`, or a store inside `.jj` that `jj workspace add --colocate` made a worktree of. A
+  repository whose git repository is external, even one named `.git`, isn't colocated unless
+  one of its workspaces is also that repository's working tree, as jj decides. musubi decides
+  when it opens the repository, so a daemon notices a workspace colocated later only once it
+  opens it again.
 
 ## What is replicated
 
@@ -533,8 +538,8 @@ holds no pack open that git's gc might delete, which Windows forbids.
   filesystem allows, and the receiver pipes it from the bundle into git.
 - As `git fetch` does, a received pack of fewer than 100 objects is unpacked into loose objects,
   and a larger one kept as a pack.
-- A node writes received objects into the repository's object store (`.git` for colocated
-  repositories), reopening the repository first, since jj-lib's git backend can't read packs added
+- A node writes received objects into the repository's object store (usually `.git` for
+  colocated repositories), reopening the repository first, since jj-lib's git backend can't read packs added
   after it opened it. It then calls jj-lib's `GitBackend::import_head_commits`, which creates the
   backend extras and the `refs/jj/keep/*` refs. The keep refs protect commits that no bookmark
   reaches from `git gc`; without them, git would eventually delete every anonymous head.

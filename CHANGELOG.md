@@ -7,6 +7,12 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- musubi exports bookmarks to git where jj does: in a repository with a workspace that is also
+  a working tree of its git repository. Before, it exported them to any external git
+  repository named `.git`, where jj writes them only on `jj git export`, and none for a
+  workspace made with `jj workspace add --colocate` in a repository whose git store is inside
+  `.jj`, where jj exports them in every command.
+
 - `musubi clone` refuses a nonempty destination before changing it. Previously it could
   share that directory's files and Git history with the hive. Choose a new or empty directory,
   or use `musubi join` to share an existing repository.

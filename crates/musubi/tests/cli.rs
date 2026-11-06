@@ -780,6 +780,24 @@ fn commands_carry_on_once_their_output_goes_unread() {
     insta::assert_snapshot!(err, @"Hint: Run `musubi hub` on one machine, then the join command it prints.");
 }
 
+/// Uninstalling a daemon that wasn't set to start at login says whether it stopped one.
+#[test]
+fn daemon_uninstall_says_whether_it_stopped_the_daemon() {
+    let env = TestEnv::new();
+    let logs = Logs::default();
+    let repo = env.init_repo("alpha");
+    let mut daemons = Daemons::default();
+    daemons.of(&repo);
+    musubi_in(&env, &logs, &repo, &["daemon", "start"]);
+    let out = musubi_in(&env, &logs, &repo, &["daemon", "uninstall"]);
+    assert_eq!(
+        out,
+        "Stopped the daemon. It wasn't set to start at login.\n"
+    );
+    let out = musubi_in(&env, &logs, &repo, &["daemon", "uninstall"]);
+    assert_eq!(out, "The daemon wasn't set to start at login.\n");
+}
+
 /// A log file never has colour, even where `--color` asks for it.
 #[test]
 fn logs_have_no_colour() {

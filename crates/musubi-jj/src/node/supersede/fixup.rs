@@ -1,4 +1,4 @@
-//! Restoring presence, settings, and expected refs that an abandon dropped.
+//! Restoring presence and expected refs that an abandon dropped.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -20,7 +20,6 @@ use super::NodeRepo;
 use super::WORKED_AT_ATTRIBUTE;
 
 use crate::canonical;
-use crate::hive_settings;
 use crate::node::git;
 use crate::node::index_err;
 use crate::node::is_visible;
@@ -36,11 +35,10 @@ use crate::workspaces;
 use jj_lib::ref_name::WorkspaceNameBuf;
 
 /// What a fix-up writes: work by each copy whose latest work or forget-after an abandon
-/// dropped, then the hive's settings as they were (docs/internals/design.md, "The fix-up").
+/// dropped (docs/internals/design.md, "The fix-up").
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Fixup {
     pub(super) work: Vec<Work>,
-    settings: Option<String>,
     #[serde(default)]
     pub(super) expected: Option<Expectation>,
 }
@@ -97,12 +95,6 @@ impl NodeRepo {
                 worked_at: self.worked_at(&before, copy)?,
                 forgotten: None,
             });
-        }
-        let (was, is) = (self.settings_at(old)?, self.settings_at(new)?);
-        if was != is
-            && let Some(was) = was
-        {
-            fixup.settings = Some(was.to_attribute());
         }
         Ok(fixup)
     }
@@ -204,7 +196,7 @@ impl NodeRepo {
 
     /// Gives pending drops a fresh publication id when the hub already has this head.
     /// The cached fix-up has restored its saved state; this child preserves the state now,
-    /// with no work, settings or expected-value instructions to replay. A concurrent command
+    /// with no work or expected-value instructions to replay. A concurrent command
     /// that already changed the head makes a new marker unnecessary.
     /// The comparison uses exact ids, as the core does, without translating `expected`. The
     /// core read the head from [`Self::canonical_heads`], so the two differ only if the
@@ -286,7 +278,7 @@ impl NodeRepo {
             return Ok(());
         }
         // Completed restoration stays in history. A new obligation must not replay its
-        // settings or expected values; an unfinished recipe keeps its partial-write choices.
+        // expected values; an unfinished recipe keeps its partial-write choices.
         let mut fixup = if self.records.fixup_written {
             Fixup::default()
         } else {
@@ -376,7 +368,7 @@ impl NodeRepo {
         let shown = self.shown_names(&canonical_head)?;
         // The first operation restores them, so that no operation of the fix-up has them as
         // the rewritten history would.
-        let mut first = Some((fixup.settings.clone(), self.expected_before(&head)?));
+        let mut first = Some(self.expected_before(&head)?);
         let context = canonical::namespace::Namespace::read(
             &self.canonical.read_operation(&canonical_head)?.metadata,
         )?
@@ -445,13 +437,8 @@ impl NodeRepo {
             if let Some(context) = &context {
                 tx.set_attribute(canonical::namespace::ATTRIBUTE.to_owned(), context.clone());
             }
-            if let Some((settings, expected)) = first.take() {
-                if let Some(settings) = settings {
-                    tx.set_attribute(hive_settings::ATTRIBUTE.to_owned(), settings);
-                }
-                if let Some(expected) = expected {
-                    tx.set_attribute(git::EXPECTED_ATTRIBUTE.to_owned(), expected);
-                }
+            if let Some(Some(expected)) = first.take() {
+                tx.set_attribute(git::EXPECTED_ATTRIBUTE.to_owned(), expected);
             }
             tx
         };

@@ -1747,7 +1747,7 @@ impl World {
 
     /// A new copy of the hive on machine `m`, as `musubi clone` makes: an empty colocated
     /// repository at a path of its own, with the machine's jj config, joined to the hive on
-    /// the root and synced, then on the hive's trunk. A new machine's, if `m` is `nodes()`, or
+    /// the root and synced, then on its local `trunk()`. A new machine's, if `m` is `nodes()`, or
     /// else in place of machine `m`'s copy, which has left the hive.
     pub fn clone_copy(&mut self, m: usize) {
         let n = self.next();
@@ -1769,6 +1769,15 @@ impl World {
             repo.jj(&["git", "init", "--colocate"]);
             repo
         };
+        // Remotes stay local. Model the user configuring this new copy for Git access,
+        // so fetch/push rules continue to cover newly joined and replacement copies.
+        repo.jj(&[
+            "git",
+            "remote",
+            "add",
+            "origin",
+            self.origin.bare.to_str().unwrap(),
+        ]);
         if self.fx.hive.hub.store().pruned() > 0 {
             fired("join:after_prune");
         }
@@ -1834,7 +1843,7 @@ impl World {
             .collect();
         self.baseline_keys[m] = keys;
         self.restart_imports(m);
-        // As `musubi clone` checks out the hive's trunk.
+        // As `musubi clone` checks out the destination's local `trunk()`.
         let trunk = self.raw_jj(
             m,
             &[
@@ -1853,8 +1862,8 @@ impl World {
         }
     }
 
-    /// Whether machine `m`'s git has the `origin` remote: every machine but a new copy that
-    /// hasn't yet taken the hive's settings, which name it.
+    /// Whether machine `m`'s git has the `origin` remote: configured explicitly for each machine,
+    /// including a new copy before it joins.
     pub fn has_origin(&self, m: usize) -> bool {
         self.fx
             .repo(m)

@@ -956,8 +956,8 @@ include canonical closure, object adequacy, custody, naming, metadata, individua
 and the initial snapshot. Focused native checks and executable component checks connect those
 contracts to the code; the theorem does not formally verify every Rust execution.
 
-Automatic semantic writes include settings reconciliation and workspace restoration before
-a round; all five idle routines; working-copy replacement inside `advance_to`; delayed writes
+Automatic semantic writes include workspace restoration before a round; the idle routines;
+working-copy replacement inside `advance_to`; delayed writes
 that notice a user's operation abandonment; and late-operation reparenting after record
 recovery. Protocol merges, realization and record adoption have their own model steps. Git
 export copies keep their canonical form. An advance with no additional automatic write has
@@ -1025,7 +1025,7 @@ justify retaining their readable prefixes among earlier records. The native depa
 regression checks equal-record receipt recovery against `RecordEpoch.exec`, including its
 decreasing credit, and exercises a successful departure and two rollbacks. Another native
 regression stops before the publisher's fix-up: missing WORK timestamps are recovered from the
-exact original in retained record metadata, without replaying stale shared settings.
+exact original in retained record metadata, without replaying stale payload.
 
 Raw translation now normalizes known dropped originals through newly received ancestry,
 including old names never previously mapped on this machine. It does not infer an unowned

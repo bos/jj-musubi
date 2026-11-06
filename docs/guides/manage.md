@@ -166,6 +166,17 @@ To stop using musubi on a machine altogether:
 
 ## Upgrade musubi
 
+For copies already using the current operation-id format, the unreleased local-configuration
+change uses protocol 14 and a new hub metadata format.
+Stop the old hub and daemons and upgrade them together. Archive the old default hub
+directory, then run `musubi hub` without `--dir` to initialize a fresh default directory;
+SSH connections will then find the new default hub. In each existing copy run
+`musubi join --hub <hub-host>` to recreate its hive and resume syncing. The copies keep their
+jj history and local configuration. Their remote names must agree on effective fetch and
+push destinations; give different destinations distinct names before rejoining. When
+upgrading from an earlier release with different operation ids, follow the full recreation
+steps below instead.
+
 ### Recreate hives when upgrading to 0.6.0
 
 Release 0.6.0, the first since 0.1.0, changes operation ids to preserve identity when history

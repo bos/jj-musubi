@@ -63,8 +63,10 @@ pub enum NodeError {
     NotRealizable(String, &'static str),
     #[error("operation {op} names canonical operation {canonical}, which is not stored")]
     DanglingAttribute { op: String, canonical: String },
-    #[error("bad hive settings in {op}: {message}")]
-    Settings { op: String, message: String },
+    #[error(
+        "remote destinations disagree with this hive's recorded names: {0}; use distinct remote names for different destinations"
+    )]
+    RemoteBindings(String),
     /// jj cannot merge this machine's concurrent operations with the hive's, as when two
     /// machines' rebases form a loop: jj 0.47 then panics ("graph has cycle").
     #[error(

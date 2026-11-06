@@ -142,6 +142,11 @@ impl Contracted {
 }
 
 impl HubStore {
+    /// The hive's directory, whose final component is its id.
+    pub fn directory(&self) -> &Path {
+        &self.dir
+    }
+
     /// Creates an empty hub store in `dir`, which must not exist yet.
     pub fn init(dir: &Path, backend: Backend) -> Result<Self, StoreError> {
         fs::create_dir(dir).map_err(io_err(dir))?;

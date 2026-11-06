@@ -39,13 +39,13 @@ fn a_missing_configured_git_is_not_replaced_by_one_on_path() {
     let env = TestEnv::new();
     let repo = env.init_repo("alpha");
     let missing = env.root().join("no-such-git");
-    let mut node = NodeRepo::open(&repo.repo_path(), &with_git(&repo, &missing)).unwrap();
+    let node = NodeRepo::open(&repo.repo_path(), &with_git(&repo, &missing)).unwrap();
     let err = node.check_complete().unwrap_err();
     assert!(
         matches!(&err, NodeError::Git(err) if not_found(err)),
         "{err:?}"
     );
-    let err = node.reconcile_settings().unwrap_err();
+    let err = node.join_summary().unwrap_err();
     assert!(
         matches!(&err, NodeError::Git(err) if not_found(err)),
         "{err:?}"

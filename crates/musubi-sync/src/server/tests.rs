@@ -156,6 +156,7 @@ async fn create_hive(server: &HubServer, repo: &TestRepo) -> String {
     let summary = node.join_summary().unwrap();
     let request = HubWideRequest::Join(JoinRequest {
         backend: summary.backend,
+        remote_bindings: std::collections::BTreeMap::new(),
         remotes: vec![],
         dir_name: repo.machine().to_owned(),
         roots: summary.roots.iter().map(|id| id.hex()).collect(),
@@ -488,4 +489,49 @@ async fn other_hives_are_served_while_a_busy_one_is_removed() {
     assert!(matches!(held.await.unwrap(), HubReply::Error(_)));
     assert_eq!(ask(&busy).await, HubReply::Removed);
     assert!(!watched.workers().removing.contains(&busy));
+}
+
+/// The hub-wide clone request reaches its production decoder with a nonempty binding map.
+/// Truncations and trailing bytes reserve nothing; a complete request reserves its names.
+#[test]
+fn hub_survives_malformed_clone_preflights() {
+    let dir = musubi_testutil::tempdir();
+    let server = HubServer::open(dir.path()).unwrap();
+    let id = server
+        .lock()
+        .create("clone-preflight", Backend::Git)
+        .unwrap();
+    let bindings = [(
+        "origin".to_owned(),
+        musubi_jj::remote_url::RemoteBinding {
+            fetch: Some("example.com/repo".to_owned()),
+            push: ["example.com/repo".to_owned()].into(),
+        },
+    )]
+    .into();
+    let request = HubWideRequest::PrepareClone {
+        hive: id.clone(),
+        backend: Backend::Git,
+        remote_bindings: bindings,
+    };
+    let bytes = Envelope::encode(request).unwrap();
+    let path = dir.path().join(&id).join("hive.toml");
+    let before = std::fs::read(&path).unwrap();
+    for end in 0..bytes.len() {
+        assert!(matches!(
+            server.handle_hub_wide(&bytes[..end], 4096),
+            HubWideReply::Error(_)
+        ));
+    }
+    let mut trailing = bytes.clone();
+    trailing.push(0);
+    assert!(matches!(
+        server.handle_hub_wide(&trailing, 4096),
+        HubWideReply::Error(_)
+    ));
+    assert_eq!(std::fs::read(path).unwrap(), before);
+    assert!(matches!(
+        server.handle_hub_wide(&bytes, 4096),
+        HubWideReply::Hive(_)
+    ));
 }

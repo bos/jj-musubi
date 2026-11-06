@@ -546,18 +546,39 @@ Another machine changed the commit your working copy is on. Run `jj workspace up
 See [When another machine rewrites your working
 copy](guides/working-across-machines.md#when-another-machine-rewrites-your-working-copy).
 
-### A remote or setting changed back
-
-Two machines changed the same remote or shared setting before either synced, and the later
-write won everywhere, by each machine's clock. The daemon on the machine whose value was
-replaced logs the old and new values. Set the value again. See [When machines
-disagree](guides/working-across-machines.md#when-machines-disagree).
-
 ### `jj log` shows `main*` after a sync
 
 In a colocated repository, jj exports bookmarks to git only when a command changes something,
 so after a `jj` command that merged other machines' work, git's branches can lag jj's
 bookmarks. The next command that changes something exports them, as does `jj git export`.
+
+### "remote names ... have different fetch or push destinations than hive ... recorded"
+
+An existing copy may instead report "remote destinations disagree with this hive's recorded
+names" after checking its local history.
+
+A remote name identifies fixed fetch and push destinations within a hive. `musubi join`
+checks effective URLs, including Git aliases, before joining; `--hive` does not bypass this
+check. Clone checks inherited global Git remotes too, including conditional includes for its
+destination path, before creating any directories. Equivalent HTTPS and SSH spellings agree.
+Give different destinations different names,
+for example `jj git remote rename origin fork`, then run `musubi join` again. Use an unused
+name: a rename does not release an earlier binding. A copy can omit a remote entirely.
+
+### "missing field `remote_bindings`" when starting a hub
+
+This hub directory predates the remote-name preflight format. Use a fresh hub directory and
+rejoin from the existing copies, as [Upgrade musubi](guides/manage.md#upgrade-musubi) describes.
+Keep the old directory as a backup; the repositories and their work remain on the copies.
+
+### "hive ... has inconsistent recorded remotes"
+
+The hive has accepted conflicting remote-name bindings, for example from a buggy peer.
+Joining and cloning refuse before applying anything or creating a clone directory. The hub
+does not choose one destination or rewrite local configuration. From a consistently
+configured copy, run `musubi leave --force`, then `musubi create <new-name>` to start another
+hive. Other copies can leave the old hive and join the new one after checking their remotes.
+The existing copies and their work stay where they are.
 
 ### "Unable to create '.../refs/heads/main.lock': File exists" or "main@git: Failed to set"
 

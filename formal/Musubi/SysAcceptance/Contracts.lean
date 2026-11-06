@@ -117,9 +117,9 @@ structure HiveObs (ρ α : Type) where
   lost : Nat → Prop
   ioFail : Nat → Prop
   /-- Node `n`'s own code makes, at hive time `t`, a semantic write no protocol step accounts
-  for: idle housekeeping (`when_idle`: `reconcile_settings`, `show_other_workspaces`,
+  for: idle housekeeping (`when_idle`: `show_other_workspaces`,
   `replace_abandoned_working_copies`, `record_forget_after`, `expire_idle`); the round's prelude
-  (`before_sync`: `reconcile_settings`, `show_other_workspaces`); `advance_to`'s working-copy
+  (`before_sync`: `show_other_workspaces`); `advance_to`'s working-copy
   cleanup (`replace_abandoned_working_copies`, and `move_taken_workspaces` after a taking); the
   pass-on of a user's `jj op abandon` (`check_abandon`), which can come after the user's work;
   and the reparenting of late operations after a renaming (`reparent_late`). Not the git export

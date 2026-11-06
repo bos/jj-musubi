@@ -321,7 +321,7 @@ Steps:
   hub and pending drops. The node first writes the fix-up on its single head and pushes that,
   reusing restoring work already written. If its head is already the hub's, it writes a
   neutral child so that accepting the push can publish the pending drops. The child keeps
-  the current view and adds no work or saved settings; retries reuse it.
+  the current view and adds no work or saved payload; retries reuse it.
   The hub answers it as any `Push`, checking the compare-and-swap against
   `contract(D_hub ∪ pending)`: every surviving image of the expected head must be an ancestor
   of the new head, and the image must be nonempty. The expected head need not be an original

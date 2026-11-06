@@ -239,11 +239,21 @@ impl HubServer {
                     HubWideReply::Joined(joined)
                 })
             }
+            HubWideRequest::PrepareClone {
+                hive,
+                backend,
+                remote_bindings,
+            } => self
+                .lock()
+                .prepare_clone(&hive, backend, &remote_bindings)
+                .map(HubWideReply::Hive),
             HubWideRequest::List => Ok(HubWideReply::Hives(self.lock().list())),
             HubWideRequest::Resolve { name } => {
                 let hubs = self.lock();
-                hubs.resolve(&name)
-                    .map(|id| HubWideReply::Hive(hubs.info(&id).expect("resolved")))
+                hubs.resolve(&name).and_then(|id| {
+                    hubs.check_remote_consistency(&id)?;
+                    Ok(HubWideReply::Hive(hubs.info(&id).expect("resolved")))
+                })
             }
             HubWideRequest::Rename { name, to } => self.lock().rename(&name, &to).map(|info| {
                 tracing::info!("renamed hive {name} to {to}");

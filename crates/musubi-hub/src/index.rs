@@ -1,9 +1,9 @@
 //! What a hub remembers about each hive for matching repositories to it: every remote URL
-//! the hive's settings have named, and every root commit it has stored. Both only grow. The
+//! a copy has recorded when joining, and every root commit it has stored. Both only grow. The
 //! index is a cache, updated as heads are accepted and rebuilt from the store's operations
 //! and objects when it is missing.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -11,9 +11,8 @@ use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::OperationId;
 use musubi_jj::files;
-use musubi_jj::hive_settings;
-use musubi_jj::hive_settings::HiveSettings;
 use musubi_jj::op_id::CanonicalOp;
+use musubi_jj::remote_url::{JOIN_HIVE, JOIN_URL_PREFIX, JoinRemotes, RemoteBinding};
 use musubi_jj::workspaces;
 use serde::Deserialize;
 use serde::Serialize;
@@ -25,8 +24,10 @@ const FILE: &str = "index.json";
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HiveIndex {
-    /// Remote URLs as the hive's settings recorded them.
+    /// Remote URL hints recorded by copies when they explicitly join.
     pub urls: BTreeSet<String>,
+    /// Every scoped name binding recorded by accepted joins. Multiple values are a conflict.
+    pub remote_bindings: BTreeMap<String, BTreeSet<RemoteBinding>>,
     /// Hex ids of stored commits whose only parent is the root commit.
     pub roots: BTreeSet<String>,
     /// Machine keys with workspaces in the accepted head's view.
@@ -77,19 +78,30 @@ impl HiveIndex {
     ) -> Result<(), StoreError> {
         for id in ops {
             let operation = store.canonical().read_operation(&CanonicalOp(id.clone()))?;
-            if let Some(settings) = operation.metadata.attributes.get(hive_settings::ATTRIBUTE) {
-                // A malformed record names no URLs; the nodes complain about it.
-                for remote in HiveSettings::parse(settings)
-                    .map(|s| s.values().remotes)
-                    .unwrap_or_default()
-                    .into_values()
+            if operation
+                .metadata
+                .attributes
+                .get(JOIN_HIVE)
+                .map(String::as_str)
+                == store.directory().file_name().and_then(|name| name.to_str())
+            {
+                for (name, binding) in
+                    JoinRemotes::recorded_bindings(&operation.metadata.attributes)
                 {
-                    self.urls.extend(remote.url);
-                    self.urls.extend(remote.push_url);
-                    self.urls.extend(remote.expanded_url);
-                    self.urls.extend(remote.expanded_push_url);
+                    self.remote_bindings
+                        .entry(name)
+                        .or_default()
+                        .insert(binding);
                 }
             }
+            self.urls.extend(
+                operation
+                    .metadata
+                    .attributes
+                    .iter()
+                    .filter(|(key, _)| key.starts_with(JOIN_URL_PREFIX))
+                    .map(|(_, url)| url.clone()),
+            );
         }
         let wants: Vec<CommitId> = store.required_commits(ops)?.into_iter().collect();
         let objects = store.object_store();

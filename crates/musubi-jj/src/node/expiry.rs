@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 use std::time::SystemTime;
 
+use jj_lib::config::ConfigFile;
 use jj_lib::config::ConfigNamePathBuf;
 use jj_lib::config::ConfigSource;
 use pollster::FutureExt as _;
@@ -40,6 +41,19 @@ pub struct Activity {
 }
 
 impl NodeRepo {
+    /// Opens this copy's local repo config; sync never writes it.
+    pub(super) fn repo_config_file(&self) -> Result<Option<ConfigFile>, NodeError> {
+        let Some(path) = &self.repo_config else {
+            return Ok(None);
+        };
+        ConfigFile::load_or_empty(ConfigSource::Repo, path)
+            .map(Some)
+            .map_err(|err| NodeError::Config {
+                path: path.clone(),
+                message: err.to_string(),
+            })
+    }
+
     /// This copy's `musubi.forget-after` as jj's config sets it now, reading its repo config
     /// afresh: `None` for never, as when nothing sets it. A value that isn't one is taken
     /// for never, with a warning.

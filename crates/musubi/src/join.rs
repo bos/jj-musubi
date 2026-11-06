@@ -103,9 +103,14 @@ pub fn join(
     set_machine_name(&located, machine)?;
     let node = located.open()?;
     let summary = node.join_summary()?;
+    let mut remotes = summary.remote_snapshot();
+    if let JoinChoice::Remake { id, .. } = &choice {
+        node.check_recorded_remote_bindings(id, &mut remotes)?;
+    }
     let request = JoinRequest {
         choice,
         backend: summary.backend,
+        remote_bindings: remotes.bindings.clone(),
         remotes: summary
             .remotes
             .into_iter()
@@ -135,6 +140,7 @@ pub fn join(
         &hub,
         full_history,
         found.record.as_ref(),
+        &remotes,
     )?;
     let count = joined.hive.machines.len();
     let machines = if count == 1 {
@@ -202,6 +208,7 @@ fn become_node(
     hub: &str,
     full_history: bool,
     before: Option<&HiveConfig>,
+    remotes: &musubi_jj::remote_url::JoinRemotes,
 ) -> anyhow::Result<()> {
     let hive_id: uuid::Uuid = joined
         .hive
@@ -213,9 +220,9 @@ fn become_node(
     let key = node.machine().key().to_owned();
     let description = format!("musubi: {machine} joins the hive");
     if full_history {
-        node.mark_joined(&description)?;
+        node.mark_joined_with_remotes(&description, &joined.hive.id, remotes)?;
     } else {
-        node.create_join_operation(&description)?;
+        node.create_join_operation_with_remotes(&description, &joined.hive.id, remotes)?;
     }
     // A hive doesn't take on the members of another: they aren't its own until they join it.
     if before.is_none_or(|before| before.hive != hive_id) {
@@ -412,6 +419,24 @@ pub fn clone(
     let HubWideReply::Hive(info) = reply else {
         anyhow::bail!("unexpected reply from the hub: {reply:?}");
     };
+    let remotes = if info.backend == Backend::Git {
+        musubi_jj::inherited_remotes::read(&destination.join(".git"))
+            .map_err(|err| anyhow::anyhow!("could not read inherited Git configuration: {err}"))?
+    } else {
+        musubi_jj::remote_url::JoinRemotes::default()
+    };
+    let reply = block_on(ask_preparing(
+        ui,
+        &hub,
+        HubWideRequest::PrepareClone {
+            hive: info.id,
+            backend: info.backend,
+            remote_bindings: remotes.bindings.clone(),
+        },
+    ))?;
+    let HubWideReply::Hive(info) = reply else {
+        anyhow::bail!("unexpected reply from the hub: {reply:?}");
+    };
     let dest = destination.to_str().context("destination is not UTF-8")?;
     let init: &[&str] = match info.backend {
         Backend::Git => &["git", "init", "--colocate"],
@@ -446,7 +471,7 @@ pub fn clone(
         reason: String::new(),
         present: vec![],
     };
-    become_node(ui, &located, &joined, &hub, false, None)?;
+    become_node(ui, &located, &joined, &hub, false, None, &remotes)?;
     start_serving(ui, &located, socket)
         .with_context(|| format!("the new copy at {} didn't sync", destination.display()))?;
     let mut out = ui.stdout();
@@ -455,10 +480,7 @@ pub fn clone(
     writeln!(out, " into {}", destination.display())?;
     drop(out);
     if let Err(err) = check_out_trunk(&located) {
-        writeln!(
-            ui.warning(),
-            "Couldn't check out the hive's trunk ({err:#})."
-        )?;
+        writeln!(ui.warning(), "Couldn't check out `trunk()` ({err:#}).")?;
         writeln!(ui.hint(), "`jj new 'trunk()'` checks it out.")?;
     }
     Ok(())
@@ -481,8 +503,8 @@ fn check_clone_destination(destination: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Checks out the hive's trunk in a new copy, as `jj git clone` checks out the remote's
-/// default branch: a new working-copy commit on it, unless the hive's `trunk()` is the root.
+/// Checks out `trunk()` using this machine's jj config in the new copy: a new
+/// working-copy commit on it, unless it is the root.
 fn check_out_trunk(located: &Located) -> anyhow::Result<()> {
     let jj = |args: &[&str]| {
         let mut jj = Process::new("jj");

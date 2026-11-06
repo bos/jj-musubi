@@ -415,9 +415,7 @@ impl NodeRepo {
         }
         // jj records the command that made an operation, which may name an http(s) URL with
         // a token meant for this machine only.
-        if !self.share_credentials()
-            && let Some(args) = metadata.attributes.get_mut("args")
-        {
+        if let Some(args) = metadata.attributes.get_mut("args") {
             *args = without_credentials(args);
         }
         // Which workspace made an operation is per-machine, like the view's working copies:

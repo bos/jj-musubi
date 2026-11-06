@@ -140,12 +140,20 @@ If the copy matches no hive, or more than one, `join` refuses and says why. See 
 refused](../troubleshooting.md#joining-is-refused).
 
 For a machine with no copy yet, clone the hive instead. This makes a new colocated
-repository, joins it to the hive, syncs it, and checks out the hive's trunk, as `jj git clone`
-checks out a remote's default branch:
+repository, joins it to the hive, syncs it, and checks out `trunk()` using this machine's jj
+config:
 
 ```sh
 musubi clone app ~/src/app --hub devbox
 ```
+
+Git remotes and repo config are local. Before fetching or pushing from this new copy, add
+a remote if none is inherited from this machine's Git config, for example
+`jj git remote add origin https://github.com/you/app.git`.
+Join checks each remote name's fetch and push destinations; `--hive` cannot override a
+mismatch. Clone checks the hive's recorded bindings before creating the destination. Set
+local rewrite and push protections as needed; see
+[Configure each machine](working-across-machines.md#configure-each-machine).
 
 The destination must be new or empty. To share a repository you already have, run
 `musubi join` in it instead.

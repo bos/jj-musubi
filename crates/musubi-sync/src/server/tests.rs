@@ -244,8 +244,8 @@ async fn a_hub_slower_than_the_timeout_still_syncs() {
     alpha.jj(&["commit", "-m", "a large history"]);
     let dir = env.root().join("hub");
     std::fs::create_dir(&dir).unwrap();
-    let mut server = HubServer::open(&dir).unwrap();
-    let hive = create_hive(&mut server, &alpha).await;
+    let server = HubServer::open(&dir).unwrap();
+    let hive = create_hive(&server, &alpha).await;
     let network = MemoryNetwork::new(1, 256);
     let hooks = Arc::new(WorkerHooks::default());
     let worker = RunningWorker::start(&server, &network, &hive, Some(hooks.clone())).await;

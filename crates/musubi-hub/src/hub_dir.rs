@@ -530,7 +530,7 @@ impl HubDir {
     }
 
     /// The stores to look in for what `request`'s remotes point at: those of the hives
-    /// [`Self::join`] can't otherwise tell are related. Looking opens each store, so it is
+    /// [`Self::join_probed`] can't otherwise tell are related. Looking opens each store, so it is
     /// done with [`Probe::run`], without the hub.
     pub fn probe(&self, request: &JoinRequest) -> Probe {
         let targets: Vec<CommitId> = request

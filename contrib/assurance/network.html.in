@@ -205,15 +205,15 @@
     aria-label="Proofs and tests"
   ></div>
   <div class="key section text-small">
-    <span>Symbols: related proofs and targets</span
-    ><span id="ng-coverage-key"
-      >Pie slices: Rust coverage · empty slice: not reached</span
-    >
+    <button type="button" class="btn btn-ghost" id="ng-symbol-key"
+      data-tooltip="The small symbols above each crate or module identify proof and test categories mapped to its source files. Pie fill shows recorded execution.">Symbols: proof/test categories</button>
+    <button type="button" class="btn btn-ghost" id="ng-coverage-key"
+      data-tooltip="Filled area counts each reached line once across the selected techniques. Shared lines are split equally between slices. Each bar counts that technique's full coverage.">Pies: coverage of selected techniques</button>
   </div>
   <div class="board section">
     <canvas
       role="img"
-      aria-label="Musubi's code network. Fixed-size symbols above each part identify related proofs and targets. Pie slices divide measured Rust line coverage among the selected techniques, sharing overlapping lines equally. Unfilled pie areas are not reached; Modules without executable line mappings are omitted. Rims and arrows identify module responsibilities, listed below the graph. Scroll or drag to pan; pinch to zoom. Hover for a coverage bar chart in the stack on the right. During hover or selection, corner marks identify the focused node, coloured nodes are its direct neighbours, and grey outlines are unrelated nodes whose coverage is temporarily hidden. Click to select and pin connections; shift-click to compare several nodes. Hover an arrow to highlight its endpoints; click it to select both and compare their charts. Click empty space to deselect. Pin a chart to keep it after deselection, unpin it to return to following the selection, and close it to dismiss. Drag its header to move it. Double-click a circle to focus, again to expand a collapsed component. Double-click empty polygon space to collapse a group."
+      aria-label="Rust crates and modules, their imports, and line coverage for the selected techniques. Use the crate/module selector under Explore the code to inspect coverage."
     ></canvas>
     <div
       id="ng-hover"
@@ -243,7 +243,7 @@
   </div>
   <div class="actions section">
     <button type="button" class="btn" id="ng-toggle-component"></button
-    ><button type="button" class="btn btn-ghost" id="ng-center">Focus</button
+    ><button type="button" class="btn btn-ghost" id="ng-center" data-tooltip="Center this selection and its import connections.">Focus</button
     ><button
       type="button"
       class="btn btn-ghost"
@@ -252,7 +252,7 @@
       data-tooltip="Pin chart"
     >
       <i data-lucide="pin" aria-hidden="true"></i></button
-    ><button type="button" class="btn btn-ghost" id="ng-whole">Overview</button>
+    ><button type="button" class="btn btn-ghost" id="ng-whole">Show whole graph</button>
     <button type="button" class="btn btn-ghost" id="ng-expand-all">
       Expand all
     </button>
@@ -261,8 +261,9 @@
     </button>
   </div>
   <div class="replay section">
-    <button type="button" class="btn" id="ng-play">Replay</button>
-    <div class="slider">
+    <span id="ng-replay-help" role="group" aria-label="Replay controls" aria-describedby="ng-replay-description"><button type="button" class="btn" id="ng-play" aria-describedby="ng-replay-description">Replay</button></span>
+    <span id="ng-replay-description" class="sr-only"></span>
+    <div class="slider" id="ng-time-help">
       <label
         class="form-label text-small tabular-nums"
         for="ng-time"
@@ -276,44 +277,55 @@
         max="600"
         value="600"
         step="0.001"
-        aria-label="Test run playhead"
+        aria-label="Test and fuzz replay position"
+        aria-describedby="ng-replay-description"
       />
     </div>
-    <label class="field form-label"
-      ><span class="sr-only">Time measure</span
-      ><select class="form-select" id="ng-clock" aria-label="Time measure">
-        <option value="wall">Elapsed time</option>
-        <option value="effort">Worker time</option>
+    <label class="field form-label" id="ng-clock-help"
+      ><span>Replay clock</span
+      ><select class="form-select" id="ng-clock" aria-label="Replay clock">
+        <option value="wall">Elapsed run time</option>
+        <option value="effort">Sum of run durations</option>
       </select></label
     >
   </div>
   <div class="section text-small" id="ng-summary" aria-live="polite"></div>
-  <div class="text-small text-muted section" id="ng-measurement-note"></div>
   <details class="section">
     <summary class="cursor-interaction">Explore the code</summary>
     <div class="viz-row section">
       <label class="field form-label"
-        >Select a part<select class="form-select" id="ng-node"></select
+        >Select a crate or module<select class="form-select" id="ng-node"></select
       ></label>
     </div>
     <div
       class="viz-row section"
       id="ng-expansions"
       role="group"
-      aria-label="Expand components"
+      aria-label="Expand crates"
     ></div>
+    <div class="section text-small">
+      <h3>Graph controls</h3>
+      <ul>
+        <li>Scroll or drag to pan; pinch to zoom.</li>
+        <li>Hover a crate or module for its coverage chart. Click to select it; Shift-click to compare selections.</li>
+        <li>Hover an arrow to highlight its endpoints; click it to compare their charts.</li>
+        <li>Pin a chart to keep it open. Unpin it to follow the selection again. Drag its header to move it; close it to dismiss it.</li>
+        <li>Double-click a circle to focus it. Double-click the focused crate again to expand its modules.</li>
+        <li>Double-click empty space inside an expanded crate's outline to collapse it.</li>
+        <li>Click empty graph space to clear the selection.</li>
+      </ul>
+    </div>
   </details>
   <div class="caption text-small text-muted section">
     <span
-      >Lines show imports; thicker lines mean more imports. Arrow colour matches
-      the importing module’s rim. Modules without executable line mappings
-      omitted.</span
+      >Arrows show imports; thickness counts distinct import paths. Arrow colour
+      identifies the importing module's role.</span
     ><span id="ng-snapshot"></span>
   </div>
   <script type="application/json" id="ng-data">
-    <!-- NETWORK_DATA -->
-  </script>
+<!-- NETWORK_DATA -->
+</script>
   <script>
-    <!-- NETWORK_LOGIC -->
-  </script>
+<!-- NETWORK_LOGIC -->
+</script>
 </div>

@@ -12,6 +12,11 @@ curated proof links. [render.py](../../contrib/assurance/render.py) bundles a co
 with HTML, CSS and JavaScript as an inline fragment or an offline page. Detailed run records
 remain in the full dataset.
 
+The renderer takes display names and descriptions from `catalog.json`, so a saved measurement
+can use current UI copy. Categories absent from the current catalog keep their saved labels.
+The source commit recorded by a snapshot is displayed in place of its temporary capture
+workspace's revision.
+
 [graph.py](../../contrib/assurance/graph.py) resolves Rust imports and computes a force layout
 with sorted identities, a fixed seed and a fixed iteration count. Crate anchors keep each
 group together. The browser reuses the saved coordinates, so filtering and replay leave the
@@ -44,7 +49,11 @@ boundaries. The embedded view saves filters, expansion and pinned-chart position
 
 For each line and technique, the dataset stores the first event that reached it. Scrubbing
 changes the event cutoff and recomputes the union. Coverage changes only at recorded test or
-fuzz-checkpoint completions. Replay spans eight seconds from start to finish in elapsed time
-or accumulated worker time. Switching clocks preserves the current event position.
+fuzz-checkpoint completions. Replay spans eight seconds from start to finish in elapsed run time
+or summed run durations. Switching clocks preserves the current event position.
+
+The embedded view uses the host's tooltip handling. Offline pages include
+`standalone-tooltips.js` for hover and keyboard-focus tooltips, including explanations on
+disabled replay controls. The interaction instructions are under **Explore the code**.
 
 [Reproducing the network](assurance.md) covers collection and rendering commands.

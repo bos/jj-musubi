@@ -290,7 +290,21 @@ class EvidenceTests(unittest.TestCase):
             data = {
                 "roles": [],
                 "nodeRoles": {},
-                "mechanisms": [],
+                "mechanisms": [
+                    {
+                        "id": "unit",
+                        "name": "Old display name",
+                        "description": "Old description",
+                        "tests": 3,
+                    },
+                    {
+                        "id": "historical-only",
+                        "name": "Historical category",
+                        "description": "Historical description",
+                        "tests": 4,
+                    },
+                ],
+                "sourceCommit": "canonical-source-commit",
                 "claims": [],
                 "evidence": [],
                 "network": {
@@ -322,7 +336,41 @@ class EvidenceTests(unittest.TestCase):
             self.assertEqual(
                 (root / "one.html").read_bytes(), (root / "two.html").read_bytes()
             )
+            inline = json.loads(
+                re.search(
+                    r'<script type="application/json" id="ng-data">\s*(.*?)\s*</script>',
+                    (root / "one.html").read_text(),
+                    re.DOTALL,
+                )[1]
+            )
+            current = next(
+                item
+                for item in json.loads((HERE / "catalog.json").read_text())["mechanisms"]
+                if item["id"] == "unit"
+            )
+            self.assertEqual(inline["mechanisms"][0]["name"], current["name"])
+            self.assertEqual(
+                inline["mechanisms"][0]["description"], current["description"]
+            )
+            self.assertEqual(inline["mechanisms"][0]["tests"], 3)
+            self.assertEqual(inline["mechanisms"][1], data["mechanisms"][1])
+            self.assertEqual(
+                inline["measured"]["sourceRevision"], "canonical-source-commit"
+            )
             self.assertEqual(json.loads((root / "data.json").read_text()), data)
+
+    def test_checked_in_snapshots_render_without_collecting_current_sources(self):
+        with tempfile.TemporaryDirectory() as work:
+            snapshots = sorted((HERE / "data").glob("*/snapshot.json"))
+            self.assertTrue(snapshots)
+            with patch.object(
+                common, "source_identity", side_effect=AssertionError("Fresh collection")
+            ):
+                for i, snapshot in enumerate(snapshots):
+                    output = Path(work) / f"{i}.html"
+                    render.render(snapshot, output, standalone=True)
+                    self.assertIn("Replay clock", output.read_text())
+                    self.assertLess(output.stat().st_size, 1_000_000)
 
 
 if __name__ == "__main__":

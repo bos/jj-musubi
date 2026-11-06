@@ -7,16 +7,16 @@
       "kind": "Model ↔ code",
       "series": 1,
       "shape": "diamond",
-      "description": "Lean proofs → Rust tests against the executable model → measured Rust coverage. Tests are identified by actual oracle requests.",
+      "description": "Lean proves model properties. This coverage comes from Rust tests that compare results with the executable Lean models.",
       "pattern": "solid"
     },
     {
       "id": "kani",
-      "name": "Kani",
+      "name": "Kani (Rust tests)",
       "kind": "Rust proofs",
       "series": 2,
       "shape": "square",
-      "description": "Properties of actual Rust computations within the proof harness.",
+      "description": "Coverage from ordinary Rust tests of functions with Kani harnesses.",
       "pattern": "solid"
     },
     {
@@ -26,11 +26,11 @@
       "shape": "square",
       "pattern": "stripes",
       "kind": "Recorded test technique",
-      "description": "Small, concrete checks of individual functions and protocol rules."
+      "description": "Tests of individual functions and protocol rules."
     },
     {
       "id": "hegel",
-      "name": "Hegel",
+      "name": "Property tests (Hegel)",
       "kind": "Properties & search",
       "series": 3,
       "shape": "circle",
@@ -75,11 +75,11 @@
     },
     {
       "id": "mutation",
-      "name": "Mutation checks",
+      "name": "Mutation testing",
       "kind": "Tests of the tests",
       "series": 4,
       "shape": "triangle",
-      "description": "Change the protocol core’s code and run its tests to see whether they fail. Counts describe code changes, not line coverage.",
+      "description": "Protocol-core mutation results.",
       "pattern": "backstripes"
     },
     {
@@ -116,7 +116,7 @@
       "shape": "ring",
       "pattern": "stripes",
       "kind": "Recorded test technique",
-      "description": "Recorded tests containing an insta snapshot assertion, directly or through a helper in the same file."
+      "description": "Tests containing insta snapshot assertions."
     }
   ],
   "claims": [

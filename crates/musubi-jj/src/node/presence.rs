@@ -78,16 +78,7 @@ impl NodeRepo {
     pub fn machine_named(&mut self, name: &str) -> Result<Option<String>, NodeError> {
         let head = self.merge_heads()?;
         let canonical = self.canonicalize(&head)?;
-        let own = self.machine.key().to_owned();
-        let shown: BTreeMap<String, String> = self
-            .other_names(&canonical)?
-            .into_iter()
-            .filter_map(|(local, key)| {
-                let (machine, _) = workspaces::split_key(key.as_str())?;
-                let (prefix, _) = local.as_str().split_once('/')?;
-                (machine != own).then(|| (machine.to_owned(), prefix.to_owned()))
-            })
-            .collect();
+        let shown = self.shown_names(&canonical)?;
         let only = |matches: Vec<&String>| match matches.as_slice() {
             [one] => Some((*one).clone()),
             _ => None,
@@ -418,6 +409,22 @@ impl NodeRepo {
             return Ok(BTreeMap::new());
         }
         let view = self.canonical.read_operation_view(canonical)?;
+        let prefixes = self.machine_prefixes(canonical, &view)?;
+        Ok(self
+            .names_of(&view, &prefixes)
+            .into_iter()
+            .filter(|(key, _)| !self.is_own_key(key))
+            .map(|(key, name)| (name, key))
+            .collect())
+    }
+
+    /// Machine prefixes reserve local workspace names even when a copy currently has no
+    /// workspace. Membership, rather than workspace existence, determines who can be named.
+    pub(super) fn machine_prefixes(
+        &self,
+        canonical: &CanonicalOp,
+        view: &View,
+    ) -> Result<BTreeMap<String, String>, NodeError> {
         let private = if let Some(local) = self.local_of(canonical) {
             let op = self.loader.op_store().read_operation(&local.0).block_on()?;
             let local_view = self.loader.op_store().read_view(&op.view_id).block_on()?;
@@ -425,13 +432,7 @@ impl NodeRepo {
         } else {
             BTreeSet::new()
         };
-        let prefixes = self.prefixes_with_own(&view, &*self.presence(canonical)?, &private)?;
-        Ok(self
-            .names_of(&view, &prefixes)
-            .into_iter()
-            .filter(|(key, _)| !self.is_own_key(key))
-            .map(|(key, name)| (name, key))
-            .collect())
+        self.prefixes_with_own(view, &*self.presence(canonical)?, &private)
     }
 }
 

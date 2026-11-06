@@ -148,6 +148,9 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         "abandoning_another_machines_working_copy_commit",
         Some(&["abandon_other_wc"]),
     ),
+    // Copy-name resolution is exercised by the native and CLI tests; generated forgets
+    // name copies by their keys and keep a primary workspace for later commands.
+    ("a_copy_without_workspaces_can_be_forgotten_by_name", None),
     (
         "a_forgotten_copy_comes_back_with_its_next_work",
         Some(&["forget_copy", "commit"]),

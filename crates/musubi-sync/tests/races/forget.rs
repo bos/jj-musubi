@@ -131,6 +131,47 @@ fn concurrent_forgets_agree() {
     assert!(!hive.shown_machines().contains(&beta));
 }
 
+/// Removing a copy's last workspace doesn't remove its membership or make it impossible
+/// to name that copy for `musubi forget`.
+#[test]
+fn a_copy_without_workspaces_can_be_forgotten_by_name() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    let beta = hive.machine_key(1);
+    hive.repo(1).jj(&["workspace", "forget", "beta"]);
+    hive.sync();
+    assert!(hive.node(0).present_copies().unwrap().1.is_present(&beta));
+    assert!(!hive.workspace_names(0).contains("beta/beta"));
+    assert_eq!(
+        hive.node(0).machine_named("beta").unwrap(),
+        Some(beta.clone())
+    );
+    // A local name can reserve the plain prefix even when beta has no workspace left.
+    let private = hive.env.root().join("alpha-private");
+    hive.repo(0).jj(&[
+        "workspace",
+        "add",
+        "--name",
+        "beta/private",
+        private.to_str().unwrap(),
+    ]);
+    hive.sync();
+    let qualified = musubi_jj::workspaces::qualified_name(&beta);
+    for name in ["beta", qualified.as_str(), beta.as_str()] {
+        assert_eq!(
+            hive.node(0).machine_named(name).unwrap(),
+            Some(beta.clone())
+        );
+    }
+    let activity = hive.node(0).activity().unwrap();
+    assert_eq!(
+        activity.iter().find(|copy| copy.key == beta).unwrap().name,
+        qualified
+    );
+    assert!(hive.node(0).forget_copy(&beta, "beta").unwrap());
+    hive.sync();
+    assert!(!hive.node(0).present_copies().unwrap().1.is_present(&beta));
+}
+
 /// While the hive has forgotten a copy, no other machine sees its working-copy commit as a
 /// working copy, so a rewrite of it there doesn't move the copy's workspace. The copy
 /// follows it to the rewrite itself, as jj would have moved it.

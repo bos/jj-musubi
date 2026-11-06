@@ -250,7 +250,7 @@ pub fn forget(ui: &Ui, start: &Path, machine: &str, socket: &Socket) -> anyhow::
             node = located.open()?;
             node.machine_named(machine)?.with_context(|| {
                 format!(
-                    "no machine {machine} shows here in hive {}; `jj workspace list` names \
+                    "no machine {machine} shows here in hive {}; `musubi status` names \
                      those that do",
                     hive.display_name()
                 )

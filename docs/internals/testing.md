@@ -61,6 +61,12 @@ which makes the suite three times as fast; a bare `cargo nextest run` uses the d
 `MUSUBI_KEEP_TEST_DIRS` keeps the directories after a run, for inspecting a failure, and puts
 them on the disk.
 
+`a_copy_without_workspaces_can_be_forgotten_by_name` removes beta's last workspace with jj,
+syncs it, and resolves beta's name, qualified name and key for forgetting, including with a
+reserved local prefix. Looking up copies only through their workspaces returns no match and
+fails this regression. `machines_whose_workspaces_are_all_default_can_join` also runs the
+real `musubi forget beta` command after beta removes its last workspace.
+
 ## Coverage reconnaissance
 
 `just coverage` is opt-in diagnostic evidence, with no percentage gate. Install the tool and

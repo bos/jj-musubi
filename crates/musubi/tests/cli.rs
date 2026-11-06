@@ -1502,6 +1502,14 @@ fn machines_whose_workspaces_are_all_default_can_join() {
     let out = musubi_in(&env, &logs, &beta, &["join", "--hub", &hub.url]);
     insta::assert_snapshot!(out, @"Joined hive alpha (matched commits), 2 machines");
     assert!(log(&beta).contains("from alpha"));
+    // A copy with no workspace is still present, and can still be forgotten by name.
+    beta.jj(&["workspace", "forget", "default"]);
+    musubi_in(&env, &logs, &beta, &["sync"]);
+    musubi_in(&env, &logs, &alpha, &["sync"]);
+    let err = musubi_fails(&env, &logs, &alpha, &["forget", "absent"]);
+    insta::assert_snapshot!(err, @"Error: no machine absent shows here in hive alpha; `musubi status` names those that do");
+    let out = musubi_in(&env, &logs, &alpha, &["forget", "beta"]);
+    insta::assert_snapshot!(out, @"Forgot beta");
 }
 
 /// Two machines in one hive, with their daemons running.

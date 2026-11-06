@@ -169,6 +169,70 @@ fn search(tc: TestCase, config: Config) {
     walk(tc, config, setup, |_, _| {});
 }
 
+#[test]
+fn e2e_workspace_names_after_trim_match_native_jj() {
+    let mut world = World::new(Setup {
+        nodes: 3,
+        naming: Naming::SharedHostname,
+        prejoin: true,
+        secondary: false,
+    });
+    world.restart(2);
+    world.trim_below_accepted_push(1);
+    world.sync(0);
+    world.trim_below_accepted_forget(0, 1);
+    world.sync(2);
+    world.rename_workspace(0, 0, "alpha");
+    let view = world.observe(0);
+    world.raw_jj(
+        0,
+        &[
+            "--ignore-working-copy",
+            "bookmark",
+            "list",
+            "-T",
+            r#"if(!remote && present, name ++ "\n")"#,
+        ],
+    );
+    let target = view
+        .commits
+        .iter()
+        .find(|commit| commit.working_copies.iter().any(|name| name == "alpha"))
+        .unwrap()
+        .id
+        .clone();
+    world.jj(0, &["bookmark", "create", "topic", "-r", &target]);
+    let view = world.observe(1);
+    let prejoin = view
+        .commits
+        .iter()
+        .find(|commit| commit.subject == "pre-join work on beta")
+        .unwrap();
+    let parent = view
+        .commits
+        .iter()
+        .find(|commit| commit.subject.is_empty() && commit.parents == [prejoin.id.clone()])
+        .unwrap()
+        .id
+        .clone();
+    world.jj(1, &["new", &parent]);
+    world.forget_copy(2, 0);
+    let commit = world
+        .observe(0)
+        .commits
+        .into_iter()
+        .find(|commit| commit.subject == "pre-join work on beta")
+        .unwrap()
+        .id;
+    let description = world.message(0);
+    world.jj(0, &["describe", &commit, "-m", &description]);
+    world.restart_hub();
+    let foreign = world.foreign_workspace_names(0)[0].clone();
+    world.jj(0, &["workspace", "forget", &foreign]);
+    world.converge();
+    assert!(world.logical_extras[0].contains("default"));
+}
+
 /// A case: the hive `setup` makes, which `prefix` takes further, a generated walk from there,
 /// and convergence.
 fn walk(tc: TestCase, config: Config, setup: Setup, prefix: impl FnOnce(&TestCase, &mut World)) {

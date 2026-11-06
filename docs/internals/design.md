@@ -64,8 +64,8 @@ specifies the messages between nodes and the hub and the properties they guarant
 | Working copies and working-copy state | no | Each machine snapshots its own. |
 | Commit index (`.jj/repo/index`) | no | Derived; jj rebuilds it. |
 | `View::git_refs`, `View::git_heads`, the `git` pseudo-remote | no | Per-machine record of this machine's `.git`. |
-| Git remote definitions (names and URLs) | yes | See [Hive settings](#hive-settings). |
-| Repo config | chosen keys | Those that decide what is safe to rewrite or push, and any named in `musubi.shared-config`. See [Hive settings](#hive-settings). |
+| Git remote definitions (names and URLs) | no | Each machine configures its own Git access. |
+| Repo config | no | Each machine owns its settings, including rewrite and push protections. |
 | User config | no | |
 
 Every operation is replicated, including working-copy snapshots. If you snapshot a file containing
@@ -74,18 +74,16 @@ a secret, every machine in the hive receives it.
 ## Working copies
 
 musubi never touches working copies. It writes only what jj itself keeps: the operation log; the
-commit store, and in git-backed repositories the git object database and refs; and the git remotes
-and repo config that the hive shares ([Hive settings](#hive-settings)).
+commit store, and in git-backed repositories the git object database and refs. Sync never
+rewrites Git remote definitions or jj config ([Local configuration](#local-configuration)).
 
 A remote operation can still rewrite this machine's working-copy commit, for example by rebasing
 its parent. jj then treats the working copy as stale, exactly as after a `jj rebase` run in
 another workspace: by default the next `jj` command stops and suggests `jj workspace
 update-stale`, which updates the files. With `snapshot.auto-update-stale = true` jj updates the
 files itself, but then any `jj` command, even `jj log`, can change files under a running build or
-an editor, so musubi doesn't turn it on. Each machine can set it for itself; to set it for the
-whole hive, set it in the repo config and name it in `musubi.shared-config` ([Hive
-settings](#hive-settings)), and the hive's value then overrides each machine's user config. Either
-way, jj snapshots edits not yet snapshotted before it updates the files, so instead of losing
+an editor, so musubi doesn't turn it on. Each machine can set it for itself.
+jj snapshots edits not yet snapshotted before it updates the files, so instead of losing
 them you get, at worst, a divergent working-copy change.
 
 ## Why replicate the operation log
@@ -230,7 +228,7 @@ Each canonical operation is work by a copy, a forget of copies, or neither:
 - A **forget** is marked `musubi.forget = <machine keys>`. `musubi forget` and `musubi leave`
   write one, which removes the copies' workspaces from the view as `jj workspace forget` would,
   abandoning each working-copy commit that is empty.
-- **Neither**: merges, and the other operations musubi writes, for settings, new working copies,
+- **Neither**: merges, and the other operations musubi writes, for new working copies,
   or showing workspaces again.
 
 A copy is **present** at an operation when some of its work in the operation's history is in the
@@ -341,7 +339,7 @@ Each copy records how long it may go unused before the hive forgets it, its `mus
 (`6h`, say, or `never`), in an operation that is its work and changes nothing else: `musubi.work =
 <machine key>` and `musubi.forget-after = 6h`. Its daemon writes one when the value jj's config
 gives differs from the one the copy last recorded (`record_forget_after`), reading the repo config
-afresh each time, as it does for settings. A copy that has recorded nothing is never forgotten, so
+afresh each time. A copy that has recorded nothing is never forgotten, so
 one set to `never` writes nothing. `musubi join`, `create` and `clone` put the value in the repo
 config unless jj's config sets it already: `6h` if a coding agent runs the command (it checks for
 the environment variables that agents set), and `never` otherwise.
@@ -357,83 +355,75 @@ The hub takes no part.
 - Clock skew only moves when a copy is forgotten. But a copy whose clock runs behind a daemon's by
   more than its setting is forgotten after each of its operations, and shown again by the next:
   machines' clocks are assumed close, as jj's timestamps assume.
-- `musubi.forget-after` is never shared across a hive, whatever `musubi.shared-config` says
-  (`config_keys`): an agent's `6h` mustn't reach a person's copy.
+- `musubi.forget-after` is local to each copy: an agent's `6h` mustn't reach a person's copy.
 - Each machine adds a delay of its own, up to five minutes, from a hash of its machine key and the
   copy's, so that one machine's forget usually reaches the others before their own time comes.
   Duplicate forgets are harmless anyway.
 
-## Hive settings
+## Local configuration
 
-Some settings must agree across the hive but live outside jj's operations. Remote bookmarks
-replicate with the view, so a fetch or push on one machine reaches every other. But which remotes
-exist, and where they point, is in each machine's git config. Without more, `jj git remote rename`
-on one machine would rename the remote bookmarks everywhere while every other machine's git config
-kept the old name.
+Git remote definitions and jj user, repo, and workspace config belong to each machine. Sync
+never applies another machine's configuration, including after a failed or interrupted sync.
+There is no settings merge, timestamp ordering, pending settings journal, or configuration
+recovery step. Explicit join/create/clone commands may set the local `musubi.forget-after`
+default, as described above; that is independent of synchronization.
 
-Some repo config must agree too. If `immutable_heads()` or `git.private-commits` differed, one
-machine would rewrite or push what another protects. But much repo config is personal, and some is
-a machine's own business, so musubi shares only chosen keys: `revset-aliases."immutable_heads()"`,
-`revset-aliases."trunk()"`, `git.private-commits`, `musubi.shared-config`, and any keys that
-`musubi.shared-config` names (`["aliases.l"]`, say). jj keeps repo config outside the repository,
-so musubi finds the file as `jj` does.
+Remote bookmarks still replicate with jj's view, by remote name. Machines using `origin`
+should configure it to name the same upstream; URLs and credentials may differ. A remote
+rename or removal changes the replicated remote bookmarks but not other machines' Git
+config. Users coordinate those changes before fetching or pushing elsewhere. A machine can
+receive remote bookmarks without having that remote configured; receiving them never creates
+its definition.
 
-The hive settings are these: each remote's name, URL, and push URL, and the shared config keys.
+Each machine's `immutable_heads()` and `git.private-commits` apply to commands on that machine.
+They do not constrain other machines, nor exclude committed work from replication. A new
+clone evaluates `trunk()` using its destination machine's jj config and adds no Git remote
+definitions; inherited global Git config still applies.
 
-### Recording and merging
+### Join and clone preflight
 
-At the end of every sync, and at its start once the machine knows the hive's settings, a machine
-reconciles its settings with the hive's. A setting that differs from what the machine last applied
-is a change of its own. It records its changes in an attribute, `musubi.settings`, of an operation
-that changes nothing else, which replicates like any other. It applies the hive's changes, remotes
-with `git remote` (which also renames or deletes the remote-tracking refs) and config keys in its
-repo config file, and its daemon logs each value it replaces: the old value, the new one, and
-which machine wrote it when.
+A remote name is bound to one normalized effective fetch destination and a set of normalized
+effective push destinations for the lifetime of a hive. Missing remotes make no claim. Git's
+`insteadOf` and `pushInsteadOf` expansions determine the effective destinations; the URL
+normalizer makes equivalent HTTPS, SSH, and bracketed IPv6 spellings agree. Candidate overlap
+is not equality: an identical alias expanding to different repositories must be refused.
 
-Where machines disagree, the later write wins. Each setting carries the time it was written, by
-the writing machine's clock (the modification time of the file holding it), and the writing
-machine's key, which breaks ties: the one that sorts last wins. The hive's settings as of an
-operation are those of its nearest ancestor that records settings, and at a merge, for each
-setting, those of the parent whose write is later. A remote is one setting, so one machine
-changing its URL while another changes its push URL are two writes, and the later stands. Clock
-skew can make the wrong write win. That is accepted: the rule isn't sound, but it is simple and
-does what people expect ("I changed it at 9, you changed it at 8, mine stands").
+A join sends its bindings separately from its discovery URL hints. An existing copy's
+explicit rejoin first checks and restores known constraints from its scoped canonical join
+observations, so remaking a lost hub cannot silently rebind a known name. That history scan
+runs only on explicit rejoins, never ordinary syncs. After hive selection,
+including explicit `--hive` and an existing copy's rejoin, the hub checks every supplied name
+against its fixed bindings and accepted join evidence. It reserves any new names in
+`hive.toml` before approving the join, so expiry of a delayed first push cannot release them.
+A refusal records no pending join and reserves no names. A different destination needs an
+unused remote name or another hive; renaming does not release the previous name's binding.
 
-What counts as a change ignores spelling. Config values are compared as normalized TOML, so that
-machines that write the same value differently agree on it. Remotes are compared by the
-repositories they name: two are equal when their URLs have the same key (the normalized form used
-for joining, under [Which hive](#which-hive)), and so do their push targets (the push URL, or else
-the URL). So one machine can reach a remote over https and another over ssh: neither spelling is a
-change, respelling records nothing, and applying a change writes only the URLs whose repository
-differs, removing a push URL that no longer names where pushes go. A machine that doesn't have a
-remote yet gets the spelling of the machine that last wrote it.
+The client records exactly the approved snapshot, without rereading Git. Its operation
+attributes contain `musubi.join-hive`, indexed `musubi.join-url.*` discovery hints,
+`musubi.join-fetch.<name>` identities, and `musubi.join-push.<index>.<name>` identities. The
+index retains all distinct binding observations scoped to its own hive, so carried history
+from another hive does not impose its contracts. It can rebuild evidence from immutable
+operations; no timestamp ordering, latest-observation selection, or settings replay is needed.
 
-### Remote URLs
+`Resolve` refuses if accepted evidence disagrees with the fixed bindings. Clone then reads
+inherited Git config with the prospective Git directory as the context for conditional
+includes, before creating any parent directory or initializing the repository. The preview
+uses jj's Git parser and its initial branch selection. A Git comparison test pins URL rewrite
+rules, including multiple push destinations. `PrepareClone` checks and reserves the inherited
+bindings under the same hub lock as joins, so two concurrent approvals cannot claim a new
+name differently. The client records exactly that snapshot. Conflicting evidence from a
+buggy peer is retained and reported. A consistently configured source can start another hive;
+configuration in existing copies stays untouched.
 
-A remote's URLs go as written and, where the writing machine's `url.<base>.insteadOf` rules change
-them, as its git expands them, since other machines needn't have the same rules. A machine
-receiving a URL writes it as written where its own git expands it the same way, so that an alias
-they share stays one, and otherwise as expanded. An alias is keyed as a host, `gh:team/p` as
-`gh/team/p`, so two machines' aliases of the same name compare as one repository whatever they
-expand to (though joining a hive takes shared history too). Once machines share an expanded URL,
-it stays until the remote points at another repository: a machine that drops a redirect to a
-mirror doesn't take the mirror's URL back from the others, though each can respell its own copy.
+Discovery hints contain fetch URLs as written and expanded, sorted and deduplicated. Ordinary
+syncs do not observe config changes or make settings operations. A copy can explicitly rejoin
+to register equivalent URLs; an op abandon can remove an observation from a rebuilt index.
+The hub's fixed bindings remain authoritative. These checks validate reported identities at
+preflight time; they cannot inspect offline copies or prevent later local edits.
 
-Unless `musubi.share-credentials` is set in jj's config, URLs go without the user and password an
-http(s) URL may carry, a token meant for one machine, and so does the command line jj records with
-each operation.
-
-A machine that needs another identity for a remote, an ssh key of its own, say, should keep the
-ordinary URL and rewrite it with git's `url.<base>.insteadOf` in its user config. A URL spelled
-with an ssh host alias names a host no other machine knows, so it doesn't count as the same
-repository, and a machine without the alias can't use it.
-
-### A joining machine's settings
-
-A machine that joins adds its remotes to the hive's, but takes the hive's where both have a remote
-of the same name for different repositories; the first machine's settings become the hive's.
-Joining adds a machine rather than changing the hive's mind, so a joining machine's remote or
-shared config key comes back even if the hive had removed it: remove it again afterwards.
+HTTP(S) credentials are removed from hints and URLs in jj's operation arguments unconditionally.
+Canonicalization uses immutable recorded metadata and never reads current configuration when
+translating an old operation. Sync never applies configuration or restores it in a fix-up.
 
 ## Ordering: one hub, one canonical head
 
@@ -723,11 +713,12 @@ accepts an operation only with everything it requires, which such a clone can't 
 URLs match as written or as the joining machine's `insteadOf` rules expand them, after
 normalization: https, ssh, scp-style, `file://`, and local paths reduce to a lowercase host,
 without any user or default port, and a path without trailing `/` or `.git`, and the host and path
-are what is compared. Azure DevOps' https and ssh forms are made one. Each hive keeps every URL it
-has ever had, so renaming a remote or moving a repository doesn't orphan it.
+are what is compared. Azure DevOps' https and ssh forms are made one. Each hive keeps the URL
+hints recorded by explicit joins. After changing a remote to an equivalent URL, an existing copy
+can run `musubi join` again to register it.
 
-For this the hub keeps an index for each hive: every remote URL its settings have recorded, every
-root commit it has stored, and the machines with workspaces at its head. The index is updated
+For this the hub keeps an index for each hive: the URL hints explicit joins recorded, every root
+commit it has stored, and the machines with workspaces at its head. The index is updated
 whenever a head is accepted, and is a cache: the hub rebuilds it from the hive's operations and
 objects when it is missing. A join also counts what the joining repository says it brings, its
 URLs and root commits, as its hive's for a couple of minutes, so that another copy joining before
@@ -878,7 +869,8 @@ base dropped in full. Matching against the older base first and stopping there m
 survivor for new work, losing its original identity and presence. Where the surviving head
 is unpublished work and all accepted history was trimmed, its pre-trim state comes from a
 maximal accepted descendant of the surviving mapped ancestor. The older saved base must not
-shadow a newer accepted push, whose forgets and settings are the state to preserve. It looks before
+shadow a newer accepted push, whose presence and expected refs are the state to preserve. It looks
+before
 anything else reads the op heads, to merge or canonicalize them, since an op head read before may
 be one of jj's rewrites that musubi then replaces. What was dropped is each canonical operation it
 had that no reachable local operation now stands for. A realization stands for the canonical
@@ -980,7 +972,7 @@ and publishes nothing: what jj brought back stays, as it does on one machine.
 
 musubi works some state out from the history rather than from views: which copies are present,
 each copy's latest work and forget-after, the machines the hive has known (and so the names other
-machines' workspaces show under), the hive's settings, and the expected value of a conflicted
+machines' workspaces show under), and the expected value of a conflicted
 remote bookmark. Presence, and with it the machines known, is as it was ([Presence through an
 abandon](#presence-through-an-abandon)), but a copy's latest work may be work the abandon
 dropped, whose time can no longer be read, and the rest would change. So the machine
@@ -996,7 +988,7 @@ its head before the abandon:
   saved values. The machine decides that as the fix-up starts, and saves it
   before writing anything, keeping it through a fix-up that replaces this one: written again
   after a crash, the fix-up would find its own work at the op head, and the copy present;
-- in the first operation, the hive's settings and the conflicted remote bookmarks' expected
+- in the first operation, the conflicted remote bookmarks' expected
   values as they were. These are worked out when the machine notices the abandon, and until
   the fix-up is written, every export of the machine's refs takes them as known at the op head
   they were worked out at.
@@ -1014,7 +1006,7 @@ it. The hub can nevertheless acquire the same head without its dropped set: anot
 may have received the operation before holding its records, then published it after a hub
 rollback. If the machine still has pending drops and its single head equals the hub's, it
 writes a fresh child to publish them. This child keeps its parent's view and records only the
-fix-up marker: it replays no saved work, forget, settings or expected values, and is not work
+fix-up marker: it replays no saved work, forget or expected values, and is not work
 by a copy. A lost request reuses that child too. Before writing it the machine checks that its
 current head still equals the head the core observed; a concurrent change makes the core
 poll and reconsider instead.

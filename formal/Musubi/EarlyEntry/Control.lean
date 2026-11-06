@@ -134,8 +134,8 @@ theorem lexLt_of_le_lt {x y z : List Nat} (h1 : LexLe x y) (h2 : LexLt y z) : Le
 
 /-- What may happen to a node's control state between its step's calls completing and its next
 step's reading, after that step's prelude, in the same round, with no automatic write of the node
-(the prelude's own writers, `before_sync`'s `reconcile_settings` and `show_other_workspaces`, a
-`jj op abandon` passed on, are such, and the frame is asked only past their cut, `QuietAt`):
+(the prelude's own writers, `before_sync`'s `show_other_workspaces` and a `jj op abandon` passed
+on, are such, and the frame is asked only past their cut, `QuietAt`):
 nothing in the raw closure stops being local, having a body or its objects (the prelude's
 `prepare_records` writes rewrites beside what is there; nothing is removed), and the CANONICAL op
 heads and the plan the core reads are the same. The prelude may move the physical heads

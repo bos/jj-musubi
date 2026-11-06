@@ -692,7 +692,6 @@ fn pending_drops_get_a_new_tip_when_the_hub_already_has_the_cached_fixup() {
         "musubi.work",
         "musubi.forget",
         "musubi.forget-after",
-        "musubi.settings",
         "musubi.expected",
     ] {
         assert!(
@@ -808,8 +807,8 @@ fn op_abandon_under_a_realized_head_replicates() {
 /// The same for this machine's own operation below its merge with another machine's work,
 /// made concurrently: jj rewrites every operation above the abandoned one that isn't below it,
 /// putting even the other machine's realized operations on its parent, and musubi puts them
-/// back. Noticed only after the settings reconciled before the sync had read the op heads, the
-/// abandon left those reading an operation jj had rewritten: a realization no longer on its
+/// back. If noticed only after a sync had read the op heads, the abandon could leave it
+/// reading an operation jj had rewritten: a realization no longer on its
 /// canonical operation's parents, and the sync stopped for good.
 #[test]
 fn op_abandon_below_a_merge_with_concurrent_work_replicates() {

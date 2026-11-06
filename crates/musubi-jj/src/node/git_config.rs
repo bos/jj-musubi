@@ -23,7 +23,7 @@ pub(super) struct ConfigCache(Mutex<Option<Arc<ConfigRead>>>);
 /// files that said it.
 pub(super) struct ConfigRead {
     /// Every config entry, in the order git reads them.
-    entries: Vec<ConfigEntry>,
+    pub entries: Vec<ConfigEntry>,
     /// `git remote -v`.
     pub remotes: String,
     /// The files the read depends on, with their contents from before it, or `None` where
@@ -110,16 +110,6 @@ impl ConfigRead {
     /// The entries from the repository's own config, and the files it includes.
     pub fn local(&self) -> impl Iterator<Item = &ConfigEntry> {
         self.entries.iter().filter(|entry| entry.scope == "local")
-    }
-
-    /// The entries from the repository's own config file alone, which `git remote` and
-    /// `git config --local` can change: not those of a file it includes. git lists a
-    /// file's entries in order, an include's own among them before what it includes, so
-    /// the first local entry comes from the file itself, named as git names it.
-    pub fn own(&self) -> impl Iterator<Item = &ConfigEntry> {
-        let own = self.local().next().and_then(|entry| entry.file.clone());
-        self.local()
-            .filter(move |entry| own.is_some() && entry.file == own)
     }
 }
 
@@ -277,7 +267,5 @@ mod tests {
         run(&["remote", "add", "e", "https://example.com/e"]);
         assert_eq!(names(), ["b", "c", "d", "e"]);
         assert!(reused());
-        // Of which `git remote` can change only its own.
-        assert_eq!(remotes(&mut cache.read(&repo).unwrap().own()), ["e"]);
     }
 }

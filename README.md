@@ -173,7 +173,7 @@ and macOS), or under systemd, to `journalctl --user -u musubi`. See
 - [Set up a hub and machines](docs/guides/setup.md): ssh, keeping the hub running, forks,
   machine names, and more than one repository.
 - [Work across machines](docs/guides/working-across-machines.md): picking up on another
-  machine, coding agents, stale working copies, undo, and shared remotes and config.
+  machine, coding agents, stale working copies, undo, and configuring each machine.
 - [Manage hives, machines, and hubs](docs/guides/manage.md): leaving, renaming, upgrading, and
   replacing a hub.
 - [Troubleshooting](docs/troubleshooting.md)

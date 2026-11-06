@@ -14,6 +14,7 @@ use std::time::Instant;
 use jj_lib::backend::CommitId;
 use musubi_jj::files;
 use musubi_jj::objects::Backend;
+use musubi_jj::remote_url::RemoteBinding;
 use musubi_jj::workspaces;
 use serde::Deserialize;
 use serde::Serialize;
@@ -37,6 +38,7 @@ const HIVE_FILE: &str = "hive.toml";
 struct HiveMeta {
     name: String,
     backend: Backend,
+    remote_bindings: BTreeMap<String, RemoteBinding>,
 }
 
 /// Which hive a joining repository asks for.
@@ -64,6 +66,8 @@ pub struct JoinRequest {
     /// Names and URLs of its remotes: a remote's name once for each of its URLs, as git
     /// expands it and as written.
     pub remotes: Vec<(String, String)>,
+    /// Effective fetch and push identities, checked independently of discovery hints.
+    pub remote_bindings: BTreeMap<String, RemoteBinding>,
     /// The name of the repository's directory, to name a hive after when it has no
     /// remotes.
     pub dir_name: String,
@@ -356,6 +360,7 @@ impl HubDir {
         let meta = HiveMeta {
             name: name.to_owned(),
             backend,
+            remote_bindings: BTreeMap::new(),
         };
         write_meta(&dir, &meta)?;
         let index = HiveIndex::default();
@@ -501,6 +506,12 @@ impl HubDir {
         for url in index.urls {
             changed |= hive.index.urls.insert(url);
         }
+        for (name, bindings) in index.remote_bindings {
+            let known = hive.index.remote_bindings.entry(name).or_default();
+            for binding in bindings {
+                changed |= known.insert(binding);
+            }
+        }
         for root in index.roots {
             changed |= hive.index.roots.insert(root);
         }
@@ -613,6 +624,16 @@ impl HubDir {
         request: &JoinRequest,
         probed: &Probed,
     ) -> Result<Joined, Refusal> {
+        if let Some((name, _)) = request.remotes.iter().find(|(name, _)| {
+            request
+                .remote_bindings
+                .get(name)
+                .is_none_or(|binding| binding.fetch.is_none())
+        }) {
+            return Err(format!(
+                "the join request omitted the fetch destination for remote {name}"
+            ));
+        }
         let backend = request.backend;
         let now = Instant::now();
         for hive in self.hives.values_mut() {
@@ -620,7 +641,7 @@ impl HubDir {
         }
         if let JoinChoice::Remake { id, .. } = &request.choice {
             if self.hives.contains_key(id) {
-                return Ok(self.joined(request, id, false, "as before".to_owned()));
+                return self.joined(request, id, false, "as before".to_owned());
             }
             if self.is_removed(id) {
                 return Err(
@@ -700,12 +721,19 @@ impl HubDir {
                 (id, true, "new".to_owned())
             }
         };
-        Ok(self.joined(request, &id, created, reason))
+        self.joined(request, &id, created, reason)
     }
 
     /// Records that `request` joins hive `id`, which counts what it brings as the hive's
     /// until it pushes, and says so.
-    fn joined(&mut self, request: &JoinRequest, id: &str, created: bool, reason: String) -> Joined {
+    fn joined(
+        &mut self,
+        request: &JoinRequest,
+        id: &str,
+        created: bool,
+        reason: String,
+    ) -> Result<Joined, Refusal> {
+        self.reserve_remote_bindings(id, &request.remote_bindings)?;
         let now = Instant::now();
         let hive = self.hives.get_mut(id).expect("chosen or created");
         hive.pending.push(Pending {
@@ -721,12 +749,93 @@ impl HubDir {
         let present = machines.iter().cloned().collect();
         machines.insert(request.machine.clone());
         info.machines = display_names(&machines);
-        Joined {
+        Ok(Joined {
             hive: info,
             created,
             reason,
             present,
+        })
+    }
+
+    /// Checks and reserves inherited Git names before a clone creates any directory.
+    pub fn prepare_clone(
+        &mut self,
+        name: &str,
+        backend: Backend,
+        incoming: &BTreeMap<String, RemoteBinding>,
+    ) -> Result<HiveInfo, Refusal> {
+        let id = self.resolve(name)?;
+        if self.hives[&id].meta.backend != backend {
+            return Err(
+                "the hive changed backend during clone; run `musubi clone` again".to_owned(),
+            );
         }
+        self.reserve_remote_bindings(&id, incoming)?;
+        Ok(self.info(&id).expect("resolved"))
+    }
+
+    fn reserve_remote_bindings(
+        &mut self,
+        id: &str,
+        incoming: &BTreeMap<String, RemoteBinding>,
+    ) -> Result<(), Refusal> {
+        let bindings = self.checked_bindings(id, incoming)?;
+        let hive = self.hives.get_mut(id).expect("chosen or created");
+        // Approval reserves names even if its first sync is delayed beyond pending expiry.
+        if hive.meta.remote_bindings != bindings {
+            let mut meta = hive.meta.clone();
+            meta.remote_bindings = bindings;
+            write_meta(&hive.dir, &meta).map_err(refusal)?;
+            hive.meta = meta;
+        }
+        Ok(())
+    }
+
+    /// Checks immutable name bindings and the accepted evidence before join or clone.
+    pub fn check_remote_consistency(&self, id: &str) -> Result<(), Refusal> {
+        self.checked_bindings(id, &BTreeMap::new()).map(|_| ())
+    }
+
+    fn checked_bindings(
+        &self,
+        id: &str,
+        incoming: &BTreeMap<String, RemoteBinding>,
+    ) -> Result<BTreeMap<String, RemoteBinding>, Refusal> {
+        let hive = &self.hives[id];
+        let mut bindings = hive.meta.remote_bindings.clone();
+        let mut inconsistent = BTreeSet::new();
+        for (name, observed) in &hive.index.remote_bindings {
+            for binding in observed {
+                if bindings.get(name).is_some_and(|old| old != binding) {
+                    inconsistent.insert(name.as_str());
+                } else {
+                    bindings.insert(name.clone(), binding.clone());
+                }
+            }
+        }
+        if !inconsistent.is_empty() {
+            return Err(format!(
+                "hive {} has inconsistent recorded remotes: {}; make a new hive from a consistently configured copy",
+                hive.meta.name,
+                inconsistent.into_iter().collect::<Vec<_>>().join(", ")
+            ));
+        }
+        let mut conflicts = Vec::new();
+        for (name, binding) in incoming {
+            if bindings.get(name).is_some_and(|old| old != binding) {
+                conflicts.push(name.as_str());
+            } else {
+                bindings.insert(name.clone(), binding.clone());
+            }
+        }
+        if !conflicts.is_empty() {
+            return Err(format!(
+                "remote names {} have different fetch or push destinations than hive {} recorded; give different destinations different remote names before joining",
+                conflicts.join(", "),
+                hive.meta.name
+            ));
+        }
+        Ok(bindings)
     }
 }
 
@@ -896,6 +1005,17 @@ mod tests {
     fn request(machine: &str, url: &str) -> JoinRequest {
         JoinRequest {
             backend: Backend::Git,
+            remote_bindings: [(
+                "origin".to_owned(),
+                RemoteBinding {
+                    fetch: RemoteUrl::parse(url).map(|url| url.key()),
+                    push: RemoteUrl::parse(url)
+                        .map(|url| url.key())
+                        .into_iter()
+                        .collect(),
+                },
+            )]
+            .into(),
             remotes: vec![("origin".to_owned(), url.to_owned())],
             dir_name: "project".to_owned(),
             roots: vec!["11".repeat(20)],
@@ -910,6 +1030,83 @@ mod tests {
             choice: JoinChoice::Create(None),
             ..request
         }
+    }
+
+    /// A name is reserved on approval, survives pending expiry and restart, and cannot
+    /// be overridden by an explicit hive choice or an existing copy's rejoin.
+    #[test]
+    fn remote_bindings_are_checked_before_joining() {
+        let dir = musubi_testutil::tempdir();
+        let mut hubs = HubDir::open(dir.path())
+            .unwrap()
+            .with_pending_lifetime(Duration::ZERO);
+        let binding = |target: &str| RemoteBinding {
+            fetch: Some(target.to_owned()),
+            push: [target.to_owned()].into(),
+        };
+        let mut first = creating(request("alpha", "https://example.com/one"));
+        first
+            .remote_bindings
+            .insert("origin".to_owned(), binding("example.com/one"));
+        let joined = hubs.join(&first).unwrap();
+        let id = joined.hive.id;
+        assert!(
+            hubs.prepare_clone(&id, Backend::Git, &first.remote_bindings)
+                .is_ok()
+        );
+        let mut conflicting = first.remote_bindings.clone();
+        conflicting
+            .get_mut("origin")
+            .unwrap()
+            .push
+            .insert("example.com/fork".to_owned());
+        assert!(hubs.prepare_clone(&id, Backend::Git, &conflicting).is_err());
+        // The first push records common history independently of the approval's names.
+        hubs.update_index(
+            &id,
+            HiveIndex {
+                roots: first.roots.iter().cloned().collect(),
+                ..HiveIndex::default()
+            },
+        )
+        .unwrap();
+        drop(hubs);
+        let mut hubs = HubDir::open(dir.path()).unwrap();
+        for choice in [
+            JoinChoice::Hive(id.clone()),
+            JoinChoice::Remake {
+                id: id.clone(),
+                name: None,
+            },
+        ] {
+            let mut second = request("beta", "https://example.com/one");
+            second.choice = choice;
+            second
+                .remote_bindings
+                .insert("origin".to_owned(), binding("example.com/two"));
+            second
+                .remote_bindings
+                .insert("extra".to_owned(), binding("example.com/extra"));
+            let err = hubs.join(&second).unwrap_err();
+            assert!(err.contains("origin"), "{err}");
+            assert!(hubs.hives[&id].pending.is_empty());
+            assert!(!hubs.hives[&id].meta.remote_bindings.contains_key("extra"));
+        }
+        // Push destinations are checked too, even when the fetch destination agrees.
+        let mut second = request("beta", "https://example.com/one");
+        second.choice = JoinChoice::Hive(id.clone());
+        let mut pushes_elsewhere = binding("example.com/one");
+        pushes_elsewhere.push.insert("example.com/fork".to_owned());
+        second
+            .remote_bindings
+            .insert("origin".to_owned(), pushes_elsewhere);
+        assert!(hubs.join(&second).is_err());
+        second.remote_bindings.clear();
+        second.remotes.clear();
+        assert!(
+            hubs.join(&second).is_ok(),
+            "a missing remote makes no claim"
+        );
     }
 
     /// A second copy joining before the first has pushed finds the first's hive, but only
@@ -941,6 +1138,7 @@ mod tests {
         let id = first.hive.id;
         assert_eq!(hubs.hives[&id].pending.len(), 1);
         let pushed = HiveIndex {
+            remote_bindings: BTreeMap::new(),
             machines: BTreeSet::from(["alpha#00000000".to_owned()]),
             ..HiveIndex::default()
         };
@@ -1000,6 +1198,7 @@ mod tests {
         let url = "https://example.com/a";
         let id = hubs.join(&creating(request("mac", url))).unwrap().hive.id;
         let pushed = HiveIndex {
+            remote_bindings: BTreeMap::new(),
             machines: BTreeSet::from(["mac#00000000".to_owned(), "mac#11111111".to_owned()]),
             roots: BTreeSet::from(["11".repeat(20)]),
             ..HiveIndex::default()
@@ -1027,6 +1226,7 @@ mod tests {
             .hive
             .id;
         let pushed = HiveIndex {
+            remote_bindings: BTreeMap::new(),
             machines: BTreeSet::from(["alpha#00000000".to_owned()]),
             roots: BTreeSet::from(["11".repeat(20)]),
             urls: BTreeSet::from(["https://example.com/a".to_owned()]),

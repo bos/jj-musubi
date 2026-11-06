@@ -592,6 +592,46 @@ fn hub_join_sync_clone_and_list() {
     fetch_history(&alpha, &beta);
     // Git accepts bracketed IPv6 in scp-style URLs; jj's remote command doesn't yet.
     beta.git(&["remote", "add", "origin", "git@[2001:db8::1]:team/project"]);
+    // A matching second remote must not hide a conflicting name, even with --hive.
+    beta.git(&[
+        "remote",
+        "set-url",
+        "origin",
+        "https://example.org/other.git",
+    ]);
+    beta.git(&[
+        "remote",
+        "add",
+        "mirror",
+        "ssh://git@[2001:db8::1]/team/project",
+    ]);
+    let before = beta.jj(&["op", "log", "--limit", "1", "--no-graph", "-T", "id"]);
+    let remotes_before = beta.jj(&["git", "remote", "list"]);
+    for extra in [None, Some("project")] {
+        let mut args = vec!["join", "--hub", hub.url.as_str()];
+        if let Some(name) = extra {
+            args.extend(["--hive", name]);
+        }
+        let err = musubi_fails(&env, &logs, &beta, &args);
+        insta::allow_duplicates! {
+        insta::assert_snapshot!(err, @"Error: remote names origin have different fetch or push destinations than hive project recorded; give different destinations different remote names before joining");
+        }
+        assert_eq!(
+            beta.jj(&["op", "log", "--limit", "1", "--no-graph", "-T", "id"]),
+            before
+        );
+        assert_eq!(beta.jj(&["git", "remote", "list"]), remotes_before);
+        assert!(!beta.repo_path().join("musubi/hive.toml").exists());
+    }
+    let list = musubi_in(&env, &logs, &alpha, &["list"]);
+    assert!(list.contains("1 machine: alpha"), "{list}");
+    beta.git(&["remote", "remove", "mirror"]);
+    beta.git(&[
+        "remote",
+        "set-url",
+        "origin",
+        "git@[2001:db8::1]:team/project",
+    ]);
     let out = musubi_in(&env, &logs, &beta, &["join", "--hub", &hub.url]);
     insta::assert_snapshot!(out, @"Joined hive project (matched remote origin), 2 machines");
     assert!(log(&beta).contains("from alpha"));
@@ -600,6 +640,22 @@ fn hub_join_sync_clone_and_list() {
         beta.jj(&["config", "get", "musubi.forget-after"]).trim(),
         "never"
     );
+
+    // A local rejoin checks the history too, so losing hub state cannot bypass the name.
+    beta.git(&[
+        "remote",
+        "set-url",
+        "origin",
+        "https://example.org/other.git",
+    ]);
+    let err = musubi_fails(&env, &logs, &beta, &["join"]);
+    insta::assert_snapshot!(err, @"Error: remote destinations disagree with this hive's recorded names: origin; use distinct remote names for different destinations");
+    beta.git(&[
+        "remote",
+        "set-url",
+        "origin",
+        "git@[2001:db8::1]:team/project",
+    ]);
 
     // The first join saved the hub: from now on no command needs --hub.
     let list = musubi_in(&env, &logs, &beta, &[]);
@@ -791,11 +847,58 @@ fn hub_join_sync_clone_and_list() {
     assert!(!delta.exists());
     beta.jj(&["config", "unset", "--user", "musubi.forget-after"]);
 
-    // The hive's trunk is alpha's main, which a clone checks out.
+    // A clone inherits global Git configuration too. Refuse a conflicting destination
+    // before creating either the clone directory or its missing parent.
+    alpha.git(&[
+        "config",
+        "--global",
+        "remote.origin.url",
+        "https://example.org/other.git",
+    ]);
+    let conflicting_clone = env.root().join("conflicting-parent/clone");
+    let err = musubi_fails(
+        &env,
+        &logs,
+        &alpha,
+        &["clone", "project", conflicting_clone.to_str().unwrap()],
+    );
+    insta::assert_snapshot!(err, @"Error: remote names origin have different fetch or push destinations than hive project recorded; give different destinations different remote names before joining");
+    assert!(!conflicting_clone.parent().unwrap().exists());
+    alpha.git(&["config", "--global", "--unset-all", "remote.origin.url"]);
+
+    let included = env.root().join("inherited-remote.gitconfig");
+    fs::write(
+        &included,
+        "[remote \"origin\"]\n url = https://example.org/other.git\n",
+    )
+    .unwrap();
+    let include = format!(
+        "includeIf.gitdir:{}.path",
+        conflicting_clone.join(".git").display()
+    );
+    alpha.git(&["config", "--global", &include, included.to_str().unwrap()]);
+    let err = musubi_fails(
+        &env,
+        &logs,
+        &alpha,
+        &["clone", "project", "../conflicting-parent/clone"],
+    );
+    insta::assert_snapshot!(err, @"Error: remote names origin have different fetch or push destinations than hive project recorded; give different destinations different remote names before joining");
+    assert!(!conflicting_clone.parent().unwrap().exists());
+    alpha.git(&["config", "--global", "--unset-all", &include]);
+
+    // A clone uses its own user's trunk alias, not the source repository's override.
     alpha.jj(&[
         "config",
         "set",
         "--repo",
+        r#"revset-aliases."trunk()""#,
+        "root()",
+    ]);
+    alpha.jj(&[
+        "config",
+        "set",
+        "--user",
         r#"revset-aliases."trunk()""#,
         "main",
     ]);
@@ -809,6 +912,11 @@ fn hub_join_sync_clone_and_list() {
     clone.current_dir(env.root().join("home"));
     // An agent clones it, so the hive forgets gamma's copy once it goes unused for 6h.
     clone.env("CLAUDE_CODE_SESSION_ID", "a session");
+    // Per-command overrides from a caller's Git hook must not become inherited remotes.
+    clone
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "remote.origin.url")
+        .env("GIT_CONFIG_VALUE_0", "https://example.org/other.git");
     // jj colouring what musubi reads of it doesn't keep the trunk from being checked out.
     alpha.jj(&["config", "set", "--user", "ui.color", "always"]);
     clone.arg("--color=never");
@@ -825,6 +933,7 @@ fn hub_join_sync_clone_and_list() {
         "bookmarks",
     ];
     assert_eq!(gamma.jj(&parent), "main");
+    assert_eq!(gamma.jj(&["git", "remote", "list"]), "");
     assert_eq!(
         fs::read_to_string(gamma.path().join("a")).unwrap(),
         "from alpha"
@@ -903,6 +1012,114 @@ fn hub_join_sync_clone_and_list() {
     Hub $ROOT/hub:
       renamed  1 machine: alpha
     Daemon: running, serving 0 repositories; doesn't start at login; `musubi daemon install` makes it
+    ");
+
+    insta::assert_snapshot!(musubi_in(&env, &logs, &alpha, &["join", "--help"]), @"
+    Make the repository in the current directory part of the hive on the hub it shares history and a
+    remote with.
+
+    The hub chooses the hive that has some of the repository's history and one of its remotes' URLs. It
+    refuses a repository that matches no hive or several, and a fork, which shares history but not a
+    remote: choose a hive yourself with `--hive`, or start a new one with `musubi create`. It starts the
+    daemon if it isn't running, and returns once the repository has synced. Git remotes and jj config
+    stay local.
+
+    Remote URLs recorded by explicit joins help match later copies; run `musubi join` again after
+    changing them to register equivalent URLs. A name is bound to its fetch and push destinations for
+    the hive's lifetime. Different destinations need distinct names; a mismatch refuses the join, even
+    with `--hive`. Missing remotes are allowed.
+
+    A bracketed IPv6 host matches in scp-style and ssh:// remote URLs alike.
+
+    Unless jj's config sets it already, it sets `musubi.forget-after` in the repository's config: how
+    long the copy may go unused before the hive forgets it, `6h` when an agent runs it, `never`
+    otherwise. `musubi create` and `musubi clone` do too.
+
+    Usage: musubi join [OPTIONS]
+
+    Options:
+          --hive <HIVE>
+              Choose this hive (a name, a prefix of one, or an id). Remote destination checks still
+              apply
+
+          --original
+              Sync this repository as the copy it was made from, which must be gone: for a copy moved by
+              copying it and deleting the original, or restored onto a new machine. musubi otherwise
+              takes it for a duplicate, and syncs nothing
+
+          --machine <MACHINE>
+              This machine's name in the hive, which other machines show its workspaces under, as in
+              `laptop/default`. Defaults to jj's `operation.hostname`
+
+          --full-history
+              Replicate the whole operation history, not just the current state
+
+          --hub <HUB>
+              The hub, as `musubi hub` prints it: the name this machine ssh-es to the hub's machine by,
+              or on that machine, the hub's directory, or the machine's name or `localhost`, for the hub
+              `musubi hub` serves there without `--dir`, reached without ssh [default: this machine's
+              default hub]
+
+      -h, --help
+              Print help (see a summary with '-h')
+
+    Global options:
+          --socket <SOCKET>
+              The daemon's control socket, in place of the usual one
+
+          --log <FILTER>
+              What to log, as a filter in `RUST_LOG`'s syntax: `debug`, or `info,musubi_sync=debug`. It
+              applies to this command, not to a daemon it starts, which uses `musubi.daemon.log` in jj's
+              config
+
+          --color <WHEN>
+              When to colour what it prints, as jj's `--color` does [default: as jj's `ui.color` says]
+              
+              [possible values: always, never, debug, auto]
+    ");
+    insta::assert_snapshot!(musubi_in(&env, &logs, &alpha, &["clone", "--help"]), @"
+    Create a new colocated repository from a hive.
+
+    It makes the repository, joins it to the hive, and returns once it has synced, with the daemon
+    keeping it in sync from then on. It checks out `trunk()` using this machine's jj config. Git remote
+    definitions and repo config are not copied.
+
+    Before creating the destination, it checks inherited Git remotes and the hive's recorded names for
+    conflicting destinations. It adds no Git remotes; configure one here when you want to fetch or push
+    upstream.
+
+    Usage: musubi clone [OPTIONS] <HIVE> <DESTINATION>
+
+    Arguments:
+      <HIVE>
+              The hive: a name, a prefix of one, or an id
+
+      <DESTINATION>
+              A new or empty directory for the repository. Missing parent directories are made
+
+    Options:
+          --hub <HUB>
+              The hub, as `musubi hub` prints it [default: this machine's default hub]
+
+          --machine <MACHINE>
+              This machine's name in the hive. Defaults to jj's `operation.hostname`
+
+      -h, --help
+              Print help (see a summary with '-h')
+
+    Global options:
+          --socket <SOCKET>
+              The daemon's control socket, in place of the usual one
+
+          --log <FILTER>
+              What to log, as a filter in `RUST_LOG`'s syntax: `debug`, or `info,musubi_sync=debug`. It
+              applies to this command, not to a daemon it starts, which uses `musubi.daemon.log` in jj's
+              config
+
+          --color <WHEN>
+              When to colour what it prints, as jj's `--color` does [default: as jj's `ui.color` says]
+              
+              [possible values: always, never, debug, auto]
     ");
 }
 
@@ -2750,10 +2967,9 @@ fn syncing_without_the_daemon_shows_in_the_list() {
     ");
 }
 
-/// The hive shares remotes and chosen repo config through the binary, which finds jj's
-/// repo config where jj keeps it.
+/// The running daemon reloads local settings without copying remotes or repo config.
 #[test]
-fn settings_are_shared_through_the_binary() {
+fn settings_stay_local_and_the_daemon_reloads_them() {
     let env = TestEnv::with_real_op_times();
     let mut logs = Logs::default();
     let hub = Hub::start(&env, &mut logs);
@@ -2770,6 +2986,7 @@ fn settings_are_shared_through_the_binary() {
     let status = status_in(&env, &logs, &beta).0;
     assert!(status.contains("forgotten once unused for 2h"), "{status}");
     let key = r#"revset-aliases."trunk()""#;
+    let beta_trunk = beta.jj(&["config", "get", key]);
     alpha.jj(&["config", "set", "--repo", key, "main@upstream"]);
     alpha.jj(&[
         "git",
@@ -2780,13 +2997,39 @@ fn settings_are_shared_through_the_binary() {
     ]);
     musubi_in(&env, &logs, &alpha, &["sync"]);
     musubi_in(&env, &logs, &beta, &["sync"]);
-    assert_eq!(beta.jj(&["config", "get", key]), "main@upstream\n");
-    assert_eq!(
-        beta.jj(&["git", "remote", "list"]),
-        "upstream https://example.com/up.git\n"
-    );
+    assert_eq!(beta.jj(&["config", "get", key]), beta_trunk);
+    assert_eq!(beta.jj(&["git", "remote", "list"]), "");
     let operations = beta.jj(&["op", "log", "--no-graph", "-T", "attributes"]);
     assert!(!operations.contains("private-token"), "{operations}");
+    musubi_in(&env, &logs, &alpha, &["join"]);
+    let record: toml::Value =
+        toml::from_str(&fs::read_to_string(alpha.repo_path().join("musubi/hive.toml")).unwrap())
+            .unwrap();
+    let hive_id = record["hive"].as_str().unwrap();
+    // A peer can publish conflicting metadata. Clone must refuse it before creating even
+    // the missing parent directory; no configuration from the peer is applied here.
+    alpha.jj(&[
+        "git",
+        "remote",
+        "set-url",
+        "upstream",
+        "https://example.org/other.git",
+    ]);
+    let mut node = musubi_jj::node::NodeRepo::open(&alpha.repo_path(), &alpha.settings()).unwrap();
+    let remotes = node.join_summary().unwrap().remote_snapshot();
+    node.mark_joined_with_remotes("peer join with conflicting remotes", hive_id, &remotes)
+        .unwrap();
+    drop(node);
+    musubi_in(&env, &logs, &alpha, &["sync"]);
+    let destination = env.root().join("missing-parent/clone");
+    let err = musubi_fails(
+        &env,
+        &logs,
+        &alpha,
+        &["clone", hive_id, destination.to_str().unwrap()],
+    );
+    insta::assert_snapshot!(err, @"Error: hive alpha has inconsistent recorded remotes: upstream; make a new hive from a consistently configured copy");
+    assert!(!destination.parent().unwrap().exists());
 }
 
 /// `jj op abandon` of history the hive has syncs like any other change, printing nothing:

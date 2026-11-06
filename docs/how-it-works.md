@@ -100,13 +100,12 @@ second or so. Every machine has the same commits and the same history of how the
 | --- | --- |
 | Commits, including ones no bookmark points to | Working-copy files |
 | Bookmarks, tags, and remote bookmarks | Untracked and ignored files |
-| The operation log | User config (`~/.config/jj/config.toml`) |
-| Each machine's working-copy commit, shown as a workspace | Most repo config |
-| Git remotes: their names and URLs | The commit index, which jj rebuilds |
-| Repo config that decides what is safe to rewrite or push | |
+| The operation log | Git remotes: their names and URLs |
+| Each machine's working-copy commit, shown as a workspace | All jj configuration |
+| | The commit index, which jj rebuilds |
 
-[Share settings](guides/working-across-machines.md#share-settings) says which remotes and
-repo config the hive shares, and how machines agree on them.
+[Configure each machine](guides/working-across-machines.md#configure-each-machine) explains
+local settings. Configure remotes explicitly on any machine that will fetch or push.
 
 Every snapshot of a working copy replicates too, so a file that jj snapshots reaches every
 machine in the hive, even if you abandon it at once. Keep secrets in ignored files.
@@ -125,7 +124,7 @@ Because that history is shared, the rest of jj's behaviour carries across machin
 
 musubi never writes to working-copy files. It changes only what jj keeps (the operation log
 and commits, and in a colocated repository, the `.git` refs that track bookmarks), and the
-git remotes and repo config that the hive shares.
+local Git refs. Git remote definitions and jj config stay local.
 
 When another machine rewrites the commit your working copy is on, by rebasing its parent, say,
 jj treats your working copy as stale, as it would after a rebase in another workspace on the
@@ -185,7 +184,7 @@ is expected.
 `jj op abandon` on one machine removes those operations on every machine, and they never come
 back; working copies and git refs are untouched. musubi adds an operation or two to the log,
 `musubi: pass on jj op abandon`, so that what it keeps in the operation history, which
-machines are active and the hive's settings, stays as it was.
+machines are active and when they last worked, stays as it was.
 
 ## Disk space
 

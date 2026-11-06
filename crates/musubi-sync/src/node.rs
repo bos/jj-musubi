@@ -128,20 +128,8 @@ impl NodeAdapter {
         Ok(self.repo.show_other_workspaces()?)
     }
 
-    /// Reconciles this machine's settings with the hive's (`NodeRepo::reconcile_settings`).
-    /// Before fetching, a machine that has never reconciled waits: it doesn't know the
-    /// hive's settings yet. Returns whether it recorded a change to upload.
-    pub fn reconcile_settings(&mut self, before_fetching: bool) -> anyhow::Result<bool> {
-        if before_fetching && !self.repo.has_reconciled_settings() {
-            return Ok(false);
-        }
-        self.repo.settle()?;
-        Ok(self.repo.reconcile_settings()?)
-    }
-
     /// Gets ready to sync. A repository made shallow or partial since it joined can't send
-    /// what its new work requires, and the hub would refuse it. Settings changed here go up
-    /// with the sync, and once the node has the hive's head, the hive's settings apply here.
+    /// what its new work requires, and the hub would refuse it.
     /// Other machines' workspaces that this machine forgot show again before anything
     /// arrives to merge with: `jj workspace forget` abandoned an empty working-copy commit
     /// here, which the hive keeps, and a merge with the abandon would rebase off it what its
@@ -150,7 +138,6 @@ impl NodeAdapter {
     pub fn before_sync(&mut self) -> anyhow::Result<()> {
         self.clock.tick(&mut self.repo);
         self.repo.check_complete()?;
-        self.reconcile_settings(true)?;
         self.show_other_workspaces()?;
         self.heads()?;
         Ok(())
@@ -172,7 +159,7 @@ impl NodeAdapter {
     }
 
     /// What a node does once its policy has nothing left to do, having just fetched the
-    /// hive's head: reconcile its settings, show other machines' workspaces again, give its
+    /// hive's head: show other machines' workspaces again, give its
     /// own workspaces new commits where theirs were abandoned elsewhere, record this copy's
     /// `musubi.forget-after` if it changed, and forget the copies that have gone unused for
     /// longer than theirs. Each runs; any may write an operation to upload, and then it
@@ -184,12 +171,11 @@ impl NodeAdapter {
     /// such as creating a bookmark, needn't touch them: then nothing would arrive to realize.
     pub fn when_idle(&mut self) -> anyhow::Result<bool> {
         self.clock.tick(&mut self.repo);
-        let settings = self.reconcile_settings(false)?;
         let workspaces = self.show_other_workspaces()?;
         let replaced = !self.repo.replace_abandoned_working_copies()?.is_empty();
         let recorded = self.repo.record_forget_after()?;
         let forgotten = self.repo.expire_idle(self.clock.now(), EXPIRY_STAGGER)?;
-        Ok(settings || workspaces || replaced || recorded || !forgotten.is_empty())
+        Ok(workspaces || replaced || recorded || !forgotten.is_empty())
     }
 
     /// The repository, for tests that act on it, as by crashing it, with its time moved on

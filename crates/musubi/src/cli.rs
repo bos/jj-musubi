@@ -88,7 +88,12 @@ pub enum Command {
     /// remotes' URLs. It refuses a repository that matches no hive or several, and a fork,
     /// which shares history but not a remote: choose a hive yourself with `--hive`, or start
     /// a new one with `musubi create`. It starts the daemon if it isn't running, and returns
-    /// once the repository has synced.
+    /// once the repository has synced. Git remotes and jj config stay local.
+    ///
+    /// Remote URLs recorded by explicit joins help match later copies; run `musubi join`
+    /// again after changing them to register equivalent URLs. A name is bound to its fetch
+    /// and push destinations for the hive's lifetime. Different destinations need distinct
+    /// names; a mismatch refuses the join, even with `--hive`. Missing remotes are allowed.
     ///
     /// A bracketed IPv6 host matches in scp-style and ssh:// remote URLs alike.
     ///
@@ -96,7 +101,8 @@ pub enum Command {
     /// config: how long the copy may go unused before the hive forgets it, `6h` when an agent
     /// runs it, `never` otherwise. `musubi create` and `musubi clone` do too.
     Join {
-        /// Join this hive (a name, a prefix of one, or an id), whatever its remotes.
+        /// Choose this hive (a name, a prefix of one, or an id). Remote destination checks
+        /// still apply.
         #[arg(long, add = ArgValueCandidates::new(completion::hives))]
         hive: Option<String>,
         /// Sync this repository as the copy it was made from, which must be gone: for a copy
@@ -110,8 +116,12 @@ pub enum Command {
     /// Create a new colocated repository from a hive.
     ///
     /// It makes the repository, joins it to the hive, and returns once it has synced, with
-    /// the daemon keeping it in sync from then on. It checks out the hive's trunk, as
-    /// `jj git clone` checks out a remote's default branch.
+    /// the daemon keeping it in sync from then on. It checks out `trunk()` using this
+    /// machine's jj config. Git remote definitions and repo config are not copied.
+    ///
+    /// Before creating the destination, it checks inherited Git remotes and the hive's
+    /// recorded names for conflicting destinations. It adds no Git remotes; configure one
+    /// here when you want to fetch or push upstream.
     Clone {
         /// The hive: a name, a prefix of one, or an id.
         #[arg(add = ArgValueCandidates::new(completion::hives))]

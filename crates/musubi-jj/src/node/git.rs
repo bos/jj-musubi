@@ -1,4 +1,4 @@
-//! What a node does only when its backend is git: share the repository's git remotes, and
+//! What a node does only when its backend is git: read the repository's local remotes, and
 //! export the jj repository's refs to git when it is colocated.
 
 use std::collections::BTreeMap;
@@ -34,13 +34,11 @@ use super::NodeError;
 use super::git_config::ConfigCache;
 use crate::git_command::GitError;
 use crate::git_command::GitRepo;
-use crate::hive_settings::Remote;
-use crate::hive_settings::repository;
-use crate::hive_settings::same_repository;
 use crate::objects::GitObjects;
 use crate::objects::Incompleteness;
 use crate::op_id::LocalOp;
 use crate::ref_locks;
+use crate::remote_url::Remote;
 use crate::remote_url::without_credentials;
 
 /// A node's git repository, when its backend is git.
@@ -163,185 +161,43 @@ impl NodeGit {
         Ok(partial.then_some(Incompleteness::Partial))
     }
 
-    /// This repository's own git config file.
-    pub fn config_path(&self) -> PathBuf {
-        self.repo.git_dir().join("config")
-    }
-
-    /// The remotes in this repository's own git config, with their URLs as written and,
-    /// where this machine's `url.<base>.insteadOf` rules change them, as git expands them,
-    /// since another machine needn't have the same rules. Unless `share_credentials`, the
-    /// URLs go [without the credentials](without_credentials) an http(s) URL may carry.
-    pub fn remotes(&self, share_credentials: bool) -> Result<BTreeMap<String, Remote>, GitError> {
+    /// Reads this repository's effective remotes as credential-free hints for matching a hive.
+    /// Git config is local: this never creates or changes a remote.
+    pub fn remotes(&self) -> Result<BTreeMap<String, Remote>, GitError> {
         let config = self.config.read(&self.repo)?;
         let mut remotes: BTreeMap<String, Remote> = BTreeMap::new();
-        for entry in config.own() {
+        for entry in &config.entries {
             let Some(value) = entry.value.as_deref() else {
                 continue;
             };
-            let Some((name, variable)) = entry
+            let Some(name) = entry
                 .key
                 .strip_prefix("remote.")
-                .and_then(|rest| rest.rsplit_once('.'))
+                .and_then(|s| s.strip_suffix(".url"))
             else {
                 continue;
             };
-            let remote = remotes.entry(name.to_owned()).or_default();
-            // The first of several, which git fetches from.
-            match variable {
-                "url" => _ = remote.url.get_or_insert_with(|| value.to_owned()),
-                "pushurl" => _ = remote.push_url.get_or_insert_with(|| value.to_owned()),
-                _ => {}
-            }
+            remotes
+                .entry(name.to_owned())
+                .or_default()
+                .url
+                .get_or_insert_with(|| without_credentials(value));
         }
-        // Each remote's URLs as git uses them: its first URL, followed by a partial clone's
-        // filter, then where it pushes. Only a push URL in the config is expanded; where
-        // `pushInsteadOf` sends pushes is this machine's own business, as aliases are.
-        let mut used: BTreeMap<&str, (Option<&str>, Option<&str>)> = BTreeMap::new();
         for line in config.remotes.lines() {
-            let Some((name, url)) = line.split_once('\t') else {
+            let Some((name, used)) = line.split_once('\t') else {
                 continue;
             };
-            let (fetch, push) = used.entry(name).or_default();
-            if let Some(url) = url.strip_suffix(" (push)") {
-                push.get_or_insert(url);
-            } else if let Some((url, _)) = url.rsplit_once(" (fetch)") {
-                fetch.get_or_insert(url);
-            }
-        }
-        let shared = |url: &str| {
-            if share_credentials {
-                url.to_owned()
-            } else {
-                without_credentials(url)
-            }
-        };
-        // An expansion only of a URL in this repository's config, and only where it differs
-        // as shared.
-        let expansion = |written: &Option<String>, used: Option<&str>| {
-            let written = written.as_deref()?;
-            let used = shared(used?);
-            (used != shared(written)).then_some(used)
-        };
-        for (name, remote) in &mut remotes {
-            if let Some(&(fetch, push)) = used.get(name.as_str()) {
-                remote.expanded_url = expansion(&remote.url, fetch);
-                remote.expanded_push_url = expansion(&remote.push_url, push);
-            }
-            for url in [&mut remote.url, &mut remote.push_url]
-                .into_iter()
-                .flatten()
-            {
-                *url = shared(url);
+            let remote = remotes.entry(name.to_owned()).or_default();
+            if let Some(used) = used.strip_suffix(" (push)") {
+                remote.push_urls.insert(without_credentials(used));
+            } else if let Some((used, _)) = used.rsplit_once(" (fetch)") {
+                let used = without_credentials(used);
+                if remote.url.as_ref() != Some(&used) && remote.expanded_url.is_none() {
+                    remote.expanded_url = Some(used);
+                }
             }
         }
         Ok(remotes)
-    }
-
-    /// How this machine writes a URL another machine wrote as `written` and expanded to
-    /// `expanded`: as written where this machine's git expands it to the same repository, so
-    /// that an alias they share stays one, even where its rule holds a token, and otherwise
-    /// as expanded.
-    fn spelling(&self, written: Option<&str>, expanded: Option<&str>) -> Option<String> {
-        let (Some(written), Some(expanded)) = (written, expanded) else {
-            return written.map(str::to_owned);
-        };
-        let same = self
-            .repo
-            .run(&["ls-remote", "--get-url", "--", written], None)
-            .is_ok_and(|here| {
-                repository(String::from_utf8_lossy(&here).trim_end()) == repository(expanded)
-            });
-        Some(if same { written } else { expanded }.to_owned())
-    }
-
-    /// Changes this repository's git remotes from `from` to `to`, as `git remote` does:
-    /// renaming a remote moves its remote-tracking refs, and removing one deletes them.
-    pub fn change_remotes(
-        &self,
-        from: &BTreeMap<String, Remote>,
-        to: &BTreeMap<String, Remote>,
-    ) -> Result<(), GitError> {
-        let mut removed: Vec<&String> = from.keys().filter(|n| !to.contains_key(*n)).collect();
-        for (name, remote) in to {
-            match from.get(name) {
-                Some(old) if old == remote => continue,
-                Some(_) => {}
-                None => {
-                    // The same remote under a new name is a rename.
-                    if let Some(position) = removed.iter().position(|old| from[*old] == *remote) {
-                        let old = removed.remove(position);
-                        self.repo.run(&["remote", "rename", old, name], None)?;
-                        continue;
-                    }
-                    let url = self.spelling(remote.url.as_deref(), remote.expanded_url.as_deref());
-                    let given = url.as_deref().unwrap_or_default();
-                    self.repo.run(&["remote", "add", "--", name, given], None)?;
-                    if url.is_none() {
-                        // git adds it with an empty URL; it has none.
-                        let key = format!("remote.{name}.url");
-                        self.repo
-                            .run(&["config", "--local", "--unset-all", &key], None)?;
-                    }
-                    // Its URL set, only a push URL, if it has one, is still to set: one naming
-                    // the URL's repository too, if that is how it was written.
-                    let push = self.spelling(
-                        remote.push_url.as_deref(),
-                        remote.expanded_push_url.as_deref(),
-                    );
-                    if let Some(push) = push {
-                        let key = format!("remote.{name}.pushurl");
-                        self.repo.run(&["config", "--local", &key, &push], None)?;
-                    }
-                    continue;
-                }
-            }
-            self.set_remote_urls(name, from.get(name), remote)?;
-        }
-        for name in removed {
-            self.repo.run(&["remote", "remove", name], None)?;
-        }
-        Ok(())
-    }
-
-    /// Points remote `name`, which `old` describes as this repository has it, where `remote`
-    /// says. A URL that already names the repository `remote`'s does is left as this
-    /// machine spells it (see [`Remote`]'s equality), and a push URL is removed once it no
-    /// longer names where pushes should go.
-    fn set_remote_urls(
-        &self,
-        name: &str,
-        old: Option<&Remote>,
-        remote: &Remote,
-    ) -> Result<(), GitError> {
-        let set = |variable: &str, value: Option<&str>| -> Result<(), GitError> {
-            let key = format!("remote.{name}.{variable}");
-            match value {
-                Some(value) => self.repo.run(&["config", "--local", &key, value], None)?,
-                // Unsetting a variable that isn't set fails; that's fine.
-                None => self
-                    .repo
-                    .run(&["config", "--local", "--unset-all", &key], None)
-                    .unwrap_or_default(),
-            };
-            Ok(())
-        };
-        let mut now = old.cloned().unwrap_or_default();
-        if old.is_none() || !same_repository(&now.url_repositories(), &remote.url_repositories()) {
-            let url = self.spelling(remote.url.as_deref(), remote.expanded_url.as_deref());
-            set("url", url.as_deref())?;
-            now.url.clone_from(&remote.url);
-            now.expanded_url.clone_from(&remote.expanded_url);
-        }
-        if old.is_none() || !same_repository(&now.push_repositories(), &remote.push_repositories())
-        {
-            let push = self.spelling(
-                remote.push_url.as_deref(),
-                remote.expanded_push_url.as_deref(),
-            );
-            set("pushurl", push.as_deref())?;
-        }
-        Ok(())
     }
 }
 
@@ -871,6 +727,12 @@ mod tests {
         let explicit = "https://example.com/team/explicit";
         run(&["remote", "add", "explicit", explicit]);
         run(&["remote", "set-url", "--push", "explicit", explicit]);
+        run(&[
+            "config",
+            "--add",
+            "remote.explicit.pushurl",
+            "https://second.example.com/team/explicit",
+        ]);
         run(&["remote", "add", "filtered", "musubi-test:team/filtered"]);
         run(&["config", "remote.filtered.partialclonefilter", "blob:none"]);
         let repo = NodeGit {
@@ -878,62 +740,48 @@ mod tests {
             colocation: None,
             config: ConfigCache::default(),
         };
-        let remotes = repo.remotes(false).unwrap();
+        let remotes = repo.remotes().unwrap();
         let urls = |name: &str| {
             let remote = &remotes[name];
-            [
-                &remote.url,
-                &remote.expanded_url,
-                &remote.push_url,
-                &remote.expanded_push_url,
-            ]
-            .map(|url| url.as_deref())
+            [&remote.url, &remote.expanded_url].map(|url| url.as_deref())
         };
-        let aliased = [
-            "musubi-test:team/aliased",
-            "https://example.com/team/aliased",
-        ];
         assert_eq!(
             urls("aliased"),
-            [Some(aliased[0]), Some(aliased[1]), None, None]
+            [
+                Some("musubi-test:team/aliased"),
+                Some("https://example.com/team/aliased")
+            ]
         );
-        let stripped = "https://example.net/team/token";
-        assert_eq!(urls("token"), [Some(stripped), None, None, None]);
-        // Where pushes go through `pushInsteadOf` is this machine's own business.
-        let pushes = "https://example.org/team/pushes";
-        assert_eq!(urls("pushes"), [Some(pushes), None, None, None]);
         assert_eq!(
-            urls("explicit"),
-            [Some(explicit), None, Some(explicit), None]
+            urls("token"),
+            [Some("https://example.net/team/token"), None]
         );
-        let filtered = [
-            "musubi-test:team/filtered",
-            "https://example.com/team/filtered",
-        ];
+        assert_eq!(
+            urls("pushes"),
+            [Some("https://example.org/team/pushes"), None]
+        );
+        assert_eq!(urls("explicit"), [Some(explicit), None]);
+        assert_eq!(
+            remotes["explicit"].binding().push,
+            [
+                "example.com/team/explicit".to_owned(),
+                "second.example.com/team/explicit".to_owned()
+            ]
+            .into()
+        );
         assert_eq!(
             urls("filtered"),
-            [Some(filtered[0]), Some(filtered[1]), None, None]
+            [
+                Some("musubi-test:team/filtered"),
+                Some("https://example.com/team/filtered")
+            ]
         );
-        let shared = repo.remotes(true).unwrap();
-        assert_eq!(shared["token"].url.as_deref(), Some(token));
-
-        // Another machine's alias is kept where this one expands it the same way.
-        let spelling = |written, expanded| repo.spelling(Some(written), Some(expanded));
-        assert_eq!(
-            spelling(aliased[0], aliased[1]).as_deref(),
-            Some(aliased[0])
-        );
-        let theirs = ["theirs:team/x", "https://example.com/team/x"];
-        assert_eq!(spelling(theirs[0], theirs[1]).as_deref(), Some(theirs[1]));
-        // An alias whose rule holds a token, which the other machine's expansion lacks.
         run(&["config", "url.https://tok@example.org/.insteadOf", "tok:"]);
-        let token = ["tok:team/x", "https://example.org/team/x"];
-        assert_eq!(spelling(token[0], token[1]).as_deref(), Some(token[0]));
-        // Not git's option, but an alias.
-        run(&["config", "url.https://example.com/.insteadOf", "-x:"]);
+        run(&["remote", "add", "expanded-token", "tok:team/x"]);
+        let remote = &repo.remotes().unwrap()["expanded-token"];
         assert_eq!(
-            spelling("-x:team/x", theirs[1]).as_deref(),
-            Some("-x:team/x")
+            remote.expanded_url.as_deref(),
+            Some("https://example.org/team/x")
         );
     }
 

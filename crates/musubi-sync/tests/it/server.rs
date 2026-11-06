@@ -50,6 +50,7 @@ fn join_request(repo: &TestRepo) -> JoinRequest {
     let summary = node.join_summary().unwrap();
     JoinRequest {
         backend: summary.backend,
+        remote_bindings: summary.remote_snapshot().bindings,
         remotes: summary
             .remotes
             .into_iter()
@@ -83,7 +84,9 @@ async fn join(transport: &dyn Transport, request: JoinRequest) -> Result<Joined,
 
 async fn sync(repo: &TestRepo, transport: Arc<dyn Transport>, hive: &str) {
     let mut node = NodeRepo::open(&repo.repo_path(), &repo.settings()).unwrap();
-    node.create_join_operation("musubi: join").unwrap();
+    let snapshot = node.join_summary().unwrap().remote_snapshot();
+    node.create_join_operation_with_remotes("musubi: join", hive, &snapshot)
+        .unwrap();
     sync_node(node, repo, transport, hive).await;
 }
 
@@ -223,6 +226,7 @@ async fn one_hub_many_hives() {
 
     // Asked for by a prefix of its name, the first hive takes gamma too, since they share
     // history; an unrelated repository can't join it.
+    gamma.jj(&["git", "remote", "rename", "origin", "fork"]);
     let mut asking = join_request(&gamma);
     asking.choice = JoinChoice::Hive("pro".to_owned());
     assert_eq!(join(&*client, asking).await.unwrap().hive.id, hive);
@@ -249,6 +253,12 @@ async fn one_hub_many_hives() {
         HubReply::NoHive
     );
 
+    // Explicitly rejoining an existing copy registers its current URLs without applying
+    // them elsewhere. The original hints remain useful to copies with older URLs.
+    let moved = "ssh://git@example.com/team/project";
+    alpha.jj(&["git", "remote", "set-url", "origin", moved]);
+    sync(&alpha, client.clone(), &hive).await;
+
     // Listing, resolving, renaming, removing.
     let HubWideReply::Hives(hives) = hub_wide(&*client, HubWideRequest::List).await else {
         panic!("expected hives");
@@ -262,6 +272,7 @@ async fn one_hub_many_hives() {
             .contains(&"https://example.com/team/project.git".to_owned()),
         "{project:?}"
     );
+    assert!(project.urls.iter().any(|url| url == moved), "{project:?}");
     let rename = HubWideRequest::Rename {
         name: "fork".to_owned(),
         to: "project".to_owned(),
@@ -313,6 +324,11 @@ async fn one_hub_many_hives() {
     assert_eq!(reopened.hive_count(), 1);
     let index = musubi_hub::index::HiveIndex::load(&dir.join(&hive)).unwrap();
     assert_eq!(index.roots.len(), 1, "{index:?}");
+    assert!(index.urls.contains(moved), "{index:?}");
+    assert!(
+        index.urls.contains("https://example.com/team/project.git"),
+        "{index:?}"
+    );
     assert!(
         index.machines.iter().any(|m| m.starts_with("alpha#")),
         "{index:?}"

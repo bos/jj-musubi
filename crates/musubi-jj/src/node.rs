@@ -4,9 +4,8 @@
 //! layer" in docs/internals/protocol.md. [`NodeRepo`] is here, with what opens and loads it; what
 //! it does is in submodules, one concern each: joining a hive (`join`), translating local
 //! operations to canonical ones (`translate`) and canonical ones to local ones (`realize`), the
-//! views between them (`view`), working copies (`working_copies`), the hive's settings
-//! (`settings`), and what can go wrong (`error`). What a node does only when its backend is git
-//! is in `git`.
+//! views between them (`view`), working copies (`working_copies`), and what can go wrong
+//! (`error`). What a node does only when its backend is git is in `git`.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -30,7 +29,6 @@ use jj_lib::simple_op_store::SimpleOpStore;
 use pollster::FutureExt as _;
 
 use crate::canonical::CanonicalStore;
-use crate::hive_settings::HiveSettings;
 use crate::objects::Backend;
 use crate::objects::GitStore;
 use crate::objects::ObjectStore;
@@ -48,7 +46,6 @@ mod join;
 mod originals;
 mod presence;
 mod realize;
-mod settings;
 mod supersede;
 mod translate;
 mod view;
@@ -103,9 +100,7 @@ pub struct NodeRepo {
     /// Local operations found to come from before this repository joined: ancestors of a
     /// join point, and operations all of whose parents are (see [`Self::canonicalize`]).
     before_join: BTreeSet<LocalOp>,
-    /// The hive's settings as of canonical operations, as computed so far.
-    settings: HashMap<CanonicalOp, Option<HiveSettings>>,
-    /// jj's repo config file for this repository, which holds the config the hive shares.
+    /// jj's repo config file for this repository, used to read this copy's expiry policy.
     repo_config: Option<PathBuf>,
     /// The last operation realized here, with its per-machine fields: usually the next
     /// one's parent, which then needn't be read back.
@@ -236,7 +231,6 @@ impl NodeRepo {
             join_points: vec![],
             join_ancestors: None,
             before_join: BTreeSet::new(),
-            settings: HashMap::new(),
             repo_config: None,
             machine: load_machine(repo_path, settings.operation_hostname(), settings)?,
             records: Records::load(&musubi_dir)?,
@@ -252,9 +246,8 @@ impl NodeRepo {
         Ok(node)
     }
 
-    /// Uses `path` as this repository's jj repo config file, which holds the config the
-    /// hive shares. jj keeps it outside the repository, so the caller finds it as jj does
-    /// (`jj config path --repo`). Without one, no config is shared.
+    /// Uses `path` as this repository's local jj repo config file, so that its
+    /// `musubi.forget-after` can be read afresh. jj keeps this outside the repository.
     pub fn with_repo_config(mut self, path: Option<PathBuf>) -> Self {
         self.repo_config = path;
         self

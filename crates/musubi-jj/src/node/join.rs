@@ -27,24 +27,30 @@ use super::CANONICAL_ATTRIBUTE;
 use super::NodeError;
 use super::NodeRepo;
 use super::index_err;
-use crate::hive_settings;
 use crate::objects::Backend;
 use crate::op_id::CanonicalOp;
 use crate::op_id::LocalOp;
 use crate::presence;
 use crate::presence::Kind;
+use crate::remote_url::{JOIN_HIVE, JoinRemotes, Remote};
 use crate::translation_map::whole_id;
 
 /// What a hub matches a joining repository against: see [`NodeRepo::join_summary`].
 #[derive(Clone, Debug)]
 pub struct JoinSummary {
     pub backend: Backend,
-    pub remotes: BTreeMap<String, hive_settings::Remote>,
+    pub remotes: BTreeMap<String, Remote>,
     /// Visible commits whose parent is the root commit, other than an empty working-copy
     /// commit with no description.
     pub roots: Vec<CommitId>,
     /// The commits remote bookmarks point to.
     pub remote_targets: Vec<CommitId>,
+}
+
+impl JoinSummary {
+    pub fn remote_snapshot(&self) -> JoinRemotes {
+        JoinRemotes::from_remotes(&self.remotes)
+    }
 }
 
 impl NodeRepo {
@@ -140,6 +146,17 @@ impl NodeRepo {
     /// place of its operation history, and records that the current op head canonicalizes
     /// to it. See "Joining" in docs/internals/design.md.
     pub fn create_join_operation(&mut self, description: &str) -> Result<CanonicalOp, NodeError> {
+        let remotes = JoinRemotes::from_remotes(&self.remotes()?);
+        self.create_join_operation_with_remotes(description, "", &remotes)
+    }
+
+    /// Records exactly the snapshot approved by the hub's join preflight.
+    pub fn create_join_operation_with_remotes(
+        &mut self,
+        description: &str,
+        hive: &str,
+        remotes: &JoinRemotes,
+    ) -> Result<CanonicalOp, NodeError> {
         let head = self.merge_heads()?;
         // A repository that was part of a hive before, and left, has canonical history
         // already: if its head descends from it, carry on from it, as any operation does. A
@@ -152,7 +169,7 @@ impl NodeRepo {
             None => None,
         };
         if carried.is_some() {
-            return self.mark_joined(description);
+            return self.mark_joined_with_remotes(description, hive, remotes);
         }
         // A join on the root brings nothing of the hive's: so far, this node may take the
         // hub's records from those it pruned.
@@ -162,10 +179,11 @@ impl NodeRepo {
         let view = self.loader.op_store().read_view(&op.view_id).block_on()?;
         let root = self.canonical.root_operation_id().clone();
         // Joining is this machine's work: it is present from its join on.
-        let attributes = BTreeMap::from([(
+        let mut attributes = BTreeMap::from([(
             presence::WORK_ATTRIBUTE.to_owned(),
             self.machine.key().to_owned(),
         )]);
+        attributes.extend(remotes.attributes(hive));
         let kind = Kind {
             work: Some(self.machine.key().to_owned()),
             ..Kind::default()
@@ -206,23 +224,72 @@ impl NodeRepo {
         Ok(canonical)
     }
 
-    /// Makes joining this machine's work, as it is: if the hive would not show this machine
-    /// as of its op head, as after it left or with its whole history joined, an operation
-    /// that changes nothing else says so. Returns the canonical form of the op head.
+    /// Records an explicit join as this machine's work and its current URL hints, even
+    /// when it is already present. Returns the canonical form of the new op head.
     pub fn mark_joined(&mut self, description: &str) -> Result<CanonicalOp, NodeError> {
+        let remotes = JoinRemotes::from_remotes(&self.remotes()?);
+        self.mark_joined_with_remotes(description, "", &remotes)
+    }
+
+    /// Records exactly the snapshot approved by the hub's join preflight.
+    pub fn mark_joined_with_remotes(
+        &mut self,
+        description: &str,
+        hive: &str,
+        remotes: &JoinRemotes,
+    ) -> Result<CanonicalOp, NodeError> {
         let head = self.merge_heads()?;
-        let canonical = self.canonicalize(&head)?;
-        if self.presence(&canonical)?.is_present(self.machine.key()) {
-            return Ok(canonical);
-        }
         let repo = self.repo_at(&head)?;
         let mut tx = repo.start_transaction();
         tx.set_attribute(
             presence::WORK_ATTRIBUTE.to_owned(),
             self.machine.key().to_owned(),
         );
+        for (key, url) in remotes.attributes(hive) {
+            tx.set_attribute(key, url);
+        }
         let joined = tx.commit(description).block_on()?;
         self.canonicalize(&LocalOp(joined.op_id().clone()))
+    }
+
+    /// Restores known name constraints before remaking a lost hub. This runs only for an
+    /// explicit rejoin, never on ordinary syncs; no mutable config or journal is written.
+    pub fn check_recorded_remote_bindings(
+        &self,
+        hive: &str,
+        remotes: &mut JoinRemotes,
+    ) -> Result<(), NodeError> {
+        let mut conflicts = BTreeSet::new();
+        for id in self.canonical.operation_ids()? {
+            let op = self.canonical.read_operation(&id)?;
+            if op.metadata.attributes.get(JOIN_HIVE).map(String::as_str) != Some(hive) {
+                continue;
+            }
+            for (name, binding) in JoinRemotes::recorded_bindings(&op.metadata.attributes) {
+                if remotes
+                    .bindings
+                    .get(&name)
+                    .is_some_and(|old| old != &binding)
+                {
+                    conflicts.insert(name);
+                } else {
+                    remotes.bindings.insert(name, binding);
+                }
+            }
+        }
+        if !conflicts.is_empty() {
+            return Err(NodeError::RemoteBindings(
+                conflicts.into_iter().collect::<Vec<_>>().join(", "),
+            ));
+        }
+        Ok(())
+    }
+
+    fn remotes(&self) -> Result<BTreeMap<String, Remote>, NodeError> {
+        Ok(match &self.git {
+            Some(git) => git.remotes()?,
+            None => BTreeMap::new(),
+        })
     }
 
     /// What a hub needs to know to decide which hive this repository belongs to.

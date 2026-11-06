@@ -471,8 +471,10 @@ pub(crate) fn hive() -> Fixture {
                 "remotes.origin.auto-track-bookmarks",
                 "y",
             ]);
+            // Each machine configures its own Git access; syncing only carries bookmarks.
+            hive.repo(index)
+                .jj(&["git", "remote", "add", "origin", origin.to_str().unwrap()]);
         }
-        repo.jj(&["git", "remote", "add", "origin", origin.to_str().unwrap()]);
         repo.jj(&["git", "fetch"]);
         hive.sync();
     })
@@ -1675,7 +1677,6 @@ fn realization_beside_a_fetch_keeps_the_fetch_while_taking_an_abandon() {
         "musubi.work",
         "musubi.forget",
         "musubi.forget-after",
-        "musubi.settings",
         "musubi.expected",
     ] {
         assert!(!raw.metadata.attributes.contains_key(key), "replayed {key}");

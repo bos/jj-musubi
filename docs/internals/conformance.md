@@ -394,7 +394,7 @@ pins reuse, not eventual entry into that epoch or the monotonicity premise.
 
 A cached restoring head can already equal the hub's while its drop remains pending. The core
 then requests a neutral publication child. The adapter rechecks the current ids and keeps the
-current view, presence, settings and expected values; it does not replay the old payload.
+current view, presence and expected values; it does not replay the old payload.
 `history::pending_drops_get_a_new_tip_when_the_hub_already_has_the_cached_fixup` checks that
 choice against `Retry.Publication`, including a lost request, retry, reopening, child contents,
 acceptance and cleared pending. Its reachable orphan-realization prefix includes loss of a

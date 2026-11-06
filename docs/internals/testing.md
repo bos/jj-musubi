@@ -104,14 +104,38 @@ to hive matching: all first commits in merged histories are found once, already 
 commits stop the walk, and jj's synthetic root is excluded. The simple-backend sync examples
 alone do not exercise this index walk.
 
-`settings_are_shared_through_the_binary` also changes `musubi.forget-after` in user config
-while the daemon runs, waits for a sync, and checks that the other machine sees the new
+`settings_stay_local_and_the_daemon_reloads_them` also changes `musubi.forget-after` in user
+config while the daemon runs, waits for a sync, and checks that the other machine sees the new
 expiry policy. Keeping the daemon's initial jj settings makes it fail.
 
 `bracketed_ipv6_urls_name_one_repository` checks that scp-style and `ssh://` IPv6 remote URLs
 match without conflating different hosts. `hub_join_sync_clone_and_list` joins real
 repositories using those two forms; splitting at a colon inside the address makes its join
 fail, saying that the repository and hive share history but not a remote.
+
+`remote_configuration_stays_local` changes fetch and push URLs on one machine while the
+other's config is locked, reopens it, and checks byte-for-byte preservation. It also keeps
+an explicit reversion local. `repo_config_stays_local` checks the same boundary for rewrite
+and push protections. Both fail with the removed settings reconciliation. Fetch, push,
+tracking, conflicted-ref, and history tests still exercise replicated remote bookmarks with
+remotes configured explicitly. `push_from_one_machine` has a copy with no remotes create work
+that the other copy pushes, and verifies that the first still has no remotes. The search
+configures each new copy's `origin` explicitly,
+so its fetch and push rules continue reaching new and replacement machines.
+
+`remote_bindings_are_checked_before_joining` retains approved name bindings through pending
+expiry and a hub restart, rejects rebindings through `--hive` and rejoin, and checks push
+mismatches and omitted names. `hub_join_sync_clone_and_list` reproduces a conflicting name
+hidden by another matching remote, checks plain and explicit joins refuse without membership
+or operation changes, and then joins equivalent IPv6 forms. The daemon/config binary test
+also sends conflicting peer metadata and checks that clone creates no destination or parent.
+`one_hub_many_hives` checks scoped join observations and index rebuilding. The envelope fuzzer
+constructs nonempty join and clone binding maps and round-trips their plain operation
+attributes. `inherited_destinations_match_git` compares the clone preview with Git for aliases,
+longest-prefix ties, pushInsteadOf, multiple and explicit push URLs, and credentials.
+`hub_join_sync_clone_and_list` refuses global and destination-conditional mismatches before
+creating the clone's parent. `hub_survives_malformed_clone_preflights` checks the production
+hub-wide handler with truncated and overlong requests and verifies that they reserve nothing.
 
 Start with unexecuted recovery and refusal paths: reopening stored state, failed publication,
 rollback, malformed input and platform adapters. Read the callers and existing assertions

@@ -8,7 +8,7 @@ the [user guide](../README.md). These documents use the terms defined in the des
 ## Architecture
 
 - [Design](design.md): What does musubi replicate, how do machines agree, including on
-  remotes and shared config, and why? Read it before changing what musubi does.
+  local configuration, and why? Read it before changing what musubi does.
 - [Sync protocol](protocol.md): What exactly do nodes and the hub say to each other, and what
   properties does that guarantee? This owns the state machines and their invariants.
 - [Race catalogue](races.md): What happens when machines change the same thing at once, and

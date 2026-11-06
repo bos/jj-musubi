@@ -3,8 +3,133 @@
 //! Two clones of one repository often name its remote differently: one over https, one over
 //! ssh, one with `.git` and one without. [`RemoteUrl::parse`] reduces each form to a host
 //! and a path, and [`RemoteUrl::key`] is what two URLs for the same repository have in
-//! common. The hub matches joining repositories by it, and hive settings use it to tell a
-//! machine's own spelling of a remote from a change to where it points.
+//! common. The hub matches joining repositories by it.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+/// Operation attributes with this prefix record URL hints when a copy explicitly joins.
+/// They help the hub match future joins, and never configure a receiving machine.
+pub const JOIN_URL_PREFIX: &str = "musubi.join-url.";
+pub const JOIN_HIVE: &str = "musubi.join-hive";
+pub const JOIN_FETCH_PREFIX: &str = "musubi.join-fetch.";
+pub const JOIN_PUSH_PREFIX: &str = "musubi.join-push.";
+
+/// A remote name's fixed identity within a hive. Missing remotes make no claim.
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+pub struct RemoteBinding {
+    pub fetch: Option<String>,
+    pub push: BTreeSet<String>,
+}
+
+/// The remote snapshot checked before an explicit join, then recorded without rereading Git.
+#[derive(Clone, Debug, Default)]
+pub struct JoinRemotes {
+    pub urls: BTreeSet<String>,
+    pub bindings: BTreeMap<String, RemoteBinding>,
+}
+
+impl JoinRemotes {
+    pub fn from_remotes(remotes: &BTreeMap<String, Remote>) -> Self {
+        Self {
+            urls: remotes
+                .values()
+                .flat_map(|remote| remote.urls().map(str::to_owned))
+                .collect(),
+            bindings: remotes
+                .iter()
+                .filter_map(|(name, remote)| {
+                    let binding = remote.binding();
+                    (binding.fetch.is_some() || !binding.push.is_empty())
+                        .then(|| (name.clone(), binding))
+                })
+                .collect(),
+        }
+    }
+
+    pub fn attributes(&self, hive: &str) -> BTreeMap<String, String> {
+        let mut attributes: BTreeMap<String, String> = self
+            .urls
+            .iter()
+            .enumerate()
+            .map(|(i, url)| (format!("{JOIN_URL_PREFIX}{i}"), url.clone()))
+            .collect();
+        attributes.insert(JOIN_HIVE.to_owned(), hive.to_owned());
+        for (name, binding) in &self.bindings {
+            if let Some(fetch) = &binding.fetch {
+                attributes.insert(format!("{JOIN_FETCH_PREFIX}{name}"), fetch.clone());
+            }
+            for (i, push) in binding.push.iter().enumerate() {
+                attributes.insert(format!("{JOIN_PUSH_PREFIX}{i}.{name}"), push.clone());
+            }
+        }
+        attributes
+    }
+
+    /// Reads plain operation attributes; values are already normalized identities.
+    pub fn recorded_bindings(
+        attributes: &BTreeMap<String, String>,
+    ) -> BTreeMap<String, RemoteBinding> {
+        let mut bindings = BTreeMap::<String, RemoteBinding>::new();
+        for (key, value) in attributes {
+            if let Some(name) = key.strip_prefix(JOIN_FETCH_PREFIX) {
+                bindings.entry(name.to_owned()).or_default().fetch = Some(value.clone());
+            } else if let Some((_, name)) = key
+                .strip_prefix(JOIN_PUSH_PREFIX)
+                .and_then(|key| key.split_once('.'))
+            {
+                bindings
+                    .entry(name.to_owned())
+                    .or_default()
+                    .push
+                    .insert(value.clone());
+            }
+        }
+        bindings
+    }
+}
+
+/// A local remote's fetch URL, and its expansion through this machine's Git aliases.
+#[derive(Clone, Debug, Default)]
+pub struct Remote {
+    pub url: Option<String>,
+    pub expanded_url: Option<String>,
+    /// Effective push URLs, including Git's pushInsteadOf rules and all push destinations.
+    pub push_urls: BTreeSet<String>,
+}
+
+impl Remote {
+    pub fn binding(&self) -> RemoteBinding {
+        let identity = |url: &str| {
+            RemoteUrl::parse(url).map_or_else(|| without_credentials(url), |url| url.key())
+        };
+        let fetch = self
+            .expanded_url
+            .as_deref()
+            .or(self.url.as_deref())
+            .filter(|url| !url.is_empty())
+            .map(identity);
+        let push = if self.push_urls.is_empty() {
+            fetch.iter().cloned().collect()
+        } else {
+            self.push_urls
+                .iter()
+                .filter(|url| !url.is_empty())
+                .map(|url| identity(url))
+                .collect()
+        };
+        RemoteBinding { fetch, push }
+    }
+
+    pub fn urls(&self) -> impl Iterator<Item = &str> {
+        self.url
+            .iter()
+            .chain(&self.expanded_url)
+            .map(String::as_str)
+            .filter(|url| !url.is_empty())
+    }
+}
 
 /// A remote URL reduced to what identifies the repository it points to.
 #[derive(Clone, Debug, PartialEq, Eq)]

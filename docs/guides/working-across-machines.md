@@ -114,7 +114,7 @@ jj config set --user snapshot.auto-update-stale true
 ```
 
 The cost is that any `jj` command, even `jj log`, can then change files under a running build
-or an open editor. To set it on every machine at once, [share it](#share-settings).
+or an open editor. Set it separately on each machine where you want that behavior.
 
 ## Undo across machines
 
@@ -155,66 +155,58 @@ To resolve what that leaves:
 In a colocated repository, a conflicted bookmark isn't exported to git, so each machine's
 `.git` keeps its own branch until you resolve it.
 
-## Fetch and push from any machine
+## Fetch and push
 
 Remote bookmarks replicate, so `jj git fetch` on one machine updates every machine's remote
 bookmarks and their `.git` remote-tracking refs; there's no need to fetch on each. A
 `jj git push` on one machine shows as pushed on all of them.
 
-## Share settings
-
-musubi also shares the git remotes and repo config settings that machines need to agree on.
-These live outside jj's operation log. The rest of each machine's config stays local.
-
-### Git remotes
-
-Adding, renaming or removing a git remote on one machine, or pointing it at a different
-repository, does the same on every machine. Each machine keeps its own spelling of a URL: one
-can reach `origin` over https while another uses ssh, and neither changes the other's.
-Bracketed IPv6 hosts match too: `git@[2001:db8::1]:team/project.git` and
-`ssh://git@[2001:db8::1]/team/project.git` name the same repository, for joining a hive and
-sharing remote settings.
-
-If a machine needs its own identity for a remote, such as an ssh key of its own, keep the
-ordinary URL and rewrite it in that machine's user git config, since other machines wouldn't
-know an ssh host alias in the URL itself:
+Git remote definitions stay local. You can use one machine for all upstream fetches and
+pushes. Other copies can have no remotes, or keep matching remotes as unused declarations;
+they still receive Git results through musubi and can commit, rewrite, and share work.
+`musubi clone` adds no Git remotes. It checks any remotes inherited from global Git config,
+including conditional includes for the new copy's path, before creating the destination.
+To use another copy for Git access, configure it explicitly:
 
 ```sh
-git config --global url."git@github-work:".insteadOf "git@github.com:"
+jj git remote add origin https://github.com/you/app.git
 ```
 
-An https URL can carry a user and password, often a token meant for that machine alone.
-musubi strips them before sharing the URL, and from the command line that jj records with
-the operation that added the remote. To share them anyway, set
-`musubi.share-credentials = true` in that machine's jj config.
+A remote name is bound to its fetch and push destinations for the lifetime of a hive.
+`musubi join` checks every configured remote against those bindings before joining, including
+when you choose `--hive` or rejoin. A copy may omit a remote. Equivalent URL forms agree,
+but a different repository or push destination needs an unused remote name or another hive.
+
+Remote bookmarks such as `main@origin` are shared by name. A rename or removal also renames
+or removes the shared remote bookmarks, while leaving the other machines' configured remotes
+alone. Coordinate those changes before another machine fetches or pushes. The preflight
+checks reported destinations at join time; it cannot inspect an offline machine's current
+files or prevent you changing local config afterwards.
+
+Each machine can use its own equivalent URL and credentials. Git aliases are expanded before
+checking destinations; an SSH host alias that normalizes to a different host is a mismatch. musubi
+records credential-free URL hints when a copy explicitly joins, to match later copies to
+the hive. Bracketed IPv6 forms such as `git@[2001:db8::1]:team/project.git` and
+`ssh://git@[2001:db8::1]/team/project.git` match for joining. After changing a remote URL,
+run `musubi join` again to register an equivalent URL. `--hive` chooses a hive; it never
+bypasses the destination check.
+Credentials are stripped from these hints and from URLs in jj's recorded command arguments.
+
+## Configure each machine
+
+jj user, repo, and workspace config stay local. This includes `trunk()`, `immutable_heads()`,
+`git.private-commits`, aliases, and signing settings. `musubi clone` uses the destination
+machine's config to evaluate `trunk()` and adds no Git remotes.
+
+Set any protection you need on every machine where it matters. A local `immutable_heads()`
+rule cannot prevent another machine rewriting shared history. `git.private-commits` controls
+that machine's Git pushes; it does not keep commits out of musubi. All committed and
+snapshotted work replicates to the hive.
 
 After changing jj settings, `musubi sync` waits for a sync with the new settings. A sync
-already in progress finishes using its earlier settings.
-
-### Repo config
-
-The hive always shares the repo config keys that decide what is safe to rewrite or push, such
-as `revset-aliases."trunk()"` and `revset-aliases."immutable_heads()"` ([the full
-list](../reference/configuration.md#each-repositorys)). To share other keys, list them in
-`musubi.shared-config`, on any machine:
-
-```sh
-jj config set --repo musubi.shared-config '["snapshot.auto-update-stale", "aliases.l"]'
-jj config set --repo snapshot.auto-update-stale true
-```
-
-A shared key is set in every machine's repo config, so it takes precedence over each
-machine's user config. Other repo config stays each machine's own.
-
-### When machines disagree
-
-Each setting carries the time it was written, by the clock of the machine that wrote it. If
-two machines change the same setting before either has synced, the later write wins
-everywhere, and the daemon on the machine whose value was replaced logs the old and new
-values. A machine whose clock is wrong can win when it shouldn't.
-
-A machine joining a hive takes the hive's value for each setting the hive has, and adds the
-others it has, such as a remote the hive lacks.
+already in progress finishes using its earlier settings. Joining or cloning can set this
+copy's local `musubi.forget-after` default; sync does not copy config values from other
+machines.
 
 ## Abandoning operations
 

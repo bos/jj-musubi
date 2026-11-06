@@ -166,9 +166,20 @@ fn default_port(scheme: &str) -> Option<&'static str> {
 }
 
 /// Splits git's scp-like syntax, `[user@]host:path`, as git recognizes it: a colon before
-/// any slash, and not a Windows drive letter.
+/// any slash, outside a bracketed IPv6 host, and not a Windows drive letter.
 fn scp_like(url: &str) -> Option<(&str, &str)> {
-    let (authority, path) = url.split_once(':')?;
+    let first_colon = url.find(':')?;
+    // Only an @ before the address can end the user: a repository path may contain one.
+    let host_start = url[..first_colon].rfind('@').map_or(0, |at| at + 1);
+    let host = &url[host_start..];
+    let colon = if host.starts_with('[') {
+        let end = host.find(']')?;
+        (host.as_bytes().get(end + 1) == Some(&b':')).then_some(host_start + end + 1)?
+    } else {
+        first_colon
+    };
+    let (authority, rest) = url.split_at(colon);
+    let path = &rest[1..];
     let drive = authority.len() == 1 && authority.chars().all(|c| c.is_ascii_alphabetic());
     (!authority.is_empty() && !authority.contains('/') && !drive).then_some((authority, path))
 }
@@ -306,6 +317,26 @@ mod tests {
         );
         assert_eq!(key("ssh://git@[::1]:22/repo"), "[::1]/repo");
         assert_eq!(key("ssh://git@[::1]:2222/repo"), "[::1]:2222/repo");
+    }
+
+    #[test]
+    fn bracketed_ipv6_urls_name_one_repository() {
+        for form in [
+            "ssh://git@[2001:db8::1]:22/team/project.git",
+            "ssh://[2001:db8::1]/team/project",
+            "git@[2001:db8::1]:team/project.git",
+            "[2001:db8::1]:team/project",
+        ] {
+            assert_eq!(key(form), "[2001:db8::1]/team/project", "{form}");
+        }
+        assert_ne!(
+            key("git@[2001:db8::1]:team/project"),
+            key("git@[2001:db8::2]:team/project")
+        );
+        assert_eq!(
+            key("git@[2001:db8::1]:team/proj@ect"),
+            key("ssh://git@[2001:db8::1]/team/proj@ect")
+        );
     }
 
     #[test]

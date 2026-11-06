@@ -90,6 +90,8 @@ pub enum Command {
     /// a new one with `musubi create`. It starts the daemon if it isn't running, and returns
     /// once the repository has synced.
     ///
+    /// A bracketed IPv6 host matches in scp-style and ssh:// remote URLs alike.
+    ///
     /// Unless jj's config sets it already, it sets `musubi.forget-after` in the repository's
     /// config: how long the copy may go unused before the hive forgets it, `6h` when an agent
     /// runs it, `never` otherwise. `musubi create` and `musubi clone` do too.

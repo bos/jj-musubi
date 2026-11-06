@@ -95,6 +95,10 @@ got.
 Commands that take a hive accept its name, any prefix of the name that no other hive shares,
 or its id. `hub remove` takes only a whole name or an id.
 
+`musubi hub` prints commands for other machines and says whether commands on this machine
+can leave out `--hub`. It recognizes symbolic links to the default hub's directory. If the
+saved path is too long to connect to it, use the shorter `--hub` path the hub prints.
+
 ## Complete commands in your shell
 
 musubi completes its commands, flags, and paths, and the names of hives and hubs, in bash,

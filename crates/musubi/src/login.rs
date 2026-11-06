@@ -574,3 +574,6 @@ mod tests {
         assert!(text.contains("WorkingDirectory=/srv/100%% hub\n"), "{text}");
     }
 }
+
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+mod process_tests;

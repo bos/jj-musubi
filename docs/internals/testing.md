@@ -243,6 +243,15 @@ hub lacks failing; and listing, renaming, removing, and an index rebuilt after a
 `musubi-hub`'s unit tests cover URL normalization, naming, and the matching rules case by
 case.
 
+`hub::request_tests` checks the command side of hub requests over the in-memory transport:
+no responder, a hub's refusal, and a caller's deadline, with Tokio's clock paused. Missing
+local hubs fail without waiting, both before a hub directory is made and after its server
+stops. `a_hub_restarts_in_its_directory_and_keeps_its_advertised_name`, Unix only, starts a
+real hub, checks both directory and per-user lock refusals, stops it with SIGTERM, checks
+socket cleanup, then restarts it from its directory with its saved advertised name. It also
+checks that a default symlink path too long for a Unix socket leaves usable explicit `--hub`
+instructions. The clean stop lets an instrumented hub flush its coverage profile.
+
 `musubi/tests/cli.rs` runs the binary as a user would: `musubi hub`; `musubi create` starting
 a hive and `musubi join` matching it, over the hub's socket and over a stand-in for ssh whose
 shell prints a banner first; `musubi clone` by a prefix of the hive's name; `musubi list` and
@@ -266,6 +275,12 @@ release with `--deploy`, what isn't a release, a release or build the repository
 once the repository has a remote, a deploy of a revision the remote lacks. The stand-in builds
 with musubi's own build script, which names the build. It doesn't fetch a commit or tag from a
 remote.
+
+The existing `hub_join_sync_clone_and_list` fixture also checks `debug op-id` in both
+directions, with odd-length prefixes, invalid hex, and an absent operation. Its snapshots
+keep local and hive ids distinct. `debug_identifies_an_operation_received_but_not_realized`
+transfers operations and views from a real repository through the canonical store's import
+APIs, without realizing them, and checks the command's message. It starts no hub or daemon.
 
 `upgrade::process_tests` in the binary's Unix unit tests runs the real upgrade worker in
 separate disposable processes, without a repository, hub, service manager, or installed
@@ -333,6 +348,14 @@ everything the user sees, so a change to what a new user meets shows in the diff
 quick start and the test with it. `cargo insta review` accepts a new snapshot. No test reaches
 a real machine over ssh: `musubi-testutil` points `MUSUBI_SSH` at a program that doesn't
 exist, so a test that needs ssh must give a stand-in.
+
+`login::process_tests` runs installation in disposable child processes with private home,
+config and state directories and stand-ins for launchctl or systemctl. It checks failed
+installation leaves no marker, successful installation records one, the daemon and hub
+keep separate markers, only the intended environment reaches the service, and uninstall
+works even after its service file was removed. On macOS it checks both GUI and background
+launchd domains. These tests never reach the real service manager; they do not check that
+it accepts the files or runs musubi.
 
 Two CLI tests install real login services, and so run only with
 `MUSUBI_TEST_LOGIN_SERVICE=1`, which CI sets on its throwaway runners: never set it where

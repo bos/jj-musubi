@@ -59,7 +59,8 @@ pub enum Command {
     ///
     /// Runs until stopped, logging what it does. The first time, it creates the directory.
     /// If this machine has no default hub yet, it becomes it. It prints the commands other
-    /// machines run to share a repository through it.
+    /// machines run to share a repository through it, and says whether commands on this
+    /// machine can leave out --hub.
     #[command(args_conflicts_with_subcommands = true)]
     Hub {
         #[command(subcommand)]

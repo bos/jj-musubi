@@ -7,6 +7,10 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- A hub recognizes its default directory through symbolic links when it prints commands for
+  this machine. Previously, restarting it through another path to the same directory could
+  ask for `--hub` unnecessarily. Nothing needs doing on upgrading.
+
 - musubi exports bookmarks to git where jj does: in a repository with a workspace that is also
   a working tree of its git repository. Before, it exported them to any external git
   repository named `.git`, where jj writes them only on `jj git export`, and none for a

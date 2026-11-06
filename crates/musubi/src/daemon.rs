@@ -1232,6 +1232,50 @@ mod tests {
 
     use super::*;
 
+    /// Backoff expires at its deadline, but a sync or losing the command sender wakes it
+    /// early. Time here is Tokio's paused clock, shared with the production wait.
+    #[tokio::test(start_paused = true)]
+    async fn retry_wait_expires_or_answers_commands() {
+        let delay = Duration::from_secs(60);
+        let (commands, mut received) = mpsc::unbounded_channel();
+        let mut waiting = vec![];
+        {
+            let wait = pause(delay, &mut received, &mut waiting);
+            tokio::pin!(wait);
+            assert!(futures::poll!(&mut wait).is_pending());
+            tokio::time::advance(delay - Duration::from_millis(1)).await;
+            assert!(futures::poll!(&mut wait).is_pending());
+            tokio::time::advance(Duration::from_millis(1)).await;
+            assert!(matches!(
+                futures::poll!(&mut wait),
+                std::task::Poll::Ready(false)
+            ));
+        }
+        let now = tokio::time::Instant::now();
+        let (reply, mut answer) = oneshot::channel();
+        {
+            let wait = pause(delay, &mut received, &mut waiting);
+            tokio::pin!(wait);
+            assert!(futures::poll!(&mut wait).is_pending());
+            commands.send(Command::Sync(reply)).unwrap();
+            assert!(!wait.await);
+        }
+        assert_eq!(tokio::time::Instant::now(), now);
+        assert_eq!(waiting.len(), 1);
+        waiting
+            .pop()
+            .unwrap()
+            .send(Err("retrying".to_owned()))
+            .unwrap();
+        assert_eq!(answer.try_recv().unwrap().unwrap_err(), "retrying");
+        let wait = pause(delay, &mut received, &mut waiting);
+        tokio::pin!(wait);
+        assert!(futures::poll!(&mut wait).is_pending());
+        drop(commands);
+        assert!(wait.await);
+        assert_eq!(tokio::time::Instant::now(), now);
+    }
+
     /// A large log starts over, in place, so that a daemon launchd started, which writes to
     /// it through its own handle, goes on logging to it.
     #[test]

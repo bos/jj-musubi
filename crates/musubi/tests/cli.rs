@@ -604,6 +604,9 @@ fn hub_join_sync_clone_and_list() {
     ");
     });
 
+    // The same hub and daemon also serve the real interactive path through a PTY.
+    top_in_a_terminal(&beta);
+
     // Operation ids translate between this machine's and the hive's.
     let local = beta.jj(&["op", "log", "--no-graph", "-n1", "-T", "id"]);
     let translated = musubi_in(&env, &logs, &beta, &["debug", "op-id", &local]);
@@ -738,6 +741,54 @@ fn hub_join_sync_clone_and_list() {
       renamed  1 machine: alpha
     Daemon: running, serving 0 repositories; doesn't start at login; `musubi daemon install` makes it
     ");
+}
+
+/// Screen predicates synchronize with the real process; no test waits for a refresh timer.
+/// Refresh scheduling itself is tested under paused Tokio time in `top::tests`.
+fn top_in_a_terminal(repo: &TestRepo) {
+    use termlens::Key;
+    use termlens::Terminal;
+
+    for quit in [Key::Char('q'), Key::Esc, Key::Ctrl('c')] {
+        let command = repo.program(musubi());
+        let mut terminal = Terminal::builder()
+            .size(80, 24)
+            .timeout(DEADLINE)
+            .env_clear()
+            .envs(
+                command
+                    .get_envs()
+                    .filter_map(|(key, value)| value.map(|value| (key, value))),
+            )
+            .current_dir(command.get_current_dir().unwrap())
+            .args(["top", "--interval", "60"])
+            .spawn(musubi())
+            .unwrap();
+        terminal
+            .wait_until(|screen| {
+                screen.contains("project since the hub started:")
+                    && screen.alternate_screen()
+                    && !screen.cursor_visible()
+            })
+            .unwrap();
+        terminal.send(Key::Char('-')).unwrap();
+        terminal
+            .wait_until(|screen| screen.contains("every 59s"))
+            .unwrap();
+        terminal.send(Key::Char('+')).unwrap();
+        terminal
+            .wait_until(|screen| screen.contains("every 1m"))
+            .unwrap();
+        terminal.resize(100, 30).unwrap();
+        terminal
+            .wait_until(|screen| screen.row_text(29).contains("q quit"))
+            .unwrap();
+        terminal.send(quit).unwrap();
+        assert!(terminal.wait_exit().unwrap().success());
+        let screen = terminal.screen();
+        assert!(!screen.alternate_screen(), "{screen}");
+        assert!(screen.cursor_visible(), "{screen}");
+    }
 }
 
 /// `musubi completion` prints a script for each shell it names.

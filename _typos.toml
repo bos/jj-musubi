@@ -1,7 +1,13 @@
 [files]
 extend-exclude = ["formal/.lake", "target", "Cargo.lock"]
 
+[default]
+# The 32-column terminal snapshot clips ISSUES at the right edge.
+extend-ignore-re = ['" HEAD IN/ OUT/ OPS COMM MAC ISSU"']
+
 [default.extend-words]
+# The terminal UI library.
+ratatui = "ratatui"
 # The Lean model's names: `Anc` is ancestry (`anc*`), `nd` a node, `hed` a head, `hax` that
 # `a` is below `x`.
 anc = "anc"

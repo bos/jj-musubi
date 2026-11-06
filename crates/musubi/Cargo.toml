@@ -55,6 +55,8 @@ widestring.workspace = true
 insta.workspace = true
 musubi-testutil.workspace = true
 postcard.workspace = true
+termlens.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

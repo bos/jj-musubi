@@ -251,6 +251,7 @@ pub enum Command {
     /// For a machine that went away without `musubi leave`, as a short-lived machine can.
     /// Its working-copy commit is abandoned if it's empty, and otherwise stays as an ordinary
     /// commit. If the copy is still there, the hive shows it again as soon as it's used.
+    /// A copy with no workspaces can still be forgotten, by its name in `musubi status`.
     Forget {
         /// The machine, as its working copies are named here: `laptop` for `laptop/default@`,
         /// `laptop-1a2b` for `laptop-1a2b/default@`, or, where even the start of its id is

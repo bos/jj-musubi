@@ -109,6 +109,9 @@ the name its working copy has there:
 musubi forget laptop
 ```
 
+A copy remains present if its last workspace was removed with `jj workspace forget`.
+`musubi status` still lists its name under Copies, and `musubi forget` accepts that name.
+
 The other machines stop showing `laptop/default@` as they sync, and the hub stops counting
 it. If the copy still exists after all, it comes back as soon as a `jj` command in it records
 an operation: one that changes something or snapshots a change to the working copy. But if

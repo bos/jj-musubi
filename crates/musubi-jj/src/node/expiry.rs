@@ -223,19 +223,20 @@ impl NodeRepo {
         Ok(last)
     }
 
-    /// The name each other machine's workspaces are shown under here, by machine key.
+    /// The name of each other present copy, by machine key, even with no workspaces.
     pub(super) fn shown_names(
         &self,
         canonical: &CanonicalOp,
     ) -> Result<BTreeMap<String, String>, NodeError> {
+        if canonical == self.canonical.root_operation_id() {
+            return Ok(BTreeMap::new());
+        }
+        let view = self.canonical.read_operation_view(canonical)?;
+        let presence = self.presence(canonical)?;
         Ok(self
-            .other_names(canonical)?
+            .machine_prefixes(canonical, &view)?
             .into_iter()
-            .filter_map(|(local, key)| {
-                let (machine, _) = workspaces::split_key(key.as_str())?;
-                let (prefix, _) = local.as_str().split_once('/')?;
-                Some((machine.to_owned(), prefix.to_owned()))
-            })
+            .filter(|(key, _)| key != self.machine.key() && presence.is_present(key))
             .collect())
     }
 }

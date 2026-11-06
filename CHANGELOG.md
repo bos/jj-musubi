@@ -7,6 +7,12 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- `musubi forget` can find a present copy after it removes its last workspace with
+  `jj workspace forget`. Previously it refused, claiming no machine of that name existed,
+  because it found machines only through their workspaces. `musubi status` also keeps the
+  correct qualified name for such a copy when local workspace names reserve its plain name.
+  Nothing needs doing on upgrading.
+
 - Clone fills missing jj settings once from defaults recorded when the hive was created:
   `user.name` and `user.email` by default. Set `musubi.clone-config` before creating a hive
   to select other keys, or `[]` for none. Existing destination settings win, and later syncs

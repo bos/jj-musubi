@@ -61,6 +61,12 @@ which makes the suite three times as fast; a bare `cargo nextest run` uses the d
 `MUSUBI_KEEP_TEST_DIRS` keeps the directories after a run, for inspecting a failure, and puts
 them on the disk.
 
+`concurrent_first_joins_share_one_key` starts two key setups after both callers see no
+key, using the real `ssh-keygen`. Both must succeed, only one may create the pair, and the
+public key must match the private key. Without the key lock and recheck, the reproducer
+fails when one `ssh-keygen` tries to overwrite the other's file. The existing SSH binary
+workflow still checks key creation and authorization through the shipped commands.
+
 `a_copy_without_workspaces_can_be_forgotten_by_name` removes beta's last workspace with jj,
 syncs it, and resolves beta's name, qualified name and key for forgetting, including with a
 reserved local prefix. Looking up copies only through their workspaces returns no match and

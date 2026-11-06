@@ -506,19 +506,18 @@ async fn probe(dest: &str, key: &Path) -> Result<(), Failure> {
 /// ssh, which may ask for a password, if it doesn't work yet.
 pub async fn prepare(ui: &Ui, dest: &str) -> anyhow::Result<()> {
     let key = key_path()?;
-    if key.exists() {
-        match probe(dest, &key).await {
-            Ok(()) => return Ok(()),
-            Err(failure) if failure.refused() => {}
-            Err(failure) => anyhow::bail!(failure.describe(dest)),
-        }
-    } else {
-        create_key(&key)?;
+    if ensure_key(&key)? {
         writeln!(
             ui.stdout(),
             "Created an ssh key for musubi: {}",
             key.display()
         )?;
+    } else {
+        match probe(dest, &key).await {
+            Ok(()) => return Ok(()),
+            Err(failure) if failure.refused() => {}
+            Err(failure) => anyhow::bail!(failure.describe(dest)),
+        }
     }
     authorize(ui, dest, &key).await?;
     probe(dest, &key)
@@ -526,9 +525,12 @@ pub async fn prepare(ui: &Ui, dest: &str) -> anyhow::Result<()> {
         .map_err(|failure| anyhow::anyhow!(failure.describe(dest)))
 }
 
-fn create_key(key: &Path) -> anyhow::Result<()> {
-    if let Some(dir) = key.parent() {
-        fs::create_dir_all(dir)?;
+/// Waits for another first join to finish both key files before probing or authorizing.
+/// Returns whether this call created the pair.
+fn ensure_key(key: &Path) -> anyhow::Result<bool> {
+    let _lock = crate::lock::lock(&key.with_extension("lock"))?;
+    if key.exists() {
+        return Ok(false);
     }
     let host = whoami::hostname().unwrap_or_else(|_| "localhost".to_owned());
     let output = std::process::Command::new("ssh-keygen")
@@ -551,7 +553,7 @@ fn create_key(key: &Path) -> anyhow::Result<()> {
         "ssh-keygen failed: {}",
         String::from_utf8_lossy(&output.stderr).trim()
     );
-    Ok(())
+    Ok(true)
 }
 
 /// Appends the key to `~/.ssh/authorized_keys` on `dest`, unless it is there already. The
@@ -591,6 +593,43 @@ async fn authorize(ui: &Ui, dest: &str, key: &Path) -> anyhow::Result<()> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    /// Two first joins on one machine can both find no key before either creates it.
+    /// They must reuse one complete key pair rather than overwrite it or fail a join.
+    #[test]
+    fn concurrent_first_joins_share_one_key() {
+        let dir = musubi_testutil::tempdir();
+        let key = dir.path().join("hub_key");
+        let start = std::sync::Barrier::new(2);
+        let created = std::thread::scope(|scope| {
+            let joins: Vec<_> = (0..2)
+                .map(|_| {
+                    scope.spawn(|| {
+                        assert!(!key.exists());
+                        start.wait();
+                        ensure_key(&key)
+                    })
+                })
+                .collect();
+            joins
+                .into_iter()
+                .map(|join| join.join().unwrap().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(created.into_iter().filter(|created| *created).count(), 1);
+        let derived = std::process::Command::new("ssh-keygen")
+            .args(["-y", "-f"])
+            .arg(&key)
+            .output()
+            .unwrap();
+        assert!(derived.status.success());
+        let public = fs::read_to_string(key.with_extension("pub")).unwrap();
+        let derived = String::from_utf8(derived.stdout).unwrap();
+        assert_eq!(
+            public.split_whitespace().take(2).collect::<Vec<_>>(),
+            derived.split_whitespace().take(2).collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     fn authorizing_keeps_other_keys_on_lines_of_their_own() {

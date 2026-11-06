@@ -7,6 +7,11 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- Concurrent first joins on one machine reuse one completed SSH key pair. Previously both
+  could start `ssh-keygen` for the same files, causing a join to fail or replace the other's
+  key. Key generation is locked until both files are ready, before either join probes or
+  authorizes the key. Nothing needs doing on upgrading.
+
 - `musubi forget` can find a present copy after it removes its last workspace with
   `jj workspace forget`. Previously it refused, claiming no machine of that name existed,
   because it found machines only through their workspaces. `musubi status` also keeps the

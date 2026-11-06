@@ -784,6 +784,14 @@ commit revokes opaque inheritance unless independent replay certifies its result
 parents and local base let native jj witness a restored name. A realization's marker neither
 certifies that name nor disqualifies its independently checked replay.
 
+Native trim fix-ups have a separate source witness: the accepted history observed before the
+trim. Only unchanged foreign bindings already certified there can be inherited.
+`workspace_fixup_witnesses_require_the_native_source` pairs an offline rename with a foreign
+workspace forget and a full trim, then checks the resulting native merge certificate. It also
+loses the sender's evidence deliberately: reparenting an old native fix-up or receiving a marked
+realization cannot create new evidence, and a replacement copy cannot inherit its predecessor's
+pending trim context. Removing either source guard fails the negative control.
+
 The reference (`e2e_search/reference.rs`) is a jj repository of the test's own that replays
 the hub's history, operation by operation, with the same parents:
 

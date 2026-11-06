@@ -156,6 +156,14 @@ pub struct RetainedOperation {
     pub parent: Option<jj_lib::op_store::View>,
 }
 
+struct WorkspaceTrim {
+    copy: String,
+    input: CanonicalOp,
+    wrote_fixup: bool,
+    seen: BTreeSet<jj_lib::op_store::OperationId>,
+    before: BTreeSet<String>,
+}
+
 pub struct World {
     pub fx: Fixture,
     pub origin: Origin,
@@ -190,6 +198,9 @@ pub struct World {
     operation_sources: BTreeMap<(usize, String), Option<OperationSource>>,
     operation_seen: Vec<BTreeSet<jj_lib::op_store::OperationId>>,
     pub commands: BTreeMap<String, CommandSnapshot>,
+    /// The accepted history observed before a native trim, independent of its later fix-up.
+    workspace_trim_inputs: BTreeMap<usize, WorkspaceTrim>,
+    pub workspace_fixup_inputs: BTreeMap<String, (String, CanonicalOp)>,
     /// The object and jj metadata stores of command sources, including copies later
     /// replaced. The fixture retains their directories until the case ends.
     pub command_sources: BTreeMap<PathBuf, PathBuf>,
@@ -299,6 +310,8 @@ impl World {
             operation_sources: BTreeMap::new(),
             operation_seen: vec![],
             commands: BTreeMap::new(),
+            workspace_trim_inputs: BTreeMap::new(),
+            workspace_fixup_inputs: BTreeMap::new(),
             command_sources: BTreeMap::new(),
             seen: vec![None; setup.nodes],
             ledger: Ledger::default(),
@@ -1087,6 +1100,16 @@ impl World {
         };
         self.note_pruning(pruned);
         self.record_merges(m);
+        // A fully driven sync also finishes an unpublished-only trim, which produces
+        // no shared drop or fix-up at all.
+        if self.fx.hive.members[m]
+            .adapter
+            .repo()
+            .pending_drops()
+            .is_empty()
+        {
+            self.workspace_trim_inputs.remove(&m);
+        }
         self.note_shown_again();
         steps
     }
@@ -1209,6 +1232,7 @@ impl World {
     /// Observe operations before and after receipt too. A publisher cannot observe an
     /// offline copy's old operation, but a received trim keeps its view while reparenting it.
     fn observe_operation_sources(&mut self, m: usize) {
+        self.observe_workspace_fixups(m);
         self.operation_seen.resize_with(self.nodes(), BTreeSet::new);
         let store = self.fx.hive.members[m]
             .adapter
@@ -1268,6 +1292,42 @@ impl World {
         }
     }
 
+    /// Canonicalization may replace a native fix-up at the heads with a marked version.
+    /// Read its immutable original too, but only files created during this local trim.
+    fn observe_workspace_fixups(&mut self, m: usize) {
+        let copy = self.fx.machine_key(m);
+        let Some(trim) = self.workspace_trim_inputs.get_mut(&m) else {
+            return;
+        };
+        assert_eq!(trim.copy, copy, "trim evidence outlived its copy");
+        let node = self.fx.hive.members[m].adapter.repo();
+        let store = node.loader().op_store();
+        let files = fs::read_dir(node.repo_path().join("op_store/operations")).unwrap();
+        for file in files {
+            let file = file.unwrap();
+            let Some(id) = file.file_name().to_str().and_then(OpId::try_from_hex) else {
+                continue;
+            };
+            if !trim.seen.insert(id.clone()) {
+                continue;
+            }
+            let op = futures::executor::block_on(store.read_operation(&id)).unwrap();
+            if !op.metadata.attributes.contains_key("musubi.fixup")
+                || op
+                    .metadata
+                    .attributes
+                    .contains_key(musubi_jj::node::CANONICAL_ATTRIBUTE)
+                || trim.before.contains(&merge_key(&op))
+            {
+                continue;
+            }
+            trim.wrote_fixup = true;
+            self.workspace_fixup_inputs
+                .entry(merge_key(&op))
+                .or_insert_with(|| (trim.copy.clone(), trim.input.clone()));
+        }
+    }
+
     fn remember_retained(&mut self, key: String, source: RetainedOperation) {
         // A later trim must not replace the original input with an already-reparented one.
         // An own operation knows that input; a received realization has a different parent.
@@ -1300,9 +1360,25 @@ impl World {
     /// Records the commits node `m`'s merges made, after a sync.
     pub fn record_merges(&mut self, m: usize) {
         self.observe_operation_sources(m);
+        self.finish_workspace_trim(m);
         let after = self.seen(m);
         let what = format!("{}: merge by its node", self.machine(m));
         self.ledger.record_sync(m, &what, &after);
+    }
+
+    fn finish_workspace_trim(&mut self, m: usize) {
+        if self
+            .workspace_trim_inputs
+            .get(&m)
+            .is_some_and(|trim| trim.wrote_fixup)
+            && self.fx.hive.members[m]
+                .adapter
+                .repo()
+                .pending_drops()
+                .is_empty()
+        {
+            self.workspace_trim_inputs.remove(&m);
+        }
     }
 
     /// Lets node `m` poll the hub and take at most `steps` policy steps, delivering every
@@ -1372,6 +1448,15 @@ impl World {
             };
             self.deliver(m, poll, false)?;
             self.fx.hive.members[m].adapter.before_sync()?;
+            self.observe_workspace_fixups(m);
+            if self.fx.hive.members[m]
+                .adapter
+                .repo()
+                .pending_drops()
+                .is_empty()
+            {
+                self.workspace_trim_inputs.remove(&m);
+            }
             let mut adopted = false;
             for _ in 0..64 {
                 if adopted && !self.behind_hub(m) {
@@ -1509,6 +1594,15 @@ impl World {
         };
         deliver(self, poll)?;
         self.fx.hive.members[m].adapter.before_sync()?;
+        self.observe_workspace_fixups(m);
+        if self.fx.hive.members[m]
+            .adapter
+            .repo()
+            .pending_drops()
+            .is_empty()
+        {
+            self.workspace_trim_inputs.remove(&m);
+        }
         let mut realized = 0;
         for _ in 0..steps {
             let member = &mut self.fx.hive.members[m];
@@ -1828,6 +1922,7 @@ impl World {
         }
         self.baseline_merge_keys.extend(self.merge_keys(m));
         self.operation_sources.retain(|(copy, _), _| *copy != m);
+        self.workspace_trim_inputs.remove(&m);
         self.operation_seen.resize_with(self.nodes(), BTreeSet::new);
         self.operation_seen[m].clear();
         self.sync_counted(m);
@@ -1986,6 +2081,7 @@ impl World {
     /// `jj op abandon` of `spec` on machine `m`: one operation, or a range `x..y`, which drops
     /// the operations `dropped`.
     pub fn abandon_ops(&mut self, m: usize, spec: &str, dropped: &[String]) {
+        self.begin_workspace_trim(m);
         let store = self.fx.hive.members[m]
             .adapter
             .repo()
@@ -2022,6 +2118,36 @@ impl World {
         }
         for (key, merge) in dropped {
             self.abandoned.push((m, key, merge));
+        }
+    }
+
+    fn begin_workspace_trim(&mut self, m: usize) {
+        self.observe_operation_sources(m);
+        self.finish_workspace_trim(m);
+        if !self.workspace_trim_inputs.contains_key(&m) {
+            let node = self.fx.hive.members[m].adapter.repo();
+            let seen: BTreeSet<_> = fs::read_dir(node.repo_path().join("op_store/operations"))
+                .unwrap()
+                .map(|file| file.unwrap())
+                .filter_map(|file| file.file_name().to_str().and_then(OpId::try_from_hex))
+                .collect();
+            let store = node.loader().op_store();
+            let before = seen
+                .iter()
+                .map(|id| futures::executor::block_on(store.read_operation(id)).unwrap())
+                .filter(|op| op.metadata.attributes.contains_key("musubi.fixup"))
+                .map(|op| merge_key(&op))
+                .collect();
+            self.workspace_trim_inputs.insert(
+                m,
+                WorkspaceTrim {
+                    copy: self.fx.machine_key(m),
+                    input: CanonicalOp(self.fx.hive.members[m].core.known().1.clone()),
+                    wrote_fixup: false,
+                    seen,
+                    before,
+                },
+            );
         }
     }
 
@@ -2277,4 +2403,108 @@ fn without_op_ids(key: &str) -> String {
         }
     }
     key.to_owned()
+}
+
+#[test]
+fn workspace_fixup_witnesses_require_the_native_source() {
+    let mut world = World::new(Setup {
+        nodes: 3,
+        naming: Naming::Own,
+        prejoin: false,
+        secondary: false,
+    });
+    world.rename_workspace(2, 0, "default");
+    world.sync(2);
+    world.sync(0);
+    let (base, dropped) = world.trim_range(0);
+    world.rename_workspace(2, 0, "work");
+    let foreign = world
+        .foreign_workspace_names(0)
+        .into_iter()
+        .find(|name| name.ends_with("/default"))
+        .unwrap();
+    world.jj(0, &["workspace", "forget", &foreign]);
+    world.jj(0, &["new", "-m", "after forgetting a foreign workspace"]);
+    world.abandon_ops(0, &format!("..{base}"), &dropped);
+    world.sync(0);
+    world.sync(2);
+    world.sync(0);
+    let native: BTreeSet<_> = world.workspace_fixup_inputs.keys().cloned().collect();
+    assert!(!native.is_empty(), "the trim must create native fix-ups");
+    assert!(!world.workspace_trim_inputs.contains_key(&0));
+    let gamma = format!("{}/default", world.fx.machine_key(2));
+    let mut reference = crate::reference::Reference::build(&world);
+    assert!(reference.witnessed_workspace_names(&world).contains(&gamma));
+
+    let operations = |world: &World, m: usize| {
+        let node = world.fx.hive.members[m].adapter.repo();
+        let store = node.loader().op_store();
+        fs::read_dir(node.repo_path().join("op_store/operations"))
+            .unwrap()
+            .map(|file| file.unwrap())
+            .filter_map(|file| file.file_name().to_str().and_then(OpId::try_from_hex))
+            .map(|id| {
+                let op = futures::executor::block_on(store.read_operation(&id)).unwrap();
+                (id, op)
+            })
+            .collect::<Vec<_>>()
+    };
+    let (id, old) = operations(&world, 0)
+        .into_iter()
+        .find(|(_, op)| {
+            native.contains(&merge_key(op))
+                && op.metadata.attributes.get("musubi.work") == Some(&world.fx.machine_key(2))
+                && !op
+                    .metadata
+                    .attributes
+                    .contains_key(musubi_jj::node::CANONICAL_ATTRIBUTE)
+        })
+        .unwrap();
+    let old_key = merge_key(&old);
+    let parent = old.parents[0].hex();
+    world.workspace_fixup_inputs.clear();
+    world.jj(
+        0,
+        &[
+            "--ignore-working-copy",
+            "--at-op",
+            &id.hex(),
+            "new",
+            "-m",
+            "above old fix-up",
+        ],
+    );
+    world.abandon_ops(0, &parent, std::slice::from_ref(&parent));
+    assert!(
+        operations(&world, 0).iter().any(|(now, op)| {
+            *now != id
+                && merge_key(op) == old_key
+                && !op
+                    .metadata
+                    .attributes
+                    .contains_key(musubi_jj::node::CANONICAL_ATTRIBUTE)
+        }),
+        "jj must actually reparent the old native fix-up"
+    );
+    world.observe_workspace_fixups(0);
+    assert!(!world.workspace_fixup_inputs.contains_key(&old_key));
+
+    // Lose the sender's witness, then give the receiver an older accepted baseline.
+    // Receiving a marked realization must not turn that baseline into source evidence.
+    world.workspace_fixup_inputs.clear();
+    world.begin_workspace_trim(1);
+    world.sync(1);
+    let received = operations(&world, 1).iter().any(|(_, op)| {
+        native.contains(&merge_key(op))
+            && op
+                .metadata
+                .attributes
+                .contains_key(musubi_jj::node::CANONICAL_ATTRIBUTE)
+    });
+    assert!(received, "the receiver must actually realize a fix-up");
+    assert!(world.workspace_fixup_inputs.is_empty());
+    assert!(!world.workspace_trim_inputs.contains_key(&1));
+    world.begin_workspace_trim(1);
+    world.clone_copy(1);
+    assert!(!world.workspace_trim_inputs.contains_key(&1));
 }

@@ -915,6 +915,27 @@ impl Reference {
                 }
             }
         }
+        // A full native trim removes the ancestry of other copies' last work. Its
+        // fix-up must preserve their accepted slots. Use the history observed before
+        // the trim, never the fix-up's work marker alone, to certify an unchanged slot.
+        if let Some((trimmer, input)) = world.workspace_fixup_inputs.get(&merge_key(&op))
+            && input != id
+            && let Some(owner) = op.metadata.attributes.get("musubi.work")
+            && owner != trimmer
+        {
+            let source = self.workspace_certificate(world, input);
+            for (key, target) in &source.keys {
+                if key.split_once('/').is_some_and(|(copy, _)| copy == owner)
+                    && view.wc_commit_ids.get(WorkspaceName::new(key)) == Some(target)
+                {
+                    result.keys.insert(key.clone(), target.clone());
+                    result.dormant.remove(key);
+                    if source.merged.contains(key) {
+                        result.merged.insert(key.clone());
+                    }
+                }
+            }
+        }
         if let Some(command) = command {
             if op
                 .metadata

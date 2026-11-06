@@ -7,6 +7,12 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- SSH key setup retries cleanly after a public-file write fails, including when an older public
+  file is still present. A new key becomes active only after both halves are ready. Existing
+  private keys are retained; a missing or empty `hub_key.pub` is recreated from its private key.
+  Previously failed setup could leave an unusable pair, and later authorization could add the
+  older public key. Fix the reported file error and retry the original command.
+
 - Clone keeps the exact hive selected by its first name lookup. A different hive named
   with that hive's id could previously redirect the clone to the wrong repository during
   preflight. The hub now checks only the resolved id, and the client rejects a reply for

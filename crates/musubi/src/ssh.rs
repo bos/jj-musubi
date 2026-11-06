@@ -526,12 +526,42 @@ pub async fn prepare(ui: &Ui, dest: &str) -> anyhow::Result<()> {
 }
 
 /// Waits for another first join to finish both key files before probing or authorizing.
-/// Returns whether this call created the pair.
+/// Returns whether this call published a new pair.
 fn ensure_key(key: &Path) -> anyhow::Result<bool> {
     let _lock = crate::lock::lock(&key.with_extension("lock"))?;
     if key.exists() {
+        let public = key.with_extension("pub");
+        if !fs::metadata(&public).is_ok_and(|metadata| metadata.len() > 0) {
+            // ssh-keygen saves the private key first. A failed public-file write must not
+            // rotate that identity or leave every later authorization unable to read it.
+            let output = std::process::Command::new("ssh-keygen")
+                .args(["-y", "-P", "", "-f"])
+                .arg(key)
+                .stdin(Stdio::null())
+                .output()
+                .context("deriving the missing public SSH key")?;
+            anyhow::ensure!(
+                output.status.success(),
+                "ssh-keygen could not derive the missing public key: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            let derived = String::from_utf8(output.stdout)?;
+            let host = whoami::hostname().unwrap_or_else(|_| "localhost".to_owned());
+            let contents = format!("{} musubi@{host}\n", derived.trim());
+            musubi_jj::files::replace(&public, contents.as_bytes())?;
+        }
         return Ok(false);
     }
+    let mut temporary = tempfile::Builder::new();
+    temporary.prefix("hub-key-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        temporary.permissions(fs::Permissions::from_mode(0o700));
+    }
+    let temporary = temporary.tempdir_in(key.parent().context("SSH key path has no parent")?)?;
+    let temporary_key = temporary.path().join("key");
     let host = whoami::hostname().unwrap_or_else(|_| "localhost".to_owned());
     let output = std::process::Command::new("ssh-keygen")
         .args([
@@ -544,7 +574,7 @@ fn ensure_key(key: &Path) -> anyhow::Result<bool> {
             &format!("musubi@{host}"),
             "-f",
         ])
-        .arg(key)
+        .arg(&temporary_key)
         .stdin(Stdio::null())
         .output()
         .context("running ssh-keygen")?;
@@ -553,6 +583,25 @@ fn ensure_key(key: &Path) -> anyhow::Result<bool> {
         "ssh-keygen failed: {}",
         String::from_utf8_lossy(&output.stderr).trim()
     );
+    // The private filename is the publication point: whenever it exists, its public
+    // half is ready. A failed keygen or public write leaves no published identity.
+    let public = fs::read(temporary_key.with_extension("pub"))?;
+    let public_path = key.with_extension("pub");
+    musubi_jj::files::replace(&public_path, &public).map_err(|err| {
+        anyhow::anyhow!(
+            "could not save musubi's public SSH key {}: {err}",
+            public_path.display()
+        )
+    })?;
+    tempfile::TempPath::try_from_path(temporary_key)?
+        .persist_noclobber(key)
+        .map_err(|err| {
+            anyhow::anyhow!(
+                "could not save musubi's private SSH key {}: {}",
+                key.display(),
+                err.error
+            )
+        })?;
     Ok(true)
 }
 
@@ -593,6 +642,61 @@ async fn authorize(ui: &Ui, dest: &str, key: &Path) -> anyhow::Result<()> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    /// A failed public-file publication leaves no private identity that could block a
+    /// retry. Existing keys survive public-file repair, and stale public files are replaced.
+    #[test]
+    fn key_setup_retries_after_the_public_file_could_not_be_written() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let mut previous_public = String::new();
+        for failure in 0..3 {
+            let dir = musubi_testutil::tempdir();
+            let key = dir.path().join("hub_key");
+            let public = key.with_extension("pub");
+            if failure == 0 {
+                fs::create_dir(&public).unwrap();
+                assert!(ensure_key(&key).is_err());
+                assert!(!key.exists(), "a failed setup published a private key");
+                fs::remove_dir(&public).unwrap();
+            } else {
+                fs::write(&public, if failure == 1 { "" } else { &previous_public }).unwrap();
+                fs::set_permissions(&public, fs::Permissions::from_mode(0o400)).unwrap();
+            }
+            assert!(
+                ensure_key(&key).unwrap(),
+                "retry must publish a complete pair"
+            );
+            let private = fs::read(&key).unwrap();
+            let derived = std::process::Command::new("ssh-keygen")
+                .args(["-y", "-f"])
+                .arg(&key)
+                .output()
+                .unwrap();
+            assert!(derived.status.success());
+            let derived = String::from_utf8(derived.stdout).unwrap();
+            let published = fs::read_to_string(&public).unwrap();
+            assert_eq!(
+                published.split_whitespace().take(2).collect::<Vec<_>>(),
+                derived.split_whitespace().take(2).collect::<Vec<_>>()
+            );
+            fs::remove_file(&public).unwrap();
+            assert!(
+                !ensure_key(&key).unwrap(),
+                "public-file repair rotated the key"
+            );
+            assert!(
+                fs::read(&key).unwrap() == private,
+                "the private key changed"
+            );
+            let public = fs::read_to_string(public).unwrap();
+            assert_eq!(
+                public.split_whitespace().take(2).collect::<Vec<_>>(),
+                derived.split_whitespace().take(2).collect::<Vec<_>>()
+            );
+            previous_public = public;
+        }
+    }
 
     /// Two first joins on one machine can both find no key before either creates it.
     /// They must reuse one complete key pair rather than overwrite it or fail a join.

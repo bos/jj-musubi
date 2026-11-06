@@ -174,6 +174,10 @@ in its state directory (`~/.local/state/musubi` on Linux and macOS), and adds it
 restrict,command="musubi hub connect" ssh-ed25519 AAAA... musubi@laptop
 ```
 
+If setup fails, retry the command once the reported problem is fixed. A new key becomes active
+only when both key files are ready. Musubi preserves an existing private key and recreates its
+public-key file if missing or empty.
+
 `command=` means the key can reach the hub and nothing else on that machine. musubi adds it
 through your own ssh, so ssh may ask for your password that once. After that, the daemon uses
 this key and never prompts. It needs an ssh agent only for a `ProxyJump` host, or to sign

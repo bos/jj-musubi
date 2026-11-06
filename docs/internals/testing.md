@@ -70,6 +70,13 @@ name instead. A missing id must be refused even if another hive uses that string
 Resolution returns a distinct `HiveId`, which clone carries through its preflight request;
 passing that identity back to name resolution requires an explicit conversion to text.
 
+`key_setup_retries_after_the_public_file_could_not_be_written` obstructs the public-key path with
+a directory, or starts with an empty or stale read-only public file. A failed setup must leave
+no published private key; a retry must publish a matching pair. Removing the public file from
+that pair then repairs it without changing the private key. Before the fix, `ssh-keygen` saved
+the private key first, and a public-file write failure left it blocking every retry. A nonempty
+public file left from an older identity could also survive and be authorized on the next try.
+
 `concurrent_first_joins_share_one_key` starts two key setups after both callers see no
 key, using the real `ssh-keygen`. Both must succeed, only one may create the pair, and the
 public key must match the private key. Without the key lock and recheck, the reproducer

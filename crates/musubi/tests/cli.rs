@@ -3415,6 +3415,19 @@ fn machines_reach_the_hub_over_ssh() {
         command.args(args).env("MUSUBI_SSH", &ssh);
         run(&env, &logs, command)
     };
+    let key = state_dir(&env, &alpha).join("hub_key");
+    fs::create_dir_all(key.with_extension("pub")).unwrap();
+    let mut blocked = alpha.program(musubi());
+    blocked
+        .args(["create", "--hub", "hubhost"])
+        .env("MUSUBI_SSH", &ssh);
+    let (ok, out, err) = try_run(&logs, &env, blocked);
+    assert!(!ok && out.is_empty());
+    insta::assert_snapshot!(err, @"
+    Error: could not save musubi's public SSH key $ROOT/home/musubi-alpha/hub_key.pub: Is a directory (os error 21)
+    ");
+    assert!(!key.exists(), "failed setup published a private identity");
+    fs::remove_dir(key.with_extension("pub")).unwrap();
     let out = over_ssh(&alpha, &["create", "--hub", "hubhost"]);
     insta::assert_snapshot!(out, @"
     Created an ssh key for musubi: $ROOT/home/musubi-alpha/hub_key

@@ -1142,7 +1142,7 @@ fn hub_join_sync_clone_and_list() {
 
     Arguments:
       <HIVE>
-              The hive: a name, a prefix of one, or an id
+              The hive: a name, a prefix of one, or an id, resolved once before setup
 
       <DESTINATION>
               A new or empty directory for the repository. Missing parent directories are made
@@ -1479,6 +1479,31 @@ fn the_daemon_picks_up_new_repositories() {
     wait_for(&logs, "work after the hub's restart to reach beta", || {
         try_log(&beta_second).is_some_and(|log| log.contains("after the restart"))
     });
+    // A different hive's name must not shadow the id returned for the requested hive.
+    let record: toml::Table =
+        toml::from_str(&fs::read_to_string(alpha.repo_path().join("musubi/hive.toml")).unwrap())
+            .unwrap();
+    let alpha_id = record["hive"].as_str().unwrap();
+    musubi_in(&env, &logs, &alpha, &["hub", "rename", "second", alpha_id]);
+    alpha.jj(&["bookmark", "create", "main", "-r", "@-"]);
+    musubi_in(&env, &logs, &alpha, &["sync"]);
+    beta.jj(&[
+        "config",
+        "set",
+        "--user",
+        r#"revset-aliases."trunk()""#,
+        "main",
+    ]);
+    let destination = env.root().join("beta-alpha");
+    let out = musubi_in(
+        &env,
+        &logs,
+        &beta,
+        &["clone", "alpha", destination.to_str().unwrap()],
+    );
+    insta::assert_snapshot!(out, @"Cloned hive alpha into $ROOT/beta-alpha");
+    assert_eq!(fs::read_to_string(destination.join("a")).unwrap(), "a");
+    assert!(!destination.join("s").exists());
 }
 
 #[test]

@@ -125,7 +125,7 @@ pub enum Command {
     /// recorded names for conflicting destinations. It adds no Git remotes; configure one
     /// here when you want to fetch or push upstream.
     Clone {
-        /// The hive: a name, a prefix of one, or an id.
+        /// The hive: a name, a prefix of one, or an id, resolved once before setup.
         #[arg(add = ArgValueCandidates::new(completion::hives))]
         hive: String,
         /// A new or empty directory for the repository. Missing parent directories are made.

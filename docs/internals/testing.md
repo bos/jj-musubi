@@ -61,6 +61,15 @@ which makes the suite three times as fast; a bare `cargo nextest run` uses the d
 `MUSUBI_KEEP_TEST_DIRS` keeps the directories after a run, for inspecting a failure, and puts
 them on the disk.
 
+`clone_preflight_keeps_the_resolved_hive` creates a hive whose name equals another hive's
+id, then keeps the id returned for the requested name through preflight. Reinterpreting that
+id as a name switches hives and fails the test. `the_daemon_picks_up_new_repositories` also
+renames a second hive to alpha's id and clones alpha through the binary, checking both the
+printed hive name and the files checked out. Before the fix it printed the second hive's
+name instead. A missing id must be refused even if another hive uses that string as its name.
+Resolution returns a distinct `HiveId`, which clone carries through its preflight request;
+passing that identity back to name resolution requires an explicit conversion to text.
+
 `concurrent_first_joins_share_one_key` starts two key setups after both callers see no
 key, using the real `ssh-keygen`. Both must succeed, only one may create the pair, and the
 public key must match the private key. Without the key lock and recheck, the reproducer

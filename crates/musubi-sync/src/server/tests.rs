@@ -511,7 +511,7 @@ fn hub_survives_malformed_clone_preflights() {
     )]
     .into();
     let request = HubWideRequest::PrepareClone {
-        hive: id.clone(),
+        hive: id.clone().into(),
         backend: Backend::Git,
         remote_bindings: bindings,
     };

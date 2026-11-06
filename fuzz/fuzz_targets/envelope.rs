@@ -50,7 +50,7 @@ fuzz_target!(|data: &[u8]| {
         );
         round_trip::<HubWideRequest>(
             &Envelope::encode(HubWideRequest::PrepareClone {
-                hive: "hive".to_owned(),
+                hive: "hive".to_owned().into(),
                 backend: request.backend,
                 remote_bindings: request.remote_bindings.clone(),
             })

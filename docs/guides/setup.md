@@ -148,6 +148,9 @@ config:
 musubi clone app ~/src/app --hub devbox
 ```
 
+Clone resolves the name or prefix once and keeps the same hive throughout setup, even if
+other hives are renamed.
+
 Clone fills missing name and email once from the hive's creation defaults; existing
 destination settings win. Other keys can be selected with `musubi.clone-config` before
 creating the hive. Git remotes and repo config then stay local. Before fetching or pushing

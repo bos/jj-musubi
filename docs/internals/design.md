@@ -419,8 +419,8 @@ operations; no timestamp ordering, latest-observation selection, or settings rep
 inherited Git config with the prospective Git directory as the context for conditional
 includes, before creating any parent directory or initializing the repository. The preview
 uses jj's Git parser and its initial branch selection. A Git comparison test pins URL rewrite
-rules, including multiple push destinations. `PrepareClone` checks and reserves the inherited
-bindings under the same hub lock as joins, so two concurrent approvals cannot claim a new
+rules, including multiple push destinations. `PrepareClone` takes the exact hive id returned by `Resolve`, never another name lookup,
+and checks and reserves the inherited bindings under the same hub lock as joins, so two concurrent approvals cannot claim a new
 name differently. The client records exactly that snapshot. Conflicting evidence from a
 buggy peer is retained and reported. A consistently configured source can start another hive;
 configuration in existing copies stays untouched.

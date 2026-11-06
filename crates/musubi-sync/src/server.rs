@@ -251,8 +251,10 @@ impl HubServer {
             HubWideRequest::Resolve { name } => {
                 let hubs = self.lock();
                 hubs.resolve(&name).and_then(|id| {
-                    hubs.check_remote_consistency(&id)?;
-                    Ok(HubWideReply::Hive(hubs.info(&id).expect("resolved")))
+                    hubs.check_remote_consistency(id.as_str())?;
+                    Ok(HubWideReply::Hive(
+                        hubs.info(id.as_str()).expect("resolved"),
+                    ))
                 })
             }
             HubWideRequest::Rename { name, to } => self.lock().rename(&name, &to).map(|info| {
@@ -301,7 +303,7 @@ impl HubServer {
     fn remove(&self, name: &str) -> Result<HiveInfo, Refusal> {
         let (id, worker) = {
             let mut workers = self.workers();
-            let id = self.lock().resolve_exact(name)?;
+            let id = self.lock().resolve_exact(name)?.into_string();
             if !workers.removing.insert(id.clone()) {
                 return Err(format!("hive {name} is already being removed"));
             }

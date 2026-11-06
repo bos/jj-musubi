@@ -302,7 +302,7 @@ The native checks read raw heads before any subsequent jj command or head-mergin
 | `translation::advance_with_concurrent_heads_refines_advance_then_merge` | Real colocated and non-colocated histories agree with the oracle's advance then merge, including exact parents, returned realization, retention and exported bookmarks. |
 | `realization_beside_a_fetch_keeps_the_fetch_while_taking_an_abandon` | After record adoption, the merge uses `max(images(old heads) ∪ {incoming})`, with no dropped ancestor, and keeps the fetched ref. [Abandonment and refs](#abandonment-and-refs) covers its combined graph/ref projection. |
 | `translation::prepared_advance_merges_each_survivor_once` | A prepared multi-image advance publishes each survivor exactly once. It supplies valid canonical survivors; it does not check `NodeAdapter` deriving that frontier while records remain prepared. |
-| `advancing_to_what_survives_of_a_dropped_head` | The full surviving frontier agrees with `SurvivorAdvance`, including physical parent count so duplicate parents cannot hide behind a set comparison. |
+| `advancing_to_what_survives_of_a_dropped_head` | The full surviving frontier agrees with `SurvivorAdvance`, including physical parent count so duplicate parents cannot hide behind a set comparison. With that head as the accepted base, several images in most cases, reading the op heads passes `read_heads`'s check of every image: the only code-side evidence for `BaseImages.lean`, which no oracle call checks. |
 | `abandoning_a_root_child_beside_a_merge_converges` | Concurrently abandoning a root child and merging it with another commit converges. |
 
 In an ordinary advance, a later unpublished merge can fail after preflight succeeds. The

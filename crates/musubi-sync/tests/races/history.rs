@@ -2345,6 +2345,12 @@ fn advancing_to_what_survives_of_a_dropped_head() {
 
         // The production helper, at that boundary.
         hive.hive.members[1].adapter.advance(&kept).unwrap();
+        // Then, as the core does, the base is that head, which may have several images.
+        // Reading the op heads requires every image to be below one of them (#138).
+        let member = &mut hive.hive.members[1];
+        member.adapter.set_accepted_base(&kept).unwrap();
+        assert_eq!(member.adapter.accepted_base().unwrap(), kept, "{case}");
+        member.adapter.heads().unwrap();
 
         let node = hive.node(1);
         let number = |op: &CanonicalOp| {

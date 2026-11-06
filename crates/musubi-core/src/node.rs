@@ -196,6 +196,9 @@ pub trait LocalRepo {
     /// restoring work is cached and the current head still equals the given known head,
     /// writes a neutral child so the pending drops have a distinct head to publish. That
     /// child preserves current state rather than replaying the cached restoring work.
+    /// It declines the child only when the head it would write on is not the one
+    /// [`heads_for`](Self::heads_for) returned, and stays so: a backend that declined at the
+    /// head it returned would have [`NodeCore::step`] poll for ever.
     fn write_fixup(
         &mut self,
         publish_from: Option<&Self::Op>,
@@ -386,7 +389,13 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
         let fixup = repo.write_fixup((head == known).then_some(&known))?;
         let new = fixup.clone().unwrap_or(head);
         if new == known {
-            // A concurrent local change can make the backend's recheck decline a marker.
+            // The fix-up written was the known head itself, which marks it written, so the
+            // next write is a neutral tip (`write_known` in formal/Musubi/NodeSettle.lean). Or
+            // the backend declined the tip, the head it writes on not being what `heads_for`
+            // read: a command landed in between, or the backend merged in a head it hid. That
+            // head stays, unless it is abandoned, which the next step advances past, so the
+            // next step does not decline at it. A decline repeats only while commands keep
+            // landing between those two reads, never on its own.
             // Refresh, rather than report idle while these drops still need publishing.
             return Ok(Step::Send(vec![self.poll(repo)?]));
         }

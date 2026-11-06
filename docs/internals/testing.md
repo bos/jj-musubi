@@ -372,6 +372,14 @@ have their closure, and another hive sharing the hub directory and activity stil
 boundary does not interrupt an import or a write, poison a lock held inside jj, or exercise the
 separate catch around activity summarization. It promises neither rollback nor power-cut
 durability.
+`server::tests::a_hub_slower_than_the_timeout_still_syncs` uses the same hook to count the
+protocol requests the hub works out an answer to, and a link that turns each such reply into a
+timeout, as when the hub takes longer than the node's timeout to prepare it. Two machines must
+still push and fetch, over messages small enough that requests, replies and bundles travel as
+blobs. It fails if the node doesn't send a request again after a timeout, or if the hub works
+out the answer to the repeat again rather than repeating its reply. The hub is never actually
+busy, so a repeat never waits behind the first.
+
 The existing `a_request_that_panics_the_hub_gets_an_error` separately reaches a real jj decoder
 panic from malformed peer input; the protocol storage-call fault tests cover their own boundaries.
 

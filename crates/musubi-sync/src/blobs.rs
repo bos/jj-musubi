@@ -114,6 +114,15 @@ impl BlobStore {
         Some(path)
     }
 
+    /// Whether this store has `id` whole, renewing it if so, as for a blob prepared again.
+    pub fn renew(&self, id: &BlobId) -> io::Result<bool> {
+        let Some(path) = self.get(id) else {
+            return Ok(false);
+        };
+        renew(&path)?;
+        Ok(true)
+    }
+
     /// Adds a file this side created, returning its id and length. The file is linked in
     /// rather than copied where the filesystem allows: a bundle can be gigabytes, and its
     /// creator deletes its own name for it. A blob of that id already here whole is kept:

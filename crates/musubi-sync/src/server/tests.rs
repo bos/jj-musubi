@@ -3,6 +3,7 @@
 #![allow(clippy::unwrap_used)]
 
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -18,6 +19,8 @@ use musubi_jj::op_id::CanonicalOp;
 use musubi_testutil::TestEnv;
 use musubi_testutil::TestRepo;
 use musubi_transport::MemoryNetwork;
+use musubi_transport::Subscription;
+use musubi_transport::TransportError;
 
 use super::*;
 use crate::driver::NodeDriver;
@@ -31,18 +34,23 @@ const INJECTED: &str = "injected panic after accepting a head";
 
 /// Per-worker hooks, absent outside unit tests. No storage or repository state is faked.
 #[derive(Default)]
-pub(super) struct PanicAfterAccept {
+pub(super) struct WorkerHooks {
     opens: AtomicUsize,
+    /// Whether to panic once the hub accepts a head.
     armed: AtomicBool,
     accepted: Mutex<Option<(u64, OpId)>>,
+    /// How many protocol requests the hub has worked out an answer to, as of the reply it
+    /// last sent.
+    afresh: AtomicU64,
 }
 
-impl PanicAfterAccept {
+impl WorkerHooks {
     pub(super) fn opened(&self) {
         self.opens.fetch_add(1, Ordering::SeqCst);
     }
 
     pub(super) fn handled(&self, service: &HubService, notice: Option<&HeadNotice>) {
+        self.afresh.store(service.afresh(), Ordering::SeqCst);
         if notice.is_some() && self.armed.swap(false, Ordering::SeqCst) {
             let (seq, head) = service.hub().store().head();
             *self.accepted.lock().unwrap() = Some((seq, head.clone()));
@@ -61,7 +69,7 @@ impl RunningWorker {
         server: &HubServer,
         network: &MemoryNetwork,
         hive: &str,
-        recovery: Option<Arc<PanicAfterAccept>>,
+        recovery: Option<Arc<WorkerHooks>>,
     ) -> Self {
         let transport: Arc<dyn Transport> = Arc::new(network.connect());
         let mut incoming = transport.subscribe(&rpc_subject(hive)).await.unwrap();
@@ -130,6 +138,105 @@ fn driver(repo: &TestRepo, transport: Arc<dyn Transport>, hive: &str) -> NodeDri
     NodeDriver::new(node, remote).unwrap()
 }
 
+/// A node's link to a hub that takes longer than the node's timeout to work out the answer
+/// to any protocol request, as to a fetch or a push of a large history: the reply to each it
+/// works out comes too late.
+struct SlowHub {
+    inner: Arc<dyn Transport>,
+    hooks: Arc<WorkerHooks>,
+    late: AtomicUsize,
+    /// Of those, requests too large to send whole.
+    late_uploaded: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl Transport for SlowHub {
+    fn max_payload(&self) -> usize {
+        self.inner.max_payload()
+    }
+
+    async fn publish(&self, subject: &str, payload: Bytes) -> Result<(), TransportError> {
+        self.inner.publish(subject, payload).await
+    }
+
+    async fn subscribe(&self, subject: &str) -> Result<Subscription, TransportError> {
+        self.inner.subscribe(subject).await
+    }
+
+    async fn request(
+        &self,
+        subject: &str,
+        payload: Bytes,
+        timeout: Duration,
+    ) -> Result<Bytes, TransportError> {
+        // The node sends one request at a time, and the hub answers one at a time.
+        let before = self.hooks.afresh.load(Ordering::SeqCst);
+        let uploaded = matches!(
+            Envelope::<HubRequest>::decode(&payload),
+            Ok(HubRequest::Indirect { .. })
+        );
+        let reply = self.inner.request(subject, payload, timeout).await?;
+        if self.hooks.afresh.load(Ordering::SeqCst) > before {
+            self.late.fetch_add(1, Ordering::SeqCst);
+            if uploaded {
+                self.late_uploaded.fetch_add(1, Ordering::SeqCst);
+            }
+            return Err(TransportError::Timeout);
+        }
+        Ok(reply)
+    }
+}
+
+/// A hub that takes longer than a node's timeout to answer a push or a fetch, as for a large
+/// history, still gets the node synced: the node asks again, and the hub answers the repeat
+/// with the reply it worked out, rather than working it out again and missing the timeout
+/// every time (issue 124). Without either, the first sync fails. Messages are small, so that
+/// requests, replies and what they carry travel as blobs, and the node must upload them again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hub_slower_than_the_timeout_still_syncs() {
+    let env = TestEnv::new();
+    let alpha = env.init_repo("alpha");
+    alpha.write_file("work", "a large history\n");
+    alpha.jj(&["commit", "-m", "a large history"]);
+    let dir = env.root().join("hub");
+    std::fs::create_dir(&dir).unwrap();
+    let mut server = HubServer::open(&dir).unwrap();
+    let hive = create_hive(&mut server, &alpha).await;
+    let network = MemoryNetwork::new(1, 256);
+    let hooks = Arc::new(WorkerHooks::default());
+    let worker = RunningWorker::start(&server, &network, &hive, Some(hooks.clone())).await;
+    let link = Arc::new(SlowHub {
+        inner: Arc::new(network.connect()),
+        hooks,
+        late: AtomicUsize::new(0),
+        late_uploaded: AtomicUsize::new(0),
+    });
+
+    // alpha's sync pushes, beta's fetches what it pushed and pushes its own, and alpha's
+    // fetches that.
+    let mut alpha_driver = driver(&alpha, link.clone(), &hive);
+    alpha_driver.sync().await.unwrap();
+    let beta = env.init_repo("beta");
+    let mut beta_driver = driver(&beta, link.clone(), &hive);
+    beta_driver.sync().await.unwrap();
+    alpha_driver.sync().await.unwrap();
+    assert_eq!(alpha_driver.known(), beta_driver.known());
+    assert_eq!(
+        beta.jj(&[
+            "file",
+            "show",
+            "work",
+            "-r",
+            "description(substring:'large')"
+        ]),
+        "a large history\n"
+    );
+    assert!(link.late.load(Ordering::SeqCst) >= 3);
+    assert!(link.late_uploaded.load(Ordering::SeqCst) >= 1);
+
+    worker.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_worker_reopens_its_service_after_a_panic() {
     let env = TestEnv::new();
@@ -146,7 +253,7 @@ async fn a_worker_reopens_its_service_after_a_panic() {
     let other_hive = create_hive(&mut server, &gamma).await;
     let hive_dir = server.lock().hive_dir(&hive).unwrap().to_owned();
     let network = MemoryNetwork::new(1, 1024 * 1024);
-    let recovery = Arc::new(PanicAfterAccept::default());
+    let recovery = Arc::new(WorkerHooks::default());
     recovery.armed.store(true, Ordering::SeqCst);
     let worker = RunningWorker::start(&server, &network, &hive, Some(recovery.clone())).await;
     let other_worker = RunningWorker::start(&server, &network, &other_hive, None).await;

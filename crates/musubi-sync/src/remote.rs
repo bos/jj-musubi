@@ -17,6 +17,7 @@ use jj_lib::object_id::ObjectId as _;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
 use musubi_transport::Transport;
+use musubi_transport::TransportError;
 
 use crate::Attachment;
 use crate::OpId;
@@ -96,6 +97,22 @@ fn unexpected(reply: HubReply) -> anyhow::Error {
 /// starts over only when what came fails it; a blob that keeps failing it won't pass by being
 /// sent again.
 const RESTARTS: usize = 3;
+
+/// How many times a node sends a protocol request again when no reply comes in time. The hub
+/// answers one at a time, and a reply can take it longer than the timeout to prepare, as
+/// for a node catching up on a large history: it answers the repeat with the reply it
+/// prepared, once it has, so a repeat that comes then gets it at once.
+const RESENDS: u32 = 19;
+
+/// Whether `err` is a request timing out.
+fn timed_out(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<TransportError>(),
+            Some(TransportError::Timeout)
+        )
+    })
+}
 
 /// How long a node keeps a blob nothing has touched: a partial download, which a later call
 /// can resume if the hub prepares the same blob again, as after a night asleep, or a blob a
@@ -178,22 +195,90 @@ impl RemoteHub {
                 })
             },
         )?;
+        let bytes = Envelope::encode(HubRequest::Protocol(request))?;
+        // A request too large to send whole goes as a blob.
+        let mut whole = None;
+        if bytes.len() > self.transport.max_payload() {
+            let (blob, len) = self.blobs.insert_bytes(&bytes)?;
+            let upload = Uploads {
+                blobs: &self.blobs,
+                ids: vec![blob],
+            };
+            whole = Some((upload, len));
+        }
+        let mut attempt = Attempt {
+            bytes: &bytes,
+            uploads: &uploads.ids,
+            upload_len,
+            whole: whole.as_ref().map(|(upload, len)| (upload.ids[0], *len)),
+        };
         let mut lanes = Lanes::new(self);
-        let lane = lanes.lane(upload_len).await;
-        if upload_len > 0 {
+        let mut resends = 0;
+        let mut asked = false;
+        loop {
+            match self.attempt(&attempt, &mut lanes, &mut asked).await {
+                Err(err) if resends < RESENDS && timed_out(&err) => {
+                    resends += 1;
+                    tracing::debug!("no reply in time; asking again ({resends} of {RESENDS})");
+                }
+                reply => return reply,
+            }
+            // Once the request has gone, the hub has what it names, until it answers it, and
+            // answers a repeat as before without them, unless the hive has changed since: then
+            // the call fails, and the sync starts over.
+            if asked {
+                attempt.uploads = &[];
+                attempt.upload_len = 0;
+            }
+        }
+    }
+
+    /// Sends a request once, with what it uploads, and returns the reply, as
+    /// [`Self::call`] does. A request too large to send whole goes again each time: the hub
+    /// lets go of it once it has it. Sets `asked` once the request goes.
+    async fn attempt(
+        &self,
+        attempt: &Attempt<'_>,
+        lanes: &mut Lanes<'_>,
+        asked: &mut bool,
+    ) -> anyhow::Result<Reply<OpId, Attachment>> {
+        let lane = lanes.lane(attempt.upload_len).await;
+        if attempt.upload_len > 0 {
             self.progress.set(Activity::Sending {
                 done: 0,
-                total: upload_len,
+                total: attempt.upload_len,
             });
         }
         let mut sent = 0;
-        for blob in &uploads.ids {
+        for blob in attempt.uploads {
             sent += self.upload(blob, &*lane, sent).await?;
         }
+        let bytes = match attempt.whole {
+            None => attempt.bytes.to_vec(),
+            Some((blob, len)) => {
+                self.progress.set(Activity::Sending {
+                    done: 0,
+                    total: len,
+                });
+                self.upload(&blob, &*lanes.lane(len).await, 0).await?;
+                Envelope::encode(HubRequest::Indirect { blob })?
+            }
+        };
         self.progress.set(Activity::Asking);
-        let reply = self.send(HubRequest::Protocol(request), &mut lanes).await;
-        drop(uploads);
-        let reply = match reply? {
+        *asked = true;
+        let mut reply = self.exchange(&*self.transport, bytes).await?;
+        if let HubReply::Indirect { blob, len } = reply {
+            self.progress.set(Activity::Receiving {
+                done: 0,
+                total: len,
+            });
+            let path = self
+                .download(&blob, len, &*lanes.lane(len).await, 0)
+                .await?;
+            let path = tempfile::TempPath::try_from_path(path)?;
+            reply = Envelope::<HubReply>::decode(&std::fs::read(&path)?)?;
+        }
+        let reply = match reply {
             HubReply::Protocol(reply) => reply,
             other => return Err(unexpected(other)),
         };
@@ -233,38 +318,6 @@ impl RemoteHub {
                 Ok(Attachment::Bundle(path))
             })
         })
-    }
-
-    async fn send(&self, request: HubRequest, lanes: &mut Lanes<'_>) -> anyhow::Result<HubReply> {
-        let mut bytes = Envelope::encode(request)?;
-        if bytes.len() > self.transport.max_payload() {
-            let (blob, len) = self.blobs.insert_bytes(&bytes)?;
-            let upload = Uploads {
-                blobs: &self.blobs,
-                ids: vec![blob],
-            };
-            self.progress.set(Activity::Sending {
-                done: 0,
-                total: len,
-            });
-            self.upload(&blob, &*lanes.lane(len).await, 0).await?;
-            self.progress.set(Activity::Asking);
-            drop(upload);
-            bytes = Envelope::encode(HubRequest::Indirect { blob })?;
-        }
-        let reply = self.exchange(&*self.transport, bytes).await?;
-        if let HubReply::Indirect { blob, len } = reply {
-            self.progress.set(Activity::Receiving {
-                done: 0,
-                total: len,
-            });
-            let path = self
-                .download(&blob, len, &*lanes.lane(len).await, 0)
-                .await?;
-            let path = tempfile::TempPath::try_from_path(path)?;
-            return Envelope::<HubReply>::decode(&std::fs::read(&path)?);
-        }
-        Ok(reply)
     }
 
     async fn exchange(
@@ -400,8 +453,19 @@ fn window(offset: u64, total: u64, chunk: u64) -> impl Iterator<Item = u64> {
     .take(WINDOW)
 }
 
-/// Blobs put in the store to upload, removed when this is dropped: once the hub has them,
-/// and however else the call ends, as when it fails or the caller drops it partway.
+/// What each attempt at a call sends.
+struct Attempt<'a> {
+    /// The encoded request.
+    bytes: &'a [u8],
+    /// The blobs it names, and their length, until the request has gone.
+    uploads: &'a [BlobId],
+    upload_len: u64,
+    /// The request as a blob, and its length, if it is too large to send whole.
+    whole: Option<(BlobId, u64)>,
+}
+
+/// Blobs put in the store to upload, removed when this is dropped: as the call ends, however
+/// it ends, as when it fails or the caller drops it partway. Kept until then, for a repeat.
 struct Uploads<'a> {
     blobs: &'a BlobStore,
     ids: Vec<BlobId>,
@@ -481,7 +545,6 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     use musubi_transport::Subscription;
-    use musubi_transport::TransportError;
 
     use super::*;
 
@@ -545,13 +608,18 @@ mod tests {
         )
         .unwrap();
         let mut lanes = Lanes::new(&remote);
+        let request = Envelope::encode(HubRequest::Indirect {
+            blob: BlobId::of_bytes(b"other"),
+        })
+        .unwrap();
+        let attempt = Attempt {
+            bytes: &request,
+            uploads: &[],
+            upload_len: 0,
+            whole: None,
+        };
         let err = remote
-            .send(
-                HubRequest::Indirect {
-                    blob: BlobId::of_bytes(b"other"),
-                },
-                &mut lanes,
-            )
+            .attempt(&attempt, &mut lanes, &mut false)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("failed its hash check"), "{err:#}");

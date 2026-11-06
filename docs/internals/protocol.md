@@ -78,6 +78,18 @@ Each request takes one round trip. Operations and objects travel inline in their
 when they fit in a quarter of the transport's message limit, and otherwise as chunked blobs
 ([Chunked blobs](#chunked-blobs)). At this level of the protocol each message is atomic.
 
+A node that gets no reply in time sends the same request again, up to 19 times. The hub
+answers one request at a time, and working out a reply can take it longer than the node's
+timeout, as for a machine catching up on a large history, or a push of one. So the hub keeps
+its last eight replies for ten minutes, and answers the same request again with the same reply,
+without the work, while its head and records are as that reply left them and the blobs the
+reply names are still there: the reply the request would get anyway. A repeat sent while the
+hub still works on the first waits behind it, then gets that reply at once. The hub doesn't
+repeat `Incomplete`, which a rejected push can make untrue without moving the head, by storing
+what `new` lacked. Once a request has gone, the node doesn't upload what it carries again: the
+hub has it until it answers, and then needs it only if the hive has changed since, when the
+repeat fails and the sync starts over.
+
 The formal model also has finer-grained requests, which musubi doesn't send: `GetHead`,
 `PutOps` and `PutObjects` (each answered by `Stored`), `GetOps(S)` for operations
 `S ⊆ anc*(known.head)` (answered by `Ops`), and `Cas`. A `Push` is `PutOps`, `PutObjects` and
@@ -117,8 +129,9 @@ These happen outside musubi, through `jj`:
 
   Over musubi's transports, a reply to the node's own request can't be stale: they match it to the
   one request the node has outstanding, and drop it if it comes after that request timed out, and
-  the hub answers only after everything the node learned before sending it. So a reply with
-  `s < known.seq`, or with `s = known.seq` and `h ≠ known.head`, means the hub has gone back
+  the hub answers only after everything the node learned before sending it, repeating a reply
+  only while its head is as the reply says. So a reply with `s < known.seq`, or with
+  `s = known.seq` and `h ≠ known.head`, means the hub has gone back
   ([Network and failures](#network-and-failures)). The node then restarts, forgetting `known`,
   and learns `(s, h)`. Over a network that duplicates replies, as the model's does, this rule
   can fire on a stale reply too, which costs a restart, and a restart is always safe.

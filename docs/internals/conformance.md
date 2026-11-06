@@ -1272,6 +1272,12 @@ links:
    `realization_beside_a_fetch_here_keeps_the_fetch` is the same on this machine, against the
    model (`beside_keeps_fetch`): the other machine merges its own operation with this one's
    restore of a conflict, keeping it, while this machine fetches a term of it.
+   `a_pending_git_move_does_not_change_the_other_machines_import_record` checks that the
+   other machine's next command imports against its own record. A pending git move can leave
+   this machine's record behind while the other machine has exported the shared conflict.
+   The harness checks the other machine's shared fields before its command, then uses its
+   own slots and physical refs as inputs to the oracle's import, command and export steps.
+   It compares every resulting slot and physical ref, including the unchanged-ref case.
    `a_resolved_merge_is_its_own_expected_value` checks the test's expected-value helper
    directly, without a repository or oracle: a resolved merge, absent included, has its own
    expected value even if neither parent had it, and never asks for a conflict side.

@@ -865,6 +865,30 @@ impl Refs {
         }
         let (synced_op, base) = self.synced.clone();
         let ours = self.head();
+        // The shared fields are the base's, but the other machine's import/export record
+        // and physical refs are its own. A pending git move here can leave our record
+        // behind even after both machines have the same shared fields.
+        let there = self.fixture.load(THERE);
+        assert_eq!(
+            shared(|r| slot(there.view().store_view(), r)),
+            base.shared()
+        );
+        let mut expected = base.clone();
+        for r in Ref::ALL {
+            let (v, g) = read(&there, r);
+            let m = expected.at(r);
+            (m.v, m.g) = (v, g);
+        }
+        expected.jj(&self.alg, |model| match &moved {
+            None => {
+                model.at(Ref::Origin).g = upstream.clone();
+                model.import_ref(&self.alg, Ref::Origin);
+            }
+            Some((r, c)) if *c != base.get(*r).v.l => {
+                model.bookmark_set(&self.alg, *r, c.clone());
+            }
+            Some(_) => {}
+        });
         match &moved {
             None => {
                 self.push_upstream(upstream);
@@ -876,34 +900,18 @@ impl Refs {
                 self.jj_set(THERE, *r, c, &current, None);
             }
         }
-        // What the other machine's operations leave in the hive, the shared fields of its
-        // view, are what this machine's model says the other's command made of them: the
-        // other machine's own refs changed nothing.
+        // Predict the command from its inputs with the oracle, including its imports and
+        // exports, before comparing what it leaves on the other machine.
         let there = self.fixture.load(THERE);
         let view = there.view().store_view();
         let canonical = shared(|r| slot(view, r));
-        let mut expected = base.clone();
-        // The other machine's command imports first, and resolves a conflicted `y@origin` to
-        // the expected value its `.git` holds if that physical ref changed, as this
-        // machine's import would
-        // (`conflicted_import_agrees`, `restore_import_agrees`).
-        if let Some(e) = conflicted_expected(&expected) {
-            expected.at(Ref::Origin).g = e;
-            expected.import(&self.alg, &[Ref::Origin]);
-        }
-        match moved {
-            None => {
-                let (theirs, _) = self
-                    .alg
-                    .lean()
-                    .import(&expected.get(Ref::Origin).v, &self.upstream);
-                expected.set(&self.alg, Ref::Y, theirs.l.clone());
-                expected.at(Ref::Origin).v = Slot {
-                    k: expected.get(Ref::Origin).v.k.clone(),
-                    ..theirs
-                };
-            }
-            Some((r, c)) => expected.set(&self.alg, r, c),
+        for r in Ref::ALL {
+            let m = expected.get(r);
+            assert_eq!(
+                read(&there, r),
+                (m.v.clone(), m.g.clone()),
+                "the other machine's {r:?} after its command"
+            );
         }
         assert_eq!(
             canonical,
@@ -1182,6 +1190,28 @@ impl Refs {
 #[hegel::test(test_cases = refs_cases(), suppress_health_check = [HealthCheck::TooSlow])]
 fn bookmarks_conform_to_refs_model(tc: TestCase) {
     hegel::stateful::machine(Refs::new()).steps(10).run(tc);
+}
+
+/// A pending git move leaves this machine's record behind while the other machine exports
+/// a concurrent fetch's conflict. Its next command sees an unchanged physical ref and keeps
+/// that conflict, even though importing against this machine's record would resolve it.
+#[test]
+fn a_pending_git_move_does_not_change_the_other_machines_import_record() {
+    let mut refs = Refs::new();
+    let [root, base, one, two, three] =
+        [0, 1, 2, 3, 4].map(|i| RefTarget::normal(refs.commits[i].clone()));
+    refs.git_moves_to(Ref::Origin, base.clone());
+    refs.jj_sets(Ref::X, one);
+    refs.git_moves_to(Ref::Origin, two);
+    refs.musubi_realizes_with(None, three, false, true, None);
+    let (here, _) = read(&refs.fixture.load(HERE), Ref::Origin);
+    let (there, git) = read(&refs.fixture.load(THERE), Ref::Origin);
+    assert_eq!(here.r, there.r);
+    assert!(!there.r.is_resolved());
+    assert_eq!(there.k, git);
+    assert_ne!(here.k, there.k);
+    refs.musubi_realizes_with(Some((Ref::X, root)), base, false, false, None);
+    assert!(!refs.model.get(Ref::Origin).v.r.is_resolved());
 }
 
 /// Undoing a move from the root restores `x` there even though jj can't export it.

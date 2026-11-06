@@ -22,6 +22,7 @@ fn hive(name: &str) -> HiveActivity {
             id: name.to_owned(),
             name: name.to_owned(),
             backend: musubi_jj::objects::Backend::Git,
+            clone_config: Default::default(),
             urls: vec![],
             machines: vec![],
         },

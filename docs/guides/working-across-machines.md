@@ -1,6 +1,6 @@
 # Work across machines
 
-See other machines' work, update a stale working copy, undo, and share settings.
+See other machines' work, update a stale working copy, undo, and configure each copy.
 
 Once a repository is in a hive, keep using `jj` as you always do. Its daemon keeps it in sync
 with the other machines.
@@ -197,6 +197,25 @@ Credentials are stripped from these hints and from URLs in jj's recorded command
 jj user, repo, and workspace config stay local. This includes `trunk()`, `immutable_heads()`,
 `git.private-commits`, aliases, and signing settings. `musubi clone` uses the destination
 machine's config to evaluate `trunk()` and adds no Git remotes.
+
+When a hive is created or recreated after hub loss, it records the creating copy's configured
+`user.name` and `user.email` as defaults for future clones. Clone fills missing values in its new
+repo config, leaving existing destination settings alone, even when they differ. When they are
+already configured, it creates no identity overrides. This happens once; later changes on any
+machine do not update the defaults or other copies.
+
+To choose other keys, set `musubi.clone-config` before `musubi create`, for example:
+
+```sh
+jj config set --repo musubi.clone-config '["user.name", "user.email", "aliases.l"]'
+```
+
+The list replaces the default selection; `[]` records no defaults. Choose portable settings:
+signing keys, tool paths, and filesystem watchers belong to each machine. Aliases and
+repository protections may depend on other aliases or remote names; include what they need,
+or configure them locally. `musubi.forget-after` remains each copy's own policy and cannot
+be selected. Rejoining an existing hive never changes its recorded clone defaults. If a hub is
+lost or replaced, the first copy to recreate the hive supplies fresh defaults.
 
 Set any protection you need on every machine where it matters. A local `immutable_heads()`
 rule cannot prevent another machine rewriting shared history. `git.private-commits` controls

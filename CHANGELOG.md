@@ -7,6 +7,14 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- Clone fills missing jj settings once from defaults recorded when the hive was created:
+  `user.name` and `user.email` by default. Set `musubi.clone-config` before creating a hive
+  to select other keys, or `[]` for none. Existing destination settings win, and later syncs
+  leave all configuration alone. This changes the protocol to 15 and the hub metadata;
+  upgrade the hub and every machine together, initialize a fresh hub directory, and rejoin
+  existing copies as described below. Move any desired `musubi.shared-config` selection to
+  `musubi.clone-config` before recreating a hive; it now affects clone defaults only.
+
 - Git remote definitions and jj configuration now stay local on each machine. Sync no
   longer copies URLs or repo config, so interrupted config updates cannot overwrite local
   edits. Configure remotes and rewrite/push protections explicitly on each machine that

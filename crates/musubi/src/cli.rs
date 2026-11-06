@@ -117,7 +117,9 @@ pub enum Command {
     ///
     /// It makes the repository, joins it to the hive, and returns once it has synced, with
     /// the daemon keeping it in sync from then on. It checks out `trunk()` using this
-    /// machine's jj config. Git remote definitions and repo config are not copied.
+    /// machine's jj config. It fills missing settings once from the defaults recorded when
+    /// the hive was created: `user.name` and `user.email`, unless `musubi.clone-config` chose
+    /// other keys there. Existing destination settings take precedence; sync never copies config.
     ///
     /// Before creating the destination, it checks inherited Git remotes and the hive's
     /// recorded names for conflicting destinations. It adds no Git remotes; configure one

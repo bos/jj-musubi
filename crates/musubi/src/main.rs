@@ -2,6 +2,7 @@
 
 mod agent;
 mod cli;
+mod clone_config;
 mod completion;
 mod config;
 mod control;

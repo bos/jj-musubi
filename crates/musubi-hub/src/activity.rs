@@ -399,6 +399,7 @@ mod tests {
             id: id.to_owned(),
             name: id.to_owned(),
             backend: musubi_jj::objects::Backend::Git,
+            clone_config: Default::default(),
             urls: vec![],
             machines: vec![],
         }

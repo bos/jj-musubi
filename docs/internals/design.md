@@ -380,6 +380,16 @@ They do not constrain other machines, nor exclude committed work from replicatio
 clone evaluates `trunk()` using its destination machine's jj config and adds no Git remote
 definitions; inherited global Git config still applies.
 
+A creating join includes the effective, explicitly configured values selected by
+`musubi.clone-config` (name and email by default), serialized as TOML values. The hub stores this
+immutable snapshot in `hive.toml` and returns it in `HiveInfo`; joins to an existing hive ignore
+their supplied defaults. Recreating a lost hive takes fresh defaults from the first rejoining
+copy, since the hub snapshot is disposable. Clone validates the selected keys and values before
+creating any paths, uses missing values for jj initialization, then rechecks the destination's
+resolved config and writes only still-missing values once. Destination user, repo, workspace,
+conditional, and environment settings take precedence. No sync reads or writes this bootstrap
+data. `musubi.forget-after` is excluded because clone chooses it for its own caller.
+
 ### Join and clone preflight
 
 A remote name is bound to one normalized effective fetch destination and a set of normalized

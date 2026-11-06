@@ -25,6 +25,7 @@ fuzz_target!(|data: &[u8]| {
         let request = musubi_hub::hub_dir::JoinRequest {
             choice: musubi_hub::hub_dir::JoinChoice::Match,
             backend: musubi_jj::objects::Backend::Git,
+            clone_config: [("user.name".to_owned(), identity.clone())].into(),
             remotes: vec![("origin".to_owned(), identity.clone())],
             remote_bindings: [(
                 format!("origin.{identity}"),

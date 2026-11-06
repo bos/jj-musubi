@@ -565,11 +565,12 @@ Give different destinations different names,
 for example `jj git remote rename origin fork`, then run `musubi join` again. Use an unused
 name: a rename does not release an earlier binding. A copy can omit a remote entirely.
 
-### "missing field `remote_bindings`" when starting a hub
+### "missing field `remote_bindings`" or "missing field `clone_config`" when starting a hub
 
-This hub directory predates the remote-name preflight format. Use a fresh hub directory and
-rejoin from the existing copies, as [Upgrade musubi](guides/manage.md#upgrade-musubi) describes.
-Keep the old directory as a backup; the repositories and their work remain on the copies.
+This hub directory predates the remote-name preflight or clone-defaults format. Use a fresh hub
+directory and rejoin from the existing copies, as [Upgrade
+musubi](guides/manage.md#upgrade-musubi) describes. Keep the old directory as a backup; the
+repositories and their work remain on the copies.
 
 ### "hive ... has inconsistent recorded remotes"
 
@@ -598,3 +599,10 @@ it. An annotated tag fetched on one machine is a lightweight tag at the same com
 others: `git describe` without
 `--tags` passes over it, and `git tag -v` has nothing to verify. Fetch the tag on a machine
 that needs it.
+
+### "musubi.clone-config cannot include musubi.forget-after"
+
+The copy's expiry policy is chosen locally when it joins or clones. Remove
+`musubi.forget-after`, or the whole `musubi` table, from `musubi.clone-config` before
+creating the hive. Select individual portable keys instead; see
+[Configure each machine](guides/working-across-machines.md#configure-each-machine).

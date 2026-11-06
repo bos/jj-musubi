@@ -147,8 +147,10 @@ config:
 musubi clone app ~/src/app --hub devbox
 ```
 
-Git remotes and repo config are local. Before fetching or pushing from this new copy, add
-a remote if none is inherited from this machine's Git config, for example
+Clone fills missing name and email once from the hive's creation defaults; existing
+destination settings win. Other keys can be selected with `musubi.clone-config` before
+creating the hive. Git remotes and repo config then stay local. Before fetching or pushing
+from this new copy, add a remote if none is inherited from this machine's Git config, for example
 `jj git remote add origin https://github.com/you/app.git`.
 Join checks each remote name's fetch and push destinations; `--hive` cannot override a
 mismatch. Clone checks the hive's recorded bindings before creating the destination. Set

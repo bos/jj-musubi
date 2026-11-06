@@ -109,9 +109,11 @@ Open `target/assurance/index.html` in a browser. It includes its data, styles an
 Lucide icons it uses, and needs no network access. Omit `--standalone` to render an inline
 fragment. Rendering a saved dataset does not read or rebuild the source checkout.
 
-Use **All** or **None** beside Techniques to select the assurance methods together.
-**Expand all** and **Collapse all** below the graph change the detail of every component;
-individual components can still be expanded or collapsed independently under **Explore the code**.
+Open **Techniques** and use **All** or **None** to select the assurance methods together.
+The toolbar’s **Expand all** / **Collapse all** toggle changes the detail of every crate.
+The toggle and crate/module counts keep their places as menus open and the view changes.
+Individual crates can still be expanded or collapsed under **Explore the code**; double-clicking
+a collapsed crate expands it without zooming.
 Replay takes eight seconds from beginning to end and advances evenly in the selected clock.
 The clock offers **Elapsed run time**, which follows recorded completion times, and
 **Sum of run durations**, which adds each test and fuzz run's duration, including overlapping

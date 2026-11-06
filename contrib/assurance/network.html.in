@@ -8,10 +8,105 @@
       display: none !important;
     }
     #musubi-code-network .section {
-      margin-top: calc(var(--font-size-base) * 1);
+      margin-top: 8px;
+    }
+    #musubi-code-network .top-controls {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px 12px;
+      position: relative;
+    }
+    #musubi-code-network .top-controls summary {
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    #musubi-code-network #ng-technique-count {
+      display: inline-block;
+      width: 5ch;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+    #musubi-code-network #ng-counts {
+      width: 22ch;
+      flex: 0 0 22ch;
+      white-space: nowrap;
+    }
+    #musubi-code-network #ng-toggle-all {
+      width: 8em;
+      flex: 0 0 8em;
+      white-space: nowrap;
+    }
+    #musubi-code-network #ng-explore {
+      position: relative;
+    }
+    #musubi-code-network #ng-explore .control-panel {
+      top: auto;
+      bottom: calc(100% + 8px);
+    }
+    #musubi-code-network .control-panel {
+      position: absolute;
+      top: calc(100% + 8px);
+      left: 0;
+      right: 0;
+      z-index: 10;
+      max-height: min(360px, 60vh);
+      overflow: auto;
+      padding: 12px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      box-shadow: 0 4px 16px color-mix(in srgb, var(--foreground) 15%, transparent);
+    }
+    #musubi-code-network .inspection.connection {
+      width: min(360px, calc(100% - 16px));
+    }
+    #musubi-code-network .connection .technique-row,
+    #musubi-code-network .comparison-head,
+    #musubi-code-network .comparison-totals {
+      display: grid;
+      grid-template-columns: minmax(0, 1.5fr) minmax(24px, 1fr) 2.5em minmax(24px, 1fr) 2.5em;
+      gap: 0.35rem;
+    }
+    #musubi-code-network .comparison-heading {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: var(--card);
+      display: grid;
+      gap: 0.5rem;
+    }
+    #musubi-code-network .comparison-heading .inspection-title {
+      position: static;
+    }
+    #musubi-code-network .comparison-head > :first-child {
+      grid-column: 2 / span 2;
+    }
+    #musubi-code-network .comparison-head > :last-child {
+      grid-column: 4 / span 2;
+    }
+    #musubi-code-network .comparison-totals > :nth-child(n + 2) {
+      grid-column: span 2;
+    }
+    #musubi-code-network .comparison-head .btn {
+      display: block;
+      width: 100%;
+      padding: 0;
+      border: 0;
+      text-align: left;
+      overflow-wrap: anywhere;
+    }
+    #musubi-code-network .inspection-title {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: var(--card);
     }
     #musubi-code-network .heading {
       padding-right: 90px;
+    }
+    #musubi-code-network .heading h2 {
+      line-height: 1.25;
     }
     #musubi-code-network .legend {
       display: flex;
@@ -69,19 +164,15 @@
     }
     #musubi-code-network .inspection {
       position: absolute;
-      width: min(300px, 100%);
+      width: min(300px, calc(100% - 16px));
+      max-height: calc(100% - 16px);
+      overflow: auto;
       pointer-events: auto;
       z-index: 4;
       display: grid;
       gap: 0.5rem;
       overflow-wrap: anywhere;
-      background: color-mix(
-        in srgb,
-        color-mix(in srgb, var(--background) 92%, var(--foreground) 8%) 94%,
-        transparent
-      );
       border: 1px solid color-mix(in srgb, var(--foreground) 18%, transparent);
-      color: var(--foreground);
     }
     #musubi-code-network .inspection-title {
       display: grid;
@@ -158,57 +249,107 @@
     #musubi-code-network .tooltip {
       position: absolute;
       pointer-events: none;
-      max-width: 300px;
+      max-width: min(300px, calc(100% - 16px));
       padding: 0.6rem 0.75rem;
-      background: var(--popover);
-      color: var(--popover-foreground);
       border-radius: 0.4rem;
       box-shadow: 0 2px 14px
         color-mix(in srgb, var(--foreground) 12%, transparent);
-      z-index: 3;
+      z-index: 20;
       overflow-wrap: anywhere;
       white-space: pre-line;
+    }
+    #musubi-code-network .tooltip,
+    #musubi-code-network .inspection {
+      background: color-mix(in srgb, var(--popover) 75%, transparent);
+      color: var(--popover-foreground);
+      -webkit-backdrop-filter: blur(4px);
+      backdrop-filter: blur(4px);
     }
     @media (max-width: 520px) {
       #musubi-code-network .heading {
         padding-right: 0;
       }
       #musubi-code-network .slider {
-        flex-basis: 100%;
+        min-width: 100px;
       }
     }
   </style>
   <div class="heading"><h2>Proofs and tests across the code</h2></div>
-  <div class="viz-row section" role="group" aria-label="Select techniques">
-    <span class="text-small">Techniques</span>
-    <button
-      type="button"
-      class="btn btn-ghost"
-      id="ng-techniques-all"
-      aria-label="Select all techniques"
-    >
-      All
+  <div class="top-controls section">
+    <details id="ng-techniques">
+      <summary>
+        Techniques <span id="ng-technique-count" class="text-small"></span>
+      </summary>
+      <div class="control-panel">
+        <div
+          class="viz-row section"
+          role="group"
+          aria-label="Select techniques"
+        >
+          <button
+            type="button"
+            class="btn btn-ghost"
+            id="ng-techniques-all"
+            aria-label="Select all techniques"
+          >
+            All
+          </button>
+          <button
+            type="button"
+            class="btn btn-ghost"
+            id="ng-techniques-none"
+            aria-label="Deselect all techniques"
+          >
+            None
+          </button>
+        </div>
+        <div
+          class="legend section"
+          id="ng-mechanisms"
+          role="group"
+          aria-label="Proofs and tests"
+        ></div>
+      </div>
+    </details>
+    <details id="ng-legend">
+      <summary>Legend</summary>
+      <div class="control-panel">
+        <div class="key section text-small">
+          <button
+            type="button"
+            class="btn btn-ghost"
+            id="ng-symbol-key"
+            data-tooltip="The small symbols above each crate or module identify proof and test categories mapped to its source files. Pie fill shows recorded execution."
+          >
+            Symbols: proof/test categories
+          </button>
+          <button
+            type="button"
+            class="btn btn-ghost"
+            id="ng-coverage-key"
+            data-tooltip="Filled area counts each reached line once across the selected techniques. Shared lines are split equally between slices. Each bar counts that technique's full coverage."
+          >
+            Pies: coverage of selected techniques
+          </button>
+        </div>
+        <div
+          id="ng-roles"
+          class="role-legend text-small section"
+          aria-label="Module roles"
+        ></div>
+        <p class="text-small section">
+          Arrows show imports; thickness counts distinct import paths. Arrow
+          colour identifies the importing module's role.
+        </p>
+      </div>
+    </details>
+    <button type="button" class="btn btn-ghost" id="ng-whole">
+      Show whole graph
     </button>
-    <button
-      type="button"
-      class="btn btn-ghost"
-      id="ng-techniques-none"
-      aria-label="Deselect all techniques"
-    >
-      None
+    <button type="button" class="btn btn-ghost" id="ng-toggle-all">
+      Expand all
     </button>
-  </div>
-  <div
-    class="legend section"
-    id="ng-mechanisms"
-    role="group"
-    aria-label="Proofs and tests"
-  ></div>
-  <div class="key section text-small">
-    <button type="button" class="btn btn-ghost" id="ng-symbol-key"
-      data-tooltip="The small symbols above each crate or module identify proof and test categories mapped to its source files. Pie fill shows recorded execution.">Symbols: proof/test categories</button>
-    <button type="button" class="btn btn-ghost" id="ng-coverage-key"
-      data-tooltip="Filled area counts each reached line once across the selected techniques. Shared lines are split equally between slices. Each bar counts that technique's full coverage.">Pies: coverage of selected techniques</button>
+    <span id="ng-counts" class="text-small text-muted"></span>
   </div>
   <div class="board section">
     <canvas
@@ -225,43 +366,27 @@
     <div id="ng-inspectors" aria-label="Pinned coverage charts"></div>
   </div>
   <div class="tooltip text-small" role="tooltip" hidden></div>
-  <div
-    id="ng-roles"
-    class="role-legend text-small section"
-    aria-label="Module roles"
-  ></div>
-  <div class="caption text-small text-muted">
-    <span id="ng-counts"></span
-    ><span id="ng-interaction" aria-live="polite"
-      >Double-click to focus · scroll to pan · pinch to zoom</span
-    >
-  </div>
-  <div class="selection section" aria-live="polite">
+  <span id="ng-interaction" class="sr-only" aria-live="polite"></span>
+  <div class="selection section sr-only" aria-live="polite">
     <h3 id="ng-name"></h3>
     <div id="ng-related" class="text-small"></div>
     <div id="ng-execution-detail"></div>
   </div>
-  <div class="actions section">
-    <button type="button" class="btn" id="ng-toggle-component"></button
-    ><button type="button" class="btn btn-ghost" id="ng-center" data-tooltip="Center this selection and its import connections.">Focus</button
-    ><button
-      type="button"
-      class="btn btn-ghost"
-      id="ng-pin"
-      aria-label="Pin chart"
-      data-tooltip="Pin chart"
-    >
-      <i data-lucide="pin" aria-hidden="true"></i></button
-    ><button type="button" class="btn btn-ghost" id="ng-whole">Show whole graph</button>
-    <button type="button" class="btn btn-ghost" id="ng-expand-all">
-      Expand all
-    </button>
-    <button type="button" class="btn btn-ghost" id="ng-collapse-all">
-      Collapse all
-    </button>
-  </div>
   <div class="replay section">
-    <span id="ng-replay-help" role="group" aria-label="Replay controls" aria-describedby="ng-replay-description"><button type="button" class="btn" id="ng-play" aria-describedby="ng-replay-description">Replay</button></span>
+    <span
+      id="ng-replay-help"
+      role="group"
+      aria-label="Replay controls"
+      aria-describedby="ng-replay-description"
+      ><button
+        type="button"
+        class="btn"
+        id="ng-play"
+        aria-describedby="ng-replay-description"
+      >
+        Replay
+      </button></span
+    >
     <span id="ng-replay-description" class="sr-only"></span>
     <div class="slider" id="ng-time-help">
       <label
@@ -282,7 +407,7 @@
       />
     </div>
     <label class="field form-label" id="ng-clock-help"
-      ><span>Replay clock</span
+      ><span class="sr-only">Replay clock</span
       ><select class="form-select" id="ng-clock" aria-label="Replay clock">
         <option value="wall">Elapsed run time</option>
         <option value="effort">Sum of run durations</option>
@@ -290,42 +415,84 @@
     >
   </div>
   <div class="section text-small" id="ng-summary" aria-live="polite"></div>
-  <details class="section">
+  <details class="section" id="ng-explore">
     <summary class="cursor-interaction">Explore the code</summary>
-    <div class="viz-row section">
-      <label class="field form-label"
-        >Select a crate or module<select class="form-select" id="ng-node"></select
-      ></label>
-    </div>
-    <div
-      class="viz-row section"
-      id="ng-expansions"
-      role="group"
-      aria-label="Expand crates"
-    ></div>
-    <div class="section text-small">
-      <h3>Graph controls</h3>
-      <ul>
-        <li>Scroll or drag to pan; pinch to zoom.</li>
-        <li>Hover a crate or module for its coverage chart. Click to select it; Shift-click to compare selections.</li>
-        <li>Hover an arrow to highlight its endpoints; click it to compare their charts.</li>
-        <li>Pin a chart to keep it open. Unpin it to follow the selection again. Drag its header to move it; close it to dismiss it.</li>
-        <li>Double-click a circle to focus it. Double-click the focused crate again to expand its modules.</li>
-        <li>Double-click empty space inside an expanded crate's outline to collapse it.</li>
-        <li>Click empty graph space to clear the selection.</li>
-      </ul>
+    <div class="control-panel">
+      <div class="actions section">
+        <button type="button" class="btn" id="ng-toggle-component"></button
+        ><button
+          type="button"
+          class="btn btn-ghost"
+          id="ng-center"
+          data-tooltip="Center this selection and its import connections."
+        >
+          Focus</button
+        ><button
+          type="button"
+          class="btn btn-ghost"
+          id="ng-pin"
+          aria-label="Pin chart"
+          data-tooltip="Pin chart"
+        >
+          <i data-lucide="pin" aria-hidden="true"></i>
+        </button>
+      </div>
+      <div class="viz-row section">
+        <label class="field form-label"
+          >Select a crate or module<select
+            class="form-select"
+            id="ng-node"
+          ></select
+        ></label>
+      </div>
+      <div
+        class="viz-row section"
+        id="ng-expansions"
+        role="group"
+        aria-label="Expand crates"
+      ></div>
+      <div class="section text-small">
+        <h3>Graph controls</h3>
+        <ul>
+          <li>Scroll or drag to pan; pinch to zoom.</li>
+          <li>
+            Hover for a name and coverage summary. Click a crate or module to
+            open its full chart; Shift-click to compare selections.
+          </li>
+          <li>
+            Hover an arrow to highlight its endpoints; click it to compare their
+            charts.
+          </li>
+          <li>
+            Pin a crate or module chart to keep it open. Unpin it to follow the
+            selection again. Drag its header to move it; close it to dismiss it.
+          </li>
+          <li>
+            Double-click a crate to expand its modules without zooming.
+            Double-click a module to focus it.
+          </li>
+          <li>
+            Double-click empty space inside an expanded crate's outline to
+            collapse it.
+          </li>
+          <li>Click empty graph space to clear the selection.</li>
+        </ul>
+      </div>
     </div>
   </details>
-  <div class="caption text-small text-muted section">
-    <span
-      >Arrows show imports; thickness counts distinct import paths. Arrow colour
-      identifies the importing module's role.</span
-    ><span id="ng-snapshot"></span>
+  <div id="ng-snapshot" class="text-small text-muted section">
+    <span id="ng-run-counts"></span> ·
+    <a
+      id="ng-source"
+      target="_blank"
+      rel="noopener noreferrer"
+      data-tooltip="Browse recorded source on GitHub"
+    ></a>
   </div>
   <script type="application/json" id="ng-data">
-<!-- NETWORK_DATA -->
-</script>
+    <!-- NETWORK_DATA -->
+  </script>
   <script>
-<!-- NETWORK_LOGIC -->
-</script>
+    <!-- NETWORK_LOGIC -->
+  </script>
 </div>

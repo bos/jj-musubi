@@ -95,6 +95,7 @@
     replayClock = "wall",
     replayPosition = 0,
     hover = null,
+    tooltipPoint = null,
     drag = null,
     edgeId = null,
     sourceId = null,
@@ -104,7 +105,6 @@
     scopeCache = new Map(),
     scopeKey = "",
     markerRects = [],
-    drillTarget = null,
     inspectors = [],
     preview = null,
     cardDrag = null;
@@ -201,7 +201,13 @@
       Number.isFinite(box.x) &&
       Number.isFinite(box.y)
     )
-      preview = { id: box.id, x: box.x, y: box.y, manual: !!box.manual };
+      preview = {
+        id: box.id,
+        x: box.x,
+        y: box.y,
+        manual: !!box.manual,
+        edge: box.edge,
+      };
     state.time =
       x.version === 1 || x.captureId !== measured.captureId
         ? duration
@@ -214,7 +220,6 @@
     if (!["wall", "effort"].includes(state.clock)) state.clock = "wall";
     if (!nodes[state.focus]) state.focus = null;
     const changed = JSON.stringify(state) !== before;
-    if (changed) drillTarget = null;
     return changed;
   }
 
@@ -539,7 +544,29 @@
   }
   function resize() {
     const w = $(".board").clientWidth,
-      h = w < 520 ? 570 : 540,
+      viewport =
+        parseFloat(
+          getComputedStyle(root).getPropertyValue(
+            "--assurance-viewport-height",
+          ),
+        ) || window.innerHeight,
+      chrome =
+        root.getBoundingClientRect().height -
+        $(".board").getBoundingClientRect().height,
+      body = getComputedStyle(document.body),
+      h = Math.round(
+        Math.max(
+          200,
+          Math.min(
+            440,
+            viewport -
+              chrome -
+              parseFloat(body.marginTop) -
+              parseFloat(body.marginBottom) -
+              32,
+          ),
+        ),
+      ),
       r = Math.min(2, window.devicePixelRatio || 1);
     if (w <= 0 || (w === width && h === height && r === dpr)) return;
     width = w;
@@ -576,7 +603,7 @@
       maxy = Math.max(...ys),
       mx = (minx + maxx) / 2,
       my = (miny + maxy) / 2;
-    const margin = width < 520 ? 48 : 70,
+    const margin = Math.min(width < 520 ? 48 : 70, height * 0.12),
       fit = Math.min(
         (graphWidth() - margin * 2) / Math.max(1, maxx - minx),
         (height - margin * 2) / Math.max(1, maxy - miny),
@@ -593,7 +620,12 @@
       screen[id] = {
         x: graphWidth() / 2 + (p[0] - mx) * fit * cam.scale + cam.x,
         y: height / 2 + (p[1] - my) * fit * cam.scale + cam.y,
-        r: Math.max(4, (n.kind === "crate" ? 30 : 11) * Math.sqrt(cam.scale)),
+        r: Math.max(
+          4,
+          (n.kind === "crate"
+            ? Math.min(30, height / 12)
+            : Math.min(11, height / 30)) * Math.sqrt(cam.scale),
+        ),
       };
     }
   }
@@ -637,7 +669,6 @@
     if (!state.selectedNodes.includes(id)) state.selectedNodes = [id];
     state.component = nodes[id].crate;
     state.selectedEdge = null;
-    drillTarget = nodes[id].kind === "crate" ? id : null;
     edgeId = null;
     sourceId = null;
     hover = null;
@@ -649,7 +680,6 @@
   }
   function wholeNetwork() {
     state.focus = null;
-    drillTarget = null;
     hover = null;
     tip.hidden = true;
     renderControls();
@@ -657,22 +687,22 @@
     persist();
   }
   function renderInteraction() {
-    const n = drillTarget ? nodes[drillTarget] : null,
-      link = focusedEdge(),
+    const link = focusedEdge(),
       focus =
         nodes[
           state.selected ||
             (!state.selected && hover?.type === "node" ? hover.id : null)
         ],
-      text = n
-        ? `Double-click again to expand ${n.name}`
-        : link
-          ? `${nodes[link.source].name} → ${nodes[link.target].name} · ${edgeId ? "2 selected · click empty space to clear" : "click to compare endpoints"}`
-          : focus
-            ? `${state.selectedNodes.length > 1 ? state.selectedNodes.length + " selections" : focus.name} · gray: no direct import link${state.selected ? " · click empty space to clear" : ""}`
-            : state.expanded.length
-              ? "Double-click a circle to focus · empty group space to collapse"
-              : "Double-click to focus · scroll to pan · pinch to zoom";
+      text =
+        focus?.kind === "crate"
+          ? `Double-click to expand ${focus.name}`
+          : link
+            ? `${nodes[link.source].name} → ${nodes[link.target].name} · ${edgeId ? "2 selected · click empty space to clear" : "click to compare endpoints"}`
+            : focus
+              ? `${state.selectedNodes.length > 1 ? state.selectedNodes.length + " selections" : focus.name} · gray: no direct import link${state.selected ? " · click empty space to clear" : ""}`
+              : state.expanded.length
+                ? "Double-click a module to focus · empty group space to collapse"
+                : "Double-click a crate to expand · scroll to pan · pinch to zoom";
     if ($("#ng-interaction").textContent !== text)
       $("#ng-interaction").textContent = text;
     const key = mutationOnly()
@@ -689,8 +719,7 @@
       : "Filled area counts each reached line once across the selected techniques. Shared lines are split equally between slices. Each bar counts that technique's full coverage.";
   }
   function doubleClickNode(id) {
-    if (nodes[id].kind === "crate" && drillTarget === id && state.focus === id)
-      setExpanded(nodes[id].crate, true);
+    if (nodes[id].kind === "crate") setExpanded(nodes[id].crate, true);
     else centerConnections(id);
   }
   function hull(points) {
@@ -1083,11 +1112,16 @@
       nodePath(ctx, p);
       ctx.stroke();
       let angle = -Math.PI / 2;
+      const fillScale = p.r / (n.kind === "crate" ? 30 : 11),
+        fillTransform = new DOMMatrix([fillScale, 0, 0, fillScale, p.x, p.y]);
       for (const method of data.mechanisms) {
         const value = run.credit[method.id] || 0;
         if (!value) continue;
         const end = angle + (Math.PI * 2 * value) / Math.max(1, run.total);
-        ctx.fillStyle = colours.fills[method.id];
+        const fill = colours.fills[method.id];
+        // Keep the texture attached to the circle as its centre and radius change.
+        if (fill instanceof CanvasPattern) fill.setTransform(fillTransform);
+        ctx.fillStyle = fill;
         ctx.globalAlpha = opacity * 0.9;
         ctx.beginPath();
         ctx.moveTo(p.x, p.y);
@@ -1112,6 +1146,8 @@
     drawLabels(near);
     renderInteraction();
     ctx.restore();
+    positionCards();
+    renderHoverTooltip();
   }
 
   function drawFocus(ids) {
@@ -1287,6 +1323,36 @@
       ? n.name
       : `${nodes["crate:" + n.crate].name} / ${n.name}`;
   }
+  function hoverSummary(id) {
+    const n = nodes[id],
+      c = execution(n),
+      coverage = state.enabled.some((id) =>
+        measured.coverageGroups.includes(id),
+      );
+    if (mutationOnly())
+      return `Mutations caught by tests: ${mutationStats(n).noticed}`;
+    if (!state.enabled.length) return "No techniques selected";
+    return coverage && !c.unmeasured
+      ? `${Math.round((c.hit / Math.max(1, c.total)) * 100)}% of lines reached`
+      : "Lines reached: —";
+  }
+  function techniqueStats(c, id) {
+    const known = measured.coverageGroups.includes(id) && !c.unmeasured,
+      hit = c.byKind[id] || 0,
+      pct = known ? (hit / Math.max(1, c.total)) * 100 : 0;
+    return {
+      known,
+      pct,
+      label: known
+        ? `${hit} of ${c.total} lines`
+        : c.unmeasured
+          ? "No compiler coverage mapping."
+          : "No coverage data recorded.",
+    };
+  }
+  function techniqueBar(id, value) {
+    return `<span class="technique-track"><span class="technique-bar" style="width:${value.pct}%;${id ? fillStyle(id) : "background-color:var(--foreground)"}"></span></span><span class="tabular-nums">${value.known ? Math.round(value.pct) + "%" : "—"}</span>`;
+  }
   function chartBody(id) {
     const n = nodes[id],
       c = execution(n);
@@ -1295,19 +1361,72 @@
     const rows = state.enabled
       .filter((id) => id !== "mutation")
       .map((id) => {
-        const m = mechanisms[id],
-          known = measured.coverageGroups.includes(id) && !c.unmeasured,
-          hit = c.byKind[id] || 0,
-          pct = known ? (hit / Math.max(1, c.total)) * 100 : 0,
-          label = known
-            ? `${hit} of ${c.total} lines`
-            : c.unmeasured
-              ? "No executable lines measured here"
-              : "No coverage data recorded";
-        return `<div class="technique-row" aria-label="${esc(m.name + ": " + label)}"><span>${esc(m.name)}</span><span class="technique-track"><span class="technique-bar" style="width:${pct}%;${fillStyle(id)}"></span></span><span class="tabular-nums">${known ? Math.round(pct) + "%" : "—"}</span></div>`;
+        const value = techniqueStats(c, id),
+          m = mechanisms[id];
+        return `<div class="technique-row" aria-label="${esc(m.name + ": " + value.label)}"><span>${esc(m.name)}</span>${techniqueBar(id, value)}</div>`;
       })
       .join("");
     return `<div class="text-small">${esc(roleName(n))}</div><div class="chart-bars text-small">${rows || (!state.enabled.length ? "<span>No techniques selected.</span>" : "")}</div>${state.enabled.includes("mutation") ? `<div class="text-small">${esc(mutationText(n))}</div>` : ""}<div class="text-small">${!state.enabled.some((id) => id !== "mutation" && measured.coverageGroups.includes(id)) ? "" : c.total ? `${c.hit.toLocaleString()} / ${c.total.toLocaleString()} lines reached (${Math.round((c.hit / c.total) * 100)}%)` : "No executable Rust lines measured."}</div>`;
+  }
+  function connectionSummary(id) {
+    if (!state.enabled.length) return "No techniques selected.";
+    if (mutationOnly()) return mutationText(nodes[id]);
+    if (!state.enabled.some((id) => measured.coverageGroups.includes(id)))
+      return "No coverage data for the selected techniques.";
+    const c = execution(nodes[id]);
+    return c.unmeasured
+      ? "No compiler coverage mapping."
+      : `${Math.round((c.hit / Math.max(1, c.total)) * 100)}% · ${c.hit.toLocaleString()}/${c.total.toLocaleString()} lines`;
+  }
+  function showConnection(edge) {
+    const el = $("#ng-hover"),
+      same = preview?.edge === edge.id,
+      open = same && !!el.querySelector("[data-connection-details]")?.open,
+      from = execution(nodes[edge.source]),
+      to = execution(nodes[edge.target]),
+      endpoint = (id, direction) =>
+        `<button type="button" class="btn btn-ghost text-small" data-inspect-node="${esc(id)}" data-tooltip="Open this coverage chart">${direction}: ${esc(chartTitle(id))}</button>`,
+      rows = state.enabled
+        .filter((id) => id !== "mutation")
+        .map((id) => {
+          const a = techniqueStats(from, id),
+            b = techniqueStats(to, id),
+            m = mechanisms[id];
+          return `<div class="technique-row" aria-label="${esc(m.name + ", from " + chartTitle(edge.source) + ": " + a.label + "; to " + chartTitle(edge.target) + ": " + b.label)}"><span>${esc(m.name)}</span>${techniqueBar(id, a)}${techniqueBar(id, b)}</div>`;
+        })
+        .join(""),
+      available = state.enabled.some((id) =>
+        measured.coverageGroups.includes(id),
+      ),
+      overall = (c) => ({
+        known: available && !c.unmeasured,
+        pct:
+          available && !c.unmeasured ? (c.hit / Math.max(1, c.total)) * 100 : 0,
+      }),
+      mutations =
+        state.enabled.includes("mutation") && !mutationOnly()
+          ? `<div class="text-small">From: ${esc(mutationText(nodes[edge.source]))}</div><div class="text-small">To: ${esc(mutationText(nodes[edge.target]))}</div>`
+          : "",
+      totals = `<div class="comparison-totals text-small"><span>${mutationOnly() ? "Mutations" : "Lines"}</span><span>${esc(connectionSummary(edge.source))}</span><span>${esc(connectionSummary(edge.target))}</span></div>`,
+      bars = mutationOnly()
+        ? totals
+        : `<div class="technique-row comparison-overall text-small" aria-label="Overall line coverage"><span>Overall</span>${techniqueBar(null, overall(from))}${techniqueBar(null, overall(to))}</div>`,
+      imports = `<div class="text-small">${edge.weight} distinct ${edge.weight === 1 ? "import path" : "import paths"}</div>`,
+      details = `<details data-connection-details${open ? " open" : ""}><summary>${mutationOnly() ? "Connection details" : "Compare techniques"}</summary>${mutationOnly() ? "" : `<div class="chart-bars text-small">${rows || "No techniques selected."}</div>${totals}${mutations}`}${imports}</details>`,
+      html = `<div class="comparison-heading"><div class="inspection-title" data-chart-drag><span class="chart-name">${mutationOnly() ? "Mutation comparison" : "Coverage comparison"}</span><div class="chart-actions"><button type="button" class="btn btn-ghost" data-close-connection aria-label="Close connection" data-tooltip="Close connection"><i data-lucide="x" aria-hidden="true"></i></button></div></div><div class="comparison-head text-small"><span>${endpoint(edge.source, "From")}</span><span>${endpoint(edge.target, "To")}</span></div></div>${bars}${details}`;
+    if (!same) {
+      preview = { id: edge.target, edge: edge.id, x: 0, y: 0 };
+      el.__html = null;
+    }
+    el.classList.add("connection");
+    el.setAttribute("aria-label", "Import connection comparison");
+    if (el.__html !== html) {
+      el.innerHTML = html;
+      el.__html = html;
+      decorateIcons();
+    }
+    el.hidden = false;
+    positionCards();
   }
   function hidePreview(force = false) {
     if (
@@ -1342,21 +1461,54 @@
       .map((el) => ({ ...cardRect(el), id: el.dataset.inspector }));
   }
   function cardSpaceHeight() {
-    return Math.max(
-      height || 540,
-      parseFloat($(".board").style.minHeight) || 0,
-    );
+    return height || 540;
   }
-  function stackCard(c, el, placed) {
+  // Open charts in a corner, against the graph's sides, by default. Do not anchor them
+  // to the node or pointer. Charts must stay inside the fixed canvas, never enlarge it.
+  // Only an explicit drag gives a chart a position away from the corners.
+  function placeCard(c, el, placed) {
     const w = el.offsetWidth,
       h = el.offsetHeight,
-      x = Math.max(0, $(".board").clientWidth - w),
-      y = placed
-        .filter((p) => !p.manual)
-        .reduce(
-          (bottom, p) => Math.max(bottom, p.y + p.h + 10),
-          width >= 700 ? 0 : height + 12,
-        );
+      right = Math.max(8, width - w - 8),
+      bottom = Math.max(8, cardSpaceHeight() - h - 8),
+      node = c.corner === undefined ? screen[c.id] : null,
+      candidates = [
+        { x: right, y: 8 },
+        { x: 8, y: 8 },
+        { x: right, y: bottom },
+        { x: 8, y: bottom },
+      ].map(({ x, y }, corner) => ({
+        x,
+        y,
+        corner,
+        overlap: placed.reduce(
+          (sum, other) =>
+            sum +
+            Math.max(
+              0,
+              Math.min(x + w, other.x + other.w) - Math.max(x, other.x),
+            ) *
+              Math.max(
+                0,
+                Math.min(y + h, other.y + other.h) - Math.max(y, other.y),
+              ),
+          node &&
+            Math.hypot(
+              node.x - Math.max(x, Math.min(x + w, node.x)),
+              node.y - Math.max(y, Math.min(y + h, node.y)),
+            ) <
+              node.r + 4
+            ? w * h
+            : 0,
+        ),
+      })),
+      { x, y, corner } = candidates.reduce((best, candidate) =>
+        candidate.overlap < best.overlap ||
+        (candidate.overlap === best.overlap && candidate.corner === c.corner)
+          ? candidate
+          : best,
+      );
+    c.corner = corner;
     c.x = x;
     c.y = y;
     el.style.left = x + "px";
@@ -1364,15 +1516,7 @@
     return { x, y, w, h, manual: false };
   }
   function sizeCardSpace() {
-    const cards = [
-        ...$("#ng-inspectors").children,
-        ...(!$("#ng-hover").hidden ? [$("#ng-hover")] : []),
-      ],
-      bottom = cards.reduce((y, el) => {
-        const r = cardRect(el);
-        return Math.max(y, r.y + r.h);
-      }, height || 540),
-      minHeight = Math.ceil(bottom) + "px";
+    const minHeight = cardSpaceHeight() + "px";
     if ($(".board").style.minHeight !== minHeight)
       $(".board").style.minHeight = minHeight;
   }
@@ -1380,19 +1524,11 @@
     if (root.querySelector("i[data-lucide]"))
       window.lucide?.createIcons({ attrs: { width: 16, height: 16 } });
   }
-  function exactCard(c, el, grow = false) {
+  function exactCard(c, el) {
     const w = el.offsetWidth,
       h = el.offsetHeight,
       x = Math.max(0, Math.min(Math.max(0, $(".board").clientWidth - w), c.x)),
-      y = Math.max(
-        0,
-        Math.min(
-          grow
-            ? Math.max(height || 540, c.y + h) - h
-            : Math.max(0, cardSpaceHeight() - h),
-          c.y,
-        ),
-      );
+      y = Math.max(0, Math.min(Math.max(0, cardSpaceHeight() - h), c.y));
     el.style.left = x + "px";
     el.style.top = y + "px";
     return { x, y, w, h, manual: !!c.manual };
@@ -1465,7 +1601,7 @@
     return `<div class="inspection-title" data-chart-drag><span class="chart-name">${esc(chartTitle(id))}</span><div class="chart-actions"><button type="button" class="btn btn-ghost" data-pin-node="${esc(id)}" aria-pressed="${pinned}" aria-label="${action}" data-tooltip="${action}"><i data-lucide="${pinned ? "pin-off" : "pin"}" aria-hidden="true"></i></button><button type="button" class="btn btn-ghost" data-close-chart="${esc(id)}" aria-label="Close chart" data-tooltip="Close chart"><i data-lucide="x" aria-hidden="true"></i></button></div></div>`;
   }
   function showPreview(id) {
-    if (state.selected && id !== state.selected) return;
+    if (id !== state.selected) return;
     if (inspectors.some((c) => c.id === id)) {
       hidePreview(true);
       return;
@@ -1473,8 +1609,10 @@
     const el = $("#ng-hover"),
       p = screen[id];
     if (!p) return;
-    const same = preview?.id === id;
+    const same = preview?.id === id && !preview.edge;
     if (!same) preview = { id, x: 0, y: 0 };
+    el.classList.remove("connection");
+    el.setAttribute("aria-label", "Coverage preview");
     const html = chartHeader(id) + chartBody(id);
     if (el.__html !== html) {
       el.innerHTML = html;
@@ -1482,16 +1620,7 @@
       decorateIcons();
     }
     el.hidden = false;
-    if (preview.manual) exactCard(preview, el, true);
-    else
-      stackCard(
-        preview,
-        el,
-        cardObstacles(el).map((r) => ({
-          ...r,
-          manual: !!inspectors.find((c) => c.id === r.id)?.manual,
-        })),
-      );
+    positionCards();
     sizeCardSpace();
   }
   function pinInspector(id, save = true, pinned = true) {
@@ -1506,6 +1635,7 @@
         x: fromPreview ? preview.x : 0,
         y: fromPreview ? preview.y : 0,
         manual: fromPreview && !!preview.manual,
+        corner: fromPreview ? preview.corner : undefined,
         pinned,
       };
       inspectors.push(c);
@@ -1529,8 +1659,8 @@
   }
   function closeChart(id) {
     inspectors = inspectors.filter((c) => c.id !== id);
-    if (preview?.id === id) hidePreview(true);
-    if (state.selectedNodes.includes(id)) {
+    if (preview?.id === id && !preview.edge) hidePreview(true);
+    if (state.selectedNodes.includes(id) && !state.selectedEdge) {
       state.selectedNodes = state.selectedNodes.filter((x) => x !== id);
       state.selected = state.selectedNodes.includes(state.selected)
         ? state.selected
@@ -1538,7 +1668,6 @@
       state.selectedEdge = null;
       edgeId = null;
       if (state.focus === id) state.focus = null;
-      drillTarget = null;
       hover = null;
       tip.hidden = true;
     }
@@ -1546,15 +1675,31 @@
     persist();
   }
 
+  function positionCards() {
+    const cards = inspectors.flatMap((c) => {
+        const el = [...$("#ng-inspectors").children].find(
+          (el) => el.dataset.inspector === c.id,
+        );
+        return el ? [{ c, el }] : [];
+      }),
+      placed = cards
+        .filter(({ c }) => c.manual)
+        .map(({ c, el }) => exactCard(c, el)),
+      el = $("#ng-hover");
+    if (preview?.manual && !el.hidden) placed.push(exactCard(preview, el));
+    for (const { c, el } of cards)
+      if (!c.manual) placed.push(placeCard(c, el, placed));
+    if (preview && !preview.manual && !el.hidden)
+      placeCard(preview, el, placed);
+  }
   function renderInspectors() {
     inspectors = inspectors.filter(
-      (c) => c.pinned || state.selectedNodes.includes(c.id),
+      (c) =>
+        c.pinned || (!state.selectedEdge && state.selectedNodes.includes(c.id)),
     );
     const area = $("#ng-inspectors");
     for (const el of [...area.children])
       if (!inspectors.some((c) => c.id === el.dataset.inspector)) el.remove();
-    const placed = [];
-    let bottom = height || 540;
     for (const c of inspectors) {
       let el = [...area.children].find((el) => el.dataset.inspector === c.id);
       if (!el) {
@@ -1571,24 +1716,24 @@
         el.__html = html;
         decorateIcons();
       }
-      const r = c.manual ? exactCard(c, el, true) : stackCard(c, el, placed);
-      r.manual = !!c.manual;
-      placed.push(r);
-      bottom = Math.max(bottom, r.y + r.h);
     }
-    const minHeight = Math.ceil(bottom) + "px";
-    if ($(".board").style.minHeight !== minHeight)
-      $(".board").style.minHeight = minHeight;
-    if (
-      preview &&
-      (inspectors.some((c) => c.id === preview.id) ||
-        (state.selected && preview.id !== state.selected))
-    )
-      hidePreview(true);
-    if (state.selected && !inspectors.some((c) => c.id === state.selected))
-      showPreview(state.selected);
-    else if (preview) showPreview(preview.id);
+    const edge = state.selectedEdge
+      ? view.links.find((e) => e.id === state.selectedEdge)
+      : null;
+    if (edge) showConnection(edge);
+    else {
+      if (
+        preview &&
+        (inspectors.some((c) => c.id === preview.id) ||
+          (state.selected && preview.id !== state.selected))
+      )
+        hidePreview(true);
+      if (state.selected && !inspectors.some((c) => c.id === state.selected))
+        showPreview(state.selected);
+      else if (preview) hidePreview(true);
+    }
     sizeCardSpace();
+    positionCards();
   }
   root.addEventListener("pointerdown", (e) => {
     if (!e.target.closest("[data-chart-drag]") || e.target.closest("button"))
@@ -1658,11 +1803,15 @@
     for (const c of components)
       root.querySelector(`[data-expand-component="${c.crate}"]`).checked =
         state.expanded.includes(c.crate);
+    $("#ng-technique-count").textContent =
+      `${state.enabled.length}/${data.mechanisms.length}`;
     $("#ng-techniques-all").disabled =
       state.enabled.length === data.mechanisms.length;
     $("#ng-techniques-none").disabled = state.enabled.length === 0;
-    $("#ng-expand-all").disabled = state.expanded.length === components.length;
-    $("#ng-collapse-all").disabled = state.expanded.length === 0;
+    const allExpanded = state.expanded.length === components.length;
+    $("#ng-toggle-all").textContent = allExpanded
+      ? "Collapse all"
+      : "Expand all";
     $("#ng-node").innerHTML =
       '<option value="">No selection</option>' +
       view.nodes
@@ -1704,14 +1853,14 @@
       state.clock === "effort" ? effort(state.time) : state.time;
     const done = events.filter((e) => e.t <= state.time).length;
     $("#ng-time-label").textContent =
-      `${formatTime(state.clock === "effort" ? effort(state.time) : state.time)} · ${done} of ${events.length} tests & fuzz checkpoints finished`;
+      `${formatTime(state.clock === "effort" ? effort(state.time) : state.time)} · ${done}/${events.length} completed`;
     const replayReason = available
       ? ""
       : !state.enabled.length
-        ? "No techniques selected. Select All or a technique above to enable replay."
+        ? "No techniques selected. Open Techniques and select All or a test or fuzzing technique."
         : mutationOnly()
-          ? "Mutation results have no replay timeline. Select a test or fuzzing technique above."
-          : "No timeline recorded for the selected techniques. Select another technique above.";
+          ? "Mutation results have no replay timeline. Select a test or fuzzing technique under Techniques."
+          : "No timeline recorded for the selected techniques. Choose another technique under Techniques.";
     for (const id of ["#ng-replay-help", "#ng-time-help"])
       if (replayReason) $(id).dataset.tooltip = replayReason;
       else $(id).removeAttribute("data-tooltip");
@@ -1726,8 +1875,15 @@
     $("#ng-play").textContent = playing ? "Pause" : "Replay";
     $("#ng-play").disabled = !available;
     $("#ng-time").disabled = !available;
-    $("#ng-snapshot").textContent =
-      `${measured.passed} tests · ${measured.fuzzCheckpoints || 0} fuzz checkpoints · ${measured.sourceRevision.slice(0, 8)}`;
+    $("#ng-run-counts").textContent =
+      `${measured.passed} tests · ${measured.fuzzCheckpoints || 0} fuzz checkpoints`;
+    const source = $("#ng-source");
+    source.textContent = measured.sourceRevision.slice(0, 8);
+    source.href = `https://github.com/bos/jj-musubi/tree/${encodeURIComponent(measured.sourceRevision)}`;
+    source.setAttribute(
+      "aria-label",
+      `Browse source at commit ${measured.sourceRevision}`,
+    );
   }
 
   function renderDetail() {
@@ -1745,6 +1901,7 @@
     const n = nodes[state.selected],
       edge = edgeId ? view.links.find((e) => e.id === edgeId) : null;
     $(".selection").hidden = !n && !edge;
+    $(".actions").hidden = !n || !!edge;
     $("#ng-toggle-component").hidden = !n || !!edge;
     $("#ng-center").hidden = !n || !!edge;
     $("#ng-pin").hidden = !n || !!edge;
@@ -1795,7 +1952,6 @@
     state.selectedNodes = [];
     state.selectedEdge = null;
     state.focus = null;
-    drillTarget = null;
     hover = null;
     edgeId = null;
     sourceId = null;
@@ -1810,7 +1966,6 @@
       return;
     }
     if (!nodes[id]) return;
-    if (drillTarget !== id) drillTarget = null;
     if (add) {
       if (state.selectedNodes.includes(id)) {
         state.selectedNodes = state.selectedNodes.filter((x) => x !== id);
@@ -1829,6 +1984,8 @@
     edgeId = null;
     state.selectedEdge = null;
     sourceId = null;
+    hover = null;
+    tip.hidden = true;
     render();
     persist();
   }
@@ -1840,20 +1997,18 @@
     state.selected = e.target;
     state.component = nodes[e.target].crate;
     state.focus = null;
-    drillTarget = null;
     state.selectedEdge = id;
     edgeId = id;
     hover = null;
     sourceId = null;
     tip.hidden = true;
     hidePreview(true);
-    for (const node of state.selectedNodes) pinInspector(node, false, false);
+    inspectors = inspectors.filter((c) => c.pinned);
     render();
     persist();
   }
   function setExpanded(name, on) {
     if (!componentNames.includes(name)) return;
-    drillTarget = null;
     state.expanded = componentNames.filter((c) =>
       c === name ? on : state.expanded.includes(c),
     );
@@ -1942,6 +2097,26 @@
         `<div class="method" data-tooltip="${esc(m.description)} ${m.tests} ${m.id === "fuzz" ? "coverage checkpoints" : m.id === "mutation" ? "mutations" : "recorded tests"}.">${swatch(m.id)}<label class="form-check"><input class="form-check-input" type="checkbox" data-mechanism="${m.id}" checked><span class="form-check-label">${esc(m.name)}</span></label>${m.status !== "recorded" ? '<span class="text-small text-muted">no data</span>' : ""}</div>`,
     )
     .join("");
+  root.addEventListener("pointerdown", (e) => {
+    for (const id of ["ng-techniques", "ng-legend", "ng-explore"]) {
+      const panel = document.getElementById(id);
+      if (panel.open && !panel.contains(e.target)) panel.open = false;
+    }
+  });
+  for (const id of ["ng-techniques", "ng-legend", "ng-explore"]) {
+    const panel = document.getElementById(id);
+    panel.addEventListener("toggle", () => {
+      if (panel.open)
+        for (const other of ["ng-techniques", "ng-legend", "ng-explore"])
+          if (other !== id) document.getElementById(other).open = false;
+    });
+    panel.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        panel.open = false;
+        panel.querySelector("summary").focus();
+      }
+    });
+  }
   root.addEventListener("change", (e) => {
     const t = e.target;
     if (t.dataset.expandComponent) {
@@ -1962,7 +2137,24 @@
     render();
     persist();
   });
+  root.addEventListener(
+    "toggle",
+    (e) => {
+      if (e.target.matches("[data-connection-details]")) positionCards();
+    },
+    true,
+  );
   root.addEventListener("click", (e) => {
+    if (e.target.closest("[data-close-connection]")) {
+      clearSelection();
+      return;
+    }
+    const endpoint = e.target.closest("[data-inspect-node]");
+    if (endpoint) {
+      selectNode(endpoint.dataset.inspectNode);
+      return;
+    }
+
     const techniques = e.target.closest(
       "#ng-techniques-all, #ng-techniques-none",
     );
@@ -2007,11 +2199,12 @@
       wholeNetwork();
       return;
     }
-    const geometry = e.target.closest("#ng-expand-all, #ng-collapse-all");
+    const geometry = e.target.closest("#ng-toggle-all");
     if (geometry) {
-      drillTarget = null;
       state.expanded =
-        geometry.id === "ng-expand-all" ? [...componentNames] : [];
+        state.expanded.length === componentNames.length
+          ? []
+          : [...componentNames];
       state.level = expansionLevel();
       state.focus = null;
       setView();
@@ -2106,10 +2299,6 @@
   }
   function directCamera() {
     cancelAnimationFrame(cameraFrame);
-    if (drillTarget) {
-      drillTarget = null;
-      renderInteraction();
-    }
     hover = null;
     tip.hidden = true;
     hidePreview();
@@ -2126,6 +2315,38 @@
     return Number.isFinite(e.clientX) && Number.isFinite(e.clientY)
       ? local(e)
       : { x: graphWidth() / 2, y: height / 2 };
+  }
+  function renderHoverTooltip() {
+    const h = hover;
+    if (!h || h.type === "group" || !tooltipPoint || drag?.moved) {
+      tip.hidden = true;
+      return;
+    }
+    if (h.type === "node") {
+      tip.textContent = `${chartTitle(h.id)}\n${hoverSummary(h.id)}`;
+    } else {
+      const edge = view.links.find((e) => e.id === h.id);
+      tip.textContent = `${chartTitle(edge.source)} · ${hoverSummary(edge.source)}\n${chartTitle(edge.target)} · ${hoverSummary(edge.target)}`;
+    }
+    tip.hidden = false;
+    const box = root.getBoundingClientRect(),
+      board = $(".board").getBoundingClientRect(),
+      left = board.left - box.left,
+      top = board.top - box.top,
+      x = tooltipPoint.x - box.left + 12,
+      y = tooltipPoint.y - box.top + 15,
+      below = y + tip.offsetHeight <= top + height - 8;
+    tip.style.left =
+      Math.max(left + 8, Math.min(left + width - tip.offsetWidth - 8, x)) +
+      "px";
+    tip.style.top =
+      Math.max(
+        top + 8,
+        Math.min(
+          top + height - tip.offsetHeight - 8,
+          below ? y : tooltipPoint.y - box.top - tip.offsetHeight - 12,
+        ),
+      ) + "px";
   }
   canvas.addEventListener("pointerdown", (e) => {
     cancelAnimationFrame(cameraFrame);
@@ -2150,12 +2371,10 @@
         dy = p.y - drag.y;
       if (Math.hypot(dx, dy) > 4) drag.moved = true;
       if (drag.moved) {
-        if (drillTarget) {
-          drillTarget = null;
-          renderInteraction();
-        }
         cam.x = drag.baseX + dx;
         cam.y = drag.baseY + dy;
+        hover = null;
+        tooltipPoint = null;
         tip.hidden = true;
         draw();
       }
@@ -2163,32 +2382,9 @@
     }
     const h = hit(p.x, p.y, true);
     hover = h;
+    tooltipPoint =
+      e.pointerType === "touch" ? null : { x: e.clientX, y: e.clientY };
     draw();
-    if (h?.type !== "node") hidePreview();
-    if (!h || state.selected) {
-      tip.hidden = true;
-      return;
-    }
-    if (h.type === "node") {
-      const n = nodes[h.id],
-        c = execution(n),
-        related = scopeKinds(n).map((id) => mechanisms[id].name);
-      showPreview(h.id);
-      tip.hidden = true;
-      return;
-    } else if (h.type === "group") {
-      tip.hidden = true;
-      return;
-    } else {
-      const edge = view.links.find((e) => e.id === h.id);
-      const group = groupAt(p.x, p.y);
-      tip.textContent = `${nodes[edge.source].name} → ${nodes[edge.target].name}\n${edge.weight} distinct import paths · click to compare endpoints${group ? "\nDouble-click to collapse " + nodes[group.id].name : ""}`;
-    }
-    tip.hidden = !!preview;
-    const box = root.getBoundingClientRect();
-    tip.style.left =
-      Math.max(0, Math.min(width - 300, e.clientX - box.left + 12)) + "px";
-    tip.style.top = e.clientY - box.top + 15 + "px";
   });
   canvas.addEventListener("pointerup", (e) => {
     if (!drag) return;
@@ -2198,7 +2394,8 @@
       canvas.releasePointerCapture(e.pointerId);
     if (!moved) {
       const p = local(e),
-        h = hit(p.x, p.y);
+        // Keep a line click consistent with its tooltip where a label overlaps it.
+        h = hit(p.x, p.y, hover?.type === "edge");
       if (h?.type === "node") selectNode(h.id, e.shiftKey);
       else if (h?.type === "edge") selectEdge(h.id);
       else clearSelection();
@@ -2276,7 +2473,9 @@
     },
     { passive: false },
   );
-  new ResizeObserver(scheduleResize).observe($(".board"));
+  const layoutObserver = new ResizeObserver(scheduleResize);
+  layoutObserver.observe($(".board"));
+  layoutObserver.observe(root);
   window.addEventListener("resize", scheduleResize);
   new MutationObserver(scheduleTheme).observe(document.documentElement, {
     attributes: true,

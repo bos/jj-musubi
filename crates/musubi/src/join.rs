@@ -427,11 +427,12 @@ pub fn clone(
     } else {
         musubi_jj::remote_url::JoinRemotes::default()
     };
+    let resolved_id = musubi_hub::hub_dir::HiveId::from(info.id);
     let reply = block_on(ask_preparing(
         ui,
         &hub,
         HubWideRequest::PrepareClone {
-            hive: info.id,
+            hive: resolved_id.clone(),
             backend: info.backend,
             remote_bindings: remotes.bindings.clone(),
         },
@@ -439,6 +440,10 @@ pub fn clone(
     let HubWideReply::Hive(info) = reply else {
         anyhow::bail!("unexpected reply from the hub: {reply:?}");
     };
+    anyhow::ensure!(
+        info.id == resolved_id.as_str(),
+        "the hub returned a different hive during clone; run `musubi clone` again"
+    );
     clone_config::missing(&jj_lib::config::StackedConfig::empty(), &info.clone_config)?;
     let dest = destination.to_str().context("destination is not UTF-8")?;
     let init: &[&str] = match info.backend {

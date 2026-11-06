@@ -607,3 +607,8 @@ The copy's expiry policy is chosen locally when it joins or clones. Remove
 `musubi.forget-after`, or the whole `musubi` table, from `musubi.clone-config` before
 creating the hive. Select individual portable keys instead; see
 [Configure each machine](guides/working-across-machines.md#configure-each-machine).
+
+### "the hub returned a different hive during clone; run `musubi clone` again"
+
+Clone refused the hub's answer before creating its destination. Retry `musubi clone`. If it
+repeats, make sure the hub and this machine run the same build.

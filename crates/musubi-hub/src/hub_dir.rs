@@ -33,6 +33,33 @@ use crate::store::StoreError;
 
 const HIVE_FILE: &str = "hive.toml";
 
+/// A hive's internal identity, distinct from a human-supplied name or prefix.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct HiveId(String);
+
+impl HiveId {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl From<String> for HiveId {
+    fn from(id: String) -> Self {
+        Self(id)
+    }
+}
+
+impl std::fmt::Display for HiveId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// A hive's `hive.toml`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct HiveMeta {
@@ -404,12 +431,12 @@ impl HubDir {
 
     /// The id of the hive `name` names: its name, its id, or a prefix of exactly one
     /// hive's name (or else id).
-    pub fn resolve(&self, name: &str) -> Result<String, Refusal> {
+    pub fn resolve(&self, name: &str) -> Result<HiveId, Refusal> {
         if let Some((id, _)) = self.hives.iter().find(|(_, h)| h.meta.name == name) {
-            return Ok(id.clone());
+            return Ok(id.clone().into());
         }
         if self.hives.contains_key(name) {
-            return Ok(name.to_owned());
+            return Ok(name.to_owned().into());
         }
         let by_name = |hive: &Hive, _: &str| hive.meta.name.starts_with(name);
         let by_id = |_: &Hive, id: &str| id.starts_with(name);
@@ -421,7 +448,7 @@ impl HubDir {
                 .collect();
             match found.as_slice() {
                 [] => {}
-                [(id, _)] => return Ok((*id).clone()),
+                [(id, _)] => return Ok((*id).clone().into()),
                 several => {
                     let mut names: Vec<&str> =
                         several.iter().map(|(_, h)| h.meta.name.as_str()).collect();
@@ -435,12 +462,12 @@ impl HubDir {
 
     /// The id of the hive whose name or id is exactly `name`, for removing it, which a
     /// prefix is too easily mistaken for.
-    pub fn resolve_exact(&self, name: &str) -> Result<String, Refusal> {
+    pub fn resolve_exact(&self, name: &str) -> Result<HiveId, Refusal> {
         if let Some((id, _)) = self.hives.iter().find(|(_, h)| h.meta.name == name) {
-            return Ok(id.clone());
+            return Ok(id.clone().into());
         }
         if self.hives.contains_key(name) {
-            return Ok(name.to_owned());
+            return Ok(name.to_owned().into());
         }
         Err(format!("this hub has no hive named {name}"))
     }
@@ -469,7 +496,7 @@ impl HubDir {
     }
 
     pub fn rename(&mut self, name: &str, to: &str) -> Result<HiveInfo, Refusal> {
-        let id = self.resolve(name)?;
+        let id = self.resolve(name)?.into_string();
         if self.hives[&id].meta.name != to {
             self.check_new_name(to)?;
             let hive = self.hives.get_mut(&id).expect("resolved");
@@ -663,7 +690,7 @@ impl HubDir {
             }
         }
         let chosen = match &request.choice {
-            JoinChoice::Hive(name) => Some(self.resolve(name)?),
+            JoinChoice::Hive(name) => Some(self.resolve(name)?.into_string()),
             JoinChoice::Match | JoinChoice::Create(_) | JoinChoice::Remake { .. } => None,
         };
         let new_name = match &request.choice {
@@ -771,18 +798,21 @@ impl HubDir {
     /// Checks and reserves inherited Git names before a clone creates any directory.
     pub fn prepare_clone(
         &mut self,
-        name: &str,
+        id: &HiveId,
         backend: Backend,
         incoming: &BTreeMap<String, RemoteBinding>,
     ) -> Result<HiveInfo, Refusal> {
-        let id = self.resolve(name)?;
-        if self.hives[&id].meta.backend != backend {
+        let hive = self
+            .hives
+            .get(id.as_str())
+            .ok_or_else(|| format!("no hive {id}"))?;
+        if hive.meta.backend != backend {
             return Err(
                 "the hive changed backend during clone; run `musubi clone` again".to_owned(),
             );
         }
-        self.reserve_remote_bindings(&id, incoming, None)?;
-        Ok(self.info(&id).expect("resolved"))
+        self.reserve_remote_bindings(id.as_str(), incoming, None)?;
+        Ok(self.info(id.as_str()).expect("checked by id"))
     }
 
     fn reserve_remote_bindings(
@@ -1048,6 +1078,28 @@ mod tests {
         }
     }
 
+    /// Clone resolves a user-supplied name once, then checks that exact hive by id.
+    #[test]
+    fn clone_preflight_keeps_the_resolved_hive() {
+        let dir = musubi_testutil::tempdir();
+        let mut hubs = HubDir::open(dir.path()).unwrap();
+        let alpha = hubs.create("alpha", Backend::Git).unwrap();
+        let other = hubs.create(&alpha, Backend::Git).unwrap();
+        assert_ne!(alpha, other);
+        assert_eq!(hubs.resolve(&alpha).unwrap().as_str(), other);
+        let resolved = hubs.resolve("alpha").unwrap();
+        let prepared = hubs
+            .prepare_clone(&resolved, Backend::Git, &BTreeMap::new())
+            .unwrap();
+        assert_eq!(prepared.id, alpha, "clone switched to a different hive");
+        let missing = Uuid::new_v4().to_string();
+        hubs.create(&missing, Backend::Git).unwrap();
+        assert!(
+            hubs.prepare_clone(&HiveId::from(missing), Backend::Git, &BTreeMap::new())
+                .is_err()
+        );
+    }
+
     /// A name is reserved on approval, survives pending expiry and restart, and cannot
     /// be overridden by an explicit hive choice or an existing copy's rejoin.
     #[test]
@@ -1070,8 +1122,12 @@ mod tests {
         let joined = hubs.join(&first).unwrap();
         let id = joined.hive.id;
         assert!(
-            hubs.prepare_clone(&id, Backend::Git, &first.remote_bindings)
-                .is_ok()
+            hubs.prepare_clone(
+                &HiveId::from(id.clone()),
+                Backend::Git,
+                &first.remote_bindings
+            )
+            .is_ok()
         );
         let mut conflicting = first.remote_bindings.clone();
         conflicting
@@ -1079,7 +1135,10 @@ mod tests {
             .unwrap()
             .push
             .insert("example.com/fork".to_owned());
-        assert!(hubs.prepare_clone(&id, Backend::Git, &conflicting).is_err());
+        assert!(
+            hubs.prepare_clone(&HiveId::from(id.clone()), Backend::Git, &conflicting)
+                .is_err()
+        );
         // The first push records common history independently of the approval's names.
         hubs.update_index(
             &id,
@@ -1395,8 +1454,8 @@ mod tests {
         };
         let id = hubs.join(&named).unwrap().hive.id;
         assert!(hubs.resolve_exact("proj").is_err(), "removed by a prefix");
-        assert_eq!(hubs.resolve_exact("project").unwrap(), id);
-        assert_eq!(hubs.resolve_exact(&id).unwrap(), id);
+        assert_eq!(hubs.resolve_exact("project").unwrap().as_str(), id);
+        assert_eq!(hubs.resolve_exact(&id).unwrap().as_str(), id);
         hubs.remove(&id).unwrap();
         assert!(hubs.is_removed(&id));
         let removed = dir.path().join("removed");

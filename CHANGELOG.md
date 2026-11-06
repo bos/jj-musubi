@@ -7,6 +7,12 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- Clone keeps the exact hive selected by its first name lookup. A different hive named
+  with that hive's id could previously redirect the clone to the wrong repository during
+  preflight. The hub now checks only the resolved id, and the client rejects a reply for
+  another hive before creating directories. This changes the protocol to 16: upgrade the
+  hub and every machine together. It adds no further hub metadata change.
+
 - Concurrent first joins on one machine reuse one completed SSH key pair. Previously both
   could start `ssh-keygen` for the same files, causing a join to fail or replace the other's
   key. Key generation is locked until both files are ready, before either join probes or

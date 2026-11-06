@@ -35,7 +35,7 @@ use crate::Attachment;
 use crate::blobs::BlobId;
 use crate::blobs::BlobStore;
 
-pub const PROTOCOL_VERSION: u32 = 15;
+pub const PROTOCOL_VERSION: u32 = 16;
 pub const JJ_LIB_VERSION: &str = "0.47.1";
 /// This release of musubi, as every message says, and `musubi --version`: for a build deployed
 /// from source, followed by when it was deployed and its commit (`build.rs`).
@@ -207,7 +207,8 @@ pub enum HubWideRequest {
     Activity,
     /// Validate and reserve the destination's inherited names before clone makes its path.
     PrepareClone {
-        hive: String,
+        /// The exact id returned by Resolve, never a hive name or prefix.
+        hive: musubi_hub::hub_dir::HiveId,
         backend: musubi_jj::objects::Backend,
         remote_bindings: std::collections::BTreeMap<String, musubi_jj::remote_url::RemoteBinding>,
     },

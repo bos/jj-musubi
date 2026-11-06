@@ -119,6 +119,12 @@ and the other machines fill it. See
 Someone removed the hive with `musubi hub remove`, and this copy has left it, keeping
 everything it has. To share the repository again, start a new hive with `musubi create`.
 
+### "hub: this hive is being removed from the hub"
+
+Someone ran `musubi hub remove` for this copy's hive, and the hub is finishing what it was
+doing for the hive's machines. Nothing needs doing: once the hive is removed, this copy leaves
+it as it next syncs, keeping everything it has. If the removal fails, the copy syncs as before.
+
 ### "this repository's hive, app, was removed from its hub; ..."
 
 A plain `musubi join`, in a copy whose hive was removed, doesn't join another hive whose

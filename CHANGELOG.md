@@ -24,6 +24,12 @@ machine (see [Upgrading](README.md#upgrading)).
   minutes, and the hub answers a repeat with the reply it already prepared. Nothing to do on
   upgrading.
 
+- The hub keeps serving every other hive while `musubi hub remove` waits for the removed hive
+  to finish what it is doing, and while `musubi join` looks for the hive a repository belongs
+  in. Previously either could hold up every machine's syncs, so that they could time out. A
+  machine of the hive being removed gets "hub: this hive is being removed from the hub" until
+  the removal finishes, then leaves the hive as before. Nothing needs doing on upgrading.
+
 - `musubi clone` refuses a nonempty destination before changing it. Previously it could
   share that directory's files and Git history with the hive. Choose a new or empty directory,
   or use `musubi join` to share an existing repository.

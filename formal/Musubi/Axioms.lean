@@ -16,6 +16,7 @@ import Musubi.RetryControl
 import Musubi.RecordStability
 import Musubi.ContractOrder
 import Musubi.SurvivorAdvance
+import Musubi.BaseImages
 import Musubi.ContractedExec
 import Musubi.ContractedRecordCut
 import Musubi.CutHistory
@@ -295,6 +296,10 @@ open Musubi
 #print axioms Contract.advanceImages_singleton_ready
 #print axioms Contract.advanceImages_merge_ready
 #print axioms Contract.advanceImages_merge_keeps
+#print axioms Contract.covered_drops
+#print axioms Contract.covered_image
+#print axioms Contract.covered_upd
+#print axioms Contract.covered_contracted
 
 #print axioms AbandonRefs.abstraction_unique
 #print axioms AbandonRefs.adoption_composes

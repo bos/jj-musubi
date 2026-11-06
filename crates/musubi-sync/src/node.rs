@@ -238,11 +238,18 @@ impl NodeAdapter {
         if let Some(known) = known {
             self.reconcile_pending(known)?;
         }
-        let mut reachable = false;
-        for NodeOp(base) in self.repo.to_node(&hub(&base))? {
+        // Every image of the base must be below a head. Dropping the base can leave it
+        // several. `formal/Musubi/BaseImages.lean` shows that the steps which change the base,
+        // the drops or the heads keep every image below a head, so this fails for lost
+        // history, including history that lost only some of the images.
+        let images = self.repo.to_node(&hub(&base))?;
+        let mut reachable = !images.is_empty();
+        for NodeOp(image) in &images {
+            let mut below = false;
             for head in &heads {
-                reachable |= self.canonical_is_ancestor(&base.0, head)?;
+                below = below || self.canonical_is_ancestor(&image.0, head)?;
             }
+            reachable &= below;
         }
         if !reachable {
             return Err(NodeError::UnreachableHistory.into());

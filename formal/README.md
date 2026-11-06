@@ -88,6 +88,7 @@ is `formal/.lake/build/bin/oracle`.
 | `Musubi/RecordStability.lean` | Finite record appends and pruning for bounded original drops, and pending shrink under record extension. |
 | `Musubi/ContractOrder.lean` | Ancestry through a contracted expected head, including its difference from original ancestry. |
 | `Musubi/SurvivorAdvance.lean` | The complete surviving-image frontier, preservation of local work, and its full-frontier merge. |
+| `Musubi/BaseImages.lean` | Every image of the accepted base stays below an op head, through each step that changes the base, the drops or the heads, as stated, unchecked against the code (#138). |
 | `Musubi/ContractedSafety.lean` | Common store and frontier invariants without an original accepted-head chain; local primitive preservation and fixed-drop credit. |
 | `Musubi/ContractedExec.lean` | The explicit executable union with survivor advance, atomic prepared adoption and contracted acceptance and rejection. |
 | `Musubi/ContractedRecordCut.lean` | One record, pruning and node-drop stabilization cut for the executable recovery union, without assuming head stability. |

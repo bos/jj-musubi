@@ -43,9 +43,18 @@ distinct from zero.
 [network-view.js](../../contrib/assurance/network-view.js) draws the graph on Canvas. HTML
 provides controls and draggable, pinnable info boxes. Separate canvas layers blur background
 edges inside unselected circles while active arrows stay sharp above them, with a pale halo.
-Labels appear selectively to avoid collisions. Hovering a node highlights its connections;
-clicking keeps that emphasis. Geometric hit testing distinguishes circles, arrows and group
-boundaries. The embedded view saves filters, expansion and pinned-chart positions.
+Labels appear selectively to avoid collisions. Hovering a node highlights its connections
+and shows a small name and coverage tooltip. Hovering an arrow compares coverage at both ends,
+using the same selected techniques and replay position. Tooltips are translucent with a blurred
+backdrop. Clicking keeps the emphasis and opens
+the full coverage chart; hovering alone never opens it. Geometric hit testing distinguishes
+circles, arrows and group boundaries. Info boxes open in a corner of the graph and stay inside
+it, scrolling when needed. Only dragging a box gives it a position away from the corners.
+Pattern fills move and scale with their circles. The embedded view saves filters, expansion
+and pinned-chart positions.
+Double-clicking a collapsed crate expands its modules without zooming; double-clicking a module
+focuses it. Control menus overlay the graph, leaving the toolbar and canvas fixed. The toolbar
+keeps its expand/collapse toggle and crate/module counts in fixed-width slots.
 
 For each line and technique, the dataset stores the first event that reached it. Scrubbing
 changes the event cutoff and recomputes the union. Coverage changes only at recorded test or
@@ -57,3 +66,10 @@ The embedded view uses the host's tooltip handling. Offline pages include
 disabled replay controls. The interaction instructions are under **Explore the code**.
 
 [Reproducing the network](assurance.md) covers collection and rendering commands.
+
+Clicking an import arrow opens one compact comparison with adjacent overall-coverage bars.
+**Compare techniques** opens paired bars for each technique, using the same styling and scale
+as ordinary node charts. One close action dismisses the connection. Clicking an endpoint name
+opens its ordinary chart. The import-path count appears inside the comparison’s details.
+
+The footer’s short source commit links to that commit’s tree on GitHub.

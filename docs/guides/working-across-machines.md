@@ -185,6 +185,9 @@ musubi strips them before sharing the URL, and from the command line that jj rec
 the operation that added the remote. To share them anyway, set
 `musubi.share-credentials = true` in that machine's jj config.
 
+After changing jj settings, `musubi sync` waits for a sync with the new settings. A sync
+already in progress finishes using its earlier settings.
+
 ### Repo config
 
 The hive always shares the repo config keys that decide what is safe to rewrite or push, such

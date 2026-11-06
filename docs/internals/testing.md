@@ -104,6 +104,10 @@ to hive matching: all first commits in merged histories are found once, already 
 commits stop the walk, and jj's synthetic root is excluded. The simple-backend sync examples
 alone do not exercise this index walk.
 
+`settings_are_shared_through_the_binary` also changes `musubi.forget-after` in user config
+while the daemon runs, waits for a sync, and checks that the other machine sees the new
+expiry policy. Keeping the daemon's initial jj settings makes it fail.
+
 Start with unexecuted recovery and refusal paths: reopening stored state, failed publication,
 rollback, malformed input and platform adapters. Read the callers and existing assertions
 before deciding a test is missing. An executed line does not show that its effects were

@@ -7,6 +7,11 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- The daemon reloads changed jj settings before each repository's next sync, including its
+  signing configuration and `musubi.forget-after` in user config. Previously it kept the
+  settings it opened the repository with, ignoring later user config edits. After changing settings, `musubi sync` waits for a sync with
+  them; one already in progress may use the old settings. Nothing needs doing on upgrading.
+
 - A hub recognizes its default directory through symbolic links when it prints commands for
   this machine. Previously, restarting it through another path to the same directory could
   ask for `--hub` unnecessarily. Nothing needs doing on upgrading.

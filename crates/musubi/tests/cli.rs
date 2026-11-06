@@ -1075,6 +1075,10 @@ fn the_daemon_picks_up_new_repositories() {
     After detecting that the machine has woken, it ends old ssh connections and clears the delay from
     failed ssh attempts.
 
+    It reloads changed jj settings for a repository before its next sync. Changes made during a sync
+    apply to the following one; `musubi sync` waits for one with the new settings. Its own
+    `musubi.daemon.*` settings need `musubi daemon restart`.
+
     When a hub runs a newer release of musubi, or a newer build deployed from source, the daemon runs
     the command `musubi.upgrade-command` names, if set, with `MUSUBI_UPGRADE_TO` set to it, and once the
     `musubi` it started from is that, starts again from it. Keep the installer in the foreground and
@@ -1609,6 +1613,10 @@ chmod +x "{exe}.new" && mv "{exe}.new" "{exe}"
 
     After detecting that the machine has woken, it ends old ssh connections and clears the delay from
     failed ssh attempts.
+
+    It reloads changed jj settings for a repository before its next sync. Changes made during a sync
+    apply to the following one; `musubi sync` waits for one with the new settings. Its own
+    `musubi.daemon.*` settings need `musubi daemon restart`.
 
     When a hub runs a newer release of musubi, or a newer build deployed from source, the daemon runs
     the command `musubi.upgrade-command` names, if set, with `MUSUBI_UPGRADE_TO` set to it, and once the
@@ -2756,7 +2764,16 @@ fn settings_are_shared_through_the_binary() {
     let hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
     let mut daemons = Daemons::default();
-    let (alpha, beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
+    let (alpha, beta) = two_machines_with(&env, &mut logs, &mut daemons, &hub, |repo| {
+        repo.jj(&["config", "set", "--user", "musubi.forget-after", "never"]);
+    });
+    // The running daemon must reload user config too, without requiring a restart.
+    alpha.jj(&["config", "set", "--user", "musubi.forget-after", "2h"]);
+    let out = musubi_in(&env, &logs, &alpha, &["sync"]);
+    insta::assert_snapshot!(out, @"");
+    musubi_in(&env, &logs, &beta, &["sync"]);
+    let status = status_in(&env, &logs, &beta).0;
+    assert!(status.contains("forgotten once unused for 2h"), "{status}");
     let key = r#"revset-aliases."trunk()""#;
     alpha.jj(&["config", "set", "--repo", key, "main@upstream"]);
     alpha.jj(&[
@@ -2764,7 +2781,7 @@ fn settings_are_shared_through_the_binary() {
         "remote",
         "add",
         "upstream",
-        "https://example.com/up.git",
+        "https://private-token@example.com/up.git",
     ]);
     musubi_in(&env, &logs, &alpha, &["sync"]);
     musubi_in(&env, &logs, &beta, &["sync"]);
@@ -2773,6 +2790,8 @@ fn settings_are_shared_through_the_binary() {
         beta.jj(&["git", "remote", "list"]),
         "upstream https://example.com/up.git\n"
     );
+    let operations = beta.jj(&["op", "log", "--no-graph", "-T", "attributes"]);
+    assert!(!operations.contains("private-token"), "{operations}");
 }
 
 /// `jj op abandon` of history the hive has syncs like any other change, printing nothing:

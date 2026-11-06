@@ -270,6 +270,10 @@ pub enum Command {
     /// After detecting that the machine has woken, it ends old ssh connections and clears
     /// the delay from failed ssh attempts.
     ///
+    /// It reloads changed jj settings for a repository before its next sync. Changes made
+    /// during a sync apply to the following one; `musubi sync` waits for one with the new
+    /// settings. Its own `musubi.daemon.*` settings need `musubi daemon restart`.
+    ///
     /// When a hub runs a newer release of musubi, or a newer build deployed from source, the
     /// daemon runs the command `musubi.upgrade-command` names, if set, with `MUSUBI_UPGRADE_TO`
     /// set to it, and once the `musubi` it started from is that, starts again from it.

@@ -44,6 +44,12 @@ impl NodeDriver {
         self.core.known()
     }
 
+    /// The settings this handle opened its repository with, so a long-running caller can
+    /// reopen it when the configuration changes, including its signer and Git executable.
+    pub fn settings(&self) -> &jj_lib::settings::UserSettings {
+        self.adapter.repo().loader().settings()
+    }
+
     /// Asks the hub for its head and anything new, then runs the policy until there is
     /// nothing left to do. Returns how many steps that took.
     pub async fn sync(&mut self) -> anyhow::Result<usize> {

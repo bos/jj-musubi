@@ -112,6 +112,9 @@ struct Hive {
     dir: PathBuf,
     meta: HiveMeta,
     index: HiveIndex,
+    /// Whether `index` holds what its file doesn't, because saving it failed: the next push
+    /// saves it again, though it brings nothing new.
+    unsaved: bool,
     /// Joins whose first push the hive hasn't accepted yet.
     pending: Vec<Pending>,
 }
@@ -189,6 +192,7 @@ impl HubDir {
                     dir: hive_dir,
                     meta,
                     index,
+                    unsaved: false,
                     pending: vec![],
                 },
             );
@@ -362,6 +366,7 @@ impl HubDir {
                 dir,
                 meta,
                 index,
+                unsaved: false,
                 pending: vec![],
             },
         );
@@ -492,7 +497,7 @@ impl HubDir {
         };
         hive.pending
             .retain(|pending| !index.machines.contains(&pending.machine));
-        let mut changed = hive.index.machines != index.machines;
+        let mut changed = hive.unsaved || hive.index.machines != index.machines;
         for url in index.urls {
             changed |= hive.index.urls.insert(url);
         }
@@ -503,7 +508,9 @@ impl HubDir {
         // Most heads bring nothing new. Saving anyway would replace the index at every push,
         // and ext4 writes out a file that replaces another at once.
         if changed {
+            hive.unsaved = true;
             hive.index.save(&hive.dir)?;
+            hive.unsaved = false;
         }
         self.sweep();
         Ok(())
@@ -900,6 +907,32 @@ mod tests {
         };
         let joined = hubs.join(&third).unwrap();
         assert_eq!(joined.hive.machines, ["mac-0000", "mac-1111", "mac-2222"]);
+    }
+
+    /// A push whose index the hub couldn't save has it saved by the next, though that push
+    /// brings nothing new, so a hub that restarts still finds the hive by it.
+    #[test]
+    fn a_failed_index_save_is_retried_at_the_next_push() {
+        let dir = musubi_testutil::tempdir();
+        let mut hubs = HubDir::open(dir.path()).unwrap();
+        let id = hubs
+            .join(&creating(request("alpha", "https://example.com/a")))
+            .unwrap()
+            .hive
+            .id;
+        let pushed = HiveIndex {
+            machines: BTreeSet::from(["alpha#00000000".to_owned()]),
+            roots: BTreeSet::from(["11".repeat(20)]),
+            urls: BTreeSet::from(["https://example.com/a".to_owned()]),
+        };
+        // A directory in the file's place makes the save fail, as a full disk would.
+        let file = dir.path().join(&id).join("index.json");
+        fs::remove_file(&file).unwrap();
+        fs::create_dir(&file).unwrap();
+        hubs.update_index(&id, pushed.clone()).unwrap_err();
+        fs::remove_dir(&file).unwrap();
+        hubs.update_index(&id, pushed.clone()).unwrap();
+        assert_eq!(HiveIndex::load(&dir.path().join(&id)), Some(pushed));
     }
 
     /// A hive whose store is corrupt is made again, empty, from what the hub knows of it,

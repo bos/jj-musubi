@@ -13,6 +13,11 @@ machine (see [Upgrading](README.md#upgrading)).
   workspace made with `jj workspace add --colocate` in a repository whose git store is inside
   `.jj`, where jj exports them in every command.
 
+- A hub that fails to save what a push taught it about a hive, on a full disk say, tries again
+  at the next push. Previously it could stay unsaved until a push brought something new, so
+  that after a restart `musubi join` could refuse a copy of the hive's own repository, saying
+  no hive on this hub shares history with it.
+
 - `musubi clone` refuses a nonempty destination before changing it. Previously it could
   share that directory's files and Git history with the hive. Choose a new or empty directory,
   or use `musubi join` to share an existing repository.

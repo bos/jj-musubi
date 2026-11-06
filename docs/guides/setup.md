@@ -115,7 +115,8 @@ Created hive app
 ```
 
 The first hub a machine uses becomes its default, so later commands need no `--hub`. The
-ssh key is explained [below](#the-ssh-key-musubi-adds).
+ssh key is explained [below](#the-ssh-key-musubi-adds). Concurrent joins on this machine reuse
+the same completed key pair; each hub may still ask you to authorize it.
 
 ## Add other machines
 

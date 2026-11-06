@@ -612,3 +612,17 @@ creating the hive. Select individual portable keys instead; see
 
 Clone refused the hub's answer before creating its destination. Retry `musubi clone`. If it
 repeats, make sure the hub and this machine run the same build.
+
+### "ssh-keygen could not derive the missing public key"
+
+Musubi found the private-key file but could not recreate its public half. Check the reported
+`ssh-keygen` error and the private key's permissions or passphrase. Restore `hub_key.pub`
+if you keep a passphrase-protected key there, then retry the original command. Both files
+are in [musubi's state directory](reference/configuration.md#files-and-directories).
+
+### "could not save musubi's public SSH key"
+
+Check the reported path and file error. If `hub_key.pub` is a directory, remove that obstruction;
+otherwise make the state directory writable. Retry the original command. A failed first setup
+has not activated a private key. A private-key save error is handled the same way: fix the
+reported file problem and retry.

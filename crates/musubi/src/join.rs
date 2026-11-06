@@ -427,7 +427,11 @@ pub fn clone(
     check_clone_destination(destination)?;
     // Its "Initialized repo in" names the directory relative to wherever this runs, ahead of
     // what musubi says, so it shows only if init fails.
-    let output = jj.args(init).arg(dest).output()?;
+    let output = jj
+        .args(init)
+        .arg(dest)
+        .output()
+        .with_context(|| format!("running `jj {}`", init.join(" ")))?;
     anyhow::ensure!(
         output.status.success(),
         "`jj {} {dest}` failed: {}",

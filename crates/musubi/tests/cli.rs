@@ -408,6 +408,145 @@ fn fetch_history(from: &TestRepo, to: &TestRepo) {
     to.jj(&["git", "remote", "remove", "seed"]);
 }
 
+/// A received hive operation need not have a local counterpart until it is realized.
+#[test]
+fn debug_identifies_an_operation_received_but_not_realized() {
+    use jj_lib::object_id::ObjectId as _;
+    use musubi_jj::node::NodeRepo;
+    use musubi_jj::op_id::LocalOp;
+
+    let env = TestEnv::new();
+    let source = env.init_repo("source");
+    let target = env.init_repo("target");
+    let mut node = NodeRepo::open(&source.repo_path(), &source.settings()).unwrap();
+    let head = source.jj(&["op", "log", "--no-graph", "-n1", "-T", "id"]);
+    let head = LocalOp(jj_lib::op_store::OperationId::try_from_hex(&head).unwrap());
+    let canonical = node.canonicalize(&head).unwrap();
+    let target_node = NodeRepo::open(&target.repo_path(), &target.settings()).unwrap();
+    // Transfer what a peer sends, without realizing any of its operations locally.
+    for id in node.canonical_store().operation_ids().unwrap() {
+        let op = node.canonical_store().read_operation(&id).unwrap();
+        if !target_node.canonical_store().has_view(&op.view_id) {
+            target_node
+                .canonical_store()
+                .import_view(
+                    &op.view_id,
+                    &node.canonical_store().view_bytes(&op.view_id).unwrap(),
+                )
+                .unwrap();
+        }
+        target_node
+            .canonical_store()
+            .import_operation(&id, &node.canonical_store().operation_bytes(&id).unwrap())
+            .unwrap();
+    }
+    assert!(target_node.local_of(&canonical).is_none());
+    drop(target_node);
+    let id = canonical.0.hex();
+    let logs = Logs::default();
+    let out = musubi_in(&env, &logs, &target, &["debug", "op-id", &id[..15]]);
+    assert_eq!(
+        out,
+        format!("hive {id} is not realized on this machine yet\n")
+    );
+    let mut settings = insta::Settings::clone_current();
+    settings.add_filter(&id, "$$HIVE");
+    settings.bind(|| {
+        insta::assert_snapshot!(out, @"hive $HIVE is not realized on this machine yet");
+    });
+}
+
+/// A clean stop removes the socket and releases both locks; restarting in the hub directory
+/// remembers its advertised name, without a new --dir or --advertise.
+#[cfg(unix)]
+#[test]
+fn a_hub_restarts_in_its_directory_and_keeps_its_advertised_name() {
+    let env = TestEnv::new();
+    let machine = env.init_repo("hub-machine");
+    let mut logs = Logs::default();
+    let _filters = snapshot_filters(&env);
+    let dir = env.root().join("my-hub");
+    fs::create_dir(&dir).unwrap();
+    let alias = env.root().join("hub-link");
+    std::os::unix::fs::symlink(&dir, &alias).unwrap();
+    let mut command = machine.program(musubi());
+    command.args([
+        "hub",
+        "--dir",
+        alias.to_str().unwrap(),
+        "--advertise",
+        "hub.example",
+    ]);
+    let mut hub = Hub::spawn(&env, &mut logs, "first", command, dir.clone());
+    let err = musubi_fails(
+        &env,
+        &logs,
+        &machine,
+        &["hub", "--dir", dir.to_str().unwrap()],
+    );
+    insta::assert_snapshot!(err, @"Error: a hub is already serving $ROOT/my-hub");
+    let terminate = |hub: &mut Hub, logs: &Logs| {
+        assert!(dir.join("run/hub.sock").exists());
+        let pid = rustix::process::Pid::from_raw(i32::try_from(hub.child.id()).unwrap()).unwrap();
+        rustix::process::kill_process(pid, rustix::process::Signal::TERM).unwrap();
+        wait_for(logs, "the hub to stop cleanly", || {
+            hub.child.try_wait().unwrap().is_some_and(|status| {
+                assert!(status.success(), "{status}");
+                true
+            })
+        });
+        assert!(!dir.join("run/hub.sock").exists());
+    };
+    terminate(&mut hub, &logs);
+    let mut command = machine.program(musubi());
+    command.arg("hub").current_dir(&dir);
+    let mut restarted = Hub::spawn(&env, &mut logs, "restarted", command, dir.clone());
+    insta::assert_snapshot!(restarted.printed.join("\n"), @"
+    Serving 0 hives from $ROOT/my-hub
+    To share a repository:               musubi create --hub hub.example
+    To add another machine's copy of it: musubi join --hub hub.example
+    To make a new copy of a hive:        musubi clone <name> <dir> --hub hub.example
+    Other machines reach this hub over ssh: use the name they ssh to this machine by, if it isn't hub.example.
+    On this machine, leave out --hub.
+    ");
+    let err = musubi_fails(&env, &logs, &machine, &["hub"]);
+    insta::assert_snapshot!(err, @"Error: a hub is already running, serving $ROOT/my-hub; use --dir to run another");
+    terminate(&mut restarted, &logs);
+
+    // The default can name this directory but still be too long for a Unix socket.
+    // In that case the explicit short path in the instructions must remain usable.
+    let long_parent = env.root().join("long".repeat(40));
+    fs::create_dir(&long_parent).unwrap();
+    let long_alias = long_parent.join("hub-link");
+    std::os::unix::fs::symlink(&dir, &long_alias).unwrap();
+    machine.jj(&[
+        "config",
+        "set",
+        "--user",
+        "musubi.hub",
+        long_alias.to_str().unwrap(),
+    ]);
+    let mut command = machine.program(musubi());
+    command.arg("hub").current_dir(&dir);
+    let mut short = Hub::spawn(&env, &mut logs, "short", command, dir.clone());
+    insta::assert_snapshot!(short.printed.last().unwrap(), @"On this machine, use --hub $ROOT/my-hub.");
+    let err = musubi_fails(
+        &env,
+        &logs,
+        &machine,
+        &[
+            "hub",
+            "rename",
+            "absent",
+            "renamed",
+            "--hub",
+            dir.to_str().unwrap(),
+        ],
+    );
+    insta::assert_snapshot!(err, @"Error: this hub has no hive named absent");
+    terminate(&mut short, &logs);
+}
+
 #[test]
 #[cfg_attr(
     windows,
@@ -614,6 +753,35 @@ fn hub_join_sync_clone_and_list() {
         translated.starts_with(&format!("local {local}")),
         "{translated}"
     );
+    let canonical = translated
+        .strip_prefix(&format!("local {local} = hive "))
+        .unwrap()
+        .trim();
+    // An odd-length prefix exercises jj's nibble prefix resolution in both stores.
+    assert_eq!(
+        musubi_in(&env, &logs, &beta, &["debug", "op-id", &local[..15]]),
+        translated
+    );
+    let reverse = musubi_in(&env, &logs, &beta, &["debug", "op-id", &canonical[..15]]);
+    assert_eq!(reverse, format!("hive {canonical} = local {local}\n"));
+    let mut settings = insta::Settings::clone_current();
+    settings.add_filter(&local, "$$LOCAL");
+    settings.add_filter(canonical, "$$HIVE");
+    settings.bind(|| {
+        insta::assert_snapshot!(format!("{translated}{reverse}"), @"
+        local $LOCAL = hive $HIVE
+        hive $HIVE = local $LOCAL
+        ");
+    });
+    let err = musubi_fails(&env, &logs, &beta, &["debug", "op-id", "not-hex"]);
+    insta::assert_snapshot!(err, @"Error: not a hex operation id");
+    // No 128-digit operation id in the fixture is all f's.
+    let missing = "f".repeat(128);
+    let err = musubi_fails(&env, &logs, &beta, &["debug", "op-id", &missing]);
+    settings.add_filter(&missing, "$$MISSING");
+    settings.bind(|| {
+        insta::assert_snapshot!(err, @"Error: no operation $MISSING here or in the hive");
+    });
 
     // A `musubi.forget-after` that isn't one fails a clone before it makes anything.
     beta.jj(&["config", "set", "--user", "musubi.forget-after", "soon"]);

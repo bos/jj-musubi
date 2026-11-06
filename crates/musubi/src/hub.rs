@@ -115,7 +115,15 @@ fn instructions(settings: &HubSettings, dir: &Path) -> anyhow::Result<String> {
     };
     // And what this one passes, which commands here leave out if it is the default.
     let local = dir.display().to_string();
-    let default_here = config::UserState::load()?.default_hub()?.as_deref() == Some(local.as_str());
+    let default_here = config::UserState::load()?
+        .default_hub()?
+        .is_some_and(|hub| {
+            hub == local
+                || (is_local(&hub)
+                    && Socket::hub(Path::new(&hub)).too_long().is_none()
+                    && fs::canonicalize(&hub)
+                        .is_ok_and(|hub| fs::canonicalize(dir).is_ok_and(|dir| dir == hub)))
+        });
     let mut text = format!(
         "To share a repository:               musubi create --hub {public}\n\
          To add another machine's copy of it: musubi join --hub {public}\n\
@@ -635,3 +643,6 @@ mod tests {
         assert!(!names_this_machine("devbox", None, None));
     }
 }
+
+#[cfg(test)]
+mod request_tests;

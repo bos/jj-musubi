@@ -1,0 +1,15 @@
+# Track installed Cargo tools for Dependabot; this package is not built.
+[package]
+name = "musubi-tool-versions"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+cargo-shared-target = "=0.1.0"
+
+[package.metadata.cargo-machete]
+# This manifest records installed tools, not Rust imports.
+ignored = ["cargo-shared-target"]

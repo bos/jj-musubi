@@ -15,6 +15,10 @@ is a bug like any other.
 
 This is a jj repository: use jj, never git.
 
+Before building in a new workspace, [seed its build
+cache](CONTRIBUTING.md#working-in-another-workspace) from an idle workspace. Keep the source idle
+until seeding finishes. Never hardlink build artifacts or share a writable target directory.
+
 ## Checks
 
 Prefer a large EC2 devbox for coverage collection, mutation campaigns, fuzzing and other heavy

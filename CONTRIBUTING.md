@@ -29,6 +29,23 @@ You need:
 Run `just --list` to see every recipe. `just dev` builds `target/debug/musubi`, and
 `just install` installs it and restarts a running daemon.
 
+## Working in another workspace
+
+On macOS/Linux, run `just workspace-cache-install` once. From a built workspace, choose a name,
+path and base for the task:
+
+```sh
+jj workspace add --name my-task -r main ../jj-musubi-my-task
+python3 contrib/seed-target.py target ../jj-musubi-my-task/target
+cd ../jj-musubi-my-task
+```
+
+Keep the source cache idle until seeding finishes; build in the new workspace only afterwards.
+Each workspace needs its own Cargo output directories. These commands assume the default
+`target/`; if output directories are redirected or no source cache exists, build normally.
+A failed seed can leave `<destination>.partial`; move it to system trash before retrying.
+`just workspace-cache-test` tests the helper with the installed tool.
+
 ## Code size
 
 `just loc` (Python 3 and `tokei` on `PATH`) shows code lines and shares by purpose, with Rust

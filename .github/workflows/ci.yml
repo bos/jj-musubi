@@ -70,6 +70,14 @@ jobs:
       - uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2.89.0
         with:
           tool: cargo-nextest,just
+      - name: Check workspace cache helper
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          just workspace-cache-install
+          just workspace-cache-test
+        env:
+          CARGO_BUILD_JOBS: 2
       # The lint job runs on Linux, which compiles none of the code for macOS or Windows.
       # Bash, so that just finds sh on Windows.
       - name: Lint

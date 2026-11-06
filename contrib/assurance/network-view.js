@@ -362,10 +362,10 @@
           { noticed: 0, missed: 0, unviable: 0, timeout: 0 },
         );
     return Object.values(r).some(Boolean)
-      ? `Tests failed for ${r.noticed} edited ${r.noticed === 1 ? "version" : "versions"}; ${r.missed} still passed. ${r.unviable} didn't compile; ${r.timeout} timed out.`
+      ? `${r.noticed} ${r.noticed === 1 ? "mutation" : "mutations"} caught by tests; ${r.missed} survived. ${r.unviable} failed to compile; ${r.timeout} timed out.`
       : measured.mutation?.sites?.length
-        ? "No code changes were tried here."
-        : "No mutation run recorded.";
+        ? "No mutations tried for this selection."
+        : "No mutation results recorded.";
   }
   function mutationOnly() {
     return state.enabled.length === 1 && state.enabled[0] === "mutation";
@@ -667,23 +667,26 @@
       text = n
         ? `Double-click again to expand ${n.name}`
         : link
-          ? `${nodes[link.source].name} → ${nodes[link.target].name} · ${edgeId ? "two parts selected · empty space to clear" : "click to compare both parts"}`
+          ? `${nodes[link.source].name} → ${nodes[link.target].name} · ${edgeId ? "2 selected · click empty space to clear" : "click to compare endpoints"}`
           : focus
-            ? `${state.selectedNodes.length > 1 ? state.selectedNodes.length + " selections" : focus.name} · grey outlines: outside these connections${state.selected ? " · empty space to clear" : ""}`
+            ? `${state.selectedNodes.length > 1 ? state.selectedNodes.length + " selections" : focus.name} · gray: no direct import link${state.selected ? " · click empty space to clear" : ""}`
             : state.expanded.length
               ? "Double-click a circle to focus · empty group space to collapse"
               : "Double-click to focus · scroll to pan · pinch to zoom";
     if ($("#ng-interaction").textContent !== text)
       $("#ng-interaction").textContent = text;
     const key = mutationOnly()
-      ? "Markers: modules where code was changed · no line-coverage percentage"
+      ? "Markers: mutated modules"
       : link
-        ? "Pies: coverage at arrow endpoints · grey outlines: unrelated"
+        ? "Pies: coverage at arrow endpoints"
         : focus
-          ? "Pies: coverage on focus and neighbours · grey outlines: unrelated"
-          : "Pie slices: Rust coverage · empty slice: not reached";
+          ? "Pies: selection and import neighbors"
+          : "Pies: coverage of selected techniques";
     if ($("#ng-coverage-key").textContent !== key)
       $("#ng-coverage-key").textContent = key;
+    $("#ng-coverage-key").dataset.tooltip = mutationOnly()
+      ? "Markers locate source files where mutations were tried. Select a crate or module to see its results."
+      : "Filled area counts each reached line once across the selected techniques. Shared lines are split equally between slices. Each bar counts that technique's full coverage.";
   }
   function doubleClickNode(id) {
     if (nodes[id].kind === "crate" && drillTarget === id && state.focus === id)
@@ -1288,7 +1291,7 @@
     const n = nodes[id],
       c = execution(n);
     if (c.unmeasured)
-      return `<div class="text-small">${esc(roleName(n))}</div><div class="text-small">${n.name === "(crate root)" ? "Declares the crate’s modules; no executable lines are mapped here." : "Error types and declarations; the compiler supplied no executable-line coverage mapping."} This is not a 0% coverage result.</div>`;
+      return `<div class="text-small">${esc(roleName(n))}</div><div class="text-small">No compiler coverage mapping for this module.</div>`;
     const rows = state.enabled
       .filter((id) => id !== "mutation")
       .map((id) => {
@@ -1300,7 +1303,7 @@
             ? `${hit} of ${c.total} lines`
             : c.unmeasured
               ? "No executable lines measured here"
-              : "No run recorded";
+              : "No coverage data recorded";
         return `<div class="technique-row" aria-label="${esc(m.name + ": " + label)}"><span>${esc(m.name)}</span><span class="technique-track"><span class="technique-bar" style="width:${pct}%;${fillStyle(id)}"></span></span><span class="tabular-nums">${known ? Math.round(pct) + "%" : "—"}</span></div>`;
       })
       .join("");
@@ -1678,7 +1681,7 @@
     const c = view.nodes.filter((id) => nodes[id].kind === "crate").length,
       m = view.nodes.length - c;
     $("#ng-counts").textContent = [
-      c ? `${c} components` : null,
+      c ? `${c} crates` : null,
       m ? `${m} modules` : null,
     ]
       .filter(Boolean)
@@ -1690,22 +1693,11 @@
         measured.coverageGroups.includes(id),
       );
     $("#ng-summary").textContent = !state.enabled.length
-      ? "Choose a proof or test above."
+      ? "No techniques selected."
       : available
         ? `${hit.toLocaleString()} of ${total.toLocaleString()} executable Rust lines reached (${Math.round((hit / total) * 100)}%).`
-        : "No run recorded.";
+        : "No coverage data for the selected techniques.";
     if (mutationOnly()) $("#ng-summary").textContent = mutationText();
-    $("#ng-measurement-note").textContent =
-      (state.enabled.includes("conformance")
-        ? "Lean proofs → Rust conformance tests → measured Rust coverage. "
-        : "") +
-      (state.enabled.includes("kani")
-        ? "Kani colours show related Rust tests, not a solver run. "
-        : "") +
-      "Bars count overlapping lines; pie slices share them equally." +
-      (state.enabled.includes("mutation")
-        ? " Mutation checks ask whether tests notice changed code; they are separate from line coverage."
-        : "");
     $("#ng-clock").value = state.clock;
     $("#ng-time").max = state.clock === "effort" ? measured.effort : duration;
     $("#ng-time").value =
@@ -1713,6 +1705,23 @@
     const done = events.filter((e) => e.t <= state.time).length;
     $("#ng-time-label").textContent =
       `${formatTime(state.clock === "effort" ? effort(state.time) : state.time)} · ${done} of ${events.length} tests & fuzz checkpoints finished`;
+    const replayReason = available
+      ? ""
+      : !state.enabled.length
+        ? "No techniques selected. Select All or a technique above to enable replay."
+        : mutationOnly()
+          ? "Mutation results have no replay timeline. Select a test or fuzzing technique above."
+          : "No timeline recorded for the selected techniques. Select another technique above.";
+    for (const id of ["#ng-replay-help", "#ng-time-help"])
+      if (replayReason) $(id).dataset.tooltip = replayReason;
+      else $(id).removeAttribute("data-tooltip");
+    $("#ng-replay-description").textContent = replayReason;
+    if (replayReason) $("#ng-replay-help").setAttribute("tabindex", "0");
+    else $("#ng-replay-help").removeAttribute("tabindex");
+    $("#ng-clock-help").dataset.tooltip =
+      state.clock === "effort"
+        ? "Adds each test and fuzz run's duration, including overlapping runs. Two parallel 10-second runs add 20 seconds."
+        : "Time along the recorded test and fuzz runs; concurrent tests overlap. Two parallel 10-second tests take 10 seconds on this clock. Separate captures are joined consecutively.";
     if (!available && playing) stop();
     $("#ng-play").textContent = playing ? "Pause" : "Replay";
     $("#ng-play").disabled = !available;
@@ -1742,8 +1751,7 @@
     if (edge) {
       $("#ng-name").textContent =
         `${nodes[edge.source].name} → ${nodes[edge.target].name}`;
-      $("#ng-related").textContent =
-        `${edge.weight} imports connect these parts.`;
+      $("#ng-related").textContent = `${edge.weight} distinct import paths.`;
       $("#ng-execution-detail").textContent = "";
       return;
     }
@@ -1760,15 +1768,17 @@
     const related = nodeKinds(n).map((id) => mechanisms[id].name);
     $("#ng-related").textContent = related.length
       ? related.join(" · ")
-      : "No matching proof or test.";
+      : "No proof/test categories for this selection.";
     const c = execution(n),
       available = state.enabled.some((id) =>
         measured.coverageGroups.includes(id),
       );
     $("#ng-execution-detail").textContent = !available
-      ? "No run recorded."
+      ? !state.enabled.length
+        ? "No techniques selected."
+        : "No coverage data for the selected techniques."
       : c.unmeasured
-        ? "No executable Rust lines measured here."
+        ? "No compiler coverage mapping for this module."
         : `${c.hit.toLocaleString()} of ${c.total.toLocaleString()} executable Rust lines reached (${Math.round((c.hit / Math.max(1, c.total)) * 100)}%).`;
     if (mutationOnly()) $("#ng-execution-detail").textContent = mutationText(n);
   }
@@ -1929,7 +1939,7 @@
   $("#ng-mechanisms").innerHTML = data.mechanisms
     .map(
       (m) =>
-        `<div class="method" data-tooltip="${esc(m.description)} ${m.tests} ${m.id === "fuzz" ? "recorded checkpoints" : m.id === "mutation" ? "code changes tried" : "recorded tests"}.">${swatch(m.id)}<label class="form-check"><input class="form-check-input" type="checkbox" data-mechanism="${m.id}" checked><span class="form-check-label">${esc(m.name)}</span></label>${m.id === "kani" ? '<span class="text-small text-muted">+ Rust checks</span>' : m.status !== "recorded" ? '<span class="text-small text-muted">not measured</span>' : ""}</div>`,
+        `<div class="method" data-tooltip="${esc(m.description)} ${m.tests} ${m.id === "fuzz" ? "coverage checkpoints" : m.id === "mutation" ? "mutations" : "recorded tests"}.">${swatch(m.id)}<label class="form-check"><input class="form-check-input" type="checkbox" data-mechanism="${m.id}" checked><span class="form-check-label">${esc(m.name)}</span></label>${m.status !== "recorded" ? '<span class="text-small text-muted">no data</span>' : ""}</div>`,
     )
     .join("");
   root.addEventListener("change", (e) => {
@@ -2172,7 +2182,7 @@
     } else {
       const edge = view.links.find((e) => e.id === h.id);
       const group = groupAt(p.x, p.y);
-      tip.textContent = `${nodes[edge.source].name} → ${nodes[edge.target].name}\n${edge.weight} imports · click to compare both parts${group ? "\nDouble-click to collapse " + nodes[group.id].name : ""}`;
+      tip.textContent = `${nodes[edge.source].name} → ${nodes[edge.target].name}\n${edge.weight} distinct import paths · click to compare endpoints${group ? "\nDouble-click to collapse " + nodes[group.id].name : ""}`;
     }
     tip.hidden = !!preview;
     const box = root.getBoundingClientRect();

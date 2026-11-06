@@ -8,11 +8,25 @@ from common import HERE
 
 def render(dataset, output, standalone=False):
     data = json.loads(Path(dataset).read_text())
+    labels = {
+        item["id"]: item
+        for item in json.loads((HERE / "catalog.json").read_text())["mechanisms"]
+    }
     # Detailed provenance and test identities stay in the dataset, not in the figure payload.
     inline = {
         "roles": data["roles"],
         "nodeRoles": data["nodeRoles"],
-        "mechanisms": data["mechanisms"],
+        "mechanisms": [
+            {
+                **item,
+                **{
+                    key: labels[item["id"]][key]
+                    for key in ("name", "description")
+                    if key in labels.get(item["id"], {})
+                },
+            }
+            for item in data["mechanisms"]
+        ],
         "claims": [{k: c[k] for k in ("id", "evidence")} for c in data["claims"]],
         "evidence": [{k: e[k] for k in ("id", "mechanism")} for e in data["evidence"]],
         "network": {
@@ -38,6 +52,8 @@ def render(dataset, output, standalone=False):
             )
         },
     }
+    if "sourceCommit" in data:
+        inline["measured"]["sourceRevision"] = data["sourceCommit"]
     for event in inline["measured"]["events"]:
         for key in ("n", "m", "models", "ok", "inputs", "corpusFiles"):
             event.pop(key, None)
@@ -90,7 +106,9 @@ window.openai={widgetState:null,setWidgetState:async()=>{}};
             + bootstrap
             + "</script></head><body>"
             + fragment
-            + "<script>lucide.createIcons()</script></body></html>"
+            + "<script>lucide.createIcons();"
+            + (HERE / "standalone-tooltips.js").read_text()
+            + "</script></body></html>"
         )
     Path(output).parent.mkdir(parents=True, exist_ok=True)
     Path(output).write_text(fragment)

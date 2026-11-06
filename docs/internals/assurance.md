@@ -12,6 +12,22 @@ and need the project's normal test tools,
 `llvm-tools-preview`, and, for the optional campaigns, cargo-fuzz with nightly Rust and
 cargo-mutants. The run manifests record the exact compiler and tool versions used.
 
+## Render the saved snapshot
+
+The repository includes a
+[November 5, 2026 snapshot](../../contrib/assurance/data/2026-11-05/README.md)
+and a Zstandard archive of its normalized observations. To view it without collecting data:
+
+```sh
+python3 contrib/assurance/assurance.py render \
+    contrib/assurance/data/2026-11-05/snapshot.json \
+    --out target/assurance/index.html --standalone
+```
+
+Open `target/assurance/index.html`. The renderer uses current labels and tooltips with the saved
+measurements. The snapshot records its source commit and collection provenance. Generated HTML
+stays under ignored `target/assurance/`; renderer code stays in `contrib/assurance/`.
+
 ## Collect data
 
 Run from the repository root, choosing a new output directory for each capture:
@@ -97,8 +113,10 @@ Use **All** or **None** beside Techniques to select the assurance methods togeth
 **Expand all** and **Collapse all** below the graph change the detail of every component;
 individual components can still be expanded or collapsed independently under **Explore the code**.
 Replay takes eight seconds from beginning to end and advances evenly in the selected clock.
-The clock offers **Elapsed time**, which follows recorded completion times, and **Worker time**,
-which adds the test and fuzz durations, including tests that ran in parallel.
+The clock offers **Elapsed run time**, which follows recorded completion times, and
+**Sum of run durations**, which adds each test and fuzz run's duration, including overlapping
+runs. Clock definitions and disabled-replay reasons appear in tooltips. The graph's **Explore
+the code** section contains its interaction instructions.
 
 The builder refuses captures whose production/model source fingerprint differs from the
 checkout. It discovers production modules and import dependencies again, so new files and

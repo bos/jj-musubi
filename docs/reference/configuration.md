@@ -19,6 +19,10 @@ musubi loads jj's config files as `jj` does (system, user, repo, and workspace),
 commits it makes when it merges concurrent work carry your identity, and are signed if you
 sign commits.
 
+The daemon reloads changed jj settings before each repository's next sync, including its
+signing configuration and `musubi.share-credentials`. A sync already in progress uses its
+earlier settings; after changing them, `musubi sync` waits for a sync with the new settings.
+
 ### This machine's
 
 musubi reads these as `jj` would outside any repository, so a repository's config doesn't

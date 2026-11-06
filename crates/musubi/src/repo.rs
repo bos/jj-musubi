@@ -61,8 +61,17 @@ impl Located {
     /// config id either.
     pub fn open(&self) -> anyhow::Result<NodeRepo> {
         let settings = settings::load(&self.workspace_root, &self.repo_path)?;
+        self.open_with_settings(&settings)
+    }
+
+    /// Opens with settings already loaded, keeping a running handle's randomness across
+    /// config reloads so that seeded change ids aren't generated again.
+    pub fn open_with_settings(
+        &self,
+        settings: &jj_lib::settings::UserSettings,
+    ) -> anyhow::Result<NodeRepo> {
         let repo_config = settings::existing_repo_config_path(&self.repo_path)?;
-        Ok(NodeRepo::open(&self.repo_path, &settings)?.with_repo_config(repo_config))
+        Ok(NodeRepo::open(&self.repo_path, settings)?.with_repo_config(repo_config))
     }
 }
 

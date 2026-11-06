@@ -53,6 +53,23 @@ pub fn load(workspace_root: &Path, repo_path: &Path) -> anyhow::Result<UserSetti
         .context("reading settings")
 }
 
+/// Whether two loads resolved the same configuration. Defaults and the environment stay
+/// fixed in a daemon; the other layers include conditional scopes and files created since
+/// it started. Compare their text as well as their paths, since a file's modification time
+/// can stay the same through a fast edit or a restore.
+pub fn unchanged(before: &UserSettings, after: &UserSettings) -> bool {
+    let layers = |settings: &UserSettings| {
+        settings
+            .config()
+            .layers()
+            .iter()
+            .filter(|layer| layer.source != jj_lib::config::ConfigSource::Default)
+            .map(|layer| (layer.source, layer.path.clone(), layer.data.to_string()))
+            .collect::<Vec<_>>()
+    };
+    layers(before) == layers(after)
+}
+
 /// jj's repo config file for the repository at `repo_path`, where jj keeps it, outside the
 /// repository. Like `jj config set --repo`, gives the repository a config id if it has none.
 pub fn repo_config_path(repo_path: &Path) -> anyhow::Result<Option<PathBuf>> {

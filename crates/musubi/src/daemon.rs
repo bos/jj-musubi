@@ -777,12 +777,17 @@ async fn serve_async(
             continue;
         }
         unreachable = None;
-        // The copy, but in a directory that replaced the one opened, as after restoring a
-        // backup: open it afresh, and watch it.
+        // Reopen when the directory or jj's settings change. The stores keep their signer
+        // and other settings from when they opened, so updating the loader alone would
+        // keep signing with the old key. An unchanged config keeps the existing caches.
         let now_identity = identity(&located.repo_path);
-        if now_identity != opened {
-            tracing::info!("the repository's directory was replaced; opening it afresh");
-            driver.reopen(located.open()?)?;
+        let settings = crate::settings::load(&located.workspace_root, &located.repo_path)?;
+        if now_identity != opened || !crate::settings::unchanged(driver.settings(), &settings) {
+            tracing::info!("the repository's directory or settings changed; opening it afresh");
+            let settings = driver
+                .settings()
+                .with_new_config(settings.config().clone())?;
+            driver.reopen(located.open_with_settings(&settings)?)?;
             watcher = Watcher::op_heads(&located.repo_path)?;
             opened = now_identity;
         }

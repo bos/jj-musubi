@@ -282,6 +282,35 @@ These tests cover ordinary foreground children preserving standard input, not de
 installers, children that close or redirect the lock, Windows processes, or login services.
 The CLI test above still covers the command, daemon restart and status output.
 
+`top::tests` renders the production `App::draw` into Ratatui's `TestBackend`, with inline
+snapshots preserving screen rows and cell assertions checking warning colors and selection.
+It covers loading, empty hubs, navigation and detail selection, resize, disappearing hives,
+unreachable hubs, issue overflow, refresh speed limits and quit keys. Its timing tests run the
+production sampling loop with Tokio time paused. They advance across refresh deadlines,
+change intervals, release slow samples, and exercise shutdown. Rate calculations
+read that same clock, including simultaneous samples and a restarted hub.
+`top::sample::tests::a_failed_hub_is_retried_at_the_deadline` advances to either side of the
+reconnect boundary; its only connection attempt is to a missing local hub. These tests start
+no daemon or ssh process. `hub_join_sync_clone_and_list` reuses its hub and daemon for PTY
+checks through `termlens`: the real binary handles speed keys and resize, and restores its
+alternate screen and cursor after `q`, Escape and Ctrl-C. Screen predicates synchronize these
+checks; they do not wait for a periodic refresh. PTY tests use real process deadlines to catch
+hangs; they cannot control the child process's clock.
+
+Tokio's `test-util` feature supplies the virtual clock for async timer tests; use
+`#[tokio::test(start_paused = true)]` and `tokio::time::advance`, with `tokio::time::Instant`
+for elapsed-time decisions. Pausing does not affect `std::time::Instant`, wall time, other
+runtimes or child processes. Poll a timer-backed future before advancing to register its
+deadline, and check its observable effect afterwards: `advance` alone does not run every
+awakened task. Avoid waiting on an idle runtime when checking an unexpired timer, since Tokio
+automatically advances paused time to the next timer when nothing can run.
+`daemon::tests::retry_wait_expires_or_answers_commands` checks retry expiry, a sync interrupt
+and command-channel closure with this clock. SSH's
+`ssh_backoff_is_bounded_and_a_wake_retires_old_failures` crosses each exponential backoff
+deadline, including the cap, then checks greeting and wake resets without rewriting private
+deadlines. The sleep detector still compares real wall and monotonic clocks, since it detects
+the operating system suspending; the supervisor tests inject its wake notification.
+
 `copies_leave_a_removed_hive` checks that copies leave a hive removed from the hub, keeping
 their work. Before taking its final listing snapshot, it waits for both the saved membership
 and the daemon's reported repository count: the daemon saves membership before it finishes

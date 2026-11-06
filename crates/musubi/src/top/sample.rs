@@ -2,11 +2,11 @@
 
 use std::collections::HashMap;
 use std::time::Duration;
-use std::time::Instant;
 
 use musubi_hub::activity::HubActivity;
 use musubi_sync::wire::HubWideReply;
 use musubi_sync::wire::HubWideRequest;
+use tokio::time::Instant;
 
 use crate::config::UserState;
 use crate::control;
@@ -55,23 +55,19 @@ pub(super) struct Sampler {
     hubs: Vec<String>,
     socket: Result<Socket, String>,
     links: HashMap<String, Link>,
-    runtime: tokio::runtime::Runtime,
 }
 
 impl Sampler {
-    pub(super) fn new(hubs: Vec<String>, socket: Result<Socket, String>) -> anyhow::Result<Self> {
-        Ok(Self {
+    pub(super) fn new(hubs: Vec<String>, socket: Result<Socket, String>) -> Self {
+        Self {
             hubs,
             socket,
             links: HashMap::new(),
-            runtime: tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?,
-        })
+        }
     }
 
     /// Asks every hub at once, so that one slow to answer holds up only itself.
-    pub(super) fn sample(&mut self) -> Sample {
+    pub(super) async fn sample(&mut self) -> Sample {
         let asks = self.hubs.iter().map(|hub| {
             let link = self.links.remove(hub);
             async move {
@@ -87,14 +83,14 @@ impl Sampler {
                 )
             }
         });
-        let asked = self.runtime.block_on(futures::future::join_all(asks));
+        let asked = futures::future::join_all(asks).await;
         let mut hubs = vec![];
         for (link, sample) in asked {
             self.links.insert(sample.hub.clone(), link);
             hubs.push(sample);
         }
         let daemon = match &self.socket {
-            Ok(socket) => self.runtime.block_on(serving(socket)),
+            Ok(socket) => serving(socket).await,
             Err(err) => Err(err.clone()),
         };
         // Read again each time, since a copy may join or leave while it watches.
@@ -159,5 +155,31 @@ async fn serving(socket: &Socket) -> Result<Option<usize>, String> {
     {
         Ok(repos) => Ok(Some(repos.len())),
         Err(err) => Err(format!("{err}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A failed connection is reused until exactly the reconnect deadline, then tried
+    /// again. The absolute path confines that attempt to a missing local hub.
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_hub_is_retried_at_the_deadline() {
+        let dir = musubi_testutil::tempdir();
+        let hub = dir.path().join("missing").to_str().unwrap().to_owned();
+        let started = Instant::now();
+        let mut link = Some(Link::Failed(started, "cached failure".to_owned()));
+        for advance in [Duration::ZERO, RECONNECT - Duration::from_millis(1)] {
+            tokio::time::advance(advance).await;
+            let (next, activity) = ask(&hub, link).await;
+            assert_eq!(activity.unwrap_err(), "cached failure");
+            assert!(matches!(&next, Link::Failed(at, _) if *at == started));
+            link = Some(next);
+        }
+        tokio::time::advance(Duration::from_millis(1)).await;
+        let (next, activity) = ask(&hub, link).await;
+        assert_ne!(activity.unwrap_err(), "cached failure");
+        assert!(matches!(next, Link::Failed(at, _) if at == started + RECONNECT));
     }
 }

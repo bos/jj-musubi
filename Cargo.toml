@@ -39,6 +39,7 @@ pollster = "1.0.1"
 postcard = { version = "1", default-features = false, features = ["use-std"] }
 tarpc = { version = "0.38", features = ["serde-transport", "serde-transport-json"] }
 tempfile = "3"
+termlens = { version = "0.11.8", default-features = false }
 # jj-lib's, so that musubi builds no second copy.
 gix = { version = "0.90", default-features = false }
 # Exact: a `reproduce_failure` blob replays only with the version of Hegel that made it.

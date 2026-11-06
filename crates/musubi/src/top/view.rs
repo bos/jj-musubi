@@ -588,7 +588,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    use std::time::Instant;
+    use tokio::time::Instant;
 
     use super::super::App;
     use super::*;

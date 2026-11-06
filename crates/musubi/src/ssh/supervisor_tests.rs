@@ -320,22 +320,28 @@ fn link() -> Link {
     }
 }
 
-#[test]
-fn ssh_backoff_is_bounded_and_a_wake_retires_old_failures() {
+#[tokio::test(start_paused = true)]
+async fn ssh_backoff_is_bounded_and_a_wake_retires_old_failures() {
     let health = Health::default();
     for (index, seconds) in [1, 2, 4, 8, 16, 32, 60, 60].into_iter().enumerate() {
-        let before = Instant::now();
         health.failed("unreachable".into());
-        let after = Instant::now();
-        let state = health.lock();
-        assert_eq!(state.failures, index as u32 + 1);
-        let at = state.retry_at.unwrap();
+        assert_eq!(health.lock().failures, index as u32 + 1);
         let backoff = Duration::from_secs(seconds);
-        assert!(at >= before + backoff && at <= after + backoff);
+        assert_eq!(health.lock().retry_at, Some(Instant::now() + backoff));
+        tokio::time::advance(backoff - Duration::from_millis(1)).await;
+        assert!(health.refusing());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(!health.refusing());
     }
+    // A successful greeting also resets the exponent and retires the old diagnostic.
+    health.worked();
+    assert_eq!(health.problem(), None);
+    health.failed("unreachable".into());
+    assert_eq!(
+        health.lock().retry_at,
+        Some(Instant::now() + Duration::from_secs(1))
+    );
     assert!(health.refusing());
-    health.lock().retry_at = Some(Instant::now() - Duration::from_secs(1));
-    assert!(!health.refusing());
     let (woke, before_wake) = watch::channel(0);
     health.woke(&woke);
     health.failed_unless_woke("obsolete connection failure".into(), &before_wake);

@@ -27,7 +27,6 @@ use std::sync::atomic::Ordering;
 use std::task::Context;
 use std::task::Poll;
 use std::time::Duration;
-use std::time::Instant;
 use std::time::SystemTime;
 
 use anyhow::Context as _;
@@ -47,6 +46,7 @@ use tokio::process::ChildStdout;
 use tokio::process::Command;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
+use tokio::time::Instant;
 
 use crate::config;
 use crate::ui::Ui;
@@ -292,11 +292,11 @@ impl Connector for Link {
 /// forgets past failures.
 async fn watch_for_waking(dest: String, health: Health, woke: watch::Sender<u64>) {
     let mut check = tokio::time::interval(WAKE_CHECK);
-    let (mut wall, mut clock) = (SystemTime::now(), Instant::now());
+    let (mut wall, mut clock) = (SystemTime::now(), std::time::Instant::now());
     loop {
         check.tick().await;
         // `Instant` stops while the machine sleeps; the wall clock doesn't.
-        let (now_wall, now_clock) = (SystemTime::now(), Instant::now());
+        let (now_wall, now_clock) = (SystemTime::now(), std::time::Instant::now());
         let slept = now_wall
             .duration_since(wall)
             .unwrap_or_default()

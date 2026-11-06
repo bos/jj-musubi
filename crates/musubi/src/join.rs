@@ -510,11 +510,13 @@ fn check_out_trunk(located: &Located) -> anyhow::Result<()> {
         String::from_utf8_lossy(&output.stderr).trim()
     );
     let trunk = String::from_utf8_lossy(&output.stdout);
+    // jj prints the id alone today; a newline from a later jj mustn't reach `jj new`.
+    let trunk = trunk.trim();
     if trunk.is_empty() {
         return Ok(());
     }
     // jj says where the working copy is now, as `jj git clone` does.
-    let status = jj(&["new", &trunk]).status().context("running `jj new`")?;
+    let status = jj(&["new", trunk]).status().context("running `jj new`")?;
     anyhow::ensure!(status.success(), "`jj new {trunk}` failed");
     Ok(())
 }

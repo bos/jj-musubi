@@ -189,7 +189,7 @@ To stop using musubi on a machine altogether:
 ## Upgrade musubi
 
 For copies already using the current operation-id format, the unreleased local-configuration,
-clone and SHA-256 changes use protocol 17 and a new hub metadata format.
+clone, SHA-256 and hub-replacement changes use protocol 18 and a new hub metadata format.
 Stop the old hub and daemons and upgrade them together. Archive the old default hub directory,
 then run `musubi hub` without `--dir` to initialize a fresh default directory; SSH connections
 will then find the new default hub. In each existing copy run `musubi join --hub <hub-host>` to
@@ -390,6 +390,11 @@ they have. Working copies, commits, bookmarks and history all come through uncha
 
 Machines don't do this by themselves, because a hub that doesn't know a hive may just be the
 wrong hub, such as one started from another directory by mistake.
+
+The hive is made again under its own name even when the hub has another hive of the same
+repository, as `musubi create <name>` makes one, so hives kept apart stay apart. To fold its
+copies into that other hive instead, run `musubi leave` then `musubi join --hive <name>` in
+each, and remove the one made again with `musubi hub remove`.
 
 To move to a hub at another address, start it, and run `musubi join` with its address in each
 machine's copy. The first makes the hive again there, and the others join it:

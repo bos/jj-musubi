@@ -281,9 +281,10 @@ instead.
 
 ### "the hub lacks this repository's hive, but it belongs in hive app (...): ..."
 
-`musubi join` would make this copy's hive again, but the hub has another hive the copy belongs
-in, made meanwhile with `musubi create`, say. Run `musubi leave --force`, then `musubi join`,
-to join that one. If the message says the copy belongs in several, run
+`musubi join` would make this copy's hive again, but the copy belongs in a hive the hub has,
+and the name it knew its hive by is another hive's, or it knows none: that hive may be its own,
+made meanwhile with `musubi create`, say. Run `musubi leave --force`, then `musubi join`, to
+join that one. If the message says the copy belongs in several, run
 `musubi join --hive <name>` after leaving.
 
 ### "musubi needs all of a repository's history, and this one is a shallow clone ..."

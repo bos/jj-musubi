@@ -831,6 +831,15 @@ impl Search {
         self.note(&tc);
     }
 
+    /// An hour passes on the hub: it stops waiting, before pruning, for machines that may have
+    /// been joining when it opened its store, as after `restart_hub`.
+    #[rule]
+    fn an_hour_passes(&mut self, tc: TestCase) {
+        fired("an_hour_passes");
+        self.world.borrow_mut().an_hour_passes();
+        self.note(&tc);
+    }
+
     /// A sync in which the reply to one request is lost after the hub handled it.
     #[rule]
     fn lose_reply(&mut self, tc: TestCase) {

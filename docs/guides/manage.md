@@ -161,10 +161,12 @@ used, and when it will be forgotten.
 To sync a copy again after it has left, run `musubi join` in it. It carries on from the
 history it shared, so a copy that joins a different hive brings its old hive's history along,
 and the new hive's machines show the old hive's working copies too. If another machine ran
-`jj op abandon` while the copy was away, and every machine still in the hive has taken it, the
-copy can't sync again: it stops with "this repository's history no longer matches the hive's"
-([what to
+`jj op abandon` while the copy was away, before you ran `musubi join` again, and every machine
+still in the hive has taken it, the copy can't sync again: it stops with "this repository's
+history no longer matches the hive's" ([what to
 do](../troubleshooting.md#this-repositorys-history-no-longer-matches-the-hives-so-it-cant-sync-again)).
+So can a copy whose first sync after joining again doesn't finish for over a day
+([more](working-across-machines.md#abandoning-operations)).
 
 To stop using musubi on a machine altogether:
 

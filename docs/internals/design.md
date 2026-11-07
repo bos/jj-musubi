@@ -1102,15 +1102,28 @@ So that a trim makes the hub smaller, the hub prunes the records every machine h
 a digest, and names the machine, and the hub remembers, in memory, what each machine said last; a
 hub that restarts waits to hear from each again. It waits for every copy the hive hasn't
 forgotten: those present at its head, as the history it holds says ([Presence](#presence)), and
-any machine the history doesn't know that has said what it took in the last day, as a machine
-joining does before the hub accepts its first push, so a join that fails holds pruning back for a
-day. Once every one of them has said it took every record the hub has, those records, their ids
-and the old ids they renamed matter only to a machine coming back from before them. The hub then
-forgets them, keeping only their count and digest, which a push's records must match, and writes
-the `heads` log again, starting with that count and digest and naming every head as the history
-now names it, so that opening takes no pruned record again. It prunes after any request that
-leaves it able to, all of its records at once: the model allows any first records every machine
-has taken, and pruning all of them leaves nothing to replay.
+any machine joining, one the history doesn't know or one that asked the hub to join the hive, that
+has said what it took in the last day, as a machine joining does before the hub accepts its first
+push. Its first fetch realizes the hive's history, and its first push may then not land for hours,
+if the machine sleeps meanwhile; a join that fails holds pruning back for a day. A copy that left
+and runs `musubi join` again is known to the history but not present until its push lands, as a
+copy the hive forgot is, whose daemon may go on saying what it took; only the joining copy sends
+the hub the Join request, which the hub records in memory for the hive's thread, and which counts
+until the copy is present at the head. So a forgotten copy whose `musubi join` failed after the
+hub took it, before its push, is waited for while it goes on saying what it took, until a day
+after it falls silent: a harmless exception, since it is waited for only while it lags. A hub that
+opens a hive's store, as after a restart, no longer knows which machines were joining, so it
+prunes nothing for an hour, as if each had said what it took just before: a machine that is online
+says so again within minutes, pruning only saves memory, and nothing need be written to remember
+them. A hive's thread that opens its store again after a panic keeps what it knew of the machines,
+which the panic leaves as it was, so that a peer whose requests panic the hub can't keep it from
+pruning. Once every machine it waits for has said it took every record the hub has, those records,
+their ids and the old ids they renamed matter only to a machine coming back from before them. The
+hub then forgets them, keeping only their count and digest, which a push's records must match, and
+writes the `heads` log again, starting with that count and digest and naming every head as the
+history now names it, so that opening takes no pruned record again. It prunes after any request
+that leaves it able to, all of its records at once: the model allows any first records every
+machine has taken, and pruning all of them leaves nothing to replay.
 
 It keeps the old operations themselves, and the rewrites, in its canonical store: deleting them
 would mean compacting the store's log, whose views are deltas against the one before ([Size limits
@@ -1136,7 +1149,18 @@ What this means for a machine:
   never took the records the hub pruned, which the hub can no longer send, and it may hold
   operations they drop, under ids the hub no longer knows (`behind_not_carried`). Its next
   fetch says so, and it stops, with the message for a history that no longer matches the hive's:
-  a new copy takes its work.
+  a new copy takes its work. So does a copy that left, if the hub pruned while it was out,
+  before it ran `musubi join` again; from then on the hub waits for it as for a copy new to the
+  hive (`a_copy_joining_again_is_waited_for`, `a_copy_joining_again_away_for_over_a_day_stops`).
+- So does a copy joining whose first sync realized the hive's history but stopped before its
+  first push landed, and that the hub then didn't hear from for a day, or that was away when
+  the hub restarted and for an hour after: the hub no longer waits for it. A copy new to the
+  hive has had nothing reach the hive until its push lands, and the history doesn't know it. It
+  could join again on the root from its view as it is, but merging that view with the hive's
+  against the root's, rather than against the head it realized, would bring back the commits
+  the hive abandoned since, and those it rewrote as divergent changes; so it stops instead
+  (`a_joining_machine_away_for_over_a_day_stops`,
+  `a_joining_machine_away_for_over_an_hour_after_a_hub_restart_stops`).
 - One that took the records the hub pruned, but holds fewer now, takes the hub's from them all
   the same. A machine takes the records an old reply announces ([Taking the
   hub's](#taking-the-hubs)), which may be fewer than it said it took, and the hub may prune

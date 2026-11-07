@@ -27,6 +27,7 @@ use musubi_hub::activity::Activity;
 use musubi_hub::activity::summarize;
 use musubi_hub::hub_dir::HiveInfo;
 use musubi_hub::hub_dir::HubDir;
+use musubi_hub::hub_dir::Joins;
 use musubi_hub::hub_dir::Opened;
 use musubi_hub::hub_dir::Refusal;
 use musubi_hub::hub_dir::open_whole;
@@ -37,6 +38,7 @@ use musubi_transport::Transport;
 
 use crate::OpId;
 use crate::hub::HubAdapter;
+use crate::hub::Machines;
 use crate::service::HubService;
 use crate::wire::Envelope;
 use crate::wire::HUB_TOKEN;
@@ -365,7 +367,16 @@ fn spawn_worker(
             // Everything this thread logs is about this hive. At error level, the span stays
             // on under any filter that shows anything.
             let _span = tracing::error_span!("hive", id = %id).entered();
+            // The machines joining the hive, which the thread takes from here without taking the
+            // hub at every request.
+            let joins = hubs
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .joins(&id)
+                .unwrap_or_default();
             let mut service = None;
+            // What the hub knew of the hive's machines when it last let go of the service.
+            let mut machines = None;
             while let Ok(message) = receiver.recv() {
                 #[cfg(test)]
                 if let Some(hold) = &hold {
@@ -391,19 +402,27 @@ fn spawn_worker(
                 let hive = Hive {
                     id: &id,
                     dir: &dir,
+                    joins: &joins,
                     hubs: &hubs,
                     activity: &activity,
                     #[cfg(test)]
                     hooks: hooks.as_deref(),
                 };
                 let served = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    serve_one(&hive, &mut service, &message, limit, &mut counted)
+                    serve_one(
+                        &hive,
+                        &mut service,
+                        &mut machines,
+                        &message,
+                        limit,
+                        &mut counted,
+                    )
                 }));
                 let reply = served.unwrap_or_else(|panic| {
                     // jj-lib and jj-core panic on some malformed input, as a peer could send
                     // it. The hive's service may be left half-changed: the next request opens
                     // it afresh.
-                    service = None;
+                    let_go(&mut service, &mut machines);
                     Err(anyhow::anyhow!(
                         "the hub failed: {}",
                         panic_message(panic.as_ref())
@@ -461,7 +480,7 @@ fn spawn_worker(
                         }
                         Ok(None) => {}
                         Err(panic) => {
-                            service = None;
+                            let_go(&mut service, &mut machines);
                             tracing::warn!(
                                 "could not summarize the new head: {}",
                                 panic_message(panic.as_ref())
@@ -497,18 +516,31 @@ struct Served {
 struct Hive<'a> {
     id: &'a str,
     dir: &'a Path,
+    joins: &'a Joins,
     hubs: &'a Mutex<HubDir>,
     activity: &'a Mutex<Activity>,
     #[cfg(test)]
     hooks: Option<&'a tests::WorkerHooks>,
 }
 
-/// Answers one request for a hive, opening its store first if need be, and updates the
-/// hive's index when a new head is accepted. Counts the request in the hub's activity once
-/// it is handled, and says so in `counted`.
+/// Drops a hive's service, which a panic may have left half-changed, keeping what it knew of the
+/// hive's machines for the service that opens the store next: forgetting that, the hub would
+/// wait for machines that may be joining as after a restart, and a peer whose requests panic
+/// it could keep it from pruning for good.
+fn let_go(service: &mut Option<HubService>, machines: &mut Option<Machines>) {
+    if let Some(service) = service.take() {
+        *machines = Some(service.into_machines());
+    }
+}
+
+/// Answers one request for a hive, opening its store first if need be, with what the hub knew of
+/// its `machines` when it let go of the service before, and updates the hive's index when a new
+/// head is accepted. Counts the request in the hub's activity once it is handled, and says so in
+/// `counted`.
 fn serve_one(
     hive: &Hive<'_>,
     service: &mut Option<HubService>,
+    machines: &mut Option<Machines>,
     message: &Message,
     max_payload: usize,
     counted: &mut bool,
@@ -516,6 +548,7 @@ fn serve_one(
     let Hive {
         id,
         dir,
+        joins,
         hubs,
         activity,
         #[cfg(test)]
@@ -542,13 +575,22 @@ fn serve_one(
             };
             tracing::info!("opened");
             let opened = service.insert(HubService::new(HubAdapter::new(store, dir)?, dir)?);
+            // Only once the service is open: failing, the next request opens it with them.
+            if let Some(machines) = machines.take() {
+                opened.recall(machines);
+            }
             #[cfg(test)]
             if let Some(hooks) = hooks {
-                hooks.opened();
+                hooks.opened(opened);
             }
             opened
         }
     };
+    // The machines that asked the hub to join the hive since its last request, which it then
+    // waits for before pruning, until their first push lands.
+    for machine in &joins.take() {
+        service.joining(machine);
+    }
     let before = service.hub().store().head().1.clone();
     let (reply, notice) = service.handle_bytes(&message.payload, max_payload)?;
     #[cfg(test)]

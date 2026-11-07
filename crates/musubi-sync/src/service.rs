@@ -21,6 +21,7 @@ use crate::blobs::BlobId;
 use crate::blobs::BlobStore;
 use crate::blobs::Received;
 use crate::hub::HubAdapter;
+use crate::hub::Machines;
 use crate::remote::REQUEST_TIMEOUT;
 use crate::remote::WINDOW;
 use crate::remote::chunk_deadline;
@@ -149,6 +150,23 @@ impl HubService {
         let (blob, len) = self.prepared.insert_bytes(bytes)?;
         self.served.remove(&blob);
         Ok((blob, len))
+    }
+
+    /// Takes up what the hub knew of the hive's machines when it last let go of the service
+    /// ([`HubAdapter::recall`]).
+    pub fn recall(&mut self, machines: Machines) {
+        self.hub.recall(machines);
+    }
+
+    /// What the hub knows of the hive's machines ([`HubAdapter::into_machines`]).
+    pub fn into_machines(self) -> Machines {
+        self.hub.into_machines()
+    }
+
+    /// Has the hub wait for `machine`, which asked it to join the hive, before pruning
+    /// ([`HubAdapter::joining`]).
+    pub fn joining(&mut self, machine: &str) {
+        self.hub.joining(machine);
     }
 
     /// Prunes the hive's records, once every machine it waits for has taken them

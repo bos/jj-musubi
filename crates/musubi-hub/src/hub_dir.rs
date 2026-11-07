@@ -8,6 +8,9 @@ use std::fs;
 use std::io::BufRead as _;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::PoisonError;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -154,6 +157,31 @@ struct Hive {
     unsaved: bool,
     /// Joins whose first push the hive hasn't accepted yet.
     pending: Vec<Pending>,
+    /// The machines whose joins chose this hive since its thread last took them.
+    joins: Joins,
+}
+
+/// The keys of the machines whose joins chose a hive since its thread last took them, for the
+/// thread, which waits for them before pruning until their first push lands: a copy that left,
+/// and joins again, has realized the hive's history by then, as a new one has. Shared with the
+/// thread ([`HubDir::joins`]), which takes them at every request without taking the hub. In
+/// memory only, as what the hub knows of the machines is.
+#[derive(Clone, Debug, Default)]
+pub struct Joins(Arc<Mutex<BTreeSet<String>>>);
+
+impl Joins {
+    fn add(&self, machine: &str) {
+        self.lock().insert(machine.to_owned());
+    }
+
+    /// The machines that joined since this was last asked.
+    pub fn take(&self) -> BTreeSet<String> {
+        std::mem::take(&mut *self.lock())
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeSet<String>> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 /// What a joining repository said it brings, so that another copy of it joining meanwhile
@@ -231,6 +259,7 @@ impl HubDir {
                     index,
                     unsaved: false,
                     pending: vec![],
+                    joins: Joins::default(),
                 },
             );
         }
@@ -409,6 +438,7 @@ impl HubDir {
                 index,
                 unsaved: false,
                 pending: vec![],
+                joins: Joins::default(),
             },
         );
         Ok(())
@@ -535,6 +565,11 @@ impl HubDir {
             stamp,
         });
         Ok(info)
+    }
+
+    /// The machines whose joins chose hive `id`, for its thread to take ([`Joins`]).
+    pub fn joins(&self, id: &str) -> Option<Joins> {
+        self.hives.get(id).map(|hive| hive.joins.clone())
     }
 
     /// Adds what newly accepted operations brought to a hive's index, and forgets the
@@ -834,6 +869,7 @@ impl HubDir {
             roots: request.roots.iter().cloned().collect(),
             until: now + self.pending_lifetime,
         });
+        hive.joins.add(&request.machine);
         let mut info = self.info(id).expect("chosen or created");
         let hive = &self.hives[id];
         let mut machines = hive.index.machines.clone();

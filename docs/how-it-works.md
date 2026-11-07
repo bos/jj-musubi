@@ -185,6 +185,9 @@ is expected.
 back; working copies and git refs are untouched. musubi adds an operation or two to the log,
 `musubi: pass on jj op abandon`, so that what it keeps in the operation history, which
 machines are active and when they last worked, stays as it was.
+A copy that goes offline during its first sync and stays away over a day, or less if the hub
+restarts, can't sync again if another machine runs `jj op abandon` meanwhile
+([more](guides/working-across-machines.md#abandoning-operations)).
 
 ## Disk space
 

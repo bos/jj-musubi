@@ -18,6 +18,7 @@ use musubi_jj::node::NodeError;
 use musubi_jj::op_id::CanonicalOp;
 use musubi_sync::Attachment;
 use musubi_sync::OpId;
+use musubi_sync::hub::WAIT_AFTER_OPENING;
 use musubi_testutil::TestEnv;
 use musubi_testutil::TestRepo;
 
@@ -219,6 +220,8 @@ pub struct World {
     recovery_ops: BTreeSet<String>,
     /// The change of every commit seen so far, for `fingerprint`.
     change_of: BTreeMap<String, String>,
+    /// Whether the hub has restarted since it last pruned, for coverage.
+    restarted_since_prune: bool,
     counter: usize,
     pub trace: Vec<String>,
 }
@@ -321,6 +324,7 @@ impl World {
             unmergeable_reverts: 0,
             recovery_ops: BTreeSet::new(),
             change_of: BTreeMap::new(),
+            restarted_since_prune: false,
             counter: 0,
             trace: vec![],
         };
@@ -1553,7 +1557,8 @@ impl World {
     /// alpha's merge of them, which gamma keeps, is accepted. Alpha abandons its merge alone,
     /// and publishes that; beta, with `work` of its own (files it commits), takes the record
     /// and realizes the hub's head, then restarts. The hub goes back to gamma's work, losing the
-    /// record, and gamma publishes the merge again. Returns it.
+    /// record, and gamma publishes the merge again. An hour passes after each time the hub goes
+    /// back, so that it prunes as soon as every machine has taken its records. Returns it.
     pub fn hold_dropped_merge(&mut self, work: &[usize]) -> OpId {
         assert_eq!(self.nodes(), 4);
         let base = self.hub_seq();
@@ -1564,6 +1569,7 @@ impl World {
         self.sync(0);
         self.sync(3);
         self.hub_goes_back(usize::try_from(self.hub_seq() - base).unwrap());
+        self.an_hour_passes();
         self.commit(2, 0, 1);
         self.sync(2);
         let q = self.hub_seq();
@@ -1599,6 +1605,7 @@ impl World {
         self.sync_taking(1);
         self.restart(1);
         self.hub_goes_back(usize::try_from(self.hub_seq() - q).unwrap());
+        self.an_hour_passes();
         self.sync(2);
         if self.fx.hive.hub_head() != ours {
             self.fail("gamma did not publish the dropped merge again");
@@ -1733,6 +1740,7 @@ impl World {
             fired("restart_hub:after_prune");
         }
         self.record("hub: restart".to_owned());
+        self.restarted_since_prune = true;
         if let Err(err) = self.fx.hive.restart_hub() {
             self.fail(&format!("restarting the hub: {err:#}"));
         }
@@ -1755,6 +1763,7 @@ impl World {
             fired("hub_goes_back:after_prune");
         }
         self.record(format!("hub: goes back {lost}"));
+        self.restarted_since_prune = true;
         let seq = self
             .hub_seq()
             .saturating_sub(lost as u64)
@@ -1774,11 +1783,18 @@ impl World {
     /// pruned again.
     pub fn hub_loses_prune(&mut self) {
         self.record("hub: loses its prune".to_owned());
+        self.restarted_since_prune = true;
         match self.fx.hive.hub_loses_prune() {
             Ok(true) => {}
             Ok(false) => self.fail("the hub had no prune to lose"),
             Err(err) => self.fail(&format!("restarting the hub: {err:#}")),
         }
+    }
+
+    /// Moves the hub's clock on an hour ([`WAIT_AFTER_OPENING`]).
+    pub fn an_hour_passes(&mut self) {
+        self.record("hub: an hour passes".to_owned());
+        self.fx.hive.hub.age(WAIT_AFTER_OPENING);
     }
 
     /// Makes the hive again, empty, as a hub does whose store is corrupt.
@@ -1802,7 +1818,8 @@ impl World {
     }
 
     /// Notes, for coverage, what the hub did about pruning during a sync that started with
-    /// `before` of its records pruned: whether it pruned, and whether a copy the hive forgot
+    /// `before` of its records pruned: whether it pruned, and did so for the first time since it
+    /// restarted, which it does only once an hour has passed; and whether a copy the hive forgot
     /// had taken what it pruned; or, if not, whether a copy the hive shows that hasn't said it
     /// took the hub's records held it back, where another had.
     fn note_pruning(&mut self, before: usize) {
@@ -1812,6 +1829,9 @@ impl World {
         let keys: Vec<String> = (0..self.nodes()).map(|m| self.fx.machine_key(m)).collect();
         if pruned > before {
             fired("prune");
+            if std::mem::take(&mut self.restarted_since_prune) {
+                fired("prune:after_restart");
+            }
             self.trace
                 .push(format!("hub: pruned the first {pruned} records"));
             for (m, key) in keys.iter().enumerate() {

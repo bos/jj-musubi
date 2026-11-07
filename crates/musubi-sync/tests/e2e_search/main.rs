@@ -227,6 +227,7 @@ fn e2e_workspace_names_after_trim_match_native_jj() {
     let description = world.message(0);
     world.jj(0, &["describe", &commit, "-m", &description]);
     world.restart_hub();
+    world.an_hour_passes();
     let foreign = world.foreign_workspace_names(0)[0].clone();
     world.jj(0, &["workspace", "forget", &foreign]);
     world.converge();

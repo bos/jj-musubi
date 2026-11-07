@@ -18,6 +18,7 @@ use musubi_jj::node::NodeRepo;
 use musubi_jj::objects::Backend;
 use musubi_jj::op_id::CanonicalOp;
 use musubi_sync::hive::Hive;
+use musubi_sync::hub::WAIT_AFTER_OPENING;
 use musubi_sync::node::Clock;
 use musubi_sync::node::NodeAdapter;
 use musubi_testutil::TestEnv;
@@ -100,6 +101,8 @@ impl Fixture {
         let repos: Vec<TestRepo> = names.iter().map(|name| env.repo_handle(name)).collect();
         let configs = std::fs::read_to_string(saved.join("configs")).unwrap();
         let mut hive = Hive::open(&env.root().join("hub")).unwrap();
+        // As in `unsynced`: the recording's machines finished joining long ago.
+        hive.hub.age(WAIT_AFTER_OPENING);
         for (repo, config) in repos.iter().zip(configs.lines()) {
             let node = NodeRepo::open(&repo.repo_path(), &repo.settings())
                 .unwrap()
@@ -119,6 +122,9 @@ impl Fixture {
     /// Joins repositories without syncing.
     pub fn unsynced(env: TestEnv, repos: Vec<TestRepo>) -> Self {
         let mut hive = Hive::new(&env.root().join("hub"), Backend::GIT).unwrap();
+        // As a hive made long before its machines take any abandon: the hub, which waits an
+        // hour after opening its store for machines that may be joining, waits only for these.
+        hive.hub.age(WAIT_AFTER_OPENING);
         for repo in &repos {
             let mut node = NodeRepo::open(&repo.repo_path(), &repo.settings())
                 .unwrap()

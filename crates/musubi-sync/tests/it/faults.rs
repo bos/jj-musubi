@@ -1975,7 +1975,7 @@ fn check_head(hub: &HubService, before: &(u64, OpId)) {
 }
 
 fn fresh_hub(dir: &Path) -> HubService {
-    let adapter = HubAdapter::init(dir, Backend::Git).unwrap();
+    let adapter = HubAdapter::init(dir, Backend::GIT).unwrap();
     HubService::new(adapter, dir).unwrap()
 }
 

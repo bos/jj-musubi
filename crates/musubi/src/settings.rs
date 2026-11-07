@@ -14,6 +14,7 @@ use jj_cli::config::RawConfig;
 use jj_cli::config::config_from_environment;
 use jj_cli::config::default_config_layers;
 use jj_cli::ui::Ui;
+use jj_lib::config::ConfigLayer;
 use jj_lib::config::StackedConfig;
 use jj_lib::settings::UserSettings;
 
@@ -40,8 +41,20 @@ pub fn user_config() -> anyhow::Result<StackedConfig> {
 /// from the workspace at `workspace_root`: the system's and the user's config, the
 /// repository's, and the workspace's.
 pub fn load(workspace_root: &Path, repo_path: &Path) -> anyhow::Result<UserSettings> {
+    load_with(workspace_root, repo_path, None)
+}
+
+/// [`load`], with `overrides` above every other layer, as `jj --config` gives them.
+pub fn load_with(
+    workspace_root: &Path,
+    repo_path: &Path,
+    overrides: Option<ConfigLayer>,
+) -> anyhow::Result<UserSettings> {
     let ui = Ui::null();
     let (mut env, mut raw) = base()?;
+    if let Some(layer) = overrides {
+        raw.as_mut().add_layer(layer);
+    }
     env.reset_repo_path(repo_path);
     env.reload_repo_config(&ui, &mut raw)
         .map_err(|err| anyhow::anyhow!("loading repo config: {err:?}"))?;

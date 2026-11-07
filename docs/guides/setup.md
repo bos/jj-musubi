@@ -22,6 +22,11 @@ You also need a repository with at least one commit and all of its history. musu
 shallow or partial clone, since it couldn't send other machines everything they need. A
 `jj git clone` without `--depth` is fine.
 
+git names a repository's objects with SHA-1 or SHA-256, chosen when it is made; musubi syncs
+either. A hive takes the one its first copy has, and every other copy must have the same:
+`git rev-parse --show-object-format` says which a repository has, and `musubi clone` makes a
+copy with the hive's.
+
 ## Choose the hub's machine
 
 Run the hub on a machine that is usually on and that every other machine can reach over ssh: a

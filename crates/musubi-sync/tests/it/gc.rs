@@ -68,7 +68,7 @@ fn gc_keeps_every_commit_the_hive_requires() {
     let env = TestEnv::new();
     let alpha = env.init_repo("alpha");
     let beta = env.init_repo("beta");
-    let mut hive = Hive::new(&env.root().join("hub"), Backend::Git).unwrap();
+    let mut hive = Hive::new(&env.root().join("hub"), Backend::GIT).unwrap();
     let a = join(&mut hive, &alpha);
     let b = join(&mut hive, &beta);
     // Rewrites, so that operations record predecessors, and an abandoned commit, which
@@ -142,7 +142,7 @@ fn objects_removed_before_realizing_are_fetched_again() {
     let env = TestEnv::new();
     let alpha = env.init_repo("alpha");
     let beta = env.init_repo("beta");
-    let mut hive = Hive::new(&env.root().join("hub"), Backend::Git).unwrap();
+    let mut hive = Hive::new(&env.root().join("hub"), Backend::GIT).unwrap();
     let a = join(&mut hive, &alpha);
     let b = join(&mut hive, &beta);
     hive.sync_all().unwrap();

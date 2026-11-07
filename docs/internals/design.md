@@ -747,6 +747,13 @@ commit. The hub decides under its lock, so a copy joining while another creates 
 musubi refuses a shallow or partial clone before asking the hub, and won't sync one: the hub
 accepts an operation only with everything it requires, which such a clone can't send.
 
+A backend includes the hash a git repository names its objects with, SHA-1 or SHA-256: the same
+history has different commit ids under each, and git can't convert a repository, so a hive has
+one and every copy must too. A hive takes its first copy's, the hub makes its store with it
+(`git init --object-format`, whatever git's default), and the hub refuses a join whose backend
+differs from the hive's, even one its remotes match. `musubi clone` makes the copy with the
+hive's, whatever jj's `git.object-hash` says.
+
 1. A repository with no commits of its own is refused: there is nothing to match, and nothing to
    share.
 2. `--hive <name>` joins that hive, but only if the repository is related to it.

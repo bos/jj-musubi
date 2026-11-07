@@ -118,7 +118,7 @@ impl Fixture {
 
     /// Joins repositories without syncing.
     pub fn unsynced(env: TestEnv, repos: Vec<TestRepo>) -> Self {
-        let mut hive = Hive::new(&env.root().join("hub"), Backend::Git).unwrap();
+        let mut hive = Hive::new(&env.root().join("hub"), Backend::GIT).unwrap();
         for repo in &repos {
             let mut node = NodeRepo::open(&repo.repo_path(), &repo.settings())
                 .unwrap()

@@ -33,21 +33,72 @@ pub use power::on_battery;
 pub use simple::SimpleStore;
 
 /// A backend musubi supports: the kind of repository a hive's machines have, which decides
-/// how its objects are stored and moved.
+/// how its objects are stored and moved. Every copy in a hive, and the hub's store of it,
+/// has the same backend, down to the hash a git repository names its objects with: commits
+/// named with one hash are different commits under the other.
+///
+/// Written as its [`Self::name`], in `hive.toml`, the hub store's `backend` file and the
+/// wire alike.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(into = "String", try_from = "String")]
 pub enum Backend {
     /// jj's git backend, its default.
-    Git,
+    Git(GitHash),
     /// jj's simple backend, which exists mainly for jj's own tests.
     Simple,
 }
 
+/// The hash a git repository names its objects with, which `git init --object-format`
+/// chooses once and for all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GitHash {
+    Sha1,
+    Sha256,
+}
+
+impl GitHash {
+    pub fn kind(self) -> gix::hash::Kind {
+        match self {
+            Self::Sha1 => gix::hash::Kind::Sha1,
+            Self::Sha256 => gix::hash::Kind::Sha256,
+        }
+    }
+
+    /// The hash of `kind`, if musubi supports it.
+    pub fn of(kind: gix::hash::Kind) -> Option<Self> {
+        match kind {
+            gix::hash::Kind::Sha1 => Some(Self::Sha1),
+            gix::hash::Kind::Sha256 => Some(Self::Sha256),
+            _ => None,
+        }
+    }
+
+    /// Its name for `git init --object-format`.
+    pub fn object_format(self) -> &'static str {
+        match self {
+            Self::Sha1 => "sha1",
+            Self::Sha256 => "sha256",
+        }
+    }
+}
+
+impl std::fmt::Display for GitHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Sha1 => "SHA-1",
+            Self::Sha256 => "SHA-256",
+        })
+    }
+}
+
 impl Backend {
+    /// jj's git backend with SHA-1, as `jj git init` makes by default.
+    pub const GIT: Self = Self::Git(GitHash::Sha1);
+
     /// The backend of a jj store, if musubi supports it.
     pub fn of(store: &Store) -> Option<Self> {
-        if jj_lib::git::get_git_backend(store).is_ok() {
-            Some(Self::Git)
+        if let Ok(git) = jj_lib::git::get_git_backend(store) {
+            GitHash::of(git.git_repo().object_hash()).map(Self::Git)
         } else if store.backend().name() == SimpleBackend::NAME {
             Some(Self::Simple)
         } else {
@@ -57,14 +108,16 @@ impl Backend {
 
     pub fn name(self) -> &'static str {
         match self {
-            Self::Git => "git",
+            Self::Git(GitHash::Sha1) => "git",
+            Self::Git(GitHash::Sha256) => "git-sha256",
             Self::Simple => "simple",
         }
     }
 
     pub fn parse(name: &str) -> Option<Self> {
         match name {
-            "git" => Some(Self::Git),
+            "git" => Some(Self::GIT),
+            "git-sha256" => Some(Self::Git(GitHash::Sha256)),
             "simple" => Some(Self::Simple),
             _ => None,
         }
@@ -73,9 +126,23 @@ impl Backend {
     /// The backend's root commit, which every view may mention and no store contains.
     pub fn root_commit(self) -> CommitId {
         match self {
-            Self::Git => CommitId::from_bytes(&[0; 20]),
+            Self::Git(hash) => CommitId::new(vec![0; hash.kind().len_in_bytes()]),
             Self::Simple => CommitId::from_bytes(&[0; 64]),
         }
+    }
+}
+
+impl From<Backend> for String {
+    fn from(backend: Backend) -> Self {
+        backend.name().to_owned()
+    }
+}
+
+impl TryFrom<String> for Backend {
+    type Error = String;
+
+    fn try_from(name: String) -> Result<Self, String> {
+        Self::parse(&name).ok_or_else(|| format!("unknown backend {name:?}"))
     }
 }
 

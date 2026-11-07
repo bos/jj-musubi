@@ -712,7 +712,17 @@ impl HubDir {
                 .filter_map(|(name, url)| Some((name.clone(), RemoteUrl::parse(url)?.key())))
                 .collect(),
         };
-        let decision = matching::decide(&joiner, &candidates);
+        let mut decision = matching::decide(&joiner, &candidates);
+        // A copy with the other hash shares no commit with the hive it belongs in, so nothing
+        // matches it: say why, rather than that nothing shares its history.
+        if let Decision::Refuse(_) = decision
+            && joiner.has_commits
+            && !matches!(request.choice, JoinChoice::Remake { .. })
+            && candidates.iter().all(|candidate| !candidate.related)
+            && let Some(refusal) = self.other_backend(request, &joiner, &candidates)
+        {
+            decision = Decision::Refuse(refusal);
+        }
         let (id, created, reason) = match (&request.choice, decision) {
             // A lost hive is made again, unless the repository belongs in a hive the hub has:
             // one made again by hand meanwhile, say.
@@ -758,6 +768,26 @@ impl HubDir {
         self.joined(request, &id, created, reason)
     }
 
+    /// Why `request` can't join the hive it asked for, or the one its remotes name, if that
+    /// hive has another backend.
+    fn other_backend(
+        &self,
+        request: &JoinRequest,
+        joiner: &Joiner,
+        candidates: &[Candidate],
+    ) -> Option<Refusal> {
+        candidates
+            .iter()
+            .filter(|candidate| match &joiner.chosen {
+                Some(id) => *id == candidate.id,
+                None => joiner
+                    .remotes
+                    .iter()
+                    .any(|(_, key)| candidate.url_keys.contains(key)),
+            })
+            .find_map(|candidate| backend_refusal(request, &self.hives[&candidate.id].meta))
+    }
+
     /// Records that `request` joins hive `id`, which counts what it brings as the hive's
     /// until it pushes, and says so.
     fn joined(
@@ -767,6 +797,9 @@ impl HubDir {
         created: bool,
         reason: String,
     ) -> Result<Joined, Refusal> {
+        if let Some(refusal) = backend_refusal(request, &self.hives[id].meta) {
+            return Err(refusal);
+        }
         self.reserve_remote_bindings(
             id,
             &request.remote_bindings,
@@ -1038,6 +1071,34 @@ fn empty_dir(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Why `request` can't join `hive`, if their backends differ: commits a git repository names
+/// with one hash are different commits under the other, and git can't convert a repository.
+fn backend_refusal(request: &JoinRequest, hive: &HiveMeta) -> Option<Refusal> {
+    if hive.backend == request.backend {
+        return None;
+    }
+    let name = &hive.name;
+    let kind = |backend: Backend| match backend {
+        Backend::Git(_) => "git",
+        Backend::Simple => "simple",
+    };
+    let differs = match (request.backend, hive.backend) {
+        (Backend::Git(ours), Backend::Git(theirs)) => {
+            format!(
+                "this repository's git names objects with {ours}, but hive {name}'s with {theirs}"
+            )
+        }
+        (ours, theirs) => format!(
+            "this repository uses jj's {} backend, but hive {name} uses its {} backend",
+            kind(ours),
+            kind(theirs)
+        ),
+    };
+    Some(format!(
+        "{differs}, so it can't join it; `musubi clone {name} <dir>` makes a copy that can"
+    ))
+}
+
 fn write_meta(dir: &Path, meta: &HiveMeta) -> anyhow::Result<()> {
     files::replace(&dir.join(HIVE_FILE), toml::to_string(meta)?.as_bytes())?;
     Ok(())
@@ -1045,11 +1106,13 @@ fn write_meta(dir: &Path, meta: &HiveMeta) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use musubi_jj::objects::GitHash;
+
     use super::*;
 
     fn request(machine: &str, url: &str) -> JoinRequest {
         JoinRequest {
-            backend: Backend::Git,
+            backend: Backend::GIT,
             clone_config: BTreeMap::new(),
             remote_bindings: [(
                 "origin".to_owned(),
@@ -1083,19 +1146,19 @@ mod tests {
     fn clone_preflight_keeps_the_resolved_hive() {
         let dir = musubi_testutil::tempdir();
         let mut hubs = HubDir::open(dir.path()).unwrap();
-        let alpha = hubs.create("alpha", Backend::Git).unwrap();
-        let other = hubs.create(&alpha, Backend::Git).unwrap();
+        let alpha = hubs.create("alpha", Backend::GIT).unwrap();
+        let other = hubs.create(&alpha, Backend::GIT).unwrap();
         assert_ne!(alpha, other);
         assert_eq!(hubs.resolve(&alpha).unwrap().as_str(), other);
         let resolved = hubs.resolve("alpha").unwrap();
         let prepared = hubs
-            .prepare_clone(&resolved, Backend::Git, &BTreeMap::new())
+            .prepare_clone(&resolved, Backend::GIT, &BTreeMap::new())
             .unwrap();
         assert_eq!(prepared.id, alpha, "clone switched to a different hive");
         let missing = Uuid::new_v4().to_string();
-        hubs.create(&missing, Backend::Git).unwrap();
+        hubs.create(&missing, Backend::GIT).unwrap();
         assert!(
-            hubs.prepare_clone(&HiveId::from(missing), Backend::Git, &BTreeMap::new())
+            hubs.prepare_clone(&HiveId::from(missing), Backend::GIT, &BTreeMap::new())
                 .is_err()
         );
     }
@@ -1124,7 +1187,7 @@ mod tests {
         assert!(
             hubs.prepare_clone(
                 &HiveId::from(id.clone()),
-                Backend::Git,
+                Backend::GIT,
                 &first.remote_bindings
             )
             .is_ok()
@@ -1136,7 +1199,7 @@ mod tests {
             .push
             .insert("example.com/fork".to_owned());
         assert!(
-            hubs.prepare_clone(&HiveId::from(id.clone()), Backend::Git, &conflicting)
+            hubs.prepare_clone(&HiveId::from(id.clone()), Backend::GIT, &conflicting)
                 .is_err()
         );
         // The first push records common history independently of the approval's names.
@@ -1235,15 +1298,15 @@ mod tests {
     fn hives_come_and_go_while_a_join_looks_in_their_stores() {
         let dir = tempfile::tempdir().unwrap();
         let mut hubs = HubDir::open(dir.path()).unwrap();
-        let gone = hubs.create("gone", Backend::Git).unwrap();
-        let kept = hubs.create("kept", Backend::Git).unwrap();
+        let gone = hubs.create("gone", Backend::GIT).unwrap();
+        let kept = hubs.create("kept", Backend::GIT).unwrap();
         let joining = JoinRequest {
             remote_targets: vec!["22".repeat(20)],
             ..creating(request("alpha", "https://example.com/a"))
         };
         let probe = hubs.probe(&joining);
         hubs.remove(&gone).unwrap();
-        let made = hubs.create("made", Backend::Git).unwrap();
+        let made = hubs.create("made", Backend::GIT).unwrap();
         let probed = probe.run();
         assert_eq!(probed.0.get(&kept), Some(&Ok(false)));
         assert!(probed.0.contains_key(&gone));
@@ -1269,6 +1332,43 @@ mod tests {
             .join(&named("work", "https://example.com/b"))
             .unwrap_err();
         assert!(err.contains("already a hive named work"), "{err}");
+    }
+
+    /// A hive keeps the hash its first copy names objects with, across a restart and in its
+    /// store's git, and refuses a copy with the other one, whether its remote matches or it
+    /// names the hive, saying why: their commits can't be the same.
+    #[test]
+    fn a_hive_keeps_its_first_copys_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let sha256 = Backend::Git(GitHash::Sha256);
+        let url = "https://example.com/a";
+        let refusal = "this repository's git names objects with SHA-1, but hive a's with \
+                       SHA-256, so it can't join it; `musubi clone a <dir>` makes a copy that can";
+        let mut hubs = HubDir::open(dir.path()).unwrap();
+        let joined = hubs
+            .join(&creating(JoinRequest {
+                backend: sha256,
+                ..request("alpha", url)
+            }))
+            .unwrap();
+        assert_eq!(hubs.join(&request("beta", url)).unwrap_err(), refusal);
+        let mut hubs = HubDir::open(dir.path()).unwrap();
+        let id = joined.hive.id;
+        assert_eq!(hubs.info(&id).unwrap().backend, sha256);
+        let store = hubs.open_store(&id).unwrap();
+        assert_eq!(store.backend(), sha256);
+        let format = std::process::Command::new("git")
+            .arg("--git-dir")
+            .arg(dir.path().join(&id).join("git"))
+            .args(["rev-parse", "--show-object-format"])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&format.stdout).trim(), "sha256");
+        let named = JoinRequest {
+            choice: JoinChoice::Hive("a".to_owned()),
+            ..request("beta", url)
+        };
+        assert_eq!(hubs.join(&named).unwrap_err(), refusal);
     }
 
     /// Machines of one name, which their keys tell apart, are listed apart, and a joining
@@ -1342,7 +1442,7 @@ mod tests {
         assert!(store::is_corrupt(&err), "{err}");
         hubs.remake(&id, &err).unwrap();
         let store = HubStore::open(&hive_dir).unwrap();
-        assert_eq!(store.backend(), Backend::Git);
+        assert_eq!(store.backend(), Backend::GIT);
         assert_eq!(store.head().0, 0);
         assert_eq!(hubs.info(&id).unwrap().name, "a");
     }

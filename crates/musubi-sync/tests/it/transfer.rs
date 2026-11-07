@@ -57,7 +57,7 @@ fn bundles_left_by_a_killed_process_are_removed() {
     let env = TestEnv::new();
     let alpha = env.init_repo("alpha");
     let hub_dir = env.root().join("hub");
-    let hub = HubAdapter::init(&hub_dir, Backend::Git).unwrap();
+    let hub = HubAdapter::init(&hub_dir, Backend::GIT).unwrap();
     let node = NodeRepo::open(&alpha.repo_path(), &alpha.settings()).unwrap();
     let dirs = [hub_dir.join("tmp"), alpha.repo_path().join("musubi/tmp")];
     let day_old = SystemTime::now() - Duration::from_secs(25 * 3600);
@@ -99,7 +99,7 @@ fn joining_with_a_copy_downloads_only_what_is_new() {
     ]);
     beta.jj(&["git", "fetch", "--remote", "origin"]);
 
-    let mut hive = Hive::new(&env.root().join("hub"), Backend::Git).unwrap();
+    let mut hive = Hive::new(&env.root().join("hub"), Backend::GIT).unwrap();
     let a = join(&mut hive, &alpha);
     let b = join(&mut hive, &beta);
     hive.sync(a).unwrap();
@@ -119,7 +119,7 @@ fn seeding_machine_does_not_download_its_own_history() {
     alpha.jj(&["commit", "-m", "big"]);
     let beta = env.init_repo("beta");
 
-    let mut hive = Hive::new(&env.root().join("hub"), Backend::Git).unwrap();
+    let mut hive = Hive::new(&env.root().join("hub"), Backend::GIT).unwrap();
     let a = join(&mut hive, &alpha);
     let b = join(&mut hive, &beta);
     hive.sync(a).unwrap();
@@ -137,7 +137,7 @@ fn own_uploads_are_not_downloaded_again() {
     let env = TestEnv::new();
     let alpha = env.init_repo("alpha");
     let beta = env.init_repo("beta");
-    let mut hive = Hive::new(&env.root().join("hub"), Backend::Git).unwrap();
+    let mut hive = Hive::new(&env.root().join("hub"), Backend::GIT).unwrap();
     let a = join(&mut hive, &alpha);
     let b = join(&mut hive, &beta);
     hive.sync_all().unwrap();
@@ -219,7 +219,7 @@ fn small_transfers_leave_no_pack() {
     let env = TestEnv::new();
     let alpha = env.init_repo("alpha");
     let beta = env.init_repo("beta");
-    let mut hive = Hive::new(&env.root().join("hub"), Backend::Git).unwrap();
+    let mut hive = Hive::new(&env.root().join("hub"), Backend::GIT).unwrap();
     let a = join(&mut hive, &alpha);
     let b = join(&mut hive, &beta);
     hive.sync_all().unwrap();
@@ -244,7 +244,7 @@ fn packs_are_consolidated_and_nothing_is_lost() {
     let env = TestEnv::new();
     let alpha = env.init_repo("alpha");
     let beta = env.init_repo("beta");
-    let mut hive = Hive::new(&env.root().join("hub"), Backend::Git).unwrap();
+    let mut hive = Hive::new(&env.root().join("hub"), Backend::GIT).unwrap();
     let a = join(&mut hive, &alpha);
     let b = join(&mut hive, &beta);
     hive.sync_all().unwrap();
@@ -280,7 +280,7 @@ fn node_keeps_up_as_packs_pile_up() {
     let env = TestEnv::new();
     let alpha = env.init_repo("alpha");
     let beta = env.init_repo("beta");
-    let mut hive = Hive::new(&env.root().join("hub"), Backend::Git).unwrap();
+    let mut hive = Hive::new(&env.root().join("hub"), Backend::GIT).unwrap();
     let a = join(&mut hive, &alpha);
     let b = join(&mut hive, &beta);
     hive.sync_all().unwrap();
@@ -310,7 +310,7 @@ fn views_travel_as_deltas() {
     let mut args = vec!["bookmark", "create", "-r", "root()"];
     args.extend(names.iter().map(String::as_str));
     alpha.jj(&args);
-    let mut hive = Hive::new(&env.root().join("hub"), Backend::Git).unwrap();
+    let mut hive = Hive::new(&env.root().join("hub"), Backend::GIT).unwrap();
     let a = join(&mut hive, &alpha);
     let b = join(&mut hive, &beta);
     hive.sync_all().unwrap();
@@ -342,7 +342,7 @@ fn nodes_follow_a_hub_that_went_back() {
     let alpha = env.init_repo("alpha");
     let beta = env.init_repo("beta");
     let hub_dir = env.root().join("hub");
-    let mut hive = Hive::new(&hub_dir, Backend::Git).unwrap();
+    let mut hive = Hive::new(&hub_dir, Backend::GIT).unwrap();
     let a = join(&mut hive, &alpha);
     let b = join(&mut hive, &beta);
     for i in 0..3 {
@@ -381,7 +381,7 @@ fn a_remade_hive_fills_from_its_machines() {
     let alpha = env.init_repo("alpha");
     let beta = env.init_repo("beta");
     let hub_dir = env.root().join("hub");
-    let mut hive = Hive::new(&hub_dir, Backend::Git).unwrap();
+    let mut hive = Hive::new(&hub_dir, Backend::GIT).unwrap();
     let a = join(&mut hive, &alpha);
     let b = join(&mut hive, &beta);
     for i in 0..3 {
@@ -397,9 +397,9 @@ fn a_remade_hive_fills_from_its_machines() {
     std::fs::write(&heads, torn).unwrap();
     // As the hub makes it again (`HubDir::remake`), which it does when opening the store
     // fails, so with the store closed: Windows can't rename a directory with files open in it.
-    hive.hub = HubAdapter::init(&env.root().join("meanwhile"), Backend::Git).unwrap();
+    hive.hub = HubAdapter::init(&env.root().join("meanwhile"), Backend::GIT).unwrap();
     std::fs::rename(&hub_dir, env.root().join("corrupt")).unwrap();
-    musubi_hub::store::HubStore::init(&hub_dir, Backend::Git).unwrap();
+    musubi_hub::store::HubStore::init(&hub_dir, Backend::GIT).unwrap();
     hive.restart_hub().unwrap();
     alpha.write_file("f", "after");
     alpha.jj(&["commit", "-m", "after"]);

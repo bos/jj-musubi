@@ -22,9 +22,14 @@ fuzz_target!(|data: &[u8]| {
     };
     if choice & 0x40 != 0 {
         let identity = String::from_utf8_lossy(rest).into_owned();
+        let backend = match choice & 0x3 {
+            0 => musubi_jj::objects::Backend::GIT,
+            1 => musubi_jj::objects::Backend::Git(musubi_jj::objects::GitHash::Sha256),
+            _ => musubi_jj::objects::Backend::Simple,
+        };
         let request = musubi_hub::hub_dir::JoinRequest {
             choice: musubi_hub::hub_dir::JoinChoice::Match,
-            backend: musubi_jj::objects::Backend::Git,
+            backend,
             clone_config: [("user.name".to_owned(), identity.clone())].into(),
             remotes: vec![("origin".to_owned(), identity.clone())],
             remote_bindings: [(

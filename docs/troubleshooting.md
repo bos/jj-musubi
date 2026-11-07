@@ -253,7 +253,9 @@ its remotes' URLs. It refuses when it can't tell, and says why:
 - **"this repository has no commits to share yet; commit something first"**: an empty
   repository matches nothing. Commit something, or clone the hive with `musubi clone`.
 - **"no hive on this hub shares history with this repository; `musubi create` starts one"**:
-  start a hive with `musubi create`, or check that `--hub` names the hub you meant.
+  start a hive with `musubi create`, or check that `--hub` names the hub you meant. If the
+  hive's other copies name objects with another hash than this one
+  (`git rev-parse --show-object-format` says which), make a copy with `musubi clone` instead.
 - **"hive app shares history with this repository, but not a remote; ..."**, or **"hives
   app, web share history ..."**: none of the copy's remotes' URLs match the hive's. A fork
   whose `origin` is your own fork looks like this, and so does a remote spelled with an ssh
@@ -288,6 +290,14 @@ to join that one. If the message says the copy belongs in several, run
 
 A shallow or partial clone can't send other machines everything they need. Make a full copy
 with `musubi clone <hive> <dir>`, if a hive has it, or with `jj git clone` without `--depth`.
+
+### "this repository's git names objects with SHA-256, but hive app's with SHA-1, ..."
+
+git names a repository's objects with SHA-1 or SHA-256, chosen when it is made, so the two can
+never have the same commits. Make a copy of the hive with `musubi clone app <dir>`, which uses
+the hive's hash. To carry over work the hive lacks, run `jj diff --git -r <rev>` in this
+repository and `git apply` in the copy, then `jj describe` it there; copy binary files by hand,
+since such a patch can't carry them.
 
 ## Leaving a hive or forgetting a machine
 

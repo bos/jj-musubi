@@ -29,7 +29,7 @@ use crate::ui::Ui;
 
 /// Stops the daemon serving the copy whose entry is at `path`, which may be gone: the hive
 /// isn't told, since only the copy can tell it.
-fn leave_path(ui: &Ui, path: &Path, socket: &Socket) -> anyhow::Result<()> {
+pub fn leave_path(ui: &Ui, path: &Path, socket: &Socket) -> anyhow::Result<()> {
     // As entries are: canonical, though the copy is gone, by the directory that held it.
     let path = std::path::absolute(path)?;
     let path = match (path.parent().map(Path::canonicalize), path.file_name()) {
@@ -71,16 +71,7 @@ fn stop_serving(key: &str, socket: &Socket) -> anyhow::Result<bool> {
     })
 }
 
-pub fn leave(
-    ui: &Ui,
-    start: &Path,
-    socket: &Socket,
-    force: bool,
-    path: Option<&Path>,
-) -> anyhow::Result<()> {
-    if let Some(path) = path {
-        return leave_path(ui, path, socket);
-    }
+pub fn leave(ui: &Ui, start: &Path, socket: &Socket, force: bool) -> anyhow::Result<()> {
     let (located, hive, entry) = the_copy(ui, start, socket)?;
     // So that the daemon doesn't sync it meanwhile.
     let served = stop_serving(&entry.key, socket)?;

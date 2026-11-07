@@ -7,6 +7,16 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- Commands run from a directory deleted meanwhile say "the current directory no longer
+  exists" if they act on the repository there, and the others, such as `musubi list` and
+  `musubi daemon stop`, work, given no relative path. `musubi status` says so, and exits 0.
+  Previously every command failed with "No such file or directory".
+
+- In a workspace whose repository can't be reached, as when the workspace it was added from
+  has moved, commands say so: "can't reach this workspace's repository, ...". Previously
+  `musubi status` said the directory wasn't in a jj repository, and other commands failed with
+  "No such file or directory".
+
 - `+` in `musubi top` slows the refresh to at most once an hour, as `--interval` allows.
   Previously it capped the refresh at once a minute, so after `--interval` above 60, pressing
   `+` made it faster.

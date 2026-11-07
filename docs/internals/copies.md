@@ -173,6 +173,7 @@ Each case, what musubi does, and the test in `crates/musubi/tests/cli.rs` that p
 | `mv` the repository | Syncs again as soon as jj runs in it (R4). | `moved_copies_sync_again` |
 | Disk unmounted, then mounted again | Suspended, then synced again (R4). | `moved_copies_sync_again` |
 | `mv` or delete the directory the daemon was started from | Nothing else stops syncing (R10). | `the_daemon_outlives_the_directory_it_was_started_in` |
+| A command run from a directory deleted meanwhile | `musubi status` says so and exits 0; commands that act on a repository there refuse, saying so; others work. | `the_daemon_outlives_the_directory_it_was_started_in` |
 | `rm -rf` a copy while its daemon runs | `rm` succeeds; the entry is suspended and listed until `musubi leave <path>` (R3, R4). | `deleted_copies_stop_syncing` |
 | Deleted, then `musubi clone` again at the same path | The clone's entry takes the path, and the old entry is dropped (R5). | `deleted_copies_stop_syncing` |
 | `cp -a` a copy, or restore a backup beside it | `musubi status` there says it is a duplicate, and names the original (R1). | `duplicates_are_never_synced` |
@@ -184,6 +185,7 @@ Each case, what musubi does, and the test in `crates/musubi/tests/cli.rs` that p
 | …replaced by a copy of another hive | Synced into its own hive, never the first (R3, R4). | `a_replaced_copy_is_never_synced_into_its_hive` |
 | `.jj/repo/musubi/machine` deleted | Not synced, and no new key made (R6). | `a_copy_without_its_key_is_not_synced` |
 | A second jj workspace, with `musubi join` run in it too | Joins again, through the same entry; `musubi leave` there takes the copy out (R5). | `commands_in_another_workspace_act_on_the_repository` |
+| …then the first workspace moved away | Commands in the second say they can't reach the repository, naming where it was. | `commands_in_another_workspace_act_on_the_repository` (Unix) |
 | A bind mount, joined through both paths | One entry, as for a second workspace: both paths reach the same `.jj/repo` (R5). | — (needs root) |
 | `sudo musubi join` | Refused (R9). | — (needs root) |
 | `musubi hub remove`, then a plain `musubi join` | Says the hive was removed (R7). | `copies_leave_a_removed_hive` |

@@ -36,14 +36,15 @@ struct Copy {
     status: Option<Status>,
 }
 
-/// Lists what it can: a daemon or hub out of reach is a line of the listing.
+/// Lists what it can: a daemon or hub out of reach is a line of the listing. `cwd`, the
+/// current directory, if it still exists, is where a template shows paths from.
 pub fn list(
     ui: &Ui,
-    cwd: &Path,
+    cwd: Option<&Path>,
     template: Option<&str>,
     socket: anyhow::Result<Socket>,
 ) -> anyhow::Result<()> {
-    let lister = Lister::new(ui, template, cwd)?;
+    let lister = Lister::new(ui, template, cwd.unwrap_or_else(|| Path::new("/")))?;
     let state = UserState::load()?;
     let (daemon, statuses) = block_on(async {
         let running = match &socket {
@@ -70,7 +71,8 @@ pub fn list(
         Ok::<_, anyhow::Error>((Ok(true), statuses))
     })?;
     // A copy moved here is served here from now on.
-    if let Ok(located) = Located::find(cwd)
+    if let Some(cwd) = cwd
+        && let Ok(located) = Located::find(cwd)
         // jj, looking at it, could write to another user's repository.
         && copy::check_owner(&located.repo_path).is_ok()
         && let Ok(found) = copy::Found::resolve(&located)

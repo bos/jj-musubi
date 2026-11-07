@@ -398,7 +398,7 @@ mod tests {
         HiveInfo {
             id: id.to_owned(),
             name: id.to_owned(),
-            backend: musubi_jj::objects::Backend::Git,
+            backend: musubi_jj::objects::Backend::GIT,
             clone_config: Default::default(),
             urls: vec![],
             machines: vec![],

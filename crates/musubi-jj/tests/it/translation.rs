@@ -11,6 +11,7 @@ use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
 use musubi_jj::node::NodeRepo;
 use musubi_jj::objects::CHANGE_ID_LENGTH;
+use musubi_jj::objects::GitHash;
 use musubi_jj::objects::GitObjects;
 use musubi_jj::objects::GitStore;
 use musubi_jj::objects::ObjectError;
@@ -982,7 +983,7 @@ fn malformed_extras_are_refused() {
         env.root().join("hub/git"),
         env.root().join("hub/extras"),
     );
-    GitObjects::init_bare(git, &hub_git).unwrap();
+    GitObjects::init_bare(git, &hub_git, GitHash::Sha1).unwrap();
     std::fs::create_dir_all(&hub_extras).unwrap();
     let hub = GitStore::for_hub(git, &hub_git, &hub_extras);
     assert_eq!(node.loader().store().change_id_length(), CHANGE_ID_LENGTH);
@@ -1366,6 +1367,44 @@ fn simple_backend_round_trips() {
     let show = |repo: &TestRepo| repo.jj(&["file", "show", "-r", "main", "dir/file"]);
     assert_eq!(show(&a), "one");
     assert_eq!(show(&b), "one");
+    assert_eq!(a.jj(&["file", "show", "-r", "main", "dir/other"]), "two");
+}
+
+/// A git repository naming objects with SHA-256 replicates as one with SHA-1 does: commits,
+/// their files and change ids, both ways.
+#[test]
+fn sha256_round_trips() {
+    let env = TestEnv::new();
+    let a = env.init_sha256_repo("alpha");
+    let b = env.init_sha256_repo("beta");
+    a.write_file("dir/file", "one");
+    a.jj(&["commit", "-m", "from alpha"]);
+    a.jj(&["bookmark", "create", "main", "-r", "@-"]);
+
+    let mut a_node = open(&a);
+    let mut b_node = open(&b);
+    let a_head = single_canonical_head(&mut a_node);
+    sync(&a_node, &mut b_node, &a_head);
+    b.jj(&["new", "main"]);
+    b.write_file("dir/other", "two");
+    b.jj(&["commit", "-m", "from beta"]);
+    b.jj(&["bookmark", "move", "main", "--to", "@-"]);
+    let b_head = single_canonical_head(&mut b_node);
+    sync(&b_node, &mut a_node, &b_head);
+
+    assert_eq!(bookmarks(&a), bookmarks(&b));
+    let ids = |repo: &TestRepo| {
+        repo.jj(&[
+            "log",
+            "--no-graph",
+            "-r",
+            "::main",
+            "-T",
+            "commit_id ++ change_id ++ \"\\n\"",
+        ])
+    };
+    assert_eq!(ids(&a), ids(&b));
+    assert_eq!(a.git(&["rev-parse", "main"]).trim().len(), 64);
     assert_eq!(a.jj(&["file", "show", "-r", "main", "dir/other"]), "two");
 }
 

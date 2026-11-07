@@ -413,8 +413,8 @@ async fn a_worker_reopens_its_service_after_a_panic() {
 async fn other_hives_are_served_while_a_busy_one_is_removed() {
     let dir = musubi_testutil::tempdir();
     let mut server = HubServer::open(dir.path()).unwrap();
-    let busy = server.lock().create("busy", Backend::Git).unwrap();
-    let idle = server.lock().create("idle", Backend::Git).unwrap();
+    let busy = server.lock().create("busy", Backend::GIT).unwrap();
+    let idle = server.lock().create("idle", Backend::GIT).unwrap();
     let hold = Arc::new(Hold::new(&busy));
     server.hold = Some(hold.clone());
     let watched = server.clone();
@@ -501,7 +501,7 @@ async fn other_hives_are_served_while_a_busy_one_is_removed() {
 async fn requests_their_senders_gave_up_on_go_unanswered() {
     let dir = musubi_testutil::tempdir();
     let mut server = HubServer::open(dir.path()).unwrap();
-    let busy = server.lock().create("busy", Backend::Git).unwrap();
+    let busy = server.lock().create("busy", Backend::GIT).unwrap();
     let hold = Arc::new(Hold::new(&busy));
     server.hold = Some(hold.clone());
     let network = MemoryNetwork::new(1, 1024 * 1024);
@@ -580,7 +580,7 @@ fn hub_survives_malformed_clone_preflights() {
     let server = HubServer::open(dir.path()).unwrap();
     let id = server
         .lock()
-        .create("clone-preflight", Backend::Git)
+        .create("clone-preflight", Backend::GIT)
         .unwrap();
     let bindings = [(
         "origin".to_owned(),
@@ -592,7 +592,7 @@ fn hub_survives_malformed_clone_preflights() {
     .into();
     let request = HubWideRequest::PrepareClone {
         hive: id.clone().into(),
-        backend: Backend::Git,
+        backend: Backend::GIT,
         remote_bindings: bindings,
     };
     let bytes = Envelope::encode(request).unwrap();

@@ -66,21 +66,26 @@ pub fn without_repository_env(command: &mut Command) {
     }
 }
 
-/// The empty tree's id, which git knows without storing it.
-const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
-
 /// A git repository, driven through the git binary at `executable`.
 pub(crate) struct GitRepo {
     executable: PathBuf,
     git_dir: PathBuf,
+    /// The id of the empty tree, which git knows without storing it, in the repository's
+    /// hash (see [`Self::command`]).
+    empty_tree: String,
 }
 
 impl GitRepo {
     /// `git_dir` is the `.git` directory, or the repository itself if it is bare.
     pub fn new(executable: &Path, git_dir: &Path) -> Self {
+        // Only a hint to git: a repository gix can't open gets SHA-1's, which in a SHA-256
+        // repository costs time, not correctness.
+        let hash = gix::open_opts(git_dir, gix::open::Options::isolated())
+            .map_or(gix::hash::Kind::Sha1, |repo| repo.object_hash());
         Self {
             executable: executable.to_owned(),
             git_dir: git_dir.to_owned(),
+            empty_tree: gix::ObjectId::empty_tree(hash).to_string(),
         }
     }
 
@@ -106,9 +111,10 @@ impl GitRepo {
             // ask tried each way of spelling HEAD as a ref, and failed: a million file
             // lookups for a clone of jj, three times as long as the packing itself. Run here,
             // git has no attributes to read anyway (a colocated `.git` is no working tree),
-            // so name the empty tree. Other gits ignore the setting, or use no tree in a bare
-            // repository already.
-            .args(["-c", &format!("attr.tree={EMPTY_TREE}")])
+            // so name the empty tree, in the repository's hash: one git can't find is looked
+            // up again for every path. Other gits ignore the setting, or use no tree in a
+            // bare repository already.
+            .args(["-c", &format!("attr.tree={}", self.empty_tree)])
             .args(args);
         command
     }
@@ -189,25 +195,41 @@ pub(crate) fn check_status(
 mod tests {
     use super::*;
 
+    /// The empty tree in the repository's hash, which git can find.
     #[test]
     fn attributes_come_from_the_empty_tree() {
-        let command =
-            GitRepo::new(Path::new("their-git"), Path::new("unused")).command(&["pack-objects"]);
-        assert_eq!(command.get_program(), "their-git");
-        let args: Vec<String> = command
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(
-            args,
-            [
-                "-c",
-                "core.hooksPath=/dev/null",
-                "-c",
-                &format!("attr.tree={EMPTY_TREE}"),
-                "pack-objects"
-            ]
-        );
+        let dir = tempfile::tempdir().unwrap();
+        for (format, empty_tree) in [
+            ("sha1", "4b825dc642cb6eb9a060e54bf8d69288fbee4904"),
+            (
+                "sha256",
+                "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321",
+            ),
+        ] {
+            let git_dir = dir.path().join(format);
+            let status = Command::new("git")
+                .args(["init", "--quiet", "--bare", "--object-format", format])
+                .arg(&git_dir)
+                .status()
+                .unwrap();
+            assert!(status.success());
+            let command = GitRepo::new(Path::new("their-git"), &git_dir).command(&["pack-objects"]);
+            assert_eq!(command.get_program(), "their-git");
+            let args: Vec<String> = command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(
+                args,
+                [
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "-c",
+                    &format!("attr.tree={empty_tree}"),
+                    "pack-objects"
+                ]
+            );
+        }
     }
 
     /// The list is git's own, so that a variable a newer git adds is noticed here.

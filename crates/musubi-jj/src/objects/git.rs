@@ -25,6 +25,7 @@ use jj_lib::stacked_table::TableSegment as _;
 use jj_lib::stacked_table::TableStore;
 use prost::Message as _;
 
+use super::GitHash;
 use super::ObjectError;
 use super::ObjectStore;
 use super::bundle;
@@ -107,17 +108,25 @@ impl GitObjects {
     /// [`Self::maintain`] and [`Self::mark_head`] consolidate it. Nor does git sync what it
     /// writes there, as it does packs and refs by default: a hub needn't be durable (see
     /// "Replacing the hub" in docs/internals/design.md).
-    pub fn init_bare(executable: &Path, git_dir: &Path) -> Result<Self, ObjectError> {
+    pub fn init_bare(
+        executable: &Path,
+        git_dir: &Path,
+        hash: GitHash,
+    ) -> Result<Self, ObjectError> {
         // Not through `run`: GIT_DIR must not be set when the repository does not exist yet.
         // In the files ref format, whatever git's default, since gix reads the hub's refs
-        // ([`Self::gix`]) and knows no other. Without git's template, whose sample hooks
-        // and description a hub never uses.
+        // ([`Self::gix`]) and knows no other. With the hive's hash, whatever git's default,
+        // which `GIT_DEFAULT_HASH` or `init.defaultObjectFormat` may set, and which git 3.0
+        // changes: the copies' objects are named with it. Without git's template, whose
+        // sample hooks and description a hub never uses.
+        let format = format!("--object-format={}", hash.object_format());
         let args = [
             "-c",
             "init.defaultRefFormat=files",
             "init",
             "--quiet",
             "--bare",
+            &format,
             "--template=",
         ];
         let output = git(executable)
@@ -1249,8 +1258,12 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
 
         let dir = tempfile::tempdir().unwrap();
-        let objects =
-            GitObjects::init_bare(Path::new("git"), &dir.path().join("repo.git")).unwrap();
+        let objects = GitObjects::init_bare(
+            Path::new("git"),
+            &dir.path().join("repo.git"),
+            GitHash::Sha1,
+        )
+        .unwrap();
         let hooks = dir.path().join("repo.git/hooks");
         // Here, whatever the developer's own git config says.
         objects

@@ -49,7 +49,7 @@ fn spawn_hub_with(
     configure: impl FnOnce(HubService) -> HubService,
 ) {
     let dir = env.root().join("hub");
-    let hub = HubAdapter::init(&dir, Backend::Git).unwrap();
+    let hub = HubAdapter::init(&dir, Backend::GIT).unwrap();
     let service = configure(HubService::new(hub, &dir).unwrap());
     tokio::task::spawn_local(async move {
         serve_hive(service, transport, (RPC, HEAD), || {})
@@ -514,7 +514,7 @@ async fn drivers_follow_a_hub_that_went_back() {
                         .unwrap();
                 })
             };
-            let serving = serve(HubAdapter::init(&dir, Backend::Git).unwrap());
+            let serving = serve(HubAdapter::init(&dir, Backend::GIT).unwrap());
             let timeout = Duration::from_secs(10);
             let mut drivers = [
                 driver(&alpha, Arc::new(network.connect()), timeout),

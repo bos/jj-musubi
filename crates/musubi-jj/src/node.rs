@@ -217,7 +217,7 @@ impl NodeRepo {
         // musubi runs the git jj runs for fetches and pushes, from jj's own setting, which jj
         // reads only for the git backend.
         let git = match Backend::of(store).ok_or_else(unsupported)? {
-            Backend::Git => {
+            Backend::Git(_) => {
                 let executable = GitSubprocessOptions::from_settings(settings)?.executable_path;
                 Some(NodeGit::open(&executable, repo_path, store).ok_or_else(unsupported)?)
             }
@@ -386,11 +386,7 @@ impl NodeRepo {
 
     /// The repository's backend, which [`Self::open`] checked is one musubi supports.
     fn backend(&self) -> Backend {
-        if self.git.is_some() {
-            Backend::Git
-        } else {
-            Backend::Simple
-        }
+        Backend::of(self.loader.store()).expect("checked when opened")
     }
 
     /// Keeps what `previous`, an earlier handle on the same repository, found out about

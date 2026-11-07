@@ -133,6 +133,15 @@ impl TestEnv {
         self.init_repo_with_command(machine, workspace, &["git", "init", "--colocate", machine])
     }
 
+    /// Creates a colocated repository whose git names objects with SHA-256.
+    pub fn init_sha256_repo(&self, machine: &str) -> TestRepo {
+        self.init_repo_with_command(
+            machine,
+            machine,
+            &["git", "init", "--colocate", "--object-hash=sha256", machine],
+        )
+    }
+
     /// Creates a repository using jj's simple backend, whose workspace is named after
     /// `machine`.
     pub fn init_simple_repo(&self, machine: &str) -> TestRepo {

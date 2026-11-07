@@ -72,7 +72,7 @@ const GIT: &str = "git";
 /// The object store of the hub store in `dir`, without opening the rest of it.
 pub(crate) fn object_store(backend: Backend, dir: &Path) -> Box<dyn ObjectStore + 'static> {
     match backend {
-        Backend::Git => Box::new(GitStore::for_hub(
+        Backend::Git(_) => Box::new(GitStore::for_hub(
             Path::new(GIT),
             &dir.join("git"),
             &dir.join("extras"),
@@ -151,10 +151,10 @@ impl HubStore {
     pub fn init(dir: &Path, backend: Backend) -> Result<Self, StoreError> {
         fs::create_dir(dir).map_err(io_err(dir))?;
         match backend {
-            Backend::Git => {
+            Backend::Git(hash) => {
                 let extras = dir.join("extras");
                 fs::create_dir(&extras).map_err(io_err(&extras))?;
-                GitObjects::init_bare(Path::new(GIT), &dir.join("git"))?;
+                GitObjects::init_bare(Path::new(GIT), &dir.join("git"), hash)?;
             }
             Backend::Simple => {
                 SimpleStore::init(&dir.join("simple"))?;
@@ -442,7 +442,7 @@ impl HubStore {
     /// clone fetches: not what older operations' views or predecessors name that they don't,
     /// nor hidden commits that remote bookmarks point at.
     fn mark_head(&self, head: &OperationId) -> Result<(), StoreError> {
-        if self.backend != Backend::Git {
+        if !matches!(self.backend, Backend::Git(_)) {
             return Ok(());
         }
         let view = self

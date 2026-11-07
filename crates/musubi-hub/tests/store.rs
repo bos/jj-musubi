@@ -168,7 +168,7 @@ fn closure_and_head_persist() {
     let head = node.canonical_heads().unwrap().pop().unwrap();
 
     let hub_dir = env.root().join("hub");
-    let mut hub = HubStore::init(&hub_dir, Backend::Git).unwrap();
+    let mut hub = HubStore::init(&hub_dir, Backend::GIT).unwrap();
     assert!(!hub.descends_from_head(&head.0).unwrap() || *hub.head().1 == head.0);
     assert!(!hub.missing_closure(&head.0).unwrap().is_empty());
 
@@ -242,7 +242,7 @@ fn closure_and_head_persist() {
 fn torn_heads_are_corrupt() {
     let env = TestEnv::new();
     let hub_dir = env.root().join("hub");
-    let root = HubStore::init(&hub_dir, Backend::Git)
+    let root = HubStore::init(&hub_dir, Backend::GIT)
         .unwrap()
         .head()
         .1
@@ -300,7 +300,7 @@ fn tampered_operation_is_rejected() {
     let repo = env.init_repo("alpha");
     let mut node = NodeRepo::open(&repo.repo_path(), &repo.settings()).unwrap();
     let head = node.canonical_heads().unwrap().pop().unwrap();
-    let hub = HubStore::init(&env.root().join("hub"), Backend::Git).unwrap();
+    let hub = HubStore::init(&env.root().join("hub"), Backend::GIT).unwrap();
     let op = node.canonical_store().read_operation(&head).unwrap();
     let view_bytes = node.canonical_store().view_bytes(&op.view_id).unwrap();
     hub.canonical()
@@ -367,7 +367,7 @@ fn closure_check_skips_accepted_history() {
     let first = node.canonical_heads().unwrap().pop().unwrap();
 
     let hub_dir = env.root().join("hub");
-    let mut hub = HubStore::init(&hub_dir, Backend::Git).unwrap();
+    let mut hub = HubStore::init(&hub_dir, Backend::GIT).unwrap();
     upload_ops(&node, &hub, &first);
     let first_ops = canonical_ancestry(&node, &first);
     let bundle_file = tempfile::NamedTempFile::new().unwrap();
@@ -435,7 +435,7 @@ fn small_edits_stay_small_beside_a_bitmap() {
     let mut node = NodeRepo::open(&repo.repo_path(), &repo.settings()).unwrap();
     let old = node.canonical_heads().unwrap().pop().unwrap();
     let hub_dir = env.root().join("hub");
-    let mut hub = HubStore::init(&hub_dir, Backend::Git).unwrap();
+    let mut hub = HubStore::init(&hub_dir, Backend::GIT).unwrap();
     upload_ops(&node, &hub, &old);
     let old_wants = required(&node, &canonical_ancestry(&node, &old));
     let bundle = tempfile::NamedTempFile::new().unwrap();

@@ -7,6 +7,19 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- musubi now syncs repositories whose git names objects with SHA-256. A hive takes the hash
+  of the copy that creates it, and the hub makes the hive's store with it, whatever git's
+  default is. Before, the hub's store took git's default, so a SHA-256 copy, or every copy once
+  git defaults to SHA-256, failed every sync with "final sha1 did not match". `musubi join`
+  refuses a copy with the other hash, saying so, and `musubi clone` makes the copy with the
+  hive's hash, whatever jj's `git.object-hash` setting says. This changes the protocol to 17:
+  upgrade the hub and every machine together. A SHA-256 copy in a hive made before this change
+  can't join it: make a copy with `musubi clone`, or start a hive of its own with
+  `musubi create`.
+
+- `musubi clone` makes the new repository itself, rather than running `jj git init`, so a
+  destination starting with `-` works. Nothing needs doing on upgrading.
+
 - Large syncs finish over links with as little as about 70 kbit/s to spare for musubi, a
   megabyte in two minutes. A machine now waits two minutes for each reply rather than 30
   seconds, and still gives up with "request timed out" after about ten minutes in which

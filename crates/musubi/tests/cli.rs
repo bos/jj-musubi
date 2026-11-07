@@ -1763,10 +1763,17 @@ fn the_daemon_picks_up_new_repositories() {
     musubi_in(&env, &logs, &alpha, &["create", "--hub", &hub.url]);
 
     // A second repository on alpha: another hive, named after its directory, served by
-    // the daemon the first join started.
+    // the daemon the first join started. Its git names objects with SHA-256, which the
+    // hive, the hub's store and a clone of it follow.
     let second = env.root().join("second");
     let mut init = alpha.program(Path::new("jj"));
-    init.args(["git", "init", "--colocate", second.to_str().unwrap()]);
+    init.args([
+        "git",
+        "init",
+        "--colocate",
+        "--object-hash=sha256",
+        second.to_str().unwrap(),
+    ]);
     run(&env, &logs, init);
     let jj_in_second = |args: &[&str]| {
         let mut command = alpha.program(Path::new("jj"));
@@ -1842,6 +1849,29 @@ fn the_daemon_picks_up_new_repositories() {
     assert_eq!(run(&env, &logs, name).trim(), "Existing Beta");
     let beta_second = env.repo_handle("beta-second");
     assert!(log(&beta_second).contains("second project"));
+    // As the hive's, though beta's jj would make SHA-1.
+    let mut format = beta.program(Path::new("git"));
+    format
+        .current_dir(env.root().join("beta-second"))
+        .args(["rev-parse", "--show-object-format"]);
+    assert_eq!(run(&env, &logs, format).trim(), "sha256");
+    // A copy of beta's own, made with SHA-1, can't join it, and is told why.
+    let sha1 = env.root().join("beta-sha1");
+    let jj_in_sha1 = |args: &[&str]| {
+        let mut command = beta.program(Path::new("jj"));
+        command.args(args).current_dir(&sha1);
+        run(&env, &logs, command)
+    };
+    fs::create_dir(&sha1).unwrap();
+    jj_in_sha1(&["git", "init", "--colocate"]);
+    fs::write(sha1.join("s"), "s").unwrap();
+    jj_in_sha1(&["commit", "-m", "second project"]);
+    let mut join = beta.program(musubi());
+    join.args(["join", "--hive", "second", "--hub", &hub.url])
+        .current_dir(&sha1);
+    let (ok, _, err) = try_run(&logs, &env, join);
+    assert!(!ok);
+    insta::assert_snapshot!(err, @"Error: this repository's git names objects with SHA-1, but hive second's with SHA-256, so it can't join it; `musubi clone second <dir>` makes a copy that can");
 
     // Work in the second repository reaches beta with no command run: alpha's daemon
     // serves it.

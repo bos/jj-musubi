@@ -4518,7 +4518,7 @@ fn joining_with_full_history() {
         alpha.write_file(&format!("f{i}"), "x");
         alpha.jj(&["commit", "-m", &format!("history {i}")]);
     }
-    let mut hive = Hive::new(&env.root().join("hub"), Backend::Git).unwrap();
+    let mut hive = Hive::new(&env.root().join("hub"), Backend::GIT).unwrap();
     let alpha_node = NodeRepo::open(&alpha.repo_path(), &alpha.settings()).unwrap();
     add_node(&mut hive, &env, alpha_node);
     let mut beta_node = NodeRepo::open(&beta.repo_path(), &beta.settings()).unwrap();

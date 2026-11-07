@@ -359,7 +359,7 @@ fn fixture() -> (TestEnv, Vec<TestRepo>, Hive) {
     let saved = musubi_testutil::recorded(Path::new(env!("CARGO_TARGET_TMPDIR")), "lies", |dir| {
         let env = TestEnv::new();
         let repos: Vec<TestRepo> = names.iter().map(|name| env.init_repo(name)).collect();
-        let mut hive = Hive::new(&env.root().join("hub"), Backend::Git).unwrap();
+        let mut hive = Hive::new(&env.root().join("hub"), Backend::GIT).unwrap();
         for repo in &repos {
             let mut node = open(repo, &repo.repo_config_path());
             node.create_join_operation(&format!("musubi: {} joins", repo.machine()))

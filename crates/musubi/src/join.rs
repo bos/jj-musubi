@@ -8,7 +8,12 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use jj_cli::formatter::FormatterExt as _;
+use jj_lib::config::ConfigLayer;
+use jj_lib::config::ConfigSource;
 use jj_lib::object_id::ObjectId as _;
+use jj_lib::ref_name::WorkspaceName;
+use jj_lib::settings::UserSettings;
+use jj_lib::workspace::Workspace;
 use musubi_hub::hub_dir::JoinChoice;
 use musubi_hub::hub_dir::JoinRequest;
 use musubi_hub::hub_dir::Joined;
@@ -17,6 +22,7 @@ use musubi_jj::objects::Backend;
 use musubi_jj::presence::BadForgetAfter;
 use musubi_sync::wire::HubWideReply;
 use musubi_sync::wire::HubWideRequest;
+use pollster::FutureExt as _;
 
 use crate::block_on;
 use crate::cli::Member;
@@ -310,7 +316,7 @@ fn validate_forget_after(
         && let Some(lease) = lease
     {
         anyhow::ensure!(
-            source <= jj_lib::config::ConfigSource::Repo || configured == Some(lease),
+            source <= ConfigSource::Repo || configured == Some(lease),
             "musubi.forget-after in {source} config for {} overrides --lease; unset it and run \
              this again",
             workspace.display()
@@ -330,8 +336,7 @@ fn set_forget_after(located: &Located, lease: Option<Duration>) -> anyhow::Resul
     let value = musubi_jj::presence::format_forget_after(lease);
     let path = settings::repo_config_path(&located.repo_path)?
         .context("this repository has no config of its own")?;
-    let mut file =
-        jj_lib::config::ConfigFile::load_or_empty(jj_lib::config::ConfigSource::Repo, &path)?;
+    let mut file = jj_lib::config::ConfigFile::load_or_empty(ConfigSource::Repo, &path)?;
     file.set_value(&name, value)?;
     file.save()?;
     Ok(())
@@ -342,14 +347,14 @@ fn set_forget_after(located: &Located, lease: Option<Duration>) -> anyhow::Resul
 /// anything.
 fn configured_forget_after(
     config: &jj_lib::config::StackedConfig,
-) -> anyhow::Result<Option<(jj_lib::config::ConfigSource, Option<Duration>)>> {
+) -> anyhow::Result<Option<(ConfigSource, Option<Duration>)>> {
     let key = musubi_jj::node::FORGET_AFTER_KEY;
     let name: jj_lib::config::ConfigNamePathBuf = key.parse()?;
     let Some((source, value)) = config
         .layers()
         .iter()
         .rev()
-        .filter(|layer| layer.source != jj_lib::config::ConfigSource::Default)
+        .filter(|layer| layer.source != ConfigSource::Default)
         .find_map(|layer| {
             let item = layer.look_up_item(&name).ok()??;
             Some((layer.source, item.as_str().map(str::to_owned)))
@@ -444,7 +449,7 @@ pub fn clone(
     let HubWideReply::Hive(info) = reply else {
         anyhow::bail!("unexpected reply from the hub: {reply:?}");
     };
-    let remotes = if info.backend == Backend::Git {
+    let remotes = if matches!(info.backend, Backend::Git(_)) {
         musubi_jj::inherited_remotes::read(&destination.join(".git"))
             .map_err(|err| anyhow::anyhow!("could not read inherited Git configuration: {err}"))?
     } else {
@@ -468,41 +473,25 @@ pub fn clone(
         "the hub returned a different hive during clone; run `musubi clone` again"
     );
     clone_config::missing(&jj_lib::config::StackedConfig::empty(), &info.clone_config)?;
-    let dest = destination.to_str().context("destination is not UTF-8")?;
-    let init: &[&str] = match info.backend {
-        Backend::Git => &["git", "init", "--colocate"],
-        Backend::Simple => &["debug", "init-simple"],
-    };
     // All preflight checks have passed. Make the empty destination too, so jj's conditional
     // scopes see its actual path, including symlink ancestors and relative `..` components.
     std::fs::create_dir_all(destination)
         .with_context(|| format!("making {}", destination.display()))?;
     let workspace = destination.canonicalize()?;
-    let destination_settings = settings::load(&workspace, &workspace.join(".jj/repo"))?;
+    let repo_path = workspace.join(".jj/repo");
+    let destination_settings = settings::load(&workspace, &repo_path)?;
     validate_forget_after(destination_settings.config(), lease, &workspace)?;
     let defaults = clone_config::missing(destination_settings.config(), &info.clone_config)?;
-    let mut jj = Process::new("jj");
-    musubi_jj::git_command::without_repository_env(&mut jj);
-    // Use the defaults for the initial working-copy commit too. Arguments are passed
-    // directly to jj; no shell or source machine config file is involved.
+    // The defaults count for the initial working-copy commit too, as `jj --config` would.
+    let mut overrides = ConfigLayer::empty(ConfigSource::CommandArg);
     for (name, value) in defaults {
-        jj.arg("--config").arg(format!("{name}={value}"));
+        overrides.set_value(&name, value)?;
     }
+    let settings = settings::load_with(&workspace, &repo_path, Some(overrides))?;
     // Contacting the hub may have taken long enough for another process to fill it.
     check_clone_destination(destination)?;
-    // Its "Initialized repo in" names the directory relative to wherever this runs, ahead of
-    // what musubi says, so it shows only if init fails.
-    let output = jj
-        .args(init)
-        .arg(dest)
-        .output()
-        .with_context(|| format!("running `jj {}`", init.join(" ")))?;
-    anyhow::ensure!(
-        output.status.success(),
-        "`jj {} {dest}` failed: {}",
-        init.join(" "),
-        String::from_utf8_lossy(&output.stderr).trim()
-    );
+    init_copy(&settings, &workspace, info.backend)
+        .with_context(|| format!("making a repository in {}", destination.display()))?;
     let located = Located::find(destination)?;
     clone_config::seed(&located.workspace_root, &info.clone_config)?;
     set_machine_name(&located, machine)?;
@@ -523,6 +512,26 @@ pub fn clone(
     if let Err(err) = check_out_trunk(&located) {
         writeln!(ui.warning(), "Couldn't check out `trunk()` ({err:#}).")?;
         writeln!(ui.hint(), "`jj new 'trunk()'` checks it out.")?;
+    }
+    Ok(())
+}
+
+/// Makes an empty repository with `backend` at `workspace`, an empty directory, as `jj git
+/// init --colocate` or `jj debug init-simple` would, but with the hive's hash rather than
+/// whichever `git.object-hash` sets: a copy's commits must be named as the hive's are.
+fn init_copy(settings: &UserSettings, workspace: &Path, backend: Backend) -> anyhow::Result<()> {
+    let name = WorkspaceName::DEFAULT;
+    match backend {
+        Backend::Git(hash) => {
+            Workspace::init_colocated_git(settings, workspace, name, hash.kind()).block_on()?;
+            // As jj does, so that git ignores jj's directory in a colocated workspace.
+            let ignore = workspace.join(".jj/.gitignore");
+            std::fs::write(&ignore, "/*\n")
+                .with_context(|| format!("writing {}", ignore.display()))?;
+        }
+        Backend::Simple => {
+            Workspace::init_simple(settings, workspace, name).block_on()?;
+        }
     }
     Ok(())
 }

@@ -32,7 +32,7 @@ change them. Set them with `--user`.
 | --- | --- |
 | `musubi.hub` | The hub commands use without `--hub`, in place of the default this machine saved (the first hub it used, or on the hub's own machine, that hub's directory). Give it as `--hub` takes it: the name you ssh to the hub's machine by, or on that machine, the hub's directory, which may start with `~/`. On the hub's machine, its own name or `localhost` means the hub `musubi hub` serves there without `--dir`, reached without ssh. |
 | `musubi.daemon.log` | What the daemon logs, unless `--log` or `RUST_LOG` says. See [Logging](#logging). |
-| `musubi.daemon.socket` | The path of the daemon's control socket, in place of the usual one. See [Files and directories](#files-and-directories). |
+| `musubi.daemon.socket` | The path of the daemon's control socket, in place of the usual one: absolute, or starting with `~/`. See [Files and directories](#files-and-directories). |
 | `musubi.daemon.connections` | `as-needed`, the default, for the daemon to keep one connection to each hub, which every repository there shares, and to open another for each transfer of 16 MiB or more while it lasts. `one` to keep to one connection to each hub, large transfers included, as where each new ssh is costly: through a tunnel that asks you to log in, say. |
 | `musubi.upgrade-command` | A command that installs the release of musubi in `$MUSUBI_UPGRADE_TO`, which the daemon runs when a hub runs a newer release than its own, or a newer build deployed from source, and then starts again from it. Unset, the default, the daemon upgrades nothing. See [Upgrade musubi](../guides/manage.md#upgrade-musubi). |
 | `musubi.templates.list` | The template, in jj's template language, `musubi list` prints each hub, hive and copy with, unless `-T` gives one. `musubi list --help` lists its keywords. |
@@ -64,8 +64,8 @@ Configure each machine explicitly; see
 | `RUST_LOG` | What a command logs, unless `--log` says. See [Logging](#logging). |
 | `NO_COLOR` | No colour, unless `--color` or your config's `ui.color` asks for it, as for jj. See [Colours](#colours). |
 | `MUSUBI_SSH` | The ssh program to run, in place of `ssh`. |
-| `MUSUBI_SOCKET` | The daemon's control socket, in place of the usual one. Same as `--socket`. |
-| `MUSUBI_STATE_DIR` | One directory for musubi's state and the daemon's socket, in place of the usual ones. With `JJ_CONFIG` for its settings, this runs a second, separate musubi. |
+| `MUSUBI_SOCKET` | The daemon's control socket, in place of the usual one: an absolute path, or one starting with `~/`. Same as `--socket`. |
+| `MUSUBI_STATE_DIR` | One directory for musubi's state and the daemon's socket, in place of the usual ones. With `JJ_CONFIG` for its settings, this runs a second, separate musubi. If you make the directory yourself, make it writable by you alone (`chmod 700`), as musubi makes it. |
 | `MUSUBI_UPGRADE_TO` | The daemon sets this for `musubi.upgrade-command` to read: the release to install, as `musubi --version` gives it, such as `0.3.0`, or `0.3.0+20261102153012.4a0db205e1f0` for a build deployed from source. |
 | `MUSUBI_BUILD` | A build-time variable for builds deployed from source. `contrib/upgrade-from-source` sets it to the deployment time and commit, such as `20261102153012.4a0db205e1f0`. It follows the release in `musubi --version`. See [Deploy a build from source](../guides/manage.md#deploy-a-build-from-source). |
 | `COMPLETE` | Set by your shell to have musubi complete what you type. See [Complete commands in your shell](commands.md#complete-commands-in-your-shell). |
@@ -140,7 +140,7 @@ machine out](../guides/manage.md#take-a-repository-or-machine-out).
 
 | Path | Holds |
 | --- | --- |
-| The state directory: `$XDG_STATE_HOME/musubi`, so `~/.local/state/musubi` on Linux and macOS unless you set `XDG_STATE_HOME`; `%APPDATA%\musubi` on Windows; or `$MUSUBI_STATE_DIR` | `state.toml`, which lists the copies the daemon syncs, each with its machine key and where it is, and this machine's default hub; `daemon.log`; `hub_key` and `hub_key.pub`, the machine's ssh key for reaching hubs; `ssh-agent`, a link to the latest ssh agent, for the daemon; `upgrade.log`, the output of `musubi.upgrade-command` when the daemon last ran it, and `upgrade-failed`, why it last failed; `login-service`, while `musubi daemon install` has the daemon start at login; on the hub's machine, `hub.path`, the directory a hub started without `--dir` serves, `hub.log`, the log of a hub launchd runs, and `hub-login-service`, while `musubi hub install` has the hub run at login; the running daemon's process id; locks. |
+| The state directory: `$XDG_STATE_HOME/musubi`, so `~/.local/state/musubi` on Linux and macOS unless you set `XDG_STATE_HOME`; `%APPDATA%\musubi` on Windows; or `$MUSUBI_STATE_DIR` | `state.toml`, which lists the copies the daemon syncs, each with its machine key and where it is, and this machine's default hub; `daemon.log`; `hub_key` and `hub_key.pub`, the machine's ssh key for reaching hubs; `ssh-agent`, a link to the latest ssh agent, for the daemon; `upgrade.log`, the output of `musubi.upgrade-command` when the daemon last ran it, and `upgrade-failed`, why it last failed; `login-service`, while `musubi daemon install` has the daemon start at login; on the hub's machine, `hub.path`, the directory a hub started without `--dir` serves, `hub.log`, the log of a hub launchd runs, and `hub-login-service`, while `musubi hub install` has the hub run at login; `daemon.pid`, the running daemon's process id and the socket it listens on; locks, among them `daemon.lock`, which keeps a second daemon from serving the same copies. musubi makes the directory readable and writable by you alone. |
 | `.jj/repo/musubi/` in each repository | The repository's hive (`hive.toml`, which records its hive, its jj config id, and whether it joined, left, or its hive was removed), this machine's identity in it (`machine`), its last sync (`status.json`), when the daemon last cleaned up after jj in it (`gc`, and `gc.lock` while it does), and musubi's own record of the hive's operations, and of those `jj op abandon` removed. `musubi leave` records in `hive.toml` that the copy left, removes `status.json`, and keeps the rest. Removing it from a repository that syncs, or copying it into another repository, confuses musubi: use `musubi leave` and `musubi clone`. |
 | Each repository's jj repo config | Explicit `musubi join`, `create` and `clone` commands set a default `musubi.forget-after` unless jj's config sets it already. Clone also fills missing selected defaults once. Sync never copies Git remote definitions or jj config from another machine. jj keeps repo config outside the repository; `jj config path --repo` prints where. |
 | What `musubi daemon install` adds | On macOS, `~/Library/LaunchAgents/io.github.bos.musubi.plist`; on Linux, `~/.config/systemd/user/musubi.service` (in `$XDG_CONFIG_HOME` if set); on Windows, the value `musubi` under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. `musubi daemon uninstall` removes it. |
@@ -152,7 +152,14 @@ The daemon's control socket is `$XDG_RUNTIME_DIR/musubi/daemon.sock` on Linux (w
 Windows. With `MUSUBI_STATE_DIR` set, it is `daemon.sock` in that directory instead (on
 Windows, a pipe named after it). Its directory must belong to you and be writable by no one
 else, or musubi won't use it. `--socket`, `MUSUBI_SOCKET`, or `musubi.daemon.socket` choose
-another.
+another, as an absolute path or one starting with `~/`, so that commands find it from any
+directory.
+
+One daemon serves a machine's copies. A command that chooses no socket uses the one the running
+daemon listens on, so that one run where the usual place differs, as under cron, after `sudo
+-u`, or wherever `XDG_RUNTIME_DIR` isn't set as it is for the daemon, reaches the same daemon.
+A daemon won't start while another serves the same state directory. If a temp cleaner deletes
+the socket, the daemon listens there again within seconds.
 
 ### On the hub's machine
 

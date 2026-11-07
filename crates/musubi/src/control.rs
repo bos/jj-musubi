@@ -12,9 +12,14 @@
 //!
 //! Only the user may reach the daemon (see [`crate::socket`]).
 //!
-//! A lock file in the state directory, named after the socket, keeps a second daemon from
-//! starting; the daemon holding it removes any socket a crashed one left behind. (Not beside
-//! the socket: temp cleaners would delete it there.)
+//! A socket chosen by a setting must be absolute, or start with `~/`, so that commands run
+//! anywhere find the same daemon. Without one, commands use the socket that this machine's
+//! daemon, if one runs, says it listens on, wherever they run: its usual place depends on
+//! the environment, which differs under cron, `sudo -u`, or in a container.
+//!
+//! A lock file in the state directory keeps a second daemon from starting there, whatever its
+//! socket ([`crate::daemon::Running`]); the daemon holding it removes any socket a crashed one
+//! left behind. (Not beside the socket: temp cleaners would delete it there.)
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -36,9 +41,10 @@ use crate::socket::Socket;
 use crate::socket::fnv;
 use crate::socket::uid;
 
-/// Changes whenever the control service does, so that a command and a daemon from
-/// different builds notice each other.
-pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "/control-3");
+/// Changes whenever the control service does, or how commands find the daemon (its lock and
+/// the file beside it), so that a command and a daemon from different builds notice each
+/// other.
+pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "/control-4");
 
 /// What a successful sync reached: the hub's head.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -75,7 +81,7 @@ pub trait Control {
 }
 
 impl Socket {
-    /// The socket to use, given `--socket`.
+    /// The socket to use, given `--socket` (or `MUSUBI_SOCKET`, which clap reads for it).
     pub fn locate(given: Option<&str>) -> anyhow::Result<Self> {
         let chosen = match given {
             Some(socket) => Some(socket.to_owned()),
@@ -85,16 +91,40 @@ impl Socket {
             },
         };
         let socket = match chosen {
-            Some(socket) => Self::named(&socket),
-            None => Self::usual()?,
+            Some(socket) => Self::chosen(&socket)?,
+            // Where this machine's daemon listens, if it runs: started where the usual place
+            // is another, as from cron, or after `sudo -u`, without `XDG_RUNTIME_DIR`.
+            None => match crate::daemon::Running::find()?.and_then(|running| running.socket) {
+                Some(socket) => socket,
+                None => Self::usual()?,
+            },
         };
         socket.check()?;
         Ok(socket)
     }
 
+    /// The socket a user chose: a path, absolute or starting with `~/`, the same from
+    /// every directory; or on Windows, a pipe's name.
+    fn chosen(socket: &str) -> anyhow::Result<Self> {
+        let named = Self::named(socket);
+        let Self::Path(path) = &named else {
+            return Ok(named);
+        };
+        if let Some(rest) = socket.strip_prefix("~/") {
+            let home = etcetera::home_dir().context("no home directory to put the socket in")?;
+            return Ok(Self::Path(home.join(rest)));
+        }
+        anyhow::ensure!(
+            path.is_absolute(),
+            "the daemon's socket {socket} is a relative path; give an absolute one, or one starting \
+             with ~/"
+        );
+        Ok(named)
+    }
+
     fn usual() -> anyhow::Result<Self> {
-        if let Some(dir) = std::env::var_os("MUSUBI_STATE_DIR") {
-            let dir = PathBuf::from(dir);
+        if std::env::var_os("MUSUBI_STATE_DIR").is_some() {
+            let dir = config::state_dir()?;
             return Ok(if cfg!(windows) {
                 Self::Pipe(format!(
                     "musubi-{:016x}",
@@ -129,26 +159,6 @@ impl Socket {
             );
         }
         Ok(())
-    }
-
-    /// The lock file a daemon holds while it serves this socket.
-    pub fn lock_path(&self) -> anyhow::Result<PathBuf> {
-        let name = format!("daemon-{:016x}.lock", fnv(self.to_string().as_bytes()));
-        Ok(config::state_dir()?.join(name))
-    }
-
-    /// Whether a daemon holds this socket's lock.
-    pub fn is_locked(&self) -> anyhow::Result<bool> {
-        let path = self.lock_path()?;
-        let file = match std::fs::OpenOptions::new().write(true).open(&path) {
-            Ok(file) => file,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(err) => return Err(err).with_context(|| format!("opening {path:?}")),
-        };
-        Ok(matches!(
-            file.try_lock(),
-            Err(std::fs::TryLockError::WouldBlock)
-        ))
     }
 
     /// Connects to a running daemon, or returns `None` if there is none.

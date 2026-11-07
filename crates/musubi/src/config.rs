@@ -221,15 +221,24 @@ pub fn write_private(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
 
 /// Where musubi keeps `state.toml`, logs, and locks: `$XDG_STATE_HOME/musubi`
 /// (`~/.local/state/musubi`), `%APPDATA%\musubi` on Windows, which has no state directory of
-/// its own, or `$MUSUBI_STATE_DIR`.
+/// its own, or `$MUSUBI_STATE_DIR`, made absolute, as the daemon is told it.
 pub fn state_dir() -> anyhow::Result<PathBuf> {
     if let Some(dir) = std::env::var_os("MUSUBI_STATE_DIR") {
-        return Ok(PathBuf::from(dir));
+        return Ok(std::path::absolute(dir)?);
     }
     let strategy = etcetera::choose_base_strategy()
         .context("cannot locate a state directory; set MUSUBI_STATE_DIR")?;
     let base = strategy.state_dir().unwrap_or_else(|| strategy.data_dir());
     Ok(base.join("musubi"))
+}
+
+/// Makes the state directory, if it doesn't exist, private to this user: it holds the ssh
+/// key musubi reaches hubs with, and with `MUSUBI_STATE_DIR` set, the daemon's socket, which
+/// musubi uses only in a directory no one else can write to.
+pub fn create_state_dir() -> anyhow::Result<PathBuf> {
+    let dir = state_dir()?;
+    crate::socket::create_private_dir(&dir)?;
+    Ok(dir)
 }
 
 /// Where a daemon started in the background, or at login, logs.
@@ -257,11 +266,8 @@ impl UserState {
     }
 
     fn save(&self) -> anyhow::Result<()> {
-        let path = Self::path()?;
-        if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir)?;
-        }
-        write_private(&path, toml::to_string(self)?.as_bytes())
+        create_state_dir()?;
+        write_private(&Self::path()?, toml::to_string(self)?.as_bytes())
     }
 
     /// Changes the saved state, holding a lock meanwhile so that two commands changing it

@@ -439,11 +439,23 @@ exist, so a test that needs ssh must give a stand-in.
 
 `login::process_tests` runs installation in disposable child processes with private home,
 config and state directories and stand-ins for launchctl or systemctl. It checks failed
-installation leaves no marker, successful installation records one, the daemon and hub
-keep separate markers, only the intended environment reaches the service, and uninstall
-works even after its service file was removed. On macOS it checks both GUI and background
-launchd domains. These tests never reach the real service manager; they do not check that
-it accepts the files or runs musubi.
+installation leaves no marker and no service file, successful installation records one, the
+daemon and hub keep separate markers, only the intended environment reaches the service, and
+uninstall works even after its service file was removed. On macOS it checks both GUI and
+background launchd domains. These tests never reach the real service manager; they do not
+check that it accepts the files or runs musubi.
+
+Two CLI tests put a stand-in for launchctl and systemctl first on the `PATH` instead, one that
+runs the hub an installed unit or agent names as the service manager would.
+`daemon_install_and_uninstall_leave_the_daemon_as_they_say` checks that a daemon install the
+service manager refuses leaves the daemon running and nothing installed, and, first, that the
+daemon starts under a umask that lets the group write.
+`a_refused_hub_install_leaves_the_installed_hub_running` checks that installing a hub for a
+directory another hub serves refuses before it stops the installed one.
+`one_daemon_serves_a_machine_wherever_it_listens`, without a service manager, checks the
+daemon's socket: a setting's `~/` and refusal of relative paths, commands finding the daemon
+where it listens, the refusal of a second daemon on another socket, and stopping and listening
+again after the socket is deleted.
 
 Two CLI tests install real login services, and so run only with
 `MUSUBI_TEST_LOGIN_SERVICE=1`, which CI sets on its throwaway runners: never set it where

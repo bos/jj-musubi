@@ -7,6 +7,37 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- One daemon serves a machine's copies, whatever socket it listens on: a daemon holds a lock
+  on the state directory, and won't start while another serves it. Previously a command run
+  where `XDG_RUNTIME_DIR` differed, as under cron or after `sudo -u`, started a second daemon,
+  and syncs of the same copies failed on each other's locks. Commands that choose no socket
+  now use the one the running daemon listens on; one that chooses another is refused, saying
+  where the daemon listens. Commands refuse a daemon from before this change until it is
+  restarted: run `musubi daemon restart` after upgrading. A second daemon an earlier release
+  started, or one that lost its socket, can't be found that way: `pgrep -fl 'musubi daemon'`
+  lists them, to stop with `kill` before restarting.
+
+- The daemon listens again within seconds when a temp cleaner deletes its socket, and `musubi
+  daemon stop` stops it meanwhile. Previously nothing could reach, stop or replace it, and
+  `musubi list` and `musubi status` said it wasn't running. They now say it runs but isn't
+  listening.
+
+- `--socket`, `MUSUBI_SOCKET` and `musubi.daemon.socket` read a path starting with `~/` as in
+  the home directory, and refuse a relative one. Previously a relative path, `~/` included,
+  gave a daemon for each directory commands ran in, and a directory named `~` in each. Give
+  such a setting as an absolute path, or from `~/`; if `musubi daemon install` ran with a
+  relative `MUSUBI_SOCKET`, run it again after fixing that.
+
+- musubi makes its state directory readable and writable by you alone, whatever your umask.
+  Previously, under a umask such as `002`, a daemon with `MUSUBI_STATE_DIR` set refused to
+  start, as its socket was in a directory others could write to, and removing the directory
+  didn't help. If a `MUSUBI_STATE_DIR` made before is writable by others, `chmod 700` it.
+
+- A `musubi daemon install` that the service manager refuses leaves the daemon running, as it
+  was, and removes the unit or agent it wrote. A `musubi hub install` for a directory another
+  hub serves refuses before stopping the hub installed already. Previously each stopped what
+  ran, and a failed daemon install left a unit `musubi daemon uninstall` didn't remove.
+
 - A copy the hive forgot no longer brings back the parent of its working copy when another
   machine rewrote or abandoned that parent meanwhile. If the working copy was empty, as after
   `jj commit`, and another machine rewrote its parent, as `jj describe` or `jj rebase` does,

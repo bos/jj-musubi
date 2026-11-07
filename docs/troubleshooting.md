@@ -519,7 +519,8 @@ daemon, and `musubi top` says nothing of it there.
 
 `musubi hub install` found a hub running that it didn't start, as `musubi hub` in a terminal
 does. Stop that hub, then run `musubi hub install` again. "a hub is already serving ..." is
-the same, for a hub run with `--dir`.
+the same, for a hub run with `--dir`. Either way, a hub an earlier `musubi hub install` runs
+goes on running.
 
 ### "the hub didn't start; see ..."
 
@@ -542,8 +543,42 @@ The daemon failed as it started. The message includes the end of its log, or nam
 ### "... is not a private directory of this user's ..."
 
 musubi uses a socket only in a directory that belongs to you and that no one else can write
-to, so that no one else can put a socket of their own in its place. Remove the directory, and
-musubi makes it again, or choose another place for the daemon's socket with `MUSUBI_SOCKET`.
+to, so that no one else can put a socket of their own in its place. musubi makes its own
+directories that way, but not one made otherwise: with `mkdir` under a umask such as `002`, say,
+or for `MUSUBI_STATE_DIR` by an earlier release. If the directory is yours, `chmod 700` it.
+Otherwise remove it, and musubi makes it again, or choose another place for the daemon's
+socket with `MUSUBI_SOCKET`. Don't remove the state directory, which `MUSUBI_STATE_DIR` names:
+it lists the copies the daemon syncs.
+
+### "the daemon's socket ... is a relative path; ..."
+
+`--socket`, `MUSUBI_SOCKET` or `musubi.daemon.socket` gave the daemon's socket relative to the
+current directory, which would make commands run elsewhere start a daemon of their own. Give
+the full path, or one starting with `~/`.
+
+### "this machine's daemon already runs, listening on ..., not ..."
+
+One daemon serves a machine's copies, and it listens on another socket than this command
+would use, as `--socket`, `MUSUBI_SOCKET` or `musubi.daemon.socket` chose another than the
+command that started it did. Commands that choose no socket use the one the daemon listens on,
+so choose the same socket everywhere, or none. To move the daemon, run `musubi daemon stop`,
+then start it with the socket you want; one that starts at login listens where the
+environment `musubi daemon install` ran in says, so run that again with the setting instead.
+Commands that would use the daemon, `musubi list` and `musubi status` among them, say the
+same, rather than going around it. "this machine's daemon already runs, listening on ..."
+without "not" comes from `musubi daemon` run on the socket the daemon listens on already.
+
+### "running (pid ...), but not listening on ..." or "this machine's daemon (pid ...) isn't listening on ..."
+
+The daemon runs, but its socket is gone, as when a temp cleaner deletes files in `/tmp` or
+`$TMPDIR`. It listens there again within seconds, and `musubi daemon stop` stops it meanwhile.
+If the message stays, run `musubi daemon restart`.
+
+### "this machine's daemon (pid ...) isn't listening on ..., and can't be stopped from here" or "running (pid ...) elsewhere, ..."
+
+The daemon runs, but it doesn't answer on its socket, and this command can't signal it, as from
+a container sharing the state directory with a daemon outside it, or on Windows. Stop it where
+it runs, with `musubi daemon stop` there or by ending its process, then start it again.
 
 ### "... would be ... bytes longer than this system allows" or "... is ... bytes too long ..."
 

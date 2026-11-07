@@ -1428,22 +1428,248 @@ fn commands_carry_on_once_their_output_goes_unread() {
     insta::assert_snapshot!(err, @"Hint: Run `musubi hub` on one machine, then the join command it prints.");
 }
 
-/// Uninstalling a daemon that wasn't set to start at login says whether it stopped one.
+/// The daemon starts where the umask lets the group write what musubi makes, as musubi
+/// makes its state directory, which holds the socket here, private; a `musubi daemon install`
+/// the service manager refuses leaves the daemon running, and nothing installed for
+/// uninstalling to remove; and uninstalling a daemon that wasn't set to start at login says
+/// whether it stopped one.
 #[test]
-fn daemon_uninstall_says_whether_it_stopped_the_daemon() {
+fn daemon_install_and_uninstall_leave_the_daemon_as_they_say() {
     let env = TestEnv::new();
     let logs = Logs::default();
     let repo = env.init_repo("alpha");
     let mut daemons = Daemons::default();
     daemons.of(&repo);
-    musubi_in(&env, &logs, &repo, &["daemon", "start"]);
-    let out = musubi_in(&env, &logs, &repo, &["daemon", "uninstall"]);
+    // Never the real service manager, even should a regression leave the daemon installed.
+    #[cfg(unix)]
+    let path = with_service_manager(&env);
+    let musubi_here = |args: &[&str]| {
+        let mut command = repo.program(musubi());
+        command.args(args);
+        #[cfg(unix)]
+        command.env("PATH", &path);
+        command
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut start = repo.program(Path::new("sh"));
+        start.env("PATH", &path).args([
+            "-c",
+            r#"umask 002 && exec "$0" daemon start"#,
+            musubi().to_str().unwrap(),
+        ]);
+        run(&env, &logs, start);
+        let mode = fs::metadata(state_dir(&env, &repo))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700);
+
+        fs::write(env.root().join("home/fail-install"), "").unwrap();
+        let (ok, out, err) = try_run(&logs, &env, musubi_here(&["daemon", "install"]));
+        assert!(!ok, "{out}");
+        if cfg!(target_os = "linux") {
+            insta::assert_snapshot!(err, @"Error: `systemctl --user enable --now musubi.service` failed: installation refused");
+        }
+        assert!(err.contains("installation refused"), "{err}");
+    }
+    #[cfg(not(unix))]
+    run(&env, &logs, musubi_here(&["daemon", "start"]));
+    let out = run(&env, &logs, musubi_here(&["daemon", "uninstall"]));
     assert_eq!(
         out,
         "Stopped the daemon. It wasn't set to start at login.\n"
     );
-    let out = musubi_in(&env, &logs, &repo, &["daemon", "uninstall"]);
+    let out = run(&env, &logs, musubi_here(&["daemon", "uninstall"]));
     assert_eq!(out, "The daemon wasn't set to start at login.\n");
+}
+
+/// A stand-in for systemctl and launchctl, in `<root>/service-manager`, which notes each call
+/// in `~/service-calls`, refuses to install the daemon while `~/fail-install` exists, and runs
+/// the hub that an installed unit or agent names as the service manager would, with the
+/// musubi in `MUSUBI_EXE`: a `PATH` that finds it first. It never reaches the real one.
+#[cfg(unix)]
+fn with_service_manager(env: &TestEnv) -> std::ffi::OsString {
+    use std::os::unix::fs::PermissionsExt as _;
+    let bin = env.root().join("service-manager");
+    fs::create_dir_all(&bin).unwrap();
+    let script = r#"#!/bin/sh
+printf '%s\n' "$*" >> "$HOME/service-calls"
+pid="$HOME/hub-service.pid"
+case "$*" in
+    '--user enable --now musubi.service'|'bootstrap '*'/io.github.bos.musubi.plist')
+        if test -f "$HOME/fail-install"; then
+            echo 'installation refused' >&2
+            exit 1
+        fi ;;
+    '--user enable --now musubi-hub.service')
+        dir=$(sed -n 's/^WorkingDirectory=//p' \
+            "$XDG_CONFIG_HOME/systemd/user/musubi-hub.service") ;;
+    'bootstrap '*'/io.github.bos.musubi.hub.plist')
+        dir=$(sed -n '/<key>WorkingDirectory<\/key>/{n;s/.*<string>\(.*\)<\/string>.*/\1/p;}' "$3") ;;
+    '--user disable --now musubi-hub.service'|'bootout '*'/io.github.bos.musubi.hub')
+        if test -f "$pid"; then
+            kill "$(cat "$pid")"
+            rm "$pid"
+        fi ;;
+    'print '*) exit 1 ;;
+esac
+if test -n "${dir:-}"; then
+    (cd "$dir" && exec "$MUSUBI_EXE" hub) </dev/null >>"$HOME/hub-service.log" 2>&1 &
+    echo $! > "$pid"
+fi
+"#;
+    for name in ["systemctl", "launchctl"] {
+        let path = bin.join(name);
+        fs::write(&path, script).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&path))).unwrap()
+}
+
+/// `musubi hub install` for a directory another hub serves refuses before it stops the hub
+/// installed already, which goes on serving.
+#[cfg(unix)]
+#[test]
+fn a_refused_hub_install_leaves_the_installed_hub_running() {
+    let env = TestEnv::new();
+    let _filters = snapshot_filters(&env);
+    let mut logs = Logs::default();
+    let repo = env.init_repo("alpha");
+    let home = env.root().join("home");
+    logs.files.push(home.join("hub-service.log"));
+    let path = with_service_manager(&env);
+    let hub = |args: &[&str]| {
+        let mut command = repo.program(musubi());
+        command
+            .arg("hub")
+            .args(args)
+            .env("PATH", &path)
+            .env("MUSUBI_EXE", musubi());
+        command
+    };
+    // Stops the installed hub, however the test ends.
+    let mut uninstall = hub(&["uninstall"]);
+    uninstall.stdout(Stdio::null()).stderr(Stdio::null());
+    let _uninstall = Daemons(vec![uninstall]);
+    let installed = env.root().join("installed-hub");
+    let installed = installed.to_str().unwrap();
+    run(&env, &logs, hub(&["install", "--dir", installed]));
+    let pid = fs::read_to_string(home.join("hub-service.pid")).unwrap();
+    let calls = fs::read_to_string(home.join("service-calls")).unwrap();
+
+    let other = Hub::start(&env, &mut logs);
+    let (ok, _, err) = try_run(
+        &logs,
+        &env,
+        hub(&["install", "--dir", other.dir.to_str().unwrap()]),
+    );
+    assert!(!ok);
+    insta::assert_snapshot!(err, @"Error: a hub is already serving $ROOT/hub; stop it, then run this again");
+    assert_eq!(
+        fs::read_to_string(home.join("service-calls")).unwrap(),
+        calls
+    );
+    assert!(
+        Command::new("kill")
+            .args(["-0", pid.trim()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let out = run(&env, &logs, hub(&["uninstall"]));
+    assert_eq!(out, "The hub no longer runs at login, and is stopped.\n");
+}
+
+/// One daemon serves a machine, whatever socket each command would use, and however it
+/// loses its own: a socket chosen with a setting is the same from every directory; commands
+/// that choose none find the daemon where it listens; a daemon can't start on another socket,
+/// and says where the one running listens; and when a temp cleaner deletes the socket, the
+/// list says so, the daemon listens there again, and it can be stopped meanwhile.
+#[cfg(unix)]
+#[test]
+fn one_daemon_serves_a_machine_wherever_it_listens() {
+    let env = TestEnv::new();
+    let _filters = snapshot_filters(&env);
+    let mut logs = Logs::default();
+    let repo = env.init_repo("alpha");
+    logs.daemon_of(&env, &repo);
+    let mut daemons = Daemons::default();
+    daemons.of(&repo);
+    let musubi_on = |socket: Option<&str>, args: &[&str]| {
+        let mut command = repo.program(musubi());
+        command.args(args);
+        if let Some(socket) = socket {
+            command.env("MUSUBI_SOCKET", socket);
+        }
+        command
+    };
+    let daemon_line = |socket: Option<&str>| {
+        let out = run(&env, &logs, musubi_on(socket, &["list"]));
+        out.lines()
+            .find(|line| line.starts_with("Daemon:"))
+            .unwrap()
+            .to_owned()
+    };
+
+    let (ok, _, err) = try_run(&logs, &env, musubi_on(Some("d.sock"), &["daemon", "start"]));
+    assert!(!ok);
+    insta::assert_snapshot!(err, @"Error: the daemon's socket d.sock is a relative path; give an absolute one, or one starting with ~/");
+    run(
+        &env,
+        &logs,
+        musubi_on(Some("~/.musubi/d.sock"), &["daemon", "start"]),
+    );
+    let chosen = env.root().join("home/.musubi/d.sock");
+    assert!(chosen.exists());
+    assert!(!repo.path().join("~").exists());
+
+    // No other daemon starts on the usual socket.
+    run(&env, &logs, musubi_on(None, &["daemon", "start"]));
+    assert!(!state_dir(&env, &repo).join("daemon.sock").exists());
+    insta::assert_snapshot!(daemon_line(None), @"Daemon: running, serving 0 repositories; doesn't start at login; `musubi daemon install` makes it");
+    let other = env.root().join("other.sock");
+    let other = other.to_str().unwrap();
+    let (ok, _, err) = try_run(&logs, &env, musubi_on(Some(other), &["daemon", "start"]));
+    assert!(!ok);
+    insta::assert_snapshot!(err, @"Error: this machine's daemon already runs, listening on $ROOT/home/.musubi/d.sock, not $ROOT/other.sock");
+    let (ok, _, err) = try_run(&logs, &env, musubi_on(Some(other), &["daemon"]));
+    assert!(!ok);
+    insta::assert_snapshot!(err, @"Error: this machine's daemon already runs, listening on $ROOT/home/.musubi/d.sock, not $ROOT/other.sock");
+    insta::assert_snapshot!(daemon_line(Some(other)), @"Daemon: this machine's daemon already runs, listening on $ROOT/home/.musubi/d.sock, not $ROOT/other.sock");
+
+    // As a temp cleaner would, while the daemon is held still, so that it can't listen again
+    // before the commands below look.
+    let pid = daemon_pid(&state_dir(&env, &repo)).unwrap();
+    let signal = |signal: &str| {
+        let sent = Command::new("kill").args([signal, &pid]).status().unwrap();
+        assert!(sent.success());
+    };
+    /// Lets the daemon go on, however the test ends, before it is stopped.
+    struct Continue<'a>(&'a str);
+    impl Drop for Continue<'_> {
+        fn drop(&mut self) {
+            Command::new("kill").args(["-CONT", self.0]).status().ok();
+        }
+    }
+    let _continue = Continue(&pid);
+    signal("-STOP");
+    fs::remove_file(&chosen).unwrap();
+    insta::assert_snapshot!(daemon_line(None), @"Daemon: running (pid N), but not listening on $ROOT/home/.musubi/d.sock; restart it with `musubi daemon restart`");
+    let status = run(&env, &logs, musubi_on(None, &["status"]));
+    let status = status.lines().find(|line| line.starts_with("Daemon:"));
+    insta::assert_snapshot!(status.unwrap(), @"Daemon: running (pid N), but not listening on $ROOT/home/.musubi/d.sock; restart it with `musubi daemon restart`; doesn't start at login");
+    signal("-CONT");
+    // Once it notices, within seconds.
+    run(&env, &logs, musubi_on(None, &["daemon", "start"]));
+    assert!(chosen.exists());
+    fs::remove_file(&chosen).unwrap();
+    let out = run(&env, &logs, musubi_on(None, &["daemon", "stop"]));
+    assert_eq!(out, "Stopped the daemon.\n");
+    let out = run(&env, &logs, musubi_on(None, &["daemon", "stop"]));
+    assert_eq!(out, "No daemon is running.\n");
 }
 
 /// A log file never has colour, even where `--color` asks for it.
@@ -3857,18 +4083,10 @@ fn musubi_as_user(state: &Path, args: &[&str]) -> Command {
     command
 }
 
-/// The running daemon's pid, from the file it writes beside its lock.
+/// The running daemon's pid, from the first line of the file it writes beside its lock.
 fn daemon_pid(state: &Path) -> Option<String> {
-    fs::read_dir(state)
-        .ok()?
-        .flatten()
-        .find(|entry| {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            name.starts_with("daemon-") && name.ends_with(".pid")
-        })
-        .and_then(|entry| fs::read_to_string(entry.path()).ok())
-        .map(|pid| pid.trim().to_owned())
+    let info = fs::read_to_string(state.join("daemon.pid")).ok()?;
+    Some(info.lines().next()?.trim().to_owned())
 }
 
 /// `musubi list`, which says whether the daemon runs.

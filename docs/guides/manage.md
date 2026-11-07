@@ -120,16 +120,29 @@ hive has taken it, the copy can't sync again: it stops with "this repository's h
 longer matches the hive's" ([what to
 do](../troubleshooting.md#this-repositorys-history-no-longer-matches-the-hives-so-it-cant-sync-again)).
 
-A copy can also be forgotten by itself once unused for long enough, as set by
-`musubi.forget-after` in its repository's config. `musubi join`, `create` and `clone` set it,
-and say what they set: `6h` when a coding agent such as Claude Code or Codex runs them, since
-its machine may go away without leaving, and `never` otherwise. They leave it alone if jj's
-config sets it already, as an agent's machine image might in the user config, or as a copy
-that joins again keeps from when it last joined. Change it with `jj config`:
+Copies are never forgotten by default, whether a person or an agent joins them. For a
+short-lived devbox or other temporary copy, give `musubi join`, `create` or `clone` an
+explicit inactivity lease:
 
 ```sh
-jj config set --repo musubi.forget-after '2 days'   # or 30m, '1h 30m', 1week, never
+musubi join --lease 6h
+musubi clone app ~/src/app --lease 6h
 ```
+
+`--lease` sets `musubi.forget-after` in this copy's repo config, replacing an existing value.
+A conflicting workspace policy would override that repo value, so the command refuses it;
+[remove the workspace override](../troubleshooting.md#workspace-config-overrides-a-lease)
+and retry. Without `--lease`, joining keeps any configured value, or sets `never` if none is
+configured. To change the policy later, including for copies previously given the agent
+default of `6h`:
+
+```sh
+jj config set --repo musubi.forget-after never     # or 30m, '1h 30m', '2 days'
+musubi sync
+```
+
+The running daemon reads the new setting before its next sync and shares the policy with
+other copies. `musubi sync` waits for that sync; no daemon restart is needed.
 
 Any operation recorded in the copy counts as using it, as does changing this setting. Once a
 copy goes unused for longer than its setting, the first daemon to notice forgets it, as

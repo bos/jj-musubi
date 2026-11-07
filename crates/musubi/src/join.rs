@@ -2,6 +2,7 @@
 
 use std::io::Write as _;
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command as Process;
 use std::time::Duration;
 
@@ -51,6 +52,7 @@ pub fn join(
         machine,
         full_history,
         hub,
+        lease,
     } = member;
     let (hub, machine, full_history) = (hub.as_deref(), machine.as_deref(), *full_history);
     let located = Located::find(start)?;
@@ -100,7 +102,23 @@ pub fn join(
         }
     };
     let remaking = matches!(choice, JoinChoice::Remake { .. });
-    configured_forget_after(settings::load(&located.workspace_root, &located.repo_path)?.config())?;
+    validate_forget_after(
+        settings::load(&located.workspace_root, &located.repo_path)?.config(),
+        *lease,
+        &located.workspace_root,
+    )?;
+    if lease.is_some()
+        && let Some(key) = found.key.as_deref()
+    {
+        let serving = serving_workspace(&located, key)?;
+        if !copy::same_directory(&serving, &located.workspace_root) {
+            validate_forget_after(
+                settings::load(&serving, &located.repo_path)?.config(),
+                *lease,
+                &serving,
+            )?;
+        }
+    }
     set_machine_name(&located, machine)?;
     let node = located.open()?;
     let summary = node.join_summary()?;
@@ -136,13 +154,13 @@ pub fn join(
         other => anyhow::bail!("unexpected reply from the hub: {other:?}"),
     };
     become_node(
-        ui,
         &located,
         &joined,
         &hub,
         full_history,
         found.record.as_ref(),
         &remotes,
+        *lease,
     )?;
     let count = joined.hive.machines.len();
     let machines = if count == 1 {
@@ -204,13 +222,13 @@ fn set_machine_name(located: &Located, machine: Option<&str>) -> anyhow::Result<
 /// whose record named another hive, `before`, forgets the copies its history brings that the
 /// hive doesn't have. The first hub joined becomes the user's default.
 fn become_node(
-    ui: &Ui,
     located: &Located,
     joined: &Joined,
     hub: &str,
     full_history: bool,
     before: Option<&HiveConfig>,
     remotes: &musubi_jj::remote_url::JoinRemotes,
+    lease: Option<Duration>,
 ) -> anyhow::Result<()> {
     let hive_id: uuid::Uuid = joined
         .hive
@@ -239,16 +257,7 @@ fn become_node(
         .context("jj gave this repository no config id")?;
     // Through the workspace it joined from already, if this is another of the same
     // repository's.
-    let path = UserState::load()?
-        .entry(&key)
-        .filter(|entry| {
-            Located::find(&entry.path)
-                .is_ok_and(|other| copy::same_directory(&other.repo_path, &located.repo_path))
-        })
-        .map_or_else(
-            || located.workspace_root.clone(),
-            |entry| entry.path.clone(),
-        );
+    let path = serving_workspace(located, &key)?;
     // The entry first: a record that names a config id no entry here does would make this
     // repository look like a duplicate, if what follows failed.
     UserState::put_entry(Entry {
@@ -269,49 +278,61 @@ fn become_node(
         let _lock = HiveConfig::lock(&located.repo_path)?;
         config.save(&located.repo_path)?;
     }
-    set_forget_after(ui, located)?;
+    set_forget_after(located, lease)?;
     UserState::save_default_hub(hub)?;
     Ok(())
 }
 
-/// The environment variables that say an agent is running musubi, as the devbox tool
-/// detects agents.
-const AGENT_VARIABLES: [&str; 3] = [
-    "CODEX_THREAD_ID",
-    "CODEX_SESSION_ID",
-    "CLAUDE_CODE_SESSION_ID",
-];
+/// Rejoining through another workspace keeps the workspace the daemon already serves.
+/// Lease preflight must inspect the same config that daemon will read.
+fn serving_workspace(located: &Located, key: &str) -> anyhow::Result<PathBuf> {
+    Ok(UserState::load()?
+        .entry(key)
+        .filter(|entry| {
+            Located::find(&entry.path)
+                .is_ok_and(|other| copy::same_directory(&other.repo_path, &located.repo_path))
+        })
+        .map_or_else(
+            || located.workspace_root.clone(),
+            |entry| entry.path.clone(),
+        ))
+}
 
-/// How long an agent's copy may go unused before the hive forgets it, by default.
-const AGENT_FORGET_AFTER: &str = "6h";
+/// A repo lease cannot override a higher-priority policy in workspace config. Refuse that
+/// conflict before joining, rather than report success with a different effective lease.
+fn validate_forget_after(
+    config: &jj_lib::config::StackedConfig,
+    lease: Option<Duration>,
+    workspace: &Path,
+) -> anyhow::Result<()> {
+    if let Some((source, configured)) = configured_forget_after(config)?
+        && let Some(lease) = lease
+    {
+        anyhow::ensure!(
+            source <= jj_lib::config::ConfigSource::Repo || configured == Some(lease),
+            "musubi.forget-after in {source} config for {} overrides --lease; unset it and run \
+             this again",
+            workspace.display()
+        );
+    }
+    Ok(())
+}
 
-/// Sets `musubi.forget-after` in the repository's config, unless jj's config sets it
-/// already: `6h` if an agent is joining, as on a short-lived machine, `never` otherwise. A
-/// value in the user's config, as an agent's image might set, wins, and so does the one
-/// set when the repository last joined. Says so if it sets `6h`, which a person watching
-/// an agent may not expect.
-fn set_forget_after(ui: &Ui, located: &Located) -> anyhow::Result<()> {
+/// An explicit lease sets this copy's inactivity timeout. Otherwise, keep jj's configured
+/// policy, or record `never` when no policy is configured. Who runs the command is irrelevant.
+fn set_forget_after(located: &Located, lease: Option<Duration>) -> anyhow::Result<()> {
     let settings = settings::load(&located.workspace_root, &located.repo_path)?;
-    if configured_forget_after(settings.config())?.is_some() {
+    if lease.is_none() && configured_forget_after(settings.config())?.is_some() {
         return Ok(());
     }
     let name: jj_lib::config::ConfigNamePathBuf = musubi_jj::node::FORGET_AFTER_KEY.parse()?;
-    let agent = AGENT_VARIABLES
-        .iter()
-        .any(|var| std::env::var_os(var).is_some());
-    let value = if agent { AGENT_FORGET_AFTER } else { "never" };
+    let value = musubi_jj::presence::format_forget_after(lease);
     let path = settings::repo_config_path(&located.repo_path)?
         .context("this repository has no config of its own")?;
     let mut file =
         jj_lib::config::ConfigFile::load_or_empty(jj_lib::config::ConfigSource::Repo, &path)?;
     file.set_value(&name, value)?;
     file.save()?;
-    if agent {
-        writeln!(
-            ui.stdout(),
-            "The hive forgets this copy once it goes unused for {AGENT_FORGET_AFTER}."
-        )?;
-    }
     Ok(())
 }
 
@@ -406,6 +427,7 @@ pub fn clone(
     hive: &str,
     hub: Option<&str>,
     machine: Option<&str>,
+    lease: Option<Duration>,
     socket: &Socket,
 ) -> anyhow::Result<()> {
     check_clone_destination(destination)?;
@@ -456,6 +478,7 @@ pub fn clone(
         .with_context(|| format!("making {}", destination.display()))?;
     let workspace = destination.canonicalize()?;
     let destination_settings = settings::load(&workspace, &workspace.join(".jj/repo"))?;
+    validate_forget_after(destination_settings.config(), lease, &workspace)?;
     let defaults = clone_config::missing(destination_settings.config(), &info.clone_config)?;
     let mut jj = Process::new("jj");
     musubi_jj::git_command::without_repository_env(&mut jj);
@@ -488,7 +511,7 @@ pub fn clone(
         reason: String::new(),
         present: vec![],
     };
-    become_node(ui, &located, &joined, &hub, false, None, &remotes)?;
+    become_node(&located, &joined, &hub, false, None, &remotes, lease)?;
     start_serving(ui, &located, socket)
         .with_context(|| format!("the new copy at {} didn't sync", destination.display()))?;
     let mut out = ui.stdout();

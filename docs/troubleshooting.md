@@ -318,6 +318,21 @@ the message names, and joined nothing. Fix it there, or unset it to have the com
 (`jj config unset --user musubi.forget-after`, or `--repo` for the repo config), then run the
 command again.
 
+
+### Workspace config overrides a lease
+
+"musubi.forget-after in workspace config for … overrides --lease; unset it and run this again"
+
+A workspace setting takes precedence over the repo setting `--lease` writes. The command
+refuses a conflicting policy before joining. The path names the affected workspace, which
+may be the workspace the daemon already serves when you rejoin from another one. Remove
+its override, then retry the lease:
+
+```sh
+jj -R <workspace-path> config unset --workspace musubi.forget-after
+musubi join --lease 6h
+```
+
 ## Syncing
 
 ### "jj cannot merge this machine's operations with the hive's (...)"

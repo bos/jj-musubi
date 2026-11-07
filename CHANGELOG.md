@@ -7,6 +7,12 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- Copies now default to never being forgotten, including when an agent runs `musubi join`,
+  `create` or `clone`. Use `--lease 6h` for a temporary copy that should be forgotten after six
+  hours without a local operation. An explicit lease replaces the copy's repo policy; without
+  one, existing config is kept. Existing six-hour policies are unchanged: run
+  `jj config set --repo musubi.forget-after never` in persistent copies, then `musubi sync`.
+
 - SSH key setup retries cleanly after a public-file write fails, including when an older public
   file is still present. A new key becomes active only after both halves are ready. Existing
   private keys are retained; a missing or empty `hub_key.pub` is recreated from its private key.

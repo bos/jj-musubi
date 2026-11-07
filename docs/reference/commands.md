@@ -30,11 +30,14 @@ explains hubs, hives, and copies.
   [`musubi.hub`](configuration.md#this-machines) names another.
 - `--machine <name>`: this machine's name in the hive, which other machines show its working
   copies under. It defaults to jj's `operation.hostname`.
+- `--lease <duration>`: explicitly forget this temporary copy after that long without a local
+  operation, such as `--lease 6h`. Sets `musubi.forget-after` in this copy's repo config.
 
 `create` and `join` also take `--full-history`, to share the repository's whole operation
 history rather than its current state, and `join` takes `--hive <name>` to join a hive of your
-choosing. All three set the copy's [`musubi.forget-after`](configuration.md#settings)
-unless jj's config sets it already. See [Set up a hub and machines](../guides/setup.md).
+choosing. Without `--lease`, all three keep the copy's configured
+[`musubi.forget-after`](configuration.md#settings), or set `never` when none is configured.
+Agent-run commands have the same default. See [Set up a hub and machines](../guides/setup.md).
 
 ## See how syncing goes
 

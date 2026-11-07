@@ -42,9 +42,10 @@ jj new devbox/default@         # build on it here, or hand it to another agent
 ```
 
 `musubi status` answers at once, so an agent can check that its repository syncs, and see the
-other machines' working copies, before it starts. A copy that an agent joins or clones is
-forgotten by itself after 6 hours unused (`musubi.forget-after`), so a short-lived devbox
-doesn't linger in every machine's `jj log`.
+other machines' working copies, before it starts. Persistent copies stay in the hive until
+you take them out. For a short-lived devbox, use `musubi join --lease 6h` or
+`musubi clone <hive> <dir> --lease 6h`: the hive forgets that copy after six hours without a
+local operation, so it doesn't linger in every machine's `jj log`.
 
 Another machine's rewrites can repeatedly make a coding agent's working copy stale. The
 [`jj-musubi` skill](../../skills/jj-musubi/SKILL.md) helps agents choose a stable base, avoid

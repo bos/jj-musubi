@@ -153,9 +153,9 @@ musubi's own commands are for checking on it:
   wrong. It answers at once, for scripts and agents to ask.
 - `musubi top` shows the hub's traffic and every machine's syncing, live.
 - `musubi sync` syncs the current repository now; `musubi leave` takes it out of its hive.
-- `musubi forget <machine>` forgets a machine that went away without leaving. A copy that a
-  coding agent (Claude Code or Codex) joined is forgotten by itself after 6 hours unused
-  (`musubi.forget-after`).
+- `musubi forget <machine>` forgets a machine that went away without leaving. A temporary
+  copy joined with `--lease 6h` is forgotten after six hours without a local
+  operation (`musubi.forget-after`); other copies are kept by default.
 - `musubi daemon install` starts the daemon at login; `musubi daemon start`, `stop` and
   `restart` control it.
 - `musubi hub install` runs the hub at login; `musubi hub rename` and `musubi hub remove`

@@ -593,8 +593,22 @@ fn hub_join_sync_clone_and_list() {
     // Joining never starts a hive; creating does.
     let err = musubi_fails(&env, &logs, &alpha, &["join", "--hub", &hub.url]);
     insta::assert_snapshot!(err, @"Error: no hive on this hub shares history with this repository; `musubi create` starts one");
-    let out = musubi_in(&env, &logs, &alpha, &["create", "--hub", &hub.url]);
+    // An agent setting up a persistent copy gets the same default as a person.
+    let mut create = alpha.program(musubi());
+    create.args(["create", "--hub", &hub.url]);
+    for variable in [
+        "CODEX_THREAD_ID",
+        "CODEX_SESSION_ID",
+        "CLAUDE_CODE_SESSION_ID",
+    ] {
+        create.env(variable, "a session");
+    }
+    let out = run(&env, &logs, create);
     insta::assert_snapshot!(out, @"Created hive project");
+    assert_eq!(
+        alpha.jj(&["config", "get", "musubi.forget-after"]).trim(),
+        "never"
+    );
 
     // A copy of the same repository, with its remote spelled another way, joins it, and
     // the daemon its join started brings it alpha's work.
@@ -644,7 +658,7 @@ fn hub_join_sync_clone_and_list() {
     let out = musubi_in(&env, &logs, &beta, &["join", "--hub", &hub.url]);
     insta::assert_snapshot!(out, @"Joined hive project (matched remote origin), 2 machines");
     assert!(log(&beta).contains("from alpha"));
-    // A person joined it, so the hive keeps it however long it goes unused.
+    // Without an explicit lease, the hive keeps it however long it goes unused.
     assert_eq!(
         beta.jj(&["config", "get", "musubi.forget-after"]).trim(),
         "never"
@@ -921,9 +935,18 @@ fn hub_join_sync_clone_and_list() {
     let mut clone = alpha.program(musubi());
     // A relative destination, through a parent, lands where it says, in a directory it
     // makes.
-    clone.args(["clone", "proj", "../src/gamma", "--machine", "gamma"]);
+    clone.args([
+        "clone",
+        "proj",
+        "../src/gamma",
+        "--machine",
+        "gamma",
+        "--lease",
+        "6h",
+    ]);
     clone.current_dir(env.root().join("home"));
-    // An agent clones it, so the hive forgets gamma's copy once it goes unused for 6h.
+    // This temporary copy explicitly leases six hours, even with a user default of never.
+    alpha.jj(&["config", "set", "--user", "musubi.forget-after", "never"]);
     clone.env("CLAUDE_CODE_SESSION_ID", "a session");
     // Per-command overrides from a caller's Git hook must not become inherited remotes.
     clone
@@ -983,14 +1006,15 @@ fn hub_join_sync_clone_and_list() {
     assert_eq!(gamma.jj(&parent), "main");
     assert_eq!(gamma.jj(&["git", "remote", "list"]), "");
     assert_eq!(
+        clone_jj(&["config", "get", "musubi.forget-after"]).trim(),
+        "6h"
+    );
+    assert_eq!(
         fs::read_to_string(gamma.path().join("a")).unwrap(),
         "from alpha"
     );
     assert!(log(&gamma).contains("picked up by the daemon"));
-    insta::assert_snapshot!(out, @"
-    The hive forgets this copy once it goes unused for 6h.
-    Cloned hive project into ../src/gamma
-    ");
+    insta::assert_snapshot!(out, @"Cloned hive project into ../src/gamma");
     wait_for(&logs, "beta to hear gamma's musubi.forget-after", || {
         status_in(&env, &logs, &beta)
             .0
@@ -1043,6 +1067,52 @@ fn hub_join_sync_clone_and_list() {
             .contains("Hive: renamed on ")
     });
 
+    // A workspace override must not silently shadow a requested repo lease, including
+    // when rejoining from a different workspace than the daemon serves.
+    let side_path = env.root().join("beta-side");
+    beta.jj(&[
+        "workspace",
+        "add",
+        "--name",
+        "side",
+        side_path.to_str().unwrap(),
+    ]);
+    let side = env.repo_handle_at("beta", &side_path);
+    beta.jj(&[
+        "config",
+        "set",
+        "--workspace",
+        "musubi.forget-after",
+        "never",
+    ]);
+    let before = beta.jj(&["op", "log", "--limit", "1", "--no-graph", "-T", "id"]);
+    for workspace in [&beta, &side] {
+        let err = musubi_fails(&env, &logs, workspace, &["join", "--lease", "6h"]);
+        insta::allow_duplicates! {
+            insta::assert_snapshot!(err, @"Error: musubi.forget-after in workspace config for $ROOT/beta overrides --lease; unset it and run this again");
+        }
+        assert_eq!(
+            beta.jj(&["op", "log", "--limit", "1", "--no-graph", "-T", "id"]),
+            before
+        );
+    }
+    beta.jj(&["config", "unset", "--workspace", "musubi.forget-after"]);
+
+    // An explicit lease replaces this copy's existing never policy. A later ordinary
+    // rejoin keeps the lease, and the running daemon publishes it without a restart.
+    let out = musubi_in(&env, &logs, &beta, &["join", "--lease", "2h"]);
+    insta::assert_snapshot!(out, @"Hive renamed is on the hub, and this repository is part of it");
+    musubi_in(&env, &logs, &beta, &["join"]);
+    assert_eq!(
+        beta.jj(&["config", "get", "musubi.forget-after"]).trim(),
+        "2h"
+    );
+    wait_for(&logs, "alpha to hear beta's explicit lease", || {
+        status_in(&env, &logs, &alpha)
+            .0
+            .contains("forgotten once unused for 2h")
+    });
+
     // Leaving takes the copy out of the hive, and stops the syncing.
     let out = musubi_in(&env, &logs, &beta, &["leave"]);
     insta::assert_snapshot!(out, @"This repository has left hive renamed.");
@@ -1079,9 +1149,10 @@ fn hub_join_sync_clone_and_list() {
 
     A bracketed IPv6 host matches in scp-style and ssh:// remote URLs alike.
 
-    Unless jj's config sets it already, it sets `musubi.forget-after` in the repository's config: how
-    long the copy may go unused before the hive forgets it, `6h` when an agent runs it, `never`
-    otherwise. `musubi create` and `musubi clone` do too.
+    Copies are never forgotten by default, including when an agent joins them. Use `--lease 6h` for a
+    temporary copy, forgotten after six hours without a local operation. An existing
+    `musubi.forget-after` is kept unless `--lease` sets another duration. `musubi create` and `musubi
+    clone` do the same.
 
     Usage: musubi join [OPTIONS]
 
@@ -1101,6 +1172,10 @@ fn hub_join_sync_clone_and_list() {
 
           --full-history
               Replicate the whole operation history, not just the current state
+
+          --lease <DURATION>
+              Forget this copy after this long without a local operation, such as `6h`. Sets
+              `musubi.forget-after` in repo config, overriding its existing value
 
           --hub <HUB>
               The hub, as `musubi hub` prints it: the name this machine ssh-es to the hub's machine by,
@@ -1153,6 +1228,10 @@ fn hub_join_sync_clone_and_list() {
 
           --machine <MACHINE>
               This machine's name in the hive. Defaults to jj's `operation.hostname`
+
+          --lease <DURATION>
+              Forget this copy after this long without a local operation, such as `6h`. Sets
+              `musubi.forget-after` in repo config, overriding its existing value
 
       -h, --help
               Print help (see a summary with '-h')
@@ -1455,6 +1534,7 @@ fn the_daemon_picks_up_new_repositories() {
     second
     --hub	The hub, as `musubi hub` prints it [default: this machine's default hub]
     --machine	This machine's name in the hive. Defaults to jj's `operation.hostname`
+    --lease	Forget this copy after this long without a local operation, such as `6h`. Sets `musubi.forget-after` in repo config, overriding its existing value
     --help	Print help (see more with '--help')
     --socket	The daemon's control socket, in place of the usual one
     --log	What to log, as a filter in `RUST_LOG`'s syntax: `debug`, or `info,musubi_sync=debug`. It applies to this command, not to a daemon it starts, which uses `musubi.daemon.log` in jj's config

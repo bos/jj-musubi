@@ -29,6 +29,8 @@ mod watch;
 
 use std::io::IsTerminal as _;
 use std::io::Write as _;
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -172,7 +174,6 @@ fn run(cli: Cli, ui: &Ui) -> anyhow::Result<()> {
     ) {
         open_files::raise();
     }
-    let cwd = std::env::current_dir()?;
     let socket = || Socket::locate(cli.socket.as_deref());
     match cli.command.unwrap_or(Command::List { template: None }) {
         Command::Hub {
@@ -248,7 +249,7 @@ fn run(cli: Cli, ui: &Ui) -> anyhow::Result<()> {
         }),
         Command::Create { name, member } => join::join(
             ui,
-            &cwd,
+            &cwd()?,
             JoinChoice::Create(name),
             &member,
             false,
@@ -260,7 +261,7 @@ fn run(cli: Cli, ui: &Ui) -> anyhow::Result<()> {
             member,
         } => {
             let choice = hive.map_or(JoinChoice::Match, JoinChoice::Hive);
-            join::join(ui, &cwd, choice, &member, original, &socket()?)
+            join::join(ui, &cwd()?, choice, &member, original, &socket()?)
         }
         Command::Clone {
             hive,
@@ -277,11 +278,19 @@ fn run(cli: Cli, ui: &Ui) -> anyhow::Result<()> {
             lease,
             &socket()?,
         ),
-        Command::List { template } => list::list(ui, &cwd, template.as_deref(), socket()),
+        Command::List { template } => {
+            list::list(ui, cwd().ok().as_deref(), template.as_deref(), socket())
+        }
         Command::Status { template } => {
-            let report = status::Report::gather(&cwd, socket());
+            let cwd = cwd();
+            let report = status::Report::gather(cwd.as_deref(), socket());
             match template {
-                Some(text) => report.print_template(ui, &text, &cwd),
+                // Paths in a template are shown from the current directory, or else from the
+                // root, outside which nothing is.
+                Some(text) => {
+                    let from = cwd.as_deref().unwrap_or_else(|_| Path::new("/"));
+                    report.print_template(ui, &text, from)
+                }
                 None => Ok(report.print(ui)?),
             }
         }
@@ -298,10 +307,11 @@ fn run(cli: Cli, ui: &Ui) -> anyhow::Result<()> {
             },
             socket(),
         ),
-        Command::Leave { force, path } => {
-            leave::leave(ui, &cwd, &socket()?, force, path.as_deref())
-        }
-        Command::Forget { machine } => leave::forget(ui, &cwd, &machine, &socket()?),
+        Command::Leave {
+            path: Some(path), ..
+        } => leave::leave_path(ui, &path, &socket()?),
+        Command::Leave { force, path: None } => leave::leave(ui, &cwd()?, &socket()?, force),
+        Command::Forget { machine } => leave::forget(ui, &cwd()?, &machine, &socket()?),
         Command::Daemon { action: None } => daemon::run(&socket()?),
         Command::Daemon {
             action: Some(DaemonAction::Start),
@@ -379,10 +389,18 @@ fn run(cli: Cli, ui: &Ui) -> anyhow::Result<()> {
             writeln!(ui.stdout(), "Started the daemon.")?;
             Ok(())
         }),
-        Command::Sync => sync::sync(ui, &cwd, &socket()?),
+        Command::Sync => sync::sync(ui, &cwd()?, &socket()?),
         Command::Completion { shell } => completion::print_script(ui, shell),
-        Command::Debug(Debug::OpId { id }) => debug::op_id(ui, &cwd, &id),
+        Command::Debug(Debug::OpId { id }) => debug::op_id(ui, &cwd()?, &id),
     }
+}
+
+/// The current directory, for the commands that act on the repository there.
+fn cwd() -> anyhow::Result<PathBuf> {
+    std::env::current_dir().map_err(|err| match err.kind() {
+        std::io::ErrorKind::NotFound => anyhow::anyhow!("the current directory no longer exists"),
+        _ => anyhow::anyhow!("can't read the current directory: {err}"),
+    })
 }
 
 fn block_on<T>(future: impl Future<Output = anyhow::Result<T>>) -> anyhow::Result<T> {

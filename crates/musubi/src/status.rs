@@ -42,7 +42,8 @@ pub struct Report {
     pub hive: Option<Hive>,
     /// Why musubi doesn't sync the repository, though its record says it is part of a hive
     /// (it was made from a copy's files, say: docs/internals/copies.md), or why that can't
-    /// be told; and what to do.
+    /// be told, as when the current directory, or its workspace's repository, is gone; and
+    /// what to do.
     pub not_synced: Option<copy::NotTheCopy>,
     /// The hub a command uses when not given `--hub`.
     pub default_hub: Option<String>,
@@ -108,11 +109,23 @@ pub struct Daemon {
 }
 
 impl Report {
-    /// Finds out about the repository containing `start`.
-    pub fn gather(start: &Path, socket: anyhow::Result<Socket>) -> Self {
+    /// Finds out about the repository containing `start`, the current directory, or why
+    /// that can't be told.
+    pub fn gather(start: Result<&Path, &anyhow::Error>, socket: anyhow::Result<Socket>) -> Self {
         let state = UserState::load().unwrap_or_default();
         let default_hub = state.default_hub().ok().flatten();
-        let located = Located::find(start).ok();
+        let mut not_synced = None;
+        let located = match start.map_err(|err| anyhow::anyhow!("{err:#}")) {
+            Ok(start) => Located::search(start),
+            Err(err) => Err(err),
+        }
+        .unwrap_or_else(|err| {
+            not_synced = Some(copy::NotTheCopy {
+                why: format!("{err:#}"),
+                what_to_do: None,
+            });
+            None
+        });
         let (mut daemon, served) = Daemon::gather(socket);
         // What the repository is to musubi, before anything opens it, which would give it a
         // key if it had none; and not as another user, as whom jj could write to it.
@@ -123,7 +136,6 @@ impl Report {
             let standing = copy::standing_of(located, &found, entry);
             Ok::<_, anyhow::Error>((found.clone(), entry.cloned(), standing))
         });
-        let mut not_synced = None;
         let mut hive = None;
         if let Some(Err(err)) = &found {
             not_synced = Some(copy::NotTheCopy {
@@ -191,10 +203,6 @@ impl Report {
     }
 
     pub fn print(&self, ui: &Ui) -> io::Result<()> {
-        let Some(located) = &self.located else {
-            writeln!(ui.stdout(), "This directory is not in a jj repository.")?;
-            return self.print_machine(ui);
-        };
         if let Some(not) = &self.not_synced {
             // As a sentence of its own.
             let mut why = not.why.clone();
@@ -208,6 +216,10 @@ impl Report {
             }
             return Ok(());
         }
+        let Some(located) = &self.located else {
+            writeln!(ui.stdout(), "This directory is not in a jj repository.")?;
+            return self.print_machine(ui);
+        };
         let Some(hive) = &self.hive else {
             writeln!(
                 ui.stdout(),

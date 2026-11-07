@@ -85,8 +85,9 @@ fn choose_dir(dir: Option<PathBuf>) -> anyhow::Result<PathBuf> {
     if let Some(dir) = dir {
         return Ok(dir);
     }
-    let cwd = std::env::current_dir()?;
-    if cwd.join(HUB_FILE).exists() {
+    if let Ok(cwd) = std::env::current_dir()
+        && cwd.join(HUB_FILE).exists()
+    {
         return Ok(cwd);
     }
     let home = etcetera::home_dir().context("no home directory; give the hub's with --dir")?;

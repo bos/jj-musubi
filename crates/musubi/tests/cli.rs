@@ -2028,6 +2028,26 @@ fn commands_in_another_workspace_act_on_the_repository() {
     ");
     let state = fs::read_to_string(&state_path).unwrap();
     assert!(!state.contains("alpha"), "{state}");
+
+    // With the main workspace moved away, the other can't reach the repository, and says so:
+    // on Unix, whose error the snapshots show.
+    #[cfg(unix)]
+    {
+        let moved = env.root().join("alpha-moved");
+        fs::rename(alpha.path(), &moved).unwrap();
+        let status = run(&env, &logs, in_second(&["status"]));
+        insta::assert_snapshot!(status, @"
+    Can't reach this workspace's repository, $ROOT/alpha/.jj/repo: No such file or directory (os error 2).
+    Default hub: $ROOT/hub
+    Daemon: running (pid N), serving 0 repositories; doesn't start at login
+    Daemon socket: [daemon socket]
+    Daemon log: $ROOT/home/musubi-alpha/daemon.log
+    ");
+        let (ok, _, err) = try_run(&logs, &env, in_second(&["sync"]));
+        assert!(!ok);
+        insta::assert_snapshot!(err, @"Error: can't reach this workspace's repository, $ROOT/alpha/.jj/repo: No such file or directory (os error 2)");
+        fs::rename(&moved, alpha.path()).unwrap();
+    }
 }
 
 /// A copy that left its hive can join it again, even after jj has run in it since, and
@@ -2763,6 +2783,25 @@ fn the_daemon_outlives_the_directory_it_was_started_in() {
     musubi_in(&env, &logs, &alpha, &["leave"]);
     fs::remove_dir_all(alpha.path()).unwrap();
 
+    // Run from a directory deleted meanwhile, commands that need none work, `musubi status`
+    // says what's wrong, and commands that act on the repository there say why they can't.
+    let (ok, script, err) = musubi_in_deleted_dir(&env, &logs, &alpha, &["completion", "bash"]);
+    assert!(ok && script.contains("musubi"), "{err}");
+    let (ok, list, err) = musubi_in_deleted_dir(&env, &logs, &alpha, &["list"]);
+    assert!(ok && list.starts_with("Hub "), "{list}{err}");
+    let (ok, status, err) = musubi_in_deleted_dir(&env, &logs, &alpha, &["status"]);
+    assert!(ok, "{err}");
+    insta::assert_snapshot!(status, @"
+    The current directory no longer exists.
+    Default hub: $ROOT/hub
+    Daemon: running (pid N), serving 0 repositories; doesn't start at login
+    Daemon socket: [daemon socket]
+    Daemon log: $ROOT/home/musubi-alpha/daemon.log
+    ");
+    let (ok, _, err) = musubi_in_deleted_dir(&env, &logs, &alpha, &["sync"]);
+    assert!(!ok);
+    insta::assert_snapshot!(err, @"Error: the current directory no longer exists");
+
     let second = env.root().join("second");
     let mut init = alpha.program(Path::new("jj"));
     init.args(["git", "init", "--colocate", second.to_str().unwrap()])
@@ -2780,6 +2819,27 @@ fn the_daemon_outlives_the_directory_it_was_started_in() {
         .current_dir(&second);
     let out = run(&env, &logs, create);
     insta::assert_snapshot!(out, @"Created hive second");
+}
+
+/// Runs musubi as `machine` runs it, in a directory deleted once it's there, returning
+/// whether it succeeded, its stdout, and its stderr.
+#[cfg(unix)]
+fn musubi_in_deleted_dir(
+    env: &TestEnv,
+    logs: &Logs,
+    machine: &TestRepo,
+    args: &[&str],
+) -> (bool, String, String) {
+    let gone = env.root().join("gone");
+    fs::create_dir(&gone).unwrap();
+    let mut command = machine.program(Path::new("sh"));
+    command
+        .current_dir(env.root())
+        .args(["-c", r#"cd "$1" && rmdir "$1" && shift && exec "$@""#, "sh"])
+        .arg(&gone)
+        .arg(musubi())
+        .args(args);
+    try_run(logs, env, command)
 }
 
 /// Runs musubi in `dir` as `machine` runs it, which must succeed, returning its stdout.

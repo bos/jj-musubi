@@ -159,6 +159,22 @@ identity, which the other machines would show as a second copy: make another cop
 
 musubi ran as a user who doesn't own the repository, as under `sudo`. Run it as the owner.
 
+### "the current directory no longer exists"
+
+The directory musubi ran in was deleted after the shell went into it, as when a repository is
+deleted and cloned again in its place. `cd` to it, if it was made again, or to another, and
+run the command again. `musubi status` says so and exits 0, and commands that don't act on a
+repository, such as `musubi list`, work anywhere, given no relative path.
+
+### "can't reach this workspace's repository, ...: ..."
+
+The current directory is in a jj workspace added with `jj workspace add`, whose repository,
+kept in the workspace it was added from, the path the message names, has moved or gone, or
+can't be read; jj fails there too, with "Cannot access ...". Move that workspace back where it
+was. Or, from where it is now, run `jj workspace forget <name>`, naming this workspace, move
+this workspace's directory aside, make it again with `jj workspace add <path> --name <name>`,
+and copy back any files you changed in it.
+
 ### `musubi list` shows a copy "not syncing: ..."
 
 The copy was deleted, moved, or is on a disk that isn't mounted, or its directory now holds

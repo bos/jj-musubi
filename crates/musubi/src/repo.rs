@@ -1,6 +1,7 @@
 //! Locating and opening the repository a command runs in.
 
 use std::io::Write as _;
+use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -32,12 +33,21 @@ pub struct Located {
 impl Located {
     /// Finds the workspace containing `start`.
     pub fn find(start: &Path) -> anyhow::Result<Self> {
+        Self::search(start)?.with_context(|| format!("{start:?} is not in a jj workspace"))
+    }
+
+    /// Finds the workspace containing `start`: `None` if no workspace does, and an error if
+    /// one does but its repository can't be reached, as when a secondary workspace's main
+    /// one has moved.
+    pub fn search(start: &Path) -> anyhow::Result<Option<Self>> {
         let start = start.canonicalize()?;
-        let workspace_root = start
+        let Some(workspace_root) = start
             .ancestors()
             .find(|dir| dir.join(".jj").is_dir())
-            .with_context(|| format!("{start:?} is not in a jj workspace"))?
-            .to_owned();
+            .map(Path::to_owned)
+        else {
+            return Ok(None);
+        };
         let repo = workspace_root.join(".jj/repo");
         // A secondary workspace's `.jj/repo` is a file holding the repository's path.
         let repo_path = if repo.is_file() {
@@ -50,10 +60,17 @@ impl Located {
         } else {
             repo
         };
-        Ok(Self {
+        // As one line, as jj says it.
+        let repo_path = repo_path.canonicalize().map_err(|err| {
+            anyhow::anyhow!(
+                "can't reach this workspace's repository, {}: {err}",
+                lexically_normal(&repo_path).display()
+            )
+        })?;
+        Ok(Some(Self {
             workspace_root,
-            repo_path: repo_path.canonicalize()?,
-        })
+            repo_path,
+        }))
     }
 
     /// Opens the repository. Its machine key, if it has none, is made only by joining:
@@ -73,6 +90,24 @@ impl Located {
         let repo_config = settings::existing_repo_config_path(&self.repo_path)?;
         Ok(NodeRepo::open(&self.repo_path, settings)?.with_repo_config(repo_config))
     }
+}
+
+/// `path` with its `.` and `..` taken out by its words alone, for a path that doesn't exist
+/// to show as it would canonical.
+fn lexically_normal(path: &Path) -> PathBuf {
+    let mut normal = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir
+                if matches!(normal.components().next_back(), Some(Component::Normal(_))) =>
+            {
+                normal.pop();
+            }
+            component => normal.push(component),
+        }
+    }
+    normal
 }
 
 /// The repository at `start`, its record and its entry, if it is the copy of its key here

@@ -92,9 +92,8 @@ pub fn list(
     // The missing copies printed under their hives.
     let mut shown: Vec<&Entry> = vec![];
     for entry in &state.copies {
-        let located = Located::find(&entry.path)
-            .ok()
-            .filter(|_| copy::holds(entry, &entry.path));
+        // Where jj last saw it, if it moved and no daemon has followed it yet.
+        let located = copy::whereabouts(entry).and_then(|path| Located::find(&path).ok());
         let Some((located, Some(hive))) = located.map(|located| {
             let hive = HiveConfig::load(&located.repo_path).ok().flatten();
             (located, hive)

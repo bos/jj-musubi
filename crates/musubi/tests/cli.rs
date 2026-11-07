@@ -2019,9 +2019,11 @@ fn two_machines_with(
     (alpha, beta)
 }
 
-/// The daemon knows a repository by one of its workspaces, but commands run in any other
-/// workspace of it act on the same repository: a join there doesn't have the daemon serve
-/// it twice, `musubi status` there finds it served, and a leave there stops the serving.
+/// The daemon knows a repository by the workspace it was made in, but commands run in any
+/// other workspace of it act on the same repository: a create there names the hive after the
+/// repository, a join in each doesn't have the daemon serve it twice, `musubi status` there
+/// finds it served, a leave there stops the serving, and once that workspace is forgotten and
+/// deleted, the repository syncs on.
 #[test]
 fn commands_in_another_workspace_act_on_the_repository() {
     let env = TestEnv::with_real_op_times();
@@ -2035,7 +2037,6 @@ fn commands_in_another_workspace_act_on_the_repository() {
     daemons.of(&alpha);
     alpha.write_file("a", "a");
     alpha.jj(&["commit", "-m", "start"]);
-    musubi_in(&env, &logs, &alpha, &["create", "--hub", &hub.url]);
     let second = env.root().join("alpha-second");
     alpha.jj(&["workspace", "add", second.to_str().unwrap()]);
     let in_second = |args: &[&str]| {
@@ -2043,9 +2044,11 @@ fn commands_in_another_workspace_act_on_the_repository() {
         command.args(args).current_dir(&second);
         command
     };
+    let out = run(&env, &logs, in_second(&["create", "--hub", &hub.url]));
+    insta::assert_snapshot!(out, @"Created hive alpha");
 
     // Joining again from the other workspace, as to make a lost hive again.
-    run(&env, &logs, in_second(&["join"]));
+    musubi_in(&env, &logs, &alpha, &["join"]);
     let list = musubi_in(&env, &logs, &alpha, &["list"]);
     insta::assert_snapshot!(list, @"
     Hub $ROOT/hub:
@@ -2053,7 +2056,7 @@ fn commands_in_another_workspace_act_on_the_repository() {
         here: $ROOT/alpha  synced N ago
     Daemon: running, serving 1 repository; doesn't start at login; `musubi daemon install` makes it
     ");
-    // Listed once, through the workspace it joined from, so a daemon starting serves it once.
+    // Listed once, by the workspace it was made in, so a daemon starting serves it once.
     let state_path = state_dir(&env, &alpha).join("state.toml");
     let state = fs::read_to_string(&state_path).unwrap();
     assert!(!state.contains("alpha-second"), "{state}");
@@ -2063,7 +2066,7 @@ fn commands_in_another_workspace_act_on_the_repository() {
     This machine: alpha, synced N ago; the hub has all its work
     Working copies:
     alpha@: zsuskuln 95c553be (no description set)
-    alpha-second@: nppvrztz b9a19b48 (no description set)
+    alpha-second@: zxsnswpr 0b2c4657 (no description set)
     Copies:
     alpha (this machine): used N ago, never forgotten
     Daemon: running (pid N), serving this repository; doesn't start at login
@@ -2101,6 +2104,20 @@ fn commands_in_another_workspace_act_on_the_repository() {
         insta::assert_snapshot!(err, @"Error: can't reach this workspace's repository, $ROOT/alpha/.jj/repo: No such file or directory (os error 2)");
         fs::rename(&moved, alpha.path()).unwrap();
     }
+
+    // Joined from the other workspace, which then goes, it syncs on.
+    run(&env, &logs, in_second(&["join"]));
+    let state = fs::read_to_string(&state_path).unwrap();
+    assert!(!state.contains("alpha-second"), "{state}");
+    alpha.jj(&["workspace", "forget", "alpha-second"]);
+    fs::remove_dir_all(&second).unwrap();
+    let list = musubi_in(&env, &logs, &alpha, &["list"]);
+    insta::assert_snapshot!(list, @"
+    Hub $ROOT/hub:
+      alpha  1 machine: alpha
+        here: $ROOT/alpha  synced N ago
+    Daemon: running, serving 1 repository; doesn't start at login; `musubi daemon install` makes it
+    ");
 }
 
 /// A copy that left its hive can join it again, even after jj has run in it since, and
@@ -3120,6 +3137,23 @@ fn moved_copies_sync_again() {
         )
         .contains("while alpha is away")
     });
+    // Moved again, with no daemon to follow it, it is where jj last saw it, not missing, and
+    // `musubi leave` with its old path doesn't stop syncing it.
+    musubi_at(&env, &logs, &alpha, &moved, &["daemon", "stop"]);
+    let again = env.root().join("again");
+    fs::rename(&moved, &again).unwrap();
+    jj_at(&env, &logs, &alpha, &again, &["status"]);
+    let root = env.root();
+    let list = musubi_at(&env, &logs, &alpha, root, &["list"]);
+    insta::assert_snapshot!(list, @"
+    Hub $ROOT/hub:
+      alpha  2 machines: alpha, beta
+        here: $ROOT/again  synced N ago
+    Daemon: not running (doesn't start at login; `musubi daemon install` makes it); `musubi daemon start` starts it
+    ");
+    let moved = moved.to_str().unwrap();
+    let err = musubi_fails_at(&env, &logs, &alpha, root, &["leave", moved]);
+    insta::assert_snapshot!(err, @"Error: the copy is at $ROOT/again; `musubi leave` there takes it out of its hive");
 }
 
 /// A copy deleted while its daemon runs can be deleted: the daemon writes nothing there,

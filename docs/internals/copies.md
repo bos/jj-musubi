@@ -30,7 +30,8 @@ duplicate that must not sync under the same key. The implementation is
 - A copy's **record** is `.jj/repo/musubi/hive.toml`. It names the hive, the hub and the
   machine, the copy's config-id, and its state: joined, left, or hive removed.
 - The daemon's **entries**, in `state.toml`, are the copies it syncs: one per key, each with
-  its key, hive id, config-id, and the path of the workspace it was joined in.
+  its key, hive id, config-id, and the path of the workspace the repository was made in,
+  which holds its `.jj/repo`, from whichever workspace it joined (R5).
 - **The copy of a key**, on a machine, is the repository whose config-id is the one in its
   record and in this machine's entry for its key. There is at most one: jj gives a duplicate on
   the same machine a new config-id, and a duplicate from elsewhere has no entry here.
@@ -84,11 +85,16 @@ machine, and the entries across machines.
   where jj records it. Any musubi command run in the copy of a key also moves its entry there. If
   the copy isn't found, as after `rm -rf` or while a disk is unmounted, the entry stays suspended
   and syncs again if the copy comes back. `musubi list` shows suspended entries as copies "not
-  syncing", saying why, and `musubi leave <path>` removes one.
+  syncing", saying why, and `musubi leave <path>` removes one. Both take a copy jj last saw
+  elsewhere as there, before the daemon has followed it, as when it isn't running: `musubi
+  list` shows it there, and `musubi leave <path>` with its old path refuses, naming where it is.
 
 - **R5. One entry per key.** A second jj workspace of a synced repository has the same key,
-  so `musubi join` there joins it again through the same entry, keeping its path. When an
-  entry takes a path, by a join, a clone or R4, any other entry at that path is dropped.
+  so `musubi join` there joins it again through the same entry, keeping its path. An entry
+  joined, or moved, from a second workspace takes the path of the workspace the repository was
+  made in, and a new hive is named after that one's directory: a second workspace can be
+  forgotten and deleted while the repository goes on. When an entry takes a path, by a join, a
+  clone or R4, any other entry at that path is dropped.
 
 - **R6. Opening a repository creates nothing.** Only `join`, `create` and `clone` create a
   key, a record or a config-id where there is none, and `join` and `create` only once the hub
@@ -187,7 +193,9 @@ Each case, what musubi does, and the test in `crates/musubi/tests/cli.rs` that p
 | …replaced by a copy of another hive | Synced into its own hive, never the first (R3, R4). | `a_replaced_copy_is_never_synced_into_its_hive` |
 | `.jj/repo/musubi/machine` deleted | Not synced, and no new key made (R6). | `a_copy_without_its_key_is_not_synced` |
 | A second jj workspace, with `musubi join` run in it too | Joins again, through the same entry; `musubi leave` there takes the copy out (R5). | `commands_in_another_workspace_act_on_the_repository` |
+| `musubi create` or `join` in a second jj workspace, which is then forgotten and deleted | The hive is named after the repository's directory, and the copy syncs on: its entry names the workspace it was made in (R5). | `commands_in_another_workspace_act_on_the_repository` |
 | …then the first workspace moved away | Commands in the second say they can't reach the repository, naming where it was. | `commands_in_another_workspace_act_on_the_repository` (Unix) |
+| Moved while the daemon isn't running, jj run in it, then `musubi leave <old path>` | `musubi list` shows it where it is, and the leave is refused, naming that (R4). | `moved_copies_sync_again` |
 | A bind mount, joined through both paths | One entry, as for a second workspace: both paths reach the same `.jj/repo` (R5). | — (needs root) |
 | `sudo musubi join` | Refused (R9). | — (needs root) |
 | `musubi hub remove`, then a plain `musubi join` | Says the hive was removed (R7). | `copies_leave_a_removed_hive` |

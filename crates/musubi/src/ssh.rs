@@ -63,6 +63,10 @@ const WAKE_CHECK: Duration = Duration::from_secs(5);
 /// How much of what ssh says on stderr to keep: the end says why it failed.
 const MAX_SAID: usize = 16 * 1024;
 
+/// How long to wait for ssh to say why a connection let go before the hub greeted didn't
+/// connect: a supervisor gives ssh a second to finish, and what it says a second more.
+const SAYING: Duration = Duration::from_secs(3);
+
 /// The ssh to run: `ssh`, or `$MUSUBI_SSH`, as tests set.
 fn program() -> OsString {
     std::env::var_os("MUSUBI_SSH").unwrap_or_else(|| "ssh".into())
@@ -134,6 +138,17 @@ struct State {
     retry_at: Option<Instant>,
     /// What the last failure was, until a connection works.
     problem: Option<String>,
+    /// The latest connection, while how it went may not be known.
+    latest: Option<Attempt>,
+}
+
+/// A connection, and whether its supervisor is done with it.
+#[derive(Clone)]
+struct Attempt {
+    /// See [`Ssh::settled`].
+    settled: Arc<AtomicBool>,
+    /// Closed once its supervisor is done, having recorded any failure.
+    supervised: watch::Receiver<()>,
 }
 
 impl State {
@@ -158,6 +173,46 @@ impl Health {
     /// What is wrong, while the connections fail.
     pub fn problem(&self) -> Option<String> {
         self.lock().problem.clone()
+    }
+
+    /// [`Health::problem`], once ssh has said why the latest connection didn't connect, if it
+    /// was let go before the hub greeted through it, as when the hub didn't greet in time: its
+    /// supervisor says so only once ssh has finished, while what failed reports at once.
+    pub async fn problem_once_known(&self) -> Option<String> {
+        let latest = self.lock().latest.clone();
+        if let Some(Attempt {
+            settled,
+            mut supervised,
+        }) = latest
+            && !settled.load(Ordering::Relaxed)
+        {
+            // Until the supervisor drops its sender, or the hub greets after all.
+            let known = async {
+                loop {
+                    tokio::select! {
+                        _ = supervised.changed() => return,
+                        () = tokio::time::sleep(Duration::from_millis(50)) => {
+                            if settled.load(Ordering::Relaxed) {
+                                return;
+                            }
+                        }
+                    }
+                }
+            };
+            tokio::time::timeout(SAYING, known).await.ok();
+        }
+        self.problem()
+    }
+
+    /// Records a connection as the latest, `settled` once how it went is known; returns what
+    /// its supervisor holds until it's done.
+    fn attempt(&self, settled: &Arc<AtomicBool>) -> watch::Sender<()> {
+        let (supervising, supervised) = watch::channel(());
+        self.lock().latest = Some(Attempt {
+            settled: settled.clone(),
+            supervised,
+        });
+        supervising
     }
 
     fn failed(&self, problem: String) {
@@ -255,6 +310,7 @@ impl Link {
             settled: settled.clone(),
             woke: self.woke.subscribe(),
             let_go,
+            _supervising: self.health.attempt(&settled),
         }));
         let output = Output {
             stdout,
@@ -360,6 +416,8 @@ struct Ssh {
     woke: watch::Receiver<u64>,
     /// Ends when the connection is let go.
     let_go: oneshot::Receiver<()>,
+    /// Dropped once the supervisor is done ([`Health::problem_once_known`]).
+    _supervising: watch::Sender<()>,
 }
 
 /// Waits for a connection's ssh to finish, ending it once the connection is let go, or at

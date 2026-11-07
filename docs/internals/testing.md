@@ -581,7 +581,8 @@ frame retains its bytes.
 The Unix process tests in `crates/musubi/src/ssh/supervisor_tests.rs` exercise the shipping
 ssh supervisor, stderr reader, output wrapper and health tracking with controlled children
 of the test binary. Pipe messages signal readiness and EOF; no test sleeps to arrange a
-race. A child that ignores EOF is killed and reaped, and a descendant holding stderr open
+race. A child that ignores EOF is killed and reaped, and an explanation of the failure waits
+for the supervisor to record why it didn't connect; a descendant holding stderr open
 cannot hold up failure reporting. A megabyte of stderr must drain without blocking the
 child, retain a bounded tail and preserve its final diagnostic. Wake notifications during
 both cleanup waits must retire the old connection without restoring a stale failure; a

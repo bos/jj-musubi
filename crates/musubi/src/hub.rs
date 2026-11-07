@@ -382,14 +382,6 @@ enum Place {
 }
 
 impl Connection {
-    /// Why the hub can't be reached now, as far as ssh says.
-    fn problem(&self) -> Option<String> {
-        match &self.place {
-            Place::Local(_) => None,
-            Place::Ssh { health, .. } => health.problem(),
-        }
-    }
-
     /// Why the hub can't be reached, for a transport that has lost its connection, in the
     /// words of the commands that connect to it: what a hub's socket on this machine says
     /// now, or what ssh last said, without running it again. `None` if nothing says so.
@@ -402,9 +394,14 @@ impl Connection {
         }
     }
 
-    /// `err`, with why the hub can't be reached, if ssh says.
-    pub fn explain(&self, err: anyhow::Error) -> anyhow::Error {
-        match self.problem() {
+    /// `err`, with why the hub can't be reached, if ssh says, waiting a moment for it to say
+    /// why it didn't connect.
+    pub async fn explain(&self, err: anyhow::Error) -> anyhow::Error {
+        let problem = match &self.place {
+            Place::Local(_) => None,
+            Place::Ssh { health, .. } => health.problem_once_known().await,
+        };
+        match problem {
             Some(problem) => err.context(problem),
             None => err,
         }
@@ -613,7 +610,8 @@ pub async fn ask_within(
             return Err(crate::ui::with_hint(err, "`musubi hub` there starts one"));
         }
         Err(err) => {
-            return Err(connection.explain(anyhow::Error::new(err).context("asking the hub")));
+            let err = anyhow::Error::new(err).context("asking the hub");
+            return Err(connection.explain(err).await);
         }
     };
     match Envelope::decode(&reply)? {

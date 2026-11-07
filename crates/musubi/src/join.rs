@@ -65,6 +65,8 @@ pub fn join(
     let (hub, machine, full_history) = (hub.as_deref(), machine.as_deref(), *full_history);
     let located = Located::find(start)?;
     copy::check_owner(&located.repo_path)?;
+    // From before it looks at what the repository is until it has recorded what it became.
+    let joining = HiveConfig::join_lock(ui, &located.repo_path)?;
     let found = copy::Found::resolve(&located)?;
     let state = UserState::load()?;
     let entry = found.key.as_deref().and_then(|key| state.entry(key));
@@ -171,6 +173,7 @@ pub fn join(
         &remotes,
         *lease,
     )?;
+    drop(joining);
     let count = joined.hive.machines.len();
     let machines = if count == 1 {
         "1 machine".to_owned()

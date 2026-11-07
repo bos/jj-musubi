@@ -7,6 +7,10 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- `musubi.forget-after` set to a duration under a second, such as `500ms`, is reported as
+  shorter than a second, the least it can be. Previously the message said it was neither
+  `never` nor a duration.
+
 - Hints that name a command with a path, such as `musubi list`'s `musubi leave <path>` and
   `musubi hub`'s `--hub <dir>`, quote the path as a shell needs, so that it can be pasted.
 

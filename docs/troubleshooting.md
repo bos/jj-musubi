@@ -323,15 +323,17 @@ have no workspaces.
 
 ### "musubi.forget-after is neither `never` nor a duration such as `6h`; taking it for never"
 
-The daemon logs this when it can't read the copy's `musubi.forget-after`, and then never has
-the hive forget the copy. Set it to `never` or a duration
+The daemon logs this when it can't read the copy's `musubi.forget-after`, or, saying "is
+shorter than a second, the least it can be", when it is a duration under a second, and then
+never has the hive forget the copy. Set it to `never` or a duration of at least a second
 (see [Settings](reference/configuration.md#settings)):
 `jj config set --repo musubi.forget-after 6h`.
 
 ### "musubi.forget-after in your user config is neither `never` nor a duration such as `6h`; fix it and run this again"
 
-`musubi join`, `create`, or `clone` found a `musubi.forget-after` it can't read, in the config
-the message names, and joined nothing. Fix it there, or unset it to have the command choose
+Or "... is shorter than a second, the least it can be; ...". `musubi join`, `create`, or
+`clone` found a `musubi.forget-after` it can't read, or one under a second, in the config the
+message names, and joined nothing. Fix it there, or unset it to have the command choose
 (`jj config unset --user musubi.forget-after`, or `--repo` for the repo config), then run the
 command again.
 

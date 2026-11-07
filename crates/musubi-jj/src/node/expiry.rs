@@ -16,6 +16,7 @@ use super::NodeRepo;
 use crate::canonical::Work;
 use crate::op_id::CanonicalOp;
 use crate::op_id::LocalOp;
+use crate::presence::BadForgetAfter;
 use crate::presence::FORGET_AFTER_ATTRIBUTE;
 use crate::presence::Presence;
 use crate::presence::WORK_ATTRIBUTE;
@@ -95,13 +96,13 @@ impl NodeRepo {
         let Some(text) = text else {
             return Ok(None);
         };
-        match text.as_deref().and_then(parse_forget_after) {
-            Some(after) => Ok(after),
-            None => {
-                tracing::warn!(
-                    "{FORGET_AFTER_KEY} is neither `never` nor a duration such as `6h`; taking \
-                     it for never"
-                );
+        match text
+            .as_deref()
+            .map_or(Err(BadForgetAfter::NotADuration), parse_forget_after)
+        {
+            Ok(after) => Ok(after),
+            Err(why) => {
+                tracing::warn!("{FORGET_AFTER_KEY} {why}; taking it for never");
                 Ok(None)
             }
         }

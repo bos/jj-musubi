@@ -790,8 +790,11 @@ repository's directory. The name follows the forge: `owner/repo` on GitHub, Code
 Gitea, and Bitbucket; the full group path on GitLab; `user/repo` for sourcehut's `~user/repo`;
 `org/project/repo` on Azure DevOps; a Gerrit project without its `a/`; and otherwise the last two
 components of the path. A hive gets the shortest form of its name no other hive has: `jj-musubi`,
-then `bos/jj-musubi`, then `github.com/bos/jj-musubi`. Names never change by themselves; `musubi
-hub rename` changes one. Commands that take a hive accept any unique prefix of its name, except
+then `bos/jj-musubi`, then `github.com/bos/jj-musubi`. A name has no whitespace or control
+characters, so one taken from a URL or a directory has its `%`-escapes decoded, each run of
+whitespace made a `-`, and other control characters dropped: `My%20Project` and `My Project`
+both name a hive `My-Project`. Names never change by themselves; `musubi hub rename` changes
+one. Commands that take a hive accept any unique prefix of its name, except
 `musubi hub remove`, which takes a whole name or an id, since a prefix is too easily mistaken.
 
 `musubi clone <name>` creates a new colocated repository and joins it to the named hive.

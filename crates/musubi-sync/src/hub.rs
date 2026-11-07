@@ -26,10 +26,18 @@ use crate::open_bundle_dir;
 use crate::short;
 use crate::temp_bundle;
 
-/// How long the hub waits, before pruning its records, for a machine its history doesn't know
-/// to take them, after it last said what it took: a machine joining says so with its first
-/// fetch, and may take that long to realize the hive's history before its first push.
+/// How long the hub waits, before pruning its records, for a machine joining the hive after it
+/// last heard from it: a machine joining says what it took with its first fetch, which realizes
+/// the hive's history, and may then be away that long, asleep, say, before its first push lands.
+/// One away longer, which the hub prunes without, can't take the records it pruned, and stops
+/// syncing for good.
 pub const JOINING_LIFETIME: Duration = Duration::from_secs(24 * 3600);
+
+/// How long the hub prunes nothing after it opens a hive's store, as after a restart or once it
+/// has made the hive again: it no longer knows which machines were joining, and one that is
+/// online says what it took within minutes of the hub coming back. A machine joining that is
+/// offline then, and away for longer, can be stranded.
+pub const WAIT_AFTER_OPENING: Duration = Duration::from_secs(3600);
 
 pub struct HubAdapter {
     store: HubStore,
@@ -37,8 +45,26 @@ pub struct HubAdapter {
     /// The history with a supersede's drops dropped too, as a push asks about it: the same
     /// for each of its questions, and for taking it.
     contracted: RefCell<Option<Contracted>>,
-    /// What each machine last said it took, since the hub started, and when.
+    /// What the hub knows of the hive's machines, in memory only.
+    machines: Machines,
+}
+
+/// What the hub knows of a hive's machines, which it keeps only in memory: what each last said
+/// it took, and when, which are joining, and when it started remembering. Opening the hive's
+/// store again in the same process, as after a panic, keeps it ([`HubAdapter::into_machines`]).
+pub struct Machines {
+    /// What each machine last said it took, and when.
     reports: HashMap<String, (RecordState, Instant)>,
+    /// The machines whose `musubi join` chose this hive, and that aren't present at its head
+    /// yet, as they are once their first push lands, with when the hub last heard from each:
+    /// the join, or what it last said it took. Among them is a copy that left, and that the
+    /// history knows, joining again.
+    joining: HashMap<String, Instant>,
+    /// When the hub opened the hive's store, and started remembering: a machine joining may
+    /// have said what it took to the hub as it was before, which kept that only in memory.
+    opened: Instant,
+    /// How far tests have moved the hub's clock on ([`HubAdapter::age`]).
+    aged: Duration,
 }
 
 impl HubAdapter {
@@ -50,6 +76,7 @@ impl HubAdapter {
         Self::new(HubStore::open(dir)?, dir)
     }
 
+    /// Serves the hive's store, knowing nothing yet of what any machine took.
     pub fn new(store: HubStore, dir: &Path) -> anyhow::Result<Self> {
         let tmp = dir.join("tmp");
         open_bundle_dir(&tmp)?;
@@ -57,8 +84,50 @@ impl HubAdapter {
             store,
             tmp,
             contracted: RefCell::new(None),
-            reports: HashMap::new(),
+            machines: Machines {
+                reports: HashMap::new(),
+                joining: HashMap::new(),
+                opened: Instant::now(),
+                aged: Duration::ZERO,
+            },
         })
+    }
+
+    /// What the hub knows of the hive's machines, for the hub that serves its store next in
+    /// this process ([`Self::recall`]).
+    pub fn into_machines(self) -> Machines {
+        self.machines
+    }
+
+    /// Takes up what the hub that served the hive's store earlier in this process knew of its
+    /// machines: nothing a machine has said since then is lost.
+    pub fn recall(&mut self, machines: Machines) {
+        self.machines = machines;
+    }
+
+    /// Has the hub wait, before pruning, for `machine`, which asked it to join the hive
+    /// (`musubi_hub::hub_dir::HubDir::joined`), until its first push lands, or until it has
+    /// heard nothing from it for [`JOINING_LIFETIME`].
+    pub fn joining(&mut self, machine: &str) {
+        let now = self.now();
+        self.machines.joining.insert(machine.to_owned(), now);
+    }
+
+    /// Makes it as if `elapsed` had passed, for tests that would otherwise wait out how long
+    /// the hub waits for a machine joining ([`JOINING_LIFETIME`], [`WAIT_AFTER_OPENING`]).
+    pub fn age(&mut self, elapsed: Duration) {
+        self.machines.aged += elapsed;
+    }
+
+    fn now(&self) -> Instant {
+        Instant::now() + self.machines.aged
+    }
+
+    /// How many machines the hub remembers having said what they took, and how many it knows
+    /// to be joining.
+    #[cfg(test)]
+    pub(crate) fn remembered(&self) -> (usize, usize) {
+        (self.machines.reports.len(), self.machines.joining.len())
     }
 
     /// Runs `f` on the history with `dropped` dropped too, worked out once for them.
@@ -92,30 +161,52 @@ impl HubAdapter {
     }
 
     /// Prunes the hub's records once every copy the hive hasn't forgotten has said it took
-    /// them all (`musubi_core::hub::prune`): every copy present at the head, and every machine
-    /// the history doesn't know that has said what it took in the last [`JOINING_LIFETIME`],
-    /// as one joining does before the hub accepts its first push. Returns how many it has
-    /// pruned, if it pruned any now.
+    /// them all (`musubi_core::hub::prune`): every copy present at the head; every machine
+    /// joining ([`Self::joining`]) that has said what it took, as its first fetch, straight
+    /// after the join, does, until the hub has heard nothing from it for [`JOINING_LIFETIME`];
+    /// and every machine the history doesn't know that has said what it took in that time, as
+    /// one joining does before the hub accepts its first push. It prunes
+    /// nothing for [`WAIT_AFTER_OPENING`] after opening the store, as after a restart: a machine
+    /// joining may have said so to the hub before. Returns how many it has pruned, if it pruned
+    /// any now.
     pub fn prune(&mut self) -> anyhow::Result<Option<u64>> {
+        let now = self.now();
+        // Before anything else, so that no join outlives the machine's first push: the machine
+        // is then waited for as present, and once the hive forgets it, and its daemon goes on
+        // saying what it took, its join mustn't keep the hub waiting.
+        if !self.machines.joining.is_empty() {
+            let presence = self.store.presence()?;
+            self.machines.joining.retain(|machine, heard| {
+                !presence.is_present(machine) && now.duration_since(*heard) < JOINING_LIFETIME
+            });
+        }
+        if now.duration_since(self.machines.opened) < WAIT_AFTER_OPENING {
+            return Ok(None);
+        }
         let records = HubStorage::records(self);
         // Nothing to prune, or no machine has taken it all yet, as after the push that took
         // a record, which renamed the history: the walk for presence can wait.
         if self.store.records().is_empty()
-            || !self.reports.values().any(|(taken, _)| *taken == records)
+            || !self
+                .machines
+                .reports
+                .values()
+                .any(|(taken, _)| *taken == records)
         {
             return Ok(None);
         }
         let presence = self.store.presence()?;
-        let now = Instant::now();
-        // What the others said no longer counts: a copy the hive forgot, or a machine it
-        // doesn't know that hasn't said anything for a day.
-        self.reports.retain(|machine, (_, when)| {
+        // What the others said no longer counts: a copy the hive forgot, unless it is joining
+        // again, or a machine it doesn't know that hasn't said anything for a day.
+        let joining = &self.machines.joining;
+        self.machines.reports.retain(|machine, (_, when)| {
             presence.is_present(machine)
+                || joining.contains_key(machine)
                 || (!presence.known().contains(machine)
                     && now.duration_since(*when) < JOINING_LIFETIME)
         });
         let mut waited: BTreeSet<String> = presence.copies().map(str::to_owned).collect();
-        waited.extend(self.reports.keys().cloned());
+        waited.extend(self.machines.reports.keys().cloned());
         let pruned = musubi_core::hub::prune(self, &waited)?;
         if let Some(count) = pruned {
             tracing::info!("pruned the first {count} records, which every machine has taken");
@@ -182,18 +273,25 @@ impl HubStorage for HubAdapter {
     }
 
     fn report(&mut self, machine: &str, records: &RecordState) {
-        let now = Instant::now();
-        match self.reports.get_mut(machine) {
+        let now = self.now();
+        if let Some(heard) = self.machines.joining.get_mut(machine) {
+            *heard = now;
+        }
+        match self.machines.reports.get_mut(machine) {
             Some((taken, when)) if taken == records => *when = now,
             _ => {
-                self.reports
+                self.machines
+                    .reports
                     .insert(machine.to_owned(), (records.clone(), now));
             }
         }
     }
 
     fn reported(&self, machine: &str) -> Option<RecordState> {
-        self.reports.get(machine).map(|(taken, _)| taken.clone())
+        self.machines
+            .reports
+            .get(machine)
+            .map(|(taken, _)| taken.clone())
     }
 
     fn prune(&mut self, count: u64) -> anyhow::Result<()> {

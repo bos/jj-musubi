@@ -7,6 +7,19 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- A copy whose first sync after `musubi join` or `musubi clone` was cut short (its machine went
+  to sleep, say) is stranded less often when another machine runs `jj op abandon` meanwhile,
+  failing for good with "this repository's history no longer matches the hive's". A hub that
+  restarted forgot which copies were joining, and could strand one at once; it now keeps every
+  abandon for an hour after it starts, so a copy that's online, or back within the hour,
+  carries on. A copy that left and ran `musubi join` again wasn't waited for at all; now, as a
+  new copy is, it's waited for until the hub has heard nothing from it for a day. A copy away
+  for longer than that, or offline when the hub restarted and away for over an hour after,
+  still can't sync again.
+  [Troubleshooting](docs/troubleshooting.md#this-repositorys-history-no-longer-matches-the-hives-so-it-cant-sync-again)
+  now says so, and how to bring such a copy's work across to a new one. Nothing needs doing on
+  upgrading.
+
 - Two `musubi create` or `musubi join` run at once in one repository take turns: the second
   finds the repository part of the hive the first joined. Before, both could say they created
   a hive, leaving one that no copy was part of. `musubi hub remove` removes such a hive.

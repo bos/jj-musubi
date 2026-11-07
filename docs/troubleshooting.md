@@ -436,20 +436,54 @@ This copy's operation history and the hive's have parted in a way musubi can't r
 Syncing stops to keep abandoned operations from returning to the hive. `musubi status` says
 retrying won't get past it.
 
-That's expected if the hive forgot this copy, with `musubi forget` or after its
-`musubi.forget-after`, or it left with `musubi leave` and joined again, and since then another
-machine has run `jj op abandon`, which every machine still in the hive has taken. The hub no
+That's expected if another machine ran `jj op abandon`, which every machine still in the hive
+has taken, while this copy was out of the hive: forgotten, with `musubi forget` or after its
+`musubi.forget-after`, or gone with `musubi leave` until it ran `musubi join` again. The hub no
 longer remembers that abandon, so it can't pass it on to this copy.
+
+It's expected too for a copy whose first sync after `musubi join` or `musubi clone` didn't
+finish: the command was interrupted, said "the first sync failed", or the machine went to
+sleep during it. The hub waits a day for such a copy, or an hour if the hub restarts while
+it's away. If it hears nothing from the copy for that long while another machine runs
+`jj op abandon`, it stops waiting. If this copy was new to the hive, none of its work reached
+it, not even what it had before joining.
 
 Otherwise, something removed operations from this repository that musubi couldn't account
 for, as when a power cut loses jj's latest update to its op heads. That's a bug: please report
 it at <https://github.com/bos/jj-musubi/issues>, with the daemon's log (`daemon.log`, in the
 [state directory](reference/configuration.md#on-every-machine)).
 
-To carry on here, make a new copy with `musubi clone`, bring across any work this copy made
-since its last sync, then run `musubi leave --force` in this one, which keeps all it has. If
-`musubi create` says this, the hive it made is empty, and this copy can't fill it: run
-`musubi leave --force`, and remove the hive with `musubi hub remove`.
+To carry on here, make a new copy on this machine with `musubi clone`, and bring across this
+copy's work that the hive lacks: what it made since its last sync, or all of it if it was new
+to the hive and its first sync never finished. Its commits are still in this repository:
+
+1. Here, give each commit at the tip of that work a bookmark (`jj log` shows them), and print
+   where this repository keeps its Git data:
+
+   ```sh
+   jj bookmark create rescue-1 -r <change>
+   jj git export
+   jj git root
+   ```
+
+2. In the new copy, fetch only those bookmarks, keep them, and drop the remote, which no other
+   copy needs:
+
+   ```sh
+   jj git remote add rescue <the path jj git root printed>
+   jj git fetch --remote rescue -b 'rescue-*'
+   jj bookmark track 'rescue-*' --remote rescue
+   jj git remote remove rescue
+   ```
+
+   This works because both copies name their commits with the hive's hash, as every copy of
+   a hive does. If `jj log` then shows divergent changes, the hive has rewritten commits this
+   work was on: rebase the work onto the hive's versions with `jj rebase`, then `jj abandon`
+   the old ones.
+
+Then run `musubi leave --force` here, which keeps all this repository has. If `musubi create`
+says this, the hive it made is empty, and this copy can't fill it: run `musubi leave --force`,
+and remove the hive with `musubi hub remove`.
 
 ### "the hub refused this machine's work: ..."
 

@@ -63,6 +63,7 @@ pub const RULES: &[&str] = &[
     "hub_goes_back",
     "hub_loses_prune",
     "remake_hub",
+    "an_hour_passes",
     "lose_reply",
     "join",
 ];
@@ -89,6 +90,7 @@ pub const EVENTS: &[&str] = &[
     "prune:forgotten_behind",
     "prune:forgotten_took",
     "prune:stopped",
+    "prune:after_restart",
     "join:after_prune",
     "restart_hub:after_prune",
     "hub_goes_back:after_prune",
@@ -517,6 +519,18 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         "a_forgotten_copy_that_took_the_pruned_records_comes_back",
         Some(&["prune:forgotten_took", "commit"]),
     ),
+    // The search's joins finish their first sync at once, their first push landing.
+    (
+        "a_joining_machine_back_within_an_hour_of_a_hub_restart_carries_on",
+        None,
+    ),
+    (
+        "a_joining_machine_away_for_over_an_hour_after_a_hub_restart_stops",
+        None,
+    ),
+    ("a_joining_machine_away_for_over_a_day_stops", None),
+    ("a_copy_joining_again_is_waited_for", None),
+    ("a_copy_joining_again_away_for_over_a_day_stops", None),
     // The search delivers every reply at once, never one held up across a prune.
     (
         "a_machine_takes_records_from_a_pruned_one_it_held_before",
@@ -525,9 +539,12 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
     ("a_machine_joins_after_a_prune", Some(&["join:after_prune"])),
     (
         "hub_restarts_after_a_prune",
-        Some(&["restart_hub:after_prune"]),
+        Some(&["restart_hub:after_prune", "prune:after_restart"]),
     ),
-    ("hub_goes_back_across_a_prune", Some(&["hub_loses_prune"])),
+    (
+        "hub_goes_back_across_a_prune",
+        Some(&["hub_loses_prune", "prune:after_restart"]),
+    ),
     (
         "a_machine_that_joined_after_a_prune_carries_on_when_the_hive_is_made_again",
         Some(&["remake_hub:joiner_with_prefix"]),

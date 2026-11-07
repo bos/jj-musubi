@@ -246,12 +246,21 @@ when a sync is finishing as you trim. Other copies remain in the hive or forgott
 were, including when the trim removes a forget that the hub just accepted.
 
 The hub remembers an abandon until every machine still in the hive has taken it, so a machine
-that's offline delays this until it syncs. Then the hub forgets it, so trimming old history
-with `jj op abandon ..<operation>` doesn't leave the hub remembering every abandoned operation,
-though it keeps them on its disk. A copy that was away when the abandon happened, forgotten with
-`musubi forget` or by its `musubi.forget-after`, or out with `musubi leave`, can't sync again when
-it comes back: it stops with "this repository's history no longer matches the hive's" ([what to
-do](../troubleshooting.md#this-repositorys-history-no-longer-matches-the-hives-so-it-cant-sync-again)).
+that's offline delays this until it syncs. It waits too for a copy whose first sync after
+`musubi join` or `musubi clone` hasn't finished, until it has heard nothing from it for a day,
+and it keeps every abandon for an hour after it starts. Then it forgets the abandon, so
+trimming old history with `jj op abandon ..<operation>` doesn't leave the hub remembering every
+abandoned operation, though it keeps them on its disk.
+
+A copy can't sync again, and stops with "this repository's history no longer matches the
+hive's" ([what to
+do](../troubleshooting.md#this-repositorys-history-no-longer-matches-the-hives-so-it-cant-sync-again)),
+if another machine abandoned operations while it was:
+
+- forgotten, with `musubi forget` or by its `musubi.forget-after`;
+- out with `musubi leave`, until it ran `musubi join` again;
+- joining, with `musubi join` or `musubi clone`, and away before its first sync finished: for
+  over a day, or for over an hour after the hub restarted.
 
 A `jj` command that was already running on another machine when the abandon reached it,
 such as a long `jj git fetch`, still syncs its work. If a second command there merges that

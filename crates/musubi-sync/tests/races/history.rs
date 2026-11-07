@@ -3,10 +3,12 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::path::Path;
+use std::time::Duration;
 
 use musubi_core::message::HeadKind;
 use musubi_core::message::Reply;
 use musubi_core::message::Request;
+use musubi_sync::hub::WAIT_AFTER_OPENING;
 use musubi_sync::node::history_lost;
 use musubi_testutil::TestEnv;
 
@@ -19,6 +21,14 @@ fn default_workspaces() -> Fixture {
     let alpha = env.init_repo_with_workspace("alpha", "default");
     let beta = env.init_repo_with_workspace("beta", "default");
     Fixture::join(env, vec![alpha, beta])
+}
+
+/// Has the hub go back to its `seq`th head, as a power cut can make it, then an hour pass, so
+/// that it prunes again once every machine has taken its records: opening its store, it waits
+/// that long for any machine that may have been joining.
+fn goes_back_then_an_hour_passes(hive: &mut musubi_sync::hive::Hive, seq: u64) {
+    hive.hub_goes_back(seq).unwrap();
+    hive.hub.age(WAIT_AFTER_OPENING);
 }
 
 /// `jj undo` undoes the latest operation, whichever machine made it, but refuses one made
@@ -262,7 +272,7 @@ fn a_cached_fixup_publishes_pending_drops_even_when_its_head_is_known() {
     let q = op_log(hive.repo(1)).swap_remove(0);
     hive.commit(1, "b", "beta keeps this");
     hive.hive.sync(1).unwrap();
-    hive.hive.hub_goes_back(base).unwrap();
+    goes_back_then_an_hour_passes(&mut hive.hive, base);
 
     // Alpha publishes a different drop, stopping before adopting its accepted record.
     hive.commit(0, "p", "alpha's drop");
@@ -276,7 +286,7 @@ fn a_cached_fixup_publishes_pending_drops_even_when_its_head_is_known() {
 
     // On a new hub history beta publishes Q. Alpha takes Q, then crashes before advancing
     // to beta's head. Its unpublished P keeps the old fix-up marked written.
-    hive.hive.hub_goes_back(base).unwrap();
+    goes_back_then_an_hour_passes(&mut hive.hive, base);
     hive.repo(1).jj(&["op", "abandon", &q.0]);
     hive.hive.sync(1).unwrap();
     hive.hive.sync_steps(0, 1, &mut |_, reply| reply).unwrap();
@@ -284,7 +294,7 @@ fn a_cached_fixup_publishes_pending_drops_even_when_its_head_is_known() {
     hive.reopen(0);
 
     // The hub loses Q; gamma restores only P, on top of alpha's old fix-up.
-    hive.hive.hub_goes_back(base).unwrap();
+    goes_back_then_an_hour_passes(&mut hive.hive, base);
     hive.hive.sync(2).unwrap();
     let mut accepted = 0;
     hive.hive
@@ -343,7 +353,7 @@ fn a_push_can_drop_its_expected_head_and_reuse_a_cached_fixup() {
     hive.hive.sync(2).unwrap(); // Gamma holds precisely the head beta will abandon.
     hive.commit(1, "b", "beta keeps this");
     hive.hive.sync(1).unwrap();
-    hive.hive.hub_goes_back(base).unwrap();
+    goes_back_then_an_hour_passes(&mut hive.hive, base);
 
     hive.commit(0, "p", "alpha's drop");
     let p = op_log(hive.repo(0)).swap_remove(0);
@@ -353,14 +363,14 @@ fn a_push_can_drop_its_expected_head_and_reuse_a_cached_fixup() {
     hive.hive.sync_steps(0, 1, &mut |_, reply| reply).unwrap();
     let fixup = hive.hive.hub_head();
 
-    hive.hive.hub_goes_back(base).unwrap();
+    goes_back_then_an_hour_passes(&mut hive.hive, base);
     hive.repo(1)
         .jj(&["op", "abandon", &format!("{beta_base}..{}", q.0)]);
     hive.hive.sync(1).unwrap();
     hive.hive.sync_steps(0, 1, &mut |_, reply| reply).unwrap();
     hive.reopen(0);
 
-    hive.hive.hub_goes_back(base).unwrap();
+    goes_back_then_an_hour_passes(&mut hive.hive, base);
     hive.hive.sync(2).unwrap();
     assert_eq!(hive.hive.hub_head(), old);
     // Follow immutable original-parent material, rather than the already contracted
@@ -620,7 +630,7 @@ fn pending_drops_get_a_new_tip_when_the_hub_already_has_the_cached_fixup() {
     assert!(hive.node(1).pending_drops().is_empty());
     assert_eq!(hive.hive.members[1].adapter.records().unwrap().count, 0);
 
-    hive.hive.hub_goes_back(q_seq).unwrap();
+    goes_back_then_an_hour_passes(&mut hive.hive, q_seq);
     let taken = hive
         .hive
         .sync_steps(1, 24, &mut |request, reply| {
@@ -1189,7 +1199,7 @@ fn dropped_head_held(
     hive.reopen(1);
 
     // The hub loses the record, the abandon and the leaves; gamma publishes it again.
-    hive.hive.hub_goes_back(regress).unwrap();
+    goes_back_then_an_hour_passes(&mut hive.hive, regress);
     hive.hive.sync(2).unwrap();
     assert_eq!(hive.hive.hub_head(), kept, "{survivors:?}");
     (hive, kept, left, gone)
@@ -2737,7 +2747,7 @@ fn a_sync_stopped_while_taking_an_abandon_the_hub_then_loses() {
         );
 
         if lose {
-            hive.hive.hub_goes_back(before).unwrap();
+            goes_back_then_an_hour_passes(&mut hive.hive, before);
         }
         // Beta alone, for at most eight steps, so that a sync that gets nowhere stops.
         let mut pushes = vec![];
@@ -3070,7 +3080,7 @@ fn taking_an_abandon_resumes_where_it_stopped() {
         }
 
         if lose {
-            hive.hive.hub_goes_back(before).unwrap();
+            goes_back_then_an_hour_passes(&mut hive.hive, before);
         }
         // Beta alone, for at most eight steps, so that a sync that gets nowhere stops.
         let mut pushes = vec![];
@@ -3172,6 +3182,7 @@ fn hub_restarts_during_and_after_a_rewrite() {
             hive.hive.sync(0).unwrap();
         }
         hive.hive.restart_hub().unwrap();
+        hive.hive.hub.age(WAIT_AFTER_OPENING);
         hive.sync();
         hive.assert_converged();
         assert_eq!(hive.hive.hub.store().record_count(), 1, "after: {after}");
@@ -3299,7 +3310,7 @@ fn abandoning_a_push_the_hub_lost_drops_it_everywhere() {
     hive.hive.sync(1).unwrap();
     hive.hive.sync(0).unwrap();
     assert!(has_operation(hive.repo(0), &pushed.1));
-    hive.hive.hub_goes_back(seq).unwrap();
+    goes_back_then_an_hour_passes(&mut hive.hive, seq);
     // So that the push isn't the op head, which jj won't abandon.
     hive.repo(1)
         .jj(&["bookmark", "create", "after", "-r", "@-"]);
@@ -4058,7 +4069,7 @@ fn records_published_again_after_the_hub_took_others() {
     }
     assert_eq!(hive.hive.hub.store().record_count(), 2);
     // The hub loses both; gamma, which saw neither, abandons another and publishes first.
-    hive.hive.hub_goes_back(seq).unwrap();
+    goes_back_then_an_hour_passes(&mut hive.hive, seq);
     let op = op_described(hive.repo(2), theirs);
     hive.repo(2).jj(&["op", "abandon", &op]);
     hive.hive.sync(2).unwrap();
@@ -4113,7 +4124,7 @@ fn a_later_operation_published_again_after_the_hub_took_others() {
         .find(|(_, d)| d.starts_with("commit "))
         .unwrap();
     hive.repo(0).jj(&["op", "abandon", &later.0]);
-    hive.hive.hub_goes_back(seq).unwrap();
+    goes_back_then_an_hour_passes(&mut hive.hive, seq);
     let op = op_described(hive.repo(2), theirs);
     hive.repo(2).jj(&["op", "abandon", &op]);
     hive.hive.sync(2).unwrap();
@@ -4622,6 +4633,8 @@ fn a_trim_makes_the_hub_smaller() {
     let store = hive.hive.hub.store();
     assert_eq!((store.record_count(), store.pruned()), (1, 1));
     assert_eq!(store.remembered_ids(), 0);
+    // Past the hour the hub waits after opening its store, for any machine still joining.
+    hive.hive.hub.age(WAIT_AFTER_OPENING);
 
     hive.commit(1, "b", "beta after the trim");
     hive.sync();
@@ -4800,19 +4813,23 @@ fn a_second_trim_keeps_git_state_with_a_cached_root_realization() {
     assert_eq!(fields(hive.node(1)), before);
 }
 
-/// The hub doesn't wait for a copy the hive has forgotten. One that comes back from behind
-/// the records the hub pruned can't take them, and could hold operations they drop: it stops
-/// syncing, with the message for a history that no longer matches the hive's, and the
-/// abandoned operation doesn't come back.
+/// The hub doesn't wait for a copy the hive has forgotten, though its daemon goes on saying
+/// what it took. One that comes back from behind the records the hub pruned can't take them,
+/// and could hold operations they drop: it stops syncing, with the message for a history that
+/// no longer matches the hive's, and the abandoned operation doesn't come back.
 #[test]
 fn a_forgotten_copy_behind_pruned_records_stops() {
     let mut hive = Fixture::new(&["alpha", "beta", "gamma"]);
     hive.commit(0, "a", "first");
     hive.commit(0, "b", "second");
     hive.sync();
-    hive.commit(2, "g", "gamma's last work");
     let gamma = hive.machine_key(2);
     assert!(hive.node(0).forget_copy(&gamma, "gamma").unwrap());
+    hive.hive.sync(0).unwrap();
+    // Gamma's daemon syncs, with nothing new of its own, and says what it took.
+    hive.hive.sync(2).unwrap();
+    assert!(!hive.shown_machines().contains(&gamma));
+    hive.commit(2, "g", "gamma's last work");
     let abandoned = commit_op(hive.repo(0));
     hive.repo(0).jj(&["op", "abandon", &abandoned.0]);
     for _ in 0..3 {
@@ -4966,7 +4983,9 @@ fn a_machine_joins_after_a_prune() {
 
 /// A hub that restarts after a prune opens with the records pruned, and replays none of
 /// them. It has forgotten what each machine said it took, so it prunes a later record only
-/// once every machine has said so again.
+/// once every machine has said so again, and an hour after it restarted, as it waits for any
+/// machine that may have been joining
+/// (`a_joining_machine_back_within_an_hour_of_a_hub_restart_carries_on`).
 #[test]
 fn hub_restarts_after_a_prune() {
     let mut hive = Fixture::new(&["alpha", "beta"]);
@@ -4995,6 +5014,7 @@ fn hub_restarts_after_a_prune() {
     hive.sync();
     hive.sync();
     hive.hive.restart_hub().unwrap();
+    hive.hive.hub.age(WAIT_AFTER_OPENING);
     hive.hive.pruning = true;
     hive.hive.sync(1).unwrap();
     assert_eq!(hive.hive.hub.store().pruned(), 1);
@@ -5003,10 +5023,251 @@ fn hub_restarts_after_a_prune() {
     hive.assert_converged();
 }
 
+/// Runs node `node`'s sync up to its first push, which never reaches the hub, as when the
+/// machine goes to sleep.
+fn sync_until_push(hive: &mut Fixture, node: usize) {
+    use musubi_core::node::Step;
+
+    hive.hive.fetch(node).unwrap();
+    loop {
+        let member = &mut hive.hive.members[node];
+        match member.core.step(&mut member.adapter).unwrap() {
+            Step::Idle => panic!("node {node} never pushed"),
+            Step::Superseded { .. } => return,
+            Step::Send(requests) => {
+                for request in requests {
+                    if matches!(request, Request::Push { .. }) {
+                        return;
+                    }
+                    let reply = hive.hive.handle(request).unwrap().reply;
+                    let member = &mut hive.hive.members[node];
+                    member
+                        .core
+                        .handle_reply(&mut member.adapter, reply)
+                        .unwrap();
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A minute and an hour on the hub's clock.
+const MINUTE: Duration = Duration::from_secs(60);
+const HOUR: Duration = Duration::from_secs(3600);
+
+/// Gamma joins alpha and beta's hive with work of its own, and its first sync realizes the
+/// hive's history, but its first push never reaches the hub, as when the machine goes to sleep.
+/// Then alpha abandons an operation gamma has, and alpha and beta take that. Returns the
+/// abandoned operation's description.
+fn joining_machine_away(hive: &mut Fixture) -> String {
+    use musubi_core::hub::HubStorage as _;
+
+    hive.commit(0, "a", "first");
+    hive.commit(0, "b", "second");
+    hive.sync();
+    let gamma = hive.env.init_repo("gamma");
+    gamma.write_file("g", "gamma's own work");
+    gamma.jj(&["commit", "-m", "gamma's own work"]);
+    hive.add(gamma);
+    sync_until_push(hive, 2);
+    let key = hive.machine_key(2);
+    assert!(hive.hive.hub.reported(&key).is_some());
+    let presence = hive.hive.hub.store().presence().unwrap();
+    assert!(!presence.known().contains(&key));
+    // Gamma has realized the operation alpha abandons, so it can't take a record of that the
+    // hub prunes without it.
+    let abandoned = commit_op(hive.repo(0));
+    assert!(has_operation(hive.repo(2), &abandoned.1));
+    hive.repo(0).jj(&["op", "abandon", &abandoned.0]);
+    for _ in 0..3 {
+        hive.hive.sync(0).unwrap();
+        hive.hive.sync(1).unwrap();
+    }
+    assert_eq!(hive.hive.hub.store().pruned(), 0);
+    abandoned.1
+}
+
+/// Asserts that machine `machine`'s sync stops for good, as one behind records the hub pruned
+/// does, saying its history no longer matches the hive's; that nothing it has, `work` among
+/// it, reaches alpha and beta; and that the operation `abandoned` doesn't come back.
+fn stops_behind_pruned_records(hive: &mut Fixture, machine: usize, work: &str, abandoned: &str) {
+    let head = hive.hive.hub_head();
+    let err = hive.hive.sync(machine).unwrap_err();
+    assert!(
+        matches!(
+            err.downcast_ref::<musubi_jj::node::NodeError>(),
+            Some(musubi_jj::node::NodeError::PrunedRecords)
+        ),
+        "{err:#}"
+    );
+    assert!(history_lost(&err));
+    assert_eq!(hive.hive.hub_head(), head);
+    for other in 0..2 {
+        hive.hive.sync(other).unwrap();
+        assert!(
+            !hive.visible(other).iter().any(|c| c.ends_with(work)),
+            "{other}"
+        );
+        assert!(!has_operation(hive.repo(other), abandoned), "{other}");
+    }
+}
+
+/// A machine whose first sync stopped before its first push landed, away while the others
+/// take an abandon, comes back within the hour after the hub restarted: the hub, which no
+/// longer remembers that the machine was joining, prunes nothing for an hour after opening its
+/// store, so the machine takes the record, and its work reaches the hive. Once the hour is
+/// over, the hub prunes the record, which every machine has taken. Pruning the moment every
+/// machine it knew of had said so, the hub left the machine behind a record it never took, and
+/// it stopped for good.
+#[test]
+fn a_joining_machine_back_within_an_hour_of_a_hub_restart_carries_on() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    let abandoned = joining_machine_away(&mut hive);
+    hive.hive.restart_hub().unwrap();
+    // Short of the hour by more than the rest of the test takes on the real clock.
+    hive.hive.hub.age(HOUR - 5 * MINUTE);
+    hive.hive.sync(0).unwrap();
+    hive.hive.sync(1).unwrap();
+    assert_eq!(hive.hive.hub.store().pruned(), 0);
+    hive.sync();
+    hive.assert_converged();
+    assert!(
+        hive.visible(0)
+            .iter()
+            .any(|c| c.ends_with("gamma's own work"))
+    );
+    hive.hive.hub.age(10 * MINUTE);
+    hive.sync();
+    assert_eq!(hive.hive.hub.store().pruned(), 1);
+    for machine in 0..3 {
+        assert!(!has_operation(hive.repo(machine), &abandoned), "{machine}");
+    }
+}
+
+/// …but one away for over an hour after the restart is stranded, a known limitation: the hub
+/// has forgotten that it was joining, and prunes without it once the others have taken the
+/// abandon. It stops syncing, as a forgotten copy does, and nothing it has reaches the hive.
+#[test]
+fn a_joining_machine_away_for_over_an_hour_after_a_hub_restart_stops() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    let abandoned = joining_machine_away(&mut hive);
+    hive.hive.restart_hub().unwrap();
+    hive.hive.hub.age(HOUR + MINUTE);
+    hive.hive.sync(0).unwrap();
+    hive.hive.sync(1).unwrap();
+    assert_eq!(hive.hive.hub.store().pruned(), 1);
+    stops_behind_pruned_records(&mut hive, 2, "gamma's own work", &abandoned);
+}
+
+/// The hub waits a day for a machine its history doesn't know whose first sync stopped before its
+/// first push landed, from when it last said what it took; `a_copy_joining_again_is_waited_for`
+/// checks the wait from a join, which `musubi join` asks for too. One away longer, which the hub
+/// has pruned without, can't take the records it pruned, and could hold operations they drop: it
+/// stops syncing, with the message for a history that no longer matches the hive's, and nothing
+/// it has reaches the hive.
+#[test]
+fn a_joining_machine_away_for_over_a_day_stops() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    let abandoned = joining_machine_away(&mut hive);
+    hive.hive.hub.age(23 * HOUR);
+    hive.hive.sync(0).unwrap();
+    assert_eq!(hive.hive.hub.store().pruned(), 0);
+    hive.hive.hub.age(2 * HOUR);
+    hive.hive.sync(0).unwrap();
+    assert_eq!(hive.hive.hub.store().pruned(), 1);
+    stops_behind_pruned_records(&mut hive, 2, "gamma's own work", &abandoned);
+}
+
+/// Gamma, a copy that left, joins again with work of its own: it asks the hub to join the
+/// hive, as `musubi join` does, and its first sync stops before its push lands, as does
+/// another half a day later. `away` after that, alpha abandons an operation gamma has, and
+/// alpha and beta take that. Returns the abandoned operation's description.
+fn copy_joining_again_away(hive: &mut Fixture, away: Duration) -> String {
+    hive.commit(0, "a", "first");
+    hive.commit(0, "b", "second");
+    hive.sync();
+    let key = hive.machine_key(2);
+    let removed = hive.node(2).forget_self().unwrap().unwrap();
+    hive.hive.sync(2).unwrap();
+    hive.node(2).restore_workspaces(&removed).unwrap();
+    hive.node(2).give_back_working_copies().unwrap();
+    hive.hive.sync(0).unwrap();
+    hive.hive.sync(1).unwrap();
+    hive.commit(2, "g", "gamma's work");
+    hive.node(2)
+        .create_join_operation("musubi: gamma joins the hive")
+        .unwrap();
+    hive.hive.hub.joining(&key);
+    sync_until_push(hive, 2);
+    hive.hive.hub.age(12 * HOUR);
+    sync_until_push(hive, 2);
+    let presence = hive.hive.hub.store().presence().unwrap();
+    assert!(presence.known().contains(&key) && !presence.is_present(&key));
+    let abandoned = commit_op(hive.repo(0));
+    assert!(has_operation(hive.repo(2), &abandoned.1));
+    hive.hive.hub.age(away);
+    hive.repo(0).jj(&["op", "abandon", &abandoned.0]);
+    for _ in 0..3 {
+        hive.hive.sync(0).unwrap();
+        hive.hive.sync(1).unwrap();
+    }
+    abandoned.1
+}
+
+/// A copy that left joins again, and its first sync stops before its push lands, while the
+/// others take an abandon. The hive's history knows the copy, which isn't present, as it knows
+/// a copy the hive forgot, which the hub doesn't wait for
+/// (`a_forgotten_copy_behind_pruned_records_stops`); but the copy asked the hub to join the
+/// hive, so the hub waits for it as for any machine joining, for a day from when it last heard
+/// from it. Back within the day, the copy takes the record, its work reaches the hive, and the
+/// hub prunes once its push has landed. Not waiting for it, the hub pruned at once, and the
+/// copy stopped for good. From then on the hub waits for it only as a copy present: once the
+/// hive forgets it, it holds no prune back, though its daemon goes on saying what it took.
+#[test]
+fn a_copy_joining_again_is_waited_for() {
+    let mut hive = Fixture::new(&["alpha", "beta", "gamma"]);
+    let abandoned = copy_joining_again_away(&mut hive, 23 * HOUR);
+    assert_eq!(hive.hive.hub.store().pruned(), 0);
+    hive.sync();
+    hive.sync();
+    hive.assert_converged();
+    assert!(hive.visible(0).iter().any(|c| c.ends_with("gamma's work")));
+    assert_eq!(hive.hive.hub.store().pruned(), 1);
+    for machine in 0..3 {
+        assert!(!has_operation(hive.repo(machine), &abandoned), "{machine}");
+    }
+
+    let gamma = hive.machine_key(2);
+    assert!(hive.node(0).forget_copy(&gamma, "gamma").unwrap());
+    hive.hive.sync(0).unwrap();
+    hive.hive.sync(2).unwrap();
+    assert!(!hive.shown_machines().contains(&gamma));
+    hive.commit(0, "c", "third");
+    hive.hive.sync(0).unwrap();
+    let abandoned = commit_op(hive.repo(0));
+    hive.repo(0).jj(&["op", "abandon", &abandoned.0]);
+    for _ in 0..3 {
+        hive.hive.sync(0).unwrap();
+        hive.hive.sync(1).unwrap();
+    }
+    assert_eq!(hive.hive.hub.store().pruned(), 2);
+}
+
+/// …but one away for over a day stops, as a new machine joining does
+/// (`a_joining_machine_away_for_over_a_day_stops`).
+#[test]
+fn a_copy_joining_again_away_for_over_a_day_stops() {
+    let mut hive = Fixture::new(&["alpha", "beta", "gamma"]);
+    let abandoned = copy_joining_again_away(&mut hive, 25 * HOUR);
+    assert_eq!(hive.hive.hub.store().pruned(), 1);
+    stops_behind_pruned_records(&mut hive, 2, "gamma's work", &abandoned);
+}
+
 /// A hub that loses the `heads` log it wrote pruning, as a power cut can make it, goes back
 /// to the one before, which names the records again. The machines that took them, and one
 /// that joined after the prune, whose records the hub's still start with, carry on, and the
-/// hub prunes again.
+/// hub prunes again, once it has waited the hour it waits after opening its store.
 #[test]
 fn hub_goes_back_across_a_prune() {
     let mut hive = Fixture::new(&["alpha", "beta"]);
@@ -5032,6 +5293,8 @@ fn hub_goes_back_across_a_prune() {
     hive.hive.restart_hub().unwrap();
     let store = hive.hive.hub.store();
     assert_eq!((store.record_count(), store.pruned()), (1, 0));
+    // Past the hour the hub waits after opening its store, for any machine still joining.
+    hive.hive.hub.age(WAIT_AFTER_OPENING);
     hive.commit(2, "g", "gamma after the hub went back");
     hive.sync();
     hive.sync();
@@ -5081,6 +5344,9 @@ fn a_machine_that_joined_after_a_prune_carries_on_when_the_hive_is_made_again() 
     hive.sync();
     assert_eq!(hive.node(2).record_prefix().count, 2);
     hive.hive.remake_hub().unwrap();
+    // An hour on, so that the hub prunes the records published again, once every machine has
+    // taken them: opening its store, it waits that long for machines that may be joining.
+    hive.hive.hub.age(WAIT_AFTER_OPENING);
     hive.commit(2, "g", "gamma after the hive was made again");
     let mut fetches = 0;
     hive.hive

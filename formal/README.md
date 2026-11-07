@@ -408,6 +408,22 @@ with that head.
   have dropped every operation any node dropped, and every operation any node made is below the
   hub's head.
 
+The executable hub waits for every node, which gives `AllPruned`; the model has no clock, no
+joining machines and no forgotten copies. The native hub waits for the copies present at its head,
+for machines its history doesn't know and for those that asked it to join, that have said what
+they took in the last day, and prunes nothing for an hour after it opens a store, as after a
+restart, when it no longer knows which machines were joining. A machine it stops waiting for, a
+copy the hive forgot, one whose join stalled for over a day, or one joining that was away when the
+hub restarted and for over an hour after, is covered for safety by the relational `prune`, which
+may prune anything the hub dropped, and its refusal by `behind_not_carried`: the hub takes no
+supersede from it. The liveness theorems assume `AllPruned` of every node, so they say nothing of
+a run with such a machine, not even that the others converge.
+`history::a_joining_machine_back_within_an_hour_of_a_hub_restart_carries_on`,
+`history::a_joining_machine_away_for_over_an_hour_after_a_hub_restart_stops`,
+`history::a_joining_machine_away_for_over_a_day_stops`,
+`history::a_copy_joining_again_is_waited_for` and
+`history::a_copy_joining_again_away_for_over_a_day_stops` check the native wait.
+
 The measure puts `(drops not yet on the hub, drops not yet on each node)` before `rmeasure`. A
 node can wait on another: with a head the hub dropped, or on a hub head it dropped and isn't
 past. `progressS` shows the node with the newest head above the hub's head can always act, since

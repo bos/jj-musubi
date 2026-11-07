@@ -37,6 +37,9 @@ const INJECTED: &str = "injected panic after accepting a head";
 #[derive(Default)]
 pub(super) struct WorkerHooks {
     opens: AtomicUsize,
+    /// How many machines the hub remembered having said what they took, and how many it knew
+    /// to be joining, as of the last time it opened the store.
+    remembered: Mutex<(usize, usize)>,
     /// Whether to panic once the hub accepts a head.
     armed: AtomicBool,
     accepted: Mutex<Option<(u64, OpId)>>,
@@ -46,8 +49,9 @@ pub(super) struct WorkerHooks {
 }
 
 impl WorkerHooks {
-    pub(super) fn opened(&self) {
+    pub(super) fn opened(&self, service: &HubService) {
         self.opens.fetch_add(1, Ordering::SeqCst);
+        *self.remembered.lock().unwrap() = service.hub().remembered();
     }
 
     pub(super) fn handled(&self, service: &HubService, notice: Option<&HeadNotice>) {
@@ -346,8 +350,13 @@ async fn a_worker_reopens_its_service_after_a_panic() {
         other => panic!("expected the reopened head, got {other:?}"),
     }
     // A healthy retained service could answer too; count the actual construction to prove
-    // the catch path discarded it. Removing `service = None` must fail this assertion.
+    // the catch path discarded it. Removing `let_go` must fail this assertion.
     assert_eq!(recovery.opens.load(Ordering::SeqCst), 2);
+    // The new one remembers what alpha said it took before the panic, so it doesn't wait again
+    // for machines that may be joining, as after a restart; and that alpha asked to join the
+    // hive (`create_hive`), which the hive's thread took up at alpha's first request: the
+    // panic came before the hub, pruning, could see alpha's push land and stop waiting for it.
+    assert_eq!(*recovery.remembered.lock().unwrap(), (1, 1));
     assert!(notices.next().now_or_never().is_none());
 
     let mut gamma_driver = driver(&gamma, client.clone(), &other_hive);

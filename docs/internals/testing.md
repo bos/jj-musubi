@@ -766,6 +766,8 @@ branch jj hasn't imported, a node can stop halfway through a sync.
   prune would; have it make the hive again, empty, as it does when its store is corrupt; or lose
   a reply the hub sent. Faults are capped per sequence, so that a short sequence still reaches
   recovery.
+- **Time**: an hour passes on the hub, which prunes nothing for that long after it opens its
+  store, as after a restart, in case a machine was joining then.
 
 Every sync step must succeed, but for two stops a user recovers from as the error says. One is jj
 failing to merge a machine's operations with the hive's ([races.md, "Known jj

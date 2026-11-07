@@ -364,7 +364,8 @@ Steps:
 - `Prune(k)`, on the hub, once every node has held the hub's first `k` records: `pruned :=
   k`. It no longer knows their ids, nor can it send those records. The Rust hub remembers what
   each machine's last request said it took, and prunes all its records, `k = |dropped|`, once
-  every copy the hive hasn't forgotten, and every machine joining it, has said it took them
+  every copy the hive hasn't forgotten, and every machine joining it that it has heard from in
+  the last day, has said it took them, and never in the hour after it opens the hive's store
   ([design.md, "What an abandon costs the hub"](design.md#what-an-abandon-costs-the-hub)).
 - A `Fetched` reply carries the hub's records the node lacks, or, if the node's records aren't
   its first ones, all it remembers, with `pruned`'s count and digest. A node takes any reply

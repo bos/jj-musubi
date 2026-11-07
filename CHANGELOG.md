@@ -7,6 +7,9 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- Hints that name a command with a path, such as `musubi list`'s `musubi leave <path>` and
+  `musubi hub`'s `--hub <dir>`, quote the path as a shell needs, so that it can be pasted.
+
 - When ssh to a hub hangs, the first sync to fail says "ssh to devbox did not connect", as
   later ones do. Previously it failed with a bare "disconnected", which `musubi status` showed
   too, since the reason came only once ssh had been stopped, a moment after the sync failed.

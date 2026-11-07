@@ -289,6 +289,23 @@ pub fn with_hint(err: anyhow::Error, hint: impl Into<String>) -> anyhow::Error {
     })
 }
 
+/// `text`, a path, say, quoted as a shell needs it to take it as one word, for a command a
+/// hint names: unquoted if no shell would take any of its characters for anything else.
+pub fn shell_word(text: &str) -> String {
+    // Windows's shells take the `\` in a path as itself.
+    let plain = |c: char| {
+        c.is_ascii_alphanumeric() || "/._-+=:,@".contains(c) || (cfg!(windows) && c == '\\')
+    };
+    if !text.is_empty() && text.chars().all(plain) {
+        text.to_owned()
+    } else if cfg!(windows) {
+        // A Windows path has no `"`.
+        format!("\"{text}\"")
+    } else {
+        format!("'{}'", text.replace('\'', r"'\''"))
+    }
+}
+
 fn hinted(err: CommandError) -> anyhow::Error {
     anyhow::Error::new(Hinted {
         error: err.error,
@@ -400,6 +417,36 @@ fn draw_bar(fraction: f64, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn hints_quote_words_as_a_shell_needs() {
+        assert_eq!(shell_word(r"C:\Users\me\app"), r"C:\Users\me\app");
+        assert_eq!(
+            shell_word(r"C:\Users\me\with space"),
+            r#""C:\Users\me\with space""#
+        );
+    }
+
+    /// A path in a hint, pasted into a shell, is the one word it was.
+    #[cfg(unix)]
+    #[test]
+    fn hints_quote_words_as_a_shell_needs() {
+        for (word, quoted) in [
+            ("/home/me/src/app", "/home/me/src/app"),
+            ("/home/me/with space", "'/home/me/with space'"),
+            ("/home/me/it's", r"'/home/me/it'\''s'"),
+            ("/home/me/$HOME*", "'/home/me/$HOME*'"),
+            ("", "''"),
+        ] {
+            assert_eq!(shell_word(word), quoted);
+            let echoed = std::process::Command::new("sh")
+                .args(["-c", &format!("printf %s {quoted}")])
+                .output()
+                .unwrap();
+            assert_eq!(String::from_utf8(echoed.stdout).unwrap(), word);
+        }
+    }
 
     /// What a user waiting on a sync sees at each step, on a terminal 60 columns wide.
     #[test]

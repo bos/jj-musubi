@@ -135,7 +135,12 @@ fn instructions(settings: &HubSettings, dir: &Path) -> anyhow::Result<String> {
     if default_here {
         text.push_str("On this machine, leave out --hub.\n");
     } else {
-        writeln!(text, "On this machine, use --hub {local}.").ok();
+        writeln!(
+            text,
+            "On this machine, use --hub {}.",
+            crate::ui::shell_word(&local)
+        )
+        .ok();
     }
     Ok(text)
 }

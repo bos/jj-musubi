@@ -7,6 +7,13 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- A hub matches a joining copy to a hive by the remote URLs only of joins to that hive. A copy
+  carries the history of a hive it left into the next one it creates or joins, and the hub
+  took the URLs of its joins to the old hive for the new one's too, so a later copy of the old
+  hive was refused as matching both. A hub's existing hives keep URLs they took that way: to
+  drop them, stop the hub, delete `index.json` in each hive's directory, the one named by its
+  id in the hub's directory, and start the hub again, which rebuilds each.
+
 - musubi now syncs repositories whose git names objects with SHA-256. A hive takes the hash
   of the copy that creates it, and the hub makes the hive's store with it, whatever git's
   default is. Before, the hub's store took git's default, so a SHA-256 copy, or every copy once

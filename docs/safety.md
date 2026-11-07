@@ -154,7 +154,9 @@ recovers, a retry must complete; the test fails if it sends more than 2,000 requ
 finishing. Another test moves data so slowly that each call takes hours, while the hub keeps
 deleting transfer data left untouched for an hour; each call must still complete without sending
 any chunk of data twice. A third gets only the first reply of each batch back in time, so that
-calls time out again and again; they must still complete.
+calls time out again and again; they must still complete. A fourth sends data one message at a
+time each way, so slowly that each chunk takes 80 seconds to cross; each call must complete
+without any chunk crossing the link twice.
 
 Tests with jj repositories replace the hub's replies with well-formed but false ones: a head the
 hub does not have, operations with changed parents, objects for another operation, or another
@@ -168,7 +170,9 @@ Stream tests use pipes with one-byte buffers to exercise cancellation, timeouts,
 late replies during transmission. Other tests split frames at different byte offsets and pause
 reads and writes. A hub-worker test panics after accepting a push but before replying; the next
 fetch must reopen the service and find the accepted history intact. Another hive served by the
-same hub must continue syncing.
+same hub must continue syncing. Another test holds a hive's worker while requests behind it time
+out; the worker must skip them, but for a chunk of an upload, which it must still store, and
+answer the requests whose senders still wait.
 
 Each operation refers to a view, which records the visible commits, bookmark targets and each
 workspace's working-copy commit. Hegel tests truncate, zero-fill and garble the logs storing

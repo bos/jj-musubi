@@ -78,17 +78,23 @@ Each request takes one round trip. Operations and objects travel inline in their
 when they fit in a quarter of the transport's message limit, and otherwise as chunked blobs
 ([Chunked blobs](#chunked-blobs)). At this level of the protocol each message is atomic.
 
-A node that gets no reply in time sends the same request again, up to 19 times. The hub
-answers one request at a time, and working out a reply can take it longer than the node's
-timeout, as for a machine catching up on a large history, or a push of one. So the hub keeps
-its last eight replies for ten minutes, and answers the same request again with the same reply,
-without the work, while its head and records are as that reply left them and the blobs the
-reply names are still there: the reply the request would get anyway. A repeat sent while the
-hub still works on the first waits behind it, then gets that reply at once. The hub doesn't
-repeat `Incomplete`, which a rejected push can make untrue without moving the head, by storing
-what `new` lacked. Once a request has gone, the node doesn't upload what it carries again: the
-hub has it until it answers, and then needs it only if the hive has changed since, when the
-repeat fails and the sync starts over.
+Whether a node's link to the hub works is the connection's to tell: ssh ends one that hears
+nothing from the hub's machine for a minute, failing what is in flight on it. A request's
+deadline, two minutes from when the node sends it, is how long to let a hub that is there answer.
+A node that gets no reply in time sends the same request again, for ten minutes. The hub answers
+one request at a time for each hive, and working out a reply can take it longer than the node's
+deadline, as for a machine catching up on a large history, or a push of one. So the hub keeps its
+last eight replies for ten minutes, and answers the same request again with the same reply,
+without the work, while its head and records are as that reply left them and the blobs the reply
+names are still there: the reply the request would get anyway. A repeat sent while the hub still
+works on the first waits behind it, then gets that reply at once. A request that waits behind
+others past its sender's deadline, which travels with it, goes unanswered, as if lost: its sender
+has asked again or given up, and working it out would only hold up the rest; a chunk of an upload
+is taken all the same, since its bytes have crossed the link already. The hub doesn't repeat
+`Incomplete`, which a rejected push can make untrue without moving the head, by storing what `new`
+lacked. Once a request has gone, the node doesn't upload what it carries again: the hub has it
+until it answers, and then needs it only if the hive has changed since, when the repeat fails and
+the sync starts over.
 
 The formal model also has finer-grained requests, which musubi doesn't send: `GetHead`,
 `PutOps` and `PutObjects` (each answered by `Stored`), `GetOps(S)` for operations
@@ -257,9 +263,12 @@ musubi's transfers stay within this model, doing less than it allows:
 - A sender keeps a window of up to eight chunks in flight, uploading and downloading, rather
   than wait for each chunk's acknowledgement, so that a transfer costs a round trip per eight
   chunks. The model lets a sender send any chunk at any time, so this needs nothing more.
-- Each request has a deadline from when it was sent, so on a link too slow to carry a window
-  before it, an attempt ends with only its first chunks taken, and the call tries again, for
-  as long as each such timeout comes after a chunk took a blob further than ever in the call.
+- Each request has a deadline from when it was sent, and each chunk of a window as long again
+  for each chunk ahead of it, since the link carries it after them: a link that carries a chunk
+  within a deadline carries a window in time, however many chunks it has. On a link slower than
+  that, or a hub that stops answering for a while, an attempt ends with only its first chunks
+  taken, and the call tries again, for as long as each such timeout comes after a chunk took a
+  blob further than ever in the call.
   Each attempt goes on from where the last left off: an upload from the prefix the hub last
   reported, a download from what the node has received. Before the reply has come, the call
   asks again, with its uploads; after, it goes on with the reply's downloads, without asking

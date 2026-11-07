@@ -514,13 +514,13 @@ end prefixProofs
 
 /-! ## Attempts under a deadline
 
-`prefix_finishes` resends one chunk at a time and counts no time. musubi's senders keep a
-window of chunks in flight, each request with a deadline from when it was sent, so that a link
-too slow to carry a window before the deadline cuts an attempt short. Of an attempt's window
-the receiver takes the first `m` chunks, in order, and the sender hears its replies to the
-first `k` before the deadline (`attempt`), going on from the furthest prefix they report
-(`next`). The chunks it doesn't hear of may still arrive, after it has stopped waiting
-(`ARun.late`).
+`prefix_finishes` resends one chunk at a time and counts no time. musubi's senders keep a window
+of chunks in flight, each request with a deadline from when it was sent, as long again for each
+chunk ahead of it in the window, so that a link too slow to carry a chunk within a deadline, or a
+hub that stops answering for a while, cuts an attempt short. Of an attempt's window the receiver
+takes the first `m` chunks, in order, and the sender hears its replies to the first `k` before the
+deadline (`attempt`), going on from the furthest prefix they report (`next`). The chunks it
+doesn't hear of may still arrive, after it has stopped waiting (`ARun.late`).
 
 From within the receiver's prefix, an attempt that hears `k` replies takes the prefix at least
 `k` chunks on, or to the end (`attempt_progress`). One from the beginning, as musubi's senders
@@ -1219,8 +1219,10 @@ renews the blob at both ends; a chunk that moves nothing (`touch`), as a sender 
 blob of a request or a reply while another moves, does too; a chunk arriving late, at the
 receiver. musubi's touches renew only the hub's end; a node sweeps what it holds only as a call
 begins, a day old, so that its end of a call's transfers needs no renewal while the call
-lasts. The hub also forgets a prepared blob a minute after serving its last chunk, which the
-model doesn't count: a call needs no blob again once it has downloaded it.
+lasts. The hub also forgets a prepared blob 18 minutes after serving its last chunk, which the
+model doesn't count: the longest a window waits for its replies, and a request after it, so that
+a chunk of the last window cut short can be asked for again; a call needs no blob again once it
+has downloaded it.
 
 A fair run (`FairRun`) is one of these steps but the sweeps, in which no more than `gap` passes
 without an attempt that delivers a chunk, or a touch. Every state a fair run reaches from a state
@@ -1233,8 +1235,9 @@ reaches, one of `ameasure` attempts that hear a reply ends with the receiver sto
 
 That attempts which hear a reply keep coming, `ameasure` of them, is the network's part. On a
 real link it depends also on how much of the sender's own earlier windows, timed out, still
-takes the link's time ahead of it, which narrowing the window after a timeout bounds, and which
-the model doesn't count. -/
+takes the link's time ahead of it, which the model doesn't count: deadlines that grow with a
+chunk's place in its window keep a link that carries a chunk within a deadline from cutting a
+window short, and narrowing the window after a timeout bounds what one cut short leaves. -/
 
 /-- A transfer in time: the receiver, where the sender goes on from, whether the sender still
 has the blob, and how long since a chunk last touched the sender's blob, and what the receiver

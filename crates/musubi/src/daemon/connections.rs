@@ -13,7 +13,7 @@ use futures::future::Shared;
 use musubi_sync::remote::OpenConnection;
 use musubi_transport::stream::WhileDisconnected;
 
-use super::REQUEST_TIMEOUT;
+use super::CONNECT_TIMEOUT;
 use crate::hub::Connection;
 
 /// How long a copy waits to open a connection of its own for a large transfer, before it
@@ -123,7 +123,7 @@ impl Hubs {
             // rather than waiting out its timeouts, so that the copy says why at once and
             // waits for the hub itself.
             let next = WhileDisconnected::NextAttempt;
-            let connected = crate::hub::connect_with(&ended.hub, REQUEST_TIMEOUT, next)
+            let connected = crate::hub::connect_with(&ended.hub, CONNECT_TIMEOUT, next)
                 .await
                 .map(Arc::new)
                 .map_err(|err| format!("{err:#}"));

@@ -342,7 +342,8 @@
         "e30",
         "e66",
         "e67",
-        "e68"
+        "e68",
+        "e69"
       ]
     },
     {
@@ -1202,6 +1203,15 @@
       "detail": "Calls slow enough for the hub to sweep old blobs still finish, moving no chunk twice.",
       "needs": [],
       "provenance": "documented"
+    },
+    {
+      "id": "e69",
+      "claim": "resume",
+      "mechanism": "faults",
+      "source": "crates/musubi-sync/tests/it/faults.rs#calls_finish_on_a_slow_link",
+      "detail": "Calls over a link that takes most of a deadline to carry each chunk finish, carrying no chunk twice.",
+      "needs": [],
+      "provenance": "documented"
     }
   ],
   "sources": {
@@ -1656,6 +1666,10 @@
     "crates/musubi-sync/tests/it/faults.rs#blobs_last_while_chunks_of_them_move": {
       "path": "crates/musubi-sync/tests/it/faults.rs",
       "symbol": "blobs_last_while_chunks_of_them_move"
+    },
+    "crates/musubi-sync/tests/it/faults.rs#calls_finish_on_a_slow_link": {
+      "path": "crates/musubi-sync/tests/it/faults.rs",
+      "symbol": "calls_finish_on_a_slow_link"
     },
     "crates/musubi-sync/tests/it/faults.rs": {
       "path": "crates/musubi-sync/tests/it/faults.rs",

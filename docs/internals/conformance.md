@@ -1632,24 +1632,30 @@ run of `TStep`s (`fair_tsteps`), and its attempts a run of `ARun`'s (`fair_arun`
 finishes (`fair_finishes`); and a transfer whose sender's blob was swept never does
 (`swept_source_stalls`). That an attempt of a fair run hears a reply at all is the network's
 part: on a real link it also depends on how much of the sender's own windows, timed out, still
-takes the link's time ahead of it, which narrowing the window after a timeout bounds, and which
-the model doesn't count.
+takes the link's time ahead of it, which the model doesn't count. Giving each chunk of a window
+a deadline for it and for each chunk ahead of it keeps a link that carries a chunk within a
+deadline from cutting a window short at all, and narrowing the window after a timeout bounds
+what one cut short leaves.
 
 In the code, ages are files' modification times, `renew` is `blobs::RENEW_AFTER` (ten minutes),
 and `life` an hour on the hub (`PREPARED_BLOB_LIFETIME`) and a day on a node
 (`UNUSED_BLOB_LIFETIME`). While a transfer is under way its chunks are minutes apart at most, as
-long as the link carries any: a request times out after 30 seconds, a call tries again at once,
-going on as long as each timeout comes after a chunk took a blob further than ever in the call,
-and the daemon tries a failed sync again within a minute. An upload reads its blob with
-`read_chunk`, as the hub does a download's, so that a chunk renews the sender's blob at both
-ends. While a call moves one blob, it touches the others of its request or reply beside each
-window: those it has uploaded, with an empty `PutChunk` at their end, and those of the reply it
-has yet to download, with a `GetChunk` of no bytes. A touch renews only the hub's end, unlike
-the model's: a node sweeps what it holds only as a call begins, a day old, so that its end of a
-call's transfers needs no renewal while the call lasts. The hub also forgets a prepared blob a
-minute after serving its last chunk, which the model doesn't count: once the reply has come, a
-call goes on with its downloads rather than asking for it again, and needs no blob again once
-it has downloaded it. Tests tie the model to the code:
+long as the link carries any: a request times out after two minutes (`REQUEST_TIMEOUT`), a chunk
+of a window after as long again for each chunk ahead of it; a call tries again at once, going on
+as long as each timeout comes after a chunk took a blob further than ever in the call, and the
+daemon tries a failed sync again within a minute. A window of eight chunks takes 16 minutes at
+most, so the touches beside each window are that far apart at most, and `renew` and that gap
+together are well within the hub's hour. An upload reads its blob with `read_chunk`, as the hub
+does a download's, so that a chunk renews the sender's blob at both ends. While a call moves one
+blob, it touches the others of its request or reply beside each window: those it has uploaded,
+with an empty `PutChunk` at their end, and those of the reply it has yet to download, with a
+`GetChunk` of no bytes. A touch renews only the hub's end, unlike the model's: a node sweeps what
+it holds only as a call begins, a day old, so that its end of a call's transfers needs no renewal
+while the call lasts. The hub also forgets a prepared blob 18 minutes after serving its last
+chunk, which the model doesn't count: the longest a window waits for its replies, and a request
+after it, so that a chunk of the last window cut short can be asked for again; once the reply has
+come, a call goes on with its downloads rather than asking for it again, and needs no blob again
+once it has downloaded it. Tests tie the model to the code:
 
 - `blobs::tests::chunks_renew_what_they_touch` checks the renewal against `Chunks.refresh`,
   through the oracle: a chunk read to send, one taken of a stored blob, and one taken of a
@@ -1671,6 +1677,11 @@ it has downloaded it. Tests tie the model to the code:
   would for a blob downloaded before a later one timed out if the call asked for the reply
   again. It fails if timeouts count against the call however far its blobs went, in either
   its uploads or its downloads.
+- `faults::calls_finish_on_a_slow_link` makes a push and a fetch of more than a window of
+  chunks over a link that takes 80 seconds to carry a chunk each way, one message after another,
+  with the production deadline: each call must get its reply without any chunk crossing the
+  link twice. It fails if a window's chunks all have one deadline: those cut short still cross
+  the link, and cross it again behind the next attempt's.
 - `faults::calls_give_up_on_a_request_never_answered` makes a push the hub never answers in
   time, its request too large to send whole, so that each time the call asks it uploads the
   request again: the call must give up, since that takes no blob further than it had been. It

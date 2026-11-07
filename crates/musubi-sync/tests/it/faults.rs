@@ -40,7 +40,10 @@ use musubi_sync::OpId;
 use musubi_sync::blobs::BlobId;
 use musubi_sync::driver::NodeDriver;
 use musubi_sync::hub::HubAdapter;
+use musubi_sync::remote::REQUEST_TIMEOUT;
+use musubi_sync::remote::RESENDS;
 use musubi_sync::remote::RemoteHub;
+use musubi_sync::remote::WINDOW;
 use musubi_sync::service::HubService;
 use musubi_sync::wire::Envelope;
 use musubi_sync::wire::HubReply;
@@ -322,8 +325,8 @@ fn blobs_prepared_again_last_as_long_as_new_ones() {
         .unwrap();
     let dir = musubi_testutil::tempdir();
     let hub_dir = dir.path().join("hub");
-    // The minute the hub keeps a blob it has served, which the test makes pass without
-    // waiting it out.
+    // How long the hub keeps a blob it has served, a minute here, shorter than the hub's own,
+    // which the test makes pass without waiting it out.
     let served_lifetime = Duration::from_secs(60);
     let mut hub = session
         .hub_after(call.start, &hub_dir)
@@ -474,7 +477,10 @@ fn calls_finish_on_a_link_that_cuts_every_window_short() {
                 .await
                 .unwrap_or_else(|err| panic!("the {kind} failed: {err:#}"));
             let cut = link.state.lock().unwrap().cut;
-            assert!(cut > 2 * 19, "the {kind} timed out only {cut} times");
+            assert!(
+                cut > 2 * RESENDS as usize,
+                "the {kind} timed out only {cut} times"
+            );
             let reply = map_reply(reply, |id| id.to_bytes(), |_| Ok(())).unwrap();
             assert_eq!(reply, call.reply, "the {kind}");
         });
@@ -587,6 +593,207 @@ impl Transport for Cutting {
             state.came.insert(chunk);
         }
         reply
+    }
+}
+
+/// A call over a link that takes 80 seconds to carry a chunk each way, slower than a chunk
+/// per minute, yet faster than one per [`REQUEST_TIMEOUT`], gets its reply, a push and a
+/// fetch of more than a window of chunks, without any chunk crossing the link twice: each
+/// chunk of a window waits for its reply as long again for each chunk ahead of it, so that
+/// none is cut short, carried for nothing, and sent again behind those that were.
+#[test]
+fn calls_finish_on_a_slow_link() {
+    let session = session();
+    let chunk = chunk_size(MAX_PAYLOAD);
+    for kind in ["push", "fetch"] {
+        let call = session
+            .calls
+            .iter()
+            .find(|call| {
+                let of_kind = match call.request {
+                    Request::Push { .. } => kind == "push",
+                    Request::Fetch { .. } => kind == "fetch",
+                    Request::GetObjects { .. } => false,
+                };
+                of_kind && chunks_moved(session, call) > WINDOW
+            })
+            .unwrap_or_else(|| panic!("no {kind} of the session moves a window of chunks"));
+        run_paused(async {
+            let dir = musubi_testutil::tempdir();
+            let hub_dir = dir.path().join("hub");
+            let network = MemoryNetwork::new(1, MAX_PAYLOAD);
+            serve(
+                session.hub_after(call.start, &hub_dir),
+                Arc::new(network.connect()),
+            )
+            .await;
+            let link = Throttled::new(
+                Arc::new(network.connect()),
+                Duration::from_secs(80) / u32::try_from(chunk).unwrap(),
+            );
+            let blobs = dir.path().join("node");
+            let remote = RemoteHub::new(link.clone(), RPC.into(), &blobs, REQUEST_TIMEOUT).unwrap();
+            let started = tokio::time::Instant::now();
+            let reply = remote
+                .call(call.request(&session.seen, &blobs))
+                .await
+                .unwrap_or_else(|err| panic!("the {kind} failed: {err:#}"));
+            let took = started.elapsed();
+            let reply = map_reply(reply, |id| id.to_bytes(), |_| Ok(())).unwrap();
+            assert_eq!(reply, call.reply, "the {kind}");
+            let state = link.state.lock().unwrap();
+            let carried = state.carried.len();
+            assert!(carried > WINDOW, "the {kind} carried only {carried} chunks");
+            assert!(
+                took >= link.carrying(state.bytes),
+                "the {kind} took only {took:?} to carry {} bytes of chunks",
+                state.bytes
+            );
+        });
+    }
+}
+
+/// How many chunks of blobs `call` moved, when the session was recorded.
+fn chunks_moved(session: &Session, call: &Call) -> usize {
+    session.seen.requests[call.start..call.start + call.requests]
+        .iter()
+        .filter(|bytes| match Envelope::decode(bytes).unwrap() {
+            HubRequest::PutChunk { data, .. } => !data.is_empty(),
+            HubRequest::GetChunk { len, .. } => len > 0,
+            _ => false,
+        })
+        .count()
+}
+
+/// A link that carries a byte each `per_byte` each way, one message after another, as a slow
+/// link does, on Tokio's paused clock. A request reaches the hub once the link has carried it
+/// and every request before it, whether its sender still waits or not, and the reply comes
+/// back once the link has carried it and the replies before it; the sender gets it if it comes
+/// within the request's timeout. It checks that no chunk crosses the link twice.
+struct Throttled {
+    per_byte: Duration,
+    /// Requests, in the order the link carries them.
+    up: tokio::sync::mpsc::UnboundedSender<Carry>,
+    state: Mutex<ThrottledState>,
+}
+
+#[derive(Default)]
+struct ThrottledState {
+    /// The chunks that crossed the link, by blob and offset, and their bytes.
+    carried: BTreeSet<(BlobId, u64)>,
+    bytes: usize,
+}
+
+/// A request on its way up a [`Throttled`] link, sent at `sent`.
+struct Carry {
+    sent: tokio::time::Instant,
+    subject: String,
+    payload: Bytes,
+    reply: tokio::sync::oneshot::Sender<Result<Bytes, TransportError>>,
+}
+
+impl Throttled {
+    /// A link to `inner`, carrying its requests up, then its replies down.
+    fn new(inner: Arc<dyn Transport>, per_byte: Duration) -> Arc<Self> {
+        let (up, mut carrying) = tokio::sync::mpsc::unbounded_channel::<Carry>();
+        let link = Arc::new(Self {
+            per_byte,
+            up,
+            state: Mutex::default(),
+        });
+        let weak = Arc::downgrade(&link);
+        tokio::task::spawn_local(async move {
+            let mut up_free = tokio::time::Instant::now();
+            let mut down_free = up_free;
+            while let Some(carry) = carrying.recv().await {
+                let Some(link) = weak.upgrade() else { return };
+                let (up, down) = match Envelope::decode(&carry.payload).unwrap() {
+                    HubRequest::PutChunk {
+                        blob, offset, data, ..
+                    } if !data.is_empty() => (Some((blob, offset, data.len())), None),
+                    HubRequest::GetChunk { blob, offset, len } if len > 0 => {
+                        (None, Some((blob, offset)))
+                    }
+                    _ => (None, None),
+                };
+                up_free = up_free.max(carry.sent) + link.carrying(carry.payload.len());
+                tokio::time::sleep_until(up_free).await;
+                if let Some((blob, offset, len)) = up {
+                    link.carried(blob, offset, len);
+                }
+                let reply = inner
+                    .request(&carry.subject, carry.payload, Duration::from_secs(3600))
+                    .await;
+                let len = reply.as_ref().map_or(0, Bytes::len);
+                down_free = down_free.max(up_free) + link.carrying(len);
+                if let (Some((blob, offset)), Ok(reply)) = (down, &reply) {
+                    let HubReply::Chunk { data, .. } = Envelope::decode(reply).unwrap() else {
+                        panic!("the hub sent no chunk of {blob:?} at {offset}");
+                    };
+                    link.carried(blob, offset, data.len());
+                }
+                tokio::task::spawn_local(async move {
+                    tokio::time::sleep_until(down_free).await;
+                    // A sender that has stopped waiting just misses the reply.
+                    carry.reply.send(reply).ok();
+                });
+            }
+        });
+        link
+    }
+
+    /// How long the link takes to carry `len` bytes.
+    fn carrying(&self, len: usize) -> Duration {
+        self.per_byte * u32::try_from(len).unwrap()
+    }
+
+    /// Notes that the chunk of `blob` at `offset`, `len` bytes long, crossed the link.
+    fn carried(&self, blob: BlobId, offset: u64, len: usize) {
+        let mut state = self.state.lock().unwrap();
+        assert!(
+            state.carried.insert((blob, offset)),
+            "{:?} crossed the link twice",
+            (blob, offset)
+        );
+        state.bytes += len;
+    }
+}
+
+#[async_trait::async_trait]
+impl Transport for Throttled {
+    fn max_payload(&self) -> usize {
+        MAX_PAYLOAD
+    }
+
+    async fn publish(&self, _: &str, _: Bytes) -> Result<(), TransportError> {
+        unimplemented!("a node publishes nothing here")
+    }
+
+    async fn subscribe(&self, _: &str) -> Result<Subscription, TransportError> {
+        unimplemented!("a node subscribes to nothing here")
+    }
+
+    async fn request(
+        &self,
+        subject: &str,
+        payload: Bytes,
+        timeout: Duration,
+    ) -> Result<Bytes, TransportError> {
+        let (reply, replied) = tokio::sync::oneshot::channel();
+        let carry = Carry {
+            sent: tokio::time::Instant::now(),
+            subject: subject.to_owned(),
+            payload,
+            reply,
+        };
+        self.up
+            .send(carry)
+            .map_err(|_| TransportError::Disconnected)?;
+        match tokio::time::timeout(timeout, replied).await {
+            Ok(Ok(reply)) => reply,
+            Ok(Err(_)) => Err(TransportError::Disconnected),
+            Err(_) => Err(TransportError::Timeout),
+        }
     }
 }
 
@@ -1817,6 +2024,16 @@ fn visible(repo: &TestRepo) -> String {
 fn run_local(future: impl Future<Output = ()>) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
+        .build()
+        .unwrap();
+    tokio::task::LocalSet::new().block_on(&runtime, future);
+}
+
+/// [`run_local`], on Tokio's paused clock, which jumps ahead whenever every task waits for it.
+fn run_paused(future: impl Future<Output = ()>) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
         .build()
         .unwrap();
     tokio::task::LocalSet::new().block_on(&runtime, future);

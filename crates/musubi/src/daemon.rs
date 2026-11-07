@@ -34,6 +34,7 @@ use musubi_sync::progress::Activity;
 use musubi_sync::progress::Progress;
 use musubi_sync::remote::HiveGone;
 use musubi_sync::remote::OpenConnection;
+use musubi_sync::remote::REQUEST_TIMEOUT;
 use musubi_sync::remote::RemoteHub;
 use musubi_sync::wire::Envelope;
 use musubi_sync::wire::HUB_TOKEN;
@@ -72,7 +73,9 @@ use crate::socket::Socket;
 use crate::watch::Watcher;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long to wait for a hub to answer when connecting: long enough for ssh's own
+/// `ConnectTimeout`, 20 seconds, and the hub's greeting after it.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_BACKOFF: Duration = Duration::from_secs(60);
 const REPORT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How often a repository that syncs is checked for whether gc is due, which counts its
@@ -1225,7 +1228,7 @@ pub async fn sync_once(
 ) -> anyhow::Result<Synced> {
     let mut status = Status::load(&located.repo_path).unwrap_or_default();
     let opened = async {
-        let connection = crate::hub::connect(&hive.hub, REQUEST_TIMEOUT).await?;
+        let connection = crate::hub::connect(&hive.hub, CONNECT_TIMEOUT).await?;
         let (driver, _) = open_driver(located, hive, &connection, None, progress)?;
         anyhow::Ok((connection, driver))
     };

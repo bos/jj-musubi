@@ -652,8 +652,9 @@ small. Something bulky (packs, large views, batches of operations) travels inlin
 or reply it belongs to when it fits in a quarter of that, and otherwise as a content-addressed
 blob, sent in chunks in a resumable session ([protocol.md, "Chunked
 blobs"](protocol.md#chunked-blobs)). The hub deletes a blob it prepared once it has served the
-last chunk and a minute has passed without a request for any chunk of it, and a blob no chunk has
-moved to or from for an hour, as of an unfinished session, expires. A blob prepared again, for
+last chunk and 18 minutes have passed without a request for any chunk of it, long enough for a
+node to ask again for a chunk of the last window whose reply came too late, and a blob no chunk
+has moved to or from for an hour, as of an unfinished session, expires. A blob prepared again, for
 another reply with the same content, counts as one prepared just now. A node deletes what it
 uploads or downloads once it is done with it, however the call ends, except a partial download,
 which it keeps for a later call to resume until it has gone a day untouched.
@@ -1211,7 +1212,14 @@ falling back to the shared one if it cannot be opened. The
 
 Every reconnect starts a fresh ssh process. Keepalives and sleep detection discard dead
 connections, while backoff prevents repeated ssh failures from launching processes or tunnel
-login prompts continuously. ssh's errors remain available in the copy's sync status.
+login prompts continuously. It is the connection that tells a dead link: ssh ends one that
+hears nothing from the hub's machine for a minute, which fails every request in flight on it at
+once. A request's deadline, two minutes, is how long a hub that is there may take to answer,
+and how long the link may take to carry a chunk; a hub that takes longer answers the request
+when the node asks again. Over a slow link, the hub machine's sshd says how much more it may
+take, about every 100 KB of an upload, so a minute without a word from it means the link
+carried under about 20 kbit/s for that minute, well under the 70 kbit/s a chunk needs to arrive
+within its deadline. ssh's errors remain available in the copy's sync status.
 
 ## Local integration
 

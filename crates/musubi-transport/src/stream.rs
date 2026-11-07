@@ -257,6 +257,7 @@ impl Shared {
                     subject,
                     payload,
                     reply,
+                    deadline: None,
                 };
                 if let Some(subscribed) = state.subscriptions.get_mut(&sid) {
                     subscribed.to.retain(|to| to.send(message.clone()).is_ok());

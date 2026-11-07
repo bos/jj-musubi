@@ -21,6 +21,9 @@ use crate::blobs::BlobId;
 use crate::blobs::BlobStore;
 use crate::blobs::Received;
 use crate::hub::HubAdapter;
+use crate::remote::REQUEST_TIMEOUT;
+use crate::remote::WINDOW;
+use crate::remote::chunk_deadline;
 use crate::short;
 use crate::wire::Envelope;
 use crate::wire::HeadNotice;
@@ -45,8 +48,10 @@ const REPLAY_LIFETIME: Duration = Duration::from_secs(600);
 const REPLAYS: usize = 8;
 
 /// How long the hub keeps a prepared blob after serving its last chunk, in case the node
-/// asks for a chunk again because a reply was lost.
-const SERVED_BLOB_LIFETIME: Duration = Duration::from_secs(60);
+/// asks for a chunk again because a reply didn't come in time: the requests of a window reach
+/// the hub together, but the node waits for the last of their replies as long as for a chunk
+/// one past the window's last ([`chunk_deadline`]), the time to ask again included.
+const SERVED_BLOB_LIFETIME: Duration = chunk_deadline(REQUEST_TIMEOUT, WINDOW);
 
 pub struct HubService {
     hub: HubAdapter,
@@ -161,6 +166,16 @@ impl HubService {
     /// What the latest request did, for the hub's activity.
     pub fn outcome(&self) -> Outcome {
         self.outcome
+    }
+
+    /// Whether a request whose sender has stopped waiting for the reply is still worth
+    /// handling: a chunk of an upload, whose bytes have crossed the link already, and take the
+    /// upload further for the sender's next attempt. Any other answer would go to nobody.
+    pub fn worth_handling_unheard(bytes: &[u8]) -> bool {
+        matches!(
+            Envelope::<HubRequest>::decode(bytes),
+            Ok(HubRequest::PutChunk { data, .. }) if !data.is_empty()
+        )
     }
 
     /// Handles one encoded request, returning the encoded reply and any head to announce.
@@ -345,8 +360,8 @@ impl HubService {
                     .unwrap_or(usize::MAX)
                     .min(chunk_size(max_payload));
                 let (total, data) = self.prepared.read_chunk(&blob, offset, len)?;
-                // Once one download has finished, another may still be going: the minute
-                // runs from the last chunk anyone asks for.
+                // Once one download has finished, another may still be going: the time it is
+                // kept runs from the last chunk anyone asks for.
                 if reaches_end(offset, data.len(), total) || self.served.contains_key(&blob) {
                     self.served.insert(blob, Instant::now());
                 }

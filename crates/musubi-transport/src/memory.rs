@@ -158,6 +158,7 @@ impl Transport for MemoryTransport {
             subject: subject.to_owned(),
             payload,
             reply: None,
+            deadline: None,
         };
         self.network.deliver(message);
         Ok(())
@@ -196,6 +197,10 @@ impl Transport for MemoryTransport {
             subject: subject.to_owned(),
             payload,
             reply: Some(inbox.clone()),
+            // On the real clock, which the threads that answer read: a test's paused Tokio
+            // clock only ever runs ahead of it, so that a responder never lets go of a request
+            // whose requester still waits.
+            deadline: std::time::Instant::now().checked_add(timeout),
         };
         self.network.deliver(message);
         let reply = tokio::time::timeout(timeout, replies.next()).await;

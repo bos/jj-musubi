@@ -492,6 +492,86 @@ async fn other_hives_are_served_while_a_busy_one_is_removed() {
     assert!(!watched.workers().removing.contains(&busy));
 }
 
+/// A request that waits for a busy hive's thread past its sender's deadline goes unanswered,
+/// as if lost: its sender has asked again, or given up, and working it out anyway, as a fetch
+/// that takes long to prepare, would hold up the repeat and other machines' requests. One
+/// whose sender still waits is answered, however long it waited, and a chunk of an upload is
+/// taken whether its sender waits or not, since its bytes have crossed the link already.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn requests_their_senders_gave_up_on_go_unanswered() {
+    let dir = musubi_testutil::tempdir();
+    let mut server = HubServer::open(dir.path()).unwrap();
+    let busy = server.lock().create("busy", Backend::Git).unwrap();
+    let hold = Arc::new(Hold::new(&busy));
+    server.hold = Some(hold.clone());
+    let network = MemoryNetwork::new(1, 1024 * 1024);
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(server.run(Arc::new(network.connect()), move || {
+        ready_tx.send(()).ok();
+    }));
+    ready_rx.await.unwrap();
+    let client: Arc<dyn Transport> = Arc::new(network.connect());
+    let send = |request: Bytes, within: Duration| {
+        let (client, subject) = (client.clone(), rpc_subject(&busy));
+        async move { client.request(&subject, request, within).await }
+    };
+    // Not a request a hive answers, but its thread works it out all the same, and counts it
+    // as failed.
+    let ask = |within: Duration| send(Bytes::from(encode(HubWideRequest::List)), within);
+    let bytes = b"a chunk that took long to cross".to_vec();
+    let blob = crate::blobs::BlobId::of_bytes(&bytes);
+    let total = bytes.len() as u64;
+    let put = |offset, data| {
+        let chunk = HubRequest::PutChunk {
+            blob,
+            total,
+            offset,
+            data,
+        };
+        Bytes::from(encode(chunk))
+    };
+
+    let held = tokio::spawn(ask(TIMEOUT));
+    hold.held().await;
+    let gone = Duration::from_millis(20);
+    for given_up in [send(put(0, bytes.clone()), gone).await, ask(gone).await] {
+        assert!(
+            matches!(given_up, Err(TransportError::Timeout)),
+            "{given_up:?}"
+        );
+    }
+    hold.release();
+    held.await.unwrap().unwrap();
+    ask(TIMEOUT).await.unwrap();
+
+    let reply = send(put(total, vec![]), TIMEOUT).await.unwrap();
+    assert_eq!(
+        Envelope::<HubReply>::decode(&reply).unwrap(),
+        HubReply::ChunkAck {
+            received: total,
+            complete: true
+        },
+        "the hive's thread let go of a chunk that had come"
+    );
+    let subject = rpc_subject(HUB_TOKEN);
+    let request = Bytes::from(encode(HubWideRequest::Activity));
+    let reply = client.request(&subject, request, TIMEOUT).await.unwrap();
+    let HubWideReply::Activity(activity) = Envelope::decode(&reply).unwrap() else {
+        panic!("expected the hub's activity");
+    };
+    let hive = activity.hives.iter().find(|hive| hive.info.id == busy);
+    assert_eq!(
+        hive.unwrap().traffic.failures,
+        2,
+        "the hive's thread worked out a request nobody waited for"
+    );
+}
+
+/// `request`, encoded.
+fn encode(request: impl serde::Serialize) -> Vec<u8> {
+    Envelope::encode(request).unwrap()
+}
+
 /// The hub-wide clone request reaches its production decoder with a nonempty binding map.
 /// Truncations and trailing bytes reserve nothing; a complete request reserves its names.
 #[test]

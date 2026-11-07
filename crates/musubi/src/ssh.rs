@@ -79,6 +79,17 @@ fn key_path() -> anyhow::Result<PathBuf> {
 
 /// ssh as the daemon runs it: with the machine's key, never prompting, without compression
 /// (musubi compresses what it sends), and giving up on a link that stops answering.
+///
+/// It is ssh that tells a dead link, which fails every request in flight on it at once: ssh
+/// ends a connection that hears nothing from the hub's machine for (`ServerAliveCountMax` + 1)
+/// `ServerAliveInterval`s, a minute, probing it every ten seconds, often enough to keep a NAT's
+/// mapping. While a node uploads, the hub answers nothing until a chunk has all come, and ssh's
+/// probes wait behind the chunks queued on the link, so what keeps the connection is the hub
+/// machine's sshd saying how much more it may send, about every 100 KB it takes in. Ending a
+/// connection after 30 seconds of that silence, as ssh did with a `ServerAliveCountMax` of 2, cut
+/// short uploads that still moved on links under about 40 kbit/s; a minute leaves room for the
+/// slowest link a request's deadline lets carry a chunk (`musubi_sync::remote::REQUEST_TIMEOUT`),
+/// even when what else shares it takes most of it for a while.
 fn connect_command(dest: &str, key: &Path) -> Command {
     let mut command = Command::new(program());
     command
@@ -96,7 +107,7 @@ fn connect_command(dest: &str, key: &Path) -> Command {
             "-o",
             "ServerAliveInterval=10",
             "-o",
-            "ServerAliveCountMax=2",
+            "ServerAliveCountMax=5",
             "-T",
             "--",
             dest,

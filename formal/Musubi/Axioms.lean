@@ -375,6 +375,18 @@ open Musubi
 #print axioms Chunks.preach_abs
 #print axioms Chunks.prefix_stored_identical
 #print axioms Chunks.prefix_finishes
+#print axioms Chunks.attempt_progress
+#print axioms Chunks.restart_stalls
+#print axioms Chunks.attempt_decreases
+#print axioms Chunks.late_le
+#print axioms Chunks.ameasure_reread
+#print axioms Chunks.attempts_finish
+#print axioms Chunks.attempts_bounded
+#print axioms Chunks.fair_tsteps
+#print axioms Chunks.fair_unswept
+#print axioms Chunks.fair_arun
+#print axioms Chunks.fair_finishes
+#print axioms Chunks.swept_source_stalls
 -- Non-vacuity
 #print axioms Scenario.scenario
 -- Executable model

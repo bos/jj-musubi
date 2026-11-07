@@ -652,11 +652,11 @@ small. Something bulky (packs, large views, batches of operations) travels inlin
 or reply it belongs to when it fits in a quarter of that, and otherwise as a content-addressed
 blob, sent in chunks in a resumable session ([protocol.md, "Chunked
 blobs"](protocol.md#chunked-blobs)). The hub deletes a blob it prepared once it has served the
-last chunk and a minute has passed without a request for any chunk of it, and unfinished sessions
-expire after an hour. A blob prepared again, for another reply with the same content, counts as
-one prepared just now. A node deletes what it uploads or downloads once it is done with it,
-however the call ends, except a partial download, which it keeps for a later call to resume until
-it has gone a day untouched.
+last chunk and a minute has passed without a request for any chunk of it, and a blob no chunk has
+moved to or from for an hour, as of an unfinished session, expires. A blob prepared again, for
+another reply with the same content, counts as one prepared just now. A node deletes what it
+uploads or downloads once it is done with it, however the call ends, except a partial download,
+which it keeps for a later call to resume until it has gone a day untouched.
 
 A sync takes few round trips: one if it brings something new, two if it pushes
 ([protocol.md, "Policy"](protocol.md#policy)).

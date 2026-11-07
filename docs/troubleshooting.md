@@ -102,9 +102,23 @@ about a minute over ssh, which waits longer between tries after each failure.
 After detecting that the machine has woken, the daemon ends old ssh connections and clears
 that delay.
 
+Over a slow link, "request timed out" can also come from a large sync that is still moving.
+Each try carries on from where the last left off, and the daemon tries again by itself, so the
+sync finishes as long as the link has more than about 300 kbit/s to spare for musubi, a
+megabyte in 30 seconds. On a slower link a large sync can't finish. `musubi sync` in a
+terminal shows how far a sync has got.
+
 If the hub runs with `--dir`, other machines can't find it: the `musubi hub connect` they run
 over ssh finds the hub that `musubi hub` last served without `--dir`. Add `--dir <dir>` to the
 `command=` in the line musubi added to `~/.ssh/authorized_keys` on the hub's machine.
+
+### "hub: no such blob" or "hub: attachment ... was not uploaded"
+
+The hub deleted data a sync still needed, after an hour in which nothing touched it, as when
+this machine slept partway through a large sync. The daemon tries again by itself, and the sync
+carries on from where it can. If this keeps happening while syncs are still moving, upgrade
+musubi on the hub's machine and on this one: earlier releases deleted such data an hour after it
+was last written, however much was still moving.
 
 ### "the hub has no record of this repository's hive ..."
 

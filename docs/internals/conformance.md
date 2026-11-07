@@ -13,7 +13,7 @@ results and state with the oracle. This document owns that correspondence and it
 | `Refs.lean`: per-machine refs | jj's import and export, and musubi's realization | `ref_laws` (the laws the model assumes), and `refs` and `view::tests`, through the oracle | [Per-machine refs](#per-machine-refs) |
 | `AbandonRefs.lean`: survivor graph and one ref | record adoption, fix-ups and publication in `NodeRepo` | `realization_beside_a_fetch_keeps_the_fetch_while_taking_an_abandon`, through the oracle | [Abandonment and refs](#abandonment-and-refs) |
 | `Expected.lean`: conflicted-ref history | `node/git.rs::expected` | `expected_history_conforms_to_model`, through the oracle | [Expected values from history](#expected-values-from-history) |
-| `Chunks.lean`: chunked blobs | `BlobStore::receive` | `receive_follows_the_prefix_model`, through the oracle | [Chunked blobs](#chunked-blobs) |
+| `Chunks.lean`: chunked blobs | `BlobStore::receive`, and `RemoteHub`'s `upload` and `download` | `receive_follows_the_prefix_model` and `transfers_follow_the_attempt_model`, through the oracle | [Chunked blobs](#chunked-blobs) |
 | `Copies.lean`: which local repository is a joined copy | `copy::standing`, `refine` and `check` | `copy::conformance::decisions_conformance`, through the oracle | [Copies](#copies) |
 | `Names.lean`: the names other machines' workspaces show under | `workspaces::display_names` | `workspaces::tests::names_conform`, through the oracle | [Workspace names](#workspace-names) |
 
@@ -1552,8 +1552,10 @@ that do not precede their child are refused. Requests do not change the protocol
 `formal/Musubi/Chunks.lean` proves that a finished blob is the one sent, despite corrupt, stale or
 duplicated chunks, and that every transfer finishes once chunks are delivered. It also models
 musubi's narrower receiver, `BlobStore::receive` (`crates/musubi-sync/src/blobs.rs`), which keeps
-only a contiguous prefix ([protocol.md, "Chunked blobs"](protocol.md#chunked-blobs)). The chain
-has two links:
+only a contiguous prefix ([protocol.md, "Chunked blobs"](protocol.md#chunked-blobs)), and
+musubi's senders, `RemoteHub::upload` and `RemoteHub::download`
+(`crates/musubi-sync/src/remote.rs`), which send a window of chunks at a time, each request with
+a deadline. The chain has three links:
 
 1. **Refinement.** `Chunks.receive` is the prefix receiver, and `PStep` its steps: a chunk
    delivered with any claimed length, and a sweep of the partial blob or the stored one.
@@ -1562,7 +1564,7 @@ has two links:
    `finishOk` then `crashRecv`, a mismatch is `crashRecv`, a chunk of a stored blob is
    `finishStored`, and the sweeps are `crashRecv` and `evict`. So `stored_identical` holds
    of it. A sender that resends from the prefix it reports finishes (`prefix_finishes`).
-2. **The steps.** The Hegel test `receive_follows_the_prefix_model`, in
+2. **The receiver's steps.** The Hegel test `receive_follows_the_prefix_model`, in
    `crates/musubi-sync/src/blobs.rs`, delivers up to 40 chunks at any offset up to one past the
    blob's end, some corrupt, some running past the end, some claiming a length one short or one
    long, and among them sweeps that remove the partial blob, the stored one, or both, so that
@@ -1574,6 +1576,30 @@ has two links:
    resends (3 for an empty blob): `⌈len / chunk⌉` to reach the end of a corrupt prefix and start
    over, as many again from the start (the steps of `prefix_finishes`'s measure), and one that
    finds the prefix gone after a sweep.
+3. **The senders' attempts.** In the model's attempt (`Chunks.attempt`), a sender sends a
+   window of honest chunks from an offset; the receiver takes the first `m`, in order, and the
+   sender hears its replies to the first `k` before the deadline, going on from the furthest
+   prefix they report (`Chunks.next`), or from where it started if it heard none. An uploader
+   starts each attempt from where it went on from after the last, or from the start once it
+   has started afresh; a downloader, being the receiver, from its own prefix
+   (`ARun.reread`). Each attempt is a run of `PStep`s, so the receiver's safety holds of it;
+   every attempt that hears a reply takes `ameasure` down (`attempt_decreases`), and nothing
+   else in a run takes it up (`late_le`, `ameasure_reread`), so that a run whose receiver
+   hasn't the blob has made fewer attempts that heard a reply than the measure of where it
+   started (`attempts_bounded`), and one of that many has stored it (`attempts_finish`). The
+   Hegel test `transfers_follow_the_attempt_model`, in `crates/musubi-sync/src/remote.rs`,
+   runs the real `upload` or `download` of a blob up to 4000 bytes long, in chunks of 256,
+   against a `HubService`, through a link on which, for each window, the first `m` chunks
+   reach the hub and replies to the first `k` of them come back in time, the rest timing out;
+   for a download, a chunk reaches the node only with its reply. Between calls, cut short by a
+   timeout, it may sweep the receiver's partial blob, and may start the sender afresh, as a
+   new process. It sends each window, as an attempt, and each sweep and fresh start to the
+   oracle, which runs `Chunks.attempt` itself from `initP`. After each window, its offsets,
+   the hub's replies to an upload's chunks, the receiver's partial blob and whether it has
+   stored the blob must be the oracle's. The test also checks the number of chunks in each
+   window, which the model leaves to the sender: as many as came back in time from the last
+   one cut short, or one; one more after each four in a row that all came back, up to eight;
+   and none past the end.
 
 | `BlobStore` | Model |
 | --- | --- |
@@ -1582,25 +1608,96 @@ has two links:
 | `Received::Prefix(n)`, `Received::Complete` | `some n`, `none` |
 | `sweep` of the partial blob, of the stored one | `sweepPartial` (`crashRecv`), `sweepStored` (`evict`) |
 | A chunk in the middle of a write when the process dies | `inject` of the part written, claiming a length past it |
+| A window of `PutChunk`s or `GetChunk`s, the deadline cutting it short | `attempt` of `m` delivered, `k` heard |
+| How far the hub last said it had an upload (`RemoteHub::told`) | The uploader's offset, `next` of what it heard |
+| What a download has received (`BlobStore::prefix`) | The downloader's offset, `ARun.reread` |
+| A new `RemoteHub`, as after a restart | The uploader's offset back to `0` |
+| A chunk of a window timed out that reaches the hub after all | `ARun.late` |
 
-A model without `evict` fails the test, since the code sweeps stored blobs.
+A model without `evict` fails the receiver's test, since the code sweeps stored blobs. A sender
+that starts each attempt from the beginning, as musubi's did, fails the senders' test as soon as
+an attempt is cut short after a chunk reached the receiver and, for an upload, the sender heard
+so: the model's next window starts from what the receiver reported. `restart_stalls` proves that
+such a sender takes the prefix nowhere once it holds the chunks an attempt delivers, however
+often it tries.
+
+The model's sweeps take place at any time, which the safety proof allows. In time, they don't:
+`TStep` adds the time since a chunk last touched the sender's blob and what the receiver has of
+it, sweeps either only once that reaches `life`, and renews each, at most every `renew`
+(`Chunks.refresh`), at an attempt that delivers a chunk, at a chunk that moves nothing
+(`touch`), and, at the receiver, at a chunk that arrives late. In a fair run (`FairRun`), no more
+than `gap` passes without an attempt or a touch. With `renew + gap ≤ life`, no state a fair run
+reaches can be swept (`fair_unswept`), a stored blob kept by touches among them; a fair run is a
+run of `TStep`s (`fair_tsteps`), and its attempts a run of `ARun`'s (`fair_arun`), so that it
+finishes (`fair_finishes`); and a transfer whose sender's blob was swept never does
+(`swept_source_stalls`). That an attempt of a fair run hears a reply at all is the network's
+part: on a real link it also depends on how much of the sender's own windows, timed out, still
+takes the link's time ahead of it, which narrowing the window after a timeout bounds, and which
+the model doesn't count.
+
+In the code, ages are files' modification times, `renew` is `blobs::RENEW_AFTER` (ten minutes),
+and `life` an hour on the hub (`PREPARED_BLOB_LIFETIME`) and a day on a node
+(`UNUSED_BLOB_LIFETIME`). While a transfer is under way its chunks are minutes apart at most, as
+long as the link carries any: a request times out after 30 seconds, a call tries again at once,
+going on as long as each timeout comes after a chunk took a blob further than ever in the call,
+and the daemon tries a failed sync again within a minute. An upload reads its blob with
+`read_chunk`, as the hub does a download's, so that a chunk renews the sender's blob at both
+ends. While a call moves one blob, it touches the others of its request or reply beside each
+window: those it has uploaded, with an empty `PutChunk` at their end, and those of the reply it
+has yet to download, with a `GetChunk` of no bytes. A touch renews only the hub's end, unlike
+the model's: a node sweeps what it holds only as a call begins, a day old, so that its end of a
+call's transfers needs no renewal while the call lasts. The hub also forgets a prepared blob a
+minute after serving its last chunk, which the model doesn't count: once the reply has come, a
+call goes on with its downloads rather than asking for it again, and needs no blob again once
+it has downloaded it. Tests tie the model to the code:
+
+- `blobs::tests::chunks_renew_what_they_touch` checks the renewal against `Chunks.refresh`,
+  through the oracle: a chunk read to send, one taken of a stored blob, and one taken of a
+  partial blob that adds nothing renew what they touch if `RENEW_AFTER` has passed since it
+  last was, and not otherwise.
+- `faults::blobs_last_while_chunks_of_them_move` makes a push and a fetch of two blobs each
+  over a link on which a minute passes before each request, as far as the hub's blobs can tell,
+  and the hub sweeps every hundred requests: one blob of each call waits over an hour, and the
+  call must get its reply without moving any chunk twice. It fails without the renewal of a
+  blob being read to send, or of a stored upload confirmed, and without touching the other
+  blobs of a request or a reply while one moves.
+- `remote::tests::uploads_the_hub_loses_go_again`: an upload the hub loses while the next
+  uploads goes again, from what the hub has, once a touch finds it gone, and a hub that loses
+  each as the other goes is given up on.
+- `faults::calls_finish_on_a_link_that_cuts_every_window_short` makes a push and a fetch of two
+  blobs each over a link that carries back in time the reply to only the first chunk of each
+  window: each call times out more than twice as often as it would ask again with nothing
+  moving, and must get its reply without asking again for a chunk whose reply came, as it
+  would for a blob downloaded before a later one timed out if the call asked for the reply
+  again. It fails if timeouts count against the call however far its blobs went, in either
+  its uploads or its downloads.
+- `faults::calls_give_up_on_a_request_never_answered` makes a push the hub never answers in
+  time, its request too large to send whole, so that each time the call asks it uploads the
+  request again: the call must give up, since that takes no blob further than it had been. It
+  fails if every reply to a chunk counts as going further.
 
 Not covered: a blob the receiver adds itself (`insert_file`, `insert_bytes`) during a
 transfer, which only the uploading machine does; a stored blob a power cut left torn, which
 `get` removes; and two receives of one blob at once, which the hub and the downloader don't
-make. The proof's sender resends one chunk at a time, where musubi's senders send windows of
-eight. A window from the prefix the receiver last reported starts with the proof's resend,
-and the rest are chunks the safety proof allows any time. A window from a stale prefix, the
-receiver having started over or swept the blob, puts nothing in the receiver, and its
-replies give the real prefix: the test's extra resend.
+make. The senders' test delivers a window's chunks in order, as one connection to the hub does,
+and gives each request of a window the same fate as the model's attempt does; the windows of
+other blobs that a call keeps at the hub aren't among its attempts. The chunks of an upload's
+window that time out may reach the hub later, after the next attempt has begun, which the model
+takes as `ARun.late`, not as part of an attempt. A reply too large to send whole travels as a
+blob downloaded before the call knows its attachments, which it can't touch meanwhile. No theorem
+covers a run of `TStep`s built step by step from its end, as a real one is: `FairRun` is built
+from its start, and every state partway through one ends a `FairRun` of its own.
 
 ```sh
-cargo nextest run -p musubi-sync -E 'test(/^blobs::/)'
+cargo nextest run -p musubi-sync -E 'test(/^blobs::/) | test(/^remote::/)'
 ```
 
-The test makes 200 cases, a few milliseconds each, one oracle serving them all. Dropping the
-check that the prefix is the length the chunk claims, so that a blob is stored when a chunk
-claims one byte too few, fails it at once, as does checking the hash a byte early.
+The receiver's test makes 200 cases, a few milliseconds each, and the senders' 100, a few
+milliseconds each on jj's simple backend, one oracle serving each test's. Dropping the check
+that the prefix is the length the chunk claims, so that a blob is stored when a chunk claims one
+byte too few, fails the receiver's test at once, as does checking the hash a byte early.
+Starting either sender's attempts at the beginning fails the senders' test, as does not
+narrowing the window after a timeout.
 
 The oracle's chunks request and reply, for a blob of three bytes:
 
@@ -1614,6 +1711,32 @@ sweep of the partial blob, the stored one, or both. The reply has, for each step
 receiver's reply to a chunk (`n` for `Received::Prefix(n)`, `null` for `Received::Complete`),
 the prefix it has, and whether it has stored the blob. A chunks request leaves the oracle's
 session as it was.
+
+The oracle's attempts request and reply, for a download of five bytes in chunks of two:
+
+```json
+{"op": "attempts", "blob": [1, 2, 3, 4, 5], "limit": 2, "sender": "download", "steps": [{"attempt": {"window": 3, "delivered": 1, "heard": 1}}, {"attempt": {"window": 2, "delivered": 2, "heard": 2}}]}
+{"ok": true, "steps": [{"next": 2, "offsets": [0, 2, 4], "pre": [1, 2], "replies": [2], "stored": false}, {"next": null, "offsets": [2, 4], "pre": [], "replies": [4, null], "stored": true}]}
+```
+
+`sender` is `upload` or `download`, and `limit` the chunk size. A step is an attempt with a
+window of `window` chunks, of which the receiver takes the first `delivered` and the sender
+hears of the first `heard`, which the oracle refuses unless `heard ≤ delivered ≤ window`; a
+sweep, as in a chunks request; or `{"restart": true}`, the sender starting afresh. The reply
+has, for each attempt, the offsets of its window, the receiver's replies to the chunks it took,
+the prefix it has, whether it has stored the blob, and where the sender goes on from (`null`
+once it has heard that the receiver has the blob); for the other steps, the prefix and whether
+the blob is stored. An attempts request leaves the oracle's session as it was.
+
+The oracle's refresh request and reply, for ages either side of `renew`, ten minutes:
+
+```json
+{"op": "refresh", "renew": 600, "ages": [0, 599, 600, 3600]}
+{"ok": true, "ages": [0, 599, 0, 0]}
+```
+
+The reply has, for each age, what `Chunks.refresh` makes of it, as a chunk touches the blob:
+`0` where it renews it.
 
 ## Copies
 

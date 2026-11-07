@@ -33,8 +33,9 @@ use crate::wire::inline_limit;
 use crate::wire::map_reply;
 use crate::wire::map_request;
 
-/// How long the hub keeps a blob it prepared for a node that never downloaded all of it,
-/// and an abandoned upload.
+/// How long the hub keeps a blob it prepared, or a node's upload, that no chunk has moved to
+/// or from: one a node is still downloading or uploading is renewed as chunks of it move
+/// ([`crate::blobs::RENEW_AFTER`]), so that this sweeps only blobs nobody went on with.
 const PREPARED_BLOB_LIFETIME: Duration = Duration::from_secs(3600);
 
 /// How long the hub answers a repeated protocol request with the reply it gave before, and
@@ -134,6 +135,15 @@ impl HubService {
 
     pub fn hub(&self) -> &HubAdapter {
         &self.hub
+    }
+
+    /// Prepares `bytes` for nodes to download, as for a reply too large to send whole, for
+    /// tests of downloading.
+    #[cfg(test)]
+    pub(crate) fn prepare(&mut self, bytes: &[u8]) -> anyhow::Result<(BlobId, u64)> {
+        let (blob, len) = self.prepared.insert_bytes(bytes)?;
+        self.served.remove(&blob);
+        Ok((blob, len))
     }
 
     /// Prunes the hive's records, once every machine it waits for has taken them
@@ -334,7 +344,7 @@ impl HubService {
                 let len = usize::try_from(len)
                     .unwrap_or(usize::MAX)
                     .min(chunk_size(max_payload));
-                let (total, data) = self.prepared.read(&blob, offset, len)?;
+                let (total, data) = self.prepared.read_chunk(&blob, offset, len)?;
                 // Once one download has finished, another may still be going: the minute
                 // runs from the last chunk anyone asks for.
                 if reaches_end(offset, data.len(), total) || self.served.contains_key(&blob) {
@@ -434,7 +444,7 @@ impl HubService {
         });
     }
 
-    /// Deletes prepared blobs nobody downloaded in time, and abandoned uploads.
+    /// Deletes prepared blobs and uploads that no chunk has moved for an hour.
     fn sweep(&self) {
         let cutoff = SystemTime::now() - PREPARED_BLOB_LIFETIME;
         self.uploads.sweep(cutoff);

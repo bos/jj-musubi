@@ -7,6 +7,17 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- Large syncs over slow links finish. Each try at a large upload or download now carries on
+  from where the last left off. Before, every try started over, so on a link too slow to move
+  eight megabytes in 30 seconds, about 2 Mbit/s, it timed out at the same point each time,
+  and the sync failed with "request timed out" again and again. After a timeout, a machine
+  also moves less at a time, and a sync that keeps moving goes on rather than giving up. The
+  hub now keeps a transfer's data while it is still moving. Before, it deleted it an hour
+  after it was last written, so a sync whose transfers took longer failed with "hub: no such
+  blob" or "hub: attachment ... was not uploaded". Upgrade the hub and every machine: each
+  machine carries on from where it left off once it is upgraded, and the hub keeps a
+  transfer's data while it moves once both are.
+
 - `musubi leave` in a copy whose hive was removed from its hub takes it out, as it does any
   other copy. Previously it refused, advising `musubi join --hive`.
 

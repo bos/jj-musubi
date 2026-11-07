@@ -7,6 +7,13 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- After a hub is lost, `musubi join` makes each hive made by name from copies of one repository
+  again under its own name, as `musubi create <name>` made it. Before, once one of them was
+  made again, the others were refused as belonging in it, with advice that would have merged
+  them into it. It is still refused when the copy belongs in a hive on the hub and its hive's
+  name is another hive's, or it knows none. This changes the protocol to 18: upgrade the hub and
+  every machine together.
+
 - A hive named after a remote or a directory whose name has spaces, or `%`-escapes such as
   `%20`, gets a name it can have: `My Project` names it `My-Project`. Before, `musubi create`
   refused it, naming a name the user never typed, or named it `My%20Project`, and `musubi join`

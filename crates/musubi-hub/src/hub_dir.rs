@@ -80,8 +80,9 @@ pub enum JoinChoice {
     /// remote or directory.
     Create(Option<String>),
     /// The one with this id, which the joining repository was part of (`musubi join` in a
-    /// repository whose hive the hub lacks): the hive made again, empty, under its id, and
-    /// under this name if it's free, unless it was removed, or the repository belongs in
+    /// repository whose hive the hub lacks): the hive made again, empty, under its id, unless
+    /// it was removed. Under this name, if no hive has it, as `Create` with the name would
+    /// make it; otherwise as `Create` without one would, refused if the repository belongs in
     /// another hive here. A hive with this id that the hub has is joined.
     Remake { id: String, name: Option<String> },
 }
@@ -702,12 +703,22 @@ impl HubDir {
             }
             _ => None,
         };
+        // A hive made again under a name no hive here has is made as `musubi create <name>`
+        // would make it, though the repository matches another: as the one it was made beside
+        // on purpose, say. Under another name, it is made as an unnamed create would be, and
+        // refused if it belongs in a hive here, as one made by hand meanwhile.
+        let remade_named = match &request.choice {
+            JoinChoice::Remake {
+                name: Some(name), ..
+            } => names::check_name(name).is_ok() && !self.name_taken(name),
+            _ => false,
+        };
         let candidates = self.candidates(request, probed)?;
         let joiner = Joiner {
             has_commits: !request.roots.is_empty(),
             chosen,
-            create: matches!(request.choice, JoinChoice::Create(_)),
-            named: new_name.is_some(),
+            create: matches!(request.choice, JoinChoice::Create(_)) || remade_named,
+            named: new_name.is_some() || remade_named,
             remotes: request
                 .remotes
                 .iter()
@@ -726,8 +737,8 @@ impl HubDir {
             decision = Decision::Refuse(refusal);
         }
         let (id, created, reason) = match (&request.choice, decision) {
-            // A lost hive is made again, unless the repository belongs in a hive the hub has:
-            // one made again by hand meanwhile, say.
+            // A lost hive is made again, unless it has no name of its own here and the
+            // repository belongs in a hive the hub has: one made again by hand meanwhile, say.
             (JoinChoice::Remake { .. }, Decision::Join { id, reason }) => {
                 let name = &self.hives[&id].meta.name;
                 return Err(format!(
@@ -1623,20 +1634,53 @@ mod tests {
         assert!(empty(), "kept the store a day after the hive was removed");
     }
 
+    /// Hives made apart on purpose, from copies of one repository, by name, are each made
+    /// again under its own name once the hub has lost them, though the copies match both.
+    #[test]
+    fn hives_made_apart_are_made_again_apart() {
+        let dir = musubi_testutil::tempdir();
+        let mut hubs = HubDir::open(dir.path()).unwrap();
+        let mut made = vec![];
+        for (machine, name) in [("alpha", "proj"), ("beta", "proj-exp")] {
+            let named = JoinRequest {
+                choice: JoinChoice::Create(Some(name.to_owned())),
+                ..request(machine, "https://example.com/proj")
+            };
+            let joined = hubs.join(&named).unwrap();
+            made.push((machine, joined.hive.id, joined.hive.name));
+        }
+        // A new hub, in place of the one lost.
+        let dir = musubi_testutil::tempdir();
+        let mut hubs = HubDir::open(dir.path()).unwrap();
+        for (machine, id, name) in made {
+            let remake = JoinRequest {
+                choice: JoinChoice::Remake {
+                    id: id.clone(),
+                    name: Some(name.clone()),
+                },
+                ..request(machine, "https://example.com/proj")
+            };
+            let joined = hubs.join(&remake).unwrap();
+            assert!(joined.created);
+            assert_eq!((joined.hive.id, joined.hive.name), (id, name));
+        }
+    }
+
     /// A repository that was part of a hive the hub has lost makes it again, under its id
-    /// and name; but not a removed hive, nor one it belongs beside; and joins it if it's
-    /// there.
+    /// and name; but not a removed hive, nor one it belongs beside when the hub has its name or
+    /// it has none; and joins it if it's there.
     #[test]
     fn a_lost_hive_is_made_again_by_joining() {
         let dir = musubi_testutil::tempdir();
         let mut hubs = HubDir::open(dir.path()).unwrap();
-        let remake = |id: &str, name: &str| JoinRequest {
+        let remake_as = |id: &str, name: Option<&str>| JoinRequest {
             choice: JoinChoice::Remake {
                 id: id.to_owned(),
-                name: Some(name.to_owned()),
+                name: name.map(str::to_owned),
             },
             ..request("alpha", "https://example.com/a")
         };
+        let remake = |id: &str, name: &str| remake_as(id, Some(name));
         let lost = Uuid::new_v4().to_string();
         let joined = hubs.join(&remake(&lost, "mine")).unwrap();
         assert!(joined.created);
@@ -1647,13 +1691,16 @@ mod tests {
         // Made again already: joined.
         let joined = hubs.join(&remake(&lost, "mine")).unwrap();
         assert!(!joined.created);
-        // Another lost hive of the same repository belongs beside this one: refused.
-        let err = hubs
-            .join(&remake(&Uuid::new_v4().to_string(), "x"))
-            .unwrap_err();
-        assert!(err.contains("belongs in hive mine"), "{err}");
-        // `musubi leave` alone would fail to tell the hive the hub lacks.
-        assert!(err.contains("`musubi leave --force`"), "{err}");
+        // Another lost hive of the same repository, under the name of this one, or none,
+        // belongs beside it: refused.
+        for name in [Some("mine"), None] {
+            let err = hubs
+                .join(&remake_as(&Uuid::new_v4().to_string(), name))
+                .unwrap_err();
+            assert!(err.contains("belongs in hive mine"), "{err}");
+            // `musubi leave` alone would fail to tell the hive the hub lacks.
+            assert!(err.contains("`musubi leave --force`"), "{err}");
+        }
         hubs.remove(&lost).unwrap();
         let err = hubs.join(&remake(&lost, "mine")).unwrap_err();
         assert!(err.contains("removed"), "{err}");

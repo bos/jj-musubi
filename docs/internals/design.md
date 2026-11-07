@@ -515,14 +515,18 @@ made again, and the machines' repositories fill the new one.
 
 A new hub doesn't have the hive id the nodes know, so it answers their requests "no hive", and
 their syncs fail, saying so. `musubi join` in one copy then makes the hive again (a join with
-`JoinChoice::Remake`), empty, under its id and the name the copy knew, or if that's taken, a name
-from its remote or directory. It refuses if the hub removed that hive, or if the copy belongs in a
-hive the hub has, as an unnamed `musubi create` would be refused. The other nodes find their hive
-at their next sync and fill it, as nodes follow any hub that goes back. A person makes the hive
-again, not the first node to sync, because a hub that doesn't know a hive may be the wrong hub,
-such as one started from another directory by mistake, which would otherwise fill up with every
-hive. `musubi join --hub` makes the hive again on another hub in the same way, which moves a copy
-there.
+`JoinChoice::Remake`), empty, under its id and the name the copy knew, as `musubi create <name>`
+would make it, though the copy matches another hive the hub has: hives made from copies of one
+repository under names of their own were made apart on purpose. If that name is another hive's, or
+the copy knows none, or none valid, it makes the hive under a name from its remote or directory,
+as an unnamed `musubi create` would, and refuses as that would if the copy belongs in a hive the
+hub has, such as one made again by hand meanwhile under that name. One made again by hand under
+another name stays apart, as the hub can't tell it from one made apart on purpose. It refuses too
+if the hub removed that hive. The other nodes find their hive at their next sync and fill it, as
+nodes follow any hub that goes back. A person makes the hive again, not the first node to sync,
+because a hub that doesn't know a hive may be the wrong hub, such as one started from another
+directory by mistake, which would otherwise fill up with every hive. `musubi join --hub` makes the
+hive again on another hub in the same way, which moves a copy there.
 
 A hub does that itself for a hive whose store it finds corrupt as it opens it, its heads file
 torn, say. The store goes under `removed/`, and the hive is made again, empty, under its id, name,

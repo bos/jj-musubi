@@ -347,6 +347,7 @@ pub struct Member {
 
 fn parse_lease(text: &str) -> Result<Duration, String> {
     musubi_jj::presence::parse_forget_after(text)
+        .ok()
         .flatten()
         .ok_or_else(|| "expected a duration of at least a second, such as `6h`".to_owned())
 }

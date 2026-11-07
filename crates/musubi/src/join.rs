@@ -14,6 +14,7 @@ use musubi_hub::hub_dir::JoinRequest;
 use musubi_hub::hub_dir::Joined;
 use musubi_jj::node::NodeRepo;
 use musubi_jj::objects::Backend;
+use musubi_jj::presence::BadForgetAfter;
 use musubi_sync::wire::HubWideReply;
 use musubi_sync::wire::HubWideRequest;
 
@@ -358,12 +359,12 @@ fn configured_forget_after(
     };
     let after = value
         .as_deref()
-        .and_then(musubi_jj::presence::parse_forget_after)
-        .with_context(|| {
-            format!(
-                "{key} in your {source} config is neither `never` nor a duration such as `6h`; \
-                 fix it and run this again"
-            )
+        .map_or(
+            Err(BadForgetAfter::NotADuration),
+            musubi_jj::presence::parse_forget_after,
+        )
+        .map_err(|why| {
+            anyhow::anyhow!("{key} in your {source} config {why}; fix it and run this again")
         })?;
     Ok(Some((source, after)))
 }

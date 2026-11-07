@@ -957,6 +957,16 @@ fn hub_join_sync_clone_and_list() {
     );
     insta::assert_snapshot!(err, @"Error: musubi.forget-after in your user config is neither `never` nor a duration such as `6h`; fix it and run this again");
     assert!(!delta.exists());
+    // Nor does one too short.
+    beta.jj(&["config", "set", "--user", "musubi.forget-after", "500ms"]);
+    let err = musubi_fails(
+        &env,
+        &logs,
+        &beta,
+        &["clone", "proj", delta.to_str().unwrap()],
+    );
+    insta::assert_snapshot!(err, @"Error: musubi.forget-after in your user config is shorter than a second, the least it can be; fix it and run this again");
+    assert!(!delta.exists());
     beta.jj(&["config", "unset", "--user", "musubi.forget-after"]);
 
     // A clone inherits global Git configuration too. Refuse a conflicting destination

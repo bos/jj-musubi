@@ -37,15 +37,27 @@ pub const WORK_ATTRIBUTE: &str = "musubi.work";
 pub const FORGET_AFTER_ATTRIBUTE: &str = "musubi.forget-after";
 
 /// How long a copy may go unused before a daemon forgets it, `None` for never: from
-/// `never`, or a duration as `humantime` reads one, such as `6h`, `1h 30m` or `2 days`.
-/// `None` if it is neither, or less than a second.
-pub fn parse_forget_after(text: &str) -> Option<Option<Duration>> {
+/// `never`, or a duration as `humantime` reads one, such as `6h`, `1h 30m` or `2 days`, of at
+/// least a second.
+pub fn parse_forget_after(text: &str) -> Result<Option<Duration>, BadForgetAfter> {
     let text = text.trim();
     if text == "never" {
-        return Some(None);
+        return Ok(None);
     }
-    let after = humantime::parse_duration(text).ok()?;
-    (after >= Duration::from_secs(1)).then_some(Some(after))
+    let after = humantime::parse_duration(text).map_err(|_| BadForgetAfter::NotADuration)?;
+    if after < Duration::from_secs(1) {
+        return Err(BadForgetAfter::TooShort);
+    }
+    Ok(Some(after))
+}
+
+/// Why a `musubi.forget-after` can't be read, as a message says after naming it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum BadForgetAfter {
+    #[error("is neither `never` nor a duration such as `6h`")]
+    NotADuration,
+    #[error("is shorter than a second, the least it can be")]
+    TooShort,
 }
 
 /// A `musubi.forget-after` as [`parse_forget_after`] reads it: `6h`, `1h 30m`, `never`.
@@ -87,7 +99,7 @@ impl Kind {
         let forget_after = metadata
             .attributes
             .get(FORGET_AFTER_ATTRIBUTE)
-            .and_then(|text| parse_forget_after(text));
+            .and_then(|text| parse_forget_after(text).ok());
         Self {
             work,
             forgets,
@@ -546,21 +558,32 @@ mod tests {
 
     #[test]
     fn forget_after_reads_and_writes() {
-        let hours = |h: u64| Some(Some(Duration::from_secs(h * 3600)));
+        let hours = |h: u64| Ok(Some(Duration::from_secs(h * 3600)));
         assert_eq!(parse_forget_after("6h"), hours(6));
         assert_eq!(parse_forget_after("6 hours"), hours(6));
         assert_eq!(
             parse_forget_after(" 1h 30m "),
-            Some(Some(Duration::from_secs(5400)))
+            Ok(Some(Duration::from_secs(5400)))
         );
         assert_eq!(
             parse_forget_after("1h30m"),
-            Some(Some(Duration::from_secs(5400)))
+            Ok(Some(Duration::from_secs(5400)))
         );
         assert_eq!(parse_forget_after("2days"), hours(48));
-        assert_eq!(parse_forget_after("never"), Some(None));
-        for bad in ["", "6", "h", "0h", "500ms", "6x", "-1h", "Never"] {
-            assert_eq!(parse_forget_after(bad), None, "{bad:?}");
+        assert_eq!(parse_forget_after("never"), Ok(None));
+        for bad in ["", "6", "h", "6x", "-1h", "Never"] {
+            assert_eq!(
+                parse_forget_after(bad),
+                Err(BadForgetAfter::NotADuration),
+                "{bad:?}"
+            );
+        }
+        for short in ["0h", "0s", "500ms"] {
+            assert_eq!(
+                parse_forget_after(short),
+                Err(BadForgetAfter::TooShort),
+                "{short:?}"
+            );
         }
         assert_eq!(
             format_forget_after(Some(Duration::from_secs(6 * 3600))),
@@ -573,7 +596,7 @@ mod tests {
         assert_eq!(format_forget_after(None), "never");
         for text in ["6h", "1h 30m", "9days", "45s", "1week", "never"] {
             let after = parse_forget_after(text).unwrap();
-            assert_eq!(parse_forget_after(&format_forget_after(after)), Some(after));
+            assert_eq!(parse_forget_after(&format_forget_after(after)), Ok(after));
         }
     }
 

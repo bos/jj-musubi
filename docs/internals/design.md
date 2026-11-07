@@ -451,9 +451,10 @@ unused remote name or another hive; renaming does not release the previous name'
 The client records exactly the approved snapshot, without rereading Git. Its operation
 attributes contain `musubi.join-hive`, indexed `musubi.join-url.*` discovery hints,
 `musubi.join-fetch.<name>` identities, and `musubi.join-push.<index>.<name>` identities. The
-index retains all distinct binding observations scoped to its own hive, so carried history
-from another hive does not impose its contracts. It can rebuild evidence from immutable
-operations; no timestamp ordering, latest-observation selection, or settings replay is needed.
+index retains all distinct binding observations and discovery hints scoped to its own hive, so
+carried history from another hive neither imposes its contracts nor matches its copies. It can
+rebuild evidence from immutable operations; no timestamp ordering, latest-observation
+selection, or settings replay is needed.
 
 `Resolve` refuses if accepted evidence disagrees with the fixed bindings. Clone then reads
 inherited Git config with the prospective Git directory as the context for conditional
@@ -775,14 +776,14 @@ are what is compared. Azure DevOps' https and ssh forms are made one. Each hive 
 hints recorded by explicit joins. After changing a remote to an equivalent URL, an existing copy
 can run `musubi join` again to register it.
 
-For this the hub keeps an index for each hive: the URL hints explicit joins recorded, every root
-commit it has stored, and the machines with workspaces at its head. The index is updated
-whenever a head is accepted, and is a cache: the hub rebuilds it from the hive's operations and
-objects when it is missing. A join also counts what the joining repository says it brings, its
-URLs and root commits, as its hive's for a couple of minutes, so that another copy joining before
-the first one's push finds the same hive. That stops once the joining machine's first push is
-accepted, which puts what it really brought in the index, or when the time is up, so a join that
-never pushes leaves nothing behind.
+For this the hub keeps an index for each hive: the URL hints explicit joins to it recorded,
+every root commit it has stored, and the machines with workspaces at its head. The index is
+updated whenever a head is accepted, and is a cache: the hub rebuilds it from the hive's
+operations and objects when it is missing. A join also counts what the joining repository says
+it brings, its URLs and root commits, as its hive's for a couple of minutes, so that another
+copy joining before the first one's push finds the same hive. That stops once the joining
+machine's first push is accepted, which puts what it really brought in the index, or when the
+time is up, so a join that never pushes leaves nothing behind.
 
 A new hive is named after the remote named `origin`, else the first remote by name, else the
 repository's directory. The name follows the forge: `owner/repo` on GitHub, Codeberg, Forgejo,

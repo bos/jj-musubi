@@ -76,32 +76,10 @@ impl HiveIndex {
         ops: &[OperationId],
         haves: &[CommitId],
     ) -> Result<(), StoreError> {
+        let hive = store.directory().file_name().and_then(|name| name.to_str());
         for id in ops {
             let operation = store.canonical().read_operation(&CanonicalOp(id.clone()))?;
-            if operation
-                .metadata
-                .attributes
-                .get(JOIN_HIVE)
-                .map(String::as_str)
-                == store.directory().file_name().and_then(|name| name.to_str())
-            {
-                for (name, binding) in
-                    JoinRemotes::recorded_bindings(&operation.metadata.attributes)
-                {
-                    self.remote_bindings
-                        .entry(name)
-                        .or_default()
-                        .insert(binding);
-                }
-            }
-            self.urls.extend(
-                operation
-                    .metadata
-                    .attributes
-                    .iter()
-                    .filter(|(key, _)| key.starts_with(JOIN_URL_PREFIX))
-                    .map(|(_, url)| url.clone()),
-            );
+            self.observe(hive, &operation.metadata.attributes);
         }
         let wants: Vec<CommitId> = store.required_commits(ops)?.into_iter().collect();
         let objects = store.object_store();
@@ -111,6 +89,30 @@ impl HiveIndex {
             self.roots.insert(root.hex());
         }
         Ok(())
+    }
+}
+
+impl HiveIndex {
+    /// Adds what an operation's `attributes` record of a join to hive `hive`, by id: nothing,
+    /// unless the join was to this hive. A copy carries the joins of the hives it was part of
+    /// before into the next it joins (docs/internals/design.md, "Join and clone preflight"),
+    /// and their URLs would match the other hives' copies to this one too.
+    fn observe(&mut self, hive: Option<&str>, attributes: &BTreeMap<String, String>) {
+        if attributes.get(JOIN_HIVE).map(String::as_str) != hive {
+            return;
+        }
+        for (name, binding) in JoinRemotes::recorded_bindings(attributes) {
+            self.remote_bindings
+                .entry(name)
+                .or_default()
+                .insert(binding);
+        }
+        self.urls.extend(
+            attributes
+                .iter()
+                .filter(|(key, _)| key.starts_with(JOIN_URL_PREFIX))
+                .map(|(_, url)| url.clone()),
+        );
     }
 }
 
@@ -127,4 +129,38 @@ fn head_machines(store: &HubStore) -> Result<BTreeSet<String>, StoreError> {
         .filter_map(|key| workspaces::split_key(key.as_str()))
         .map(|(machine, _)| machine.to_owned())
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use musubi_jj::remote_url::JOIN_FETCH_PREFIX;
+
+    use super::*;
+
+    /// A join's URLs are this hive's only if the join was to this hive: a copy that was part
+    /// of another hive brings that hive's joins along, whose URLs would otherwise match that
+    /// hive's copies here too, making their joins ambiguous.
+    #[test]
+    fn only_joins_to_this_hive_count() {
+        let join = |hive: &str, url: &str| -> BTreeMap<String, String> {
+            BTreeMap::from([
+                (JOIN_HIVE.to_owned(), hive.to_owned()),
+                (format!("{JOIN_URL_PREFIX}0"), url.to_owned()),
+                (format!("{JOIN_FETCH_PREFIX}origin"), url.to_owned()),
+            ])
+        };
+        let mut index = HiveIndex::default();
+        index.observe(Some("y"), &join("x", "https://github.com/bos/x"));
+        index.observe(Some("y"), &join("y", "https://github.com/bos/y"));
+        assert_eq!(
+            index.urls,
+            BTreeSet::from(["https://github.com/bos/y".to_owned()])
+        );
+        assert_eq!(
+            index.remote_bindings.keys().collect::<Vec<_>>(),
+            ["origin"],
+            "{index:?}"
+        );
+        assert_eq!(index.remote_bindings["origin"].len(), 1, "{index:?}");
+    }
 }

@@ -178,7 +178,7 @@ pub fn list(
             ui.hint(),
             "A copy not where it was syncs again if it comes back, or once jj runs in it where it \
              was moved to. If it's gone, `musubi leave {}` stops looking for it.",
-            entry.path.display()
+            crate::ui::shell_word(&entry.path.display().to_string())
         )?;
     }
     let mut out = ui.stdout();

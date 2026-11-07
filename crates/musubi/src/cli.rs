@@ -217,6 +217,8 @@ pub enum Command {
     /// behind it is, and how its syncing goes. Above them it lists the issues: hubs out of
     /// reach, requests the hub failed, machines that are offline, behind, or failing to
     /// sync, and this machine's daemon not running, where it has copies to sync.
+    /// An offline machine is listed once when it goes quiet; its hive's issue count and
+    /// red machine row keep showing it until it is heard from again.
     ///
     /// It asks this machine's default hub and the hubs of its copies, or the hub `--hub`
     /// names. Without a terminal, or with `--once`, it prints what it sees once, without

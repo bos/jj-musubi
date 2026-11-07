@@ -384,8 +384,12 @@ The CLI test above still covers the command, daemon restart and status output.
 `top::tests` renders the production `App::draw` into Ratatui's `TestBackend`, with inline
 snapshots preserving screen rows and cell assertions checking warning colors and selection.
 It covers loading, empty hubs, navigation and detail selection, resize, disappearing hives,
-unreachable hubs, issue overflow, refresh speed limits and quit keys. Its timing tests run the
-production sampling loop with Tokio time paused. They advance across refresh deadlines,
+unreachable hubs, issue overflow, refresh speed limits and quit keys.
+`a_silent_machine_is_an_issue_once` checks that continuing silence leaves room for new issues
+while keeping the hive's count and red rows, including departed copies' retained reports. It
+checks that contact between sparse polls rearms the warning even if the next poll is silent too.
+Its timing tests run the production sampling loop with Tokio time paused. They advance across
+refresh deadlines,
 change intervals, release slow samples, and exercise shutdown. Rate calculations
 read that same clock, including simultaneous samples and a restarted hub.
 `top::sample::tests::a_failed_hub_is_retried_at_the_deadline` advances to either side of the

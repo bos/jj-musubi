@@ -1,5 +1,6 @@
 //! Activity, rates, and issues rendered for plain output and the terminal.
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::time::Duration;
 
@@ -166,7 +167,12 @@ impl View {
             writeln!(out, "{line}").ok();
         }
         if self.issues.is_empty() {
-            writeln!(out, "No issues.").ok();
+            let message = if self.hives.iter().any(|hive| hive.issues > 0) {
+                "No new issues."
+            } else {
+                "No issues."
+            };
+            writeln!(out, "{message}").ok();
         } else {
             writeln!(out, "Issues:").ok();
             for issue in &self.issues {
@@ -315,10 +321,31 @@ impl HiveView {
         }
         let mut machines = vec![];
         let mut up_to_date = 0;
+        // A machine gone for good must not crowd out new issues on every refresh.
+        let told: HashSet<&str> = earlier
+            .into_iter()
+            .flat_map(|(_, hive)| &hive.machines)
+            .filter(|machine| is_silent(machine))
+            .map(|machine| machine.key.as_str())
+            .collect();
+        // Without contact, its age grows by elapsed from an age already over SILENT. With
+        // contact between polls, its age is at most elapsed. Half SILENT separates the two,
+        // allowing for the activity request's 10-second deadline and rounding. Use elapsed
+        // on the sampling clock: a restarted hub has a different origin for its uptime.
+        let elapsed = earlier.map_or(Duration::ZERO, |(elapsed, _)| elapsed);
+        let minimum_age = elapsed.saturating_add(Duration::from_secs(SILENT / 2));
+        let mut quiet = 0;
         for machine in &hive.machines {
             let (state, issue) = machine_state(machine, hive.head, activity.uptime);
             if issue {
-                issues.push(format!("{name}: {} {state}", machine.name));
+                let continuous_silence = machine
+                    .heard
+                    .is_some_and(|age| Duration::from_secs(age) > minimum_age);
+                if is_silent(machine) && told.contains(machine.key.as_str()) && continuous_silence {
+                    quiet += 1;
+                } else {
+                    issues.push(format!("{name}: {} {state}", machine.name));
+                }
             } else if machine.report.is_some() && machine.behind.is_none() {
                 up_to_date += 1;
             }
@@ -336,6 +363,7 @@ impl HiveView {
                 issue,
             ));
         }
+        let issue_count = issues.len() + quiet;
         let row = vec![
             name.clone(),
             hive.head.map_or("—".to_owned(), |head| format!("#{head}")),
@@ -344,10 +372,10 @@ impl HiveView {
             traffic.ops_in.to_string(),
             traffic.commits_in.to_string(),
             format!("{up_to_date}/{}", hive.machines.len()),
-            if issues.is_empty() {
+            if issue_count == 0 {
                 String::new()
             } else {
-                issues.len().to_string()
+                issue_count.to_string()
             },
         ];
         let mut totals = vec![
@@ -402,7 +430,7 @@ impl HiveView {
         let view = Self {
             hub: hub.to_owned(),
             row,
-            issues: issues.len(),
+            issues: issue_count,
             totals,
             machines,
             recent,
@@ -466,6 +494,11 @@ impl HiveView {
         .header(Row::new(RECENT_HEADER).bold());
         frame.render_widget(table, recent);
     }
+}
+
+/// Whether a machine has reported before but has since gone quiet, including departed copies.
+fn is_silent(machine: &MachineActivity) -> bool {
+    machine.report.is_some() && machine.heard.is_some_and(|heard| heard > SILENT)
 }
 
 /// What to say of `machine`, in a hive whose head is `head`, on a hub up `uptime` seconds,

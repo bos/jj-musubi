@@ -53,7 +53,9 @@ Each hive's row shows the bytes a second going into and out of the hub, and the 
 commits that came in since the hub started. Below, for the hive you pick with the arrow keys, it
 shows each machine and the latest updates, with the machine each came from and what `jj op log`
 calls it. The issues at the top need attention: a hub out of reach or failing requests, and
-machines offline, stuck behind, or failing to sync.
+machines offline, stuck behind, or failing to sync. An offline machine is listed only at the
+first refresh that finds it quiet, leaving room for new issues. Its hive's `ISSUES` still counts
+it and its row stays red. It is listed again if it is heard from and then goes quiet again.
 [Troubleshooting](../troubleshooting.md#what-musubi-top-reports) says what to do about each.
 
 `q` quits, `r` refreshes now, and `+` and `-` refresh less or more often. Without a terminal,

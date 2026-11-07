@@ -2,11 +2,17 @@
 //! abandoned.
 
 use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::slice;
 
 use jj_lib::backend::CommitId;
+use jj_lib::commit::Commit;
 use jj_lib::ref_name::WorkspaceNameBuf;
 use jj_lib::repo::ReadonlyRepo;
 use jj_lib::repo::Repo as _;
+use jj_lib::rewrite::CommitRewriter;
+use jj_lib::transaction::Transaction;
 use pollster::FutureExt as _;
 
 use super::NodeError;
@@ -102,7 +108,10 @@ impl NodeRepo {
     /// While the hive has forgotten this machine, an abandoned working copy stays where it is
     /// rather than get a new commit, which the other machines would see as an empty commit
     /// of no one's: the machine's next `jj` command rewrites it, as a snapshot, say, and that
-    /// work shows it again.
+    /// work shows it again. But no other machine sees it there either, so jj leaves it behind
+    /// when another machine rewrites or abandons its parents, and that snapshot would bring
+    /// them back. So it is rebased, still hidden, as jj would have rebased it
+    /// (`rebase_hidden`).
     pub fn replace_abandoned_working_copies(&mut self) -> Result<Vec<String>, NodeError> {
         self.replace_hidden_working_copies(false)
     }
@@ -130,7 +139,10 @@ impl NodeRepo {
             return Ok(vec![]);
         }
         let mut tx = repo.start_transaction();
-        let (mut abandoned, mut rewritten) = (vec![], vec![]);
+        let (mut abandoned, mut rewritten, mut rebased) = (vec![], vec![], vec![]);
+        // Each hidden commit rebased, by the commit it was, so that workspaces sharing one
+        // share its rebase too, as when jj rebases it.
+        let mut rebases: HashMap<CommitId, Option<CommitId>> = HashMap::new();
         for (name, wc) in hidden {
             let wc_commit = repo.store().get_commit_async(&wc).block_on()?;
             if let Some(rewrite) = visible_rewrite(&repo, wc_commit.change_id())? {
@@ -143,6 +155,20 @@ impl NodeRepo {
                 continue;
             }
             if forgotten {
+                let rebase = match rebases.get(&wc) {
+                    Some(rebase) => rebase.clone(),
+                    None => {
+                        let rebase = rebase_hidden(&repo, &mut tx, wc_commit)?;
+                        rebases.insert(wc, rebase.clone());
+                        rebase
+                    }
+                };
+                if let Some(commit) = rebase {
+                    tx.repo_mut()
+                        .set_wc_commit(name.clone(), commit)
+                        .map_err(index_err)?;
+                    rebased.push(name.as_str().to_owned());
+                }
                 continue;
             }
             // Where jj would have put the new working copy had this happened on this machine:
@@ -166,7 +192,7 @@ impl NodeRepo {
             tx.repo_mut().check_out(name.clone(), &parent).block_on()?;
             abandoned.push(name.as_str().to_owned());
         }
-        if abandoned.is_empty() && rewritten.is_empty() {
+        if abandoned.is_empty() && rewritten.is_empty() && rebased.is_empty() {
             return Ok(vec![]);
         }
         let mut description = vec![];
@@ -182,11 +208,74 @@ impl NodeRepo {
                 rewritten.join(", ")
             ));
         }
+        if !rebased.is_empty() {
+            description.push(format!(
+                "working copy of {} rebased, its parents rewritten or abandoned elsewhere",
+                rebased.join(", ")
+            ));
+        }
         tx.commit(format!("musubi: {}", description.join("; ")))
             .block_on()?;
         abandoned.extend(rewritten);
+        abandoned.extend(rebased);
         Ok(abandoned)
     }
+}
+
+/// The hidden working-copy commit `commit`, of a copy the hive has forgotten, rebased as jj
+/// would have rebased it had it seen what other machines did to its parents
+/// ([`new_parents`]), and written hidden: neither a head nor recorded as a rewrite, so that
+/// the hive hears nothing of it, as of the commit it replaces, until the copy's next work.
+/// `None` where its parents are where they were.
+fn rebase_hidden(
+    repo: &ReadonlyRepo,
+    tx: &mut Transaction,
+    commit: Commit,
+) -> Result<Option<CommitId>, NodeError> {
+    let parents = new_parents(repo, commit.parent_ids())?;
+    if parents == commit.parent_ids() {
+        return Ok(None);
+    }
+    let rebased = CommitRewriter::new(tx.repo_mut(), commit, parents)
+        .rebase()
+        .block_on()?
+        .detach()
+        .write_hidden()
+        .block_on()?;
+    // jj resolves `@` through the index, which has only the commits transactions add to it.
+    tx.repo_mut()
+        .index_commits(slice::from_ref(&rebased))
+        .block_on()?;
+    Ok(Some(rebased.id().clone()))
+}
+
+/// The parents jj would rebase a child of `parents` onto, as it does when it merges
+/// concurrent operations: a visible parent stays; a hidden one whose change has one visible
+/// commit, its rewrite, is replaced by that; and one whose change has none, abandoned, by
+/// what its own parents are replaced by. So too one whose change has several, diverged: had jj
+/// seen the child, each rewrite would have rebased it, but one child can follow only one, and
+/// neither says which.
+fn new_parents(repo: &ReadonlyRepo, parents: &[CommitId]) -> Result<Vec<CommitId>, NodeError> {
+    let mut new = vec![];
+    let mut to_visit: Vec<CommitId> = parents.iter().rev().cloned().collect();
+    let mut visited = HashSet::new();
+    while let Some(id) = to_visit.pop() {
+        if !visited.insert(id.clone()) {
+            continue;
+        }
+        if is_visible(repo, &id)? {
+            if !new.contains(&id) {
+                new.push(id);
+            }
+            continue;
+        }
+        let commit = repo.store().get_commit_async(&id).block_on()?;
+        match visible_rewrite(repo, commit.change_id())? {
+            Some(rewrite) => to_visit.push(rewrite),
+            None => to_visit.extend(commit.parent_ids().iter().rev().cloned()),
+        }
+    }
+    Ok(new)
 }
 
 /// Whether `commit` is one of `heads` or an ancestor of one.

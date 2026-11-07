@@ -7,6 +7,12 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- A hub on this machine given to `--hub` another way, as `../hub` or with a trailing `/`, is
+  the same hub. Previously each spelling was kept as a hub of its own, so `musubi list` showed
+  its hives under each. A copy that joined with such a spelling goes on showing under it:
+  run `musubi join --hub <dir>` in it again, giving the hub's directory as `musubi hub` prints
+  it.
+
 - Commands run from a directory deleted meanwhile say "the current directory no longer
   exists" if they act on the repository there, and the others, such as `musubi list` and
   `musubi daemon stop`, work, given no relative path. `musubi status` says so, and exits 0.

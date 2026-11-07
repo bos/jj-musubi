@@ -92,9 +92,9 @@ impl Located {
     }
 }
 
-/// `path` with its `.` and `..` taken out by its words alone, for a path that doesn't exist
-/// to show as it would canonical.
-fn lexically_normal(path: &Path) -> PathBuf {
+/// `path` with its `.`, `..` and trailing `/` taken out by its words alone, without looking at
+/// what is there, as for a path that doesn't exist.
+pub fn lexically_normal(path: &Path) -> PathBuf {
     let mut normal = PathBuf::new();
     for component in path.components() {
         match component {

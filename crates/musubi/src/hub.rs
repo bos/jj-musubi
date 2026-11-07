@@ -159,8 +159,9 @@ pub fn serve(ui: &Ui, args: ServeArgs) -> anyhow::Result<()> {
     };
     let created = !dir.join(HUB_FILE).exists();
     fs::create_dir_all(&dir).with_context(|| format!("creating {dir:?}"))?;
-    // Absolute, but not canonical: on Windows that is a `\\?\` path, which git can't use.
-    let dir = std::path::absolute(&dir)?;
+    // As commands keep it, which is not canonical: on Windows that is a `\\?\` path, which
+    // git can't use.
+    let dir = local_dir(&dir)?;
     let Some(_dir_lock) = try_lock(&dir.join("hub.lock"))? else {
         anyhow::bail!("a hub is already serving {}", dir.display());
     };
@@ -416,19 +417,37 @@ pub fn is_local(hub: &str) -> bool {
     Path::new(hub).is_absolute()
 }
 
-/// `hub` as given to --hub, in the form commands keep: a hub directory here made absolute,
-/// which given relative would be taken for an ssh destination, and a name for this machine
-/// made the directory of its hub, as [`on_this_machine`] does.
+/// `hub` as given to --hub, in the form commands keep: a hub directory here in the form
+/// [`local_dir`] gives, which given relative would be taken for an ssh destination, and a
+/// name for this machine made the directory of its hub, as [`on_this_machine`] does.
 pub fn resolve(hub: &str) -> String {
-    if is_local(hub) {
-        return hub.to_owned();
-    }
-    if Path::new(hub).join(HUB_FILE).is_file()
-        && let Ok(dir) = std::path::absolute(hub)
+    let dir = Path::new(hub);
+    if (is_local(hub) || dir.join(HUB_FILE).is_file())
+        && let Ok(dir) = local_dir(dir)
     {
         return dir.display().to_string();
     }
+    if is_local(hub) {
+        return hub.to_owned();
+    }
     on_this_machine(hub)
+}
+
+/// The directory of a hub on this machine in the one form commands keep it in, so that
+/// however it was given, as `../hub` or `/srv/hub/`, it is the same hub: absolute, without
+/// `.`, `..` or a trailing `/`, and its symbolic links kept, as `musubi hub` prints it.
+pub fn local_dir(dir: &Path) -> io::Result<PathBuf> {
+    let normal = crate::repo::lexically_normal(&std::path::absolute(dir)?);
+    // Except where `..` follows a symbolic link, and so names the directory above its target:
+    // then canonical. Not on Windows, whose canonical paths git can't use, and which takes
+    // `..` by its words.
+    if cfg!(not(windows))
+        && let (Ok(canonical), Ok(normal)) = (dir.canonicalize(), normal.canonicalize())
+        && canonical != normal
+    {
+        return Ok(canonical);
+    }
+    Ok(normal)
 }
 
 /// The ssh destination `hub`, or if it names this machine, the directory of the hub
@@ -661,6 +680,34 @@ mod tests {
             assert!(!here(dest), "{dest}");
         }
         assert!(!names_this_machine("devbox", None, None));
+    }
+
+    /// However a hub's directory here is spelled, it is one hub, named as `musubi hub` names
+    /// it: through its symbolic links, unless `..` follows one.
+    #[cfg(unix)]
+    #[test]
+    fn a_hub_directory_has_one_form() {
+        let root = tempfile::tempdir().unwrap();
+        // As `musubi hub` would be given it, not canonical: on macOS the temporary directory
+        // is behind a link.
+        let root = root.path();
+        let hub = root.join("hub");
+        fs::create_dir_all(hub.join("sub")).unwrap();
+        std::os::unix::fs::symlink(hub.join("sub"), root.join("link")).unwrap();
+        for given in [
+            hub.clone(),
+            root.join("hub/"),
+            root.join("hub/."),
+            root.join("hub/sub/.."),
+            root.join("elsewhere/../hub"),
+        ] {
+            assert_eq!(local_dir(&given).unwrap(), hub, "{given:?}");
+        }
+        // `link/..` is the directory above its target, not `root`.
+        assert_eq!(
+            local_dir(&root.join("link/..")).unwrap(),
+            hub.canonicalize().unwrap()
+        );
     }
 }
 

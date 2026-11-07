@@ -76,9 +76,8 @@ fn log_filter(cli: &Cli, ui: &Ui) -> anyhow::Result<tracing_subscriber::EnvFilte
         return parse_filter(&filter)
             .with_context(|| format!("bad log filter {filter:?} in musubi.daemon.log"));
     }
-    // jj's library logs every lock it takes and every index it builds, at length.
     if daemon || hub {
-        return parse_filter("info,jj_lib=warn");
+        return parse_filter(&serving_filter());
     }
     // Anything logged would land in the middle of the screen; top shows what goes wrong.
     if matches!(cli.command, Some(Command::Top { once: false, .. }))
@@ -89,6 +88,28 @@ fn log_filter(cli: &Cli, ui: &Ui) -> anyhow::Result<tracing_subscriber::EnvFilte
     // Commands say why a hub is out of reach in their error; the ssh link would say it
     // again at every retry.
     parse_filter("warn,musubi::ssh=off")
+}
+
+/// The crates of jj's that musubi builds, as targets of what they log.
+const JJ_CRATES: &[&str] = &[
+    "jj_cli",
+    "jj_core",
+    "jj_core_proc_macros",
+    "jj_default_index",
+    "jj_dsl",
+    "jj_frontend",
+    "jj_git_backend",
+    "jj_lib",
+    "jj_local_util",
+];
+
+/// What the hub and the daemon log unless told otherwise: what they do, and only warnings
+/// from jj's crates, which log every lock they take and every index they build, at length.
+fn serving_filter() -> String {
+    std::iter::once("info".to_owned())
+        .chain(JJ_CRATES.iter().map(|name| format!("{name}=warn")))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Parses a filter in `RUST_LOG`'s syntax.
@@ -408,4 +429,64 @@ fn block_on<T>(future: impl Future<Output = anyhow::Result<T>>) -> anyhow::Resul
         .enable_all()
         .build()?
         .block_on(future)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    use super::*;
+
+    /// What a subscriber writes, kept to read back.
+    #[derive(Clone, Default)]
+    struct Kept(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Kept {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_hub_and_the_daemon_log_only_warnings_from_jj() {
+        // Every crate of jj's in the build, so that one jj adds is quieted too.
+        let built: BTreeSet<String> = include_str!("../../../Cargo.lock")
+            .lines()
+            .filter_map(|line| line.strip_prefix("name = \"jj-")?.strip_suffix('"'))
+            .filter(|name| *name != "musubi")
+            .map(|name| format!("jj_{}", name.replace('-', "_")))
+            .collect();
+        let quieted: BTreeSet<String> = JJ_CRATES.iter().map(|&name| name.to_owned()).collect();
+        assert_eq!(built, quieted);
+
+        let kept = Kept::default();
+        let writer = kept.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(parse_filter(&serving_filter()).unwrap())
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(target: "jj_local_util::lock::unix", "attempting to lock");
+            tracing::info!(target: "jj_default_index::store", "scanning operations");
+            tracing::warn!(target: "jj_local_util::lock::unix", "a lock went wrong");
+            tracing::info!(target: "musubi::daemon", "synced");
+        });
+        let log = String::from_utf8(kept.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            !log.contains("attempting") && !log.contains("scanning"),
+            "{log}"
+        );
+        assert!(
+            log.contains("a lock went wrong") && log.contains("synced"),
+            "{log}"
+        );
+    }
 }

@@ -7,6 +7,10 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- The hub and the daemon log only warnings from all of jj's libraries, as the reference says.
+  Previously they logged each lock and each index scan of the crates jj 0.47 split out of
+  `jj_lib`, such as `jj_local_util` and `jj_default_index`.
+
 - A hub on this machine given to `--hub` another way, as `../hub` or with a trailing `/`, is
   the same hub. Previously each spelling was kept as a hub of its own, so `musubi list` showed
   its hives under each. A copy that joined with such a spelling goes on showing under it:

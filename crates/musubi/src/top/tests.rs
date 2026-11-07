@@ -80,6 +80,91 @@ fn key(app: &mut App, code: KeyCode) -> Action {
     app.key(KeyEvent::new(code, KeyModifiers::NONE))
 }
 
+/// Continuing silence leaves room for new issues while keeping the hive count and red rows.
+#[test]
+fn a_silent_machine_is_an_issue_once() {
+    let heard = |seconds| {
+        let mut sample = sample();
+        let hub = sample.hubs[0].activity.as_mut().unwrap();
+        hub.uptime = 7200;
+        hub.hives[0].machines[0].heard = Some(seconds);
+        sample
+    };
+    let silent = heard(600);
+    let warning = "app: laptop not heard from in 10m: offline, or its daemon isn't running";
+    let first = View::new(&silent, None, None).plain();
+    assert!(first.contains(warning), "{first}");
+    let again = View::new(&silent, Some(&silent), None).plain();
+    assert!(!again.contains(warning), "{again}");
+    assert!(again.contains("No new issues."), "{again}");
+    assert!(again.contains("not heard from in 10m"), "{again}");
+    let mut app = App::new(Duration::from_secs(5));
+    app.receive(heard(600));
+    app.receive(heard(600));
+    let screen = draw(&mut app, 100, 24);
+    let text = screen.backend().to_string();
+    let row = text
+        .lines()
+        .find(|line| line.starts_with("\"app "))
+        .unwrap();
+    let cells: Vec<_> = row.trim_matches('"').split_whitespace().collect();
+    assert_eq!(&cells[cells.len() - 2..], ["0/1", "1"], "{text}");
+    let machine = text
+        .lines()
+        .position(|line| line.starts_with("\"laptop "))
+        .unwrap();
+    assert_eq!(
+        screen.backend().buffer()[(0, machine as u16)].fg,
+        Color::Red
+    );
+    assert!(!text.contains("Issues:"), "{text}");
+    // Heard again and then quiet is a new warning; another hive's silence is independent.
+    let back = View::new(&silent, Some(&heard(1)), None).plain();
+    assert!(back.contains(warning), "{back}");
+    let mut another = heard(600);
+    another.hubs[0].activity.as_mut().unwrap().hives[1].machines[0].heard = Some(600);
+    let new = View::new(&another, Some(&silent), None).plain();
+    assert!(new.contains("guide: laptop not heard from"), "{new}");
+    assert!(!new.contains(warning), "{new}");
+    // A report can arrive and become old again entirely between two hourly polls.
+    let mut later = heard(3540);
+    later.hubs[0].at = silent.hubs[0].at + Duration::from_secs(3600);
+    later.hubs[0].activity.as_mut().unwrap().uptime = 10800;
+    let returned = View::new(&later, Some(&silent), None).plain();
+    assert!(
+        returned.contains("app: laptop not heard from"),
+        "{returned}"
+    );
+    // Without intervening contact, an hour of further silence is still the same issue.
+    later.hubs[0].activity.as_mut().unwrap().hives[0].machines[0].heard = Some(4200);
+    let continuous = View::new(&later, Some(&silent), None).plain();
+    assert!(
+        !continuous.contains("app: laptop not heard from"),
+        "{continuous}"
+    );
+    // A restarted hub can already have more uptime by the next hourly poll. Its report
+    // ages still show that it heard from the machine since the previous poll.
+    let mut before_restart = heard(600);
+    before_restart.hubs[0].activity.as_mut().unwrap().uptime = 2000;
+    let mut restarted = heard(3400);
+    restarted.hubs[0].at = before_restart.hubs[0].at + Duration::from_secs(3600);
+    restarted.hubs[0].activity.as_mut().unwrap().uptime = 3500;
+    let restarted = View::new(&restarted, Some(&before_restart), None).plain();
+    assert!(
+        restarted.contains("app: laptop not heard from"),
+        "{restarted}"
+    );
+    // Reply latency can vary by up to the activity deadline without new contact.
+    later.hubs[0].activity.as_mut().unwrap().hives[0].machines[0].heard = Some(4190);
+    let delayed = View::new(&later, Some(&silent), None).plain();
+    assert!(!delayed.contains("app: laptop not heard from"), "{delayed}");
+    // Departed copies retain reports and offline rows until the hub discards them.
+    let mut departed = heard(600);
+    departed.hubs[0].activity.as_mut().unwrap().hives[0].machines[0].in_view = false;
+    let departed = View::new(&departed, Some(&departed), None).plain();
+    assert!(!departed.contains(warning), "{departed}");
+}
+
 fn draw(app: &mut App, width: u16, height: u16) -> Terminal<TestBackend> {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal.draw(|frame| app.draw(frame)).unwrap();

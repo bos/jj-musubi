@@ -7,6 +7,10 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- `musubi top` lists an offline machine among its issues once when it goes quiet, leaving room
+  for new issues. The hive's issue count and the red machine row still show it. Nothing needs
+  doing on upgrading.
+
 - Copies now default to never being forgotten, including when an agent runs `musubi join`,
   `create` or `clone`. Use `--lease 6h` for a temporary copy that should be forgotten after six
   hours without a local operation. An explicit lease replaces the copy's repo policy; without

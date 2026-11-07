@@ -61,7 +61,8 @@ the oracle. It continues checking data retention, availability of required opera
 and convergence after failures stop.
 
 The core harness does not use jj repositories. Conformance tests for jj's ref handling, operation
-abandonment, copy selection and receiving chunked data compare each with its Lean model.
+abandonment, copy selection, and receiving and sending chunked data compare each with its Lean
+model.
 Repository tests also check effects the core harness cannot represent, such as merging incoming
 history with local edits and retrying updates after hub rollback.
 
@@ -84,8 +85,8 @@ The checks for chunk offsets, lengths and message size limits verify that:
 - The end-of-download check cannot overflow and reports completion exactly when the read reaches
   the end of the data, for any offset and requested length.
 - Each batch of an upload or download starts at the requested offset and advances by the chunk
-  size without overflow. A batch ends after eight chunks or on reaching the end of the data; the
-  next batch continues the transfer.
+  size without overflow. A batch ends after its size in chunks, at most eight, or on reaching
+  the end of the data; the next batch continues the transfer.
 
 The storage check exercises how the hub accepts pushes. The hub's head is the latest operation it
 has accepted. A push names the head it was built on, called its expected head. A new update must
@@ -150,7 +151,10 @@ calls with faults. The payload limit forces transfers to use multiple chunks. A 
 lost before reaching the hub, or its reply can be lost after the hub has acted on it. Another case
 delivers the request an hour late, after the hub has deleted expired transfer data. Once the link
 recovers, a retry must complete; the test fails if it sends more than 2,000 requests without
-finishing.
+finishing. Another test moves data so slowly that each call takes hours, while the hub keeps
+deleting transfer data left untouched for an hour; each call must still complete without sending
+any chunk of data twice. A third gets only the first reply of each batch back in time, so that
+calls time out again and again; they must still complete.
 
 Tests with jj repositories replace the hub's replies with well-formed but false ones: a head the
 hub does not have, operations with changed parents, objects for another operation, or another

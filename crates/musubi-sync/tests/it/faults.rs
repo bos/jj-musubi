@@ -17,6 +17,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -358,6 +360,362 @@ fn blobs_prepared_again_last_as_long_as_new_ones() {
     download(&mut hub, blob, len);
 }
 
+/// A call that moves its blobs slowly enough that the hub sweeps, every hundred requests, what
+/// has gone untouched for an hour, still gets its reply: the hub renews a blob a chunk of it
+/// moves to or from, and the node keeps the others the call moves at the hub, with chunks
+/// that move nothing beside each window, while it moves one. A push's attachments, uploaded
+/// one after another, and a fetch's, downloaded so, each take the call longer than the hub
+/// keeps a blob nobody touches, and no chunk moves twice. Without renewal the hub sweeps the
+/// blob a download is reading, or an upload that the request names, and the call fails,
+/// saying the attachment was not uploaded, or that there is no such blob; or the node finds
+/// it gone, and uploads it again.
+#[test]
+fn blobs_last_while_chunks_of_them_move() {
+    let session = session();
+    // Each attachment a blob of many chunks.
+    let max_payload = 512;
+    for kind in ["push", "fetch"] {
+        let call = session
+            .calls
+            .iter()
+            .find(|call| {
+                let of_kind = match call.request {
+                    Request::Push { .. } => kind == "push",
+                    Request::Fetch { .. } => kind == "fetch",
+                    Request::GetObjects { .. } => false,
+                };
+                of_kind && blobs_moved(session, call) >= 2
+            })
+            .unwrap_or_else(|| panic!("no {kind} of the session moves two blobs"));
+        run_local(async {
+            let dir = musubi_testutil::tempdir();
+            let hub_dir = dir.path().join("hub");
+            let network = MemoryNetwork::new(1, max_payload);
+            serve(
+                session.hub_after(call.start, &hub_dir),
+                Arc::new(network.connect()),
+            )
+            .await;
+            let link = Arc::new(Ageing {
+                inner: Arc::new(network.connect()),
+                hub_dir: hub_dir.clone(),
+                requests: AtomicUsize::new(0),
+                moved: Mutex::new(BTreeSet::new()),
+                blobs: Mutex::new(BTreeMap::new()),
+                asked: Mutex::new(None),
+            });
+            let blobs = dir.path().join("node");
+            let remote = RemoteHub::new(link.clone(), RPC.into(), &blobs, TIMEOUT).unwrap();
+            let reply = remote
+                .call(call.request(&session.seen, &blobs))
+                .await
+                .unwrap_or_else(|err| panic!("the {kind} failed: {err:#}"));
+            // Some blob waits, untouched but for chunks that move nothing, for over an hour:
+            // one uploaded first, until the push goes, or one downloaded last, from the
+            // fetch's reply. Which it is depends on the session's blobs.
+            let asked = link.asked.lock().unwrap().unwrap();
+            let blobs = link.blobs.lock().unwrap();
+            let waited = blobs
+                .values()
+                .map(|&(first, last)| match kind {
+                    "push" => asked.saturating_sub(last),
+                    _ => first.saturating_sub(asked),
+                })
+                .max()
+                .unwrap();
+            assert!(waited > 60, "no blob of the {kind} waited an hour");
+            let reply = map_reply(reply, |id| id.to_bytes(), |_| Ok(())).unwrap();
+            assert_eq!(reply, call.reply, "the {kind}");
+        });
+    }
+}
+
+/// A call on a link too slow to carry more than one chunk of a window before its deadline,
+/// so that every window of more is cut short, and the call times out again and again, more
+/// often than it sends a request again when nothing moves, still gets its reply, a push and a
+/// fetch of two blobs each, since each timeout comes after its window moved the transfer on.
+/// No chunk whose reply came is asked for again, as the call's next attempt would ask for a
+/// blob downloaded before a later one timed out, if the call forgot it, or the hub forgot the
+/// reply because a blob it prepared for it had gone.
+#[test]
+fn calls_finish_on_a_link_that_cuts_every_window_short() {
+    let session = session();
+    let max_payload = 512;
+    for kind in ["push", "fetch"] {
+        let call = session
+            .calls
+            .iter()
+            .find(|call| {
+                let of_kind = match call.request {
+                    Request::Push { .. } => kind == "push",
+                    Request::Fetch { .. } => kind == "fetch",
+                    Request::GetObjects { .. } => false,
+                };
+                of_kind && blobs_moved(session, call) >= 2
+            })
+            .unwrap_or_else(|| panic!("no {kind} of the session moves two blobs"));
+        run_local(async {
+            let dir = musubi_testutil::tempdir();
+            let hub_dir = dir.path().join("hub");
+            let network = MemoryNetwork::new(1, max_payload);
+            serve(
+                session.hub_after(call.start, &hub_dir),
+                Arc::new(network.connect()),
+            )
+            .await;
+            let link = Arc::new(Cutting {
+                inner: Arc::new(network.connect()),
+                state: Mutex::new(CuttingState::default()),
+            });
+            let blobs = dir.path().join("node");
+            let remote = RemoteHub::new(link.clone(), RPC.into(), &blobs, TIMEOUT).unwrap();
+            let reply = remote
+                .call(call.request(&session.seen, &blobs))
+                .await
+                .unwrap_or_else(|err| panic!("the {kind} failed: {err:#}"));
+            let cut = link.state.lock().unwrap().cut;
+            assert!(cut > 2 * 19, "the {kind} timed out only {cut} times");
+            let reply = map_reply(reply, |id| id.to_bytes(), |_| Ok(())).unwrap();
+            assert_eq!(reply, call.reply, "the {kind}");
+        });
+    }
+}
+
+/// A link that, of each window of chunks in flight at once, carries back in time the reply
+/// to the first only, the others reaching the hub but timing out. It checks that no chunk
+/// whose reply came is asked for again.
+struct Cutting {
+    inner: Arc<dyn Transport>,
+    state: Mutex<CuttingState>,
+}
+
+#[derive(Default)]
+struct CuttingState {
+    /// Requests in flight: a window starts once none are.
+    in_flight: usize,
+    /// Whether the current window has had its chunk.
+    carried: bool,
+    /// The chunks whose replies came, by blob and offset.
+    came: BTreeSet<(BlobId, u64)>,
+    /// How many times a reply timed out.
+    cut: usize,
+}
+
+/// Ready the second time it is polled: a request that waits on it lets the sender put the
+/// rest of its window in flight before any reply comes.
+#[derive(Default)]
+struct YieldOnce(bool);
+
+impl Future for YieldOnce {
+    type Output = ();
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        if self.0 {
+            return std::task::Poll::Ready(());
+        }
+        self.0 = true;
+        cx.waker().wake_by_ref();
+        std::task::Poll::Pending
+    }
+}
+
+/// A request in flight on a [`Cutting`] link, until it is answered or dropped.
+struct InFlight<'a>(&'a Mutex<CuttingState>);
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        self.0.lock().unwrap().in_flight -= 1;
+    }
+}
+
+#[async_trait::async_trait]
+impl Transport for Cutting {
+    fn max_payload(&self) -> usize {
+        self.inner.max_payload()
+    }
+
+    async fn publish(&self, subject: &str, payload: Bytes) -> Result<(), TransportError> {
+        self.inner.publish(subject, payload).await
+    }
+
+    async fn subscribe(&self, subject: &str) -> Result<Subscription, TransportError> {
+        self.inner.subscribe(subject).await
+    }
+
+    async fn request(
+        &self,
+        subject: &str,
+        payload: Bytes,
+        timeout: Duration,
+    ) -> Result<Bytes, TransportError> {
+        let chunk = match Envelope::decode(&payload).unwrap() {
+            HubRequest::PutChunk {
+                blob, offset, data, ..
+            } if !data.is_empty() => Some((blob, offset)),
+            HubRequest::GetChunk { blob, offset, len } if len > 0 => Some((blob, offset)),
+            _ => None,
+        };
+        let comes = {
+            let mut state = self.state.lock().unwrap();
+            if state.in_flight == 0 {
+                state.carried = false;
+            }
+            state.in_flight += 1;
+            match chunk {
+                Some(chunk) => {
+                    assert!(
+                        !state.came.contains(&chunk),
+                        "{chunk:?} was asked for again"
+                    );
+                    !std::mem::replace(&mut state.carried, true)
+                }
+                None => true,
+            }
+        };
+        let _in_flight = InFlight(&self.state);
+        YieldOnce::default().await;
+        let reply = self.inner.request(subject, payload, timeout).await;
+        let mut state = self.state.lock().unwrap();
+        if !comes {
+            state.cut += 1;
+            return Err(TransportError::Timeout);
+        }
+        if let (Some(chunk), Ok(_)) = (chunk, &reply) {
+            state.came.insert(chunk);
+        }
+        reply
+    }
+}
+
+/// A call whose request the hub never answers in time gives up, rather than asking again
+/// forever, though each time it asks it uploads the request again, too large to send whole:
+/// that takes no blob further than the call has had it already.
+#[test]
+fn calls_give_up_on_a_request_never_answered() {
+    let session = session();
+    let call = session
+        .calls
+        .iter()
+        .find(|call| matches!(call.request, Request::Push { .. }) && call.requests > 1)
+        .unwrap();
+    run_local(async {
+        let dir = musubi_testutil::tempdir();
+        let hub_dir = dir.path().join("hub");
+        // Small enough that the push goes as a blob.
+        let network = MemoryNetwork::new(1, 256);
+        serve(
+            session.hub_after(call.start, &hub_dir),
+            Arc::new(network.connect()),
+        )
+        .await;
+        let link = Link::new(
+            Arc::new(network.connect()),
+            &hub_dir,
+            Some((0, Fault::Unanswered)),
+        );
+        let blobs = dir.path().join("node");
+        let remote = RemoteHub::new(link.clone(), RPC.into(), &blobs, TIMEOUT).unwrap();
+        let err = remote
+            .call(call.request(&session.seen, &blobs))
+            .await
+            .unwrap_err();
+        link.check_progress();
+        assert!(format!("{err:#}").contains("timed out"), "{err:#}");
+        let indirect = link
+            .sent()
+            .iter()
+            .filter(|bytes| matches!(Envelope::decode(bytes), Ok(HubRequest::Indirect { .. })))
+            .count();
+        assert!(indirect > 1, "the push went whole");
+    });
+}
+
+/// How many blobs `call` moved, in chunks, when the session was recorded.
+fn blobs_moved(session: &Session, call: &Call) -> usize {
+    let blobs: BTreeSet<BlobId> = session.seen.requests[call.start..call.start + call.requests]
+        .iter()
+        .filter_map(|bytes| match Envelope::decode(bytes).unwrap() {
+            HubRequest::PutChunk { blob, .. } | HubRequest::GetChunk { blob, .. } => Some(blob),
+            _ => None,
+        })
+        .collect();
+    blobs.len()
+}
+
+/// A link on which a minute passes before each request, as far as the hub's blobs can tell:
+/// each is a minute older than it was. It checks that no chunk moves twice.
+struct Ageing {
+    inner: Arc<dyn Transport>,
+    hub_dir: PathBuf,
+    requests: AtomicUsize,
+    /// The chunks that moved, by blob and offset.
+    moved: Mutex<BTreeSet<(BlobId, u64)>>,
+    /// The first and last request to move a chunk of each blob, and the first protocol
+    /// request, counted in minutes.
+    blobs: Mutex<BTreeMap<BlobId, (usize, usize)>>,
+    asked: Mutex<Option<usize>>,
+}
+
+#[async_trait::async_trait]
+impl Transport for Ageing {
+    fn max_payload(&self) -> usize {
+        self.inner.max_payload()
+    }
+
+    async fn publish(&self, subject: &str, payload: Bytes) -> Result<(), TransportError> {
+        self.inner.publish(subject, payload).await
+    }
+
+    async fn subscribe(&self, subject: &str) -> Result<Subscription, TransportError> {
+        self.inner.subscribe(subject).await
+    }
+
+    async fn request(
+        &self,
+        subject: &str,
+        payload: Bytes,
+        timeout: Duration,
+    ) -> Result<Bytes, TransportError> {
+        let minute = self.requests.fetch_add(1, Ordering::SeqCst);
+        let chunk = match Envelope::decode(&payload).unwrap() {
+            HubRequest::PutChunk {
+                blob, offset, data, ..
+            } if !data.is_empty() => Some((blob, offset)),
+            HubRequest::GetChunk { blob, offset, len } if len > 0 => Some((blob, offset)),
+            HubRequest::Protocol(_) | HubRequest::Indirect { .. } => {
+                self.asked.lock().unwrap().get_or_insert(minute);
+                None
+            }
+            _ => None,
+        };
+        if let Some(chunk) = chunk {
+            assert!(
+                self.moved.lock().unwrap().insert(chunk),
+                "{chunk:?} moved twice"
+            );
+            let mut blobs = self.blobs.lock().unwrap();
+            blobs.entry(chunk.0).or_insert((minute, minute)).1 = minute;
+        }
+        for store in ["blobs", "blobs/prepared"] {
+            for sub in ["partial", "complete"] {
+                for entry in std::fs::read_dir(self.hub_dir.join(store).join(sub)).unwrap() {
+                    let file = std::fs::File::options()
+                        .write(true)
+                        .open(entry.unwrap().path())
+                        .unwrap();
+                    let modified = file.metadata().unwrap().modified().unwrap();
+                    file.set_modified(modified - Duration::from_secs(60))
+                        .unwrap();
+                }
+            }
+        }
+        self.inner.request(subject, payload, timeout).await
+    }
+}
+
 /// A node may upload a bundle with the same content as a blob the hub prepared for another
 /// node's download, as a push of what the other node fetched. Its upload is its own: the
 /// hub deletes it once it has the push, and the blob for the download stays.
@@ -484,11 +842,13 @@ fn calls_leave_no_downloads_behind() {
                 .unwrap(),
         );
         let requests = probe.sent();
+        // Not the chunks that move nothing, which keep the second blob at the hub while the
+        // first downloads.
         let downloads: Vec<_> = requests
             .iter()
             .enumerate()
             .filter_map(|(n, bytes)| match Envelope::decode(bytes) {
-                Ok(HubRequest::GetChunk { blob, .. }) => Some((n, blob)),
+                Ok(HubRequest::GetChunk { blob, len, .. }) if len > 0 => Some((n, blob)),
                 _ => None,
             })
             .collect();
@@ -565,6 +925,9 @@ enum Fault {
     /// Before the request arrives, an hour passes, and the hub gives up on the node's
     /// transfers in progress; then the link carries on, as when the lid opens again.
     Stall,
+    /// From the request on, the hub hears every request, but no reply to a protocol request
+    /// comes in time, as from a hub that takes longer than the timeout to answer each.
+    Unanswered,
 }
 
 /// A node's link to the hub: it records what the node sends, and fails as told.
@@ -670,6 +1033,16 @@ impl Transport for Link {
             Some((at, Fault::Stall)) if n == at => {
                 an_hour_passes(&self.hub_dir);
                 self.inner.request(subject, payload, timeout).await
+            }
+            Some((at, Fault::Unanswered))
+                if n >= at
+                    && matches!(
+                        Envelope::decode(&payload),
+                        Ok(HubRequest::Protocol(_) | HubRequest::Indirect { .. })
+                    ) =>
+            {
+                self.inner.request(subject, payload, timeout).await.ok();
+                Err(TransportError::Timeout)
             }
             _ => self.inner.request(subject, payload, timeout).await,
         };

@@ -329,6 +329,23 @@
       ]
     },
     {
+      "id": "resume",
+      "area": "transfer",
+      "title": "Slow transfers finish",
+      "detail": "Each attempt goes on where the last left off, and blobs stay while chunks of them move.",
+      "code": [
+        "crates/musubi-sync/src/remote.rs",
+        "crates/musubi-sync/src/service.rs",
+        "crates/musubi-sync/src/blobs.rs"
+      ],
+      "evidence": [
+        "e30",
+        "e66",
+        "e67",
+        "e68"
+      ]
+    },
+    {
       "id": "budget",
       "area": "transfer",
       "title": "Payload budgets leave envelope room",
@@ -1156,6 +1173,35 @@
       "detail": "Checks that download bounds cannot overflow and that completion agrees with the blob size.",
       "needs": [],
       "provenance": "documented"
+    },
+    {
+      "id": "e66",
+      "claim": "resume",
+      "mechanism": "conformance",
+      "source": "crates/musubi-sync/src/remote.rs#transfers_follow_the_attempt_model",
+      "detail": "Real upload and download windows, cut short by deadlines, are checked against the Lean oracle.",
+      "needs": [
+        "lean"
+      ],
+      "provenance": "documented"
+    },
+    {
+      "id": "e67",
+      "claim": "resume",
+      "mechanism": "unit",
+      "source": "crates/musubi-sync/src/blobs.rs#chunks_renew_what_they_touch",
+      "detail": "Chunks renew the blobs they touch as the timed model's renewal says.",
+      "needs": [],
+      "provenance": "documented"
+    },
+    {
+      "id": "e68",
+      "claim": "resume",
+      "mechanism": "faults",
+      "source": "crates/musubi-sync/tests/it/faults.rs#blobs_last_while_chunks_of_them_move",
+      "detail": "Calls slow enough for the hub to sweep old blobs still finish, moving no chunk twice.",
+      "needs": [],
+      "provenance": "documented"
     }
   ],
   "sources": {
@@ -1599,6 +1645,18 @@
       "path": "crates/musubi-sync/src/blobs.rs",
       "symbol": "receive_follows_the_prefix_model"
     },
+    "crates/musubi-sync/src/remote.rs#transfers_follow_the_attempt_model": {
+      "path": "crates/musubi-sync/src/remote.rs",
+      "symbol": "transfers_follow_the_attempt_model"
+    },
+    "crates/musubi-sync/src/blobs.rs#chunks_renew_what_they_touch": {
+      "path": "crates/musubi-sync/src/blobs.rs",
+      "symbol": "chunks_renew_what_they_touch"
+    },
+    "crates/musubi-sync/tests/it/faults.rs#blobs_last_while_chunks_of_them_move": {
+      "path": "crates/musubi-sync/tests/it/faults.rs",
+      "symbol": "blobs_last_while_chunks_of_them_move"
+    },
     "crates/musubi-sync/tests/it/faults.rs": {
       "path": "crates/musubi-sync/tests/it/faults.rs",
       "symbol": null
@@ -1931,6 +1989,12 @@
       "Expected"
     ],
     "chunks": [
+      "Chunks"
+    ],
+    "attempts": [
+      "Chunks"
+    ],
+    "refresh": [
       "Chunks"
     ],
     "retryFixup": [

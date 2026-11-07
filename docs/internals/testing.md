@@ -18,7 +18,7 @@ on the next run. *The search* is the generated end-to-end tests below, run with 
 | Protocol property tests | `crates/musubi-core/tests` | The Rust state machines departing from the model, or not recovering from storage errors or a buggy hub | Milliseconds per case |
 | Presence conformance | `crates/musubi-jj/tests/it/presence.rs` | Which copies (machines' repositories) a hive shows departing from `formal/Musubi/Presence.lean`, or changing where a contraction keeps an operation (`PresenceContract.lean`) ([conformance.md, "Presence"](conformance.md#presence); [design.md, "Copies that go away"](design.md#copies-that-go-away)) | Milliseconds per case |
 | Copies conformance | `crates/musubi/src/copy/conformance.rs` | Which repository musubi takes for the copy of a key, and the daemon's check before each sync, departing from `formal/Musubi/Copies.lean` ([conformance.md, "Copies"](conformance.md#copies); [copies.md](copies.md)) | Under a second for all 4212 cases |
-| Chunked blob conformance | `crates/musubi-sync/src/blobs.rs` | The blob receiver departing from the prefix receiver of `formal/Musubi/Chunks.lean` ([conformance.md, "Chunked blobs"](conformance.md#chunked-blobs)) | A few milliseconds per case |
+| Chunked blob conformance | `crates/musubi-sync/src/blobs.rs`, `crates/musubi-sync/src/remote.rs` | The blob receiver departing from the prefix receiver of `formal/Musubi/Chunks.lean`, and the senders from its attempts under a deadline ([conformance.md, "Chunked blobs"](conformance.md#chunked-blobs)) | A few milliseconds per case |
 | Workspace names conformance | `crates/musubi-jj/src/workspaces.rs` | The names under which a machine shows other machines' workspaces departing from `formal/Musubi/Names.lean` ([conformance.md, "Workspace names"](conformance.md#workspace-names)) | A millisecond per case |
 | Per-machine refs conformance | `crates/musubi-jj/tests/it/ref_laws.rs`, `crates/musubi-sync/tests/races/refs.rs` | jj's ref merge, import and export, and musubi's realization, departing from `formal/Musubi/Refs.lean` ([conformance.md, "Per-machine refs"](conformance.md#per-machine-refs)) | ~0.3 s per case |
 | Race catalogue | `crates/musubi-sync/tests/races` | Concurrent changes on different machines resolving differently from jj's local behavior ([races.md](races.md)) | ~0.3 s per test |
@@ -541,6 +541,14 @@ as long as a new one (`blobs_prepared_again_last_as_long_as_new_ones`); uploadin
 content leaves a prepared blob alone (`uploads_leave_prepared_blobs_alone`); and a call that
 fails or is dropped partway leaves no uploads behind, and no downloads but a partial one, kept
 for a later call to resume (`calls_leave_no_uploads_behind`, `calls_leave_no_downloads_behind`).
+A push and a fetch slow enough that the hub sweeps old blobs as they go still get their replies,
+moving no chunk twice: the hub renews a blob a chunk moves to or from, and the node keeps the
+call's other blobs at the hub while one moves (`blobs_last_while_chunks_of_them_move`). Over a
+link that carries back in time only the first chunk of each window, a push and a fetch time out
+again and again but finish, never asking again for a chunk whose reply came
+(`calls_finish_on_a_link_that_cuts_every_window_short`); and a push the hub never answers in
+time gives up, though it uploads its request again each time it asks
+(`calls_give_up_on_a_request_never_answered`).
 
 `musubi-sync/tests/it/lies.rs` goes past the code that reads replies off the wire. Its
 `nodes_recover_from_wrong_replies` gives a node, partway through a sync with real repositories,
@@ -681,7 +689,7 @@ adapter also makes bounded retries tractable:
   offset and length a node asks for, and holds exactly when the read reached the end.
 - `remote::proofs`: each window of chunks an upload or download sends starts at its offset,
   goes up a chunk at a time without overflowing, and either reaches the end or is a full
-  window.
+  window, of any size up to eight.
 - `musubi-core::storage_proofs`: the production push handler over a three-operation graph,
   with two independently faulty pushes, retained import subsets, a complete honest retry
   and an idempotent replay. It checks closed monotone heads and truthful replies, in about

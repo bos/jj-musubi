@@ -6,8 +6,13 @@
 //! hash once everything has arrived, starting over on a mismatch. A receiver that already
 //! has the blob reports it complete at once. `formal/Musubi/Chunks.lean` models this
 //! receiver (`receive`), proves it a refinement of the protocol's model, and proves that a
-//! sender resending from the prefix it reports finishes; `receive_follows_the_prefix_model`
-//! checks it against that model (docs/internals/conformance.md, "Chunked blobs").
+//! sender resending from the prefix it reports finishes, attempt by attempt however few chunks
+//! each carries before its deadline; `receive_follows_the_prefix_model` checks it against that
+//! model (docs/internals/conformance.md, "Chunked blobs").
+//!
+//! Sweeps take blobs by age, so a blob a chunk moves to or from is renewed, at most every
+//! [`RENEW_AFTER`]: one being moved stays as long as chunks of it keep moving, however long
+//! that takes.
 
 use std::collections::HashSet;
 use std::fs;
@@ -22,11 +27,18 @@ use std::ops::Range;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::Duration;
 use std::time::SystemTime;
 
 use musubi_jj::files;
 use serde::Deserialize;
 use serde::Serialize;
+
+/// How often a blob that chunks keep moving to or from is renewed, at most: rarely enough that
+/// a transfer doesn't touch its file's time at every chunk, and often enough that a sweep of
+/// what has gone untouched for an hour never takes one still moving, though minutes pass
+/// between its chunks, as while a node's sync waits to be tried again.
+pub const RENEW_AFTER: Duration = Duration::from_secs(600);
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct BlobId(pub [u8; 32]);
@@ -160,7 +172,13 @@ impl BlobStore {
         Ok((id, bytes.len() as u64))
     }
 
-    /// Takes a chunk of `id`, which is `total` bytes long. See the module docs.
+    /// How much of `id` this store has received: the length of its partial blob.
+    pub fn prefix(&self, id: &BlobId) -> u64 {
+        fs::metadata(self.partial_path(id)).map_or(0, |metadata| metadata.len())
+    }
+
+    /// Takes a chunk of `id`, which is `total` bytes long. See the module docs. What it has
+    /// of the blob, whole or in part, is renewed, as a chunk that adds to it renews it.
     pub fn receive(
         &self,
         id: &BlobId,
@@ -168,7 +186,9 @@ impl BlobStore {
         offset: u64,
         data: &[u8],
     ) -> io::Result<Received> {
-        if self.get(id).is_some() {
+        if let Some(path) = self.get(id) {
+            // As a sender confirming the blob does, while it uploads what goes with it.
+            renew_if_due(&path, fs::metadata(&path).and_then(|m| m.modified()));
             return Ok(Received::Complete);
         }
         let partial = self.partial_path(id);
@@ -177,9 +197,12 @@ impl BlobStore {
             .read(true)
             .append(true)
             .open(&partial)?;
-        let have = file.metadata()?.len();
+        let metadata = file.metadata()?;
+        let have = metadata.len();
         if let Some(skip) = new_from(have, offset, data.len()) {
             file.write_all(&data[skip..])?;
+        } else {
+            renew_if_due(&partial, metadata.modified());
         }
         let have = file.metadata()?.len();
         if have < total {
@@ -199,11 +222,30 @@ impl BlobStore {
 
     /// Up to `len` bytes of a finished blob from `offset`, and the blob's total length.
     pub fn read(&self, id: &BlobId, offset: u64, len: usize) -> io::Result<(u64, Vec<u8>)> {
+        self.read_from(id, offset, len, false)
+    }
+
+    /// [`Self::read`] for a chunk sent to a receiver, which renews the blob.
+    pub fn read_chunk(&self, id: &BlobId, offset: u64, len: usize) -> io::Result<(u64, Vec<u8>)> {
+        self.read_from(id, offset, len, true)
+    }
+
+    fn read_from(
+        &self,
+        id: &BlobId,
+        offset: u64,
+        len: usize,
+        renewing: bool,
+    ) -> io::Result<(u64, Vec<u8>)> {
         let path = self
             .get(id)
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no such blob"))?;
-        let mut file = File::open(path)?;
-        let total = file.metadata()?.len();
+        let mut file = File::open(&path)?;
+        let metadata = file.metadata()?;
+        if renewing {
+            renew_if_due(&path, metadata.modified());
+        }
+        let total = metadata.len();
         let span = span(total, offset, len);
         file.seek(SeekFrom::Start(span.start))?;
         let mut data = vec![];
@@ -263,6 +305,15 @@ pub(crate) fn sweep_dir(dir: &Path, cutoff: SystemTime) {
     }
 }
 
+/// Renews the blob at `path`, last modified at `modified`, if [`RENEW_AFTER`] has passed since.
+/// A blob that can't be renewed is still read or received: it may be swept sooner.
+fn renew_if_due(path: &Path, modified: io::Result<SystemTime>) {
+    let due = modified.is_ok_and(|modified| modified.elapsed().is_ok_and(|age| age >= RENEW_AFTER));
+    if due && let Err(err) = renew(path) {
+        tracing::debug!("cannot renew {}: {err}", path.display());
+    }
+}
+
 /// Makes a blob's file as new as one just added, since the hub expires blobs by age.
 fn renew(path: &Path) -> io::Result<()> {
     // Open for writing, which Windows needs to set the time; nothing is written.
@@ -309,7 +360,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = BlobStore::open(dir.path()).unwrap();
         let (_, path) = store.temp_file().unwrap().keep().unwrap();
-        store.sweep(SystemTime::now() + std::time::Duration::from_secs(60));
+        store.sweep(SystemTime::now() + Duration::from_secs(60));
         assert!(!path.exists());
     }
 
@@ -333,6 +384,91 @@ mod tests {
         let store = torn();
         store.insert_bytes(b"contents").unwrap();
         assert_eq!(store.read(&id, 0, 100).unwrap(), (8, b"contents".to_vec()));
+    }
+
+    /// A chunk renews what a store has of its blob as `Chunks.lean`'s `refresh` says, which
+    /// the oracle works out: once [`RENEW_AFTER`] has passed since it last was, and not
+    /// before. So does one read to send it, one taken of a blob stored whole, and one taken of
+    /// a partial blob that adds nothing to it; one that adds to it writes it, renewing it at
+    /// once. A plain read doesn't renew it.
+    #[test]
+    fn chunks_renew_what_they_touch() {
+        let dir = musubi_testutil::tempdir();
+        let store = BlobStore::open(dir.path()).unwrap();
+        let blob = b"0123456789";
+        let (whole, _) = store.insert_bytes(blob).unwrap();
+        let partial = BlobId::of_bytes(b"abcdefghij");
+        store.receive(&partial, 10, 0, b"abcd").unwrap();
+        let minute = Duration::from_secs(60);
+        let age_of = |path: &Path| {
+            fs::metadata(path)
+                .unwrap()
+                .modified()
+                .unwrap()
+                .elapsed()
+                .unwrap()
+        };
+        let set_age = |path: &Path, age: Duration| {
+            OpenOptions::new()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(SystemTime::now() - age)
+                .unwrap();
+        };
+        type Touch<'a> = (&'a str, PathBuf, Box<dyn Fn() + 'a>, bool);
+        let touches: Vec<Touch<'_>> = vec![
+            (
+                "read to send",
+                store.complete_path(&whole),
+                Box::new(|| drop(store.read_chunk(&whole, 0, 4).unwrap())),
+                true,
+            ),
+            (
+                "taken whole",
+                store.complete_path(&whole),
+                Box::new(|| {
+                    assert_eq!(
+                        store.receive(&whole, 10, 0, b"01").unwrap(),
+                        Received::Complete
+                    );
+                }),
+                true,
+            ),
+            (
+                "taken in part, adding nothing",
+                store.partial_path(&partial),
+                Box::new(|| {
+                    assert_eq!(
+                        store.receive(&partial, 10, 0, b"ab").unwrap(),
+                        Received::Prefix(4)
+                    );
+                }),
+                true,
+            ),
+            (
+                "read",
+                store.complete_path(&whole),
+                Box::new(|| drop(store.read(&whole, 0, 4).unwrap())),
+                false,
+            ),
+        ];
+        let ages = [RENEW_AFTER - minute, RENEW_AFTER + minute];
+        let mut oracle = Oracle::spawn();
+        let reply = oracle.call(&serde_json::json!({
+            "op": "refresh",
+            "renew": RENEW_AFTER.as_secs(),
+            "ages": ages.map(|age| age.as_secs()),
+        }));
+        assert_eq!(reply["ok"], true, "{reply}");
+        for (touch, path, take, renews) in &touches {
+            for (age, model) in ages.iter().zip(reply["ages"].as_array().unwrap()) {
+                set_age(path, *age);
+                take();
+                let renewed = age_of(path) < minute;
+                assert_eq!(renewed, *renews && model == 0, "{touch}, {age:?} old");
+            }
+        }
     }
 
     /// A chunk whose offset and length add up past `u64::MAX` is ignored, not an overflow.
@@ -419,7 +555,7 @@ mod tests {
                 if stored {
                     age(&store.complete_path(&id));
                 }
-                store.sweep(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1));
+                store.sweep(SystemTime::UNIX_EPOCH + Duration::from_secs(1));
                 taken.push(Taken {
                     step: serde_json::json!({"sweep": {"partial": partial, "stored": stored}}),
                     received: None,

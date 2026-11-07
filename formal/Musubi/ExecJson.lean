@@ -338,6 +338,59 @@ def chunksReply (b : List Nat) (steps : List ChunkStep) : Json :=
       state s' [] :: go s' rest
   Json.mkObj [("ok", Json.bool true), ("steps", Json.arr (go Chunks.initP steps).toArray)]
 
+/-- A reply as JSON: a number for `Received::Prefix`, null for `Received::Complete`. -/
+def optJson : Option Nat → Json
+  | some n => toJson n
+  | none => Json.null
+
+/-- A step of a transfer by attempts (`Chunks.lean`, "Attempts under a deadline"): an attempt
+whose window has `w` chunks, of which the receiver takes the first `m` and the sender hears of
+the first `k`; a sweep, as in a chunks request; or the sender starting afresh, as a new process
+does, which forgets how far the receiver had got. -/
+inductive AttemptStep where
+  | attempt (w m k : Nat)
+  | sweep (pre stored : Bool)
+  | restart
+
+def decodeAttemptStep (j : Json) : Except String AttemptStep :=
+  match j.getObjVal? "attempt", j.getObjVal? "sweep" with
+  | .ok a, _ => do
+    let w ← getNat a "window"
+    let m ← getNat a "delivered"
+    let k ← getNat a "heard"
+    if k ≤ m ∧ m ≤ w then return .attempt w m k
+    else throw "an attempt hears of no more chunks than arrive, nor more arrive than it sends"
+  | _, .ok s => return .sweep (← s.getObjValAs? Bool "partial") (← s.getObjValAs? Bool "stored")
+  | _, _ => do
+    let _ ← j.getObjValAs? Bool "restart"
+    return .restart
+
+/-- A transfer by attempts from `initP`, the sender an uploader, which goes on from where the
+receiver last said it was (`Chunks.next`), or a downloader, which goes on from the receiver's
+prefix, being the receiver (`Chunks.ARun.reread`). After each attempt: the offsets of its
+window, the receiver's replies to the chunks it took, the prefix it has, whether it has stored
+the blob, and where the sender goes on from (null once it has heard that the receiver has the
+blob). -/
+def attemptsReply (b : List Nat) (limit : Nat) (download : Bool) (steps : List AttemptStep) :
+    Json :=
+  let state (s : Chunks.PState) (fields : List (String × Json)) : Json :=
+    Json.mkObj (fields ++ [("pre", toJson s.pre.toArray), ("stored", Json.bool s.store.isSome)])
+  let rec go (s : Chunks.PState) (o : Nat) : List AttemptStep → List Json
+    | [] => []
+    | .attempt w m k :: rest =>
+      let o := if download then s.pre.length else o
+      let replies := (Chunks.deliver (blobHash b) b s (Chunks.windowFrom b limit o m)).2
+      let (s', next) := Chunks.attempt (blobHash b) b limit s o m k
+      state s' [("offsets", toJson ((Chunks.windowFrom b limit o w).map (·.off)).toArray),
+          ("replies", Json.arr (replies.map optJson).toArray), ("next", optJson next)] ::
+        go s' (next.getD o) rest
+    | .sweep pre stored :: rest =>
+      let s' := { s with pre := if pre then [] else s.pre,
+                         store := if stored then none else s.store }
+      state s' [] :: go s' o rest
+    | .restart :: rest => state s [] :: go s 0 rest
+  Json.mkObj [("ok", Json.bool true), ("steps", Json.arr (go Chunks.initP 0 steps).toArray)]
+
 /-! ## Workspace names (`Names.lean`) -/
 
 def decodeKey (j : Json) : Except String Names.Key := do
@@ -819,6 +872,23 @@ def handle (sess : Session) (line : String) : Json × Session :=
           ss.toList.mapM decodeChunkStep with
       | .error e, _ | _, .error e => (errReply s!"bad request: {e}", sess)
       | .ok b, .ok steps => (chunksReply b steps, sess)
+    | .ok "refresh" =>
+      match getNat j "renew", getNats j "ages" with
+      | .error e, _ | _, .error e => (errReply s!"bad request: {e}", sess)
+      | .ok renew, .ok ages =>
+        (Json.mkObj [("ok", Json.bool true),
+          ("ages", toJson (ages.map (Chunks.refresh renew)).toArray)], sess)
+    | .ok "attempts" =>
+      let sender := j.getObjValAs? String "sender"
+      match getNats j "blob", getNat j "limit", sender, j.getObjValAs? (Array Json) "steps" >>=
+          fun ss => ss.toList.mapM decodeAttemptStep with
+      | .error e, _, _, _ | _, .error e, _, _ | _, _, .error e, _ | _, _, _, .error e =>
+        (errReply s!"bad request: {e}", sess)
+      | .ok b, .ok limit, .ok sender, .ok steps =>
+        if limit = 0 then (errReply "bad request: chunks hold a byte at least", sess)
+        else if sender = "upload" then (attemptsReply b limit false steps, sess)
+        else if sender = "download" then (attemptsReply b limit true steps, sess)
+        else (errReply s!"bad request: no sender {sender}", sess)
     | .ok "names" =>
       let me := j.getObjVal? "me" >>= decodeKey
       let workspaces := j.getObjValAs? (Array Json) "workspaces" >>= fun ws =>

@@ -254,18 +254,38 @@ crashing, every session finishes.
 
 musubi's transfers stay within this model, doing less than it allows:
 
-- A sender keeps up to eight chunks in flight, uploading and downloading, rather than wait
-  for each chunk's acknowledgement, so that a transfer costs a round trip per eight chunks.
-  The model lets a sender send any chunk at any time, so this needs nothing more.
+- A sender keeps a window of up to eight chunks in flight, uploading and downloading, rather
+  than wait for each chunk's acknowledgement, so that a transfer costs a round trip per eight
+  chunks. The model lets a sender send any chunk at any time, so this needs nothing more.
+- Each request has a deadline from when it was sent, so on a link too slow to carry a window
+  before it, an attempt ends with only its first chunks taken, and the call tries again, for
+  as long as each such timeout comes after a chunk took a blob further than ever in the call.
+  Each attempt goes on from where the last left off: an upload from the prefix the hub last
+  reported, a download from what the node has received. Before the reply has come, the call
+  asks again, with its uploads; after, it goes on with the reply's downloads, without asking
+  again, which once the hive had moved on would have the hub work the reply out afresh. After
+  a window cut short, the next has as many chunks as came back in time, or one, since the rest
+  still take the link's time; each four windows in a row that all come back let the next have
+  one more, up to eight.
 - The receiver keeps only bytes that extend what it has contiguously, as if the others had
   been lost. It reports the length of that prefix, not the missing ranges, and checks the
   hash as soon as the prefix reaches the blob length a chunk claims, with no `Finish`.
-- A crash keeps the partial blob. A sweep of old blobs removes it, or the stored blob.
+- A crash keeps the partial blob. A sweep of old blobs removes it, the stored blob, or the
+  blob a hub prepared for a download, but only once no chunk has touched it for an hour on
+  the hub, or a day on a node: a chunk renews the blob it moves to or from, at most every ten
+  minutes, whether it adds anything or not. While a call moves one blob of a request or a
+  reply, it keeps the others at the hub with a chunk that moves nothing beside each window:
+  those it has uploaded, and those of the reply it has yet to download.
 
 `formal/Musubi/Chunks.lean` proves, for an injective hash, that each step of this receiver is a
-run of the model's steps, and that a sender resending from the prefix it reports finishes. A test
-checks the receiver against that model ([conformance.md, "Chunked
-blobs"](conformance.md#chunked-blobs)).
+run of the model's steps, and that a sender resending from the prefix it reports finishes. It
+proves too that every attempt that hears a reply brings the transfer nearer its end, however few
+chunks it carries before its deadline, where a sender that started each attempt from the
+beginning, as musubi's once did, made no progress once the receiver held a window's worth; and
+that a sweep, allowed only of what has gone untouched, never takes a blob that chunks keep
+touching often enough. That attempts which hear a reply keep coming is the network's part, which
+the narrowing window helps the link keep. Tests check the receiver and the senders against that
+model ([conformance.md, "Chunked blobs"](conformance.md#chunked-blobs)).
 
 ## Verification
 

@@ -75,7 +75,7 @@ is `formal/.lake/build/bin/oracle`.
 | `Musubi/Supersede.lean` | Replicated `jj op abandon`: the protocol over original operations with each party's dropped set (`SStep`, `SRStep`), its invariant, superseded ids never coming back, and liveness with supersedes (`SPStepR`). |
 | `Musubi/Scenario.lean` | A concrete reachable run (a lost Cas race, then fetch, advance, merge, and the merge accepted), showing the model is not vacuous. |
 | `Musubi/RegressScenario.lean` | A run of the executable model in which the hub goes back and two nodes then merge the same heads. |
-| `Musubi/Chunks.lean` | The chunked-blob model, its safety and liveness; and musubi's receiver, which keeps only a prefix, proved a refinement of it, with its own liveness. |
+| `Musubi/Chunks.lean` | The chunked-blob model, its safety and liveness; musubi's receiver, which keeps only a prefix, proved a refinement of it, with its own liveness; and its senders, attempt by attempt under a deadline, and in time, with sweeps of what has gone untouched. |
 | `Musubi/Exec.lean` | The executable model: finite `EState`, the `Action`s of [conformance.md](../docs/internals/conformance.md), `execStep`; and the liveness measures, convergence, and what a policy `Push` uploads, computed (`measureE`, `rmeasureE`, `convergedE`, `upOpsL`, `upObjsL`). |
 | `Musubi/ExecSound.lean` | Soundness of `execStep` and of those computations ([below](#the-executable-model-and-the-conformance-oracle)). |
 | `Musubi/ExecJson.lean` | The oracle's JSON codec and request handler (no protocol logic). |
@@ -153,7 +153,7 @@ is `formal/.lake/build/bin/oracle`.
 | `Musubi/Copies.lean` | Which repository is the copy of a key: musubi's decisions, jj's config-id rule, and a machine's repositories moved, copied, deleted and replaced. |
 | `Musubi/Names.lean` | The names a machine shows other machines' workspaces under, and `#guard` tests of them. |
 | `Musubi/Axioms.lean` | `#print axioms` for every main theorem. |
-| `Oracle.lean` | The `oracle` executable: a stdin/stdout loop around `ExecJson.handle`, which also answers measure, upload, presence, copies, chunks, names, refs and expected-value requests. |
+| `Oracle.lean` | The `oracle` executable: a stdin/stdout loop around `ExecJson.handle`, which also answers measure, upload, presence, copies, chunks, attempts, names, refs and expected-value requests. |
 | `test/smoke.jsonl`, `test/smoke.expected`, `test/run_smoke.sh` | The oracle smoke test. |
 
 
@@ -184,6 +184,8 @@ is `formal/.lake/build/bin/oracle`.
 | Policy (reliable, atomic exchanges) | `PStep`: `learn`, `realize`, `advance`, `merge`, `pushAccept`, `pushIdem`, `pushReject` |
 | Chunked blob session | `Chunks.CState`, `Chunks.CStep` (full model), `Chunks.LStep` (reliable delivery) |
 | musubi's receiver (`BlobStore::receive`) | `Chunks.PState`, `Chunks.receive`, `Chunks.PStep`, `Chunks.PLStep` (resending from the prefix) |
+| musubi's senders (`RemoteHub::upload`, `download`) | `Chunks.attempt` (a window, `m` chunks delivered, `k` replies heard), `Chunks.next`, `Chunks.ARun` (attempts, and chunks arriving late) |
+| Time, renewal and sweeps of blobs | `Chunks.TState`, `Chunks.TStep`, `Chunks.refresh`, `Chunks.FairRun` (fair runs, without sweeps) |
 
 ## Main theorems
 
@@ -479,6 +481,44 @@ Each theorem assumes `hash` injective.
   blob it stores is the one sent.
 - `prefix_finishes`: from every state the prefix receiver reaches, a sender that resends
   from the prefix it reports finishes, and the receiver stores exactly the sent blob.
+
+Attempts under a deadline: a sender sends a window of chunks from an offset; the receiver takes
+the first `m`, the sender hears its replies to the first `k`, and goes on from the furthest
+prefix they report (`attempt`, `next`). Chunks of a window whose replies it never heard may
+reach the receiver later (`ARun.late`), and a downloader goes on from the receiver's prefix,
+being the receiver (`ARun.reread`).
+
+- `attempt_progress`: an attempt from within the receiver's prefix, short of the end, that
+  hears `k` replies takes the prefix at least `k` chunks on from where it started, or to the
+  end, and the sender goes on from there; or the receiver stores the blob.
+- `restart_stalls`: an attempt from the beginning, once the prefix holds the chunks it
+  delivers, leaves the prefix as it was, however many replies it hears: a sender that starts
+  every attempt there never finishes.
+- `attempt_decreases`: from any state, an attempt that hears a reply takes `ameasure` down; a
+  chunk arriving late (`late_le`), and going on from the receiver's prefix
+  (`ameasure_reread`), never take it up.
+- `attempts_finish`, `attempts_bounded`: from every state the prefix receiver reaches, a run
+  whose receiver hasn't the blob yet has made fewer attempts that heard a reply than
+  `ameasure`; one of `ameasure` such attempts has stored exactly the sent blob.
+
+In time (`TStep`), a sweep takes the sender's blob, or what the receiver has of it, only once no
+chunk has touched it for `life`, and a chunk renews what it touches at most every `renew`
+(`refresh`): an attempt, a chunk that moves nothing (`touch`), and, at the receiver, a chunk
+arriving late. A fair run (`FairRun`) takes `TStep`s but sweeps (`fair_tsteps`), with no more than
+`gap` passing without an attempt that delivers a chunk, or a touch.
+
+- `fair_unswept`: every state a fair run reaches from a state renewed within `renew`, with
+  `renew + gap ≤ life`, has gone untouched for less than `life`, so that no sweep can take
+  place there.
+- `fair_arun`, `fair_finishes`: a fair run's attempts that hear a reply are a run of `ARun`,
+  so that one with `ameasure` of them, from a state the prefix receiver reaches, ends with the
+  receiver storing exactly the sent blob.
+- `swept_source_stalls`: once a sweep has taken the sender's blob, the receiver never stores
+  it.
+
+That attempts which hear a reply keep coming, `ameasure` of them, is an assumption about the
+network. On a real link it depends too on how much of the sender's own timed-out windows is
+still ahead of it, which the code bounds by narrowing its window and the model doesn't count.
 
 ### Per-machine refs (`Refs.lean`)
 
@@ -1223,7 +1263,12 @@ rest on:
   overlapping bytes; check `hash(assembled) = id` at `Finish`, and restart on a mismatch;
   treat a stored blob as finished. A receiver may instead keep only a contiguous prefix,
   report its length, and check the hash once it reaches the claimed length, as musubi's does
-  (`preach_abs`).
+  (`preach_abs`). For liveness under deadlines, start each attempt where the receiver last
+  said it was, or, for a downloader, from what it has, not from the beginning
+  (`attempts_finish`, `restart_stalls`); sweep a blob only once no chunk has touched it for
+  `life`, renew one a chunk touches at most every `renew`, and touch every blob a transfer
+  still needs, with `renew` plus the longest wait between touches within `life`
+  (`fair_unswept`, `fair_finishes`).
 
 The real repository's `advance` can also finish taking records. It holds them in the same
 save that counts their renaming before moving heads; after an interrupted move, recovery
@@ -1365,11 +1410,10 @@ match, such as staging never being cleared):
 - **The hub forgetting.** `hubForget ops objs` names what the hub keeps, as
   `SyncStep.hubForget` does.
 
-The oracle also answers with the prefix receiver of `Chunks.lean` and the naming rule of
-`Names.lean`, whose definitions run as they are, so they need no executable form of their own
-([conformance.md, "Chunked blobs"](../docs/internals/conformance.md#chunked-blobs) and
+The oracle also answers with the prefix receiver of `Chunks.lean`, its senders' attempts, and the
+naming rule of `Names.lean`, whose definitions run as they are, so they need no executable form of
+their own ([conformance.md, "Chunked blobs"](../docs/internals/conformance.md#chunked-blobs) and
 ["Workspace names"](../docs/internals/conformance.md#workspace-names)). `Refs.lean`'s functions
-are executable as they are too, over any `RefAlg`: `RefsExec.lean` runs them on numbered
-targets, with jj's merges as a table each request carries, and the oracle answers refs requests
-with them ([conformance.md, "Per-machine
-refs"](../docs/internals/conformance.md#per-machine-refs)).
+are executable as they are too, over any `RefAlg`: `RefsExec.lean` runs them on numbered targets,
+with jj's merges as a table each request carries, and the oracle answers refs requests with them
+([conformance.md, "Per-machine refs"](../docs/internals/conformance.md#per-machine-refs)).

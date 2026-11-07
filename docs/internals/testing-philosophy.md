@@ -48,7 +48,7 @@ These need no test:
 A Lean proof covers every interleaving, but of the model; a test runs the real code, but on the
 cases it tries. Model a rule that must hold over every history or interleaving and whose state
 can be made small: the protocol, which copies a hive shows (`Presence.lean`), what imports and
-exports do to per-machine refs (`Refs.lean`), receiving chunked blobs (`Chunks.lean`). Design
+exports do to per-machine refs (`Refs.lean`), moving chunked blobs (`Chunks.lean`). Design
 it in the model first where you can, and keep the code's core a pure function that a test can
 check against the model.
 

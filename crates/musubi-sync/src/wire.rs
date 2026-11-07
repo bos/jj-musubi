@@ -35,7 +35,7 @@ use crate::Attachment;
 use crate::blobs::BlobId;
 use crate::blobs::BlobStore;
 
-pub const PROTOCOL_VERSION: u32 = 18;
+pub const PROTOCOL_VERSION: u32 = 19;
 pub const JJ_LIB_VERSION: &str = "0.47.1";
 /// This release of musubi, as every message says, and `musubi --version`: for a build deployed
 /// from source, followed by when it was deployed and its commit (`build.rs`).
@@ -221,6 +221,11 @@ pub enum HubWideReply {
     /// The hive, as it is now, after a request about it: after a [`HubWideRequest::Report`],
     /// so that a daemon learns its new name.
     Hive(HiveInfo),
+    /// The hive a [`HubWideRequest::Rename`] named, as it is now, and the name it had.
+    Renamed {
+        from: String,
+        hive: HiveInfo,
+    },
     Activity(HubActivity),
     Error(String),
 }

@@ -7,6 +7,11 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- `musubi hub rename` by a prefix of a hive's name says what the hive was called: it said
+  "Hive alp already has that name" after renaming `alpha` to `alp`, and "Renamed hive dem to
+  demo" when nothing changed. An empty name names no hive, where it named the only one. This
+  changes the protocol to 19: upgrade the hub and every machine together.
+
 - A copy joined from a second jj workspace is known by the workspace the repository was made
   in, and a hive created there is named after that one's directory. Before, the daemon knew it
   by the second workspace, so once that was forgotten and deleted, `musubi list` showed the

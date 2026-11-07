@@ -258,10 +258,12 @@ impl HubServer {
                     ))
                 })
             }
-            HubWideRequest::Rename { name, to } => self.lock().rename(&name, &to).map(|info| {
-                tracing::info!("renamed hive {name} to {to}");
-                HubWideReply::Hive(info)
-            }),
+            HubWideRequest::Rename { name, to } => {
+                self.lock().rename(&name, &to).map(|(from, hive)| {
+                    tracing::info!("renamed hive {from} to {to}");
+                    HubWideReply::Renamed { from, hive }
+                })
+            }
             HubWideRequest::Remove { name } => self.remove(&name).map(HubWideReply::Hive),
             HubWideRequest::Report { hive, report } => {
                 // Under the hub, so that a removal can't forget the hive's activity between

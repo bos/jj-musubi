@@ -92,9 +92,7 @@ pub fn choose_name(candidates: &[String], taken: impl Fn(&str) -> bool) -> Strin
 
 /// Why `name` can't name a hive, if it can't.
 pub fn check_name(name: &str) -> Result<(), String> {
-    if name.is_empty() {
-        return Err("a hive name can't be empty".to_owned());
-    }
+    check_name_given(name)?;
     if name.chars().any(char::is_whitespace) {
         return Err(format!("a hive name can't contain spaces: {name:?}"));
     }
@@ -102,6 +100,14 @@ pub fn check_name(name: &str) -> Result<(), String> {
         return Err(format!(
             "a hive name can't contain control characters: {name:?}"
         ));
+    }
+    Ok(())
+}
+
+/// Fails if `name`, a hive's name as a user gives it, is empty.
+pub fn check_name_given(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("a hive name can't be empty".to_owned());
     }
     Ok(())
 }

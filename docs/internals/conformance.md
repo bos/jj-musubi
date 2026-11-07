@@ -1244,7 +1244,7 @@ links:
    | A `jj` command moves `x`, `y` or `t` (`jj bookmark set`, `jj bookmark delete`, `jj tag set`, `jj tag delete`), or changes nothing (`jj status`) | `jjImport` of each ref whose physical value differs from `git_refs`; `jjExport` of every ref even when importing changed nothing; then, if the command moves a bookmark, `set` and `jjExport` of every ref |
    | `y` moves in `origin`, and `jj git fetch` fetches it | as a `jj` command, whose change is `RStep.fetch` |
    | A `jj` command at the operation before the latest action (`--at-op`) moves `x` or `y`, and `jj status` follows | on the older operation's slots, `set` and `jjExport` of every ref (it imports nothing); then `TSlot.merge` of the head with them against the older operation's, in the order of the merge operation's parents, then as a `jj` command that changes nothing |
-   | `jj undo`, or `jj op restore` to the operation before the latest action or to the one both machines last synced at | as a `jj` command that imports; then, if it restored an operation, which its description names, every ref's slot but `K` from that operation's view (`restoreLocal`, `restoreRemote`), the expected value the head's (`restoreC`), and `jjExport` of every ref |
+   | `jj undo`, or `jj op restore` to the operation before the latest action or to the one both machines last synced at | as a `jj` command that changes nothing; then, if it restored an operation, which its description names, every ref's slot but `K` from that operation's view (`restoreLocal`, `restoreRemote`), the expected value the head's (`restoreC`), and `jjExport` of every ref |
    | The other machine moves `x` or `t` or fetches `y`, and both sync, with `refs/heads/x.lock` held here or not | `LStep.advance` of `x`, `y` and `t` and `CStep.advance` of `y@origin`, with this machine's expected value, then `jjExport` of every ref, except where the lock makes `x`'s update fail, then `exportConflicted` of `y@origin`; nothing if there was nothing to realize |
    | The other machine moves `x` or `t` or fetches `y` before it has this machine's latest operations, merges them with its own as it syncs, and this machine syncs | the other's operation realized from the slots both last synced at, and `realizeMerge` of it with the head, against those slots, in the order of the merge's parents, which is `TSlot.merge`; then the exports, as above. Two fetches that moved `y@origin` to different values merge to a conflict, whose expected value is its side; a conflict from one parent keeps that parent's, and a merge that resolves it has the remote bookmark itself |
    | Either of the last two, with a `jj` command here that moves `x`, `y` or `t` or fetches `y` after the other machine's operations and before this machine syncs | the command, as above; then the other's operation realized as above from this machine's slots before the command, and `jjExport` of every ref, against `.git` as the command left it, then `exportConflictedBeside` of `y@origin` against the command's record; then `TSlot.merge` of the two against the slots before the command, in the order of the merge's parents, and the exports, as above, with the merge's expected value: `LStep.beside` and `CStep.beside`. The other machine then syncs |
@@ -1253,9 +1253,12 @@ links:
    order, and the two refs of `y` share the bookmark, so an import of one that sets the
    bookmark is a `set` of the other. An integrated command exports after its import phase
    even when importing changed nothing. This completes pending exports after native op-head
-   merges; the command's own transaction still exports only if it changes the view.
+   merges, and exports that failed earlier, as where git's lock on a ref was held; the
+   command's own transaction still exports only if it changes the view.
    `an_unchanged_import_exports_a_bookmark_selected_by_a_merge` pins this jj 0.47 behavior
-   with concurrent fetches followed by a bookmark command at an older operation.
+   with concurrent fetches followed by a bookmark command at an older operation, and
+   `a_restore_first_exports_what_a_lock_held_back` with a realization whose export git's lock
+   refused, followed by `jj op restore`.
 
    After every action the test requires, for each ref, the bookmark, the remote bookmark
    and its tracking state, its `git_refs` entry and the git ref to be the model's, `LInv`
@@ -1337,8 +1340,14 @@ What the test relies on of jj, and what it leaves out:
   `git_refs`. Where the restored bookmark can't be exported, an ordinary command leaves it
   alone if the physical ref still matches `git_refs`. The model's unconditional import
   counterexample `restore_reverts` is not an ordinary jj command in that state. The native
-  regression is `undo_of_an_unexportable_bookmark_keeps_it`. jj also refuses to undo a merge
-  operation or a realization attributed to another machine's workspace.
+  regression is `undo_of_an_unexportable_bookmark_keeps_it`. Before restoring, `jj undo` and
+  `jj op restore` import and export as any integrated command does, so a bookmark whose export
+  failed earlier, as when git's lock on its ref was held, reaches `.git` and `git_refs` first,
+  and stays there if the restored bookmark can't be exported, as Hegel found
+  (`a_restore_first_exports_what_a_lock_held_back`). Where that import or export makes an
+  operation, `jj undo` undoes it, so the test reads what a restore restored from its
+  description. Otherwise jj refuses to undo a merge operation or a realization attributed to
+  another machine's workspace.
 - **Conflicted remote bookmarks.** musubi writes and records the expected value in `.git`:
   one conflict side after concurrent fetches, or the value from before a restore. Ordinary
   commands leave the conflict alone; an explicit fetch imports its result even if the

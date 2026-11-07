@@ -497,16 +497,12 @@ impl Daemon {
             Err(err) => (Err(err.clone()), vec![]),
             Ok(socket) => match crate::block_on(statuses(socket)) {
                 Ok(Some(served)) => (Ok(true), served),
-                Ok(None) => (Ok(false), vec![]),
+                Ok(None) => (daemon::unreachable(socket).map_or(Ok(false), Err), vec![]),
                 Err(err) => (Err(format!("{err:#}")), vec![]),
             },
         };
-        let pid = match (&socket, &running) {
-            (Ok(socket), Ok(true)) => socket
-                .lock_path()
-                .ok()
-                .and_then(|lock| std::fs::read_to_string(lock.with_extension("pid")).ok())
-                .map(|pid| pid.trim().to_owned()),
+        let pid = match &running {
+            Ok(true) => daemon::Running::find().ok().flatten().and_then(|it| it.pid),
             _ => None,
         };
         let daemon = Self {

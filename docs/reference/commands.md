@@ -66,7 +66,7 @@ the Unix epoch, and durations in seconds. A value that can't be told, or doesn't
 | `hive` | The repository's part in its hive, or `null` outside one: `name`, `id`, `hub`, `machine` (this machine's name in the hive), `head` (the hive's head, as of the last sync), `last_sync`, `error` (why its syncing fails), `sent` (whether the hub has all this machine's work, as far as the last sync tells), `forgotten`, `working_copies` (each with `name`, `commit`, `change` and `description`), and `copies` (each with `machine`, `this`, `last_used`, and `forget_after`, `null` for never). |
 | `not_synced` | Why musubi doesn't sync the repository, though it has a hive's record, as when it was made by copying a copy's files, or why that can't be told (see [Move, copy or restore a repository](../guides/manage.md#move-copy-or-restore-a-repository)); `hive` is `null` then. `null` otherwise. |
 | `default_hub` | The hub commands use without `--hub`, or `null`. |
-| `daemon` | `running`, or `null` with `error` saying why that can't be told; `pid`; `serving` (whether it serves this repository); `served` (how many repositories it serves); `at_login`; `socket`; `log`; and `upgrade_failed`, with `release` and `error`, if the daemon's latest upgrade to a release newer than this one failed, else `null`. |
+| `daemon` | `running`, or `null` with `error` saying why that can't be told, or that the daemon runs but can't be reached; `pid`; `serving` (whether it serves this repository); `served` (how many repositories it serves); `at_login`; `socket`; `log`; and `upgrade_failed`, with `release` and `error`, if the daemon's latest upgrade to a release newer than this one failed, else `null`. |
 
 ## Run the daemon
 
@@ -144,7 +144,7 @@ source <(musubi completion zsh)
 | --- | --- |
 | `--color <when>` | Choose when to colour what the command prints: `always`, `never`, `debug` (showing labels), or `auto` (only on a terminal). Without it, jj's `ui.color` says. See [Colours](configuration.md#colours). |
 | `--log <filter>` | Choose what this command logs, as a filter in `RUST_LOG`'s syntax, such as `debug` or `musubi_sync=debug`. See [Logging](configuration.md#logging). |
-| `--socket <path>` | Talk to the daemon on another control socket. See [Files and directories](configuration.md#files-and-directories). |
+| `--socket <path>` | Talk to the daemon on another control socket: an absolute path, or one starting with `~/`. See [Files and directories](configuration.md#files-and-directories). |
 
 When whatever reads a command's output stops before the end, as `head` does in `musubi list |
 head`, the command still does all it would, printing nothing more there, and exits with

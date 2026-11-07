@@ -314,9 +314,17 @@ fn run(cli: Cli, ui: &Ui) -> anyhow::Result<()> {
         } => block_on(async {
             let socket = socket()?;
             // The service manager starts the daemon from now on, so stop one started
-            // otherwise.
-            daemon::stop(&socket).await?;
-            let described = login::install(login::Service::Daemon, None)?;
+            // otherwise; and start it again if the service manager can't.
+            let stopped = daemon::stop(&socket).await?;
+            let described = match login::install(login::Service::Daemon, None) {
+                Ok(described) => described,
+                Err(err) => {
+                    if stopped && let Err(again) = daemon::ensure(&socket).await {
+                        writeln!(ui.warning(), "Couldn't start the daemon again: {again:#}")?;
+                    }
+                    return Err(err);
+                }
+            };
             daemon::ensure(&socket).await?;
             writeln!(
                 ui.stdout(),

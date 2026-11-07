@@ -140,13 +140,20 @@ fn run(program: &str, args: &[&str]) -> anyhow::Result<()> {
 }
 
 /// Sets `service` up to start at login, run in `dir` if given, and starts it now. The caller
-/// has stopped any it started itself.
+/// has stopped any it started itself. If that fails, and it wasn't installed before, it
+/// removes what it wrote, which [`uninstall`], finding no marker, would leave.
 pub fn install(service: Service, dir: Option<&Path>) -> anyhow::Result<String> {
     let exe = std::env::current_exe()?;
-    fs::create_dir_all(config::state_dir()?)?;
-    let described = platform::install(service, &exe, dir)?;
-    fs::write(service.marker()?, &described)?;
-    Ok(described)
+    config::create_state_dir()?;
+    let before = installed(service);
+    let result = platform::install(service, &exe, dir).and_then(|described| {
+        fs::write(service.marker()?, &described)?;
+        Ok(described)
+    });
+    if result.is_err() && !before {
+        platform::uninstall(service).ok();
+    }
+    result
 }
 
 /// Undoes [`install`], stopping what the service manager runs. Returns whether it was

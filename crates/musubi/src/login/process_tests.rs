@@ -98,6 +98,8 @@ fn installation_process() {
             !installed(service),
             "a failed install must not leave a marker"
         );
+        // Nor anything else, which uninstalling, finding no marker, would leave.
+        assert!(!service_file(&home, service).exists());
         fs::remove_file(home.join("fail-install")).unwrap();
         let description = install(service, Some(&home)).unwrap();
         assert_eq!(
@@ -110,11 +112,7 @@ fn installation_process() {
     start().unwrap();
 
     for service in [Service::Daemon, Service::Hub] {
-        let path = if cfg!(target_os = "macos") {
-            home.join(format!("Library/LaunchAgents/{}.plist", service.label()))
-        } else {
-            home.join("config/systemd/user").join(service.unit())
-        };
+        let path = service_file(&home, service);
         let text = fs::read_to_string(&path).unwrap();
         assert!(text.contains("MUSUBI_TEST_GUI"), "{text}");
         assert!(
@@ -174,5 +172,14 @@ fn installation_process() {
         }
         assert!(calls.contains("--user daemon-reload\n"), "{calls}");
         assert!(calls.contains("--user start musubi.service\n"), "{calls}");
+    }
+}
+
+/// The unit file or agent that installing `service` writes.
+fn service_file(home: &Path, service: Service) -> PathBuf {
+    if cfg!(target_os = "macos") {
+        home.join(format!("Library/LaunchAgents/{}.plist", service.label()))
+    } else {
+        home.join("config/systemd/user").join(service.unit())
     }
 }

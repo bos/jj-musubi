@@ -52,7 +52,13 @@ pub fn list(
         };
         let client = match running {
             Ok(Some(client)) => client,
-            Ok(None) => return Ok((Ok(false), BTreeMap::new())),
+            Ok(None) => {
+                let running = match socket.as_ref().ok().and_then(daemon::unreachable) {
+                    Some(problem) => Err(anyhow::anyhow!(problem)),
+                    None => Ok(false),
+                };
+                return Ok((running, BTreeMap::new()));
+            }
             Err(err) => return Ok((Err(err), BTreeMap::new())),
         };
         let statuses: BTreeMap<String, Status> = client

@@ -35,8 +35,9 @@ pub fn lock(path: &Path) -> anyhow::Result<Lock> {
 }
 
 fn open(path: &Path) -> anyhow::Result<fs::File> {
+    // Most locks are in the state directory, which may not exist yet.
     if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir)?;
+        crate::socket::create_private_dir(dir)?;
     }
     fs::OpenOptions::new()
         .create(true)

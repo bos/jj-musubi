@@ -240,10 +240,29 @@ pub fn install(ui: &Ui, args: ServeArgs) -> anyhow::Result<()> {
     if args.advertise.is_some() {
         settings.advertise = args.advertise;
     }
-    // Stop the hub an earlier install runs, which may serve another directory.
+    let state = config::create_state_dir()?;
+    // Before stopping the hub an earlier install runs, which may serve another directory:
+    // whatever else serves this one would refuse it anyway.
+    let installed = login::installed(Service::Hub);
+    let replacing = installed
+        && fs::read_to_string(state.join("hub.path"))
+            .ok()
+            .and_then(|served| fs::canonicalize(served.trim()).ok())
+            .is_some_and(|served| served == dir);
+    if !replacing && try_lock(&dir.join("hub.lock"))?.is_none() {
+        anyhow::bail!(
+            "a hub is already serving {}; stop it, then run this again",
+            dir.display()
+        );
+    }
+    if !installed && try_lock(&state.join("hub.lock"))?.is_none() {
+        let serving = fs::read_to_string(state.join("hub.path")).unwrap_or_default();
+        anyhow::bail!(
+            "a hub is already running, serving {}; stop it, then run this again",
+            serving.trim()
+        );
+    }
     let stopping = login::uninstall(Service::Hub)?;
-    let state = config::state_dir()?;
-    fs::create_dir_all(&state)?;
     // The service manager may return before the hub it stops has let go of its lock.
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     let user_lock = loop {

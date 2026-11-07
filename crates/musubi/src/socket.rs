@@ -81,7 +81,8 @@ impl Socket {
     }
 
     /// Binds the socket. The caller holds a lock that keeps anyone else listening here, so
-    /// any socket file is one left behind by a process that died.
+    /// any socket file is one left behind by a process that died. Dropping the listener
+    /// leaves the file: the caller removes it, if it is still its own ([`Self::file`]).
     pub fn listen(&self) -> anyhow::Result<Listener> {
         if let Self::Path(path) = self {
             if let Some(dir) = path.parent() {
@@ -94,7 +95,9 @@ impl Socket {
                 Err(err) => return Err(err).with_context(|| format!("removing {path:?}")),
             }
         }
-        let options = ListenerOptions::new().name(self.name()?);
+        let options = ListenerOptions::new()
+            .name(self.name()?)
+            .reclaim_name(false);
         #[cfg(windows)]
         let options = {
             use interprocess::os::windows::local_socket::ListenerOptionsExt as _;
@@ -106,6 +109,20 @@ impl Socket {
         options
             .create_tokio()
             .with_context(|| format!("listening on {self}"))
+    }
+
+    /// Which file is at the socket's path, if any: on Unix, its device and inode, which tell
+    /// a socket bound since, or put there by another process, from the one bound before. A
+    /// named pipe has none: it lasts as long as its listener, and no one else can take it.
+    pub fn file(&self) -> Option<(u64, u64)> {
+        #[cfg(unix)]
+        if let Self::Path(path) = self {
+            use std::os::unix::fs::MetadataExt as _;
+            return std::fs::symlink_metadata(path)
+                .ok()
+                .map(|metadata| (metadata.dev(), metadata.ino()));
+        }
+        None
     }
 
     /// Connects to what listens on the socket, or returns `None` if nothing does.
@@ -146,14 +163,21 @@ pub async fn accept(listener: &Listener) -> Stream {
     }
 }
 
+/// Makes `dir`, if it doesn't exist, readable and writable by this user alone, whatever the
+/// umask: a socket's directory, or musubi's state directory, which holds one when
+/// `MUSUBI_STATE_DIR` is set. Its parents, if missing, are made as usual.
 #[cfg(unix)]
-fn create_private_dir(dir: &Path) -> anyhow::Result<()> {
+pub fn create_private_dir(dir: &Path) -> anyhow::Result<()> {
     use std::os::unix::fs::DirBuilderExt as _;
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)
-        .with_context(|| format!("creating {dir:?}"))
+    if let Some(parent) = dir.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).with_context(|| format!("creating {parent:?}"))?;
+    }
+    match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+        Err(err) if err.kind() != std::io::ErrorKind::AlreadyExists => {
+            Err(err).with_context(|| format!("creating {dir:?}"))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Fails unless `dir` is a directory, not a symbolic link, that belongs to this user and
@@ -163,13 +187,18 @@ fn check_private_dir(dir: &Path) -> anyhow::Result<()> {
     use std::os::unix::fs::MetadataExt as _;
     let metadata = std::fs::symlink_metadata(dir).with_context(|| format!("checking {dir:?}"))?;
     let uid = uid()?;
-    anyhow::ensure!(
-        metadata.is_dir() && metadata.uid() == uid && metadata.mode() & 0o022 == 0,
-        "{} is not a private directory of this user's (it must be owned by uid {uid}, not a \
-         symbolic link, and writable by no one else), so its sockets can't be trusted; remove \
-         it, or for the daemon's socket, choose another place with MUSUBI_SOCKET",
-        dir.display()
-    );
+    if !(metadata.is_dir() && metadata.uid() == uid && metadata.mode() & 0o022 == 0) {
+        return Err(crate::ui::with_hint(
+            anyhow::anyhow!(
+                "{} is not a private directory of this user's, so its sockets can't be trusted",
+                dir.display()
+            ),
+            format!(
+                "If it's yours, `chmod 700 {}` makes it private.",
+                dir.display()
+            ),
+        ));
+    }
     Ok(())
 }
 
@@ -179,7 +208,7 @@ fn check_private_dir(_: &Path) -> anyhow::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn create_private_dir(dir: &Path) -> anyhow::Result<()> {
+pub fn create_private_dir(dir: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {dir:?}"))
 }
 

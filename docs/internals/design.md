@@ -352,7 +352,11 @@ machine sees it as a working copy, it follows the rewrite (`replace_abandoned_wo
 Where the forget abandoned an empty working-copy commit, it stays on the hidden commit, since a
 new one would be an empty commit of no one's on every other machine. jj's next snapshot, or any
 command that rewrites `@`, makes a new visible commit of it, and that work publishes the machine's
-workspaces again.
+workspaces again. No other machine sees the commit as a working copy, so jj doesn't rebase it when
+another machine rewrites or abandons its parents, and the snapshot would bring them back. So the
+machine rebases it itself, as jj would have rebased a working-copy commit it saw, writing it
+hidden and recording no rewrite, in an operation that isn't its work, so that it stays forgotten
+(`replace_abandoned_working_copies`).
 
 ### Leaving
 

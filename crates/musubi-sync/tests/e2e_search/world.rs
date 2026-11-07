@@ -8,6 +8,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use jj_lib::object_id::ObjectId as _;
+use jj_lib::repo::Repo as _;
 use musubi_core::hub::HubStorage as _;
 use musubi_core::message::HeadKind;
 use musubi_core::message::Reply;
@@ -1092,6 +1093,7 @@ impl World {
         self.touched.insert(m);
         self.merge_local_heads(m);
         let pruned = self.fx.hive.hub.store().pruned();
+        let forgotten = self.forgotten_working_copies(m);
         let steps = loop {
             match self.fx.hive.sync(m) {
                 Ok(steps) => break steps,
@@ -1099,6 +1101,7 @@ impl World {
             }
         };
         self.note_pruning(pruned);
+        self.note_forgotten_rebase(m, forgotten);
         self.record_merges(m);
         // A fully driven sync also finishes an unpublished-only trim, which produces
         // no shared drop or fix-up at all.
@@ -1112,6 +1115,66 @@ impl World {
         }
         self.note_shown_again();
         steps
+    }
+
+    /// Machine `m`'s own working-copy commits, by workspace, each with its change id and
+    /// whether it is visible, read in process, where the hive has forgotten the machine:
+    /// `None` where it shows it.
+    fn forgotten_working_copies(
+        &self,
+        m: usize,
+    ) -> Option<BTreeMap<String, (String, String, bool)>> {
+        if self.fx.shown_machines().contains(&self.fx.machine_key(m)) {
+            return None;
+        }
+        let repo = self.fx.load(m);
+        let index = repo.index();
+        let heads = repo.view().heads();
+        let visible = |id: &jj_lib::backend::CommitId| {
+            futures::executor::block_on(index.has_id(id)).unwrap()
+                && heads
+                    .iter()
+                    .any(|head| futures::executor::block_on(index.is_ancestor(id, head)).unwrap())
+        };
+        Some(
+            repo.view()
+                .wc_commit_ids()
+                .iter()
+                // The search names workspaces without a `/`: those with one are others'.
+                .filter(|(name, _)| !name.as_str().contains('/'))
+                .map(|(name, id)| {
+                    let commit =
+                        futures::executor::block_on(repo.store().get_commit_async(id)).unwrap();
+                    let change = commit.change_id().hex();
+                    (name.as_str().to_owned(), (id.hex(), change, visible(id)))
+                })
+                .collect(),
+        )
+    }
+
+    /// Notes, for coverage, a sync of machine `m`, forgotten before it and after, that moved
+    /// a working copy of its own from one hidden commit to another of the same change: as a
+    /// forgotten copy rebases one whose parents other machines rewrote or abandoned
+    /// (`replace_abandoned_working_copies`).
+    fn note_forgotten_rebase(
+        &self,
+        m: usize,
+        before: Option<BTreeMap<String, (String, String, bool)>>,
+    ) {
+        let (Some(before), Some(after)) = (before, self.forgotten_working_copies(m)) else {
+            return;
+        };
+        let rebased = after.iter().any(|(name, (commit, change, visible))| {
+            !visible
+                && before
+                    .get(name)
+                    .is_some_and(|(old, old_change, was_visible)| {
+                        !was_visible && old != commit && old_change == change
+                    })
+        });
+        if rebased {
+            fired("forgotten:working_copy_rebased");
+        }
     }
 
     /// The `merge_key` of machine `m`'s newest operation.

@@ -94,6 +94,8 @@ pub const EVENTS: &[&str] = &[
     "hub_goes_back:after_prune",
     "remake_hub:after_prune",
     "remake_hub:joiner_with_prefix",
+    // A forgotten copy's sync rebased a hidden working copy of its own.
+    "forgotten:working_copy_rebased",
 ];
 
 /// Each catalogue row, by test name, with the rules and events that together exercise it
@@ -218,6 +220,22 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
     (
         "a_forgotten_working_copy_follows_its_rewrite",
         Some(&["forget_copy", "edit_unsnapshotted", "describe"]),
+    ),
+    (
+        "a_forgotten_working_copy_follows_a_rewrite_of_its_parent",
+        Some(&[
+            "forgotten:working_copy_rebased",
+            "describe",
+            "edit_unsnapshotted",
+        ]),
+    ),
+    (
+        "a_forgotten_working_copy_follows_an_abandon_of_its_parent",
+        Some(&[
+            "forgotten:working_copy_rebased",
+            "abandon",
+            "edit_unsnapshotted",
+        ]),
     ),
     (
         "other_machines_working_copies_follow_rewrites",

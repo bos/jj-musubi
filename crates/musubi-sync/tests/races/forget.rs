@@ -3,6 +3,12 @@
 
 use std::collections::BTreeSet;
 
+use futures::executor::block_on;
+use jj_lib::commit::Commit;
+use jj_lib::object_id::ObjectId as _;
+use jj_lib::ref_name::WorkspaceName;
+use jj_lib::repo::Repo as _;
+
 use crate::fixture::Fixture;
 
 /// The descriptions of the visible commits on machine `index`.
@@ -189,6 +195,128 @@ fn a_forgotten_working_copy_follows_its_rewrite() {
     hive.sync();
     let described = hive.commit_id(1, "described by alpha");
     assert_eq!(hive.workspaces(1)["beta"], described);
+}
+
+/// Machine `index`'s working-copy commit in its own workspace `name`, read in process: a `jj`
+/// command would snapshot, which is work, or update a stale working copy.
+fn own_working_copy(hive: &Fixture, index: usize, name: &str) -> (bool, Commit) {
+    let repo = hive.load(index);
+    let id = repo
+        .view()
+        .get_wc_commit_id(WorkspaceName::new(name))
+        .unwrap();
+    let commit = block_on(repo.store().get_commit_async(id)).unwrap();
+    let index = repo.index();
+    let visible = block_on(index.has_id(id)).unwrap()
+        && repo
+            .view()
+            .heads()
+            .iter()
+            .any(|head| block_on(index.is_ancestor(id, head)).unwrap());
+    (visible, commit)
+}
+
+/// While the hive has forgotten a copy, its working copy stays on the empty commit the forget
+/// abandoned, which no other machine sees, so jj doesn't rebase it when another machine
+/// rewrites its parent, here with `how`. The copy rebases it itself, still hidden, onto the
+/// commits described `parents`, as jj would have rebased a workspace it saw. Left on the old
+/// parent, the copy's next snapshot brought that back on every machine: beside its rewrite,
+/// divergent, or abandoned no longer. The copy's working copy is on "alpha parent", and with
+/// `merge` on "alpha base" too. Returns the hive, converged.
+fn forgotten_copy_snapshots_after_its_parent_is(
+    how: &[&str],
+    merge: bool,
+    parents: &[&str],
+) -> Fixture {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.commit(0, "a", "alpha base");
+    if merge {
+        hive.repo(0).jj(&["new", "root()"]);
+    }
+    hive.commit(0, "p", "alpha parent");
+    if merge {
+        let base = hive.commit_id(0, "alpha base");
+        hive.repo(0).jj(&["new", &base, "@-"]);
+    }
+    hive.sync();
+    let alpha = hive.machine_key(0);
+    let (_, empty) = own_working_copy(&hive, 0, "alpha");
+    assert!(hive.node(1).forget_copy(&alpha, "alpha").unwrap());
+    hive.sync();
+    let parent = hive.commit_id(1, "alpha parent");
+    let mut args = how.to_vec();
+    args.push(&parent);
+    hive.repo(1).jj(&args);
+    let before = hive.visible(1);
+    hive.sync();
+    assert!(
+        !hive.shown_machines().contains(&alpha),
+        "rebasing its working copy is no work of alpha's"
+    );
+    assert_eq!(hive.visible(1), before, "beta sees alpha's working copy");
+    let (visible, rebased) = own_working_copy(&hive, 0, "alpha");
+    assert!(!visible, "alpha's working copy is visible");
+    assert_eq!(rebased.change_id(), empty.change_id());
+    let expected: Vec<String> = parents.iter().map(|p| hive.commit_id(1, p)).collect();
+    let actual: Vec<String> = rebased.parent_ids().iter().map(|id| id.hex()).collect();
+    assert_eq!(
+        actual, expected,
+        "alpha's working copy is on the wrong parents"
+    );
+
+    hive.repo(0).write_file("new", "alpha edit");
+    hive.repo(0).jj(&["status"]);
+    let with_edit = hive.repo(0).jj(&[
+        "log",
+        "--no-graph",
+        "-r",
+        "all() & files(\"new\")",
+        "-T",
+        "commit_id ++ \"\\n\"",
+    ]);
+    assert!(!with_edit.is_empty(), "the edit is in no commit");
+    hive.assert_converged();
+    assert!(hive.shown_machines().contains(&alpha));
+    assert!(
+        !descriptions(&hive, 1).contains("alpha parent"),
+        "the old parent is back"
+    );
+    assert_eq!(
+        hive.repo(0).jj(&["file", "show", "-r", "@", "new"]),
+        "alpha edit"
+    );
+    let template = "description.first_line() ++ \"\\n\"";
+    let shown = hive
+        .repo(0)
+        .jj(&["log", "--no-graph", "-r", "@-", "-T", template]);
+    let mut shown: Vec<&str> = shown.lines().collect();
+    let mut parents = parents.to_vec();
+    shown.sort_unstable();
+    parents.sort_unstable();
+    assert_eq!(shown, parents);
+    hive
+}
+
+/// The forgotten copy's working copy, a merge, goes onto the rewrite of one parent, beside
+/// the other.
+#[test]
+fn a_forgotten_working_copy_follows_a_rewrite_of_its_parent() {
+    forgotten_copy_snapshots_after_its_parent_is(
+        &["describe", "-m", "reworded"],
+        true,
+        &["alpha base", "reworded"],
+    );
+}
+
+/// The forgotten copy's working copy goes onto the abandoned parent's parent, without the
+/// abandoned change. That changes its files, so the working copy is stale, as any workspace
+/// jj moves: jj, updating it, snapshots the edit at the operation it last recorded, into a
+/// commit beside the empty working copy, and takes the edit off the disk until the copy's
+/// next sync follows that commit and the next command updates the files again.
+#[test]
+fn a_forgotten_working_copy_follows_an_abandon_of_its_parent() {
+    let hive = forgotten_copy_snapshots_after_its_parent_is(&["abandon"], false, &["alpha base"]);
+    assert!(!hive.repo(0).path().join("p").exists());
 }
 
 /// A machine that rewrites another's working-copy commit and then forgets that copy, before
@@ -597,9 +725,8 @@ fn a_workspace_shown_again_by_a_longer_name_can_lose_a_move_meanwhile() {
     hive.repo(1).write_file("from-beta", "beta's edit");
     hive.repo(1).jj(&["describe", "-m", "beta's working copy"]);
     hive.sync();
-    let working_copy = |hive: &Fixture| {
-        hive.load(1).view().wc_commit_ids()[jj_lib::ref_name::WorkspaceName::new("beta")].clone()
-    };
+    let working_copy =
+        |hive: &Fixture| hive.load(1).view().wc_commit_ids()[WorkspaceName::new("beta")].clone();
     hive.repo(0).jj(&["workspace", "forget", "beta/beta"]);
     add_workspace(&hive, 0, "beta/beta", "alpha-beta");
     // Shows beta's workspace again, and pushes nothing.

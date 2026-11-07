@@ -166,9 +166,10 @@ impl NodeAdapter {
     /// returns true, since the policy has more to do.
     ///
     /// Realizing another machine's operation replaces abandoned working copies too, but
-    /// while the hive has forgotten this machine it leaves them be
-    /// (`NodeRepo::replace_abandoned_working_copies`), and the work that shows it again,
-    /// such as creating a bookmark, needn't touch them: then nothing would arrive to realize.
+    /// while the hive has forgotten this machine it leaves them hidden, rebasing them only
+    /// where their parents went (`NodeRepo::replace_abandoned_working_copies`), and the work
+    /// that shows it again, such as creating a bookmark, needn't touch them: then nothing
+    /// would arrive to realize.
     pub fn when_idle(&mut self) -> anyhow::Result<bool> {
         self.clock.tick(&mut self.repo);
         let workspaces = self.show_other_workspaces()?;

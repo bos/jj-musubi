@@ -7,6 +7,20 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- A copy the hive forgot no longer brings back the parent of its working copy when another
+  machine rewrote or abandoned that parent meanwhile. If the working copy was empty, as after
+  `jj commit`, and another machine rewrote its parent, as `jj describe` or `jj rebase` does,
+  or abandoned it, the copy's next `jj` command that recorded anything, such as a snapshot of
+  an edit, made the old parent visible again on every machine: divergent beside its rewrite,
+  or no longer abandoned. A copy a coding agent joined is forgotten after 6 hours unused, so
+  this was easy to meet. Now its working copy moves as jj would have moved it, onto the
+  rewrite or onto the abandoned commit's parent; if that changes its files, the next `jj`
+  command there finds the working copy stale, as after any rewrite on another machine.
+  Nothing needs doing on upgrading. To tidy up a parent that already came back beside its
+  rewrite, move what was built on it onto the rewrite in its place, with
+  `jj rebase -s <child> -o 'parents(<child>) ~ <old> | <rewrite>'`, then `jj abandon <old>`;
+  abandon again one that came back after an abandon.
+
 - A workspace of your own named like another machine's, as `beta/x` where a machine named
   beta has a workspace `x`, now stays yours: when you add it while beta adds `x` or joins the
   hive, when you add it, or rename one to it, after `jj workspace forget beta/x`, and through

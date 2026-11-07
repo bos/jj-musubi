@@ -7,6 +7,13 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- A hive named after a remote or a directory whose name has spaces, or `%`-escapes such as
+  `%20`, gets a name it can have: `My Project` names it `My-Project`. Before, `musubi create`
+  refused it, naming a name the user never typed, or named it `My%20Project`, and `musubi join`
+  making a lost hive again could give it a name with spaces. A refused name now says what is
+  wrong with it. Nothing needs doing on upgrading; `musubi hub rename` renames a hive named
+  badly before.
+
 - A hub matches a joining copy to a hive by the remote URLs only of joins to that hive. A copy
   carries the history of a hive it left into the next one it creates or joins, and the hub
   took the URLs of its joins to the old hive for the new one's too, so a later copy of the old

@@ -385,8 +385,10 @@ impl HubDir {
         Ok(id)
     }
 
-    /// Creates an empty hive with id `id`, a UUID in its usual form.
+    /// Creates an empty hive with id `id`, a UUID in its usual form, and `name`, which must be
+    /// valid.
     fn create_as(&mut self, id: &str, name: &str, backend: Backend) -> anyhow::Result<()> {
+        names::check_name(name).map_err(anyhow::Error::msg)?;
         let dir = self.dir.join(id);
         HubStore::init(&dir, backend)?;
         let meta = HiveMeta {
@@ -745,7 +747,9 @@ impl HubDir {
                 return Err(message);
             }
             (JoinChoice::Remake { id, name }, Decision::Refuse(_) | Decision::Create) => {
-                let mut names: Vec<String> = name.iter().cloned().collect();
+                // A name an earlier release gave it may not be valid now.
+                let former = name.iter().filter(|name| names::check_name(name).is_ok());
+                let mut names: Vec<String> = former.cloned().collect();
                 names.extend(names::name_candidates(&request.remotes, &request.dir_name));
                 let name = names::choose_name(&names, |name| self.name_taken(name));
                 self.create_as(id, &name, backend).map_err(refusal)?;
@@ -1314,6 +1318,42 @@ mod tests {
         let joined = hubs.join_probed(&joining, &probed).unwrap();
         assert!(joined.created);
         assert!(![gone, kept, made].contains(&joined.hive.id));
+    }
+
+    /// A hive is never named what no hive can be: a new one made without a name gets a valid
+    /// one from the repository's directory, and so does a hive made again under a name an
+    /// earlier release gave it that isn't valid now.
+    #[test]
+    fn default_names_are_valid_names() {
+        let dir = musubi_testutil::tempdir();
+        let mut hubs = HubDir::open(dir.path()).unwrap();
+        let unnamed = |dir_name: &str, choice: JoinChoice| JoinRequest {
+            choice,
+            dir_name: dir_name.to_owned(),
+            remotes: vec![],
+            remote_bindings: BTreeMap::new(),
+            ..request("alpha", "https://example.com/a")
+        };
+        let joined = hubs
+            .join(&unnamed("My Project", JoinChoice::Create(None)))
+            .unwrap();
+        assert_eq!(joined.hive.name, "My-Project");
+        let remake = JoinChoice::Remake {
+            id: Uuid::new_v4().to_string(),
+            name: Some("Old Name".to_owned()),
+        };
+        let mut other = unnamed("Other Project", remake);
+        other.roots = vec!["22".repeat(20)];
+        let joined = hubs.join(&other).unwrap();
+        assert!(joined.created);
+        assert_eq!(joined.hive.name, "Other-Project");
+        let err = hubs
+            .create_as(&Uuid::new_v4().to_string(), "My Project", Backend::GIT)
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            r#"a hive name can't contain spaces: "My Project""#
+        );
     }
 
     /// A hive created with a name has it, and no second hive can be created with it.

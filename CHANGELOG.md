@@ -7,6 +7,9 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- `musubi leave` in a copy whose hive was removed from its hub takes it out, as it does any
+  other copy. Previously it refused, advising `musubi join --hive`.
+
 - `musubi.forget-after` set to a duration under a second, such as `500ms`, is reported as
   shorter than a second, the least it can be. Previously the message said it was neither
   `never` nor a duration.

@@ -129,7 +129,8 @@ it as it next syncs, keeping everything it has. If the removal fails, the copy s
 
 A plain `musubi join`, in a copy whose hive was removed, doesn't join another hive whose
 history matches. Choose one with `musubi join --hive <name>`, or start a new one with
-`musubi create`.
+`musubi create`. Or run `musubi leave`, which records that the copy left, as any other that
+left, after which `musubi join` matches it with a hive as it would any repository.
 
 ## Copies, moves and duplicates
 

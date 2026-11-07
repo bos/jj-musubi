@@ -2200,6 +2200,18 @@ fn copies_leave_a_removed_hive() {
     // It remembers its hive was removed, rather than joining another its history matches.
     let err = musubi_fails(&env, &logs, &beta, &["join", "--hub", &hub.url]);
     insta::assert_snapshot!(err, @"Error: this repository's hive, alpha, was removed from its hub; `musubi join --hive <name>` joins another, and `musubi create` starts a new one");
+    // Leaving it records that it left, as any copy that left, with nothing to tell the hive.
+    let out = musubi_in(&env, &logs, &beta, &["leave"]);
+    insta::assert_snapshot!(out, @"This repository has left hive alpha.");
+    assert_eq!(membership(&beta), "left");
+    let (status, _) = status_in(&env, &logs, &beta);
+    insta::assert_snapshot!(status, @"
+    This repository is not part of a hive: $ROOT/beta
+    Default hub: $ROOT/hub
+    Daemon: not running; doesn't start at login
+    Daemon socket: [daemon socket]
+    Daemon log: $ROOT/home/musubi-beta/daemon.log
+    ");
     // Alpha's daemon hears when it next syncs, as after an operation here.
     alpha.write_file("after", "after");
     alpha.jj(&["status"]);

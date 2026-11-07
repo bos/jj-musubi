@@ -39,14 +39,41 @@ use crate::wire::inline_limit;
 use crate::wire::map_reply;
 use crate::wire::map_request;
 
+/// How long a node waits for the hub to answer a request, from when it sends it, and for each
+/// chunk of a window, as long again for each chunk ahead of it ([`chunk_deadline`]).
+///
+/// Whether the link to the hub works is the connection's to tell: ssh ends one that hears nothing
+/// from the hub's machine for a minute, failing every request in flight on it at once. A deadline
+/// is how long to let a hub that is there answer, and how long the link may take to carry a chunk
+/// ([`chunk_size`]), so that a large sync can't finish on a link with less than about 70 kbit/s
+/// to spare for it, a megabyte in two minutes. A hub that takes longer to work out a reply, as
+/// for a machine catching up on a large history, answers when the node asks again ([`RESENDS`]).
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How long to wait for the reply to the chunk at `place` in a window, from 0, with `timeout`
+/// a request's deadline: that for it and for each chunk ahead of it. A window's chunks go out at
+/// once, and the link carries each after those ahead of it, so that a link that carries a chunk
+/// within a deadline carries a window of them in time, however many: a window whose chunks all
+/// had one deadline would be cut short on a link too slow to carry all of them in it, and the
+/// chunks cut short would still take the link's time ahead of the next attempt's, up to eight
+/// times as long as the link takes to carry one.
+pub const fn chunk_deadline(timeout: Duration, place: usize) -> Duration {
+    let chunks = if place < u32::MAX as usize {
+        place as u32 + 1
+    } else {
+        u32::MAX
+    };
+    timeout.saturating_mul(chunks)
+}
+
 /// Chunks of one blob in flight at once, at most: enough to keep a link with a long round trip
-/// busy, without queueing much at the hub, which answers one request at a time. Fewer on a
-/// link too slow to carry this many before their deadline (`RemoteHub::window`).
+/// busy, without queueing much at the hub, which answers one request at a time. Fewer after a
+/// window cut short (`RemoteHub::window`).
 pub const WINDOW: usize = 8;
 
 /// How many windows in a row must all come back for the next to have one more chunk, once
 /// one has been cut short: growing at once would cut every other window short, on a link
-/// that carries fewer than [`WINDOW`] chunks before their deadline.
+/// that carries fewer than [`WINDOW`] chunks before their deadlines.
 const GROW_AFTER: usize = 4;
 
 /// How many uploads a node remembers how far the hub had got with, for calls that failed
@@ -114,12 +141,13 @@ const RESTARTS: usize = 3;
 
 /// How many times in a row a node sends a protocol request again when no reply comes in
 /// time, and how many times in a row it tries a download again that timed out, without a
-/// blob going further meanwhile. The hub answers one at a time, and a reply can take it
-/// longer than the timeout to prepare, as for a node catching up on a large history: it
-/// answers the repeat with the reply it prepared, once it has, so a repeat that comes then
-/// gets it at once. A transfer that times out having gone further than ever, on a link too
-/// slow to carry a window before its deadline, goes on as long as it does.
-const RESENDS: u32 = 19;
+/// blob going further meanwhile: with the first, ten minutes of [`REQUEST_TIMEOUT`]s, as long
+/// as the hub keeps a reply to answer a repeat with. The hub answers one at a time, and a
+/// reply can take it longer than the timeout to prepare, as for a node catching up on a large
+/// history: it answers the repeat with the reply it prepared, once it has, so a repeat that
+/// comes then gets it at once. A transfer that times out having gone further than ever, on a
+/// link too slow to carry its chunks within their deadlines, goes on as long as it does.
+pub const RESENDS: u32 = 4;
 
 /// Whether `err` is a request timing out.
 fn timed_out(err: &anyhow::Error) -> bool {
@@ -147,7 +175,7 @@ pub struct RemoteHub {
     progress: Progress,
     /// How much of each blob being uploaded the hub last said it had, or that it had all of
     /// it, most recent last, for the upload's next attempt to go on from: from the start, a
-    /// link too slow to carry a window of chunks before their deadline would carry again,
+    /// link too slow to carry a window of chunks before their deadlines would carry again,
     /// each time, chunks the hub has, and time out before any it lacks. A download goes on
     /// from what it has received.
     told: Mutex<Vec<(BlobId, u64)>>,
@@ -314,7 +342,7 @@ impl RemoteHub {
         if let Some((blob, _)) = attempt.whole {
             self.forget(&[blob]);
         }
-        self.exchange(&*self.transport, bytes).await
+        self.exchange(&*self.transport, bytes, self.timeout).await
     }
 
     /// Downloads what the hub's `reply` names, and returns it, as [`Self::call`] does. A
@@ -380,15 +408,22 @@ impl RemoteHub {
         })
     }
 
+    /// Sends `bytes` as a request, and returns the hub's reply, if it comes within `timeout`.
     async fn exchange(
         &self,
         transport: &dyn Transport,
         bytes: Vec<u8>,
+        timeout: Duration,
     ) -> anyhow::Result<HubReply> {
         let reply = transport
-            .request(&self.rpc_subject, Bytes::from(bytes), self.timeout)
+            .request(&self.rpc_subject, Bytes::from(bytes), timeout)
             .await?;
         Envelope::<HubReply>::decode(&reply)
+    }
+
+    /// How long to wait for the reply to the chunk at `place` in a window ([`chunk_deadline`]).
+    fn chunk_deadline(&self, place: usize) -> Duration {
+        chunk_deadline(self.timeout, place)
     }
 
     /// Uploads `blobs`, one after another, as [`Self::upload`] does, then any of those
@@ -440,7 +475,7 @@ impl RemoteHub {
         let mut restarts = 0;
         loop {
             let mut acks = FuturesOrdered::new();
-            for next in window(offset, total, chunk as u64, self.window()) {
+            for (place, next) in window(offset, total, chunk as u64, self.window()).enumerate() {
                 let (_, data) = self.blobs.read_chunk(blob, next, chunk)?;
                 let request = HubRequest::PutChunk {
                     blob: *blob,
@@ -448,7 +483,8 @@ impl RemoteHub {
                     offset: next,
                     data,
                 };
-                acks.push_back(self.exchange(transport, Envelope::encode(request)?));
+                let request = Envelope::encode(request)?;
+                acks.push_back(self.exchange(transport, request, self.chunk_deadline(place)));
             }
             // The hub may take a window's chunks in any order, so go on from the furthest it
             // reported, or none once it has the blob. If it started over during the window,
@@ -524,7 +560,8 @@ impl RemoteHub {
         work: impl Future<Output = T>,
     ) -> (Vec<anyhow::Result<HubReply>>, T) {
         let keeps = futures::future::join_all(keeps.into_iter().map(|request| async move {
-            self.exchange(transport, Envelope::encode(request)?).await
+            self.exchange(transport, Envelope::encode(request)?, self.timeout)
+                .await
         }));
         futures::join!(keeps, work)
     }
@@ -579,13 +616,14 @@ impl RemoteHub {
             }
             let start = offset;
             let mut chunks = FuturesOrdered::new();
-            for at in window(offset, total, chunk, self.window()) {
+            for (place, at) in window(offset, total, chunk, self.window()).enumerate() {
                 let request = Envelope::encode(HubRequest::GetChunk {
                     blob: *blob,
                     offset: at,
                     len: chunk,
                 })?;
-                chunks.push_back(async move { (at, self.exchange(transport, request).await) });
+                let reply = self.exchange(transport, request, self.chunk_deadline(place));
+                chunks.push_back(async move { (at, reply.await) });
             }
             let taken = async {
                 let mut heard = 0;

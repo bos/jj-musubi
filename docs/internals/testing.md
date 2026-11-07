@@ -531,7 +531,13 @@ timeout, as when the hub takes longer than the node's timeout to prepare it. Two
 still push and fetch, over messages small enough that requests, replies and bundles travel as
 blobs. It fails if the node doesn't send a request again after a timeout, or if the hub works
 out the answer to the repeat again rather than repeating its reply. The hub is never actually
-busy, so a repeat never waits behind the first.
+busy, so a repeat never waits behind the first. What the thread does with a request that
+waited behind others past its sender's deadline is
+`server::tests::requests_their_senders_gave_up_on_go_unanswered`'s: it holds a hive's thread on
+one request while two time out behind it, a chunk of an upload and another, then checks that the
+thread stored the chunk, and, in the hub's activity, that it answered the requests before and
+after but not the other one. It fails if the thread works out every request it takes, as it
+did, or lets go of the chunk too.
 
 The existing `a_request_that_panics_the_hub_gets_an_error` separately reaches a real jj decoder
 panic from malformed peer input; the protocol storage-call fault tests cover their own boundaries.
@@ -546,9 +552,18 @@ moving no chunk twice: the hub renews a blob a chunk moves to or from, and the n
 call's other blobs at the hub while one moves (`blobs_last_while_chunks_of_them_move`). Over a
 link that carries back in time only the first chunk of each window, a push and a fetch time out
 again and again but finish, never asking again for a chunk whose reply came
-(`calls_finish_on_a_link_that_cuts_every_window_short`); and a push the hub never answers in
+(`calls_finish_on_a_link_that_cuts_every_window_short`); a push the hub never answers in
 time gives up, though it uploads its request again each time it asks
-(`calls_give_up_on_a_request_never_answered`).
+(`calls_give_up_on_a_request_never_answered`); and a push and a fetch of more than a window of
+chunks finish over a link that carries each chunk in 80 seconds, one message after another each
+way, on Tokio's paused clock, with the production deadline, no chunk crossing the link twice
+(`calls_finish_on_a_slow_link`). With one deadline for a whole window, its later chunks are cut
+short, still cross the link, and cross it again behind the next attempt's, which then times out
+too, until the fetch gives up; with the 30-second deadline musubi had, no chunk comes back in
+time at all. Only the node's clock is paused: the hub's lifetimes run on the real one, so the
+test never ages a blob, and no window is cut short, so it never asks again for a chunk of the
+last window, which is what the hub keeps a served blob 18 minutes for. Nor does any test pin
+ssh's keepalive settings, which were measured by hand over a throttled link.
 
 `musubi-sync/tests/it/lies.rs` goes past the code that reads replies off the wire. Its
 `nodes_recover_from_wrong_replies` gives a node, partway through a sync with real repositories,

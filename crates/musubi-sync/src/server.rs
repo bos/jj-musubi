@@ -1,11 +1,12 @@
 //! A hub serving every hive in its directory (see `musubi_hub::hub_dir`).
 //!
-//! One subscription, `musubi.*.rpc`, takes every request. Those for a hive go to that
-//! hive's own thread, which opens its store on the first request and then answers its
-//! requests one at a time, as [`HubService`] does; different hives never wait for each
-//! other. Requests to `musubi.hub.rpc` ([`HUB_TOKEN`]) are about the hub as a whole:
-//! joining, listing, renaming, and removing hives. A request for a hive the hub doesn't
-//! have gets an error: only a join creates a hive.
+//! One subscription, `musubi.*.rpc`, takes every request. Those for a hive go to that hive's own
+//! thread, which opens its store on the first request and then answers its requests one at a
+//! time, as [`HubService`] does; different hives never wait for each other. A request whose
+//! sender has stopped waiting for it by the time the thread comes to it goes unanswered, as if
+//! lost, unless it uploads a chunk. Requests to `musubi.hub.rpc` ([`HUB_TOKEN`]) are about the
+//! hub as a whole: joining, listing, renaming, and removing hives. A request for a hive the hub
+//! doesn't have gets an error: only a join creates a hive.
 //!
 //! The hub keeps account of what it serves, and of what machines report of their syncing,
 //! in memory, for `musubi top` (see `musubi_hub::activity`).
@@ -353,7 +354,7 @@ fn spawn_worker(
     #[cfg(test)] hooks: Option<Arc<tests::WorkerHooks>>,
     #[cfg(test)] hold: Option<Arc<tests::Hold>>,
 ) -> Worker {
-    let (requests, receiver) = mpsc::channel();
+    let (requests, receiver) = mpsc::channel::<Message>();
     let runtime = tokio::runtime::Handle::current();
     let head = head_subject(&id);
     let thread = std::thread::Builder::new()
@@ -367,6 +368,18 @@ fn spawn_worker(
                 #[cfg(test)]
                 if let Some(hold) = &hold {
                     hold.wait(&id);
+                }
+                // A request that waited here, behind others, past its sender's deadline has
+                // nobody to answer: its sender has asked again, or given up. Working it out
+                // anyway, as for a fetch that takes long to prepare, would hold up the repeat
+                // and the requests of other machines, and could take as long again for each
+                // repeat that waited behind it. A chunk of an upload is still taken: its bytes
+                // have crossed the link already.
+                if message.abandoned(Instant::now())
+                    && !HubService::worth_handling_unheard(&message.payload)
+                {
+                    tracing::debug!("let go of a request its sender stopped waiting for");
+                    continue;
                 }
                 let limit = transport.max_payload();
                 let started = Instant::now();

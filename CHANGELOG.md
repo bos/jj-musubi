@@ -7,6 +7,17 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- Large syncs finish over links with as little as about 70 kbit/s to spare for musubi, a
+  megabyte in two minutes. A machine now waits two minutes for each reply rather than 30
+  seconds, and still gives up with "request timed out" after about ten minutes in which
+  nothing moves. ssh now waits a minute without a word from the hub's machine, rather than 30
+  seconds, before it ends the connection, so that it doesn't cut off a slow upload; so a
+  machine takes up to a minute to notice a link that has died, unless it has just woken from
+  sleep. The hub also lets go of a request whose machine has stopped waiting for it, rather
+  than working it out for nobody while other machines wait. Upgrade the hub as well as every
+  machine: against an older hub, a slow download can fail with "hub: no such blob" and start
+  over.
+
 - Large syncs over slow links finish. Each try at a large upload or download now carries on
   from where the last left off. Before, every try started over, so on a link too slow to move
   eight megabytes in 30 seconds, about 2 Mbit/s, it timed out at the same point each time,

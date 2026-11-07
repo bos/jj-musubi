@@ -44,6 +44,16 @@ pub struct Message {
     pub payload: Bytes,
     /// Where to publish a reply, for requests.
     pub reply: Option<String>,
+    /// When the requester stops waiting for the reply, for requests that say. A responder
+    /// that comes to one later has nobody to answer, and can let it be, as if it were lost.
+    pub deadline: Option<std::time::Instant>,
+}
+
+impl Message {
+    /// Whether whoever asked has stopped waiting for a reply, at `now`.
+    pub fn abandoned(&self, now: std::time::Instant) -> bool {
+        self.deadline.is_some_and(|deadline| now >= deadline)
+    }
 }
 
 /// Messages arriving on a subscription. The stream ends when the transport shuts down.

@@ -742,7 +742,9 @@ fn hub_join_sync_clone_and_list() {
         "origin",
         "git@[2001:db8::1]:team/project",
     ]);
-    let out = musubi_in(&env, &logs, &beta, &["join", "--hub", &hub.url]);
+    // The hub's directory given another way is the same hub, as the list and status below
+    // spell it.
+    let out = musubi_in(&env, &logs, &beta, &["join", "--hub", "../hub/"]);
     insta::assert_snapshot!(out, @"Joined hive project (matched remote origin), 2 machines");
     assert!(log(&beta).contains("from alpha"));
     // Without an explicit lease, the hive keeps it however long it goes unused.

@@ -342,7 +342,7 @@ impl UserState {
         let hub = Settings::load()?.hub.or_else(|| self.hub.clone());
         Ok(hub.map(|hub| {
             if crate::hub::is_local(&hub) {
-                hub
+                crate::hub::local_dir(Path::new(&hub)).map_or(hub, |dir| dir.display().to_string())
             } else {
                 crate::hub::on_this_machine(&hub)
             }

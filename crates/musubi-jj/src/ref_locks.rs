@@ -10,7 +10,12 @@
 //! took it, and git closes it before renaming it, so only its age tells a lock left behind
 //! from one held now. So when one of musubi's ref updates fails, it removes the ref locks
 //! older than [`STALE`], and tries again. A process suspended for longer partway through an
-//! update, as on a laptop put to sleep, finds its lock gone when it resumes, and fails.
+//! update, as on a laptop put to sleep, usually finds its lock gone when it resumes, and
+//! fails. But if it resumes while another update holds a lock of its own on the same ref, as
+//! musubi's retry does for a few milliseconds, its rename moves that lock over the ref: the
+//! ref gets the other update's value, the resumed process reports success though its own
+//! value is lost, and the other update fails, its lock gone. Neither can tell, since a lock
+//! records nothing of who took it.
 
 use std::fs;
 use std::path::Path;

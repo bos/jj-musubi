@@ -74,6 +74,20 @@ impl Located {
         }))
     }
 
+    /// The directory of the workspace the repository was made in, which holds its `.jj/repo`,
+    /// from whichever of its workspaces it was found: what the daemon knows a copy by, since
+    /// the repository goes with it, where another workspace can be forgotten and deleted. The
+    /// workspace found, if the repository's isn't where it should be.
+    pub fn repository_root(&self) -> PathBuf {
+        let root = self.repo_path.parent().and_then(Path::parent);
+        match root {
+            Some(root) if copy::same_directory(&root.join(".jj/repo"), &self.repo_path) => {
+                root.to_owned()
+            }
+            _ => self.workspace_root.clone(),
+        }
+    }
+
     /// Opens the repository, which must have a machine key: only a join makes one
     /// ([`crate::copy`], R6), and opening makes nothing, a jj config id included.
     pub fn open(&self) -> anyhow::Result<NodeRepo> {
@@ -153,11 +167,12 @@ pub fn follow_move(
     entry: &Entry,
     socket: &Socket,
 ) -> anyhow::Result<Entry> {
-    if entry.path == located.workspace_root || copy::holds(entry, &entry.path) {
+    let root = located.repository_root();
+    if entry.path == root || copy::holds(entry, &entry.path) {
         return Ok(entry.clone());
     }
     let moved = Entry {
-        path: located.workspace_root.clone(),
+        path: root,
         ..entry.clone()
     };
     // Unless the daemon, or another command, changed it first, which may have made another

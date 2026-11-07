@@ -77,7 +77,8 @@ pub enum Command {
     /// returns once the repository has synced.
     Create {
         /// The hive's name [default: the repository's name on its forge, from its `origin`
-        /// remote, else its first remote, else the directory's name].
+        /// remote, else its first remote, else the name of the directory of the workspace it
+        /// was made in, with each space a `-`].
         name: Option<String>,
         #[command(flatten)]
         member: Member,

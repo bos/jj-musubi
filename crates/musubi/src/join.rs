@@ -147,7 +147,7 @@ pub fn join(
             })
             .collect(),
         dir_name: located
-            .workspace_root
+            .repository_root()
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default(),
@@ -272,8 +272,9 @@ fn become_node(
     let config_id = copy::Found::read(&located.repo_path)?
         .config_id
         .context("jj gave this repository no config id")?;
-    // Through the workspace it joined from already, if this is another of the same
-    // repository's.
+    // By the workspace the repository was made in, whichever this is, as another may go
+    // away; or by the path it joined through already, if that reaches this repository, as a
+    // bind mount does.
     let path = serving_workspace(located, &key)?;
     // The entry first: a record that names a config id no entry here does would make this
     // repository look like a duplicate, if what follows failed.
@@ -300,8 +301,10 @@ fn become_node(
     Ok(())
 }
 
-/// Rejoining through another workspace keeps the workspace the daemon already serves.
-/// Lease preflight must inspect the same config that daemon will read.
+/// The workspace the daemon serves this repository through: the one it already serves, if
+/// that reaches this repository, else the workspace the repository was made in, whichever
+/// this is, as another may go away. Lease preflight must inspect the same config that daemon
+/// will read.
 fn serving_workspace(located: &Located, key: &str) -> anyhow::Result<PathBuf> {
     Ok(UserState::load()?
         .entry(key)
@@ -309,10 +312,7 @@ fn serving_workspace(located: &Located, key: &str) -> anyhow::Result<PathBuf> {
             Located::find(&entry.path)
                 .is_ok_and(|other| copy::same_directory(&other.repo_path, &located.repo_path))
         })
-        .map_or_else(
-            || located.workspace_root.clone(),
-            |entry| entry.path.clone(),
-        ))
+        .map_or_else(|| located.repository_root(), |entry| entry.path.clone()))
 }
 
 /// A repo lease cannot override a higher-priority policy in workspace config. Refuse that

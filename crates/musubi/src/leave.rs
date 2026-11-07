@@ -42,11 +42,13 @@ pub fn leave_path(ui: &Ui, path: &Path, socket: &Socket) -> anyhow::Result<()> {
         .iter()
         .find(|entry| entry.path == path)
         .with_context(|| format!("this machine syncs no copy at {}", path.display()))?;
-    anyhow::ensure!(
-        !copy::holds(entry, &entry.path),
-        "the copy is at {}; `musubi leave` there takes it out of its hive",
-        entry.path.display()
-    );
+    // Moved, as jj saw, though nothing followed it yet.
+    if let Some(at) = copy::whereabouts(entry) {
+        anyhow::bail!(
+            "the copy is at {}; `musubi leave` there takes it out of its hive",
+            at.display()
+        );
+    }
     stop_serving(&entry.key, socket)?;
     UserState::remove_entry(&entry.key)?;
     writeln!(

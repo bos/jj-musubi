@@ -7,6 +7,14 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- A copy joined from a second jj workspace is known by the workspace the repository was made
+  in, and a hive created there is named after that one's directory. Before, the daemon knew it
+  by the second workspace, so once that was forgotten and deleted, `musubi list` showed the
+  copy as missing and suggested `musubi leave <path>`, which stopped it syncing for good. A
+  copy jj saw moved is listed where it is now, and `musubi leave` with its old path is refused,
+  even before the daemon follows it. If `musubi leave <path>` stopped such a copy syncing,
+  `musubi join --original` in it syncs it again.
+
 - A refused or failed `musubi join` or `musubi create` no longer names this machine in the
   repository: its name is kept only once the hub takes the join. Before, the next
   `musubi create --machine <name>` was refused, the machine having been named after the host.

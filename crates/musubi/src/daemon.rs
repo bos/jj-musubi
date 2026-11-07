@@ -967,7 +967,10 @@ async fn serve_async(
         tracing::debug!("sync took {:?}", started.elapsed());
         let synced = known(&driver);
         // Why the hub is out of reach, if the connector knows, says more than a timeout.
-        let result = result.map_err(|err| connection.explain(err));
+        let result = match result {
+            Ok(synced) => Ok(synced),
+            Err(err) => Err(connection.explain(err).await),
+        };
         // The hive is over: leave it, then say so, so that whoever asked finds it left.
         if let Err(err) = &result
             && HiveGone::of(err) == Some(HiveGone::Removed)
@@ -1234,7 +1237,10 @@ pub async fn sync_once(
             return Err(err);
         }
     };
-    let result = driver.sync().await.map_err(|err| connection.explain(err));
+    let result = match driver.sync().await {
+        Ok(synced) => Ok(synced),
+        Err(err) => Err(connection.explain(err).await),
+    };
     let synced = known(&driver);
     status.synced(result.as_ref().err(), &synced);
     status.save(&located.repo_path);

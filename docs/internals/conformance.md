@@ -728,10 +728,11 @@ through the shipping supervisor, stderr reader and output wrapper. The reconnect
 the real stream client and relay. Tests inject wakes; they do not cover real sleep detection,
 ssh authentication, remote hosts or daemon sync scheduling.
 
-The checks cover active-child termination and reaping, deadlines for inherited stderr,
-bounded stderr retention, wake/failure ordering, greeting-based health reset and reconnection
-notification. The `waking_during_*` regressions also cover wakes during the EOF grace and
-inherited-stderr waits, including health updates across runtime threads.
+The checks cover active-child termination and reaping, explanations waiting for the reason a
+connection let go didn't connect, deadlines for inherited stderr, bounded stderr retention,
+wake/failure ordering, greeting-based health reset and reconnection notification. The
+`waking_during_*` regressions also cover wakes during the EOF grace and inherited-stderr waits,
+including health updates across runtime threads.
 
 Negative controls establish sensitivity at these boundaries. Removing only the explicit
 post-kill wait survived because Tokio's child-drop cleanup reaped the child in that run;

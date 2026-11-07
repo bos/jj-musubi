@@ -7,6 +7,10 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- When ssh to a hub hangs, the first sync to fail says "ssh to devbox did not connect", as
+  later ones do. Previously it failed with a bare "disconnected", which `musubi status` showed
+  too, since the reason came only once ssh had been stopped, a moment after the sync failed.
+
 - The hub and the daemon log only warnings from all of jj's libraries, as the reference says.
   Previously they logged each lock and each index scan of the crates jj 0.47 split out of
   `jj_lib`, such as `jj_local_util` and `jj_default_index`.

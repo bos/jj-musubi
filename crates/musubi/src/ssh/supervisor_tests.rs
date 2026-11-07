@@ -167,6 +167,7 @@ impl Running {
             settled: settled.clone(),
             woke: receiver,
             let_go,
+            _supervising: health.attempt(&settled),
         };
         (
             Self {
@@ -221,7 +222,15 @@ async fn letting_go_kills_and_reaps_a_child_that_ignores_eof() {
     let mut run = Running::new("stubborn");
     line(&mut run.output, "READY").await;
     run.input.take();
+    // Let go before the hub greeted, as when it doesn't greet in time. What failed reports
+    // that at once, while the supervisor gives ssh a moment to finish before saying why: an
+    // explanation waits for it.
     run.closed.take();
+    assert_eq!(run.health.problem(), None);
+    assert_eq!(
+        run.health.problem_once_known().await.as_deref(),
+        Some("ssh to controlled-child did not connect")
+    );
     line(&mut run.output, "EOF").await;
     run.finished().await;
     assert_eq!(run.health.lock().failures, 1);

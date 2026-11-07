@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use musubi_jj::node::NodeRepo;
+use musubi_jj::workspaces::Machine;
 
 use crate::block_on;
 use crate::config::Entry;
@@ -73,9 +74,8 @@ impl Located {
         }))
     }
 
-    /// Opens the repository. Its machine key, if it has none, is made only by joining:
-    /// callers other than a join check it has one first ([`crate::copy`]). It gives it no jj
-    /// config id either.
+    /// Opens the repository, which must have a machine key: only a join makes one
+    /// ([`crate::copy`], R6), and opening makes nothing, a jj config id included.
     pub fn open(&self) -> anyhow::Result<NodeRepo> {
         let settings = settings::load(&self.workspace_root, &self.repo_path)?;
         self.open_with_settings(&settings)
@@ -87,8 +87,19 @@ impl Located {
         &self,
         settings: &jj_lib::settings::UserSettings,
     ) -> anyhow::Result<NodeRepo> {
+        let machine = NodeRepo::machine_of(&self.repo_path)?
+            .context("this repository is not part of a hive")?;
+        self.open_as(settings, machine)
+    }
+
+    /// Opens the repository as `machine`'s, storing no key, for joining as it.
+    pub fn open_as(
+        &self,
+        settings: &jj_lib::settings::UserSettings,
+        machine: Machine,
+    ) -> anyhow::Result<NodeRepo> {
         let repo_config = settings::existing_repo_config_path(&self.repo_path)?;
-        Ok(NodeRepo::open(&self.repo_path, settings)?.with_repo_config(repo_config))
+        Ok(NodeRepo::open_as(&self.repo_path, settings, machine)?.with_repo_config(repo_config))
     }
 }
 

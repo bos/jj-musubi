@@ -39,23 +39,40 @@ impl Machine {
     /// it does jj's change ids: so a test that names two machines alike names them the same
     /// way every time it runs.
     pub(crate) fn load_or_create(path: &Path, default_name: &str, rng: &JJRng) -> io::Result<Self> {
-        match fs::read_to_string(path) {
-            Ok(key) if !key.trim().is_empty() => {
-                return Ok(Self {
-                    key: key.trim().to_owned(),
-                });
-            }
-            Ok(_) => {}
-            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-            Err(err) => return Err(err),
+        if let Some(machine) = Self::load(path)? {
+            return Ok(machine);
         }
+        let machine = Self::new(default_name, rng);
+        machine.keep(path)?;
+        Ok(machine)
+    }
+
+    /// The machine whose key is in `path`, if there is one.
+    pub(crate) fn load(path: &Path) -> io::Result<Option<Self>> {
+        match fs::read_to_string(path) {
+            Ok(key) if !key.trim().is_empty() => Ok(Some(Self {
+                key: key.trim().to_owned(),
+            })),
+            Ok(_) => Ok(None),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// A machine named `name`, with a new key, which nothing has stored yet.
+    pub(crate) fn new(name: &str, rng: &JJRng) -> Self {
         let suffix = rng.new_change_id(4).hex();
-        let key = format!("{}#{suffix}", sanitize(default_name));
+        Self {
+            key: format!("{}#{suffix}", sanitize(name)),
+        }
+    }
+
+    /// Stores this machine's key in `path`.
+    pub(crate) fn keep(&self, path: &Path) -> io::Result<()> {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir)?;
         }
-        files::replace(path, key.as_bytes())?;
-        Ok(Self { key })
+        files::replace(path, self.key.as_bytes())
     }
 
     pub fn key(&self) -> &str {

@@ -287,6 +287,15 @@ made meanwhile with `musubi create`, say. Run `musubi leave --force`, then `musu
 join that one. If the message says the copy belongs in several, run
 `musubi join --hive <name>` after leaving.
 
+### "this repository's machine is already named laptop"
+
+`--machine` names this machine in a repository the first time it becomes part of a hive, and
+the name stays: other machines show its work under it. Run the command without `--machine`,
+or with the name it has. For a copy under another name, make one with
+`musubi clone <hive> <dir> --machine <name>`. If `musubi status` says the repository is not
+part of a hive, an earlier release named it when a join was refused: delete
+`.jj/repo/musubi/machine`, and run the command again.
+
 ### "musubi needs all of a repository's history, and this one is a shallow clone ..."
 
 A shallow or partial clone can't send other machines everything they need. Make a full copy

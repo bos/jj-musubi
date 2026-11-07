@@ -7,6 +7,13 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- A refused or failed `musubi join` or `musubi create` no longer names this machine in the
+  repository: its name is kept only once the hub takes the join. Before, the next
+  `musubi create --machine <name>` was refused, the machine having been named after the host.
+  `musubi debug op-id` in a repository in no hive says so, rather than naming the machine.
+  In a repository an earlier join named that way, which `musubi status` says is not part of a
+  hive, delete `.jj/repo/musubi/machine` to name it with `--machine`.
+
 - After a hub is lost, `musubi join` makes each hive made by name from copies of one repository
   again under its own name, as `musubi create <name>` made it. Before, once one of them was
   made again, the others were refused as belonging in it, with advice that would have merged

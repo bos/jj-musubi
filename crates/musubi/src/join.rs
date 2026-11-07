@@ -20,6 +20,7 @@ use musubi_hub::hub_dir::Joined;
 use musubi_jj::node::NodeRepo;
 use musubi_jj::objects::Backend;
 use musubi_jj::presence::BadForgetAfter;
+use musubi_jj::workspaces::Machine;
 use musubi_sync::wire::HubWideReply;
 use musubi_sync::wire::HubWideRequest;
 use pollster::FutureExt as _;
@@ -109,11 +110,8 @@ pub fn join(
         }
     };
     let remaking = matches!(choice, JoinChoice::Remake { .. });
-    validate_forget_after(
-        settings::load(&located.workspace_root, &located.repo_path)?.config(),
-        *lease,
-        &located.workspace_root,
-    )?;
+    let settings = settings::load(&located.workspace_root, &located.repo_path)?;
+    validate_forget_after(settings.config(), *lease, &located.workspace_root)?;
     if lease.is_some()
         && let Some(key) = found.key.as_deref()
     {
@@ -126,8 +124,10 @@ pub fn join(
             )?;
         }
     }
-    set_machine_name(&located, machine)?;
-    let node = located.open()?;
+    // Kept only once the hub takes the join: a join refused, or failing, before then leaves
+    // `--machine` free to name it next time.
+    let machine = joining_machine(&located, machine, &settings)?;
+    let node = located.open_as(&settings, machine.clone())?;
     let summary = node.join_summary()?;
     let mut remotes = summary.remote_snapshot();
     if let JoinChoice::Remake { id, .. } = &choice {
@@ -153,13 +153,15 @@ pub fn join(
             .unwrap_or_default(),
         roots: summary.roots.iter().map(|id| id.hex()).collect(),
         remote_targets: summary.remote_targets.iter().map(|id| id.hex()).collect(),
-        machine: node.machine().key().to_owned(),
+        machine: machine.key().to_owned(),
     };
     drop(node);
     let joined = match block_on(ask_preparing(ui, &hub, HubWideRequest::Join(request)))? {
         HubWideReply::Joined(joined) => joined,
         other => anyhow::bail!("unexpected reply from the hub: {other:?}"),
     };
+    // The hub took this machine's key: it is the repository's from now on.
+    NodeRepo::keep_machine(&located.repo_path, &machine)?;
     become_node(
         &located,
         &joined,
@@ -210,24 +212,32 @@ async fn ask_preparing(
     hub::ask(hub, request).await
 }
 
-fn set_machine_name(located: &Located, machine: Option<&str>) -> anyhow::Result<()> {
-    if let Some(name) = machine {
-        let settings = settings::load(&located.workspace_root, &located.repo_path)?;
-        let machine = NodeRepo::name_machine(&located.repo_path, name, &settings)?;
-        // The same name again, as when retrying a refused join, is no change.
+/// The machine the repository at `located` joins a hive as: the one its key names, which
+/// `name`, if given, must name, since its key has been part of a hive; else a new one, named
+/// `name` or after the host, whose key [`become_node`] keeps.
+fn joining_machine(
+    located: &Located,
+    name: Option<&str>,
+    settings: &UserSettings,
+) -> anyhow::Result<Machine> {
+    let Some(machine) = NodeRepo::machine_of(&located.repo_path)? else {
+        let name = name.unwrap_or_else(|| settings.operation_hostname());
+        return Ok(NodeRepo::new_machine(name, settings));
+    };
+    if let Some(name) = name {
         anyhow::ensure!(
             machine.name() == musubi_jj::workspaces::sanitize(name),
             "this repository's machine is already named {}",
             machine.name()
         );
     }
-    Ok(())
+    Ok(machine)
 }
 
-/// Records that the repository is part of the hive it `joined`: the join operation (unless
-/// replicating full history), its record, and its entry, for the daemon to serve it. A copy
-/// whose record named another hive, `before`, forgets the copies its history brings that the
-/// hive doesn't have. The first hub joined becomes the user's default.
+/// Records that the repository, with its machine key, is part of the hive it `joined`: the
+/// join operation (unless replicating full history), its record, and its entry, for the
+/// daemon to serve it. A copy whose record named another hive, `before`, forgets the copies its
+/// history brings that the hive doesn't have. The first hub joined becomes the user's default.
 fn become_node(
     located: &Located,
     joined: &Joined,
@@ -494,13 +504,14 @@ pub fn clone(
         .with_context(|| format!("making a repository in {}", destination.display()))?;
     let located = Located::find(destination)?;
     clone_config::seed(&located.workspace_root, &info.clone_config)?;
-    set_machine_name(&located, machine)?;
+    let machine = joining_machine(&located, machine, &settings)?;
     let joined = Joined {
         hive: info.clone(),
         created: false,
         reason: String::new(),
         present: vec![],
     };
+    NodeRepo::keep_machine(&located.repo_path, &machine)?;
     become_node(&located, &joined, &hub, false, None, &remotes, lease)?;
     start_serving(ui, &located, socket)
         .with_context(|| format!("the new copy at {} didn't sync", destination.display()))?;

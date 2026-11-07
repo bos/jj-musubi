@@ -361,7 +361,8 @@ with musubi's own build script, which names the build. It doesn't fetch a commit
 remote.
 
 The existing `hub_join_sync_clone_and_list` fixture also checks `debug op-id` in both
-directions, with odd-length prefixes, invalid hex, and an absent operation. Its snapshots
+directions, with odd-length prefixes, invalid hex, and an absent operation, and in a
+repository in no hive, where it makes no machine key. Its snapshots
 keep local and hive ids distinct. `debug_identifies_an_operation_received_but_not_realized`
 transfers operations and views from a real repository through the canonical store's import
 APIs, without realizing them, and checks the command's message. It starts no hub or daemon.

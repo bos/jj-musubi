@@ -203,8 +203,24 @@ impl Drop for NodeRepo {
 }
 
 impl NodeRepo {
-    /// Opens the repository whose `.jj/repo` directory is `repo_path`.
+    /// Opens the repository whose `.jj/repo` directory is `repo_path`, giving it a machine key
+    /// named after the host if it has none, as tests want. musubi's commands make a key only
+    /// when the hub takes a join (docs/internals/copies.md, R6), so they open with
+    /// [`Self::open_as`].
     pub fn open(repo_path: &Path, settings: &UserSettings) -> Result<Self, NodeError> {
+        let machine = load_machine(repo_path, settings.operation_hostname(), settings)?;
+        Self::open_as(repo_path, settings, machine)
+    }
+
+    /// Opens the repository whose `.jj/repo` directory is `repo_path` as `machine`'s, whatever
+    /// key it has, storing none: for a repository about to join a hive as `machine`
+    /// ([`Self::machine_of`], [`Self::new_machine`]), which keeps its key only once the hub
+    /// takes it ([`Self::keep_machine`]).
+    pub fn open_as(
+        repo_path: &Path,
+        settings: &UserSettings,
+        machine: Machine,
+    ) -> Result<Self, NodeError> {
         let loader =
             RepoLoader::init_from_file_system(settings, repo_path, &default_backend_factories())?;
         if loader.op_store().name() != SimpleOpStore::NAME {
@@ -263,7 +279,7 @@ impl NodeRepo {
             join_ancestors: None,
             before_join: BTreeSet::new(),
             repo_config: None,
-            machine: load_machine(repo_path, settings.operation_hostname(), settings)?,
+            machine,
             records: Records::load(&musubi_dir)?,
             late: vec![],
             abandon_checked: None,
@@ -284,15 +300,36 @@ impl NodeRepo {
         self
     }
 
-    /// Names this machine `name` in the repository whose `.jj/repo` directory is
-    /// `repo_path`, before it is first opened, which would name it after the host. Returns the
-    /// machine as named, which, if it had a name already, keeps it.
-    pub fn name_machine(
-        repo_path: &Path,
-        name: &str,
-        settings: &UserSettings,
-    ) -> Result<Machine, NodeError> {
-        load_machine(repo_path, name, settings)
+    /// The machine whose key the repository whose `.jj/repo` directory is `repo_path` has, if
+    /// it has one.
+    pub fn machine_of(repo_path: &Path) -> Result<Option<Machine>, NodeError> {
+        let path = machine_path(repo_path);
+        Machine::load(&path).map_err(|source| NodeError::Io { path, source })
+    }
+
+    /// A machine named `name`, with a new key, from `settings`' randomness, which
+    /// `debug.randomness-seed` makes repeatable.
+    pub fn new_machine(name: &str, settings: &UserSettings) -> Machine {
+        Machine::new(name, &settings.get_rng())
+    }
+
+    /// Gives the repository whose `.jj/repo` directory is `repo_path` `machine`'s key, unless
+    /// it has it already. Fails if it has another.
+    pub fn keep_machine(repo_path: &Path, machine: &Machine) -> Result<(), NodeError> {
+        let path = machine_path(repo_path);
+        let io = |source| NodeError::Io {
+            path: path.clone(),
+            source,
+        };
+        match Machine::load(&path).map_err(io)? {
+            Some(kept) if kept == *machine => Ok(()),
+            Some(kept) => Err(io(std::io::Error::other(format!(
+                "it has machine key {} already, not {}",
+                kept.key(),
+                machine.key()
+            )))),
+            None => machine.keep(&path).map_err(io),
+        }
     }
 
     /// This machine's identity in the hive.
@@ -536,9 +573,14 @@ fn load_machine(
     name: &str,
     settings: &UserSettings,
 ) -> Result<Machine, NodeError> {
-    let path = repo_path.join("musubi/machine");
+    let path = machine_path(repo_path);
     Machine::load_or_create(&path, name, &settings.get_rng())
         .map_err(|source| NodeError::Io { path, source })
+}
+
+/// Where the repository whose `.jj/repo` directory is `repo_path` keeps its machine key.
+fn machine_path(repo_path: &Path) -> PathBuf {
+    repo_path.join("musubi/machine")
 }
 
 thread_local! {

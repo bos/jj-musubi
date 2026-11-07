@@ -661,11 +661,20 @@ fn hub_join_sync_clone_and_list() {
         "\nmusubi.clone-config = ['user.name', 'user.email', 'aliases.pickup']\n\
          aliases.pickup = ['log', '--no-graph']\n",
     );
+    // Alpha's machine goes by another name than its host's.
+    let hostname = "operation.hostname = \"alpha\"";
+    assert!(config.contains(hostname), "{config}");
+    let config = config.replace(hostname, "operation.hostname = \"laptop\"");
     fs::write(&creator_config, config).unwrap();
+
+    let key = alpha.repo_path().join("musubi/machine");
 
     // Nothing to share yet.
     let err = musubi_fails(&env, &logs, &alpha, &["create", "--hub", &hub.url]);
     insta::assert_snapshot!(err, @"Error: this repository has no commits to share yet; commit something first");
+    // Nor is there anything to look up in a repository in no hive, which makes no key.
+    let err = musubi_fails(&env, &logs, &alpha, &["debug", "op-id", "00"]);
+    insta::assert_snapshot!(err, @"Error: this repository is not part of a hive");
 
     alpha.write_file("a", "from alpha");
     alpha.jj(&["commit", "-m", "from alpha"]);
@@ -680,9 +689,11 @@ fn hub_join_sync_clone_and_list() {
     // Joining never starts a hive; creating does.
     let err = musubi_fails(&env, &logs, &alpha, &["join", "--hub", &hub.url]);
     insta::assert_snapshot!(err, @"Error: no hive on this hub shares history with this repository; `musubi create` starts one");
+    // A refused join leaves the machine unnamed, for the next to name.
+    assert!(!key.exists());
     // An agent setting up a persistent copy gets the same default as a person.
     let mut create = alpha.program(musubi());
-    create.args(["create", "--hub", &hub.url]);
+    create.args(["create", "--hub", &hub.url, "--machine", "alpha"]);
     for variable in [
         "CODEX_THREAD_ID",
         "CODEX_SESSION_ID",
@@ -785,7 +796,7 @@ fn hub_join_sync_clone_and_list() {
     This machine: beta, synced N ago; the hub has all its work
     Working copies:
     beta@: kkmpptxz aa1f41eb (no description set)
-    alpha/alpha@: vruxwmqv 8a0ddcb6 (no description set)
+    alpha/alpha@: yostqsxw b737eb34 (no description set)
     Copies:
     beta (this machine): used N ago, never forgotten
     alpha: used N ago, never forgotten

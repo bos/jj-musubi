@@ -132,6 +132,15 @@ to hive matching: all first commits in merged histories are found once, already 
 commits stop the walk, and jj's synthetic root is excluded. The simple-backend sync examples
 alone do not exercise this index walk.
 
+`hub_join_sync_clone_and_list` also checks that agent-run creation defaults to `never`, an
+explicit clone lease overrides a user default of `never`, and a rejoin lease replaces the
+copy's repo policy and reaches another running daemon. Agent environment variables changing
+the default, or preserving the old policy despite an explicit lease, breaks these checks.
+`leases_are_explicit_durations_on_every_join_command` checks all three argument parsers and
+rejects invalid or subsecond leases before setup. The CLI flow also refuses a lease shadowed
+by workspace config, both in that workspace and when rejoining through a linked workspace,
+without writing an operation.
+
 `settings_stay_local_and_the_daemon_reloads_them` also changes `musubi.forget-after` in user
 config while the daemon runs, waits for a sync, and checks that the other machine sees the new
 expiry policy. Keeping the daemon's initial jj settings makes it fail.

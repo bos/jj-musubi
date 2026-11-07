@@ -121,9 +121,10 @@ Join or leave only when asked. `musubi list` shows hubs, hives, and this machine
 
 - `musubi join` adds this copy to an existing hive; `musubi create` starts a hive;
   `musubi clone <hive> <dir>` makes a new copy. Each accepts `--hub <host>`, starts the daemon,
-  and performs the first sync. Run by a coding agent, each sets `musubi.forget-after` to `6h`
-  unless jj's config already sets it: the hive forgets the copy once no operation has been
-  recorded in it for six hours. Each command says what it set; tell the user.
+  and performs the first sync. Copies default to `musubi.forget-after = "never"`, including
+  when an agent joins them. Keep that default on a user's persistent machine. When setting
+  up an explicitly temporary copy, pass `--lease 6h`: the hive forgets the copy after six
+  hours without a local operation. Without `--lease`, existing configured policies are kept.
 - `musubi daemon install` starts the daemon at login. Don't run it or change
   `musubi.forget-after` unless asked; explain the effect when proposing either.
 - `musubi leave` removes this copy from its hive and needs to reach the hub. Offer `--force`

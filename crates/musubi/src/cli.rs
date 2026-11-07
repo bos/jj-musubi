@@ -1,6 +1,7 @@
 //! Command-line arguments, shared by parsing, help, and shell completion.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use clap::Parser;
 use clap::Subcommand;
@@ -97,9 +98,10 @@ pub enum Command {
     ///
     /// A bracketed IPv6 host matches in scp-style and ssh:// remote URLs alike.
     ///
-    /// Unless jj's config sets it already, it sets `musubi.forget-after` in the repository's
-    /// config: how long the copy may go unused before the hive forgets it, `6h` when an agent
-    /// runs it, `never` otherwise. `musubi create` and `musubi clone` do too.
+    /// Copies are never forgotten by default, including when an agent joins them. Use
+    /// `--lease 6h` for a temporary copy, forgotten after six hours without a local operation.
+    /// An existing `musubi.forget-after` is kept unless `--lease` sets another duration.
+    /// `musubi create` and `musubi clone` do the same.
     Join {
         /// Choose this hive (a name, a prefix of one, or an id). Remote destination checks
         /// still apply.
@@ -137,6 +139,10 @@ pub enum Command {
         /// This machine's name in the hive. Defaults to jj's `operation.hostname`.
         #[arg(long)]
         machine: Option<String>,
+        /// Forget this copy after this long without a local operation, such as `6h`.
+        /// Sets `musubi.forget-after` in repo config, overriding its existing value.
+        #[arg(long, value_name = "DURATION", value_parser = parse_lease)]
+        lease: Option<Duration>,
     },
     /// List the hub's hives, this machine's copies of them, and how their syncing goes
     /// (the default command).
@@ -325,12 +331,22 @@ pub struct Member {
     /// Replicate the whole operation history, not just the current state.
     #[arg(long)]
     pub full_history: bool,
+    /// Forget this copy after this long without a local operation, such as `6h`.
+    /// Sets `musubi.forget-after` in repo config, overriding its existing value.
+    #[arg(long, value_name = "DURATION", value_parser = parse_lease)]
+    pub lease: Option<Duration>,
     /// The hub, as `musubi hub` prints it: the name this machine ssh-es to the hub's machine
     /// by, or on that machine, the hub's directory, or the machine's name or `localhost`, for
     /// the hub `musubi hub` serves there without `--dir`, reached without ssh [default: this
     /// machine's default hub].
     #[arg(long, add = ArgValueCandidates::new(completion::hubs))]
     pub hub: Option<String>,
+}
+
+fn parse_lease(text: &str) -> Result<Duration, String> {
+    musubi_jj::presence::parse_forget_after(text)
+        .flatten()
+        .ok_or_else(|| "expected a duration of at least a second, such as `6h`".to_owned())
 }
 
 /// Where a hub is, and what it tells other machines, for `hub` and `hub install`.
@@ -417,4 +433,40 @@ pub enum DaemonAction {
     Install,
     /// Stop starting the daemon at login, and stop it.
     Uninstall,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use clap::Parser as _;
+
+    use super::Cli;
+    use super::Command;
+
+    #[test]
+    fn leases_are_explicit_durations_on_every_join_command() {
+        for args in [vec!["create"], vec!["join"], vec!["clone", "hive", "copy"]] {
+            let lease_of = |cli: Cli| match cli.command.unwrap() {
+                Command::Create { member, .. } | Command::Join { member, .. } => member.lease,
+                Command::Clone { lease, .. } => lease,
+                _ => panic!("not a join command"),
+            };
+            let command = std::iter::once("musubi").chain(args.iter().copied());
+            assert_eq!(lease_of(Cli::try_parse_from(command).unwrap()), None);
+            let command = std::iter::once("musubi")
+                .chain(args.iter().copied())
+                .chain(["--lease", "6h"]);
+            assert_eq!(
+                lease_of(Cli::try_parse_from(command).unwrap()),
+                Some(Duration::from_secs(6 * 60 * 60))
+            );
+            for invalid in ["never", "soon", "0s", "500ms"] {
+                let command = std::iter::once("musubi")
+                    .chain(args.iter().copied())
+                    .chain(["--lease", invalid]);
+                assert!(Cli::try_parse_from(command).is_err());
+            }
+        }
+    }
 }

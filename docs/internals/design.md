@@ -341,8 +341,8 @@ Each copy records how long it may go unused before the hive forgets it, its `mus
 gives differs from the one the copy last recorded (`record_forget_after`), reading the repo config
 afresh each time. A copy that has recorded nothing is never forgotten, so
 one set to `never` writes nothing. `musubi join`, `create` and `clone` put the value in the repo
-config unless jj's config sets it already: `6h` if a coding agent runs the command (it checks for
-the environment variables that agents set), and `never` otherwise.
+config unless jj's config sets it already: `never` regardless of who runs the command. An
+explicit `--lease <duration>` replaces the copy's repo policy with that inactivity timeout.
 
 `Presence` keeps each copy's latest operations recording its forget-after, and what they record,
 through forgets, merged as `worked` is; where two lines of history recorded different values, the

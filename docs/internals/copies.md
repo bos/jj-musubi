@@ -91,9 +91,11 @@ machine, and the entries across machines.
   entry takes a path, by a join, a clone or R4, any other entry at that path is dropped.
 
 - **R6. Opening a repository creates nothing.** Only `join`, `create` and `clone` create a
-  key, a record or a config-id where there is none. Opening a repository, `musubi list`,
-  `musubi sync` and the daemon never do; they let jj give a duplicate a new config-id, as every
-  jj command does. A missing key or record suspends the entry.
+  key, a record or a config-id where there is none, and `join` and `create` only once the hub
+  has taken the join, so that one refused leaves `--machine` free to name the key. Opening a
+  repository, `musubi list`, `musubi sync`, `musubi debug` and the daemon never do; they let jj
+  give a duplicate a new config-id, as every jj command does. A missing key or record suspends
+  the entry.
 
 - **R7. A record is never deleted.** `musubi leave` marks it left. When the hub replies that
   the hive was removed, which a hub that lost its state never says, the daemon marks the record

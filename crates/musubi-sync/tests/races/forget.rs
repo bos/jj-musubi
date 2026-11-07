@@ -351,6 +351,164 @@ fn own_workspaces_named_like_another_machine_are_own() {
     hive.assert_converged();
 }
 
+/// Machine `index`'s own workspace `name`, at `path` under the hive's root.
+fn add_workspace(
+    hive: &Fixture,
+    index: usize,
+    name: &str,
+    path: &str,
+) -> musubi_testutil::TestRepo {
+    let path = hive.env.root().join(path);
+    hive.repo(index)
+        .jj(&["workspace", "add", "--name", name, path.to_str().unwrap()]);
+    hive.repo(index).another_copy(&path)
+}
+
+/// Checks that alpha's own workspace `name` is at `own`, shown on machine `other` as
+/// `alpha/name`, and that `other`'s workspace `theirs` is at `commit`, shown on alpha under
+/// `other`'s qualified name, as `beta-1a2b/x`.
+fn assert_kept_apart(
+    hive: &Fixture,
+    name: &str,
+    own: &str,
+    other: usize,
+    theirs: &str,
+    commit: &str,
+) {
+    let alpha = hive.workspaces(0);
+    assert_eq!(alpha.get(name).map(String::as_str), Some(own), "{alpha:?}");
+    let qualified = musubi_jj::workspaces::qualified_name(&hive.machine_key(other));
+    assert_eq!(
+        alpha
+            .get(&format!("{qualified}/{theirs}"))
+            .map(String::as_str),
+        Some(commit),
+        "{alpha:?}"
+    );
+    let shown = hive.workspaces(other);
+    assert_eq!(
+        shown.get(theirs).map(String::as_str),
+        Some(commit),
+        "{shown:?}"
+    );
+    assert_eq!(
+        shown.get(&format!("alpha/{name}")).map(String::as_str),
+        Some(own),
+        "{shown:?}"
+    );
+}
+
+/// A workspace this machine adds as `beta/x` while beta adds its workspace `x`, before this
+/// machine syncs, is this machine's own all the same: beta is shown as `beta-1a2b` instead,
+/// and neither working copy moves, then, after this machine's next snapshot in its
+/// workspace, or through `jj undo` of forgetting it. So too where this machine realized
+/// beta's work before the `jj` command that adds its workspace, and merges the two after, in
+/// the same sync, as it would after a crash between; and where beta's work forgets this
+/// machine's copy first, so that this machine realizes it with its own workspaces kept.
+#[test]
+fn own_workspaces_named_like_one_added_meanwhile_are_own() {
+    use musubi_core::node::LocalRepo as _;
+    use musubi_core::node::Step;
+
+    for (realized_first, forgotten) in [(false, false), (true, false), (false, true)] {
+        let mut hive = Fixture::new(&["alpha", "beta"]);
+        if forgotten {
+            let alpha = hive.machine_key(0);
+            assert!(hive.node(1).forget_copy(&alpha, "alpha").unwrap());
+        }
+        let beta_x = add_workspace(&hive, 1, "x", "beta-x");
+        beta_x.write_file("from-beta", "beta's x");
+        beta_x.jj(&["describe", "-m", "beta's x"]);
+        let theirs = hive.workspaces(1)["x"].clone();
+        if realized_first {
+            hive.hive.sync(1).unwrap();
+            hive.hive.fetch(0).unwrap();
+            let member = &mut hive.hive.members[0];
+            while !member.adapter.is_local(&member.core.known().1).unwrap() {
+                let step = member.core.step(&mut member.adapter).unwrap();
+                assert!(matches!(step, Step::Realized(_)), "{step:?}");
+            }
+        }
+        let alpha_x = add_workspace(&hive, 0, "beta/x", "alpha-beta-x");
+        let own = hive.workspaces(0)["beta/x"].clone();
+        if realized_first {
+            // The same sync goes on to merge the realization, made before the command, with it.
+            let member = &mut hive.hive.members[0];
+            let step = member.core.step(&mut member.adapter).unwrap();
+            assert!(matches!(step, Step::Advanced(_)), "{step:?}");
+        } else {
+            hive.hive.sync(1).unwrap();
+        }
+        hive.sync();
+        assert_kept_apart(&hive, "beta/x", &own, 1, "x", &theirs);
+        if realized_first || forgotten {
+            continue;
+        }
+        alpha_x.write_file("from-alpha", "alpha's beta/x");
+        alpha_x.jj(&["describe", "-m", "alpha's beta/x"]);
+        let own = hive.workspaces(0)["beta/x"].clone();
+        hive.sync();
+        beta_x.jj(&["status"]);
+        assert_kept_apart(&hive, "beta/x", &own, 1, "x", &theirs);
+        assert!(!beta_x.path().join("from-alpha").exists());
+        hive.repo(0).jj(&["workspace", "forget", "beta/x"]);
+        hive.repo(0).jj(&["undo"]);
+        hive.sync();
+        hive.sync();
+        assert_kept_apart(&hive, "beta/x", &own, 1, "x", &theirs);
+        hive.assert_converged();
+    }
+}
+
+/// So too for a workspace added as `gamma/gamma` while a machine named gamma joins: gamma's
+/// shows as `gamma-1a2b/gamma`.
+#[test]
+fn own_workspaces_named_like_one_of_a_machine_joining_meanwhile_are_own() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    let gamma = hive.env.init_repo("gamma");
+    hive.add(gamma);
+    hive.hive.sync(2).unwrap();
+    let theirs = hive.workspaces(2)["gamma"].clone();
+    add_workspace(&hive, 0, "gamma/gamma", "alpha-gamma");
+    let own = hive.workspaces(0)["gamma/gamma"].clone();
+    hive.sync();
+    hive.sync();
+    assert_kept_apart(&hive, "gamma/gamma", &own, 2, "gamma", &theirs);
+    hive.assert_converged();
+}
+
+/// A workspace this machine adds, or renames its own to, under the name of another machine's
+/// that it has just forgotten, is its own: forgetting another machine's workspace stays
+/// local, and the next sync shows that one again, as `beta-1a2b/beta`. So too where that
+/// machine meanwhile moves its working copy, before this machine shows it again (for after,
+/// see `a_workspace_shown_again_by_a_longer_name_can_lose_a_move_meanwhile`), and this machine
+/// merges the move with its own workspace.
+#[test]
+fn own_workspaces_named_like_one_forgotten_here_are_own() {
+    for (rename, meanwhile) in [(false, false), (true, false), (false, true)] {
+        let mut hive = Fixture::new(&["alpha", "beta"]);
+        hive.repo(1).write_file("from-beta", "beta's edit");
+        hive.repo(1).jj(&["describe", "-m", "beta's working copy"]);
+        hive.sync();
+        hive.repo(0).jj(&["workspace", "forget", "beta/beta"]);
+        if rename {
+            hive.repo(0).jj(&["workspace", "rename", "beta/beta"]);
+        } else {
+            add_workspace(&hive, 0, "beta/beta", "alpha-beta");
+        }
+        let own = hive.workspaces(0)["beta/beta"].clone();
+        if meanwhile {
+            hive.commit(1, "from-beta", "beta's work");
+            hive.hive.sync(1).unwrap();
+        }
+        let theirs = hive.workspaces(1)["beta"].clone();
+        hive.sync();
+        hive.sync();
+        assert_kept_apart(&hive, "beta/beta", &own, 1, "beta", &theirs);
+        hive.assert_converged();
+    }
+}
+
 /// A merge of a forget that saw a copy's latest work with work from before it keeps the
 /// copy's workspaces as its latest work left them, whichever parent the merge lists first.
 #[test]
@@ -424,4 +582,36 @@ fn a_copy_that_left_shows_again_once_it_joins() {
     hive.sync();
     assert!(hive.shown_machines().contains(&beta));
     assert!(hive.workspace_names(0).contains("beta/beta"));
+}
+
+/// A known limitation (docs/internals/races.md, "Copies that go away"): where this machine
+/// shows another machine's workspace again under a longer name, as `beta-1a2b/beta` after
+/// `jj workspace forget beta/beta` and adding its own `beta/beta`, and that machine moves the
+/// workspace before the operation that shows it reaches the hub, jj's merge of the two, in
+/// order of their end times, keeps the one that shows it, which ended first: the workspace
+/// goes back. Here beta's `jj commit` goes back to the commit it committed. This fails once
+/// the limitation goes away; then the row changes with it.
+#[test]
+fn a_workspace_shown_again_by_a_longer_name_can_lose_a_move_meanwhile() {
+    let mut hive = Fixture::new(&["alpha", "beta"]);
+    hive.repo(1).write_file("from-beta", "beta's edit");
+    hive.repo(1).jj(&["describe", "-m", "beta's working copy"]);
+    hive.sync();
+    let working_copy = |hive: &Fixture| {
+        hive.load(1).view().wc_commit_ids()[jj_lib::ref_name::WorkspaceName::new("beta")].clone()
+    };
+    hive.repo(0).jj(&["workspace", "forget", "beta/beta"]);
+    add_workspace(&hive, 0, "beta/beta", "alpha-beta");
+    // Shows beta's workspace again, and pushes nothing.
+    hive.hive.fetch(0).unwrap();
+    hive.commit(1, "from-beta", "beta's work");
+    let moved = working_copy(&hive);
+    hive.hive.sync(1).unwrap();
+    hive.sync();
+    let committed = hive.commit_id(1, "beta's work");
+    assert_ne!(working_copy(&hive), moved);
+    assert_eq!(
+        jj_lib::object_id::ObjectId::hex(&working_copy(&hive)),
+        committed
+    );
 }

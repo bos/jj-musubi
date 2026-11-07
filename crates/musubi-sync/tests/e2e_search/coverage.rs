@@ -191,6 +191,19 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
     ("own_workspaces_with_a_slash_are_own", None),
     ("own_workspaces_named_like_another_machine_are_own", None),
     (
+        "own_workspaces_named_like_one_added_meanwhile_are_own",
+        None,
+    ),
+    (
+        "own_workspaces_named_like_one_of_a_machine_joining_meanwhile_are_own",
+        None,
+    ),
+    ("own_workspaces_named_like_one_forgotten_here_are_own", None),
+    (
+        "a_workspace_shown_again_by_a_longer_name_can_lose_a_move_meanwhile",
+        None,
+    ),
+    (
         "an_operation_that_forgot_its_workspace_keeps_its_name",
         None,
     ),

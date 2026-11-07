@@ -7,6 +7,17 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- A workspace of your own named like another machine's, as `beta/x` where a machine named
+  beta has a workspace `x`, now stays yours: when you add it while beta adds `x` or joins the
+  hive, when you add it, or rename one to it, after `jj workspace forget beta/x`, and through
+  `jj undo` of forgetting it. Previously musubi could take it for beta's `x`: it got beta's
+  working-copy commit, and editing in it moved beta's working copy, changing beta's files.
+  While yours has that name, this machine shows all of beta's workspaces under a longer name,
+  as `beta-1a2b/x` and `beta-1a2b/default`. A workspace already taken for beta's stays so on
+  upgrading, and beta's `jj workspace list` doesn't list it under this machine's name. In
+  that workspace, run `jj workspace rename` to a name without a `/`, then `jj new`, so that it
+  no longer shares beta's working-copy commit, which may hold edits made on either machine.
+
 - `musubi top` lists an offline machine among its issues once when it goes quiet, leaving room
   for new issues. The hive's issue count and the red machine row still show it. Nothing needs
   doing on upgrading.

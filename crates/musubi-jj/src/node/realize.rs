@@ -9,6 +9,7 @@ use std::sync::PoisonError;
 use std::thread;
 
 use futures::TryStreamExt as _;
+use jj_lib::backend::CommitId;
 use jj_lib::content_hash::blake2b_hash;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::Operation as StoreOperation;
@@ -51,6 +52,19 @@ pub(super) struct Unwritten {
     write: thread::JoinHandle<Result<(), NodeError>>,
     local: LocalOp,
     canonical: CanonicalOp,
+}
+
+/// The names a realization keeps as the base of its merge with the op heads has them, at
+/// their commits (`NodeRepo::reserved_for`).
+pub(super) type Kept = BTreeMap<WorkspaceNameBuf, CommitId>;
+
+/// The names realizations along a line from `start` keep, beside op heads `heads`, of those
+/// that rename other machines' workspaces, `renaming` (`NodeRepo::reserved_for`).
+pub(super) struct KeptMemo {
+    heads: Vec<LocalOp>,
+    start: LocalOp,
+    renaming: BTreeSet<WorkspaceNameBuf>,
+    kept: Kept,
 }
 
 /// A realized operation, not yet written.
@@ -96,6 +110,13 @@ impl NodeRepo {
             self.heads_mapped = true;
         }
         let order = self.unrealized(canonical)?;
+        if order.is_empty() {
+            return self.local_of(canonical).ok_or_else(|| {
+                NodeError::NotRealizable(canonical.0.hex(), "its local operation is missing")
+            });
+        }
+        let starts = self.starts_of(&order);
+        let (reserved, kept) = self.reserved_for(&order)?;
         for (i, (id, op)) in order.iter().enumerate() {
             // `unrealized` puts parents first, so a parent missing here is a bug: refuse to
             // realize the operation rather than panic in the daemon.
@@ -117,7 +138,9 @@ impl NodeRepo {
             }
             let per_machine = self.inherited_per_machine(&parents)?;
             let prepared = match &mut self.prepared {
-                Some((inherited, views)) if Arc::ptr_eq(inherited, &per_machine) => {
+                Some((inherited, names, views))
+                    if Arc::ptr_eq(inherited, &per_machine) && *names == reserved =>
+                {
                     views.remove(id)
                 }
                 _ => None,
@@ -130,7 +153,7 @@ impl NodeRepo {
                     // So that the threads making views each find the presence before theirs
                     // remembered, rather than each reading the history below it.
                     self.presence(id)?;
-                    let mut views = self.local_views(&run, &per_machine).into_iter();
+                    let mut views = self.local_views(&run, &per_machine, &reserved).into_iter();
                     let view = views
                         .next()
                         .expect("a run starts with its first operation")?;
@@ -140,19 +163,28 @@ impl NodeRepo {
                         .zip(views)
                         .filter_map(|((id, _), view)| Some((id.clone(), view.ok()?)))
                         .collect();
-                    self.prepared = Some((per_machine.clone(), ahead));
+                    self.prepared = Some((per_machine.clone(), reserved.clone(), ahead));
                     view
                 }
             };
-            let view = self.with_own_workspaces(id, op, &parents, view)?;
+            let view = self.with_own_workspaces(id, op, &parents, view, &reserved)?;
             let own = self.own_of(&view);
-            let realization = self.realize_one(id, op, parents, view, per_machine)?;
+            let view = with_kept(view, &kept);
+            let realization =
+                self.realize_one(id, op, parents, view, &own, &reserved, per_machine)?;
             self.last_own = Some((realization.id.clone(), Arc::new(own)));
             self.write_later(realization, id.clone())?;
         }
-        self.local_of(canonical).ok_or_else(|| {
+        let realized = self.local_of(canonical).ok_or_else(|| {
             NodeError::NotRealizable(canonical.0.hex(), "its local operation is missing")
-        })
+        })?;
+        // The next along this line starts from this one, beside the same op heads.
+        if let Some(memo) = &mut self.kept_memo
+            && starts == [memo.start.clone()]
+        {
+            memo.start = realized.clone();
+        }
+        Ok(realized)
     }
 
     /// `first`, and the stored, unrealized operations of `later` that follow it, each with
@@ -213,15 +245,145 @@ impl NodeRepo {
         Ok(order)
     }
 
-    /// The local views of `ops`, which all inherit `per_machine`, made in parallel.
+    /// What realizing `order`, parents first, keeps clear of: this machine's own names in its
+    /// op heads (`reserved_names`), which other machines' workspaces are shown clear of; and
+    /// those of them that a merge with the heads would merge against, in the views of the
+    /// closest common ancestors of the heads and the operations it starts from, at their
+    /// commits. Showing another machine's workspaces under a longer name drops the names they
+    /// had, which the merge would take for removals, and a removal wins over the heads' own
+    /// workspace of that name, as after `jj workspace forget beta/default` and `jj workspace
+    /// add --name beta/default`. So a realization keeps such a name as the merge's base has it,
+    /// which leaves the merge the heads' own workspace.
+    fn reserved_for(
+        &mut self,
+        order: &[(CanonicalOp, StoreOperation)],
+    ) -> Result<(Arc<BTreeSet<WorkspaceNameBuf>>, Kept), NodeError> {
+        let reserved = self.reserved_names()?;
+        if reserved.is_empty() {
+            return Ok((reserved, Kept::new()));
+        }
+        // Only a name one of the machines these views show could be shown under renames them.
+        let mut machines = BTreeSet::new();
+        for (id, op) in order {
+            let view = self.canonical.read_view(&op.view_id)?;
+            machines.extend(self.machines_of(&view, self.presence(id)?.known()));
+        }
+        let renaming: BTreeSet<WorkspaceNameBuf> = reserved
+            .iter()
+            .filter(|name| self.names_other_machine(name, &machines))
+            .cloned()
+            .collect();
+        let starts = self.starts_of(order);
+        if renaming.is_empty() || starts.is_empty() {
+            return Ok((reserved, Kept::new()));
+        }
+        let mut heads = self.local_heads()?;
+        heads.sort();
+        // A line of realizations beside the same op heads merges against the same base.
+        if let ([start], Some(memo)) = (starts.as_slice(), &self.kept_memo)
+            && memo.heads == heads
+            && memo.start == *start
+            && memo.renaming == renaming
+        {
+            return Ok((reserved, memo.kept.clone()));
+        }
+        // The operations it starts from may still be being written.
+        if self
+            .unwritten
+            .iter()
+            .any(|unwritten| starts.contains(&unwritten.local))
+        {
+            self.settle()?;
+        }
+        let load = |op: &LocalOp| self.loader.load_operation(&op.0).block_on();
+        let start_ops = starts.iter().map(load).collect::<Result<Vec<_>, _>>()?;
+        let head_ops = heads.iter().map(load).collect::<Result<Vec<_>, _>>()?;
+        let mut kept = Kept::new();
+        for base in op_walk::closest_common_ancestors(start_ops, head_ops).block_on()? {
+            for (name, commit) in base.view().block_on()?.wc_commit_ids() {
+                if renaming.contains(name) {
+                    kept.entry(name.clone()).or_insert_with(|| commit.clone());
+                }
+            }
+        }
+        if let [start] = starts.as_slice() {
+            self.kept_memo = Some(KeptMemo {
+                heads,
+                start: start.clone(),
+                renaming,
+                kept: kept.clone(),
+            });
+        }
+        Ok((reserved, kept))
+    }
+
+    /// The local operations realizing `order`, parents first, starts from: the realizations
+    /// of its operations' parents that aren't in it.
+    fn starts_of(&self, order: &[(CanonicalOp, StoreOperation)]) -> Vec<LocalOp> {
+        let realizing: HashSet<&CanonicalOp> = order.iter().map(|(id, _)| id).collect();
+        let mut starts: Vec<LocalOp> = vec![];
+        for parent in order.iter().flat_map(|(_, op)| CanonicalOp::parents_of(op)) {
+            if !realizing.contains(&parent)
+                && let Some(local) = self.local_of(&parent)
+                && !starts.contains(&local)
+            {
+                starts.push(local);
+            }
+        }
+        starts
+    }
+
+    /// Whether `local` is a realization not yet published that was named clear of fewer of
+    /// this machine's own names (`reserved_names`) than its op heads have now, as one made
+    /// before a crash, or before a `jj` command published: merged with them, it may show
+    /// another machine's workspace by a name that is a workspace of this machine's own there.
+    fn realized_beside_other_heads(&mut self, local: &LocalOp) -> Result<bool, NodeError> {
+        let op = self.loader.op_store().read_operation(&local.0).block_on()?;
+        if !op.metadata.attributes.contains_key(CANONICAL_ATTRIBUTE)
+            || self
+                .reserved_names()?
+                .is_subset(&super::view::reserved_of(&op.metadata)?)
+        {
+            return Ok(false);
+        }
+        // Published already, as when records being taken leave the op heads at it, it is
+        // merged with nothing new.
+        let load = |op: &LocalOp| self.loader.load_operation(&op.0).block_on();
+        let heads = self
+            .local_heads()?
+            .iter()
+            .map(load)
+            .collect::<Result<Vec<_>, _>>()?;
+        let bases = op_walk::closest_common_ancestors([load(local)?], heads).block_on()?;
+        Ok(!bases.iter().any(|base| base.id() == &local.0))
+    }
+
+    /// Realizes `canonical` again in place of `local`, its realization, not yet published,
+    /// beside the op heads as they are now.
+    fn realize_again(
+        &mut self,
+        canonical: &CanonicalOp,
+        local: &LocalOp,
+    ) -> Result<LocalOp, NodeError> {
+        self.settle()?;
+        // The old one stays unreachable, as after a crash: the map's file names the new one
+        // after it, and the one named last counts.
+        self.map.forget(local, canonical);
+        self.prepared = None;
+        self.realize(canonical)
+    }
+
+    /// The local views of `ops`, which all inherit `per_machine`, made in parallel, with
+    /// other machines' workspaces named clear of `reserved` (`reserved_names`).
     fn local_views(
         &self,
         ops: &[(CanonicalOp, StoreOperation)],
         per_machine: &PerMachine,
+        reserved: &BTreeSet<WorkspaceNameBuf>,
     ) -> Vec<Result<LocalView, NodeError>> {
         let make = |part: &[(CanonicalOp, StoreOperation)]| -> Vec<_> {
             part.iter()
-                .map(|(id, op)| self.local_view(id, op, per_machine))
+                .map(|(id, op)| self.local_view(id, op, per_machine, reserved))
                 .collect()
         };
         if ops.len() == 1 {
@@ -297,7 +459,8 @@ impl NodeRepo {
 
     /// Waits for the realizations being written, then records them in the translation
     /// map's file. If any write failed, the map forgets them all: a later realization may
-    /// refer to the failed one, and realizing them again writes the same operations.
+    /// refer to the failed one, and realizing them again writes the same operations, unless
+    /// this machine's own names in its op heads changed meanwhile (`reserved_names`).
     pub fn settle(&mut self) -> Result<(), NodeError> {
         let unwritten = std::mem::take(&mut self.unwritten);
         let mut failed = None;
@@ -380,13 +543,14 @@ impl NodeRepo {
     /// wrote for it, as a fix-up's (`write_fixup`), maybe where it had forgotten this machine
     /// and so without its workspaces; only this machine's own operations remove them. A view
     /// that has this machine's workspaces, or where it is otherwise present without any, is
-    /// left as it is.
+    /// left as it is. Other machines' workspaces stay named clear of `reserved` too.
     fn with_own_workspaces(
         &mut self,
         canonical_id: &CanonicalOp,
         op: &StoreOperation,
         parents: &[LocalOp],
         local: LocalView,
+        reserved: &BTreeSet<WorkspaceNameBuf>,
     ) -> Result<LocalView, NodeError> {
         if local.names.keys().any(|key| self.is_own_key(key)) {
             return Ok(local);
@@ -430,7 +594,7 @@ impl NodeRepo {
             mut prefixes,
             ..
         } = local;
-        let private = own.keys().cloned().collect();
+        let private: BTreeSet<WorkspaceNameBuf> = own.keys().chain(reserved).cloned().collect();
         let canonical_view = self.canonical.read_view(&op.view_id)?;
         let adjusted =
             self.prefixes_with_own(&canonical_view, &*self.presence(canonical_id)?, &private)?;
@@ -513,7 +677,7 @@ impl NodeRepo {
 
     /// This machine's own workspaces in a local view: every one but those named for another
     /// machine's.
-    fn own_of(&self, local: &LocalView) -> BTreeMap<WorkspaceNameBuf, jj_lib::backend::CommitId> {
+    fn own_of(&self, local: &LocalView) -> BTreeMap<WorkspaceNameBuf, CommitId> {
         let others: HashSet<&WorkspaceNameBuf> = local
             .names
             .iter()
@@ -530,21 +694,25 @@ impl NodeRepo {
     }
 
     /// Realizes one canonical operation whose parents are realized, as `parents`, without
-    /// writing it, from its local view.
+    /// writing it, from its local view, in which `own` are this machine's own workspaces and
+    /// other machines' are shown clear of `reserved` (`reserved_for`).
+    #[expect(clippy::too_many_arguments, reason = "each is part of the realization")]
     fn realize_one(
         &self,
         canonical_id: &CanonicalOp,
         op: &StoreOperation,
         parents: Vec<LocalOp>,
         local: LocalView,
+        own: &BTreeMap<WorkspaceNameBuf, CommitId>,
+        reserved: &BTreeSet<WorkspaceNameBuf>,
         per_machine: Arc<PerMachine>,
     ) -> Result<Realization, NodeError> {
-        let own = self.own_of(&local);
         let LocalView {
             view, id, prefixes, ..
         } = local;
         let mut metadata = op.metadata.clone();
-        self.record_private_workspaces(&mut metadata, own.into_keys(), canonical_id)?;
+        self.record_private_workspaces(&mut metadata, own.keys().cloned(), canonical_id)?;
+        super::view::record_reserved(&mut metadata, reserved);
         if let Some((prefix, target)) = target_of(&metadata.description)
             && let target = CanonicalOp(target)
             && self
@@ -719,7 +887,7 @@ impl NodeRepo {
         }
         // Each realized first, so that those left can be worked out again from the op heads
         // under the lock below, without realizing anything while holding it.
-        let all = canonicals
+        let mut all = canonicals
             .iter()
             .map(|canonical| self.realize(canonical))
             .collect::<Result<Vec<_>, _>>()?;
@@ -729,6 +897,17 @@ impl NodeRepo {
         let Some((mut left, mut realized)) = self.left_beside(canonicals, &all, &heads)? else {
             return Ok(None);
         };
+        // One realized beside other op heads is realized again beside these, before they are
+        // merged: its names for other machines' workspaces may be this machine's own in them.
+        for (canonical, local) in left.iter().zip(realized.iter_mut()) {
+            if self.realized_beside_other_heads(local)? {
+                let again = self.realize_again(canonical, local)?;
+                for one in all.iter_mut().filter(|one| **one == *local) {
+                    *one = again.clone();
+                }
+                *local = again;
+            }
+        }
         let (mut superseded, mut concurrent) = self.check_mergeable(&left, &realized, &heads)?;
         let colocation = self.colocation();
         let colocated = colocation.is_some();
@@ -1278,6 +1457,26 @@ impl NodeRepo {
 
 #[cfg(all(test, unix))]
 mod advance_tests;
+
+/// `local` with each of `kept` it lacks, at its commit in the base of the realization's merge
+/// with the op heads (`reserved_for`).
+fn with_kept(mut local: LocalView, kept: &Kept) -> LocalView {
+    let mut changed = false;
+    for (name, commit) in kept {
+        if !local.view.wc_commit_ids.contains_key(name) {
+            local
+                .view
+                .wc_commit_ids
+                .insert(name.clone(), commit.clone());
+            changed = true;
+        }
+    }
+    if changed {
+        // The id the op store gives it, worked out as it does.
+        local.id = jj_lib::op_store::ViewId::new(blake2b_hash(&local.view).to_vec());
+    }
+    local
+}
 
 /// The operations that those of `ops` that `jj op revert` wrote reverted, by hex id: it
 /// describes what it writes so.

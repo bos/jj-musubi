@@ -77,9 +77,9 @@ them. On Windows, the daemon started at login gets the login's environment.
 
 ## Logging
 
-The hub and the daemon log what they do, at `info`, and only warnings from the jj library
-they use (`jj_lib`). Other commands log only warnings, since they report what they did
-themselves.
+The hub and the daemon log what they do, at `info`, and only warnings from jj's crates
+(`jj_lib`, `jj_local_util`, and the others jj is built from). Other commands log only
+warnings, since they report what they did themselves.
 
 - `musubi hub` logs to its terminal. Run at login by `musubi hub install`, it logs on macOS to
   `hub.log` in musubi's state directory, starting the log afresh when it starts if it has

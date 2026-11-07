@@ -253,18 +253,20 @@ fn run(cli: Cli, ui: &Ui) -> anyhow::Result<()> {
                 name: hive.clone(),
                 to: new_name,
             };
-            if let HubWideReply::Hive(info) = hub::ask(&hub, request).await? {
-                let mut out = ui.stdout();
-                if hive == info.name {
-                    write!(out, "Hive ")?;
-                    write!(out.labeled("hive"), "{hive}")?;
-                    writeln!(out, " already has that name")?;
-                } else {
-                    write!(out, "Renamed hive ")?;
-                    write!(out.labeled("hive"), "{hive}")?;
-                    write!(out, " to ")?;
-                    writeln!(out.labeled("hive"), "{}", info.name)?;
-                }
+            let reply = hub::ask(&hub, request).await?;
+            let HubWideReply::Renamed { from, hive } = reply else {
+                anyhow::bail!("unexpected reply from the hub: {reply:?}");
+            };
+            let mut out = ui.stdout();
+            if from == hive.name {
+                write!(out, "Hive ")?;
+                write!(out.labeled("hive"), "{from}")?;
+                writeln!(out, " already has that name")?;
+            } else {
+                write!(out, "Renamed hive ")?;
+                write!(out.labeled("hive"), "{from}")?;
+                write!(out, " to ")?;
+                writeln!(out.labeled("hive"), "{}", hive.name)?;
             }
             Ok(())
         }),

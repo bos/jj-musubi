@@ -1156,21 +1156,14 @@ fn hub_join_sync_clone_and_list() {
         run(&env, &logs, status).contains("Forgotten by the hive")
     });
 
-    // A renamed hive goes by its new name on every machine, once its daemon next syncs.
-    let out = musubi_in(
-        &env,
-        &logs,
-        &alpha,
-        &["hub", "rename", "project", "renamed"],
-    );
+    // A renamed hive goes by its new name on every machine, once its daemon next syncs. A
+    // prefix names it, but no name at all names none.
+    let out = musubi_in(&env, &logs, &alpha, &["hub", "rename", "proj", "renamed"]);
     insta::assert_snapshot!(out, @"Renamed hive project to renamed");
-    let out = musubi_in(
-        &env,
-        &logs,
-        &alpha,
-        &["hub", "rename", "renamed", "renamed"],
-    );
+    let out = musubi_in(&env, &logs, &alpha, &["hub", "rename", "ren", "renamed"]);
     insta::assert_snapshot!(out, @"Hive renamed already has that name");
+    let err = musubi_fails(&env, &logs, &alpha, &["hub", "rename", "", "other"]);
+    insta::assert_snapshot!(err, @"Error: a hive name can't be empty");
     musubi_in(&env, &logs, &beta, &["sync"]);
     wait_for(&logs, "beta's daemon to hear the hive's new name", || {
         status_in(&env, &logs, &beta)

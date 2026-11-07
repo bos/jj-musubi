@@ -286,7 +286,10 @@ async fn one_hub_many_hives() {
         name: "fork".to_owned(),
         to: "gamma".to_owned(),
     };
-    assert!(matches!(hub_wide(&*client, rename).await, HubWideReply::Hive(h) if h.name == "gamma"));
+    assert!(matches!(
+        hub_wide(&*client, rename).await,
+        HubWideReply::Renamed { from, hive } if from == "fork/project" && hive.name == "gamma"
+    ));
     // Only by its whole name or id, which a prefix is too easily mistaken for.
     let remove = |name: &str| HubWideRequest::Remove {
         name: name.to_owned(),

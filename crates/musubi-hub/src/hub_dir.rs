@@ -435,6 +435,8 @@ impl HubDir {
     /// The id of the hive `name` names: its name, its id, or a prefix of exactly one
     /// hive's name (or else id).
     pub fn resolve(&self, name: &str) -> Result<HiveId, Refusal> {
+        // A prefix of every name.
+        names::check_name_given(name)?;
         if let Some((id, _)) = self.hives.iter().find(|(_, h)| h.meta.name == name) {
             return Ok(id.clone().into());
         }
@@ -466,6 +468,7 @@ impl HubDir {
     /// The id of the hive whose name or id is exactly `name`, for removing it, which a
     /// prefix is too easily mistaken for.
     pub fn resolve_exact(&self, name: &str) -> Result<HiveId, Refusal> {
+        names::check_name_given(name)?;
         if let Some((id, _)) = self.hives.iter().find(|(_, h)| h.meta.name == name) {
             return Ok(id.clone().into());
         }
@@ -498,9 +501,12 @@ impl HubDir {
         hives
     }
 
-    pub fn rename(&mut self, name: &str, to: &str) -> Result<HiveInfo, Refusal> {
+    /// Renames the hive `name` names, as [`Self::resolve`] finds it, `to`. Returns the name it
+    /// had, and the hive as it is now.
+    pub fn rename(&mut self, name: &str, to: &str) -> Result<(String, HiveInfo), Refusal> {
         let id = self.resolve(name)?.into_string();
-        if self.hives[&id].meta.name != to {
+        let from = self.hives[&id].meta.name.clone();
+        if from != to {
             self.check_new_name(to)?;
             let hive = self.hives.get_mut(&id).expect("resolved");
             let mut meta = hive.meta.clone();
@@ -508,7 +514,7 @@ impl HubDir {
             write_meta(&hive.dir, &meta).map_err(refusal)?;
             hive.meta = meta;
         }
-        Ok(self.info(&id).expect("resolved"))
+        Ok((from, self.info(&id).expect("resolved")))
     }
 
     /// Takes a hive out of the hub, keeping its store under `removed/`. The caller has
@@ -1365,6 +1371,25 @@ mod tests {
             err.to_string(),
             r#"a hive name can't contain spaces: "My Project""#
         );
+    }
+
+    /// A hive is renamed by a prefix of its name, saying the name it had; and no empty name
+    /// names one, though every name starts with it.
+    #[test]
+    fn hives_are_renamed_by_prefix_but_not_by_nothing() {
+        let dir = musubi_testutil::tempdir();
+        let mut hubs = HubDir::open(dir.path()).unwrap();
+        hubs.create("alpha", Backend::GIT).unwrap();
+        let (from, info) = hubs.rename("alp", "beta").unwrap();
+        assert_eq!((from.as_str(), info.name.as_str()), ("alpha", "beta"));
+        let (from, info) = hubs.rename("be", "beta").unwrap();
+        assert_eq!((from.as_str(), info.name.as_str()), ("beta", "beta"));
+        let empty = "a hive name can't be empty".to_owned();
+        assert_eq!(hubs.resolve("").unwrap_err(), empty);
+        assert_eq!(hubs.resolve_exact("").unwrap_err(), empty);
+        assert_eq!(hubs.rename("", "gamma").unwrap_err(), empty);
+        let beta = hubs.resolve("beta").unwrap();
+        assert_eq!(hubs.info(beta.as_str()).unwrap().name, "beta");
     }
 
     /// A hive created with a name has it, and no second hive can be created with it.

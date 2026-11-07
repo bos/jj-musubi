@@ -70,6 +70,19 @@ use view::PerMachine;
 /// The operation attribute naming the canonical operation a realization represents.
 pub const CANONICAL_ATTRIBUTE: &str = "musubi.canonical";
 
+/// Local views made ahead (see `NodeRepo::prepared`).
+type PreparedViews = (
+    Arc<PerMachine>,
+    Arc<BTreeSet<jj_lib::ref_name::WorkspaceNameBuf>>,
+    HashMap<CanonicalOp, LocalView>,
+);
+
+/// The op heads, with their canonical forms, and the names `NodeRepo::reserved_names` gave.
+type ReservedNames = (
+    Vec<(LocalOp, Option<CanonicalOp>)>,
+    Arc<BTreeSet<jj_lib::ref_name::WorkspaceNameBuf>>,
+);
+
 /// The op heads, base and accepted push an abandon was last looked for at, and not found.
 type AbandonChecked = Option<(
     Vec<LocalOp>,
@@ -108,15 +121,29 @@ pub struct NodeRepo {
     /// Realized operations still being written (see [`Self::realize_pending`]).
     unwritten: Vec<Unwritten>,
     /// Local views made ahead of their operations' realization, by canonical operation, with
-    /// the per-machine fields they were made with: used only while those are what the
-    /// operations inherit (see [`Self::realize_pending`]).
-    prepared: Option<(Arc<PerMachine>, HashMap<CanonicalOp, LocalView>)>,
+    /// the per-machine fields they were made with and the names they keep clear of
+    /// (`reserved_names`): used only while those are what the operations inherit and keep
+    /// clear of (see [`Self::realize_pending`]).
+    prepared: Option<PreparedViews>,
     /// The last operation realized here, with this machine's own workspaces in its view:
     /// what the next one keeps where the hive has forgotten this machine.
     last_own: Option<(
         LocalOp,
         Arc<BTreeMap<jj_lib::ref_name::WorkspaceNameBuf, CommitId>>,
     )>,
+    /// This machine's own names that could clash with another machine's as of the op heads
+    /// last asked about, with their canonical forms (see `NodeRepo::reserved_names`).
+    reserved_memo: Option<ReservedNames>,
+    /// The names the last line of realizations kept (see `NodeRepo::reserved_for`).
+    kept_memo: Option<realize::KeptMemo>,
+    /// The workspace names in the view of the operation `canonical_view` last canonicalized,
+    /// usually the next one's parent.
+    last_view_names: Mutex<
+        Option<(
+            jj_lib::op_store::OperationId,
+            Arc<BTreeSet<jj_lib::ref_name::WorkspaceNameBuf>>,
+        )>,
+    >,
     /// Private ownership reconstructed from immutable native operation views.
     private_names:
         Mutex<HashMap<jj_lib::op_store::OperationId, BTreeSet<jj_lib::ref_name::WorkspaceNameBuf>>>,
@@ -163,7 +190,8 @@ struct UnmergeableSearch {
 impl Drop for NodeRepo {
     fn drop(&mut self) {
         // While unwinding, a writer's panic passed on would abort the process; the writes
-        // finish anyway, and what they wrote is realized again, identically, next time.
+        // finish anyway, and what they wrote is realized again next time, identically unless
+        // this machine's own names in its op heads changed meanwhile (`reserved_names`).
         if thread::panicking() {
             return;
         }
@@ -222,6 +250,9 @@ impl NodeRepo {
             last_realized: None,
             last_own: None,
             private_names: Mutex::new(HashMap::new()),
+            reserved_memo: None,
+            kept_memo: None,
+            last_view_names: Mutex::new(None),
             prepared: None,
             presences: Arc::default(),
             worked_names: Mutex::default(),

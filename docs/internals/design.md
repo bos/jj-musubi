@@ -184,7 +184,11 @@ Translation keeps per-machine fields per-machine:
   until they are all written.
   - An operation that won't be an op head inherits its parent realization's per-machine fields, or
     for a merge, their three-way merge, as jj's merge of the operations would make it. That makes
-    realizing deterministic, so re-realizing after a crash rewrites identical files.
+    realizing deterministic, given the op heads, whose own workspace names other machines'
+    are shown clear of ([Which workspaces are this machine's
+    own](#which-workspaces-are-this-machines-own)), so re-realizing after a crash rewrites
+    identical files, or, where a `jj` command changed those meanwhile, leaves the first
+    unreachable.
   - For the operation that becomes an op head, in a colocated repository, musubi runs jj's
     `export_refs` with C's bookmarks, tags, and remote bookmarks against this machine's `.git`.
     This writes `refs/heads`, `refs/tags`, and `refs/remotes`, compare-and-swapping against the
@@ -297,10 +301,42 @@ whose prefix is one that a known machine other than this one can be shown under 
   parents.
 
 Otherwise `canonical_view` doesn't publish it. `show_other_workspaces` also drops it from the
-local view, unless jj's workspace store says this machine has a working copy for it. A workspace
-of `desk`'s own that it named `laptop/x` therefore stays its own, whether it was made before a
-machine named `laptop` joined or after, while the hive has forgotten `desk`, and through
-`jj undo`; and that machine is shown as `laptop-1a2b`, to keep clear of it.
+local view, unless jj's workspace store says this machine has a working copy for it.
+
+Which of another machine's workspaces a name is comes from the operation's local parents: each
+canonical parent's workspaces are named as the local parent standing for it named them. A
+`jj` command that adds a name none of the views it started from had, as after `jj workspace
+forget laptop/default` here, makes a workspace of `desk`'s own, though the hive shows one of the
+laptop's by that name. An operation that goes back to an older one starts from the view it
+brings back, less what was `desk`'s own there, so that `jj undo` of forgetting `desk`'s own
+`laptop/x` brings back `desk`'s workspace. musubi's own operations make no names: they show other
+machines' workspaces again under the names the hive gives them.
+
+A realization of another machine's operation is merged with `desk`'s op heads, published or not,
+so it names other machines' workspaces clear of `desk`'s own names in them too
+(`reserved_names`), and records those names (`RESERVED_WORKSPACES`), by which `canonical_view`
+names them so again at the merge. Otherwise the laptop's workspace `x`, which the laptop adds
+while `desk` adds its `laptop/x`, or that of a machine named `laptop` joining meanwhile, would
+be `laptop/x` here too, and jj's merge would keep one of the two working copies under the name.
+Showing the laptop as `laptop-1a2b` drops the names it had here, which jj's merge takes for
+removals, and a removal wins over `desk`'s own workspace of such a name, as after `jj workspace
+forget laptop/default` and `jj workspace add --name laptop/default`. So a realization keeps such a
+name as the base of the merge has it (`reserved_for`), which leaves the merge `desk`'s own. A
+realization not yet published that was named clear of fewer of `desk`'s names than its op heads
+have now, as one made before a crash or a `jj` command, is realized again before it is merged.
+
+A workspace of `desk`'s own that it named `laptop/x` therefore stays its own, and the laptop is
+shown as `laptop-1a2b`, to keep clear of it:
+
+- whether it was made before a machine named `laptop` joined, while it joins, or after;
+- while the laptop adds a workspace `x` of its own;
+- after `desk` forgot the laptop's `laptop/x` here;
+- while the hive has forgotten `desk`;
+- through `jj undo`.
+
+[races.md](races.md#copies-that-go-away) says where a `jj` command racing a sync can still put
+the two under one name, and where showing the laptop's workspace under a longer name can undo
+the laptop's move of it meanwhile.
 
 ### A forgotten copy's working copies
 

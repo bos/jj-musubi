@@ -1710,9 +1710,10 @@ links:
    name of this machine's own, fails it. `longer_names_where_shorter_clash` pins the cases the
    rule before this one named alike, which `Names.lean` checks with `#guard`.
 
-The test checks the rule, not where musubi applies it: that `local_names` and `canonical_view`
-pass it every machine the history has known, this one included, and this machine's own names is
-for the race catalogue (`crates/musubi-sync/tests/races/forget.rs`) to check.
+The test checks the rule, not where musubi applies it: that `local_names`, `canonical_view` and
+`local_view` pass it every machine the history has known, this one included, and all of this
+machine's own names, including those in the op heads a realization is merged with, is for the
+race catalogue (`crates/musubi-sync/tests/races/forget.rs`) to check.
 
 The oracle's names request and reply:
 

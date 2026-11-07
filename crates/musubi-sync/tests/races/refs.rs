@@ -371,16 +371,14 @@ impl Model {
     }
 
     /// jj's import of `refs`, in its order, each a `jjImport` and a `set` of the others with
-    /// the bookmark. Returns whether it changed the view.
-    fn import(&mut self, alg: &Alg, refs: &[Ref]) -> bool {
-        let before = self.slots();
+    /// the bookmark.
+    fn import(&mut self, alg: &Alg, refs: &[Ref]) {
         for &r in refs {
             // Since jj's 095c1ca, unchanged physical refs do not update remote bookmarks.
             if self.get(r).g != self.get(r).v.k {
                 self.import_ref(alg, r);
             }
         }
-        self.slots() != before
     }
 
     /// A fetch imports its explicit result even if the physical ref did not change.
@@ -1048,9 +1046,12 @@ impl Refs {
         self.synced = (self.head(), self.model.clone());
     }
 
-    /// `jj undo`, or if `target`, `jj op restore` to it: as a `jj` command, its import, then
-    /// `Model::restore` of the operation it restores, read from its description, if it made
-    /// one. jj refuses to undo a merge operation, or one made in another workspace.
+    /// `jj undo`, or if `target`, `jj op restore` to it: as a `jj` command that changes
+    /// nothing: its import, then its export, which writes what an earlier export left undone,
+    /// before anything is restored; then `Model::restore` of the operation it restores, read
+    /// from its description, if it made one. Where the import or export made an operation,
+    /// `jj undo` undoes that one; otherwise jj refuses to undo a merge operation, or one made
+    /// in another workspace.
     fn jj_restores_to(&mut self, target: Option<OperationId>) {
         let before = self.head();
         let repo = self.fixture.repo(HERE);
@@ -1058,9 +1059,7 @@ impl Refs {
             None => repo.jj_output(&["undo"]),
             Some(op) => repo.jj_output(&["op", "restore", &op.hex()]),
         };
-        if self.model.import(&self.alg, &Ref::ALL) {
-            self.model.export(&self.alg, false, false);
-        }
+        self.model.jj(&self.alg, |_| {});
         let repo = self.fixture.load(HERE);
         let description = &repo.operation().metadata().description;
         let restored = (repo.op_id() != &before)
@@ -1080,8 +1079,9 @@ impl Refs {
                 let view = block_on(op.view()).unwrap();
                 self.model.restore(&self.alg, view.store_view());
             }
-            // jj makes no operation if the restored view is the current one, as when the
-            // operation undone changed only `git_refs`, which a restore keeps.
+            // jj makes no restore if the restored view is the current one, as when the
+            // operation undone changed only `git_refs`, which a restore keeps, though the
+            // import or export before it may have made an operation.
             None => assert!(
                 !output.status.success()
                     || String::from_utf8_lossy(&output.stderr).contains("Nothing changed."),
@@ -1821,4 +1821,31 @@ fn an_unchanged_import_exports_a_bookmark_selected_by_a_merge() {
         Some(Beside::Fetches(base.clone())),
     );
     refs.jj_sets_at_older_op(Ref::Y, RefTarget::normal(refs.commits[2].clone()));
+}
+
+/// A restore first exports what an earlier export left undone, as any integrated command
+/// does, in a shorter form of the case Hegel found. `x` moves to the root, which jj can't
+/// export, then the other machine moves it to `base`, which musubi realizes here while git's
+/// lock on `refs/heads/x` is held, so that `.git` and the record keep `one`. `jj op restore`
+/// to the operation with `x` at the root first writes `base` to `.git` and the record, then
+/// restores `x` to the root and `x@git` to `one`, and can't export the root, so `.git` keeps
+/// `base`, as jj does on one machine.
+#[test]
+fn a_restore_first_exports_what_a_lock_held_back() {
+    let mut refs = Refs::new();
+    let [root, base, one] = [0, 1, 2].map(|i| RefTarget::normal(refs.commits[i].clone()));
+    refs.jj_sets(Ref::X, root.clone());
+    refs.musubi_realizes_with(
+        Some((Ref::X, base.clone())),
+        base.clone(),
+        true,
+        false,
+        None,
+    );
+    let x = refs.model.get(Ref::X);
+    assert_eq!((&x.v.l, &x.v.r, &x.v.k, &x.g), (&base, &one, &one, &one));
+    refs.jj_restores_to(Some(refs.older.0.clone()));
+    let x = refs.model.get(Ref::X);
+    assert_eq!((&x.v.l, &x.v.r, &x.v.k, &x.g), (&root, &one, &base, &base));
+    assert!(x.restored, "{x:?}");
 }

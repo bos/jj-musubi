@@ -225,7 +225,8 @@ impl Colocation {
         let repo: Arc<ReadonlyRepo> = loader.load_at(&op).block_on()?;
         let mut tx = repo.start_transaction();
         // Refs that fail to export keep their recorded values, exactly as after a failed
-        // export in a local `jj` command; jj's next import reconciles them.
+        // export in a local `jj` command; jj's next command imports those git has moved since,
+        // and exports the rest again.
         let stats = jj_lib::git::export_refs(tx.repo_mut())?;
         let mut known = self.expected.lock().expect("not poisoned").clone();
         known.extend(

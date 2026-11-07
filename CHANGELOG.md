@@ -7,6 +7,10 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- Two `musubi create` or `musubi join` run at once in one repository take turns: the second
+  finds the repository part of the hive the first joined. Before, both could say they created
+  a hive, leaving one that no copy was part of. `musubi hub remove` removes such a hive.
+
 - `musubi hub rename` by a prefix of a hive's name says what the hive was called: it said
   "Hive alp already has that name" after renaming `alpha` to `alp`, and "Renamed hive dem to
   demo" when nothing changed. An empty name names no hive, where it named the only one. This

@@ -3365,7 +3365,28 @@ fn a_new_hive_doesnt_inherit_members() {
     let mut daemons = Daemons::default();
     let (_alpha, beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
     musubi_in(&env, &logs, &beta, &["leave"]);
-    musubi_in(&env, &logs, &beta, &["create", "other"]);
+    // Two at once, as from two terminals: one makes its hive, and the other finds the
+    // repository part of it, rather than making a hive no copy is part of.
+    let create = |name: &str| {
+        let mut command = beta.program(musubi());
+        command.args(["create", name]);
+        command
+    };
+    let (first, second) = std::thread::scope(|scope| {
+        let first = scope.spawn(|| try_run(&logs, &env, create("other")));
+        let second = try_run(&logs, &env, create("other2"));
+        (first.join().unwrap(), second)
+    });
+    let (made, refused) = match (first, second) {
+        ((true, out, _), (false, _, err)) | ((false, _, err), (true, out, _)) => (out, err),
+        both => panic!("not one of them refused: {both:?}"),
+    };
+    // Whichever made its hive goes by `other` here.
+    let mut settings = insta::Settings::clone_current();
+    settings.add_filter(r"\bother2\b", "other");
+    let _other = settings.bind_to_scope();
+    insta::assert_snapshot!(made, @"Created hive other");
+    insta::assert_snapshot!(refused, @"Error: this repository is already part of hive other; `musubi leave` first to join another");
     let list = musubi_in(&env, &logs, &beta, &["list"]);
     insta::assert_snapshot!(list, @"
     Hub $ROOT/hub:

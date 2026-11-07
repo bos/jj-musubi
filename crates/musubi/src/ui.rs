@@ -130,6 +130,18 @@ impl Ui {
         }
     }
 
+    /// Runs `wait`, which may block a while, showing `what` on a terminal meanwhile, cleared
+    /// once it's done.
+    pub fn while_blocked<T>(&self, what: &str, wait: impl FnOnce() -> T) -> T {
+        let Some(mut output) = self.ui.progress_output() else {
+            return wait();
+        };
+        let _clear = output.output_guard(format!("\r{}", Clear(ClearType::CurrentLine)));
+        write!(output, "{what}").ok();
+        output.flush().ok();
+        wait()
+    }
+
     /// jj's settings, for a template language.
     pub fn settings(&self) -> anyhow::Result<UserSettings> {
         Ok(UserSettings::from_config_and_home_dir(

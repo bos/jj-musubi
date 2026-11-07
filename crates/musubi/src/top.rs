@@ -35,9 +35,9 @@ use crate::hub;
 use crate::socket::Socket;
 use crate::ui::Ui;
 
-/// The shortest and longest refresh `+` and `-` choose.
+/// The shortest and longest refresh, as `--interval` gives it or `+` and `-` choose it.
 const FASTEST: Duration = Duration::from_secs(1);
-const SLOWEST: Duration = Duration::from_secs(60);
+pub const SLOWEST: Duration = Duration::from_secs(60 * 60);
 
 pub struct Args {
     pub hub: Option<String>,

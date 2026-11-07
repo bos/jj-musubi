@@ -401,6 +401,12 @@ fn refresh_speed_and_quit_keys() {
     }
     assert_eq!(app.interval, SLOWEST - FASTEST);
     assert_eq!(app.selected.selected(), Some(0));
+    // `+` never speeds up a refresh as slow as `--interval` allows.
+    app.interval = Duration::from_secs(3600);
+    assert_eq!(
+        key(&mut app, KeyCode::Char('+')),
+        Action::Wake(Wake::Every(Duration::from_secs(3600)))
+    );
     assert_eq!(key(&mut app, KeyCode::Char('c')), Action::None);
     assert_eq!(key(&mut app, KeyCode::Char('?')), Action::None);
     for code in [KeyCode::Char('q'), KeyCode::Esc] {

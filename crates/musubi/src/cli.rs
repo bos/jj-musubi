@@ -230,7 +230,7 @@ pub enum Command {
         hub: Option<String>,
         /// How often to refresh, in seconds. `+` and `-` change it as it runs.
         #[arg(short, long, value_name = "SECONDS", default_value_t = 5,
-              value_parser = clap::value_parser!(u64).range(1..=3600))]
+              value_parser = clap::value_parser!(u64).range(1..=crate::top::SLOWEST.as_secs()))]
         interval: u64,
         /// Print what it sees once, and stop.
         #[arg(long)]

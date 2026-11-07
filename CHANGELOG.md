@@ -7,6 +7,10 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- `+` in `musubi top` slows the refresh to at most once an hour, as `--interval` allows.
+  Previously it capped the refresh at once a minute, so after `--interval` above 60, pressing
+  `+` made it faster.
+
 - One daemon serves a machine's copies, whatever socket it listens on: a daemon holds a lock
   on the state directory, and won't start while another serves it. Previously a command run
   where `XDG_RUNTIME_DIR` differed, as under cron or after `sudo -u`, started a second daemon,

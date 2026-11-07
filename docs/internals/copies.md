@@ -189,6 +189,7 @@ Each case, what musubi does, and the test in `crates/musubi/tests/cli.rs` that p
 | A bind mount, joined through both paths | One entry, as for a second workspace: both paths reach the same `.jj/repo` (R5). | — (needs root) |
 | `sudo musubi join` | Refused (R9). | — (needs root) |
 | `musubi hub remove`, then a plain `musubi join` | Says the hive was removed (R7). | `copies_leave_a_removed_hive` |
+| …or `musubi leave` | Records that the copy left, as any other that left. | `copies_leave_a_removed_hive` |
 | A copy that left one hive creates or joins another | Its join forgets the old hive's copies (R8). | `a_new_hive_doesnt_inherit_members` |
 | `musubi join` killed partway, when joining a hive again | The daemon keeps syncing the copy: its `add` request restarts the copy's sync in one step, so nothing stops it between. | — |
 

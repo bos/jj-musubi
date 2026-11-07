@@ -83,7 +83,8 @@ serves every other hive as usual. Each machine's copy leaves the hive as it next
 record that the hive was removed, so that no copy brings it back. To share the repository
 again, start a new hive with `musubi create`, and run `musubi join --hive <name>` in the other
 copies. A plain `musubi join` in a copy whose hive was removed refuses to join another hive
-and says that the old one was removed.
+and says that the old one was removed; run `musubi leave` in it first, after which `musubi
+join` matches it with a hive as it would any repository.
 
 ## Take a repository or machine out
 

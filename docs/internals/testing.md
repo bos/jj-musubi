@@ -414,10 +414,11 @@ deadline, including the cap, then checks greeting and wake resets without rewrit
 deadlines. The sleep detector still compares real wall and monotonic clocks, since it detects
 the operating system suspending; the supervisor tests inject its wake notification.
 
-`copies_leave_a_removed_hive` checks that copies leave a hive removed from the hub, keeping
-their work. Before taking its final listing snapshot, it waits for both the saved membership
-and the daemon's reported repository count: the daemon saves membership before it finishes
-cleanup, so the membership file alone cannot tell when its thread has stopped.
+`copies_leave_a_removed_hive` checks that copies leave a hive removed from the hub, keeping their
+work, and that `musubi leave` then takes such a copy out as any other. Before taking its final
+listing snapshot, it waits for both the saved membership and the daemon's reported repository
+count: the daemon saves membership before it finishes cleanup, so the membership file alone cannot
+tell when its thread has stopped.
 
 `recreating_hives_keeps_work_without_inheriting_remote_workspaces` follows the upgrade
 guide with two copies and a real linked workspace whose name contains `/`, including the

@@ -294,7 +294,7 @@ fn run(cli: Cli, ui: &Ui) -> anyhow::Result<()> {
             lease,
         } => join::clone(
             ui,
-            &destination,
+            destination.as_deref(),
             &hive,
             hub.as_deref(),
             machine.as_deref(),

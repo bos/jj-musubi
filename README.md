@@ -107,7 +107,7 @@ It creates `~/musubi-hub` the first time, and prints what to run on the other ma
 Created a new hub in /home/you/musubi-hub
 To share a repository:               musubi create --hub devbox
 To add another machine's copy of it: musubi join --hub devbox
-To make a new copy of a hive:        musubi clone <name> <dir> --hub devbox
+To make a new copy of a hive:        musubi clone <name> [<dir>] --hub devbox
 Other machines reach this hub over ssh: use the name they ssh to this machine by, if it isn't devbox.
 On this machine, leave out --hub.
 ```

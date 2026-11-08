@@ -1,6 +1,7 @@
 //! Creating, joining, and cloning hives, and starting their first sync.
 
 use std::io::Write as _;
+use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command as Process;
@@ -442,14 +443,16 @@ fn start_serving(ui: &Ui, located: &Located, socket: &Socket) -> anyhow::Result<
 
 pub fn clone(
     ui: &Ui,
-    destination: &Path,
+    destination: Option<&Path>,
     hive: &str,
     hub: Option<&str>,
     machine: Option<&str>,
     lease: Option<Duration>,
     socket: &Socket,
 ) -> anyhow::Result<()> {
-    check_clone_destination(destination)?;
+    if let Some(destination) = destination {
+        check_clone_destination(destination)?;
+    }
     let hub = UserState::hub(hub)?;
     configured_forget_after(&settings::user_config()?)?;
     let reply = block_on(ask_preparing(
@@ -461,6 +464,25 @@ pub fn clone(
     ))?;
     let HubWideReply::Hive(info) = reply else {
         anyhow::bail!("unexpected reply from the hub: {reply:?}");
+    };
+    // Named after the hive the hub resolved, not the prefix or id that chose it.
+    let default;
+    let destination = match destination {
+        Some(destination) => destination,
+        None => {
+            let hint = format!(
+                "`musubi clone {} <dir>` clones into a directory you name",
+                crate::ui::shell_word(hive)
+            );
+            default = default_destination(&info.name).ok_or_else(|| {
+                crate::ui::with_hint(
+                    anyhow::anyhow!("can't name a directory after hive {:?}", info.name),
+                    hint.clone(),
+                )
+            })?;
+            check_clone_destination(&default).map_err(|err| crate::ui::with_hint(err, hint))?;
+            &default
+        }
     };
     let remotes = if matches!(info.backend, Backend::Git(_)) {
         musubi_jj::inherited_remotes::read(&destination.join(".git"))
@@ -550,6 +572,26 @@ fn init_copy(settings: &UserSettings, workspace: &Path, backend: Backend) -> any
     Ok(())
 }
 
+/// The directory a clone of hive `name` makes when given none: the last part of the name, as
+/// `jj git clone` names it after the last part of the URL. A `\` separates parts too, on every
+/// platform, so that a name gives the same directory everywhere, and never a subdirectory on
+/// Windows.
+fn default_destination(name: &str) -> Option<PathBuf> {
+    let part = name.rsplit(['/', '\\']).find(|part| !part.is_empty());
+    // Not `.`, `..`, or, on Windows, a drive such as `C:`.
+    match part.map(Path::new) {
+        Some(path)
+            if matches!(
+                path.components().collect::<Vec<_>>()[..],
+                [Component::Normal(_)]
+            ) =>
+        {
+            Some(path.to_owned())
+        }
+        _ => None,
+    }
+}
+
 /// `jj git init` adopts an existing Git repository and its files, which a clone must not share.
 fn check_clone_destination(destination: &Path) -> anyhow::Result<()> {
     match std::fs::read_dir(destination) {
@@ -605,4 +647,22 @@ fn check_out_trunk(located: &Located) -> anyhow::Result<()> {
     let status = jj(&["new", trunk]).status().context("running `jj new`")?;
     anyhow::ensure!(status.success(), "`jj new {trunk}` failed");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::default_destination;
+
+    #[test]
+    fn a_clone_is_named_after_the_last_part_of_its_hive() {
+        let named = default_destination;
+        let some = |dir: &str| Some(dir.into());
+        assert_eq!(named("dotfiles"), some("dotfiles"));
+        assert_eq!(named("bos/dotfiles"), some("dotfiles"));
+        assert_eq!(named("github.com/bos/dotfiles/"), some("dotfiles"));
+        assert_eq!(named(r"bos\dotfiles"), some("dotfiles"));
+        for unnamed in [".", "..", "bos/..", "/"] {
+            assert_eq!(named(unnamed), None, "{unnamed}");
+        }
+    }
 }

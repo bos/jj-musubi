@@ -592,7 +592,7 @@ fn a_hub_restarts_in_its_directory_and_keeps_its_advertised_name() {
     Serving 0 hives from $ROOT/my-hub
     To share a repository:               musubi create --hub hub.example
     To add another machine's copy of it: musubi join --hub hub.example
-    To make a new copy of a hive:        musubi clone <name> <dir> --hub hub.example
+    To make a new copy of a hive:        musubi clone <name> [<dir>] --hub hub.example
     Other machines reach this hub over ssh: use the name they ssh to this machine by, if it isn't hub.example.
     On this machine, leave out --hub.
     ");
@@ -1317,14 +1317,15 @@ fn hub_join_sync_clone_and_list() {
     conflicting destinations. It adds no Git remotes; configure one here when you want to fetch or push
     upstream.
 
-    Usage: musubi clone [OPTIONS] <HIVE> <DESTINATION>
+    Usage: musubi clone [OPTIONS] <HIVE> [DESTINATION]
 
     Arguments:
       <HIVE>
               The hive: a name, a prefix of one, or an id, resolved once before setup
 
-      <DESTINATION>
-              A new or empty directory for the repository. Missing parent directories are made
+      [DESTINATION]
+              A new or empty directory for the repository [default: one in the current directory named
+              after the hive, as `dotfiles` for `bos/dotfiles`]. Missing parent directories are made
 
     Options:
           --hub <HUB>
@@ -1800,7 +1801,13 @@ fn the_daemon_picks_up_new_repositories() {
     Daemon: running, serving 2 repositories; doesn't start at login; `musubi daemon install` makes it
     ");
 
-    // Cloning must not adopt another directory's files or Git history into this hive.
+    // Cloning must not adopt another directory's files or Git history into this hive, nor
+    // another repository already named as the hive is.
+    let err = musubi_fails_at(&env, &logs, &alpha, env.root(), &["clone", "alpha"]);
+    insta::assert_snapshot!(err, @"
+    Error: destination alpha is not empty; choose a new or empty directory
+    Hint: `musubi clone alpha <dir>` clones into a directory you name
+    ");
     let occupied = env.root().join("occupied");
     fs::create_dir(&occupied).unwrap();
     fs::write(occupied.join("private.txt"), "not for this hive").unwrap();
@@ -3190,8 +3197,10 @@ fn deleted_copies_stop_syncing() {
         here: $ROOT/alpha  not syncing: it's missing
     Daemon: running, serving 1 repository; doesn't start at login; `musubi daemon install` makes it
     ");
-    // A clone in its place takes over its entry.
-    musubi_at(&env, &logs, &alpha, root, &["clone", "alpha", path]);
+    // A clone in its place takes over its entry. Given no directory, it makes one named after
+    // the hive, not after the prefix that chose it.
+    let out = musubi_at(&env, &logs, &alpha, root, &["clone", "alp"]);
+    insta::assert_snapshot!(out, @"Cloned hive alpha into alpha");
     let list = musubi_at(&env, &logs, &alpha, root, &["list"]);
     insta::assert_snapshot!(list, @"
     Hub $ROOT/hub:
@@ -4208,7 +4217,7 @@ fn the_quick_start_works_as_written() {
         .into_iter()
         .map(|arg| match arg {
             "<name>" => "alpha",
-            "<dir>" => dir,
+            "[<dir>]" => dir,
             arg => arg,
         })
         .collect();
@@ -4221,7 +4230,7 @@ fn the_quick_start_works_as_written() {
     Created a new hub in $ROOT/home/musubi-hub
     To share a repository:               musubi create --hub $HOST
     To add another machine's copy of it: musubi join --hub $HOST
-    To make a new copy of a hive:        musubi clone <name> <dir> --hub $HOST
+    To make a new copy of a hive:        musubi clone <name> [<dir>] --hub $HOST
     Other machines reach this hub over ssh: use the name they ssh to this machine by, if it isn't $HOST.
     On this machine, leave out --hub.
     beta$ musubi create

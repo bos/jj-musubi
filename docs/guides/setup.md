@@ -227,8 +227,10 @@ musubi join --machine work-laptop
 ```
 
 Two machines may share a name: musubi tells them apart by an id of its own, and shows them as
-`laptop-1a2b/default@` and `laptop-3c4d/default@` from then on, even once one has left. A
-machine where a workspace of your own has a name starting `laptop/` shows the laptop so too.
+`laptop-1a2b/default@` and `laptop-3c4d/default@` from then on, even once one has left. So
+may two copies on one machine, as when a copy deleted without `musubi leave` is cloned again:
+`musubi list` and `musubi status` say which name a copy here has in the hive's list. A machine
+where a workspace of your own has a name starting `laptop/` shows the laptop so too.
 
 ## Bring the operation history
 

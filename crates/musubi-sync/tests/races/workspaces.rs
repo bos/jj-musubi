@@ -609,7 +609,8 @@ fn machines_sharing_a_hostname_are_told_apart() {
 }
 
 /// Two machines that share a hostname show each other as the hub lists them, by name and part
-/// of the id, not by the plain name, which the other has too.
+/// of the id, not by the plain name, which the other has too, and each names itself so for
+/// `musubi status`.
 #[test]
 fn two_machines_sharing_a_hostname_show_each_other_qualified() {
     let env = TestEnv::new();
@@ -624,6 +625,17 @@ fn two_machines_sharing_a_hostname_show_each_other_qualified() {
             .filter(|name| name.contains('/'))
             .collect();
         assert_eq!(others, vec![format!("{qualified}/default")]);
+        let own = hive.machine_key(index);
+        let own_name = musubi_jj::workspaces::qualified_name(&own);
+        let activity = hive.node(index).activity().unwrap();
+        let named: Vec<(&str, &str)> = activity
+            .iter()
+            .map(|copy| (copy.key.as_str(), copy.name.as_str()))
+            .collect();
+        assert!(
+            named.contains(&(own.as_str(), own_name.as_str())),
+            "{named:?}"
+        );
     }
 }
 

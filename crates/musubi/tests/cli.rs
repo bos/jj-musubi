@@ -3158,7 +3158,9 @@ fn moved_copies_sync_again() {
 
 /// A copy deleted while its daemon runs can be deleted: the daemon writes nothing there,
 /// and stops syncing it until it comes back. `musubi list` says so, and a clone made in its
-/// place, or `musubi leave` with its path, puts an end to it.
+/// place, or `musubi leave` with its path, puts an end to it. The hive shows the clone
+/// beside the deleted copy, both of this machine's name, until that is forgotten: told apart
+/// by part of their keys, which `musubi status` and `musubi forget` in the clone take too.
 // Moving and deleting a repository whose files the daemon has open is for Unix only
 // (docs/internals/copies.md, "Out of scope").
 #[cfg(unix)]
@@ -3166,16 +3168,18 @@ fn moved_copies_sync_again() {
 fn deleted_copies_stop_syncing() {
     let env = TestEnv::new();
     let _filters = snapshot_filters(&env);
-    // The clone's machine key is new, and the start of it shows in the hive's names for it.
-    let mut settings = insta::Settings::clone_current();
-    settings.add_filter(r"\balpha-[0-9a-f]{4}\b", "alpha-XXXX");
-    let _keys = settings.bind_to_scope();
     let mut logs = Logs::default();
     let hub = Hub::start(&env, &mut logs);
     // Stopped before the hub.
     let mut daemons = Daemons::default();
     let (alpha, beta) = two_machines(&env, &mut logs, &mut daemons, &hub);
     settled(&env, &logs, &alpha, alpha.path());
+    // The start of each copy's key shows in the hive's names for it, where both are alpha.
+    let short_key = |repo: &TestRepo| {
+        let key = fs::read_to_string(repo.repo_path().join("musubi/machine")).unwrap();
+        musubi_jj::workspaces::qualified_name(key.trim())
+    };
+    let deleted = short_key(&alpha);
     let root = env.root();
     let path = alpha.path().to_str().unwrap();
     let missing = format!(
@@ -3201,13 +3205,68 @@ fn deleted_copies_stop_syncing() {
     // the hive, not after the prefix that chose it.
     let out = musubi_at(&env, &logs, &alpha, root, &["clone", "alp"]);
     insta::assert_snapshot!(out, @"Cloned hive alpha into alpha");
-    let list = musubi_at(&env, &logs, &alpha, root, &["list"]);
+    let clone = short_key(&alpha);
+    let mut settings = insta::Settings::clone_current();
+    settings.add_filter(&regex_escape(&deleted), "alpha-DELETED");
+    settings.add_filter(&regex_escape(&clone), "alpha-CLONE");
+    // Working copies' ids: the clone's commit has the time `musubi clone` made it, and the
+    // change ids depend on how many commands the waits above ran.
+    settings.add_filter(r"(?m)^(\S+@): [k-z]{8} [0-9a-f]{8} ", "$1: [ids] ");
+    let _keys = settings.bind_to_scope();
+    // The hive's machines are listed in the order of their keys, which differs from run to
+    // run.
+    let either = |list: String| {
+        list.lines()
+            .map(|line| {
+                if line.contains("machines:") {
+                    line.replace(&deleted, "alpha-XXXX")
+                        .replace(&clone, "alpha-XXXX")
+                } else {
+                    line.to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let list = either(musubi_at(&env, &logs, &alpha, root, &["list"]));
     insta::assert_snapshot!(list, @"
     Hub $ROOT/hub:
       alpha  3 machines: alpha-XXXX, alpha-XXXX, beta
+        here: $ROOT/alpha as alpha-CLONE  synced N ago
+    Daemon: running, serving 1 repository; doesn't start at login; `musubi daemon install` makes it
+    ");
+    // The clone is named as the hive names it, here as elsewhere.
+    let (status, _) = status_in(&env, &logs, &alpha);
+    insta::assert_snapshot!(status, @"
+    Hive: alpha on $ROOT/hub
+    This machine: alpha-CLONE, synced N ago; the hub has all its work
+    Working copies:
+    default@: [ids] (no description set)
+    alpha-DELETED/alpha@: [ids] (no description set)
+    beta/beta@: [ids] (no description set)
+    Copies:
+    alpha-CLONE (this machine): used N ago, never forgotten
+    alpha-DELETED: used N ago, never forgotten
+    beta: used N ago, never forgotten
+    Daemon: running (pid N), serving this repository; doesn't start at login
+    Daemon socket: [daemon socket]
+    Daemon log: $ROOT/home/musubi-alpha/daemon.log
+    ");
+    let err = musubi_fails(&env, &logs, &alpha, &["forget", &clone]);
+    insta::assert_snapshot!(err, @"Error: alpha-CLONE is this machine; `musubi leave` takes this repository out of hive alpha");
+    // The plain name is the other copy's, the only one it can mean, and the hive then names
+    // the clone plainly, as `musubi status` does.
+    let out = musubi_in(&env, &logs, &alpha, &["forget", "alpha"]);
+    insta::assert_snapshot!(out, @"Forgot alpha-DELETED");
+    let list = musubi_at(&env, &logs, &alpha, root, &["list"]);
+    insta::assert_snapshot!(list, @"
+    Hub $ROOT/hub:
+      alpha  2 machines: alpha, beta
         here: $ROOT/alpha  synced N ago
     Daemon: running, serving 1 repository; doesn't start at login; `musubi daemon install` makes it
     ");
+    let machine = musubi_in(&env, &logs, &alpha, &["status", "-T", r#"machine ++ "\n""#]);
+    insta::assert_snapshot!(machine, @"alpha");
     musubi_at(&env, &logs, &alpha, alpha.path(), &["daemon", "stop"]);
     fs::remove_dir_all(alpha.path()).unwrap();
     let out = musubi_at(&env, &logs, &alpha, root, &["leave", path]);
@@ -3215,7 +3274,7 @@ fn deleted_copies_stop_syncing() {
     let list = musubi_at(&env, &logs, &alpha, root, &["list"]);
     insta::assert_snapshot!(list, @"
     Hub $ROOT/hub:
-      alpha  3 machines: alpha-XXXX, alpha-XXXX, beta
+      alpha  2 machines: alpha, beta
     Daemon: not running (doesn't start at login; `musubi daemon install` makes it); `musubi daemon start` starts it
     ");
 }

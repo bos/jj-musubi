@@ -7,6 +7,11 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- `musubi clone <hive>` without a directory makes the copy in a new directory named after the
+  last part of the hive's name, in the current directory, as `jj git clone` does with a URL:
+  `musubi clone bos/dotfiles` makes `dotfiles`. The name is the hive's, even when given a
+  prefix of it. As with a directory given, it refuses one that exists and isn't empty.
+
 - A copy whose first sync after `musubi join` or `musubi clone` was cut short (its machine went
   to sleep, say) is stranded less often when another machine runs `jj op abandon` meanwhile,
   failing for good with "this repository's history no longer matches the hive's". A hub that

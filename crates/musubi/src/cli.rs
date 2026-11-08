@@ -131,9 +131,11 @@ pub enum Command {
         /// The hive: a name, a prefix of one, or an id, resolved once before setup.
         #[arg(add = ArgValueCandidates::new(completion::hives))]
         hive: String,
-        /// A new or empty directory for the repository. Missing parent directories are made.
+        /// A new or empty directory for the repository [default: one in the current directory
+        /// named after the hive, as `dotfiles` for `bos/dotfiles`]. Missing parent directories
+        /// are made.
         #[arg(value_hint = ValueHint::DirPath)]
-        destination: PathBuf,
+        destination: Option<PathBuf>,
         /// The hub, as `musubi hub` prints it [default: this machine's default hub].
         #[arg(long, add = ArgValueCandidates::new(completion::hubs))]
         hub: Option<String>,

@@ -128,7 +128,7 @@ fn instructions(settings: &HubSettings, dir: &Path) -> anyhow::Result<String> {
     let mut text = format!(
         "To share a repository:               musubi create --hub {public}\n\
          To add another machine's copy of it: musubi join --hub {public}\n\
-         To make a new copy of a hive:        musubi clone <name> <dir> --hub {public}\n\
+         To make a new copy of a hive:        musubi clone <name> [<dir>] --hub {public}\n\
          Other machines reach this hub over ssh: use the name they ssh to this machine by, if \
          it isn't {public}.\n"
     );

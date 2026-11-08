@@ -243,7 +243,15 @@ You installed a new musubi, but the daemon still runs the old one. Run
 ### "destination ... is not empty; choose a new or empty directory"
 
 `musubi clone` needs a new or empty directory. Choose another destination, or run
-`musubi join` in an existing repository to share that copy.
+`musubi join` in an existing repository to share that copy. Without a directory,
+`musubi clone` makes one in the current directory, named after the last part of the hive's
+name; if that exists, give a directory, as in `musubi clone <hive> <dir>`, or run it from
+another directory.
+
+### "can't name a directory after hive ..."
+
+The hive's name ends in nothing that can name a directory, such as `..`, so give one, as in
+`musubi clone <hive> <dir>`.
 
 ### Joining is refused
 

@@ -58,7 +58,7 @@ The first time, it creates `~/musubi-hub` and prints what to run elsewhere:
 Created a new hub in /home/you/musubi-hub
 To share a repository:               musubi create --hub devbox
 To add another machine's copy of it: musubi join --hub devbox
-To make a new copy of a hive:        musubi clone <name> <dir> --hub devbox
+To make a new copy of a hive:        musubi clone <name> [<dir>] --hub devbox
 Other machines reach this hub over ssh: use the name they ssh to this machine by, if it isn't devbox.
 On this machine, leave out --hub.
 ```
@@ -152,6 +152,10 @@ config:
 ```sh
 musubi clone app ~/src/app --hub devbox
 ```
+
+Without a directory, as in `musubi clone app --hub devbox`, it makes the copy in a new directory
+named after the hive, in the current directory: `app`, or `dotfiles` for a hive named
+`bos/dotfiles`.
 
 Clone resolves the name or prefix once and keeps the same hive throughout setup, even if
 other hives are renamed.

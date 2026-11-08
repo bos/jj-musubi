@@ -1363,7 +1363,7 @@ fn top_in_a_terminal(repo: &TestRepo) {
     use termlens::Key;
     use termlens::Terminal;
 
-    for quit in [Key::Char('q'), Key::Esc, Key::Ctrl('c')] {
+    for quit in [Key::Char('q'), Key::Ctrl('c')] {
         let command = repo.program(musubi());
         let mut terminal = Terminal::builder()
             .size(80, 24)
@@ -1392,6 +1392,16 @@ fn top_in_a_terminal(repo: &TestRepo) {
         terminal.send(Key::Char('+')).unwrap();
         terminal
             .wait_until(|screen| screen.contains("every 1m"))
+            .unwrap();
+        terminal.send(Key::Char('d')).unwrap();
+        terminal
+            .wait_until(|screen| screen.contains("Refresh every how many seconds"))
+            .unwrap();
+        for key in [Key::Char('3'), Key::Char('0'), Key::Enter] {
+            terminal.send(key).unwrap();
+        }
+        terminal
+            .wait_until(|screen| screen.contains("every 30s"))
             .unwrap();
         terminal.resize(100, 30).unwrap();
         terminal

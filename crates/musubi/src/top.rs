@@ -23,6 +23,10 @@ use ratatui::crossterm::event::KeyCode;
 use ratatui::crossterm::event::KeyEvent;
 use ratatui::crossterm::event::KeyEventKind;
 use ratatui::crossterm::event::KeyModifiers;
+use ratatui::layout::Constraint;
+use ratatui::layout::Layout;
+use ratatui::style::Stylize as _;
+use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::TableState;
 
@@ -35,7 +39,7 @@ use crate::hub;
 use crate::socket::Socket;
 use crate::ui::Ui;
 
-/// The shortest and longest refresh, as `--interval` gives it or `+` and `-` choose it.
+/// The shortest and longest refresh, as `--interval` gives it or `d`, `+` and `-` choose it.
 const FASTEST: Duration = Duration::from_secs(1);
 pub const SLOWEST: Duration = Duration::from_secs(60 * 60);
 
@@ -110,6 +114,7 @@ fn interactive(
             };
             match app.key(key) {
                 Action::Quit => return Ok(()),
+                Action::Redraw => terminal.clear()?,
                 Action::Wake(message) => {
                     wake.send(message).ok();
                 }
@@ -148,12 +153,16 @@ struct App {
     latest: Option<Sample>,
     previous: Option<Sample>,
     selected: TableState,
+    /// The seconds typed so far after `d`, while asking how often to refresh.
+    delay: Option<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum Action {
     None,
     Quit,
+    /// Clear the terminal and draw it all again.
+    Redraw,
     Wake(Wake),
 }
 
@@ -164,6 +173,7 @@ impl App {
             latest: None,
             previous: None,
             selected: TableState::default().with_selected(0),
+            delay: None,
         }
     }
 
@@ -171,18 +181,55 @@ impl App {
         self.previous = self.latest.replace(sample);
     }
 
+    /// Acts on `key`, bound as top and atop bind it: space, Enter or `t` refresh now; `d`, `s`
+    /// or `i` ask how many seconds to refresh every; Ctrl-L redraws.
     fn key(&mut self, key: KeyEvent) -> Action {
         if key.kind != KeyEventKind::Press {
             return Action::None;
         }
-        match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => return Action::Quit,
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                return Action::Quit;
+        // Some terminals send Backspace as Ctrl-H.
+        let key = if self.delay.is_some()
+            && key.code == KeyCode::Char('h')
+            && key.modifiers == KeyModifiers::CONTROL
+        {
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)
+        } else {
+            key
+        };
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            return match key.code {
+                KeyCode::Char('c') => Action::Quit,
+                KeyCode::Char('l') => Action::Redraw,
+                _ => Action::None,
+            };
+        }
+        if let Some(typed) = &mut self.delay {
+            match key.code {
+                KeyCode::Char(digit @ '0'..='9') => typed.push(digit),
+                KeyCode::Backspace => {
+                    typed.pop();
+                }
+                KeyCode::Enter if typed.is_empty() => self.delay = None,
+                // A number out of range leaves the question open, to be corrected.
+                KeyCode::Enter => {
+                    let seconds = Duration::from_secs(typed.parse().unwrap_or(0));
+                    if (FASTEST..=SLOWEST).contains(&seconds) {
+                        self.delay = None;
+                        self.interval = seconds;
+                        return Action::Wake(Wake::Every(seconds));
+                    }
+                }
+                KeyCode::Esc => self.delay = None,
+                _ => {}
             }
+            return Action::None;
+        }
+        match key.code {
+            KeyCode::Char('q') => return Action::Quit,
             KeyCode::Up | KeyCode::Char('k') => self.selected.select_previous(),
             KeyCode::Down | KeyCode::Char('j') => self.selected.select_next(),
-            KeyCode::Char('r') => return Action::Wake(Wake::Now),
+            KeyCode::Char(' ' | 't') | KeyCode::Enter => return Action::Wake(Wake::Now),
+            KeyCode::Char('d' | 's' | 'i') => self.delay = Some(String::new()),
             KeyCode::Char('+') => {
                 self.interval = (self.interval + FASTEST).min(SLOWEST);
                 return Action::Wake(Wake::Every(self.interval));
@@ -197,11 +244,26 @@ impl App {
     }
 
     fn draw(&mut self, frame: &mut Frame<'_>) {
+        let keys = match &self.delay {
+            Some(typed) => Line::from(format!(
+                "Refresh every how many seconds, {} to {}? {typed}_   Esc cancels",
+                FASTEST.as_secs(),
+                SLOWEST.as_secs(),
+            )),
+            None => Line::from(
+                "q quit   ↑↓ choose a hive   space refresh   d interval   + slower   - faster",
+            )
+            .dim(),
+        };
         let Some(latest) = &self.latest else {
-            frame.render_widget(Paragraph::new("Asking the hubs…"), frame.area());
+            // The keys still show, so that a question asked of them isn't hidden.
+            let [waiting, area_of_keys] =
+                Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(frame.area());
+            frame.render_widget(Paragraph::new("Asking the hubs…"), waiting);
+            frame.render_widget(Paragraph::new(keys), area_of_keys);
             return;
         };
         let view = View::new(latest, self.previous.as_ref(), Some(self.interval));
-        view.draw(frame, &mut self.selected);
+        view.draw(frame, &mut self.selected, keys);
     }
 }

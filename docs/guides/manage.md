@@ -58,8 +58,10 @@ first refresh that finds it quiet, leaving room for new issues. Its hive's `ISSU
 it and its row stays red. It is listed again if it is heard from and then goes quiet again.
 [Troubleshooting](../troubleshooting.md#what-musubi-top-reports) says what to do about each.
 
-`q` quits, `r` refreshes now, and `+` and `-` refresh less or more often. Without a terminal,
-or with `--once`, it prints one snapshot, without the rates.
+Its keys are like those of `top` and `atop`: `q` quits; space, Enter or `t` refreshes now; `d`,
+`s` or `i` asks how many seconds to refresh every; and Ctrl-L redraws the screen. `+` and `-`
+also refresh less or more often. Without a terminal, or with `--once`, it prints one snapshot,
+without the rates.
 
 The hub keeps all this in memory. After the hub restarts, each machine shows up again once its
 daemon next syncs, within half a minute. The hub forgets a machine it hasn't heard from in a

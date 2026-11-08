@@ -7,6 +7,11 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- `musubi top` binds its keys as `top` and `atop` do: space, Enter or `t` refreshes now, in
+  place of `r`; `d`, `s` or `i` asks how many seconds to refresh every; and Ctrl-L redraws the
+  screen. Esc no longer quits, as it quits neither: use `q` or Ctrl-C. `+` and `-` still
+  refresh less or more often.
+
 - A copy cloned again in place of one deleted without `musubi leave` shares the machine's name
   with it, and the hive tells the two apart by part of their ids: `musubi list` gave
   `laptop-1a2b, laptop-3c4d` without saying which was the copy here. In that copy, `musubi

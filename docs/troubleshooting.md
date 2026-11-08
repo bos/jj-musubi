@@ -196,8 +196,17 @@ and copy back any files you changed in it.
 The copy was deleted, moved, or is on a disk that isn't mounted, or its directory now holds
 another repository. musubi writes nothing there meanwhile. A copy moved with `mv` syncs again
 once jj or musubi runs in it; one that comes back syncs again by itself. If it's gone,
-`musubi leave <path>` stops looking for it, and `musubi forget` on another machine stops the
+`musubi leave <path>` stops looking for it, and `musubi forget` in another copy stops the
 others showing it.
+
+### `musubi list` shows this machine twice, as `laptop-1a2b` and `laptop-3c4d`
+
+Two copies in the hive have this machine's name, as when a copy deleted without `musubi leave`
+is cloned again, or a second copy is made on this machine. musubi tells them apart by part of
+their ids. `musubi list` says which name a copy here has
+(`here: /home/you/src/app as laptop-3c4d  synced 4s ago`), and `musubi status` in a copy
+lists the other with when it was last used. If the other is gone,
+`musubi forget laptop-1a2b`, naming it, stops the hive showing it.
 
 ### "incompatible peer: protocol ... but this is protocol ..."
 
@@ -363,7 +372,10 @@ have no workspaces.
 
 ### "laptop is this machine; `musubi leave` takes this repository out of hive app"
 
-`musubi forget` forgets other machines' copies. To take this one out, run `musubi leave`.
+`musubi forget` forgets other machines' copies. To take this one out, run `musubi leave`. If
+another copy has this machine's name, `musubi list` and `musubi status` say which is this one:
+forget the other by its name
+([above](#musubi-list-shows-this-machine-twice-as-laptop-1a2b-and-laptop-3c4d)).
 
 ### "musubi.forget-after is neither `never` nor a duration such as `6h`; taking it for never"
 

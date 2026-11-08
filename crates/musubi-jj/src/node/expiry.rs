@@ -3,6 +3,7 @@
 //! latest work is older than that.
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -32,7 +33,8 @@ pub const FORGET_AFTER_KEY: &str = "musubi.forget-after";
 pub struct Activity {
     /// The copy's machine key.
     pub key: String,
-    /// The machine's name as its workspaces are shown here.
+    /// The machine's name as its workspaces are shown here, or, for this machine, as the hive
+    /// names it among the copies present.
     pub name: String,
     /// When it last worked, by the clock of the machine that did.
     pub last_work: SystemTime,
@@ -189,7 +191,7 @@ impl NodeRepo {
         let mut copies = vec![];
         for key in presence.copies() {
             let name = if key == self.machine.key() {
-                self.machine.name().to_owned()
+                self.name_in_hive(&presence)
             } else {
                 names
                     .get(key)
@@ -222,6 +224,22 @@ impl NodeRepo {
             last = last.max(time);
         }
         Ok(last)
+    }
+
+    /// This machine's name in the hive: its plain name, unless another copy present has that
+    /// name too, as when a copy deleted without `musubi leave` is cloned again, and then with
+    /// part of its key, `laptop-1a2b`. It is named among the copies present as the hub names
+    /// those with workspaces for `musubi list` (`workspaces::display_names`), so the two
+    /// differ only where a copy present has no workspaces.
+    /// A workspace of this machine's own never makes it longer, as it can another machine's
+    /// name here: no machine shows those under a prefix.
+    fn name_in_hive(&self, presence: &Presence<Work>) -> String {
+        let own = self.machine.key();
+        let mut machines: BTreeSet<String> = presence.copies().map(str::to_owned).collect();
+        machines.insert(own.to_owned());
+        workspaces::display_names(&machines, |_| false)
+            .remove(own)
+            .unwrap_or_else(|| self.machine.name().to_owned())
     }
 
     /// The name of each other present copy, by machine key, even with no workspaces.

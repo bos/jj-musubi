@@ -126,6 +126,10 @@ hive has taken it, the copy can't sync again: it stops with "this repository's h
 longer matches the hive's" ([what to
 do](../troubleshooting.md#this-repositorys-history-no-longer-matches-the-hives-so-it-cant-sync-again)).
 
+A copy deleted and cloned again on the same machine shows beside the new one, both under the
+machine's name with part of their ids, as `laptop-1a2b` and `laptop-3c4d`. `musubi list` and
+`musubi status` say which is the new copy; forget the other by its name.
+
 Copies are never forgotten by default, whether a person or an agent joins them. For a
 short-lived devbox or other temporary copy, give `musubi join`, `create` or `clone` an
 explicit inactivity lease:

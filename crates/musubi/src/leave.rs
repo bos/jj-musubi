@@ -266,15 +266,25 @@ fn leave_once(
 pub fn forget(ui: &Ui, start: &Path, machine: &str, socket: &Socket) -> anyhow::Result<()> {
     let (located, hive, _) = the_copy(ui, start, socket)?;
     let mut node = located.open()?;
-    let this =
-        |node: &NodeRepo| machine == node.machine().name() || machine == node.machine().key();
+    let this_machine = || {
+        anyhow::anyhow!(
+            "{machine} is this machine; `musubi leave` takes this repository out of hive {}",
+            hive.display_name()
+        )
+    };
+    // By its key or the name `musubi status` gives it, as `laptop-1a2b` while another copy is
+    // `laptop` too, whichever other machine a name like that could mean.
+    let own = node.machine().key().to_owned();
+    if machine == own || shown_name(&mut node, &own)?.as_deref() == Some(machine) {
+        return Err(this_machine());
+    }
     // One this machine hasn't heard of yet may have joined since it last synced.
     let key = match node.machine_named(machine)? {
         Some(key) => key,
-        None if this(&node) => anyhow::bail!(
-            "{machine} is this machine; `musubi leave` takes this repository out of hive {}",
-            hive.display_name()
-        ),
+        // Any other name it could be shown under, where no other machine could have it.
+        None if musubi_jj::workspaces::could_be_shown_as(&own, machine) => {
+            return Err(this_machine());
+        }
         None => {
             drop(node);
             sync_quietly(ui, start, socket)?;
@@ -288,12 +298,23 @@ pub fn forget(ui: &Ui, start: &Path, machine: &str, socket: &Socket) -> anyhow::
             })?
         }
     };
-    if node.forget_copy(&key, machine)? {
+    // By the name it is shown under, which says which copy a plain name meant.
+    let shown = shown_name(&mut node, &key)?.unwrap_or_else(|| machine.to_owned());
+    if node.forget_copy(&key, &shown)? {
         let mut out = ui.stdout();
         write!(out, "Forgot ")?;
-        write!(out.labeled("machine"), "{machine}")?;
+        write!(out.labeled("machine"), "{shown}")?;
         writeln!(out)?;
     }
     drop(node);
     sync(ui, start, socket)
+}
+
+/// The name `musubi status` gives the copy whose machine key is `key`, if it is present.
+fn shown_name(node: &mut NodeRepo, key: &str) -> anyhow::Result<Option<String>> {
+    Ok(node
+        .activity()?
+        .into_iter()
+        .find(|copy| copy.key == key)
+        .map(|copy| copy.name))
 }

@@ -7,6 +7,16 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- A copy cloned again in place of one deleted without `musubi leave` shares the machine's name
+  with it, and the hive tells the two apart by part of their ids: `musubi list` gave
+  `laptop-1a2b, laptop-3c4d` without saying which was the copy here. In that copy, `musubi
+  status` named it `laptop`, and `musubi forget laptop-3c4d`, its own name, said no such machine
+  showed there. Now `musubi list` says which name a copy here has (`here: /home/you/src/app as
+  laptop-3c4d  synced 4s ago`; the new keyword `machine` in `musubi.templates.list`), `musubi
+  status`, with its `machine` keyword and JSON field, names this machine as the hive does, and
+  `musubi forget` says that name is this machine, and names the copy it forgot as it shows:
+  `musubi forget laptop` there says "Forgot laptop-1a2b". Nothing needs doing on upgrading.
+
 - `musubi clone <hive>` without a directory makes the copy in a new directory named after the
   last part of the hive's name, in the current directory, as `jj git clone` does with a URL:
   `musubi clone bos/dotfiles` makes `dotfiles`. The name is the hive's, even when given a

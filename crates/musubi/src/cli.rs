@@ -162,6 +162,8 @@ pub enum Command {
         /// * `id: String`: The hive's id; empty on a hub's line.
         /// * `machines: List<String>`: The machines in the hive, as its hub knows them.
         /// * `path: Option<FsPath>`: Where the copy is; none on a hub's line or a hive's.
+        /// * `machine: String`: The copy's name among `machines` where another copy has its
+        ///   machine's name too, as `laptop-1a2b`; else empty.
         /// * `status: String`: How the copy's syncing goes; empty on a hub's line or a
         ///   hive's.
         /// * `problem: String`: What's wrong, if anything: why the hub is out of reach, that
@@ -259,7 +261,8 @@ pub enum Command {
     /// Forget another machine's copy of this repository: the other machines stop showing its
     /// working copies, and the hub stops counting it.
     ///
-    /// For a machine that went away without `musubi leave`, as a short-lived machine can.
+    /// For a machine that went away without `musubi leave`, as a short-lived machine can, or
+    /// an earlier copy on this machine, deleted without it.
     /// Its working-copy commit is abandoned if it's empty, and otherwise stays as an ordinary
     /// commit. If the copy is still there, the hive shows it again as soon as it's used.
     /// A copy with no workspaces can still be forgotten, by its name in `musubi status`.

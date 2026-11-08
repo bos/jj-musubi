@@ -31,6 +31,9 @@ pub struct Line {
     pub machines: Vec<String>,
     /// Where the copy is; none on a hub's line or a hive's.
     pub path: Option<PathBuf>,
+    /// The copy's name among `machines`, where it isn't its machine's own, as while another
+    /// copy has that name too; else empty.
+    pub machine: String,
     /// How the copy's syncing goes; empty on a hub's line or a hive's.
     pub status: String,
     /// What's wrong, if anything: why the hub is out of reach, that the hive is no longer
@@ -109,6 +112,9 @@ fn language(settings: &UserSettings, cwd: &Path) -> Language {
     });
     language.add_keyword("path", |line| {
         Ok(line.map(|line| line.path).into_dyn_wrapped())
+    });
+    language.add_keyword("machine", |line| {
+        Ok(line.map(|line| line.machine).into_dyn_wrapped())
     });
     language.add_keyword("status", |line| {
         Ok(line.map(|line| line.status).into_dyn_wrapped())

@@ -183,7 +183,7 @@ Each case, what musubi does, and the test in `crates/musubi/tests/cli.rs` that p
 | `mv` or delete the directory the daemon was started from | Nothing else stops syncing (R10). | `the_daemon_outlives_the_directory_it_was_started_in` |
 | A command run from a directory deleted meanwhile | `musubi status` says so and exits 0; commands that act on a repository there refuse, saying so; others work. | `the_daemon_outlives_the_directory_it_was_started_in` |
 | `rm -rf` a copy while its daemon runs | `rm` succeeds; the entry is suspended and listed until `musubi leave <path>` (R3, R4). | `deleted_copies_stop_syncing` |
-| Deleted, then `musubi clone` again at the same path | The clone's entry takes the path, and the old entry is dropped (R5). | `deleted_copies_stop_syncing` |
+| Deleted, then `musubi clone` again at the same path | The clone's entry takes the path, and the old entry is dropped (R5). The hive shows both copies, of one name, told apart by part of their keys; `musubi list` and `musubi status` name the clone so, and `musubi forget` in it takes that name as this machine's and the plain name as the other's. | `deleted_copies_stop_syncing` |
 | `cp -a` a copy, or restore a backup beside it | `musubi status` there says it is a duplicate, and names the original (R1). | `duplicates_are_never_synced` |
 | …then `musubi join`, `sync`, `leave` or `join --original` there | Refused (R1, R2). | `duplicates_are_never_synced` |
 | A duplicate of a copy that left, then `musubi join` there | Refused (R1). | `copy::tests`, and `join_refuses_duplicate` in the model |

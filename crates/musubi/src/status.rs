@@ -81,7 +81,8 @@ pub struct WorkingCopy {
 /// A copy in the hive.
 #[derive(Clone)]
 pub struct Copy {
-    /// Its machine's name, as its working copies are named here.
+    /// Its machine's name, as its working copies are named here, or, for this machine's, as
+    /// the hive names it among the copies present.
     pub name: String,
     pub this: bool,
     pub last_used: SystemTime,
@@ -319,7 +320,7 @@ impl Hive {
             None => "",
         };
         write!(out, "This machine: ")?;
-        write!(out.labeled("machine"), "{}", config.node)?;
+        write!(out.labeled("machine"), "{}", self.machine())?;
         writeln!(out, ", {synced}{sent}")?;
         if self.forgotten {
             writeln!(
@@ -423,7 +424,7 @@ impl Hive {
             "name": self.config.display_name(),
             "id": self.config.hive.to_string(),
             "hub": self.config.hub,
-            "machine": self.config.node,
+            "machine": self.machine(),
             "head": sync.and_then(|sync| sync.known_seq),
             "last_sync": sync.and_then(|sync| sync.last_success),
             "error": sync.and_then(|sync| sync.error.as_ref()),
@@ -432,6 +433,16 @@ impl Hive {
             "working_copies": working_copies,
             "copies": copies,
         })
+    }
+
+    /// This machine's name in the hive: as the hive names it among the copies present, which
+    /// tells it apart by part of its key from another copy of its name, while the hive has it;
+    /// else as its record names it.
+    fn machine(&self) -> &str {
+        self.copies
+            .iter()
+            .find(|copy| copy.this)
+            .map_or(&self.config.node, |copy| &copy.name)
     }
 
     /// Whether its last sync failed.
@@ -647,7 +658,7 @@ fn language(settings: &UserSettings, cwd: &Path) -> Language {
         report
             .hive
             .as_ref()
-            .map(|hive| hive.config.node.clone())
+            .map(|hive| hive.machine().to_owned())
             .unwrap_or_default()
     });
     keyword(&mut language, "default_hub", |report| {

@@ -274,9 +274,13 @@ chosen among every machine the history has known, present or forgotten (`Presenc
 machine keeps its name as others come and go, and a forgotten machine's name is never another's.
 The hub names every machine with workspaces in the hive for `musubi list`, among themselves, so a
 machine shows here as the hub lists it but where a forgotten machine, which only the hub leaves
-out, or a workspace of this machine's own makes its name longer here. This machine's own names as
-of a canonical operation are its workspaces in that view, or, where the hive has forgotten it,
-those as of its latest work, which `Presence` keeps through forgets (`own_names`).
+out, or a workspace of this machine's own makes its name longer here. `musubi status` names this
+machine among the copies present, as the hub names those with workspaces (`name_in_hive`);
+`musubi list` finds a copy here among the hub's names by its key (`listed_as`); and `musubi
+forget` takes this machine's key and that name for this machine's, and any other name it could
+be shown under, where no other machine could be. This machine's own names as of a canonical
+operation are its workspaces in that view, or, where the hive has forgotten it, those as of its
+latest work, which `Presence` keeps through forgets (`own_names`).
 
 `jj undo` and `jj op restore` bring back older views, with names the hive no longer gives: a
 forgotten machine's, say, or, as here, one shown plainly before another machine of its name

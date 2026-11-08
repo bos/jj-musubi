@@ -13,7 +13,8 @@
 list = '''
 if(path,
   if(hub,
-    "    here: " ++ path ++ "  " ++ if(problem, label("problem", status), status),
+    "    here: " ++ path ++ if(machine, " as " ++ label("machine", machine))
+      ++ "  " ++ if(problem, label("problem", status), status),
     "  " ++ path ++ " (hive " ++ id ++ ")  " ++ label("problem", status),
   ),
   if(hive,

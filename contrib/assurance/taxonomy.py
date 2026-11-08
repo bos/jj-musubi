@@ -1,5 +1,6 @@
 """Classify recorded executions by their source and actual use of the Lean oracle."""
 
+import os
 import re
 from collections import defaultdict
 
@@ -30,7 +31,9 @@ def index_functions():
             while depth and b < len(masked):
                 depth += (masked[b] == "{") - (masked[b] == "}")
                 b += 1
-            start = text.rfind("}", 0, m.start()) + 1
+            # Its own attributes and doc comments: from the end of the item, statement or block
+            # opening before it, outside literals, so not a neighbour's attributes.
+            start = max(masked.rfind(c, 0, m.start()) for c in "};{") + 1
             entry = {
                 "path": relative,
                 "name": m[1],
@@ -38,15 +41,25 @@ def index_functions():
                 "start": text.count("\n", 0, m.start()) + 1,
                 "end": text.count("\n", 0, b) + 1,
                 "hegel": "#[hegel::test" in text[start : m.start()],
+                "attributes": text[start : m.start()],
             }
             functions[package, m[1]].append(entry)
             by_file[relative][m[1]] = entry
     return functions, by_file
 
 
+def built_here(function):
+    """Whether this platform compiles `function`: a test can have a version for Unix and
+    another, of the same name, for Windows. Only `#[cfg(unix)]` and `#[cfg(windows)]` on the
+    function itself count; other platform conditions leave both versions in, which
+    `find_function` refuses as ambiguous rather than guess."""
+    other = "#[cfg(unix)]" if os.name == "nt" else "#[cfg(windows)]"
+    return other not in function.get("attributes", "")
+
+
 def find_function(identity, functions):
     parts = identity.split("::")
-    candidates = functions[parts[0], parts[-1]]
+    candidates = [f for f in functions[parts[0], parts[-1]] if built_here(f)]
 
     def score(f):
         tokens = set(re.split(r"[/_.]", f["path"]))

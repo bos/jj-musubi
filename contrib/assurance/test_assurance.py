@@ -73,6 +73,27 @@ class GraphTests(unittest.TestCase):
                 )
                 self.assertEqual(test["path"], "crates/folder/src/lib.rs")
 
+    def test_a_test_with_a_version_for_each_platform_is_found(self):
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work)
+            crate = root / "crates/folder"
+            (crate / "src").mkdir(parents=True)
+            (crate / "Cargo.toml").write_text('[package]\nname="a-package"\n')
+            # A neighbour's cfg, on an item with no braces, mustn't count as the test's.
+            (crate / "src/lib.rs").write_text(
+                "#[cfg(test)]\nmod tests {\n"
+                "    #[cfg(windows)]\n    use std::os::windows as _;\n"
+                "    #[cfg(unix)]\n    #[test]\n    fn quotes() {}\n"
+                "    #[cfg(windows)]\n    #[test]\n    fn quotes() {}\n}\n"
+            )
+            with patch.object(taxonomy, "ROOT", root):
+                functions, _ = taxonomy.index_functions()
+                test = taxonomy.find_function("a-package::tests::quotes", functions)
+            here = "#[cfg(windows)]" if os.name == "nt" else "#[cfg(unix)]"
+            other = "#[cfg(unix)]" if os.name == "nt" else "#[cfg(windows)]"
+            self.assertIn(here, test["attributes"])
+            self.assertNotIn(other, test["attributes"])
+
     def test_new_roles_are_explicitly_unclassified(self):
         network = {
             "nodes": {

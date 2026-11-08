@@ -257,19 +257,20 @@ def fuzz(directory, toolchain="nightly", seconds=60, checkpoints=4, seed=42, job
     write_json(directory / "manifest.json", record)
 
 
-def mutation(directory, jobs=4, toolchain="stable"):
-    directory, record = manifest(
-        directory,
-        "mutation",
-        {
-            "jobs": jobs,
-            "cases": 150,
-            "seed": 42,
-            "database": "disabled",
-            "toolchain": toolchain,
-        },
-    )
-    command = [
+def mutation(directory, jobs=4, toolchain="stable", shard=None):
+    """The mutation campaign, or with `shard` as (k, n), its kth of n shards (numbered from
+    0), which other machines can run at the same time: `build` takes every shard together."""
+    settings = {
+        "jobs": jobs,
+        "cases": 150,
+        "seed": 42,
+        "database": "disabled",
+        "toolchain": toolchain,
+    }
+    if shard:
+        settings["shard"] = f"{shard[0]}/{shard[1]}"
+    directory, record = manifest(directory, "mutation", settings)
+    campaign = [
         "cargo",
         "+" + toolchain,
         "mutants",
@@ -291,6 +292,10 @@ def mutation(directory, jobs=4, toolchain="stable"):
         "--output",
         str(directory),
     ]
+    # Round-robin, so that each shard takes mutants from every file, and they finish together.
+    command = campaign + (
+        ["--shard", settings["shard"], "--sharding", "round-robin"] if shard else []
+    )
     env = dict(
         os.environ,
         MUSUBI_ORACLE=str(ROOT / "formal/.lake/build/bin/oracle"),
@@ -314,12 +319,23 @@ def mutation(directory, jobs=4, toolchain="stable"):
     record["lean"] = subprocess.check_output(
         ["lake", "env", "lean", "--version"], cwd=ROOT / "formal", text=True
     ).strip()
+    # The whole campaign's plan, which the shards together must cover, and this run's part.
     plan = json.loads(
         subprocess.check_output(
-            command + ["--list", "--json"], env=env, cwd=ROOT, text=True
+            campaign + ["--list", "--json"], env=env, cwd=ROOT, text=True
         )
     )
     write_json(directory / "mutation-plan.json", plan)
+    if shard:
+        plan = json.loads(
+            subprocess.check_output(
+                command + ["--list", "--json"], env=env, cwd=ROOT, text=True
+            )
+        )
+        if not plan:
+            raise ValueError(
+                f"Shard {settings['shard']} has no mutants: split the campaign into fewer shards"
+            )
     write_json(directory / "manifest.json", record)
     result = run(command, env=env, log=directory / "mutation.log", check=False)
     record.update(ended=time.time(), exitCode=result.returncode)

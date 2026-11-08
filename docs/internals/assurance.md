@@ -62,6 +62,27 @@ stopped by nextest before the campaign’s outer timeout. A change the tests acc
 inspection: it may reveal a missing check, or make no observable difference.
 Mutation results describe the places changed, not a fraction of executed Rust lines.
 
+Mutation testing takes most of a collection's time, and splits across machines. Run each
+shard of the campaign, numbered from 0, from the same source revision, on as many machines as
+there are shards:
+
+```sh
+python3 contrib/assurance/assurance.py mutation --shard 0/4 --out target/assurance/mutation-0
+```
+
+Then copy the shards' capture directories to one checkout of the same revision, and pass each
+to `build` with its own `--run`:
+
+```sh
+python3 contrib/assurance/assurance.py build --run target/assurance/tests \
+    --run target/assurance/fuzz --run target/assurance/mutation-0 \
+    --run target/assurance/mutation-1 --run target/assurance/mutation-2 \
+    --run target/assurance/mutation-3 --out target/assurance/data.json
+```
+
+`build` checks that the shards ran with the same settings and tools, and that together they
+cover the campaign's plan exactly once.
+
 For other budgets or profiles, use the Python entry point:
 
 ```sh

@@ -1,5 +1,6 @@
 """Protect graph repeatability and the distinction between execution and proof evidence."""
 
+import argparse
 import json
 import os
 import re
@@ -251,6 +252,76 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(
             result, {"noticed": 1, "missed": 1, "unviable": 1, "timeout": 1}
         )
+
+    def test_mutation_shards_join_into_their_campaign(self):
+        plan = [{"name": name} for name in ("m0", "m1", "m2")]
+
+        def capture(root, shard, names):
+            directory = root / (shard.replace("/", "-") + "-" + "-".join(names))
+            (directory / "mutants.out").mkdir(parents=True)
+            (directory / "mutation-plan.json").write_text(json.dumps(plan))
+            outcomes = [
+                {
+                    "scenario": {
+                        "Mutant": {
+                            "file": "a.rs",
+                            "name": name,
+                            "span": {"start": {"line": int(name[1:])}},
+                        }
+                    },
+                    "summary": "MissedMutant" if name == "m2" else "CaughtMutant",
+                    "log_path": name + ".log",
+                }
+                for name in names
+            ]
+            for name in names:
+                (directory / "mutants.out" / (name + ".log")).write_text("")
+            (directory / "mutants.out/outcomes.json").write_text(
+                json.dumps({"outcomes": outcomes, "end_time": "then"})
+            )
+            return directory, {"settings": {"shard": shard}, "commands": [["mutants"]]}
+
+        with tempfile.TemporaryDirectory() as work:
+            root = Path(work)
+            first = capture(root, "0/2", ["m0", "m2"])
+            second = capture(root, "1/2", ["m1"])
+            result = build.mutation_campaign([second, first])
+            self.assertEqual(result["files"], {"a.rs": {"noticed": 2, "missed": 1}})
+            self.assertEqual([s["line"] for s in result["sites"]], [0, 1, 2])
+            with self.assertRaisesRegex(ValueError, "every shard"):
+                build.mutation_campaign([first])
+            with self.assertRaisesRegex(ValueError, "every shard"):
+                build.mutation_campaign([first, first])
+            short = capture(root, "1/2", [])
+            with self.assertRaisesRegex(ValueError, "exactly once"):
+                build.mutation_campaign([first, short])
+            alone = (second[0], {"settings": {}, "commands": [["mutants"]]})
+            with self.assertRaisesRegex(ValueError, "every shard of one campaign"):
+                build.mutation_campaign([first, alone])
+            other = (second[0], second[1] | {"rustc": "another"})
+            with self.assertRaisesRegex(ValueError, "settings, tools or commands"):
+                build.mutation_campaign([first, other])
+            elsewhere = (second[0], second[1] | {"commands": [["mutants", "--output", "x"]]})
+            self.assertEqual(build.mutation_campaign([first, elsewhere])["files"],
+                             result["files"])
+            replanned = capture(root, "1/2", ["m1", "x9"])
+            (replanned[0] / "mutation-plan.json").write_text(json.dumps(plan[:2]))
+            with self.assertRaisesRegex(ValueError, "plan different campaigns"):
+                build.mutation_campaign([first, replanned])
+            unfinished = capture(root, "1/2", ["m1", "y9"])
+            (unfinished[0] / "mutants.out/outcomes.json").write_text(
+                json.dumps({"outcomes": []})
+            )
+            with self.assertRaisesRegex(ValueError, "incomplete"):
+                build.mutation_campaign([first, unfinished])
+
+    def test_shards_are_numbered_from_zero(self):
+        import assurance
+
+        self.assertEqual(assurance.shard("0/4"), (0, 4))
+        for text in ("4/4", "1", "a/b", "-1/4"):
+            with self.assertRaises(argparse.ArgumentTypeError):
+                assurance.shard(text)
 
     def test_nextest_timeout_alone_is_not_a_detected_code_change(self):
         with tempfile.TemporaryDirectory() as work:

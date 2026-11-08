@@ -66,6 +66,68 @@ def mutation_results(outcomes, log_root=None):
     }
 
 
+def campaign_of(manifest):
+    """What every shard of one mutation campaign must share: all but which shard it is,
+    how many workers ran it, and where its output went."""
+    settings = {k: v for k, v in manifest["settings"].items() if k not in ("shard", "jobs")}
+    commands = []
+    for command in manifest.get("commands", []):
+        kept, skip = [], False
+        for arg in command:
+            if skip:
+                skip = False
+            elif arg in ("--output", "--shard", "--jobs", "--jobserver-tasks"):
+                skip = True
+            else:
+                kept.append(arg)
+        commands.append(kept)
+    tools = {k: manifest.get(k) for k in ("cargoMutants", "rustc", "nextest", "lean")}
+    return {"settings": settings, "commands": commands, "tools": tools}
+
+
+def mutation_campaign(runs):
+    """The results of one mutation campaign: a single capture, or every shard of one."""
+    if not runs:
+        return {"files": {}, "sites": []}
+    shards = [manifest["settings"].get("shard") for _, manifest in runs]
+    if None in shards and len(runs) > 1:
+        raise ValueError("Pass one mutation capture, or every shard of one campaign")
+    plans = [json.loads((d / "mutation-plan.json").read_text()) for d, _ in runs]
+    if any(plan != plans[0] for plan in plans):
+        raise ValueError("The mutation shards plan different campaigns")
+    if len({json.dumps(campaign_of(manifest), sort_keys=True) for _, manifest in runs}) > 1:
+        raise ValueError(
+            "The mutation shards ran with different settings, tools or commands"
+        )
+    if shards[0] is not None:
+        counts = {int(s.split("/")[1]) for s in shards}
+        indices = sorted(int(s.split("/")[0]) for s in shards)
+        if len(counts) != 1 or indices != list(range(counts.pop())):
+            raise ValueError(
+                f"Pass every shard of the mutation campaign once; got {sorted(shards)}"
+            )
+    files, sites, names = defaultdict(Counter), [], []
+    for directory, _ in runs:
+        outcomes = json.loads((directory / "mutants.out/outcomes.json").read_text())
+        if outcomes.get("end_time") is None:
+            raise ValueError(f"{directory}: mutation run is incomplete")
+        names += [
+            o["scenario"]["Mutant"]["name"]
+            for o in outcomes["outcomes"]
+            if isinstance(o["scenario"], dict)
+        ]
+        result = mutation_results(outcomes, directory / "mutants.out")
+        for file, counts in result["files"].items():
+            files[file].update(counts)
+        sites += result["sites"]
+    if sorted(names) != sorted(m["name"] for m in plans[0]):
+        raise ValueError("The mutation run doesn't cover its plan exactly once")
+    return {
+        "files": {f: dict(c) for f, c in sorted(files.items())},
+        "sites": sorted(sites, key=lambda s: (s["file"], s["line"], s["change"])),
+    }
+
+
 def load_catalog():
     catalog = json.loads((HERE / "catalog.json").read_text())
     ids = {e["id"] for e in catalog["evidence"]}
@@ -142,7 +204,7 @@ def build(runs, output, seed=9):
     catalog = load_catalog()
     network = graph.build(inventory(catalog), seed)
     functions, by_file = taxonomy.index_functions()
-    captures, observations, mutation = [], [], {"files": {}, "sites": []}
+    captures, observations, mutation_runs = [], [], []
     offset, effort = 0.0, 0.0
     for directory in sorted(
         (Path(p).resolve() for p in runs),
@@ -166,15 +228,7 @@ def build(runs, output, seed=9):
             raise ValueError(f"{directory}: capture failed")
         captures.append({k: v for k, v in manifest.items() if k != "sourceHashes"})
         if manifest["kind"] == "mutation":
-            if mutation["sites"]:
-                raise ValueError("Pass only one mutation capture")
-            outcomes = json.loads((directory / "mutants.out/outcomes.json").read_text())
-            plan = json.loads((directory / "mutation-plan.json").read_text())
-            if outcomes.get("end_time") is None or outcomes.get("total_mutants") != len(
-                plan
-            ):
-                raise ValueError(f"{directory}: mutation run is incomplete")
-            mutation = mutation_results(outcomes, directory / "mutants.out")
+            mutation_runs.append((directory, manifest))
             continue
         paths = sorted(
             directory.glob("tests/*/test.json")
@@ -231,6 +285,7 @@ def build(runs, output, seed=9):
                 }
             )
         offset = observations[-1]["t"]
+    mutation = mutation_campaign(mutation_runs)
     # Capture order is explicit and stable: tests first, then fuzz; mutation is a separate measure.
     # Each run retains its own execution timestamps; gaps between captures are not test effort.
     if not observations:

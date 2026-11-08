@@ -8,6 +8,16 @@ from pathlib import Path
 import collect
 
 
+def shard(text):
+    try:
+        k, n = (int(part) for part in text.split("/"))
+    except ValueError:
+        raise argparse.ArgumentTypeError("expected K/N, such as 0/4") from None
+    if not 0 <= k < n:
+        raise argparse.ArgumentTypeError("K/N needs 0 <= K < N; shards are numbered from 0")
+    return k, n
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -24,6 +34,12 @@ def main():
             )
             p.add_argument(
                 "--profile", default="default", choices=["default", "ci", "search"]
+            )
+        if name == "mutation":
+            p.add_argument(
+                "--shard",
+                type=shard,
+                help="Run only shard K of N, numbered from 0, as K/N; build takes them all",
             )
         if name == "fuzz":
             p.add_argument("--seconds", type=int, default=60, help="Seconds per target")

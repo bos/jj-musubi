@@ -204,7 +204,8 @@ impl View {
         out
     }
 
-    pub(super) fn draw(&self, frame: &mut Frame<'_>, selected: &mut TableState) {
+    /// Draws the view, with `keys` at the bottom.
+    pub(super) fn draw(&self, frame: &mut Frame<'_>, selected: &mut TableState, keys: Line<'_>) {
         if let Some(index) = selected.selected()
             && index >= self.hives.len()
         {
@@ -222,7 +223,7 @@ impl View {
             self.issues.len().min(MOST_ISSUES) + 1
         };
         let hive_lines = self.hives.len().max(1) + 1;
-        let [status, issues, hives, gap, detail, keys] = Layout::vertical([
+        let [status, issues, hives, gap, detail, area_of_keys] = Layout::vertical([
             Constraint::Length(self.status.len() as u16),
             Constraint::Length(issue_lines as u16),
             Constraint::Length(hive_lines.min(12) as u16),
@@ -280,10 +281,7 @@ impl View {
         if let Some(hive) = selected.selected().and_then(|i| self.hives.get(i)) {
             hive.draw(frame, detail);
         }
-        frame.render_widget(
-            Paragraph::new("q quit   ↑↓ choose a hive   r refresh   + slower   - faster").dim(),
-            keys,
-        );
+        frame.render_widget(Paragraph::new(keys), area_of_keys);
     }
 }
 
@@ -779,6 +777,7 @@ mod tests {
             latest: Some(sample(now, 0)),
             previous: None,
             selected: TableState::default().with_selected(3),
+            delay: None,
         };
         let mut screen = |width| {
             let mut terminal = Terminal::new(TestBackend::new(width, 40)).unwrap();

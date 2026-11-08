@@ -178,8 +178,17 @@ fn loading_and_empty_screens() {
     "Asking the hubs…                        "
     "                                        "
     "                                        "
-    "                                        "
+    "q quit   ↑↓ choose a hive   space refres"
     "#);
+    // A question asked before the first refresh shows, as it is typed.
+    for code in [KeyCode::Char('d'), KeyCode::Char('4')] {
+        key(&mut app, code);
+    }
+    insta::assert_snapshot!(draw(&mut app, 64, 2).backend(), @r#"
+    "Asking the hubs…                                                "
+    "Refresh every how many seconds, 1 to 3600? 4_   Esc cancels     "
+    "#);
+    key(&mut app, KeyCode::Esc);
     let mut empty = sample();
     empty.hubs[0].activity.as_mut().unwrap().hives.clear();
     app.receive(empty);
@@ -191,7 +200,7 @@ fn loading_and_empty_screens() {
     "                                                                "
     "                                                                "
     "                                                                "
-    "q quit   ↑↓ choose a hive   r refresh   + slower   - faster     "
+    "q quit   ↑↓ choose a hive   space refresh   d interval   + slowe"
     "#);
     let mut failed = sample();
     failed.hubs[0].activity = Err("connection refused".to_owned());
@@ -207,7 +216,7 @@ fn loading_and_empty_screens() {
     "                                                                "
     "                                                                "
     "                                                                "
-    "q quit   ↑↓ choose a hive   r refresh   + slower   - faster     "
+    "q quit   ↑↓ choose a hive   space refresh   d interval   + slowe"
     "#);
 }
 
@@ -242,7 +251,7 @@ fn navigation_selects_details_and_resize_preserves_selection() {
     "                                                                                "
     "                                                                                "
     "                                                                                "
-    "q quit   ↑↓ choose a hive   r refresh   + slower   - faster                     "
+    "q quit   ↑↓ choose a hive   space refresh   d interval   + slower   - faster    "
     "#);
     assert_eq!(key(&mut app, KeyCode::Down), Action::None);
     terminal.draw(|frame| app.draw(frame)).unwrap();
@@ -270,7 +279,7 @@ fn navigation_selects_details_and_resize_preserves_selection() {
     "                                                                                "
     "                                                                                "
     "                                                                                "
-    "q quit   ↑↓ choose a hive   r refresh   + slower   - faster                     "
+    "q quit   ↑↓ choose a hive   space refresh   d interval   + slower   - faster    "
     "#);
     let buffer = terminal.backend().buffer();
     assert!(buffer[(0, 5)].modifier.contains(Modifier::REVERSED));
@@ -295,7 +304,7 @@ fn navigation_selects_details_and_resize_preserves_selection() {
     "MACHINE HEARD   AT      MUSUBI  "
     "laptop  1s ago  #10     0.5.0   "
     "                                "
-    "q quit   ↑↓ choose a hive   r re"
+    "q quit   ↑↓ choose a hive   spac"
     "#);
     assert_eq!(app.selected.selected(), Some(1));
     assert_eq!(key(&mut app, KeyCode::Char('k')), Action::None);
@@ -357,7 +366,7 @@ fn unreachable_hubs_and_excess_issues_are_visible_and_red() {
     "MACHINE          HEARD     AT      MUSUBI   STATE                               "
     "laptop           1s ago    #10     0.5.0    sync failing: permission denied     "
     "                                                                                "
-    "q quit   ↑↓ choose a hive   r refresh   + slower   - faster                     "
+    "q quit   ↑↓ choose a hive   space refresh   d interval   + slower   - faster    "
     "#);
     let buffer = terminal.backend().buffer();
     // Heading, diagnostic, and selected hive row all keep the warning color.
@@ -370,27 +379,52 @@ fn unreachable_hubs_and_excess_issues_are_visible_and_red() {
     }
 }
 
+/// Keys are bound as top and atop bind them, and how many seconds to refresh every is typed
+/// in after `d`, `s` or `i`.
 #[test]
-fn refresh_speed_and_quit_keys() {
-    let mut app = App::new(FASTEST);
-    assert_eq!(key(&mut app, KeyCode::Char('r')), Action::Wake(Wake::Now));
-    assert_eq!(
-        key(&mut app, KeyCode::Char('-')),
-        Action::Wake(Wake::Every(FASTEST))
-    );
-    assert_eq!(
-        key(&mut app, KeyCode::Char('+')),
-        Action::Wake(Wake::Every(FASTEST * 2))
-    );
-    app.interval = SLOWEST;
-    assert_eq!(
-        key(&mut app, KeyCode::Char('+')),
-        Action::Wake(Wake::Every(SLOWEST))
-    );
-    assert_eq!(
-        key(&mut app, KeyCode::Char('-')),
-        Action::Wake(Wake::Every(SLOWEST - FASTEST))
-    );
+fn keys_are_those_of_top_and_atop() {
+    let mut app = App::new(Duration::from_secs(5));
+    for refresh in [KeyCode::Char(' '), KeyCode::Enter, KeyCode::Char('t')] {
+        assert_eq!(key(&mut app, refresh), Action::Wake(Wake::Now));
+    }
+    let every = |seconds| Action::Wake(Wake::Every(Duration::from_secs(seconds)));
+    for (keys, action) in [
+        ("d12\n", every(12)),
+        ("s3x\n", every(3)),
+        ("i45\x08\n", every(4)),
+        ("d\n", Action::None),
+        ("d7\x1bq", Action::Quit),
+        // A number out of range is corrected, and the question takes no other key.
+        ("d0\n\x082\n", every(2)),
+        ("d36000\nq\x08\x08\n", every(360)),
+        ("d\x1b\x1b", Action::None),
+        ("i5q", Action::None),
+        // Enter answers the question the row above left open.
+        ("\n", every(5)),
+        // These rows go on from the interval the row before left.
+        ("d2\n-", every(1)),
+        ("-", every(1)),
+        ("+", every(2)),
+        // `+` never speeds up a refresh as slow as `--interval` allows.
+        ("d3599\n+", every(3600)),
+        ("+", every(3600)),
+        ("-", every(3599)),
+        ("rc?", Action::None),
+    ] {
+        let mut last = Action::None;
+        for typed in keys.chars() {
+            last = key(
+                &mut app,
+                match typed {
+                    '\n' => KeyCode::Enter,
+                    '\x08' => KeyCode::Backspace,
+                    '\x1b' => KeyCode::Esc,
+                    typed => KeyCode::Char(typed),
+                },
+            );
+        }
+        assert_eq!(last, action, "{keys:?}");
+    }
     for kind in [KeyEventKind::Release, KeyEventKind::Repeat] {
         for code in [KeyCode::Char('q'), KeyCode::Char('+'), KeyCode::Down] {
             assert_eq!(
@@ -399,23 +433,21 @@ fn refresh_speed_and_quit_keys() {
             );
         }
     }
-    assert_eq!(app.interval, SLOWEST - FASTEST);
+    assert_eq!(app.interval, Duration::from_secs(3599));
     assert_eq!(app.selected.selected(), Some(0));
-    // `+` never speeds up a refresh as slow as `--interval` allows.
-    app.interval = Duration::from_secs(3600);
-    assert_eq!(
-        key(&mut app, KeyCode::Char('+')),
-        Action::Wake(Wake::Every(Duration::from_secs(3600)))
-    );
-    assert_eq!(key(&mut app, KeyCode::Char('c')), Action::None);
-    assert_eq!(key(&mut app, KeyCode::Char('?')), Action::None);
-    for code in [KeyCode::Char('q'), KeyCode::Esc] {
-        assert_eq!(key(&mut app, code), Action::Quit);
+    // Esc quits neither top nor atop.
+    assert_eq!(key(&mut app, KeyCode::Esc), Action::None);
+    let control = |code| KeyEvent::new(KeyCode::Char(code), KeyModifiers::CONTROL);
+    assert_eq!(app.key(control('l')), Action::Redraw);
+    // Ctrl-H, as some terminals send Backspace, takes back a digit.
+    for typed in ['d', '7', '8'] {
+        key(&mut app, KeyCode::Char(typed));
     }
-    assert_eq!(
-        app.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
-        Action::Quit
-    );
+    assert_eq!(app.key(control('h')), Action::None);
+    assert_eq!(key(&mut app, KeyCode::Enter), every(7));
+    assert_eq!(app.key(control('d')), Action::None);
+    assert_eq!(app.key(control('c')), Action::Quit);
+    assert_eq!(key(&mut app, KeyCode::Char('q')), Action::Quit);
 }
 
 /// Poll the actual sampling loop with Tokio's clock frozen. Each explicit poll runs until
@@ -440,7 +472,7 @@ async fn refresh_deadlines_manual_refresh_and_interval_changes() {
     let mut app = App::new(interval);
     app.receive(first);
     tokio::time::advance(Duration::from_secs(2)).await;
-    for code in [KeyCode::Char('r'), KeyCode::Char('+')] {
+    for code in [KeyCode::Char(' '), KeyCode::Char('+')] {
         let Action::Wake(message) = key(&mut app, code) else {
             panic!("expected refresh")
         };

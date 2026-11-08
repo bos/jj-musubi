@@ -385,7 +385,9 @@ The CLI test above still covers the command, daemon restart and status output.
 `top::tests` renders the production `App::draw` into Ratatui's `TestBackend`, with inline
 snapshots preserving screen rows and cell assertions checking warning colors and selection.
 It covers loading, empty hubs, navigation and detail selection, resize, disappearing hives,
-unreachable hubs, issue overflow, refresh speed limits and quit keys.
+unreachable hubs, issue overflow, and the question of how often to refresh.
+`keys_are_those_of_top_and_atop` checks each key's binding, that the question takes only
+digits and stays open for a number out of range, and the limits of `+` and `-`.
 `a_silent_machine_is_an_issue_once` checks that continuing silence leaves room for new issues
 while keeping the hive's count and red rows, including departed copies' retained reports. It
 checks that contact between sparse polls rearms the warning even if the next poll is silent too.
@@ -396,10 +398,10 @@ read that same clock, including simultaneous samples and a restarted hub.
 `top::sample::tests::a_failed_hub_is_retried_at_the_deadline` advances to either side of the
 reconnect boundary; its only connection attempt is to a missing local hub. These tests start
 no daemon or ssh process. `hub_join_sync_clone_and_list` reuses its hub and daemon for PTY
-checks through `termlens`: the real binary handles speed keys and resize, and restores its
-alternate screen and cursor after `q`, Escape and Ctrl-C. Screen predicates synchronize these
-checks; they do not wait for a periodic refresh. PTY tests use real process deadlines to catch
-hangs; they cannot control the child process's clock.
+checks through `termlens`: the real binary handles speed keys, the question `d` asks, and
+resize, and restores its alternate screen and cursor after `q` and Ctrl-C. Screen predicates
+synchronize these checks; they do not wait for a periodic refresh. PTY tests use real process
+deadlines to catch hangs; they cannot control the child process's clock.
 
 Tokio's `test-util` feature supplies the virtual clock for async timer tests; use
 `#[tokio::test(start_paused = true)]` and `tokio::time::advance`, with `tokio::time::Instant`

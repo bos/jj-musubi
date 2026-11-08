@@ -15,12 +15,12 @@ cargo-mutants. The run manifests record the exact compiler and tool versions use
 ## Render the saved snapshot
 
 The repository includes a
-[November 5, 2026 snapshot](../../contrib/assurance/data/2026-11-05/README.md)
+[November 7, 2026 snapshot](../../contrib/assurance/data/2026-11-07/README.md)
 and a Zstandard archive of its normalized observations. To view it without collecting data:
 
 ```sh
 python3 contrib/assurance/assurance.py render \
-    contrib/assurance/data/2026-11-05/snapshot.json \
+    contrib/assurance/data/2026-11-07/snapshot.json \
     --out target/assurance/index.html --standalone
 ```
 

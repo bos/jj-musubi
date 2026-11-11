@@ -44,7 +44,7 @@ termlens = { version = "0.11.8", default-features = false }
 gix = { version = "0.90", default-features = false }
 # Exact: a `reproduce_failure` blob replays only with the version of Hegel that made it.
 # Link the engine into test binaries so they don't depend on another workspace's target/.
-hegeltest = { version = "=0.51.0", features = ["static-engine"] }
+hegeltest = { version = "=0.52.0", features = ["static-engine"] }
 # jj-lib's: musubi decodes jj-lib's protobuf types with it.
 prost = "0.14.4"
 # The same as jj-cli's, so that musubi builds no second copy. `musubi top` counts the rows a

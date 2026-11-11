@@ -30,7 +30,7 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install stable --profile minimal --component clippy,rustfmt && rustup default stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: just,cargo-deny,cargo-machete,typos
       - run: just fmt-check
@@ -67,7 +67,7 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install stable --profile minimal --component clippy && rustup default stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-nextest,just
       - name: Check workspace cache helper
@@ -94,7 +94,7 @@ jobs:
         with:
           path: ~/.elan
           key: elan-${{ runner.os }}-${{ hashFiles('formal/lean-toolchain') }}
-      - uses: leanprover/lean-action@fe408643ea7367d8c0404a8be3975bb145f5fb64 # v1.7.0
+      - uses: leanprover/lean-action@ba3fdfe5c4476c925da13bf11a005ddb47e47aee # v1.7.1
         with:
           lake-package-directory: formal
           auto-config: false
@@ -144,7 +144,7 @@ jobs:
           path: ~/.elan
           key: elan-${{ runner.os }}-${{ hashFiles('formal/lean-toolchain') }}
       # Checks the proofs and builds the oracle.
-      - uses: leanprover/lean-action@fe408643ea7367d8c0404a8be3975bb145f5fb64 # v1.7.0
+      - uses: leanprover/lean-action@ba3fdfe5c4476c925da13bf11a005ddb47e47aee # v1.7.1
         with:
           lake-package-directory: formal
           auto-config: false

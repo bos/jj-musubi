@@ -44,8 +44,14 @@ impl NodeRepo {
                 Err(err) => return Err(err),
             }
         }
-        if !self.late.is_empty() {
-            self.reparent_late()?;
+        // Reparenting may need a genuinely missing realization. Its first step must not
+        // recurse here: every reachable operation, including source aliases, is mapped now.
+        self.heads_mapped = true;
+        if !self.late.is_empty()
+            && let Err(err) = self.reparent_late()
+        {
+            self.heads_mapped = false;
+            return Err(err);
         }
         Ok(canonical)
     }
@@ -63,23 +69,32 @@ impl NodeRepo {
             let Some(canonical) = self.canonical_of(local) else {
                 continue;
             };
-            let mut op = op_store.read_operation(&local.0).block_on()?;
-            let parents: Option<Vec<OperationId>> = self
-                .canonical
-                .parents(&canonical)?
-                .iter()
-                .map(|parent| Some(self.local_of(parent)?.0))
-                .collect();
-            let Some(parents) = parents else {
-                tracing::info!(
-                    "operation {} stays on the history it was written on",
-                    local.0.hex()
-                );
-                continue;
-            };
-            if parents == op.parents {
+            // Taking records can supersede an identity after it was queued. Its counted
+            // rewrite already supplies the current realization; do not revive its old body.
+            if self.current_ids(&canonical)? != [canonical.clone()] {
                 continue;
             }
+            let mut op = op_store.read_operation(&local.0).block_on()?;
+            let mut parents = vec![];
+            for parent in self.canonical.parents(&canonical)? {
+                // A contraction can give an operation a parent not yet realized here.
+                // Keep the normalization pending if making that parent fails.
+                let parent = match self.local_of(&parent) {
+                    Some(local) => local,
+                    None => self.realize(&parent)?,
+                };
+                parents.push(parent.0);
+            }
+            if parents == op.parents
+                && op.metadata.attributes.get(CANONICAL_ATTRIBUTE) == Some(&canonical.0.hex())
+            {
+                continue;
+            }
+            // A marker ends the native walk for private ownership. Capture that evidence
+            // before replacing the parents, so that this marked copy is self-contained.
+            let view = op_store.read_view(&op.view_id).block_on()?;
+            let own = self.own_of_view(view.wc_commit_ids, &canonical, &op)?;
+            self.record_private_workspaces(&mut op.metadata, own.into_keys(), &canonical)?;
             op.parents = parents;
             op.metadata
                 .attributes
@@ -106,7 +121,7 @@ impl NodeRepo {
     }
 
     /// The canonical parents of a local operation, as they are now: what renamings
-    /// superseded, renamed. Also whether any was.
+    /// superseded, renamed. Also whether a name or preferred local realization changed.
     fn current_parents(&self, parents: &[LocalOp]) -> Result<(Vec<CanonicalOp>, bool), NodeError> {
         let mut renamed = false;
         let mut current = vec![];
@@ -118,7 +133,13 @@ impl NodeRepo {
                 .canonical_of(parent)
                 .expect("parents canonicalized first");
             let now = self.current_ids(&canonical)?;
-            renamed |= now != [canonical];
+            // A warm cache can know an old source and its normalized realization under
+            // the same canonical id. New children must use the preferred physical parent.
+            let moved = self
+                .map
+                .local_of(&canonical)
+                .is_some_and(|preferred| preferred != parent);
+            renamed |= now != [canonical] || moved;
             for op in now {
                 if !current.contains(&op) {
                     current.push(op);
@@ -171,7 +192,12 @@ impl NodeRepo {
         // Post-order walk: an operation is canonicalized once all its parents are.
         let mut stack: Vec<(LocalOp, Option<StoreOperation>)> = vec![(local.clone(), None)];
         while let Some((id, loaded)) = stack.pop() {
-            if self.canonical_of(&id).is_some() || self.before_join.contains(&id) {
+            // A durable source alias establishes identity, not that its ancestors have
+            // been walked. Only an actual cache entry lets realization skip that walk.
+            if id == *self.root_op_id()
+                || self.map.canonical_of(&id).is_some()
+                || self.before_join.contains(&id)
+            {
                 continue;
             }
             let op = match loaded {
@@ -191,7 +217,9 @@ impl NodeRepo {
             let missing: Vec<_> = parents
                 .iter()
                 .filter(|parent| {
-                    self.canonical_of(parent).is_none() && !self.before_join.contains(*parent)
+                    *parent != self.root_op_id()
+                        && self.map.canonical_of(parent).is_none()
+                        && !self.before_join.contains(*parent)
                 })
                 .cloned()
                 .collect();
@@ -201,19 +229,30 @@ impl NodeRepo {
                 continue;
             }
             let late = parents.iter().any(|parent| self.late.contains(parent));
-            let canonical_id =
-                if let Some(canonical) = op.metadata.attributes.get(CANONICAL_ATTRIBUTE) {
-                    self.realized_canonical(&id, &op, canonical)?
-                } else if self.is_before_join(&id, &op)? {
-                    self.before_join.insert(id);
+            let canonical_id = if let Some(source) = self.records.source(&id).cloned() {
+                // Keep the established identity. An unchanged alias becomes an
+                // explicitly marked realization on its canonical parents; a dropped
+                // or renamed one instead makes its descendants late below.
+                if self.current_ids(&source)? == [source.clone()] {
+                    self.late.push(id.clone());
+                }
+                source
+            } else if let Some(canonical) = op.metadata.attributes.get(CANONICAL_ATTRIBUTE) {
+                self.realized_canonical(&id, &op, canonical)?
+            } else if self.is_before_join(&id, &op)? {
+                self.before_join.insert(id);
+                continue;
+            } else {
+                let (parents, renamed) = self.current_parents(&parents)?;
+                if renamed && let Some(original) = self.existing_original(&id, &op)? {
+                    self.insert_map(id, original)?;
                     continue;
-                } else {
-                    let (parents, renamed) = self.current_parents(&parents)?;
-                    if renamed || late {
-                        self.late.push(id.clone());
-                    }
-                    self.write_canonical(&id, &op, parents)?
-                };
+                }
+                if renamed || late {
+                    self.late.push(id.clone());
+                }
+                self.write_canonical(&id, &op, parents)?
+            };
             self.insert_map(id, canonical_id)?;
         }
         match self.canonical_of(local) {
@@ -301,11 +340,15 @@ impl NodeRepo {
                 op: id.0.hex(),
                 canonical: canonical.to_owned(),
             })?;
-        let canonical_id = match self.current_ids(&named)?.as_slice() {
+        let local_parents = LocalOp::parents_of(op);
+        let current = self.current_ids(&named)?;
+        if current != [named.clone()] && self.original_realization(&named, &local_parents)? {
+            return Ok(named);
+        }
+        let canonical_id = match current.as_slice() {
             [now] => now.clone(),
             _ => named,
         };
-        let local_parents = LocalOp::parents_of(op);
         let (parents, renamed) = self.current_parents(&local_parents)?;
         if renamed
             || local_parents
@@ -324,6 +367,52 @@ impl NodeRepo {
             return Err(NodeError::RewrittenRealization);
         }
         Ok(canonical_id)
+    }
+
+    /// An obsolete marked ancestor can remain below a delayed command. Its unchanged
+    /// physical body still establishes the old identity, even if contraction now drops it
+    /// entirely. Its children apply the renaming; validating it as its image would instead
+    /// compare the old body with a different operation (possibly the root).
+    fn original_realization(
+        &self,
+        named: &CanonicalOp,
+        parents: &[LocalOp],
+    ) -> Result<bool, NodeError> {
+        Ok(self.raw_parents(parents) == self.canonical.parents(named)?)
+    }
+
+    fn raw_parents(&self, parents: &[LocalOp]) -> Vec<CanonicalOp> {
+        let mut raw = vec![];
+        for parent in parents {
+            if self.before_join.contains(parent) {
+                continue;
+            }
+            let parent = self
+                .canonical_of(parent)
+                .expect("parents canonicalized first");
+            if !raw.contains(&parent) {
+                raw.push(parent);
+            }
+        }
+        raw
+    }
+
+    /// Reconstruct an unchanged native ancestor's already stored original before applying
+    /// renamings to a new child. This runs only when a parent has moved, not for ordinary
+    /// new operations. No canonical operation or view is written speculatively.
+    fn existing_original(
+        &self,
+        id: &LocalOp,
+        op: &StoreOperation,
+    ) -> Result<Option<CanonicalOp>, NodeError> {
+        let (original, _, _) =
+            self.canonical_form(id, op, self.raw_parents(&LocalOp::parents_of(op)), |view| {
+                self.canonical.view_id(view)
+            })?;
+        let original = CanonicalStore::operation_id(&original);
+        Ok((self.canonical.has_operation(&original)
+            && self.current_ids(&original)? != [original.clone()])
+        .then_some(original))
     }
 
     fn write_canonical(
@@ -352,13 +441,21 @@ impl NodeRepo {
         id: &LocalOp,
         op: &StoreOperation,
     ) -> Result<Option<CanonicalOp>, NodeError> {
-        // Canonicalizing would give the others canonical forms first, which the hive lacks.
+        // Canonicalizing must walk an identity-only source alias before caching a child
+        // above it too, even when the hive already has that child's canonical body.
         let local_parents = LocalOp::parents_of(op);
-        if local_parents
-            .iter()
-            .any(|parent| self.canonical_of(parent).is_none() && !self.before_join.contains(parent))
-        {
+        if local_parents.iter().any(|parent| {
+            parent != self.root_op_id()
+                && self.map.canonical_of(parent).is_none()
+                && !self.before_join.contains(parent)
+        }) {
             return Ok(None);
+        }
+        if let Some(source) = self.records.source(id).cloned() {
+            if self.current_ids(&source)? == [source.clone()] {
+                self.late.push(id.clone());
+            }
+            return Ok(Some(source));
         }
         let (parents, renamed) = self.current_parents(&local_parents)?;
         let late = renamed
@@ -372,7 +469,11 @@ impl NodeRepo {
             else {
                 return Ok(None);
             };
-            let canonical = match self.current_ids(&named)?.as_slice() {
+            let current = self.current_ids(&named)?;
+            if current != [named.clone()] && self.original_realization(&named, &local_parents)? {
+                return Ok(Some(named));
+            }
+            let canonical = match current.as_slice() {
                 [now] => now.clone(),
                 _ => named,
             };
@@ -381,6 +482,9 @@ impl NodeRepo {
             self.before_join.insert(id.clone());
             None
         } else {
+            if renamed && let Some(original) = self.existing_original(id, op)? {
+                return Ok(Some(original));
+            }
             let (canonical_op, _, _) =
                 self.canonical_form(id, op, parents, |view| self.canonical.view_id(view))?;
             let canonical = CanonicalStore::operation_id(&canonical_op);

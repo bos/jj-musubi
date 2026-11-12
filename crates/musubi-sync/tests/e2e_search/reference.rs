@@ -94,6 +94,132 @@ struct WorkspaceCertificate {
     keys: BTreeMap<String, CommitId>,
     merged: BTreeSet<String>,
     dormant: BTreeSet<String>,
+    /// Names authenticated at this exact source history, independently of their current
+    /// canonical target. A native command may rebase a foreign working copy locally.
+    names: BTreeSet<String>,
+}
+
+impl WorkspaceCertificate {
+    fn names_carried_by_command(
+        &self,
+        command: &crate::world::CommandSnapshot,
+        births: &BTreeSet<String>,
+    ) -> BTreeSet<String> {
+        self.names
+            .iter()
+            .filter(|key| {
+                command_workspace_alias(command, births, key, None)
+                    .is_some_and(|alias| command.made.wc_commit_ids.contains_key(&alias))
+            })
+            .cloned()
+            .collect()
+    }
+}
+
+/// One unambiguous raw alias for an already-certified key. The copy history is captured
+/// with the command, including departed copies; an owned literal cannot name a foreign slot.
+fn command_workspace_alias(
+    command: &crate::world::CommandSnapshot,
+    births: &BTreeSet<String>,
+    key: &str,
+    target: Option<&CommitId>,
+) -> Option<jj_lib::ref_name::WorkspaceNameBuf> {
+    let (owner, workspace) = key.split_once('/')?;
+    let candidates: Vec<_> = command
+        .base
+        .wc_commit_ids
+        .iter()
+        .filter(|(name, base)| {
+            if target.is_some_and(|target| *base != target) {
+                return false;
+            }
+            if owner == command.copy {
+                return name.as_str() == workspace;
+            }
+            let Some((prefix, shown_workspace)) = name.as_str().split_once('/') else {
+                return false;
+            };
+            !births.contains(&format!("{}/{}", command.copy, name.as_str()))
+                && shown_workspace == workspace
+                && command
+                    .copies
+                    .iter()
+                    .filter(|copy| musubi_jj::workspaces::could_be_shown_as(copy, prefix))
+                    .count()
+                    == 1
+                && musubi_jj::workspaces::could_be_shown_as(owner, prefix)
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+    match candidates.as_slice() {
+        [name] => Some(name.clone()),
+        _ => None,
+    }
+}
+
+#[test]
+fn native_aliases_carry_only_authenticated_workspace_names() {
+    let commit = |byte| CommitId::new(vec![byte; 20]);
+    let mut base = View::make_root(commit(0));
+    base.wc_commit_ids.insert("default".into(), commit(1));
+    base.wc_commit_ids.insert("beta/default".into(), commit(2));
+    let mut command = crate::world::CommandSnapshot {
+        id: OperationId::new(vec![1; 64]),
+        copy: "alpha".to_owned(),
+        copies: BTreeSet::from(["alpha".to_owned(), "beta".to_owned()]),
+        parent: OperationId::new(vec![2; 64]),
+        input: None,
+        predecessors: None,
+        base: base.clone(),
+        made: base,
+    };
+    command
+        .made
+        .wc_commit_ids
+        .insert("beta/default".into(), commit(3));
+    let mut input = WorkspaceCertificate::default();
+    input
+        .names
+        .extend(["alpha/default".to_owned(), "beta/default".to_owned()]);
+    input.keys.insert("beta/default".to_owned(), commit(4));
+    let mut births = input.names.clone();
+    assert!(
+        input
+            .names_carried_by_command(&command, &births)
+            .contains("beta/default")
+    );
+    assert_eq!(input.keys["beta/default"], commit(4));
+
+    // Neither a historical birth nor a matching existing raw alias supplies a missing
+    // input certificate. The target and the global birth remain unchanged in this control.
+    input.names.remove("beta/default");
+    input.keys.remove("beta/default");
+    assert!(
+        !input
+            .names_carried_by_command(&command, &births)
+            .contains("beta/default")
+    );
+    input.names.insert("beta/default".to_owned());
+    births.insert("alpha/beta/default".to_owned());
+    assert!(
+        !input
+            .names_carried_by_command(&command, &births)
+            .contains("beta/default")
+    );
+
+    command
+        .made
+        .wc_commit_ids
+        .remove(WorkspaceName::new("default"));
+    command
+        .made
+        .wc_commit_ids
+        .insert("second".into(), commit(1));
+    assert!(
+        !input
+            .names_carried_by_command(&command, &births)
+            .contains("alpha/default")
+    );
 }
 
 struct WorkspaceReplay {
@@ -344,11 +470,8 @@ impl Reference {
             if let Some(command) = command
                 && !explained(op)
             {
-                let made: Vec<String> = reference
-                    .made_divergent_or_conflicted(&command.base, &view)
-                    .iter()
-                    .map(Made::to_string)
-                    .collect();
+                let made =
+                    reference.unexplained_command_changes(&command.base, &command.made, &view);
                 if !made.is_empty() {
                     reference.unexplained.push(format!(
                         "{}: {}",
@@ -512,6 +635,31 @@ impl Reference {
         made
     }
 
+    /// A native command can itself make a change diverge. Its recorded result bounds what
+    /// translation may add: compare versions and conflict terms, not just their counts.
+    pub fn unexplained_command_changes(
+        &mut self,
+        before: &View,
+        native: &View,
+        canonical: &View,
+    ) -> Vec<String> {
+        let mut made: Vec<_> = self
+            .made_divergent_or_conflicted(before, canonical)
+            .iter()
+            .map(Made::to_string)
+            .collect();
+        if !made.is_empty() {
+            let known = self
+                .visible(native)
+                .iter()
+                .map(|commit| self.facts(commit).change.clone())
+                .collect();
+            let beyond = self.beyond(canonical, native, &known);
+            made.retain(|change| beyond.contains(change));
+        }
+        made
+    }
+
     /// How many visible commits each change has in `view`, by jj's change id.
     fn change_counts(&mut self, view: &View) -> BTreeMap<String, usize> {
         let mut counts = BTreeMap::new();
@@ -670,8 +818,9 @@ impl Reference {
         Some(copied)
     }
 
-    /// Replay an authenticated local merge with only independently certified private own
-    /// bindings added. Membership forgets omit these slots centrally; jj keeps them locally.
+    /// Replay an authenticated local merge with that copy's actual owned bindings, for
+    /// independently certified names. Foreign native rewrites can differ from canonical
+    /// bindings, and membership forgets omit private slots centrally.
     /// Realizations are eligible too: their marker is no evidence, but their authenticated
     /// parents and base can independently witness the same merge through native jj.
     fn workspace_private_replays(
@@ -685,6 +834,7 @@ impl Reference {
             return vec![];
         }
         let mut replays = vec![];
+        let mut merges = HashMap::<(OperationId, OperationId, OperationId), View>::new();
         for member in &world.fx.hive.members {
             let node = member.adapter.repo();
             let maker = node.machine().key();
@@ -766,27 +916,18 @@ impl Reference {
                         valid = false;
                         break;
                     };
-                    let Ok(presence) = node.presence(canonical_id) else {
-                        valid = false;
-                        break;
-                    };
-                    for (key, target) in &certificate.keys {
+                    view.wc_commit_ids.retain(|key, _| {
+                        !key.as_str()
+                            .split_once('/')
+                            .is_some_and(|(owner, _)| owner == maker)
+                    });
+                    for key in &certificate.names {
                         let Some((owner, workspace)) = key.split_once('/') else {
                             continue;
                         };
-                        let private = !presence.is_present(owner)
-                            || (canonical.metadata.workspace_name.is_none()
-                                && canonical
-                                    .metadata
-                                    .attributes
-                                    .get("musubi.work")
-                                    .is_some_and(|copy| copy == owner));
                         if owner == maker
-                            && certificate.dormant.contains(key)
-                            && private
-                            && !view.wc_commit_ids.contains_key(WorkspaceName::new(key))
-                            && raw.wc_commit_ids().get(WorkspaceName::new(workspace))
-                                == Some(target)
+                            && let Some(target) =
+                                raw.wc_commit_ids().get(WorkspaceName::new(workspace))
                         {
                             view.wc_commit_ids
                                 .insert(key.clone().into(), target.clone());
@@ -803,7 +944,18 @@ impl Reference {
                     self.write_like(&local_parents[0], &views[1], vec![base_copy.id().clone()]);
                 let right =
                     self.write_like(&local_parents[1], &views[2], vec![base_copy.id().clone()]);
-                let merged = self.merge(vec![&left, &right]).view;
+                let input = (
+                    base_copy.id().clone(),
+                    left.id().clone(),
+                    right.id().clone(),
+                );
+                let merged = if let Some(view) = merges.get(&input) {
+                    view.clone()
+                } else {
+                    let view = self.merge(vec![&left, &right]).view;
+                    merges.insert(input, view.clone());
+                    view
+                };
                 let Ok(made) = block_on(local_op.view()) else {
                     continue;
                 };
@@ -886,6 +1038,20 @@ impl Reference {
                 .any(|old| old.contains(target))
         };
         let mut result = WorkspaceCertificate::default();
+        if command.is_none() && parents.len() == 1 {
+            for input in &inputs {
+                result.names.extend(
+                    input
+                        .names
+                        .iter()
+                        .filter(|key| {
+                            view.wc_commit_ids.contains_key(WorkspaceName::new(key))
+                                || private_at(key)
+                        })
+                        .cloned(),
+                );
+            }
+        }
         for input in &inputs {
             for (key, target) in &input.keys {
                 let live = !input.dormant.contains(key)
@@ -952,46 +1118,19 @@ impl Reference {
                     self.workspace_unmapped
                         .insert((command.copy.clone(), command.parent.clone()));
                 }
-                // Map an already-certified key to one unambiguous raw source alias. The
-                // copy history is captured with the command, including departed copies.
-                let alias_for =
-                    |key: &str, base: &CommitId| -> Option<jj_lib::ref_name::WorkspaceNameBuf> {
-                        let (owner, workspace) = key.split_once('/')?;
-                        let candidates: Vec<_> = command
-                            .base
-                            .wc_commit_ids
-                            .iter()
-                            .filter(|(name, target)| {
-                                if *target != base {
-                                    return false;
-                                }
-                                if owner == command.copy {
-                                    return name.as_str() == workspace;
-                                }
-                                let Some((prefix, name)) = name.as_str().split_once('/') else {
-                                    return false;
-                                };
-                                name == workspace
-                                    && command
-                                        .copies
-                                        .iter()
-                                        .filter(|copy| {
-                                            musubi_jj::workspaces::could_be_shown_as(copy, prefix)
-                                        })
-                                        .count()
-                                        == 1
-                                    && musubi_jj::workspaces::could_be_shown_as(owner, prefix)
-                            })
-                            .map(|(name, _)| name.clone())
-                            .collect();
-                        match candidates.as_slice() {
-                            [name] => Some(name.clone()),
-                            _ => None,
-                        }
-                    };
+                for input in &command_inputs {
+                    result
+                        .names
+                        .extend(input.names_carried_by_command(command, &world.workspace_births));
+                }
                 for input in &command_inputs {
                     for (key, base) in &input.keys {
-                        let Some(alias) = alias_for(key, base) else {
+                        let Some(alias) = command_workspace_alias(
+                            command,
+                            &world.workspace_births,
+                            key,
+                            Some(base),
+                        ) else {
                             // A native command by another copy cannot remove a dormant
                             // owner's namespace. Carry only this already-certified absent
                             // binding, without authorizing a live payload or a new name.
@@ -1053,6 +1192,14 @@ impl Reference {
                     result.merged.remove(&key);
                     result.dormant.remove(&key);
                 }
+                result.names.retain(|key| {
+                    let (owner, name) = key.split_once('/').unwrap();
+                    owner != command.copy
+                        || command
+                            .made
+                            .wc_commit_ids
+                            .contains_key(WorkspaceName::new(name))
+                });
                 for (name, target) in &command.made.wc_commit_ids {
                     if name.as_str().contains('/') || command.base.wc_commit_ids.contains_key(name)
                     {
@@ -1118,7 +1265,11 @@ impl Reference {
                             || !inputs.iter().zip(&source_views).any(|(input, source)| {
                                 input.keys.get(name).is_some_and(|certified| {
                                     source.wc_commit_ids.get(key) == Some(certified)
-                                })
+                                }) || (private.as_ref().is_some_and(|(maker, _)| {
+                                    name.split_once('/')
+                                        .is_some_and(|(owner, _)| owner == maker)
+                                }) && input.names.contains(name)
+                                    && source.wc_commit_ids.contains_key(key))
                             })
                         {
                             continue;
@@ -1164,6 +1315,7 @@ impl Reference {
                 }
             }
         }
+        result.names.extend(result.keys.keys().cloned());
         self.workspace_certificates
             .insert(id.clone(), result.clone());
         result
@@ -1694,8 +1846,8 @@ impl std::fmt::Display for Made {
 /// operation wrote HEAD and jj's merge with the operations since conflicted its record of it.
 /// (Whether musubi keeps those records as jj would is for the per-machine refs' conformance
 /// test, docs/internals/conformance.md, and the check of every import, `imports`.) Anything
-/// else that makes a change diverge or a name conflict on its own is musubi's: an operation of
-/// its own, or a realization or canonical form that differs from what the machine did.
+/// else must be bounded by a captured native command's actual result, or it is musubi's:
+/// an operation of its own, or a realization or canonical form that differs from that result.
 fn explained(op: &op_store::Operation) -> bool {
     let description = op.metadata.description.as_str();
     [

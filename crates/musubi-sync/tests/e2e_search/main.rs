@@ -12,8 +12,9 @@
 //! refs or of git's HEAD changes a ref that git didn't move, except where jj itself would
 //! (`imports`). At every full convergence (`checks`): the fixture's `assert_converged`; every
 //! node's canonical head is the hub's; translating every operation again from nothing does what
-//! the protocol's model assumes; every operation is on every machine, but those `jj op abandon`
-//! dropped, which are on none; tags agree; each machine has its own workspaces, at visible
+//! the protocol's model assumes; every replicated operation is on every machine, down to its
+//! independently recorded join point, but those native `jj op abandon` removed completely,
+//! which are on none; tags agree; each machine has its own workspaces, at visible
 //! commits; no divergence and no bookmark or tag conflict that jj wouldn't make of the same
 //! operations in one repository (`reference`), nor the same rebase done twice (`ledger`); and
 //! every machine shows the others' workspaces at their working copies, and git never sees them.
@@ -423,6 +424,33 @@ fn e2e_records_snapshots_from_commands_and_looking() {
     assert_eq!(snapshot.metadata.description, "snapshot working copy");
     assert!(world.commands.contains_key(&world::merge_key(&snapshot)));
     world.converge();
+
+    // The captured native payload bounds translation even when it itself diverges. Both
+    // versions come from the real snapshot/describe interval above, with one change id.
+    let source = &world.commands[&world::merge_key(&command)];
+    let mut divergent = source.made.clone();
+    divergent
+        .head_ids
+        .extend(source.base.head_ids.iter().cloned());
+    let mut reference = reference::Reference::build(&world);
+    assert!(
+        reference
+            .unexplained_command_changes(&source.base, &divergent, &divergent)
+            .is_empty()
+    );
+    assert!(
+        !reference
+            .unexplained_command_changes(&source.base, &source.made, &divergent)
+            .is_empty()
+    );
+    let later = futures::executor::block_on(store.read_view(&snapshot.view_id)).unwrap();
+    let mut different = source.made.clone();
+    different.head_ids.extend(later.head_ids);
+    assert!(
+        !reference
+            .unexplained_command_changes(&source.base, &divergent, &different)
+            .is_empty()
+    );
 }
 
 #[test]

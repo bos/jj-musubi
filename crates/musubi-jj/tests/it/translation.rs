@@ -146,6 +146,8 @@ fn taking_an_abandon_preserves_original_identity_after_cache_loss() {
 
     let env = TestEnv::new();
     let repo = env.init_repo("alpha");
+    repo.jj(&["describe", "-m", "unchanged ancestor"]);
+    repo.jj(&["describe", "-m", "unchanged prefix"]);
     let (a_local, between, x_local) = repeated_restore_ops(&repo);
     let mut node = open(&repo);
     let a = node.canonicalize(&a_local).unwrap();
@@ -154,29 +156,36 @@ fn taking_an_abandon_preserves_original_identity_after_cache_loss() {
     let mut contraction =
         Contraction::new(node.canonical_store(), [a.clone(), between.clone()]).unwrap();
     let expected = contraction.images(node.canonical_store(), &x).unwrap()[0].clone();
+    node.crash_taking_records(false);
     node.adopt_records(
         &RecordPrefix::none(),
         &[Record::new([HubOp(a), HubOp(between)])],
     )
-    .unwrap();
-    let head = repo.jj(&[
-        "--ignore-working-copy",
-        "op",
-        "log",
-        "--no-graph",
-        "-n1",
-        "-T",
-        "id",
-    ]);
-    let head = LocalOp(jj_lib::op_store::OperationId::try_from_hex(head.trim()).unwrap());
+    .unwrap_err();
+    drop(node);
+    std::fs::remove_file(repo.repo_path().join("musubi/translation")).unwrap();
+    let mut node = open(&repo);
+    node.check_abandon().unwrap();
+    let head = node.local_heads().unwrap().pop().unwrap();
     assert_ne!(
         head, a_local,
         "the survivor must not coalesce into the dropped local id"
     );
-    drop(node);
-    std::fs::remove_file(repo.repo_path().join("musubi/translation")).unwrap();
-    let mut node = open(&repo);
     assert_eq!(node.canonicalize(&head).unwrap(), expected);
+    let mut pending = vec![head.clone()];
+    let mut seen = BTreeSet::new();
+    while let Some(local) = pending.pop() {
+        if !seen.insert(local.clone()) {
+            continue;
+        }
+        assert!(
+            node.canonical_of(&local).is_some(),
+            "recovery identities must not hide unmapped ancestors"
+        );
+        let op =
+            futures::executor::block_on(node.loader().op_store().read_operation(&local.0)).unwrap();
+        pending.extend(op.parents.into_iter().map(LocalOp));
+    }
 
     // A command that loaded the old history is canonicalized on the renamed parents and
     // then reparented locally by reparent_late, a second path that needs the durable marker.
@@ -313,11 +322,44 @@ fn a_delayed_child_of_a_jj_rewrite_keeps_its_origin_after_cache_loss() {
     ]);
     let mut node = open(&repo);
     assert_eq!(node.canonicalize(&source).unwrap(), expected);
+    let raw =
+        futures::executor::block_on(node.loader().op_store().read_operation(&source.0)).unwrap();
+    for parent in raw.parents {
+        let parent = LocalOp(parent);
+        assert!(
+            node.canonical_of(&parent).is_some(),
+            "a source alias must not hide an unmapped parent"
+        );
+    }
     node.canonical_heads().unwrap();
     assert_ne!(
         node.local_of(&expected),
-        Some(source),
+        Some(source.clone()),
         "an alias is not the preferred realization"
+    );
+    // A second delayed command sees the cached alias, without another cache loss.
+    repo.jj(&[
+        "--ignore-working-copy",
+        "--at-op",
+        &source.0.hex(),
+        "new",
+        "-m",
+        "delayed again",
+    ]);
+    node.canonical_heads().unwrap();
+    let mut pending = node.local_heads().unwrap();
+    let mut reachable = BTreeSet::new();
+    while let Some(local) = pending.pop() {
+        if !reachable.insert(local.clone()) {
+            continue;
+        }
+        let op =
+            futures::executor::block_on(node.loader().op_store().read_operation(&local.0)).unwrap();
+        pending.extend(op.parents.into_iter().map(LocalOp));
+    }
+    assert!(
+        !reachable.contains(&source),
+        "a warm-cache command must use the normalized source"
     );
 }
 
@@ -624,11 +666,10 @@ fn prepared_advance_merges_each_survivor_once() {
             "--ignore-working-copy",
             "--at-op",
             &x.0.hex(),
-            "bookmark",
-            "create",
+            "new",
+            "--no-edit",
+            "-m",
             name,
-            "-r",
-            "@",
         ]);
     }
     assert_eq!(node.local_heads().unwrap().len(), 2);

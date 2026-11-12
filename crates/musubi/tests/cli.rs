@@ -1007,7 +1007,11 @@ fn hub_join_sync_clone_and_list() {
     .unwrap();
     let include = format!(
         "includeIf.gitdir:{}.path",
-        conflicting_clone.join(".git").display()
+        env.root()
+            .canonicalize()
+            .unwrap()
+            .join("conflicting-parent/clone/.git")
+            .display()
     );
     alpha.git(&["config", "--global", &include, included.to_str().unwrap()]);
     let err = musubi_fails(

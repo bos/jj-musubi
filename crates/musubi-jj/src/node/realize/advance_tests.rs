@@ -225,6 +225,10 @@ fn fixture(colocated: bool) -> (TestEnv, CanonicalOp) {
         "-r",
         "@",
     ]);
+    if colocated {
+        // Commands ignoring the working copy need not export Git refs automatically.
+        b.jj(&["--ignore-working-copy", "git", "export"]);
+    }
     b.jj(&[
         "--ignore-working-copy",
         "--at-op",

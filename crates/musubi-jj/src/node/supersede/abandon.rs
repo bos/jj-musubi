@@ -227,14 +227,6 @@ impl NodeRepo {
     /// moving the op heads leaves them.
     fn realign_heads(&mut self, heads: &[LocalOp]) -> Result<(), NodeError> {
         if let Some(realign) = self.records.realign.clone() {
-            if !self.records.realign_mapped {
-                for (local, canonical) in &realign.canonical {
-                    if self.canonical_of(local).is_none() {
-                        self.insert_map(local.clone(), canonical.clone())?;
-                    }
-                }
-                self.records.realign_mapped = true;
-            }
             let now: HashSet<&LocalOp> = heads.iter().collect();
             let to: HashSet<&LocalOp> = realign.to.iter().collect();
             let ours = now == realign.from.keys().collect() || now == to;
@@ -250,6 +242,12 @@ impl NodeRepo {
             let moved = ours || beside;
             if moved {
                 self.forget_local_caches();
+                // Recovery records establish identity, not that the disposable cache has
+                // walked the ancestors. Walk only the settled targets here; native heads
+                // beside them can still need abandon detection first.
+                for target in &realign.to {
+                    self.canonicalize_unchecked(target)?;
+                }
                 self.move_workspaces(&HashMap::new())?;
             }
             // What the operations stood for is kept until none that a renaming superseded is

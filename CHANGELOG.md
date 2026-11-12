@@ -7,6 +7,9 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- After a restart, a `jj` command that finishes on an older operation no longer makes sync
+  leave duplicate operations in the local operation log. No action is needed on upgrading.
+
 - `musubi top` binds its keys as `top` and `atop` do: space, Enter or `t` refreshes now, in
   place of `r`; `d`, `s` or `i` asks how many seconds to refresh every; and Ctrl-L redraws the
   screen. Esc no longer quits, as it quits neither: use `q` or Ctrl-C. `+` and `-` still

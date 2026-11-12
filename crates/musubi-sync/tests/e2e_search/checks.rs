@@ -175,8 +175,8 @@ impl World {
         }
     }
 
-    /// Every operation made on any machine since setup is in every machine's op log, but for
-    /// those a `jj op abandon` dropped, which are in none.
+    /// Every replicated operation made since setup is in every machine's op log, but for
+    /// those native `jj op abandon` removed completely, which are in none above the joins.
     fn check_operations(&self) {
         for m in 0..self.nodes() {
             let keys = self.op_keys(m);
@@ -578,6 +578,18 @@ fn translation_failure(node: &NodeRepo, fresh: &mut NodeRepo, hub: &OpId) -> Res
             && parents != [LocalOp(op_store.root_operation_id().clone())]
         {
             continue;
+        }
+        // Source aliases establish identity without filling the disposable cache below
+        // them. Reconstruct those mappings too, without permitting a head move here.
+        let before_heads = fresh.local_heads().map_err(|e| err(&e))?;
+        for parent in &parents {
+            match fresh.canonicalize(parent) {
+                Ok(_) | Err(musubi_jj::node::NodeError::BeforeJoin(_)) => {}
+                Err(e) => return Err(err(&e)),
+            }
+        }
+        if fresh.local_heads().map_err(|e| err(&e))? != before_heads {
+            return Err("translating a parent changed the op heads".to_owned());
         }
         // A parent with no canonical form is from before the join, which a merge leaves out.
         let hive_parents: Vec<CanonicalOp> = parents

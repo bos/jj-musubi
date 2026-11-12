@@ -834,6 +834,21 @@ A local survivor carries its canonical identity through rewriting. Unmarked jj r
 identity musubi has established are retained as source aliases too: an in-flight command may
 still write on them. These facts must survive loss of the disposable translation cache, so a
 restart cannot mistake a renamed operation for new work.
+The alias records identity alone. Rebuilding the translation cache walks its parents before
+recording it there, so that realization does not write another copy of an existing ancestor.
+An alias whose identity has not been superseded is reparented and marked with that identity
+before its descendants are normalized.
+That marker carries the private workspace ownership inherited through its native parents too:
+future ownership walks stop at the marked operation.
+The identities retained for an interrupted head move obey the same rule. Recovery walks the
+settled target heads before moving workspaces; it does not cache their saved identities as
+completed ancestry walks. Cache rows distinguish this guarantee from older disposable entries,
+which are ignored and rebuilt.
+An older marked realization below a delayed command also keeps its original identity when its
+native parents still map exactly to that stored operation's parents. An unmarked ancestor on
+renamed parents is first checked against an already stored original on its raw parent identities.
+The command above it uses the current images of those identities. Reparenting skips bodies
+superseded since they were queued: the counted rewrite already supplied their replacements.
 
 The hive's history drops a set of canonical operations. Each surviving operation's parent list
 has every dropped parent replaced, where it stands, by that parent's own parents, themselves so

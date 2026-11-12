@@ -5,6 +5,9 @@
 //! file only saves re-walking the operation log on startup, so it is append-only, written
 //! without fsync, and a line that a power cut tore, or that the next line was appended to,
 //! is ignored.
+//!
+//! Rows start with `walked`: older two-field rows could cache a child above an identity-only
+//! source alias without walking its parents. Ignore those disposable entries and rebuild them.
 
 use std::collections::HashMap;
 use std::fs;
@@ -93,7 +96,7 @@ impl TranslationMap {
         // In one write, not writeln!'s several, so that two processes appending at once
         // don't interleave their lines.
         let start = if self.unended { "\n" } else { "" };
-        let line = format!("{start}{} {}\n", local.0.hex(), canonical.0.hex());
+        let line = format!("{start}walked {} {}\n", local.0.hex(), canonical.0.hex());
         self.file.write_all(line.as_bytes())?;
         self.unended = false;
         Ok(())
@@ -118,7 +121,10 @@ impl TranslationMap {
 
 /// A line's local and canonical ids, if it is whole.
 fn parse(line: &[u8]) -> Option<(LocalOp, CanonicalOp)> {
-    let (local, canonical) = std::str::from_utf8(line).ok()?.split_once(' ')?;
+    let (local, canonical) = std::str::from_utf8(line)
+        .ok()?
+        .strip_prefix("walked ")?
+        .split_once(' ')?;
     Some((LocalOp(whole_id(local)?), CanonicalOp(whole_id(canonical)?)))
 }
 
@@ -150,6 +156,22 @@ mod tests {
         CanonicalOp(id(byte))
     }
 
+    #[test]
+    fn old_rows_do_not_claim_complete_ancestry() {
+        let dir = musubi_testutil::tempdir();
+        let path = dir.path().join("translation");
+        let (local, canonical) = (local(0xa), canonical(0xb));
+        fs::write(&path, format!("{} {}\n", local.0.hex(), canonical.0.hex())).unwrap();
+        let mut map = TranslationMap::open(&path).unwrap();
+        assert_eq!(map.canonical_of(&local), None);
+        assert_eq!(map.local_of(&canonical), None);
+        map.insert(local.clone(), canonical.clone()).unwrap();
+        drop(map);
+        let map = TranslationMap::open(&path).unwrap();
+        assert_eq!(map.canonical_of(&local), Some(&canonical));
+        assert_eq!(map.local_of(&canonical), Some(&local));
+    }
+
     /// A line torn by a power cut names nothing, and the next line is not lost with it.
     #[test]
     fn a_torn_line_names_nothing() {
@@ -161,7 +183,7 @@ mod tests {
         fs::write(
             &path,
             format!(
-                "{} {}\n{} {}",
+                "walked {} {}\nwalked {} {}",
                 a.0.hex(),
                 b.0.hex(),
                 c.0.hex(),
@@ -191,7 +213,7 @@ mod tests {
         let (mut text, mut whole, mut torn) = (String::new(), vec![], vec![]);
         for i in 0..lines {
             let (local, canonical) = (local(2 * i), canonical(2 * i + 1));
-            let line = format!("{} {}", local.0.hex(), canonical.0.hex());
+            let line = format!("walked {} {}", local.0.hex(), canonical.0.hex());
             if tc.draw(gs::booleans()) {
                 let cut = tc.draw(gs::integers::<usize>().max_value(line.len() - 1));
                 text.push_str(&line[..cut]);

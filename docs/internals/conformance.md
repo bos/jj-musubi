@@ -635,6 +635,10 @@ that source keeps its established canonical correspondence.
 `a_delayed_child_of_a_jj_rewrite_keeps_its_origin_after_cache_loss` checks that the source alias
 survives cache loss and restart, that retaining a counted step while losing its head move
 completes the physical rewrite, and that a delayed child keeps the original identity afterward.
+Resolving that identity must also map its native parents before realization decides which
+operations are missing; an identity-only alias is not evidence that its ancestry was walked.
+A second delayed command without another cache loss must also use the normalized local
+parent, even though its canonical identity has not changed.
 `torn_steps_lose_only_themselves` generates the source rows too: no partial counted block can
 silently omit an alias that records depend on. These local translation and crash boundaries are
 tested runtime obligations, not additional theorems of the abstract protocol model.

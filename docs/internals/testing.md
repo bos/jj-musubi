@@ -314,6 +314,19 @@ files after writes finish. A recorded fixture shares setup among the three failu
 cases. [Conformance](conformance.md#storage-errors) describes the batch invalidation, recovery
 and publication checks and their limits.
 
+`translation::a_delayed_child_of_a_jj_rewrite_keeps_its_origin_after_cache_loss` also checks
+that resolving a saved source identity walks its native parents before recovery decides which
+operations need realizing. Restoring the old shortcut, which returned the identity without
+walking those parents, fails its unmapped-parent assertion.
+Keeping a second delayed child on the cached old source fails its native-reachability
+assertion, even when that source and its normalized realization share a canonical id.
+`translation::taking_an_abandon_preserves_original_identity_after_cache_loss` also interrupts
+taking records before publishing the heads and removes the cache. Restoring the saved head
+identities directly into the cache fails its assertion that recovery maps every native ancestor.
+`history::a_command_inside_a_full_trim_keeps_workspace_owners` checks rebuilding through an old
+marked ancestor after a full trim: validating that ancestor as its contracted image instead of
+its original body rejects the delayed command.
+
 ### The hub and the CLI
 
 `failure_logs_read_operation_heads_without_changing_them` checks that CLI failure diagnostics
@@ -815,16 +828,21 @@ and the test checks that:
   translation cache, translating again from nothing gives what the machine remembered, makes no
   canonical operation, gives distinct local operations reachable from the op heads distinct
   canonical forms, with the parents' forms as their parents but at a join point, and gives every
-  operation of the hive's history a realization that translates back to it;
+  operation of the hive's history a realization that translates back to it. Reconstructing
+  an alias's parent mappings must not move the already settled op heads;
 - all repositories agree on visible commits, change ids, bookmarks, tags, and remote bookmarks;
 - in every colocated repository, `refs/heads` matches the local bookmarks that are neither
   conflicted nor on the root commit (which git can't hold), and a further `jj status` imports
   nothing;
-- every operation made on any machine appears in every machine's `jj op log`, but for a copy's
-  join, which on the copy itself is the last operation it made before joining, and for those
-  `jj op abandon` dropped, which appear in none, unless jj brought one back on the machine that
-  abandoned it, through a stale working copy ([races.md, "Known jj
-  limitations"](races.md#known-jj-limitations));
+- every operation made on any machine appears in the replicated portion of every machine's
+  `jj op log`, down to independently recorded join points, except a copy's join, which on the
+  copy itself is its last operation before joining, and operations `jj op abandon` removed
+  completely. Removing one native alias while another remains does not remove that operation.
+  Dropped operations appear in none, unless jj brought one back on the abandoning machine
+  through a stale working copy
+  ([races.md, "Known jj limitations"](races.md#known-jj-limitations)).
+  History below a join point stays private even if a native abandon reparents that join point
+  above shared history;
 - no change diverges, and no bookmark or tag conflicts, unless jj makes the same of the same
   operations in one repository (the reference, below);
 - no change has two commits with the same parents and contents that two merges rewrote from
@@ -865,7 +883,8 @@ the hub's history, operation by operation, with the same parents:
    when its former parent was dropped. It remains a command: the harness records each new
    operation of a jj invocation, including intermediate snapshots and imports, with its source
    input and output. The reference checks its shared payload against that output and checks
-   unexplained divergence and conflicts against its input. Genuine reconciliations still take the
+   unexplained divergence and conflicts against its input, bounded by the native result. Genuine
+   reconciliations still take the
    merge path. `e2e_command_above_dropped_merge` pairs such a bookmark command with a concurrent
    one and checks the resulting genuine merge, then trims to the root while preserving the
    inherited conflict. Source witnesses cover reparented single-parent fix-ups as well as merges;
@@ -889,7 +908,18 @@ limitations"](races.md#known-jj-limitations)).
 The test also checks that the hive's history can stand for one repository's: every machine's
 realization of each operation has the hive's view of it, and no operation but a merge makes
 anything diverge or conflict unless what it did explains it: a fetch, an undo or restore, or an
-import of git refs or of git's HEAD.
+import of git refs or of git's HEAD. A recorded native command can itself introduce divergence;
+translation may retain those exact versions and conflict terms, but add none beyond them.
+The snapshot-capture example checks both an accepted native divergence and a rejected extra
+canonical version using its captured commit versions.
+
+Workspace certificates distinguish an authenticated historical name from an exact canonical
+binding. A captured command can rebase another copy's working copy without moving that owner's
+canonical slot. It carries an input name only through its unambiguous raw alias; a global birth
+or a matching outgoing name alone supplies no certificate. Native merge replay uses the same
+copy's actual owned bindings in its base and ordered parents, for authenticated names only,
+and checks the output structurally. The pure namespace controls cover a missing input certificate,
+an owner rename, and an owned literal that collides with a foreign alias.
 
 To keep the search effective:
 

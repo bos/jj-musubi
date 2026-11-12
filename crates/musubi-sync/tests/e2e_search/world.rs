@@ -16,6 +16,7 @@ use musubi_core::message::Request;
 use musubi_core::node::Step;
 use musubi_jj::node::NodeError;
 use musubi_jj::op_id::CanonicalOp;
+use musubi_jj::op_id::LocalOp;
 use musubi_sync::Attachment;
 use musubi_sync::OpId;
 use musubi_sync::hub::WAIT_AFTER_OPENING;
@@ -46,6 +47,23 @@ pub const FILES: [&str; 3] = ["a.txt", "b.txt", "dir/c.txt"];
 /// Operation metadata, which a realization shares with the operation it realizes, so it
 /// identifies an operation across machines even though local ids differ.
 const OP_KEY_TEMPLATE: &str = r#"time.start().format("%Y-%m-%dT%H:%M:%S%.f") ++ " " ++ time.end().format("%Y-%m-%dT%H:%M:%S%.f") ++ " " ++ user ++ " " ++ description.first_line() ++ "\n""#;
+
+/// The native head before joining: the fixture has not introduced concurrency yet.
+fn native_head(repo: &TestRepo) -> OpId {
+    let heads: Vec<_> = fs::read_dir(repo.repo_path().join("op_heads/heads"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(heads.len(), 1);
+    OpId::try_from_hex(heads[0].to_str().unwrap()).unwrap()
+}
+
+/// A native abandon changes an operation's parents but preserves the rest of its identity.
+fn join_fingerprint(op: &jj_lib::op_store::Operation) -> OpId {
+    let mut op = op.clone();
+    op.parents.clear();
+    OpId::new(jj_lib::content_hash::blake2b_hash(&op).to_vec())
+}
 
 /// The one id of `ids`, if it has exactly one.
 fn single(ids: Option<&BTreeSet<String>>) -> Option<&String> {
@@ -182,6 +200,8 @@ pub struct World {
     /// Each machine's operation ids and keys once the hive was set up.
     baseline_ids: Vec<BTreeSet<String>>,
     pub baseline_keys: Vec<BTreeSet<String>>,
+    /// Each copy's join point, observed before joining, apart from its parents.
+    join_points: Vec<OpId>,
     /// The keys of every machine's operations once the hive was set up: what a copy made
     /// later has of them is its baseline too.
     hive_baseline: BTreeSet<String>,
@@ -284,7 +304,17 @@ impl World {
                 workspaces
             })
             .collect();
+        let join_points: Vec<_> = repos.iter().map(native_head).collect();
         let fx = Fixture::join(env, repos);
+        let join_points = join_points
+            .iter()
+            .zip(&fx.hive.members)
+            .map(|(head, member)| {
+                let store = member.adapter.repo().loader().op_store();
+                let op = futures::executor::block_on(store.read_operation(head)).unwrap();
+                join_fingerprint(&op)
+            })
+            .collect();
         let workspace_births: BTreeSet<String> = workspaces
             .iter()
             .enumerate()
@@ -306,6 +336,7 @@ impl World {
             workspaces,
             baseline_ids: vec![],
             baseline_keys: vec![],
+            join_points,
             hive_baseline: BTreeSet::new(),
             baseline_merge_keys: BTreeSet::new(),
             abandoned: vec![],
@@ -825,7 +856,7 @@ impl World {
                 let input = self.fx.hive.members[m]
                     .adapter
                     .repo()
-                    .canonical_of(&musubi_jj::op_id::LocalOp(parent_id.clone()))
+                    .canonical_of(&LocalOp(parent_id.clone()))
                     .filter(|input| {
                         self.fx.hive.members[m]
                             .adapter
@@ -1968,7 +1999,21 @@ impl World {
             .lines()
             .map(without_op_ids)
             .collect();
+        let join_point = native_head(&repo);
         self.fx.add(repo);
+        let store = self
+            .fx
+            .hive
+            .members
+            .last()
+            .unwrap()
+            .adapter
+            .repo()
+            .loader()
+            .op_store();
+        let join_point = join_fingerprint(
+            &futures::executor::block_on(store.read_operation(&join_point)).unwrap(),
+        );
         let primary = vec![Workspace {
             name: "default".to_owned(),
             path: None,
@@ -1995,7 +2040,9 @@ impl World {
             self.seen.push(None);
             self.baseline_ids.push(BTreeSet::new());
             self.baseline_keys.push(BTreeSet::new());
+            self.join_points.push(join_point.clone());
         }
+        self.join_points[m] = join_point;
         self.logical_extras.resize_with(self.nodes(), BTreeSet::new);
         self.logical_extras[m].clear();
         for ws in &self.workspaces[m] {
@@ -2061,7 +2108,7 @@ impl World {
         let Some(before) = before else {
             return;
         };
-        let keys = self.merge_keys(m);
+        let keys: BTreeSet<_> = self.replicated_history(m).into_values().collect();
         let count = self.abandoned.len();
         self.abandoned
             .retain(|(by, _, merge)| *by != m || before.contains(merge) || !keys.contains(merge));
@@ -2076,7 +2123,7 @@ impl World {
         self.abandoned
             .iter()
             .any(|(by, ..)| *by == m)
-            .then(|| self.merge_keys(m))
+            .then(|| self.replicated_history(m).into_values().collect())
     }
 
     /// The `merge_key` of every operation in machine `m`'s history, read in process: a `jj`
@@ -2109,8 +2156,7 @@ impl World {
         keys
     }
 
-    /// Machine `m` runs `jj op abandon` of its operation `op`, which no machine may have
-    /// afterwards.
+    /// Machine `m` runs `jj op abandon` of its native operation `op`.
     pub fn op_abandon(&mut self, m: usize, op: &str) {
         self.abandon_ops(m, op, &[op.to_owned()]);
     }
@@ -2162,7 +2208,8 @@ impl World {
     }
 
     /// `jj op abandon` of `spec` on machine `m`: one operation, or a range `x..y`, which drops
-    /// the operations `dropped`.
+    /// the native operations `dropped`. An operation with another reachable local version
+    /// has not been removed from the replicated history.
     pub fn abandon_ops(&mut self, m: usize, spec: &str, dropped: &[String]) {
         self.begin_workspace_trim(m);
         let store = self.fx.hive.members[m]
@@ -2199,8 +2246,13 @@ impl World {
             let replaced = self.retained_source(m, &op);
             self.remember_retained(key.clone(), replaced);
         }
+        let retained: BTreeSet<_> = self.replicated_history(m).into_values().collect();
         for (key, merge) in dropped {
-            self.abandoned.push((m, key, merge));
+            // Native abandonment of one physical alias can leave another reachable.
+            // The logical operation remains part of the history in that case.
+            if !retained.contains(&merge) {
+                self.abandoned.push((m, key, merge));
+            }
         }
     }
 
@@ -2366,11 +2418,38 @@ impl World {
         }
     }
 
+    /// The replicated portion of the native history, stopping at this copy's join point.
+    /// A native abandon can reparent a join point above shared history; its parents are
+    /// still private, even if some of those operations once belonged to the hive.
     pub fn op_keys(&self, m: usize) -> BTreeSet<String> {
-        self.raw_jj(m, &["op", "log", "--no-graph", "-T", OP_KEY_TEMPLATE])
-            .lines()
-            .map(without_op_ids)
+        let history = self.replicated_history(m);
+        self.op_ids_and_keys(m, None)
+            .into_iter()
+            .filter(|(id, _)| history.contains_key(&OpId::try_from_hex(id).unwrap()))
+            .map(|(_, key)| key)
             .collect()
+    }
+
+    /// Native ids and merge keys above the independently observed join boundary.
+    fn replicated_history(&self, m: usize) -> BTreeMap<OpId, String> {
+        let store = self.fx.hive.members[m].adapter.repo().loader().op_store();
+        let mut pending = self.fx.hive.members[m]
+            .adapter
+            .repo()
+            .local_heads()
+            .unwrap();
+        let mut history = BTreeMap::new();
+        while let Some(local) = pending.pop() {
+            if history.contains_key(&local.0) {
+                continue;
+            }
+            let op = futures::executor::block_on(store.read_operation(&local.0)).unwrap();
+            history.insert(local.0, merge_key(&op));
+            if join_fingerprint(&op) != self.join_points[m] {
+                pending.extend(op.parents.into_iter().map(LocalOp));
+            }
+        }
+        history
     }
 
     // Workspaces.

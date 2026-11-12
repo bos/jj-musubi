@@ -118,8 +118,6 @@ pub(super) struct Records {
     taking: Option<Taking>,
     /// For tests of crashes and errors: where the next taking of records stops.
     stop: Option<TakingStop>,
-    /// Whether `realign`'s translations are in the translation cache, as this opened it.
-    realign_mapped: bool,
 }
 
 /// Where a test stops the next taking of records ([`NodeRepo::fail_holding_records`],
@@ -308,7 +306,9 @@ impl Records {
     }
 
     pub(super) fn source(&self, local: &LocalOp) -> Option<&CanonicalOp> {
-        self.sources.get(local)
+        self.sources
+            .get(local)
+            .or_else(|| self.realign.as_ref()?.canonical.get(local))
     }
 
     /// [`NodeRepo::held_records`].

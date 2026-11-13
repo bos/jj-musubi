@@ -159,6 +159,12 @@ operations, objects, staging and accepted base, and restarts `NodeCore`; there a
 handles or translation caches to reopen. A hub's ordinary error keeps the same adapter,
 as `HubService` does, and fails the requesting node's sync. The error reply's bytes are
 abstracted away. Recovery is not a claim that retrying the same node core is sufficient.
+Every fake process restart also clears its armed crash injection and the interrupted
+receipt's object-loss latch. Those are transient test controls, not retained store data.
+`storage_boundaries::an_interrupted_fetch_does_not_discard_a_later_object_reply` fails a
+fetch after its operations were staged, then receives the objects separately. Keeping the
+old latch discards that new reply and fails the oracle's `recvObjs` comparison; the test
+keeps the oracle throughout recovery.
 Once faults stop, ordinary honest exchanges must converge with every created operation
 retained; representable cases also keep the oracle's liveness checks during that suffix.
 

@@ -181,3 +181,27 @@ fn duplicate_upload_errors_stutter_in_the_model() {
     world.quiesce();
     world.check_invariants();
 }
+
+/// An error after staging operations restarts the process before its armed object loss.
+/// The subsequent object-only reply belongs to a new receipt and must be retained.
+#[test]
+fn an_interrupted_fetch_does_not_discard_a_later_object_reply() {
+    let mut world = World::new(2, Some(Oracle::spawn()));
+    world.user_op(1, 0, 1);
+    world.exchange(1, 0);
+    world.crash_before_objects(0);
+    world.poll(0);
+    let request = world.net_len() - 1;
+    world.deliver(request);
+    let reply = world.net_len() - 1;
+    world.arm_storage(1, Timing::After);
+    world.deliver(reply);
+    let (_, failure) = world.stop_storage();
+    assert_eq!(failure.unwrap().call, "node.stage_ops");
+    assert!(world.has_oracle());
+    world.deliver_notifications(0);
+    world.exchange(0, 0);
+    assert!(world.has_oracle());
+    world.quiesce();
+    world.check_invariants();
+}

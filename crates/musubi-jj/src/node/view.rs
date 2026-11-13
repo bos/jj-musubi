@@ -463,14 +463,34 @@ impl NodeRepo {
     pub(super) fn workspace_context(&self, at: &CanonicalOp) -> Result<String, NodeError> {
         let view = self.canonical.read_operation_view(at)?;
         let presence = self.presence(at)?;
+        self.workspace_context_of_view(&view, &presence)
+    }
+
+    pub(super) fn workspace_context_of_view(
+        &self,
+        view: &View,
+        presence: &Presence<Work>,
+    ) -> Result<String, NodeError> {
+        // A temporary canonical view can already contain this command's new workspaces
+        // while `presence` still describes its parents. Reserve those literal names too.
+        let own = view
+            .wc_commit_ids
+            .keys()
+            .filter_map(|key| {
+                workspaces::split_key(key.as_str()).and_then(|(owner, name)| {
+                    (owner == self.machine.key()).then(|| WorkspaceNameBuf::from(name))
+                })
+            })
+            .collect();
+        let prefixes = self.prefixes_with_own(view, presence, &own)?;
         Ok(Namespace {
             source: self.machine.key().to_owned(),
             names: self
-                .local_names(&view, &presence)?
+                .names_of(view, &prefixes)
                 .into_iter()
                 .map(|(key, name)| (name.as_str().to_owned(), key.as_str().to_owned()))
                 .collect(),
-            known: self.machines_of(&view, presence.known()),
+            known: self.machines_of(view, presence.known()),
         }
         .encode())
     }
@@ -1085,6 +1105,47 @@ mod tests {
 
     use super::refs_model::RefsModel;
     use super::refs_model::Slot;
+
+    #[test]
+    fn source_context_reserves_new_owned_literals_before_presence_is_applied() {
+        let env = TestEnv::new();
+        let repo = env.init_repo("alpha");
+        let mut node = NodeRepo::open(&repo.repo_path(), &repo.settings()).unwrap();
+        let head = node.canonical_heads().unwrap().pop().unwrap();
+        let owner = node.machine.key().to_owned();
+        let work = Work::of(&node.canonical, &head).unwrap();
+        let presence = (*node.presence(&head).unwrap()).clone().apply(
+            &work,
+            &Kind {
+                forgets: BTreeSet::from([owner.clone()]),
+                ..Kind::default()
+            },
+        );
+        assert!(!presence.is_present(&owner));
+        let mut view = node.canonical.read_operation_view(&head).unwrap();
+        let target = view.wc_commit_ids.values().next().unwrap().clone();
+        let own = workspaces::workspace_key(&owner, "beta/x");
+        let foreign = workspaces::workspace_key("beta#bbbb", "x");
+        view.wc_commit_ids.insert(own.clone(), target.clone());
+        view.wc_commit_ids.insert(foreign.clone(), target);
+        assert!(
+            !node
+                .own_names_in(&view, &presence)
+                .unwrap()
+                .contains(WorkspaceName::new("beta/x"))
+        );
+        let context: Namespace =
+            serde_json::from_str(&node.workspace_context_of_view(&view, &presence).unwrap())
+                .unwrap();
+        assert_eq!(context.names.get("beta/x"), Some(&own.as_str().to_owned()));
+        assert!(
+            context
+                .names
+                .iter()
+                .any(|(name, key)| { key == foreign.as_str() && name != "beta/x" })
+        );
+        assert_eq!(context.names.len(), view.wc_commit_ids.len());
+    }
 
     const X: &str = "refs/heads/x";
 

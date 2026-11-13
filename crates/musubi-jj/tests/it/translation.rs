@@ -361,6 +361,80 @@ fn an_orphaned_command_keeps_its_native_workspace_owners() {
     }
 }
 
+/// A new native child can still name an old parent while its canonical image is root.
+/// Trimming the parent changes membership, not the ownership of names in that child's view.
+#[test]
+fn a_fresh_child_of_trimmed_parents_keeps_its_source_namespace() {
+    use musubi_jj::records::{HubOp, Record, RecordPrefix};
+    use pollster::FutureExt as _;
+
+    for cold in [false, true] {
+        let env = TestEnv::new();
+        let a = env.init_repo("alpha");
+        let b = env.init_repo("beta");
+        let mut node = open(&a);
+        let mut other = open(&b);
+        let first = single_canonical_head(&mut node);
+        sync(&node, &mut other, &first);
+        let joined = single_canonical_head(&mut other);
+        sync(&other, &mut node, &joined);
+        let basis = node.local_heads().unwrap().pop().unwrap();
+        let base = node.canonicalize(&basis).unwrap();
+        let foreign = node
+            .machine_workspaces()
+            .unwrap()
+            .into_iter()
+            .map(|(name, _)| name)
+            .find(|name| name.contains('/'))
+            .unwrap();
+        let drops = node
+            .canonical_store()
+            .ancestors_until(&[base], |_| false)
+            .unwrap();
+        node.prepare_records(
+            &RecordPrefix::none(),
+            &[Record::new(drops.into_iter().map(HubOp))],
+        )
+        .unwrap();
+        node.crash_taking_records(false);
+        let root = node.canonical_store().root_operation_id().clone();
+        node.advance_to(std::slice::from_ref(&root)).unwrap_err();
+        drop(node);
+        // No physical op abandon: the native command still inherits the old namespace.
+        a.jj(&["--ignore-working-copy", "describe", "-m", "fresh child"]);
+        if cold {
+            std::fs::remove_file(a.repo_path().join("musubi/translation")).unwrap();
+        }
+        node = open(&a);
+        let child = node.local_heads().unwrap().pop().unwrap();
+        let raw = node
+            .loader()
+            .op_store()
+            .read_operation(&child.0)
+            .block_on()
+            .unwrap();
+        assert_eq!(raw.parents, vec![basis.0.clone()]);
+        let head = node.canonicalize(&child).unwrap();
+        let op = node.canonical_store().read_operation(&head).unwrap();
+        assert_eq!(op.parents, vec![root.0]);
+        let view = node.canonical_store().read_operation_view(&head).unwrap();
+        assert!(
+            !view
+                .wc_commit_ids
+                .keys()
+                .any(|key| { key.as_str() == format!("{}/{}", node.machine().key(), foreign) }),
+            "a foreign alias must not become this machine's workspace: {:?}",
+            view.wc_commit_ids
+        );
+        assert!(
+            view.wc_commit_ids
+                .keys()
+                .all(|key| { key.as_str() == format!("{}/alpha", node.machine().key()) })
+        );
+        assert_eq!(view.wc_commit_ids.len(), 1);
+    }
+}
+
 /// A root from private history is not an orphan whose ownership needs recovering.
 #[test]
 fn a_private_root_workspace_is_not_a_lost_shared_source() {

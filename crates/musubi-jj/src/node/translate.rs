@@ -756,12 +756,32 @@ impl NodeRepo {
                 }
             }
         }
+        // Parent contraction changes which workspaces are present, but must not change
+        // whose names a fresh native command inherited. Recover that namespace from the
+        // original canonical parents before interpreting its view on the new frontier.
+        // Do not publish those parents or inherit their membership into the result.
+        let source_parents = self.raw_parents(&LocalOp::parents_of(op));
+        let changed_parents = source_parents != parents;
+        if changed_parents {
+            let (source_view, source_presence) = self.canonical_view(
+                id,
+                view.clone(),
+                &source_parents,
+                op.commit_predecessors.as_ref(),
+                &Kind::of(&metadata),
+                &metadata,
+            )?;
+            metadata.attributes.insert(
+                crate::canonical::namespace::ATTRIBUTE.to_owned(),
+                self.workspace_context_of_view(&source_view, &source_presence)?,
+            );
+        }
         if let Some(context) = crate::canonical::namespace::Namespace::read(&metadata)? {
             let mut known = std::collections::BTreeSet::new();
             for parent in &parents {
                 known.extend(self.presence(parent)?.known().iter().cloned());
             }
-            if context.known.is_subset(&known) {
+            if !changed_parents && context.known.is_subset(&known) {
                 metadata
                     .attributes
                     .remove(crate::canonical::namespace::ATTRIBUTE);

@@ -907,6 +907,13 @@ machine. Its exact foreign bindings apply only to aliases already in their nativ
 so a new local workspace can reuse a forgotten foreign alias. Other machines consume the
 canonical views and render the canonical keys in their own namespaces.
 
+A command can also finish on a native parent that still exists while a pending trim has
+already changed that parent's canonical image. Before interpreting the command on its new
+canonical parents, musubi derives its source namespace from the original canonical parents.
+This records translation evidence only: their old membership and workspace bindings do not
+become the new operation's parents or presence. Literal names actually owned in that source
+view reserve their prefixes even if the command is bringing a forgotten copy back.
+
 A receiving machine also captures and canonicalizes the exact native heads that exist when
 it prepares a trim, before contracting them. This covers commands that finished after the
 policy last inspected its heads. These operations still have their actual source parents,

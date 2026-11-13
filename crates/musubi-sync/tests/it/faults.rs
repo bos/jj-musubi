@@ -2011,14 +2011,18 @@ fn big_commit(repo: &TestRepo, message: &str) {
 }
 
 fn visible(repo: &TestRepo) -> String {
-    repo.jj(&[
+    let output = repo.jj(&[
         "log",
         "--no-graph",
         "-r",
         "all()",
         "-T",
         "commit_id ++ \" \" ++ description.first_line() ++ \"\\n\"",
-    ])
+    ]);
+    // Concurrent commits can have different valid topological enumeration orders.
+    let mut rows: Vec<_> = output.lines().collect();
+    rows.sort_unstable();
+    rows.join("\n")
 }
 
 fn run_local(future: impl Future<Output = ()>) {

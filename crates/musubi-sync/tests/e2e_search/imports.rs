@@ -99,6 +99,8 @@ pub struct Imports {
     /// Each machine's HEAD, where git moved it through the branch it is a symbolic ref to,
     /// since jj last imported it, by its workspace's name: what HEAD had before each move.
     head_moved: Vec<BTreeMap<String, Vec<RefTarget>>>,
+    /// Exact published carriers of a root receipt's independently captured Git frontier.
+    pub(crate) preserved_heads: Vec<BTreeMap<OperationId, Vec<OperationId>>>,
 }
 
 /// A ref an import compares with `.git`.
@@ -302,7 +304,8 @@ struct Log {
     ops: HashMap<OperationId, op_store::Operation>,
     views: HashMap<OperationId, View>,
     repos: HashMap<OperationId, Arc<ReadonlyRepo>>,
-    native_sources: BTreeMap<String, op_store::Operation>,
+    captured_sources: BTreeMap<String, op_store::Operation>,
+    preserved_heads: BTreeMap<OperationId, Vec<OperationId>>,
     validated: HashSet<(OperationId, RecordKind)>,
     head_writers: HashMap<(OperationId, String), Arc<HashSet<Option<CommitId>>>>,
 }
@@ -330,7 +333,7 @@ impl Log {
                 continue;
             }
             let (id, ws) = &key;
-            let op = self.record_operation(id);
+            let op = self.head_operation(id, ws);
             let now = self.head(id, ws);
             let renamed = op
                 .metadata
@@ -378,9 +381,29 @@ impl Log {
         Ok(self.head_writers[&wanted].clone())
     }
 
+    fn head_operation(&mut self, id: &OperationId, ws: &str) -> op_store::Operation {
+        let mut op = self.captured_operation(id);
+        if let Some(parents) = self.preserved_heads.get(id).cloned() {
+            // A root receipt can carry the captured observation, but a later merge or
+            // export of the same canonical target can legitimately change its record.
+            // Both explanations must follow jj's rules and validate their source history.
+            op.metadata.workspace_name = None;
+            let mut captured = op.clone();
+            captured.parents = parents;
+            if self.head_transition_matches(id, ws, &captured) {
+                return captured;
+            }
+        }
+        op
+    }
+
     fn record_operation(&mut self, id: &OperationId) -> op_store::Operation {
+        self.captured_operation(id)
+    }
+
+    fn captured_operation(&mut self, id: &OperationId) -> op_store::Operation {
         let op = self.op(id).clone();
-        self.native_sources
+        self.captured_sources
             .get(&crate::world::merge_key(&op))
             .filter(|source| !source.metadata.attributes.contains_key(CANONICAL_ATTRIBUTE))
             .filter(|source| crate::world::same_source_body(source, &op))
@@ -418,7 +441,10 @@ impl Log {
                 RecordKind::Ref(r) => self.plausible(&id, r)?,
                 RecordKind::Head(ws) => self.head_plausible(&id, ws)?,
             }
-            let op = self.record_operation(&id);
+            let op = match record {
+                RecordKind::Head(ws) => self.head_operation(&id, ws),
+                RecordKind::Ref(_) => self.record_operation(&id),
+            };
             pending.push((id, true));
             pending.extend(op.parents.into_iter().rev().map(|p| (p, false)));
         }
@@ -558,12 +584,16 @@ impl Log {
         Ok(touched)
     }
 
-    fn head_plausible(&mut self, id: &OperationId, ws: &str) -> Result<(), String> {
-        let op = self.record_operation(id);
+    fn head_transition_matches(
+        &mut self,
+        id: &OperationId,
+        ws: &str,
+        op: &op_store::Operation,
+    ) -> bool {
         let now = self.head(id, ws);
         let parents: Vec<RefTarget> = op.parents.iter().map(|p| self.head(p, ws)).collect();
-        let plausible = match parents.as_slice() {
-            [parent] => jj_command(&self.owner, &op) || *parent == now,
+        match parents.as_slice() {
+            [parent] => jj_command(&self.owner, op) || *parent == now,
             [left, right] if !parents.contains(&now) => {
                 let bases = self.bases(&op.parents);
                 let base_heads: Vec<RefTarget> = bases.iter().map(|b| self.head(b, ws)).collect();
@@ -575,8 +605,13 @@ impl Log {
                 }
             }
             _ => parents.contains(&now),
-        };
-        if !plausible {
+        }
+    }
+
+    fn head_plausible(&mut self, id: &OperationId, ws: &str) -> Result<(), String> {
+        let op = self.head_operation(id, ws);
+        if !self.head_transition_matches(id, ws, &op) {
+            let now = self.head(id, ws);
             return Err(format!(
                 "{} made jj's record of {ws}'s HEAD {}, as jj doesn't",
                 describe(&self.owner, id, &op),
@@ -747,7 +782,8 @@ fn physical_head_writers_are_distinct_from_merge_record_terms() {
         ops: HashMap::new(),
         views: HashMap::new(),
         repos: HashMap::new(),
-        native_sources: BTreeMap::new(),
+        captured_sources: BTreeMap::new(),
+        preserved_heads: BTreeMap::new(),
         validated: HashSet::new(),
         head_writers: HashMap::new(),
     };
@@ -781,6 +817,151 @@ fn physical_head_writers_are_distinct_from_merge_record_terms() {
 }
 
 #[test]
+fn preserved_head_records_require_the_exact_captured_frontier() {
+    use crate::world::{Naming, Setup};
+
+    let world = World::new(Setup {
+        nodes: 2,
+        naming: Naming::Default,
+        prejoin: true,
+        secondary: false,
+    });
+    let loader = world.fx.hive.members[0].adapter.repo().loader().clone();
+    let store = loader.op_store().clone();
+    let original = OperationId::try_from_hex(world.latest_op_head(0)).unwrap();
+    let template = block_on(store.read_operation(&original)).unwrap();
+    let view = block_on(store.read_view(&template.view_id)).unwrap();
+    let a = head(&view, "default");
+    assert!(!a.is_absent());
+    let b = RefTarget::normal(
+        view.wc_commit_ids
+            .values()
+            .find(|id| a.as_normal() != Some(*id))
+            .unwrap()
+            .clone(),
+    );
+    let make = |description: &str, value: RefTarget, parent: OperationId, writer: bool| {
+        let mut op = template.clone();
+        op.parents = vec![parent];
+        op.metadata.description = description.to_owned();
+        op.metadata.workspace_name = writer.then(|| WorkspaceName::DEFAULT.to_owned());
+        op.metadata.attributes.clear();
+        if !writer {
+            op.metadata
+                .attributes
+                .insert(CANONICAL_ATTRIBUTE.to_owned(), "root carrier".to_owned());
+        }
+        let mut v = view.clone();
+        v.git_heads.insert(WorkspaceName::DEFAULT.to_owned(), value);
+        op.view_id = block_on(store.write_view(&v)).unwrap();
+        block_on(store.write_operation(&op)).unwrap()
+    };
+    let historical = make("reset git head", b.clone(), original.clone(), true);
+    let carrier = make("preserve root input", a.clone(), historical.clone(), false);
+    let bad_input = make(
+        "invalid input observation",
+        a.clone(),
+        historical.clone(),
+        false,
+    );
+    let wrong = make(
+        "wrong root input",
+        RefTarget::absent(),
+        historical.clone(),
+        false,
+    );
+    let inherited = make("later physical merge", b.clone(), historical.clone(), false);
+    let mut body = block_on(store.read_operation(&carrier)).unwrap();
+    body.metadata.description = "different carrier body".to_owned();
+    let altered = block_on(store.write_operation(&body)).unwrap();
+    let own_canonical = world.fx.hive.members[0]
+        .adapter
+        .repo()
+        .canonical_store()
+        .operation_ids()
+        .unwrap()
+        .into_iter()
+        .find(|id| {
+            let store = world.fx.hive.members[0].adapter.repo().canonical_store();
+            musubi_jj::presence::Kind::of(&store.read_operation(id).unwrap().metadata)
+                .work
+                .as_deref()
+                == Some(world.fx.machine_key(0).as_str())
+        })
+        .unwrap();
+    let mut claimed = block_on(store.read_operation(&wrong)).unwrap();
+    claimed.metadata.workspace_name = Some(WorkspaceName::DEFAULT.to_owned());
+    claimed
+        .metadata
+        .attributes
+        .insert(CANONICAL_ATTRIBUTE.to_owned(), own_canonical.0.hex());
+    assert!(jj_command(&world.owner(0), &claimed));
+    let claimed = block_on(store.write_operation(&claimed)).unwrap();
+    let log = |preserved_heads| Log {
+        owner: world.owner(0),
+        loader: loader.clone(),
+        store: store.clone(),
+        ops: HashMap::new(),
+        views: HashMap::new(),
+        repos: HashMap::new(),
+        captured_sources: BTreeMap::new(),
+        preserved_heads,
+        validated: HashSet::new(),
+        head_writers: HashMap::new(),
+    };
+    let setup = &world.imports.setup[0];
+    let record = RecordKind::Head("default".to_owned());
+    assert!(
+        log(BTreeMap::new())
+            .validate_record(&carrier, setup, &record)
+            .is_err()
+    );
+    // A rendering of the same target can subsequently inherit another valid physical
+    // record. The captured frontier is an explanation, not a replacement for that history.
+    log(BTreeMap::from([(
+        inherited.clone(),
+        vec![original.clone()],
+    )]))
+    .validate_record(&inherited, setup, &record)
+    .unwrap();
+    let valid = BTreeMap::from([(carrier.clone(), vec![original.clone()])]);
+    log(valid.clone())
+        .validate_record(&carrier, setup, &record)
+        .unwrap();
+    assert!(
+        log(valid)
+            .validate_record(&altered, setup, &record)
+            .is_err()
+    );
+    assert!(
+        log(BTreeMap::from([(wrong.clone(), vec![original.clone()])]))
+            .validate_record(&wrong, setup, &record)
+            .is_err()
+    );
+    assert!(
+        log(BTreeMap::from([(claimed.clone(), vec![original.clone()])]))
+            .validate_record(&claimed, setup, &record)
+            .is_err(),
+        "a carrier of an own command still writes no HEAD"
+    );
+    let invalid = BTreeMap::from([(carrier.clone(), vec![bad_input])]);
+    assert!(
+        log(invalid.clone())
+            .head_plausible(&carrier, "default")
+            .is_ok()
+    );
+    assert!(
+        log(invalid)
+            .validate_record(&carrier, setup, &record)
+            .is_err()
+    );
+    let physical = log(BTreeMap::from([(carrier.clone(), vec![original])]))
+        .possible_heads(&carrier, "default", setup)
+        .unwrap();
+    assert_eq!(&*physical, &HashSet::from([a.as_normal().cloned()]));
+}
+
+#[test]
 fn trimmed_record_sources_preserve_provenance_without_hiding_invalid_ancestors() {
     use crate::world::{Naming, Setup};
 
@@ -798,7 +979,7 @@ fn trimmed_record_sources_preserve_provenance_without_hiding_invalid_ancestors()
     let source = block_on(store.read_operation(&native)).unwrap();
     assert_eq!(source.metadata.description, "musubi: forget beta");
     world.trim_below_accepted_push(0);
-    let sources = world.native_record_sources(0);
+    let sources = world.captured_record_sources(0);
     let key = crate::world::merge_key(&source);
     assert!(sources.contains_key(&key));
     let root = store.root_operation_id().clone();
@@ -814,14 +995,15 @@ fn trimmed_record_sources_preserve_provenance_without_hiding_invalid_ancestors()
             name: "kept".to_owned(),
         }),
     ];
-    let log = |native_sources| Log {
+    let log = |captured_sources| Log {
         owner: world.owner(0),
         loader: loader.clone(),
         store: store.clone(),
         ops: HashMap::new(),
         views: HashMap::new(),
         repos: HashMap::new(),
-        native_sources,
+        captured_sources,
+        preserved_heads: BTreeMap::new(),
         validated: HashSet::new(),
         head_writers: HashMap::new(),
     };
@@ -905,11 +1087,10 @@ fn trimmed_record_sources_preserve_provenance_without_hiding_invalid_ancestors()
         .attributes
         .insert(CANONICAL_ATTRIBUTE.to_owned(), "not independent".to_owned());
     assert!(
-        log(marked)
+        log(marked.clone())
             .validate_record(&trimmed_id, setup, &records[0])
             .is_err()
     );
-
     // An exact captured source can itself be invalid, or inherit an invalid record from
     // an operation a trim removed. Validate both original histories rather than trusting
     // equality with the captured view or just with its immediate parent.
@@ -948,6 +1129,18 @@ fn trimmed_record_sources_preserve_provenance_without_hiding_invalid_ancestors()
             "invalid erased ancestor"
         );
     }
+    for source in invalid.values_mut() {
+        source.metadata.attributes.insert(
+            CANONICAL_ATTRIBUTE.to_owned(),
+            "observed non-writer".to_owned(),
+        );
+    }
+    assert!(
+        log(invalid)
+            .validate_record(&altered_id, setup, &records[0])
+            .is_err(),
+        "marked source ancestry must still be valid"
+    );
 }
 
 impl World {
@@ -958,6 +1151,7 @@ impl World {
             self.imports.judged.push(HashSet::new());
             self.imports.moved.push(BTreeMap::new());
             self.imports.head_moved.push(BTreeMap::new());
+            self.imports.preserved_heads.push(BTreeMap::new());
             self.check_imports(m);
             self.imports.setup.push(self.imports.seen[m].clone());
         }
@@ -972,12 +1166,14 @@ impl World {
             self.imports.judged.push(HashSet::new());
             self.imports.moved.push(BTreeMap::new());
             self.imports.head_moved.push(BTreeMap::new());
+            self.imports.preserved_heads.push(BTreeMap::new());
             self.imports.setup.push(HashSet::new());
         }
         self.imports.seen[m].clear();
         self.imports.judged[m].clear();
         self.imports.moved[m].clear();
         self.imports.head_moved[m].clear();
+        self.imports.preserved_heads[m].clear();
         self.imports.started = false;
         self.check_imports(m);
         self.imports.started = true;
@@ -1045,7 +1241,8 @@ impl World {
             ops: HashMap::new(),
             views: HashMap::new(),
             repos: HashMap::new(),
-            native_sources: BTreeMap::new(),
+            captured_sources: BTreeMap::new(),
+            preserved_heads: self.imports.preserved_heads[m].clone(),
             validated: HashSet::new(),
             head_writers: HashMap::new(),
         };
@@ -1104,7 +1301,7 @@ impl World {
                 continue;
             }
             if !sources_loaded {
-                log.native_sources = self.native_record_sources(m);
+                log.captured_sources = self.captured_record_sources(m);
                 sources_loaded = true;
             }
             // Reading the log fails only if musubi lost an operation file it refers to.
@@ -1429,7 +1626,7 @@ impl World {
             if self.imports.setup[m].contains(&at) {
                 return Err("the record is the same as at setup".to_owned());
             }
-            let op = log.record_operation(&at);
+            let op = log.head_operation(&at, &ws);
             let now = log.head(&at, &ws);
             if let [before] = op.parents.as_slice() {
                 let was = log.head(before, &ws);

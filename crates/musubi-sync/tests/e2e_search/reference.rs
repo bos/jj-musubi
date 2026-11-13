@@ -222,6 +222,70 @@ fn native_aliases_carry_only_authenticated_workspace_names() {
     );
 }
 
+#[test]
+fn a_clones_workspace_witness_is_its_native_join_input() {
+    use crate::world::{Naming, Setup};
+
+    let mut world = World::new(Setup {
+        nodes: 2,
+        naming: Naming::Default,
+        prejoin: false,
+        secondary: false,
+    });
+    world.forget_copy(0, 1);
+    world.sync(0);
+    world.clone_copy(1);
+    world.converge();
+    let (key, bindings) = world.workspace_joins.iter().next().unwrap();
+    let store = world.fx.hive.members[1].adapter.repo().canonical_store();
+    let join = store
+        .operation_ids()
+        .unwrap()
+        .into_iter()
+        .find(|id| merge_key(&store.read_operation(id).unwrap()) == *key)
+        .unwrap();
+    let own = format!("{}/default", world.fx.machine_key(1));
+    let mut reference = Reference::build(&world);
+    assert_eq!(
+        reference
+            .workspace_certificate(&world, &join)
+            .keys
+            .get(&own),
+        bindings.get(&own)
+    );
+    assert!(bindings.contains_key(&own));
+
+    // A matching join timestamp and description do not certify another owner's name or
+    // an owned name at a target the native join never had.
+    let mut operation = store.read_operation(&join).unwrap();
+    let mut view = store.read_view(&operation.view_id).unwrap();
+    let foreign = format!("{}/default", world.fx.machine_key(0));
+    let wrong = world.fx.hive.members[0]
+        .adapter
+        .repo()
+        .loader()
+        .store()
+        .root_commit_id()
+        .clone();
+    view.wc_commit_ids
+        .insert(foreign.clone().into(), wrong.clone());
+    view.wc_commit_ids.insert(own.clone().into(), wrong);
+    operation.view_id = store.write_view(&view).unwrap();
+    let forged = store.write_operation(&operation).unwrap();
+    let certificate = reference.workspace_certificate(&world, &forged);
+    assert!(!certificate.keys.contains_key(&foreign));
+    assert!(!certificate.keys.contains_key(&own));
+
+    world.workspace_joins.clear();
+    reference.workspace_certificates.clear();
+    assert!(
+        !reference
+            .workspace_certificate(&world, &join)
+            .names
+            .contains(&own)
+    );
+}
+
 struct WorkspaceReplay {
     view: View,
     parents: Vec<View>,
@@ -1077,6 +1141,13 @@ impl Reference {
         if world.baseline_operation(&merge_key(&op)) {
             for key in &world.initial_workspace_keys {
                 if let Some(target) = view.wc_commit_ids.get(WorkspaceName::new(key)) {
+                    result.keys.insert(key.clone(), target.clone());
+                }
+            }
+        }
+        if let Some(bindings) = world.workspace_joins.get(&merge_key(&op)) {
+            for (key, target) in bindings {
+                if view.wc_commit_ids.get(WorkspaceName::new(key)) == Some(target) {
                     result.keys.insert(key.clone(), target.clone());
                 }
             }

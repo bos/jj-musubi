@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
+use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::repo::Repo as _;
 use musubi_core::hub::HubStorage as _;
@@ -152,7 +153,7 @@ pub struct CommandSnapshot {
     pub copies: BTreeSet<String>,
     pub parent: jj_lib::op_store::OperationId,
     pub input: Option<CanonicalOp>,
-    pub predecessors: Option<BTreeMap<jj_lib::backend::CommitId, Vec<jj_lib::backend::CommitId>>>,
+    pub predecessors: Option<BTreeMap<CommitId, Vec<CommitId>>>,
     pub base: jj_lib::op_store::View,
     pub made: jj_lib::op_store::View,
 }
@@ -223,6 +224,9 @@ pub struct World {
     /// The accepted history observed before a native trim, independent of its later fix-up.
     workspace_trim_inputs: BTreeMap<usize, WorkspaceTrim>,
     pub workspace_fixup_inputs: BTreeMap<String, (String, CanonicalOp)>,
+    /// Owned native bindings observed before each replacement copy joins. Its synthetic
+    /// join has different metadata from the native prejoin head.
+    pub workspace_joins: BTreeMap<String, BTreeMap<String, CommitId>>,
     /// The object and jj metadata stores of command sources, including copies later
     /// replaced. The fixture retains their directories until the case ends.
     pub command_sources: BTreeMap<PathBuf, PathBuf>,
@@ -347,6 +351,7 @@ impl World {
             commands: BTreeMap::new(),
             workspace_trim_inputs: BTreeMap::new(),
             workspace_fixup_inputs: BTreeMap::new(),
+            workspace_joins: BTreeMap::new(),
             command_sources: BTreeMap::new(),
             seen: vec![None; setup.nodes],
             ledger: Ledger::default(),
@@ -1165,7 +1170,7 @@ impl World {
         let repo = self.fx.load(m);
         let index = repo.index();
         let heads = repo.view().heads();
-        let visible = |id: &jj_lib::backend::CommitId| {
+        let visible = |id: &CommitId| {
             futures::executor::block_on(index.has_id(id)).unwrap()
                 && heads
                     .iter()
@@ -2001,19 +2006,23 @@ impl World {
             .collect();
         let join_point = native_head(&repo);
         self.fx.add(repo);
-        let store = self
-            .fx
-            .hive
-            .members
-            .last()
+        let node = self.fx.hive.members.last().unwrap().adapter.repo();
+        let joined = node.canonical_of(&LocalOp(join_point.clone())).unwrap();
+        let join_key = merge_key(&node.canonical_store().read_operation(&joined).unwrap());
+        let store = node.loader().op_store();
+        let joined_from = futures::executor::block_on(store.read_operation(&join_point)).unwrap();
+        let join_bindings = futures::executor::block_on(store.read_view(&joined_from.view_id))
             .unwrap()
-            .adapter
-            .repo()
-            .loader()
-            .op_store();
-        let join_point = join_fingerprint(
-            &futures::executor::block_on(store.read_operation(&join_point)).unwrap(),
-        );
+            .wc_commit_ids
+            .into_iter()
+            .map(|(name, target)| {
+                (
+                    format!("{}/{}", node.machine().key(), name.as_str()),
+                    target,
+                )
+            })
+            .collect();
+        let join_point = join_fingerprint(&joined_from);
         let primary = vec![Workspace {
             name: "default".to_owned(),
             path: None,
@@ -2050,6 +2059,7 @@ impl World {
             self.workspace_births.insert(key.clone());
             self.initial_workspace_keys.insert(key);
         }
+        self.workspace_joins.insert(join_key, join_bindings);
         self.baseline_merge_keys.extend(self.merge_keys(m));
         self.operation_sources.retain(|(copy, _), _| *copy != m);
         self.workspace_trim_inputs.remove(&m);

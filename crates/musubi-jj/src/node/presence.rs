@@ -267,6 +267,25 @@ impl NodeRepo {
             .collect())
     }
 
+    /// This exact native head set's owned bindings, qualified before their aliases are read.
+    pub(super) fn own_at_heads(
+        &mut self,
+        heads: &[LocalOp],
+    ) -> Result<BTreeMap<WorkspaceNameBuf, CommitId>, NodeError> {
+        for head in heads {
+            match self.canonicalize_unchecked(head) {
+                Ok(_) | Err(NodeError::BeforeJoin(_)) => {}
+                Err(err) => return Err(err),
+            }
+        }
+        let mut native = heads
+            .iter()
+            .map(|head| self.loader.load_operation(&head.0).block_on())
+            .collect::<Result<Vec<_>, _>>()?;
+        native.sort_by_key(|op| op.metadata().time.end.timestamp);
+        self.merged_local_workspaces(&native)
+    }
+
     /// Merges this copy's bindings over the actual native heads and native merge bases.
     /// Canonical operations can omit them while the copy is forgotten.
     pub(super) fn merged_local_workspaces(

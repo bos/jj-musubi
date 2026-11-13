@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::PoisonError;
@@ -37,6 +38,12 @@ use crate::op_id::CanonicalOp;
 use crate::op_id::LocalOp;
 use crate::presence::Kind;
 use crate::workspaces;
+
+pub(super) struct PublishedHistory {
+    heads: Vec<LocalOp>,
+    pub(super) locals: HashSet<LocalOp>,
+    canonicals: Arc<HashMap<CanonicalOp, LocalOp>>,
+}
 
 /// How many realized operations may be written at once. jj's op store syncs each file it
 /// writes to disk, which takes milliseconds on a cloud disk, so realizing many operations
@@ -167,7 +174,7 @@ impl NodeRepo {
                     view
                 }
             };
-            let view = self.with_own_workspaces(id, op, &parents, view, &reserved)?;
+            let view = self.with_own_workspaces(id, op, &parents, view, &reserved, None)?;
             let own = self.own_of(&view);
             let view = with_kept(view, &kept);
             let realization =
@@ -551,6 +558,7 @@ impl NodeRepo {
         parents: &[LocalOp],
         local: LocalView,
         reserved: &BTreeSet<WorkspaceNameBuf>,
+        root_own: Option<&BTreeMap<WorkspaceNameBuf, CommitId>>,
     ) -> Result<LocalView, NodeError> {
         if local.names.keys().any(|key| self.is_own_key(key)) {
             return Ok(local);
@@ -575,7 +583,13 @@ impl NodeRepo {
             }
         };
         if own.is_empty() && parents.get(source) == Some(self.root_op_id()) {
-            own = self.own_before_taking().cloned().unwrap_or_default();
+            own = match root_own {
+                Some(own) => own.clone(),
+                None => {
+                    let heads = self.local_heads()?;
+                    self.own_for_root(&heads)?
+                }
+            };
         }
         let own_work = Kind::of(&op.metadata).work.as_deref() == Some(self.machine.key());
         let fixup = op
@@ -627,6 +641,188 @@ impl NodeRepo {
             names,
             prefixes,
         })
+    }
+
+    fn own_for_root(
+        &mut self,
+        heads: &[LocalOp],
+    ) -> Result<BTreeMap<WorkspaceNameBuf, CommitId>, NodeError> {
+        match self.own_before_taking(heads) {
+            Some(own) => Ok(own.clone()),
+            None => self.own_at_heads(heads),
+        }
+    }
+
+    /// Actual native ancestry, not the cache's preferred unpublished aliases. Append-only
+    /// moves extend only the new suffix; a trim or restore rebuilds the index.
+    fn published_realizations(
+        &mut self,
+        heads: &[LocalOp],
+    ) -> Result<Arc<HashMap<CanonicalOp, LocalOp>>, NodeError> {
+        for head in heads {
+            match self.canonicalize_unchecked(head) {
+                Ok(_) | Err(NodeError::BeforeJoin(_)) => {}
+                Err(err) => return Err(err),
+            }
+        }
+        let mut heads = heads.to_vec();
+        heads.sort();
+        if let Some(history) = &self.published_history
+            && history.heads == heads
+        {
+            return Ok(history.canonicals.clone());
+        }
+        let mut previous = self.published_history.take();
+        loop {
+            let mut pending = heads.clone();
+            let mut added = vec![];
+            let mut seen = HashSet::new();
+            let mut boundaries = HashSet::new();
+            while let Some(local) = pending.pop() {
+                if !seen.insert(local.clone()) {
+                    continue;
+                }
+                if previous
+                    .as_ref()
+                    .is_some_and(|old| old.locals.contains(&local))
+                {
+                    boundaries.insert(local);
+                    continue;
+                }
+                let op = self.loader.op_store().read_operation(&local.0).block_on()?;
+                pending.extend(LocalOp::parents_of(&op));
+                added.push(local);
+            }
+            if previous
+                .as_ref()
+                .is_some_and(|old| old.heads.iter().any(|head| !boundaries.contains(head)))
+            {
+                previous = None;
+                continue;
+            }
+            let (mut locals, mut canonicals) = previous.map_or_else(
+                || (HashSet::new(), HashMap::new()),
+                |old| (old.locals, Arc::unwrap_or_clone(old.canonicals)),
+            );
+            for local in added.into_iter().rev() {
+                if let Some(canonical) = self.canonical_of(&local) {
+                    canonicals.insert(canonical, local.clone());
+                }
+                locals.insert(local);
+            }
+            let canonicals = Arc::new(canonicals);
+            self.published_history = Some(PublishedHistory {
+                heads,
+                locals,
+                canonicals: canonicals.clone(),
+            });
+            return Ok(canonicals);
+        }
+    }
+
+    /// Re-render only unpublished suffixes against actual published parent aliases.
+    /// Every operation validates its full inputs, so partial writes recover after restart.
+    fn current_realizations(
+        &mut self,
+        canonicals: &[CanonicalOp],
+        published: &HashMap<CanonicalOp, LocalOp>,
+        prepared: &HashMap<CanonicalOp, LocalOp>,
+        root_own: &BTreeMap<WorkspaceNameBuf, CommitId>,
+    ) -> Result<Vec<LocalOp>, NodeError> {
+        let order = self.canonical.ancestors_until(canonicals, |id| {
+            prepared.contains_key(id) || published.contains_key(id)
+        })?;
+        let order = order
+            .into_iter()
+            .map(|id| {
+                let op = self.canonical.read_operation(&id)?;
+                Ok((id, op))
+            })
+            .collect::<Result<Vec<_>, NodeError>>()?;
+        // Bind the actual published frontier before choosing merge bases for kept names.
+        for (_, op) in &order {
+            let mut references = CanonicalOp::parents_of(op);
+            if let Some((_, target)) = target_of(&op.metadata.description) {
+                references.push(CanonicalOp(target));
+            }
+            for id in references {
+                if let Some(local) = prepared.get(&id).or_else(|| published.get(&id)) {
+                    self.insert_map(local.clone(), id)?;
+                }
+            }
+        }
+        let (reserved, kept) = self.reserved_for(&order)?;
+        for (id, op) in &order {
+            let old = self.local_of(id);
+            let mut cached = None;
+            if let Some(local) = &old {
+                let raw = self.loader.op_store().read_operation(&local.0).block_on()?;
+                // An original native operation is its own authority; only prepared
+                // realizations can depend on stale parent aliases or private root context.
+                if !raw.metadata.attributes.contains_key(CANONICAL_ATTRIBUTE) {
+                    continue;
+                }
+                cached = Some(raw);
+            }
+            let parents = CanonicalOp::parents_of(op)
+                .iter()
+                .map(|parent| {
+                    prepared
+                        .get(parent)
+                        .or_else(|| published.get(parent))
+                        .cloned()
+                        .or_else(|| self.local_of(parent))
+                        .ok_or_else(|| {
+                            NodeError::NotRealizable(id.0.hex(), "a parent has no local operation")
+                        })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if !matches!((parents.as_slice(), &self.last_realized), ([parent], Some((last, _))) if parent == last)
+            {
+                self.settle()?;
+            }
+            let fields = match cached.as_ref() {
+                // An export can update a prepared realization's Git record. Preserve
+                // that independently observed state while its physical parents are unchanged.
+                Some(raw)
+                    if raw
+                        .parents
+                        .iter()
+                        .eq(parents.iter().map(|parent| &parent.0)) =>
+                {
+                    let view = self.loader.op_store().read_view(&raw.view_id).block_on()?;
+                    Arc::new(PerMachine::of(&view))
+                }
+                _ => self.inherited_per_machine(&parents)?,
+            };
+            let view = self.local_view(id, op, &fields, &reserved)?;
+            let view =
+                self.with_own_workspaces(id, op, &parents, view, &reserved, Some(root_own))?;
+            let own = self.own_of(&view);
+            let view = with_kept(view, &kept);
+            let expected =
+                self.realize_one(id, op, parents, view, &own, &reserved, fields.clone())?;
+            self.last_own = Some((expected.id.clone(), Arc::new(own)));
+            if old.as_ref() == Some(&expected.id) {
+                self.last_realized = Some((expected.id, fields));
+            } else {
+                self.write_later(expected, id.clone())?;
+            }
+        }
+        self.settle()?;
+        canonicals
+            .iter()
+            .map(|id| {
+                prepared
+                    .get(id)
+                    .or_else(|| published.get(id))
+                    .cloned()
+                    .or_else(|| self.local_of(id))
+                    .ok_or_else(|| {
+                        NodeError::NotRealizable(id.0.hex(), "its local operation is missing")
+                    })
+            })
+            .collect()
     }
 
     /// Which of a canonical operation's parents has this machine's latest work in its history:
@@ -885,58 +1081,61 @@ impl NodeRepo {
                 "nothing to advance to",
             ));
         }
-        // Each realized first, so that those left can be worked out again from the op heads
-        // under the lock below, without realizing anything while holding it.
-        let mut all = canonicals
-            .iter()
-            .map(|canonical| self.realize(canonical))
-            .collect::<Result<Vec<_>, _>>()?;
-        // Views made ahead inherit what this changes, in a colocated repository.
-        self.prepared = None;
-        let mut heads = self.local_heads()?;
-        let Some((mut left, mut realized)) = self.left_beside(canonicals, &all, &heads)? else {
-            return Ok(None);
-        };
-        // One realized beside other op heads is realized again beside these, before they are
-        // merged: its names for other machines' workspaces may be this machine's own in them.
-        for (canonical, local) in left.iter().zip(realized.iter_mut()) {
-            if self.realized_beside_other_heads(local)? {
-                let again = self.realize_again(canonical, local)?;
-                for one in all.iter_mut().filter(|one| **one == *local) {
-                    *one = again.clone();
-                }
-                *local = again;
+        let op_heads_store = self.loader.op_heads_store().clone();
+        let (
+            left,
+            mut realized,
+            superseded,
+            mut concurrent,
+            colocated,
+            root_base,
+            _lock,
+            heads_lock,
+        ) = loop {
+            // Prepare outside both publication locks. A native command can publish while
+            // this runs, so compare the exact captured head set again under those locks.
+            let root_base = self.taking_root_base()?;
+            self.settle()?;
+            if !self.heads_mapped {
+                self.canonical_heads()?;
             }
-        }
-        let (mut superseded, mut concurrent) = self.check_mergeable(&left, &realized, &heads)?;
-        let colocation = self.colocation();
-        let colocated = colocation.is_some();
-        let _lock = colocation.map(Colocation::lock).transpose()?;
-        // A `jj` command in the colocated workspace publishes only while holding the lock, so
-        // none can until this publishes. One may have published since the op heads were read,
-        // though, which the export and the merge must take in: published beside the merge, it
-        // would be merged by the next `jj` command without exporting before its import.
-        // The heads are checked again only if they changed, so that the first check, whose
-        // search for an operation to revert where jj can't merge them can take a while, keeps
-        // `jj` commands
-        // waiting for the lock only in that rare case. Which are left goes by the same heads.
-        if colocated {
+            self.prepared = None;
+            let mut heads = self.local_heads()?;
+            let published = self.published_realizations(&heads)?;
+            let own = self.own_for_root(&heads)?;
+            let Some(prepared) = self.prepared_realizations(&heads) else {
+                continue;
+            };
+            let all = self.current_realizations(canonicals, &published, &prepared, &own)?;
+            let Some((left, mut realized)) = self.left_beside(canonicals, &all, &heads)? else {
+                return Ok(None);
+            };
+            for (id, local) in left.iter().zip(&mut realized) {
+                if self.realized_beside_other_heads(local)? {
+                    *local = self.realize_again(id, local)?;
+                }
+            }
+            let (superseded, concurrent) = self.check_mergeable(&left, &realized, &heads)?;
+            let colocation = self.colocation();
+            let colocated = colocation.is_some();
+            let lock = colocation.map(Colocation::lock).transpose()?;
+            let heads_lock = op_heads_store.lock().block_on()?;
             let mut now = self.local_heads()?;
             heads.sort();
             now.sort();
             if now != heads {
-                match self.left_beside(canonicals, &all, &now)? {
-                    Some(again) => (left, realized) = again,
-                    None => return Ok(None),
-                }
-                (superseded, concurrent) = self.check_mergeable(&left, &realized, &now)?;
+                drop(heads_lock);
+                drop(lock);
+                continue;
             }
-        }
+            break (
+                left, realized, superseded, concurrent, colocated, root_base, lock, heads_lock,
+            );
+        };
         // Recheck the source under the colocated lock, after all realization work. A
         // root-based cached realization may have no Git fields, or ones from before a
         // concurrent command. Taking a trim must change neither this copy's record of Git
         // nor its physical Git state merely because that record's old ancestry disappeared.
-        let root_base = self.taking_root_base()?;
         if root_base {
             let sources = self.local_heads()?;
             let fields = self.inherited_per_machine(&sources)?;
@@ -1059,6 +1258,7 @@ impl NodeRepo {
                 .update_op_heads(&replaced, &merged.as_ref().unwrap_or(&head).0)
                 .block_on()?;
         }
+        drop(heads_lock);
         drop(_lock);
         self.move_taken_workspaces()?;
         self.replace_abandoned_working_copies()?;

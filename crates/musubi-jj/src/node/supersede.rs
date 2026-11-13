@@ -717,6 +717,7 @@ impl NodeRepo {
 
     /// Forgets the hub-to-node translation worked out so far, `pending` having changed.
     fn forget_to_node(&mut self) {
+        self.published_history = None;
         *self
             .records
             .to_node
@@ -725,21 +726,55 @@ impl NodeRepo {
         self.records.forget_normalizer();
     }
 
+    /// Exact native counterparts prepared for the current receipt. These preserve native
+    /// per-machine work; they are not disposable realizations of their canonical payloads.
+    /// None means a native command moved the heads after receipt preparation.
+    pub(super) fn prepared_realizations(
+        &self,
+        heads: &[LocalOp],
+    ) -> Option<HashMap<CanonicalOp, LocalOp>> {
+        let taking = self
+            .records
+            .taking
+            .as_ref()
+            .filter(|taking| !taking.switched);
+        if let Some(taking) = taking {
+            let mut heads = heads.to_vec();
+            heads.sort();
+            if taking.heads != heads {
+                return None;
+            }
+        }
+        Some(
+            taking
+                .into_iter()
+                .flat_map(|taking| taking.locals.values().flatten())
+                .filter_map(|local| Some((self.canonical_of(local)?, local.clone())))
+                .collect(),
+        )
+    }
+
     pub(super) fn own_before_taking(
         &self,
+        heads: &[LocalOp],
     ) -> Option<
         &std::collections::BTreeMap<jj_lib::ref_name::WorkspaceNameBuf, jj_lib::backend::CommitId>,
     > {
         self.records
             .taking
             .as_ref()
-            .filter(|taking| !taking.switched)
+            .filter(|taking| {
+                let mut heads = heads.to_vec();
+                heads.sort();
+                !taking.switched && taking.heads == heads
+            })
             .map(|taking| &taking.own)
     }
 
     /// Forgets what is remembered by local operation id, which a rewrite of local
     /// operations makes stale.
     fn forget_local_caches(&mut self) {
+        self.published_history = None;
         self.last_realized = None;
         self.last_own = None;
         self.prepared = None;

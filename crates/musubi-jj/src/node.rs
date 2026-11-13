@@ -131,6 +131,8 @@ pub struct NodeRepo {
         LocalOp,
         Arc<BTreeMap<jj_lib::ref_name::WorkspaceNameBuf, CommitId>>,
     )>,
+    /// Native ancestry at the last exact head set, extended only across append-only moves.
+    published_history: Option<realize::PublishedHistory>,
     /// This machine's own names that could clash with another machine's as of the op heads
     /// last asked about, with their canonical forms (see `NodeRepo::reserved_names`).
     reserved_memo: Option<ReservedNames>,
@@ -265,6 +267,7 @@ impl NodeRepo {
             heads_mapped: false,
             last_realized: None,
             last_own: None,
+            published_history: None,
             private_names: Mutex::new(HashMap::new()),
             reserved_memo: None,
             kept_memo: None,
@@ -516,6 +519,14 @@ impl NodeRepo {
     }
 
     fn insert_map(&mut self, local: LocalOp, canonical: CanonicalOp) -> Result<(), NodeError> {
+        if self
+            .published_history
+            .as_ref()
+            .is_some_and(|history| history.locals.contains(&local))
+            && self.canonical_of(&local).as_ref() != Some(&canonical)
+        {
+            self.published_history = None;
+        }
         self.map
             .insert(local, canonical)
             .map_err(|source| NodeError::Io {

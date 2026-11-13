@@ -362,6 +362,24 @@ machine rebases it itself, as jj would have rebased a working-copy commit it saw
 hidden and recording no rewrite, in an operation that isn't its work, so that it stays forgotten
 (`replace_abandoned_working_copies`).
 
+When contraction leaves a root parent with no private bindings, realization takes them from
+the exact native heads, qualified before their aliases are read and merged over their native
+bases. An active receipt supplies its captured bindings only while those exact heads remain.
+This also applies to realization ahead of a receipt. Before publication, each unpublished
+operation is rendered again from its actual selected physical parents, following only that
+operation's rewrites. One current native binding snapshot supplies the erased root basis for
+the whole preparation. An unchanged canonical id cannot make a cached binding override a
+later native rename or deletion, including deletion of every owned workspace.
+
+Cached unpublished suffixes stop at actual published counterparts or exact native counterparts
+prepared for the same receipt and captured heads. A preferred but unpublished alias alone is
+no authority. Changed physical parents supply fresh per-machine fields; unchanged parents keep
+a cached operation's own export observations. Each operation checks its full inputs, so a
+partial rewrite followed by restart needs no separate rebuild progress. Publication rechecks its
+exact head set under the operation-head lock, and the colocated lock where applicable, retrying
+preparation outside those locks if a native command published meanwhile. Cleanup releases them
+before taking a workspace lock.
+
 ### Leaving
 
 `musubi leave` snapshots the working copy (`jj util snapshot`), forgets this copy with an

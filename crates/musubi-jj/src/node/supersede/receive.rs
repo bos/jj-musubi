@@ -167,21 +167,8 @@ impl NodeRepo {
         self.keep_custody(prefix, records, common)?;
         self.check_abandon()?;
         let heads = self.local_heads()?;
-        // A command can publish after the policy read heads_for. Translate this exact
-        // captured history on its actual parents before contracting away their views.
-        for head in &heads {
-            match self.canonicalize_unchecked(head) {
-                Ok(_) | Err(NodeError::BeforeJoin(_)) => {}
-                Err(err) => return Err(err),
-            }
-        }
-        let mut native_heads = heads
-            .iter()
-            .map(|head| self.loader.load_operation(&head.0).block_on())
-            .collect::<Result<Vec<_>, _>>()?;
-        // As jj orders heads before merging their views.
-        native_heads.sort_by_key(|op| op.metadata().time.end.timestamp);
-        let own = self.merged_local_workspaces(&native_heads)?;
+        // Qualify the exact captured history before contracting away its namespace.
+        let own = self.own_at_heads(&heads)?;
         let store = &self.canonical;
         let (mapped, unmapped) = self.local_walk(&heads)?;
         // Records in custody that these lack: the hub lost them, and this node publishes what

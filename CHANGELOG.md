@@ -7,6 +7,10 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- A copy the hive has forgotten keeps its own workspaces after another machine trims all
+  their shared history, including when it renamed or forgot a workspace after sync prepared
+  that history. Cached operations also keep the right parents after a restart.
+
 - Sync preserves workspace ownership when `jj op abandon` removes all history below a command
   this machine has not yet sent, including after a restart during repair. If `jj util gc` has
   already removed the history needed to tell whose workspace it is, sync stops rather than

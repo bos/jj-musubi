@@ -905,6 +905,13 @@ bindings, owner deletion, all-dormant inputs, and a target visible only in the r
 parents and local base let native jj witness a restored name. A realization's marker neither
 certifies that name nor disqualifies its independently checked replay.
 
+`translation::root_realizations_keep_current_private_workspaces_without_a_receipt` checks
+exact private bindings when a forgotten copy realizes contracted history ahead of receipt.
+It covers native renames, deletion of every workspace, owned slash names beside foreign
+aliases, cached children of refreshed parents, reopening, a multi-target advance, and a
+non-colocated repository. It also requires one reachable native realization per canonical
+operation; checking names alone would miss a stale target or a duplicated physical prefix.
+
 A replacement clone's synthetic join has its own independently captured native input, keyed
 by the join's metadata identity. Only its exact owned workspace keys and commit targets can
 be certified from that input. `reference::a_clones_workspace_witness_is_its_native_join_input`

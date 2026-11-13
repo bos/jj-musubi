@@ -1068,6 +1068,267 @@ fn realized_bookmark_moves_survive_colocated_import() {
     assert!(op_descriptions(&b).is_superset(&op_descriptions(&a)));
 }
 
+/// A received root-based history has no private binding to inherit from its parent.
+/// Realizing it ahead of record receipt still preserves this copy's native namespace.
+#[test]
+fn root_realizations_keep_current_private_workspaces_without_a_receipt() {
+    use musubi_jj::canonical::Contraction;
+    use pollster::FutureExt as _;
+
+    for change in [
+        "unchanged",
+        "rename",
+        "delete",
+        "owned alias",
+        "rename after",
+        "delete after",
+        "cached child",
+        "restart child",
+        "multi child",
+        "noncolocated child",
+    ] {
+        let env = TestEnv::new();
+        let a = env.init_repo("alpha");
+        let b = if change == "noncolocated child" {
+            env.init_non_colocated_repo("beta")
+        } else {
+            env.init_repo("beta")
+        };
+        a.jj(&["workspace", "rename", "default"]);
+        b.jj(&["workspace", "rename", "default"]);
+        if change == "owned alias" {
+            a.jj(&[
+                "workspace",
+                "add",
+                "--name",
+                "second",
+                env.root().join("alpha-second").to_str().unwrap(),
+            ]);
+        }
+        let mut a_node = open(&a);
+        let mut b_node = open(&b);
+        let initial = single_canonical_head(&mut a_node);
+        sync(&a_node, &mut b_node, &initial);
+        let joined = single_canonical_head(&mut b_node);
+        sync(&b_node, &mut a_node, &joined);
+        a_node.forget_copy(b_node.machine().key(), "beta").unwrap();
+        a.jj(&["new", "--no-edit", "-m", "after forgetting beta"]);
+        // Exporting this bookmark changes the published parent's Git record, while
+        // children prepared before that export still have the root's empty record.
+        a.jj(&["bookmark", "create", "kept", "-r", "@"]);
+        let tip = single_canonical_head(&mut a_node);
+        let child = if change.ends_with("child") {
+            a.jj(&["bookmark", "create", "later", "-r", "@"]);
+            single_canonical_head(&mut a_node);
+            a.jj(&["bookmark", "create", "last", "-r", "@"]);
+            Some(single_canonical_head(&mut a_node))
+        } else {
+            None
+        };
+        let store = a_node.canonical_store();
+        let drops = store
+            .ancestors_until(std::slice::from_ref(&tip), |_| false)
+            .unwrap()
+            .into_iter()
+            .filter(|id| *id != tip)
+            .collect::<Vec<_>>();
+        let mut contraction = Contraction::new(store, drops).unwrap();
+        let incoming = contraction.images(store, &tip).unwrap().pop().unwrap();
+        assert_eq!(
+            store.parents(&incoming).unwrap(),
+            [store.root_operation_id().clone()]
+        );
+        let child = child.map(|id| contraction.images(store, &id).unwrap().pop().unwrap());
+        let middle = child
+            .as_ref()
+            .map(|id| store.parents(id).unwrap()[0].clone());
+        let last = child.as_ref().unwrap_or(&incoming);
+        ship_objects(&a_node, &b_node, last);
+        ship_operations(&a_node, &b_node, last);
+        if let Some(child) = &child {
+            b_node.realize(child).unwrap();
+        }
+
+        assert!(
+            !b_node
+                .presence(&incoming)
+                .unwrap()
+                .is_present(b_node.machine().key())
+        );
+        let original_heads = b_node.local_heads().unwrap();
+        if change == "rename" {
+            b.jj(&["workspace", "rename", "private"]);
+        } else if change == "delete" {
+            b.jj(&["workspace", "forget", "default"]);
+        } else if change == "owned alias" {
+            b.jj(&["workspace", "forget", "alpha/default"]);
+            b.jj(&[
+                "workspace",
+                "add",
+                "--name",
+                "alpha/default",
+                env.root().join("owned").to_str().unwrap(),
+            ]);
+        }
+        let read_own = |node: &NodeRepo, local: &LocalOp| {
+            let op = node
+                .loader()
+                .op_store()
+                .read_operation(&local.0)
+                .block_on()
+                .unwrap();
+            let view = node
+                .loader()
+                .op_store()
+                .read_view(&op.view_id)
+                .block_on()
+                .unwrap();
+            view.wc_commit_ids
+                .iter()
+                .filter(|(name, _)| {
+                    !name.as_str().contains('/')
+                        || name.as_str() == "alpha/default" && change == "owned alias"
+                })
+                .map(|(name, target)| (name.as_str().to_owned(), target.clone()))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let mut expected = read_own(&b_node, &b_node.local_heads().unwrap()[0]);
+        let realized = b_node.realize(&incoming).unwrap();
+        assert_eq!(read_own(&b_node, &realized), expected, "{change}");
+        let raw = b_node
+            .loader()
+            .op_store()
+            .read_operation(&realized.0)
+            .block_on()
+            .unwrap();
+        if change == "owned alias" {
+            let context: serde_json::Value = serde_json::from_str(
+                raw.metadata
+                    .attributes
+                    .get("musubi.local-workspaces")
+                    .expect("owned slash binding needs a private ownership witness"),
+            )
+            .unwrap();
+            assert!(
+                context["names"]
+                    .as_object()
+                    .unwrap()
+                    .contains_key("alpha/default")
+            );
+        }
+        if let Some(context) = raw.metadata.attributes.get("musubi.local-workspaces") {
+            let context: serde_json::Value = serde_json::from_str(context).unwrap();
+            assert!(
+                context["names"]
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .all(|name| expected.contains_key(name)),
+                "foreign aliases became private: {change}"
+            );
+        }
+        assert_eq!(b_node.canonicalize(&realized).unwrap(), incoming);
+        if change == "unchanged" {
+            assert_eq!(
+                b_node.local_heads().unwrap(),
+                original_heads,
+                "realizing ahead publishes nothing"
+            );
+        }
+        if change == "rename after" || change.ends_with("child") {
+            b.jj(&["workspace", "rename", "private"]);
+        } else if change == "delete after" {
+            b.jj(&["workspace", "forget", "default"]);
+        }
+        if change.ends_with("after") || change.ends_with("child") {
+            expected = read_own(&b_node, &b_node.local_heads().unwrap()[0]);
+            if change == "multi child" {
+                b_node
+                    .advance_to(&[incoming.clone(), child.clone().unwrap()])
+                    .unwrap();
+            } else {
+                b_node.advance(&incoming).unwrap();
+                if let Some(child) = &child {
+                    b.jj(&["bookmark", "create", "native", "-r", "root()"]);
+                    if change == "restart child" {
+                        drop(b_node);
+                        b_node = open(&b);
+                    }
+                    b_node.advance(child).unwrap();
+                }
+            }
+            for head in b_node.local_heads().unwrap() {
+                assert_eq!(read_own(&b_node, &head), expected, "{change}");
+            }
+        }
+        // A refreshed parent and a cached child may never publish two physical aliases
+        // of the same canonical operation, including after reopening disposable caches.
+        let mut pending = b_node.local_heads().unwrap();
+        let mut native = BTreeSet::new();
+        let mut counted = BTreeMap::new();
+        while let Some(local) = pending.pop() {
+            if !native.insert(local.clone()) {
+                continue;
+            }
+            let op = b_node
+                .loader()
+                .op_store()
+                .read_operation(&local.0)
+                .block_on()
+                .unwrap();
+            pending.extend(LocalOp::parents_of(&op));
+            if let Some(canonical) = b_node.canonical_of(&local) {
+                assert!(
+                    counted.insert(canonical, local).is_none(),
+                    "duplicate realization: {change}"
+                );
+            }
+        }
+        if let Some(middle) = middle {
+            let local = &counted[&middle];
+            let op = b_node
+                .loader()
+                .op_store()
+                .read_operation(&local.0)
+                .block_on()
+                .unwrap();
+            let view = b_node
+                .loader()
+                .op_store()
+                .read_view(&op.view_id)
+                .block_on()
+                .unwrap();
+            assert_eq!(op.parents.len(), 1);
+            let parent = b_node
+                .loader()
+                .op_store()
+                .read_operation(&op.parents[0])
+                .block_on()
+                .unwrap();
+            let parent_view = b_node
+                .loader()
+                .op_store()
+                .read_view(&parent.view_id)
+                .block_on()
+                .unwrap();
+            assert_eq!(
+                view.git_heads, parent_view.git_heads,
+                "inherited Git heads: {change}"
+            );
+            assert_eq!(
+                view.git_refs, parent_view.git_refs,
+                "inherited Git refs: {change}"
+            );
+            let git = jj_lib::git::REMOTE_NAME_FOR_LOCAL_GIT_REPO;
+            assert_eq!(
+                view.remote_views.get(git),
+                parent_view.remote_views.get(git),
+                "inherited Git remote: {change}"
+            );
+        }
+    }
+}
+
 #[test]
 fn canonicalizing_a_realization_returns_its_canonical_operation() {
     let env = TestEnv::new();

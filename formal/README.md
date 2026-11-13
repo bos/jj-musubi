@@ -1441,3 +1441,22 @@ their own ([conformance.md, "Chunked blobs"](../docs/internals/conformance.md#ch
 are executable as they are too, over any `RefAlg`: `RefsExec.lean` runs them on numbered targets,
 with jj's merges as a table each request carries, and the oracle answers refs requests with them
 ([conformance.md, "Per-machine refs"](../docs/internals/conformance.md#per-machine-refs)).
+
+
+## Snapshot publication budgets
+
+`Publication.lean` accounts for unique extra paths and content bytes across outgoing operation
+history, excluding shared and intentional versions. Exact plans govern approval. Cleanup
+freezes source intent before contracting operation parents with `Contract.cpar`, retains the
+current view and context, and adds a checkpoint referencing every intentional commit version.
+It proves retained intentional file closure, survivor ancestry, stale-source refusal, and the
+view/context checks at installation. The oracle evaluates these same definitions, with native
+jj fixtures comparing exact sets and applied effects; see
+[conformance](../docs/internals/conformance.md#snapshot-publication).
+
+An unknown native command record sets `intentKnown` false, refusing cleanup while still
+allowing exact publication approval. The full object closure, jj transaction facts and selected
+revision decoding, opaque canonical context, and guarded physical identity mapping are native
+contracts, not theorems about jj itself. The existing convergence
+results do not prove progress through a deliberate publication hold: they require holds to be
+resolved, disabled or approved eventually.

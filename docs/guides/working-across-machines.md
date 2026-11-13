@@ -26,7 +26,8 @@ jj config set --user fsmonitor.backend watchman
 jj config set --user fsmonitor.watchman.register-snapshot-trigger true
 ```
 
-Everything jj records reaches every machine, so keep secrets in ignored files.
+Keep secrets in ignored files. The snapshot publication budget below limits accidental bulk
+content; it does not identify secrets or stop small accidental files from syncing.
 
 ## Coding agents
 
@@ -227,6 +228,92 @@ After changing jj settings, `musubi sync` waits for a sync with the new settings
 already in progress finishes using its earlier settings. Joining or cloning can set this
 copy's local `musubi.forget-after` default; sync does not copy config values from other
 machines.
+
+## When snapshots pick up too much
+
+musubi holds sending when automatic snapshots retain more than 1000 file paths or 8 MiB
+beyond explicit change history and content already shared with the hive. Receiving continues.
+An explicit `jj commit`, `describe`, `split`, `squash`, or other command that creates or
+modifies changes makes those change versions intentional history: their content needs no
+approval. Explicitly bookmarking a working-copy version also retains it intentionally; later
+automatic bookmark moves do not approve later content. A partial commit does not approve the
+unselected working-copy remainder.
+
+When jj did not record enough information about a command's changes, musubi may still
+require approval to send that history and cannot prune it safely. This includes some Git imports
+of existing versions and operation-history restores; the exact send override still works. See
+[troubleshooting](../troubleshooting.md#cleanup-cannot-preserve-earlier-changes).
+
+For example, suppose `jj status` snapshots `README.txt`, `AGENTS.md`, and a directory of
+accidental files. You commit only `README.txt`, then remove the accidental directory and run
+`jj status` again. `README.txt` is intentional history. `AGENTS.md` is current work. The
+older snapshots still retain the accidental files, even though they are gone from disk.
+
+Inspect what would go out:
+
+```sh
+musubi sync --outgoing
+```
+
+The output lists the extra paths, their bytes and versions, and the operations retaining
+them. Content shared by several snapshots is counted once; the operation rows overlap.
+Ten distinct 900 KB files exceed the default byte budget, even though the file count is small.
+The budget is cumulative across the whole outgoing history, rather than a limit per snapshot.
+
+Choose operations from that list, using the ids printed there. For example:
+
+```sh
+musubi sync --prune a12b34c56d78 b23c45d67e89
+```
+
+This previews removing those whole operations. It says how much snapshot content would
+remain, warns that older uncommitted versions may become unrecoverable, and prints an exact
+apply command. Copy that command, including its token:
+
+```sh
+musubi sync --prune a12b34c56d78 b23c45d67e89 --apply <token-from-preview>
+musubi sync
+```
+
+Cleanup keeps the exact README commit, the current `AGENTS.md`, other current files,
+bookmarks, and workspace positions. If a removed snapshot had an older version of
+`AGENTS.md` alongside the accidental files, that older uncommitted version may be lost.
+Explicit change versions survive even when their operations were selected. No individual
+file is edited out of an old snapshot. Selecting too few operations may leave the same files
+retained elsewhere; the preview shows that, without adding operations to your selection.
+Files still in the current working copy remain required: remove unwanted files first and
+run `jj status`.
+
+If you want everything to go through instead, `--outgoing` prints the override:
+
+```sh
+musubi sync --approve <token-from-outgoing>
+```
+
+Approval covers exactly the inspected outgoing history and limits. Later snapshots or
+incoming changes can invalidate it; inspect again if musubi asks. If the sync fails or the
+hub is offline, approval stays valid for that exact publication and the daemon can retry it
+later. `--outgoing` then says "Approved for sending". Cleanup similarly refuses
+a stale preview. Before applying it, musubi records unsnapshotted edits; if that changes the
+plan, preview again. This preserves edits made since the preview.
+
+Cleanup only removes history known never to have been offered to the hub. A request whose
+reply was lost may already have propagated, and history from before this tracking began is
+also treated conservatively. For history already sent, see
+[Abandoning operations](#abandoning-operations).
+Pruning disconnects operations; jj's normal garbage collection eventually reclaims objects
+that nothing else needs. It is not immediate disk reclamation or removal of secrets.
+
+Set different limits for a repository, or use `--user` for your default:
+
+```sh
+jj config set --repo musubi.publication.max-files 2000
+jj config set --repo musubi.publication.max-bytes '16 MiB'
+```
+
+Zero disables the corresponding limit. Setting both to zero disables the guard. To prevent
+jj from automatically adding new files at all, jj also offers `snapshot.auto-track = 'none()'`;
+that changes your usual jj workflow and is not required for the publication budget.
 
 ## Abandoning operations
 

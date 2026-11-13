@@ -15,6 +15,7 @@ results and state with the oracle. This document owns that correspondence and it
 | `Expected.lean`: conflicted-ref history | `node/git.rs::expected` | `expected_history_conforms_to_model`, through the oracle | [Expected values from history](#expected-values-from-history) |
 | `Chunks.lean`: chunked blobs | `BlobStore::receive`, and `RemoteHub`'s `upload` and `download` | `receive_follows_the_prefix_model` and `transfers_follow_the_attempt_model`, through the oracle | [Chunked blobs](#chunked-blobs) |
 | `Copies.lean`: which local repository is a joined copy | `copy::standing`, `refine` and `check` | `copy::conformance::decisions_conformance`, through the oracle | [Copies](#copies) |
+| `Publication.lean`: cumulative snapshot budgets, scoped approval and selected cleanup | `node/publication` and the pre-upload gate | `node::publication::tests` through the oracle, and `musubi-sync` publication fixtures | [Snapshot publication](#snapshot-publication) |
 | `Names.lean`: the names other machines' workspaces show under | `workspaces::display_names` | `workspaces::tests::names_conform`, through the oracle | [Workspace names](#workspace-names) |
 
 ## The claim
@@ -692,6 +693,7 @@ Deliberately broken versions of the core, each caught:
 | Node omits the publication request when its cached head equals the hub's | `cached_restoration_still_publishes_a_pending_drop_at_the_known_head`, against `Retry.Publication.write`; the real orphan-realization regression also fails before the fix |
 | An old head reply changes current record bookkeeping, or a notification acknowledges a pending drop | `head_replies_update_records_only_for_the_known_pair`, checking publication, fetching and adoption |
 | An old fetch marks its head accepted, or replaces the current records | `fetched_replies_mark_only_new_heads_and_take_only_current_records`, checking the storage callback and adoption |
+| A fetch omits canonical record bodies when it stages no current-head operations | The same test observes `store_record_ops` separately from staging, including current and stale replies |
 | Node realizes an operation before its parents | invariants and conformance |
 | Node realizes an operation before its objects arrive | invariants and conformance |
 | Node realizes the front of its queue without removing it | `regress_scenario_conformance`, against `EarlyEntry.Burst.stepB`: the second realization leaves every rank component unchanged |
@@ -2008,3 +2010,42 @@ unsnapshotted work, publication by the next native command, and explicit workspa
 view where the private owned name was still a foreign alias. It checks the canonical binding
 before further native commands and the peer's resulting workspace names. Private-name
 reconstruction follows restore and revert sources and stops at native join boundaries.
+
+
+## Snapshot publication
+
+`Musubi.Publication` models file versions as `(path, content)` pairs and supplies each commit's
+complete file closure as a native contract. Its own executable definitions classify jj output
+facts, subtract shared and intentional content, deduplicate paths and content bytes, decide
+publication, and plan selected whole-operation cleanup. Frozen source intent is a distinct
+hash-visible annotation step before `Contract.cpar` changes ordered parents. The contraction
+ancestry theorems are used directly, rather than assuming that a flat list proves graph safety.
+
+`node::publication::tests` builds actual repositories using jj commands. It compares exact
+file-version sets, intentional commit sets, unique path counts, byte counts, budget decisions,
+approval and stale-source decisions with the oracle. Selected-cleanup fixtures compare the
+preview and the *applied native state*, including ordered contracted parents and checkpoint
+frontier with distinct shared-boundary labels, plus the partial README commit with current
+AGENTS content and removed accidental files. Other fixtures pin duplicate content, new paths
+reusing intentional bytes, ten large transient files, symlinks, automatic operation merges,
+initial joins, explicit revision selections, conservative Git imports, untracking accidental files,
+automatic descendant rewrites and native abandonment followed by GC before first inspection.
+Automatic import/rebase, fresh import keys and failed-export retries grant no exemptions;
+explicit import invocation and jj's argument rendering are pinned separately. The import fuzz
+target checks arbitrary invocation strings and quoted option values alongside retained-intent
+decoding.
+Unknown command records exercise `intentKnown = false` and cleanup refusal. The gate runs before
+uploads in the real `Hive` integration fixtures; those assert unwanted commits never reach the
+hub while incoming work still arrives.
+The CLI fixture snapshots inspection, preview, stale application, successful cleanup and exact
+override through real hub and CLI processes. The fixture stops its daemons after setup to
+keep the inspected operation rows reproducible.
+
+The native source contracts remain explicit: jj's creation/rewrite records, automatic snapshot
+flag and pinned command descriptions identifying selected revisions; complete commit/tree-side
+object closure and actual byte sizes; collision-resistant content identities, with operation-image
+coalescence refused; and canonicalization's view,
+namespace, expected-ref and causal-presence projections. Prepared native effects are read back
+and checked before op-head installation. These focused checks do not establish a full
+refinement of every native jj command or the asynchronous convergence theorem. A publication
+hold is an intentional lack of send progress; convergence requires holds eventually resolving.

@@ -408,6 +408,8 @@ pub struct FakeRepo {
     /// real repository does in files and `git` processes.
     pub staged_reads: Cell<usize>,
     pub object_checks: Cell<usize>,
+    /// Canonical record bodies requested even when no current-head operations are staged.
+    pub stored_record_ops: Option<Vec<Vec<Op>>>,
     /// Crash before writing the next objects to stage: a real repository writes operations
     /// and objects separately.
     pub crash_before_objects: bool,
@@ -455,6 +457,7 @@ impl FakeRepo {
             last_merge: None,
             staged_reads: Cell::new(0),
             object_checks: Cell::new(0),
+            stored_record_ops: None,
             crash_before_objects: false,
             objects_lost: false,
             dropped: BTreeSet::new(),
@@ -581,6 +584,13 @@ impl LocalRepo for FakeRepo {
             self.sops.insert(entry.id, entry.parents.clone());
         }
         self.objects_lost = self.crash_before_objects;
+        Ok(())
+    }
+
+    fn store_record_ops(&mut self, records: &[Vec<Op>], _: &Vec<Obj>) -> Result<(), Infallible> {
+        if let Some(stored) = &mut self.stored_record_ops {
+            stored.extend_from_slice(records);
+        }
         Ok(())
     }
 

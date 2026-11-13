@@ -17,6 +17,63 @@ on macOS, and to `journalctl --user -u musubi-hub` on Linux. To log more, see
 Messages below use `devbox` for the hub's machine, `app` for a hive, and `laptop` for a
 machine.
 
+## Sending held by the snapshot publication budget
+
+### "sending held: snapshots retain ... exceeding the publication budget"
+
+Automatic snapshots retain too much content beyond explicit change history and shared
+content. Removed files can still occupy older snapshots. Receiving continues. Run
+`musubi sync --outgoing` to inspect the paths and retaining operations. Its printed approval
+command sends exactly that work. Or remove unwanted files from the working copy, run
+`jj status`, and use `musubi sync --prune OPERATION...` to preview discarding selected
+unpublished operations. Apply only the printed preview command you want.
+
+The [workflow](guides/working-across-machines.md#when-snapshots-pick-up-too-much) includes a
+partial commit with useful files still uncommitted, and explains the defaults and settings.
+
+### "outgoing work changed; ..."
+
+The inspected history, limits, or cleanup context changed. Run `musubi sync --outgoing`
+again, or repeat your `musubi sync --prune OPERATION...` preview, and use its new token.
+Cleanup records edits made since the preview before checking the token, so an unsnapshotted
+edit can cause this refusal. Your current work stays intact.
+
+### "operation ... was offered to the hub or predates publication tracking; ..."
+
+This cleanup cannot establish that the operation stayed local. A lost upload reply can leave
+history already shared, and upgrading cannot reconstruct every older attempted upload.
+Choose other operations, approve publication, or use the existing [operation abandonment
+workflow](guides/working-across-machines.md#abandoning-operations) for shared history.
+
+### Cleanup cannot preserve earlier changes
+
+"cannot safely prune this history: jj did not record enough information ..."
+
+The jj command record does not say enough about the changes it selected. This can happen with
+older or custom commands, undo, redo, restoring operation state, or a Git import reusing existing
+versions whose selection jj did not record. An automatic retry of a Git-ref export can also
+leave this kind of record.
+musubi cannot guarantee preserving those versions while pruning, so no history was pruned.
+Inspect with `musubi sync --outgoing` and use its exact approval command to send this history.
+
+### "this selection would change another copy's activity or membership; ..."
+
+Removing these operations would change how a later concurrent forget of another copy resolves.
+No history was pruned. Choose different operations or approve publication. Cleanup makes new
+activity for this copy; it cannot replace another copy's activity with newly invented events.
+
+### "this cleanup cannot preserve ..." or "the prepared cleanup differs from its preview; ..."
+
+musubi checked the prepared operations and could not reproduce the inspected state exactly.
+No history was pruned. Choose a smaller selection or approve publication. A stale workspace
+may need `jj workspace update-stale` before inspecting again.
+
+### "cannot read this copy's record of attempted publications: ..."
+
+The local publication record is damaged. Do not delete it to make history look unpublished.
+Keep this copy's work and follow the [new-copy recovery
+workflow](#this-repositorys-history-no-longer-matches-the-hives-so-it-cant-sync-again).
+
 ## jj reports "stack limit reached"
 
 jj 0.47.0's static Linux binary can report `stack limit reached` for its built-in aliases and

@@ -133,3 +133,7 @@
 {"afterScoped":true,"beforeScoped":true,"grows":false,"matches":false,"ok":true}
 {"afterScoped":true,"beforeScoped":true,"grows":false,"matches":false,"ok":true}
 {"afterScoped":false,"beforeScoped":true,"grows":false,"matches":false,"ok":true}
+{"afterBytes":0,"afterFileCount":0,"afterFiles":[],"afterFits":true,"afterIntentional":[0],"afterView":[0],"applies":true,"bytes":9000000,"fileCount":1,"files":[{"object":1,"path":1}],"fits":false,"intentional":[0],"maySend":false,"ok":true,"parents":[[3,[0]],[4,[3]]]}
+{"afterBytes":0,"afterFileCount":0,"afterFiles":[],"afterFits":true,"afterIntentional":[0],"afterView":[0],"applies":true,"bytes":9000000,"fileCount":1,"files":[{"object":1,"path":1}],"fits":false,"intentional":[0],"maySend":true,"ok":true,"parents":[[3,[0]],[4,[3]]]}
+{"afterBytes":0,"afterFileCount":0,"afterFiles":[],"afterFits":true,"afterIntentional":[0],"afterView":[0],"applies":false,"bytes":9000000,"fileCount":1,"files":[{"object":1,"path":1}],"fits":false,"intentional":[0],"maySend":false,"ok":true,"parents":[[3,[0]],[4,[3]]]}
+{"afterBytes":0,"afterFileCount":0,"afterFiles":[],"afterFits":true,"afterIntentional":[0],"afterView":[0],"applies":false,"bytes":9000000,"fileCount":1,"files":[{"object":1,"path":1}],"fits":false,"intentional":[0],"maySend":false,"ok":true,"parents":[[3,[0]],[4,[3]]]}

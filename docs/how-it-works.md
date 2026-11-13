@@ -92,7 +92,7 @@ daemon reconnects by itself after a network change or a sleep.
 
 Every `jj` command that changes the repository records what it did as an operation, in jj's
 [operation log](https://docs.jj-vcs.dev/latest/operation-log/): the record that `jj undo` takes
-back and `jj op log` shows. musubi syncs that record. The daemon sends each new operation,
+back and `jj op log` shows. musubi syncs that record. Unless held by the snapshot publication budget, the daemon sends each new operation,
 with the commits it needs, to the hub, which passes it on to the other machines within a
 second or so. Every machine has the same commits and the same history of how they got there.
 
@@ -107,8 +107,11 @@ second or so. Every machine has the same commits and the same history of how the
 [Configure each machine](guides/working-across-machines.md#configure-each-machine) explains
 local settings. Configure remotes explicitly on any machine that will fetch or push.
 
-Every snapshot of a working copy replicates too, so a file that jj snapshots reaches every
-machine in the hive, even if you abandon it at once. Keep secrets in ignored files.
+Snapshots of a working copy replicate too. The [publication
+budget](guides/working-across-machines.md#when-snapshots-pick-up-too-much) holds sending when
+snapshots retain too much extra content, so you can inspect or discard accidental bulk files
+before they spread. Smaller accidental files can still reach every machine, even if you
+abandon them at once. Keep secrets in ignored files.
 
 Because that history is shared, the rest of jj's behaviour carries across machines:
 

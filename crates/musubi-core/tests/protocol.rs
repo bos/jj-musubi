@@ -788,6 +788,7 @@ fn fetched_replies_mark_only_new_heads_and_take_only_current_records() {
         let faults = Rc::new(RefCell::new(Faults::default()));
         // Count storage effects without injecting a failure.
         faults.borrow_mut().arm(usize::MAX, Timing::Before);
+        repo.stored_record_ops = Some(vec![]);
         let mut repo = Fallible::new(repo, faults.clone());
         let named = if same_head { head } else { ROOT };
         let handled = core
@@ -812,6 +813,15 @@ fn fetched_replies_mark_only_new_heads_and_take_only_current_records() {
             .iter()
             .filter(|&&call| call == "node.learned")
             .count();
+        assert_eq!(
+            repo.stored_record_ops,
+            Some(if takes_records {
+                vec![vec![dropped]]
+            } else {
+                vec![]
+            }),
+            "record bodies must be retained even with no current-head operations: {seq}, {same_head}"
+        );
         assert_eq!(marks, usize::from(learns), "{seq}, {same_head}");
         if learns {
             assert_eq!(

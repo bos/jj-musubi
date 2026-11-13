@@ -285,12 +285,39 @@ pub enum Command {
     /// this copy, it retries from the hub's current state. Run `musubi sync` again to retry
     /// at once.
     ///
+    /// Automatic snapshots may retain files you subsequently removed. Sending pauses if
+    /// that content exceeds 1000 paths or 8 MiB beyond explicit change history and shared
+    /// content; receiving continues. Inspect with --outgoing, approve exactly what it shows
+    /// with --approve TOKEN, or preview discarding selected unpublished operations with
+    /// --prune OPERATION... . Apply a preview with --prune OPERATION... --apply TOKEN;
+    /// current work and explicit change versions are retained, but earlier uncommitted
+    /// versions may become unrecoverable. jj config keys musubi.publication.max-files and
+    /// musubi.publication.max-bytes set the limits; 0 disables the corresponding limit.
+    ///
     /// Trimming earlier history with `jj op abandon` preserves each copy's own Git state.
     /// Other copies remain in the hive or forgotten as they were.
     ///
     /// If jj made the result of an operation abandon ambiguous, syncing stops and gives a
     /// `jj op integrate` command to restore the missing history before trying again.
-    Sync,
+    Sync {
+        /// Inspect the snapshot content waiting to be sent, without sending or snapshotting.
+        #[arg(long, conflicts_with_all = ["approve", "prune", "apply"])]
+        outgoing: bool,
+        /// Send the exact publication inspected with --outgoing, despite its snapshot budget.
+        #[arg(long, value_name = "TOKEN", conflicts_with = "prune")]
+        approve: Option<String>,
+        /// Preview discarding these unpublished operations while retaining current work.
+        #[arg(long, num_args = 1.., value_name = "OPERATION")]
+        prune: Vec<String>,
+        /// Apply the exact cleanup preview identified by this token.
+        #[arg(
+            long,
+            value_name = "TOKEN",
+            requires = "prune",
+            conflicts_with = "approve"
+        )]
+        apply: Option<String>,
+    },
     /// Run the daemon that keeps this machine's repositories in sync, or control it.
     ///
     /// Without a subcommand, it runs the daemon in the foreground, logging to standard

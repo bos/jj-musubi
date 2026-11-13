@@ -349,6 +349,17 @@ impl LocalRepo for Fallible<FakeRepo> {
         self.faults.borrow().finish(hit)
     }
 
+    fn store_record_ops(
+        &mut self,
+        records: &[Vec<Op>],
+        attachment: &Vec<Obj>,
+    ) -> Result<(), StorageError> {
+        // The abstract universe already holds every immutable body; still observe the
+        // request so that current-head filtering cannot silently omit record metadata.
+        infallible(self.inner.store_record_ops(records, attachment));
+        Ok(())
+    }
+
     fn stage_objects(&mut self, ops: &[Op], objs: &Vec<Obj>) -> Result<(), StorageError> {
         let hit = self.enter("node.stage_objects", !objs.is_empty(), objs.len() > 1)?;
         let prefix;

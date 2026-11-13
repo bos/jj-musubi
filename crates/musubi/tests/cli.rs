@@ -3842,6 +3842,14 @@ fn op_abandon_syncs_but_history_otherwise_lost_stops_syncing() {
     If a hub reply leaves needed data missing, the sync fails. If the daemon serves this copy, it
     retries from the hub's current state. Run `musubi sync` again to retry at once.
 
+    Automatic snapshots may retain files you subsequently removed. Sending pauses if that content
+    exceeds 1000 paths or 8 MiB beyond explicit change history and shared content; receiving continues.
+    Inspect with --outgoing, approve exactly what it shows with --approve TOKEN, or preview discarding
+    selected unpublished operations with --prune OPERATION... . Apply a preview with --prune
+    OPERATION... --apply TOKEN; current work and explicit change versions are retained, but earlier
+    uncommitted versions may become unrecoverable. jj config keys musubi.publication.max-files and
+    musubi.publication.max-bytes set the limits; 0 disables the corresponding limit.
+
     Trimming earlier history with `jj op abandon` preserves each copy's own Git state. Other copies
     remain in the hive or forgotten as they were.
 
@@ -3851,6 +3859,18 @@ fn op_abandon_syncs_but_history_otherwise_lost_stops_syncing() {
     Usage: musubi sync [OPTIONS]
 
     Options:
+          --outgoing
+              Inspect the snapshot content waiting to be sent, without sending or snapshotting
+
+          --approve <TOKEN>
+              Send the exact publication inspected with --outgoing, despite its snapshot budget
+
+          --prune <OPERATION>...
+              Preview discarding these unpublished operations while retaining current work
+
+          --apply <TOKEN>
+              Apply the exact cleanup preview identified by this token
+
       -h, --help
               Print help (see a summary with '-h')
 
@@ -4620,4 +4640,144 @@ fn the_hub_runs_through_the_login_service() {
     assert!(err.contains("no hub is serving"), "{err}");
     let out = run(&env, &logs, musubi_as_user(&state, &["hub", "uninstall"]));
     assert_eq!(out, "The hub wasn't set to run at login.\n");
+}
+
+/// A held sender can inspect, discard selected recovery history, or approve exactly one
+/// publication. A stale cleanup records unsnapshotted edits before refusing to discard it.
+#[test]
+fn publication_budget_inspection_cleanup_and_override() {
+    let env = TestEnv::with_real_op_times();
+    let _filters = snapshot_filters(&env);
+    let mut settings = insta::Settings::clone_current();
+    settings.add_filter(r"\b[0-9a-f]{128}\b", "[operation]");
+    settings.add_filter(r"\b[0-9a-f]{64}\b", "[token]");
+    settings.add_filter(r"\b[0-9a-f]{12}\b", "[operation]");
+    settings.add_filter(r"\b[0-9a-f]{40}\b", "[commit]");
+    let _filters = settings.bind_to_scope();
+    let mut logs = Logs::default();
+    let hub = Hub::start(&env, &mut logs);
+    let mut daemons = Daemons::default();
+    let (alpha, beta) = two_machines_with(&env, &mut logs, &mut daemons, &hub, |repo| {
+        repo.jj(&[
+            "config",
+            "set",
+            "--repo",
+            "musubi.publication.max-files",
+            "10",
+        ]);
+        repo.jj(&[
+            "config",
+            "set",
+            "--repo",
+            "musubi.publication.max-bytes",
+            "32",
+        ]);
+    });
+    // Settle membership and stop background writers so operation rows are reproducible.
+    musubi_in(&env, &logs, &alpha, &["daemon", "stop"]);
+    musubi_in(&env, &logs, &beta, &["daemon", "stop"]);
+    musubi_in(&env, &logs, &alpha, &["sync"]);
+    musubi_in(&env, &logs, &beta, &["sync"]);
+    musubi_in(&env, &logs, &alpha, &["sync"]);
+    alpha.write_file("README.txt", "README");
+    alpha.write_file("AGENTS.md", "keep");
+    alpha.write_file("accident", &"x".repeat(64));
+    alpha.jj(&["status"]);
+    alpha.jj(&["commit", "README.txt", "-m", "Keep README"]);
+    fs::remove_file(alpha.path().join("accident")).unwrap();
+    alpha.jj(&["status"]);
+    insta::assert_snapshot!(musubi_fails(&env, &logs, &alpha, &["sync"]), @"
+    Error: sending held: snapshots retain 2 files (68 bytes), exceeding the publication budget
+    Hint: run `musubi sync --outgoing` to inspect or approve them
+    ");
+    let outgoing = musubi_in(&env, &logs, &alpha, &["sync", "--outgoing"]);
+    insta::assert_snapshot!(outgoing, @"
+    Sending held: snapshots retain 2 files, 68 bytes beyond intentional history.
+    Limits: 10 files, 32 bytes (0 disables a limit).
+
+    Files (versions shared by operations are counted once):
+      AGENTS.md  4 bytes, 1 version
+      accident  64 bytes, 1 version
+
+    Retaining operations (their byte counts overlap):
+      [operation]  2 files, 68 bytes  snapshot working copy
+      [operation]  2 files, 68 bytes  commit [commit]
+      [operation]  2 files, 68 bytes  snapshot working copy
+
+    Send this work: musubi sync --approve [token]
+    Preview cleanup: musubi sync --prune <operation>...
+    ");
+    let selectors = |outgoing: &str| {
+        outgoing
+            .lines()
+            .filter_map(|line| {
+                let word = line.strip_prefix("  ")?.split_whitespace().next()?;
+                (word.len() >= 12 && word.bytes().all(|c| c.is_ascii_hexdigit()))
+                    .then(|| word.to_owned())
+            })
+            .collect::<Vec<_>>()
+    };
+    let selected = selectors(&outgoing);
+    let mut prune = vec!["sync", "--prune"];
+    prune.extend(selected.iter().map(String::as_str));
+    let preview = musubi_in(&env, &logs, &alpha, &prune);
+    insta::assert_snapshot!(preview, @"
+    Discard 3 unpublished operations.
+    Keep all current commits, bookmarks, workspaces and files.
+    Earlier versions of uncommitted files may become unrecoverable.
+    Snapshot content: 2 files, 68 bytes -> 1 file, 4 bytes.
+    Apply: musubi sync --prune [operation] [operation] [operation] --apply [token]
+    ");
+    let token = preview.split_whitespace().last().unwrap();
+    alpha.write_file("AGENTS.md", "latest");
+    let mut apply = prune.clone();
+    apply.extend(["--apply", token]);
+    insta::assert_snapshot!(musubi_fails(&env, &logs, &alpha, &apply), @"Error: outgoing work changed; preview the cleanup again before applying it");
+    assert_eq!(
+        fs::read_to_string(alpha.path().join("AGENTS.md")).unwrap(),
+        "latest"
+    );
+    let outgoing = musubi_in(&env, &logs, &alpha, &["sync", "--outgoing"]);
+    let selected = selectors(&outgoing);
+    let mut prune = vec!["sync", "--prune"];
+    prune.extend(selected.iter().map(String::as_str));
+    let preview = musubi_in(&env, &logs, &alpha, &prune);
+    let token = preview.split_whitespace().last().unwrap();
+    let mut apply = prune;
+    apply.extend(["--apply", token]);
+    let mut command = alpha.program(musubi());
+    command.args(&apply);
+    let (ok, stdout, stderr) = try_run(&logs, &env, command);
+    assert!(ok, "{stdout}{stderr}\n{}", logs.dump());
+    insta::assert_snapshot!(stderr, @"Discarded 4 unpublished operations; current work is unchanged.");
+    musubi_in(&env, &logs, &alpha, &["sync"]);
+    musubi_in(&env, &logs, &beta, &["sync"]);
+    assert!(
+        !beta
+            .jj(&[
+                "--ignore-working-copy",
+                "log",
+                "--no-graph",
+                "-r",
+                "all()",
+                "-T",
+                "description"
+            ])
+            .contains("accident")
+    );
+    alpha.write_file("large", &"z".repeat(64));
+    alpha.jj(&["status"]);
+    let outgoing = musubi_in(&env, &logs, &alpha, &["sync", "--outgoing"]);
+    let token = outgoing
+        .lines()
+        .find_map(|line| line.strip_prefix("Send this work: musubi sync --approve "))
+        .unwrap();
+    musubi_in(&env, &logs, &alpha, &["sync", "--approve", token]);
+    insta::assert_snapshot!(musubi_in(&env, &logs, &alpha, &["sync", "--outgoing"]), @"Within publication budget: snapshots retain 0 files, 0 bytes beyond intentional history.");
+    alpha.write_file("pending", &"p".repeat(64));
+    alpha.jj(&["status"]);
+    alpha.jj(&["bookmark", "create", "unrelated", "-r", "root()"]);
+    alpha.jj(&["undo"]);
+    let outgoing = musubi_in(&env, &logs, &alpha, &["sync", "--outgoing"]);
+    insta::assert_snapshot!(outgoing.lines().last().unwrap(), @"Cleanup unavailable: jj did not record enough information to preserve an earlier command's changes.");
 }

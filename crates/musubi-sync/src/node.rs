@@ -88,10 +88,12 @@ pub struct NodeAdapter {
     /// A complete immutable known-head closure already used to name these pending drops.
     /// Repeating a realization step needs no second walk of that same history.
     pending_named: Option<(OpId, Record)>,
+    publication: RefCell<musubi_jj::node::PublicationCache>,
 }
 
 impl NodeAdapter {
-    pub fn new(repo: NodeRepo) -> anyhow::Result<Self> {
+    pub fn new(mut repo: NodeRepo) -> anyhow::Result<Self> {
+        repo.initialize_publication_offers()?;
         let musubi_dir = repo.repo_path().join("musubi");
         let tmp = musubi_dir.join("tmp");
         open_bundle_dir(&tmp)?;
@@ -108,6 +110,7 @@ impl NodeAdapter {
             staged_children: HashMap::new(),
             staged_commits: None,
             pending_named: None,
+            publication: RefCell::default(),
         })
     }
 
@@ -898,7 +901,29 @@ impl LocalRepo for NodeAdapter {
     }
 
     fn pushing(&mut self, head: &OpId) -> anyhow::Result<()> {
+        self.repo.record_publication_offer(&canonical(head))?;
         write_op(&self.pushed_path, head)
+    }
+
+    fn permit_publication(&mut self, ops: &[OpId], base: &OpId) -> anyhow::Result<()> {
+        self.repo.initialize_publication_offers()?;
+        let limits = musubi_jj::node::PublicationLimits::load(self.repo.loader().settings())?;
+        if limits.files == 0 && limits.bytes == 0 {
+            return Ok(());
+        }
+        let report = self.repo.publication_report(
+            &canonicals(ops),
+            &canonical(base),
+            &mut self.publication.borrow_mut(),
+        )?;
+        if report.held() && !musubi_jj::node::publication_approved(self.repo.repo_path(), &report) {
+            return Err(musubi_jj::node::PublicationHeld {
+                files: report.files.len(),
+                bytes: report.bytes,
+            }
+            .into());
+        }
+        Ok(())
     }
 
     fn learned(&mut self, head: &OpId) -> anyhow::Result<()> {

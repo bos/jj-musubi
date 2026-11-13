@@ -58,8 +58,26 @@ import Musubi.Supersede
 import Musubi.NodeSysExec
 import Musubi.NativeEvents
 import Musubi.FineAssembly
+import Musubi.Publication
 
 open Musubi
+
+#print axioms Publication.protected_not_charged
+#print axioms Publication.known_not_charged
+#print axioms Publication.protected_content_free
+#print axioms Publication.cleanup_keeps_current_view
+#print axioms Publication.cleanup_keeps_intentional
+#print axioms Publication.cleanup_requires_intentional
+#print axioms Publication.cleanup_keeps_intentional_files
+#print axioms Publication.cleanup_keeps_context
+#print axioms Publication.survivor_parent_survives
+#print axioms Publication.survivor_ancestry
+#print axioms Publication.installed_keeps_intentional_files
+#print axioms Publication.installed_keeps_view_context
+#print axioms Publication.cleanup_keeps_unselected
+#print axioms Publication.uncertain_cleanup_refused
+#print axioms Publication.stale_cleanup_refused
+#print axioms Publication.changed_plan_held
 
 -- Shared run facts; the first two are axiom-free.
 #print axioms Musubi.acc_no_infinite_chain

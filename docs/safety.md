@@ -40,7 +40,9 @@ storage errors eventually stop. Machines must resume syncing, and their requests
 correct replies. Protocol actions whose prerequisites remain satisfied must eventually run. Old
 replies must eventually stop affecting protocol state. Repository calls must behave as specified,
 and musubi's maintenance routines must eventually stop writing operations. The proofs assume this
-last condition; they do not prove termination of those routines.
+last condition; they do not prove termination of those routines. Snapshot publication holds
+must eventually be resolved, disabled or approved; the convergence proofs do not establish
+progress through a deliberate hold.
 
 Other models cover operation abandonment, git-ref import and export, distinguishing a joined
 repository from a duplicate of its directory, workspace names, and chunked transfers.

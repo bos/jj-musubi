@@ -412,7 +412,27 @@ fn run(cli: Cli, ui: &Ui) -> anyhow::Result<()> {
             writeln!(ui.stdout(), "Started the daemon.")?;
             Ok(())
         }),
-        Command::Sync => sync::sync(ui, &cwd()?, &socket()?),
+        Command::Sync {
+            outgoing,
+            approve,
+            prune,
+            apply,
+        } => {
+            let start = cwd()?;
+            let socket = socket()?;
+            if outgoing || approve.is_some() || !prune.is_empty() {
+                sync::publication(
+                    ui,
+                    &start,
+                    &socket,
+                    approve.as_deref(),
+                    &prune,
+                    apply.as_deref(),
+                )
+            } else {
+                sync::sync(ui, &start, &socket)
+            }
+        }
         Command::Completion { shell } => completion::print_script(ui, shell),
         Command::Debug(Debug::OpId { id }) => debug::op_id(ui, &cwd()?, &id),
     }

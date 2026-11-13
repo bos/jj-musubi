@@ -7,6 +7,17 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- Sending pauses when automatic snapshots retain more than 1000 extra paths or 8 MiB beyond
+  explicit change history and shared content; receiving continues. `musubi sync --outgoing`
+  shows the content and retaining operations. Its exact `--approve TOKEN` override sends
+  them; `--prune OPERATION...` previews removing selected unpublished operations, with
+  `--apply TOKEN` applying that preview while preserving current work and intentional change
+  versions. Older uncommitted versions in removed snapshots may be lost. Configure the
+  limits with `musubi.publication.max-files` and `musubi.publication.max-bytes`; zero disables
+  a limit. History offered before tracking began is conservatively ineligible for this
+  cleanup. This changes the protocol to 22: upgrade the hub and all machines together and
+  restart each daemon. A new CLI refuses the older daemon's control protocol.
+
 - Sync no longer rejects a command made after a full history trim with "operation workspace
   context is malformed", including when only other copies have workspace bindings. Nothing
   needs doing on upgrading.

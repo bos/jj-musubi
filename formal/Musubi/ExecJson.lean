@@ -4,6 +4,7 @@ only; no protocol logic.
 -/
 import Lean.Data.Json
 import Init.Data.List.Sort.Lemmas
+import Musubi.Publication
 import Musubi.Exec
 import Musubi.SupersedeExec
 import Musubi.PresenceExec
@@ -868,6 +869,82 @@ def rawPushReply (j : Json) : Except String Json := do
 
 /-! ## Request handling -/
 
+/-- Native publication fixtures supply file closures and jj's operation facts. The reply
+computes the budget and selected cleanup using the same definitions as the proofs. -/
+def publicationReply (j : Json) : Except String Json := do
+  let decodeFile (v : Json) : Except String Publication.File := do
+    return ⟨← getNat v "path", ← getNat v "object"⟩
+  let decodeWrite (v : Json) : Except String Publication.Write := do
+    return ⟨← getNat v "commit", ← v.getObjValAs? Bool "workspaceTip",
+      ← v.getObjValAs? Bool "rewritten"⟩
+  let decodeOperation (v : Json) : Except String Publication.Operation := do
+    let writes ← v.getObjValAs? (Array Json) "writes"
+    let frozen ← v.getObjValAs? (Option (List Nat)) "frozen"
+    return {
+      id := ← getNat v "id"
+      parents := ← getNats v "parents"
+      snapshot := ← v.getObjValAs? Bool "snapshot"
+      frozen := frozen
+      writes := ← writes.toList.mapM decodeWrite
+      selections := ← getNats v "selections"
+      required := ← getNats v "required" }
+  let commits ← j.getObjValAs? (Array (Array Json)) "commits"
+  let closures ← commits.toList.mapM (fun row => row.toList.mapM decodeFile)
+  let sizes ← j.getObjValAs? (Array Nat) "sizes"
+  let operations ← j.getObjValAs? (Array Json) "operations"
+  let operations ← operations.toList.mapM decodeOperation
+  let known ← getNats j "known"
+  let selected ← getNats j "selected"
+  let view ← getNats j "view"
+  let limits : Publication.Limits := ⟨← getNat j "maxFiles", ← getNat j "maxBytes"⟩
+  let closure := fun c => closures[c]?.getD []
+  let size := fun o => sizes[o]?.getD 0
+  let before := Publication.charged closure known operations
+  let heads ← getNats j "heads"
+  let expected ← getNats j "expectedHeads"
+  let context ← getNats j "context"
+  let identity ← getNats j "planIdentity"
+  let approvalJson ← j.getObjVal? "approval"
+  let approval ← if approvalJson == Json.null then pure none else do
+    let extra ← approvalJson.getObjValAs? (Array Json) "extra"
+    let identity ← getNats approvalJson "identity"
+    let extra ← extra.toList.mapM decodeFile
+    pure (some ({ identity, extra } : Publication.Plan))
+  let intentKnown ← j.getObjValAs? Bool "intentKnown"
+  let state : Publication.State := { heads, view, operations, context, intentKnown }
+  let fresh := (operations.map Publication.Operation.id).foldl max 0 + 1
+  let afterState := Publication.cleanup state selected fresh
+  let actualJson ← j.getObjVal? "actual"
+  let actual ← if actualJson == Json.null then pure afterState else do
+    let actualOps ← actualJson.getObjValAs? (Array Json) "operations"
+    let heads ← getNats actualJson "heads"
+    let view ← getNats actualJson "view"
+    let context ← getNats actualJson "context"
+    let operations ← actualOps.toList.mapM decodeOperation
+    pure ({ heads, view, context, operations } : Publication.State)
+  let after := Publication.charged closure known afterState.operations
+  let beforeSize := Publication.chargeSize closure known operations size
+  let afterSize := Publication.chargeSize closure known afterState.operations size
+  let encodeFile (f : Publication.File) := Json.mkObj [
+    ("path", toJson f.path), ("object", toJson f.object)]
+  return Json.mkObj [
+    ("ok", toJson true),
+    ("files", Json.arr (before.map encodeFile).toArray),
+    ("fileCount", toJson (Publication.fileCount before)),
+    ("bytes", toJson (Publication.byteCount beforeSize before)),
+    ("fits", toJson (Publication.fits beforeSize limits before)),
+    ("maySend", toJson (Publication.maySend beforeSize limits ⟨identity, before⟩ approval)),
+    ("applies", toJson (Publication.applyCleanup closure known expected state selected fresh
+      actual).isSome),
+    ("parents", toJson (afterState.operations.map (fun op => (op.id, op.parents)))),
+    ("intentional", nats (Publication.protectedRoots operations)),
+    ("afterFiles", Json.arr (after.map encodeFile).toArray),
+    ("afterFileCount", toJson (Publication.fileCount after)),
+    ("afterBytes", toJson (Publication.byteCount afterSize after)),
+    ("afterFits", toJson (Publication.fits afterSize limits after)),
+    ("afterView", nats afterState.view),
+    ("afterIntentional", nats (Publication.protectedRoots afterState.operations))]
+
 /-- The oracle's session: the node count and current state, once `reset`. -/
 abbrev Session := Option (Nat × SEState)
 
@@ -882,6 +959,10 @@ def handle (sess : Session) (line : String) : Json × Session :=
       match getNat j "nodes" with
       | .error e => (errReply s!"bad request: {e}", sess)
       | .ok N => (okReply N initSE, some (N, initSE))
+    | .ok "publication" =>
+      match publicationReply j with
+      | .error error => (errReply s!"bad request: {error}", sess)
+      | .ok reply => (reply, sess)
     | .ok "step" =>
       match sess with
       | none => (errReply "bad request: step before reset", sess)

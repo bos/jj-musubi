@@ -122,7 +122,7 @@ impl NodeRepo {
 
     /// The operation the hub accepted that this machine fetches from (the sync adapter's
     /// `accepted_base`), a hub name, if it has one.
-    pub(super) fn stored_base(&self) -> Option<HubOp> {
+    pub(in crate::node) fn stored_base(&self) -> Option<HubOp> {
         self.stored_op("accepted_base")
     }
 

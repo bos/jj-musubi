@@ -29,6 +29,8 @@ const HISTORY_GONE: &str = "this repository's history no longer matches the hive
 
 #[derive(Debug, Error)]
 pub enum NodeError {
+    #[error("{0}")]
+    Publication(String),
     #[error("failed to load repository")]
     Load(#[from] StoreLoadError),
     #[error("unsupported op store {0:?}; musubi needs simple_op_store")]

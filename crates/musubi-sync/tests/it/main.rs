@@ -5,6 +5,7 @@ mod faults;
 mod gc;
 mod lies;
 mod network;
+mod publication;
 mod serve;
 mod server;
 mod transfer;

@@ -198,7 +198,7 @@ To stop using musubi on a machine altogether:
 
 For copies already using the current operation-id format, the unreleased local-configuration,
 clone, SHA-256, hub-replacement, renaming, abandon-repair and workspace-ownership changes use
-protocol 21 and a new hub metadata format.
+protocol 22, snapshot publication budgets, and a new hub metadata format.
 Stop the old hub and daemons and upgrade them together. Archive the old default hub directory,
 then run `musubi hub` without `--dir` to initialize a fresh default directory; SSH connections
 will then find the new default hub. In each existing copy run `musubi join --hub <hub-host>` to

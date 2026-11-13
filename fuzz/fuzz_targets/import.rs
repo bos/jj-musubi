@@ -65,6 +65,13 @@ fn history() -> &'static History {
                 op.metadata.attributes.insert("musubi.workspace-context".to_owned(),
                     r#"{"source":"alpha#aaaa","names":{"beta/default":"beta#bbbb/default","default":"alpha#aaaa/default"},"known":["alpha#aaaa","beta#bbbb"]}"#.to_owned());
             }
+            if i % 3 == 0 {
+                op.commit_predecessors = Some(std::collections::BTreeMap::from([
+                    (CommitId::from_bytes(&[i + 1; 20]), vec![]),
+                ]));
+                op.metadata.attributes.insert("musubi.publication-intent".to_owned(),
+                    format!("[\"{}\"]", CommitId::from_bytes(&[i + 1; 20]).hex()));
+            }
             let op_id = store.write_operation(&op).unwrap();
             views.push((view_id.clone(), store.view_bytes(&view_id).unwrap()));
             ops.push((op_id.0.clone(), store.operation_bytes(&op_id).unwrap()));
@@ -114,6 +121,18 @@ fn encode(normal: &[u8], how: u8) -> Vec<u8> {
 }
 
 fuzz_target!(|data: &[u8]| {
+    // The recorded invocation controls whether import writes are intentional. Arbitrary
+    // option values, including jj's unusual apostrophe escaping, cannot become commands.
+    let args = String::from_utf8_lossy(data);
+    let _ = musubi_jj::node::explicit_git_import(&args);
+    let value = args.replace('\'', "\\'");
+    assert!(!musubi_jj::node::explicit_git_import(&format!(
+        "jj --config '{value}' status"
+    )));
+    assert_eq!(
+        musubi_jj::node::explicit_git_import(&format!("jj --config '{value}' git import")),
+        !args.contains('\'') && !args.ends_with('\\'),
+    );
     let history = history();
     let mut input = Input(data);
     let path = scratch().join("import-bundle");
@@ -185,10 +204,10 @@ fuzz_target!(|data: &[u8]| {
                 let mut decoded = history.decoded[i].clone();
                 let mut encoded = proto::Operation::decode(op.as_slice()).unwrap();
                 let attributes = &mut encoded.metadata.as_mut().unwrap().attributes;
-                let attribute = if input.byte() % 2 == 0 {
-                    "musubi.original-parents"
-                } else {
-                    "musubi.workspace-context"
+                let attribute = match input.byte() % 3 {
+                    0 => "musubi.original-parents",
+                    1 => "musubi.workspace-context",
+                    _ => "musubi.publication-intent",
                 };
                 decoded.metadata.attributes.remove(attribute);
                 attributes.remove(attribute);

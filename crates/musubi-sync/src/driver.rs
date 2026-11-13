@@ -61,6 +61,9 @@ impl NodeDriver {
         self.adapter.before_sync()?;
         let mut steps = 0;
         loop {
+            // Cleanup cannot race the approval check or an attachment upload. jj commands
+            // remain independent; every outgoing request names immutable operations.
+            let _publication = musubi_jj::node::publication_lock(self.adapter.repo().repo_path())?;
             match self.core.step(&mut self.adapter)? {
                 Step::Idle => {
                     if self.adapter.when_idle()? {

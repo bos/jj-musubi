@@ -183,6 +183,16 @@ pub trait LocalRepo {
         Ok(())
     }
 
+    /// Local publication policy, before recording an attempted push or preparing uploads.
+    /// A refusal leaves receiving and realization available on the next sync.
+    fn permit_publication(
+        &mut self,
+        _ops: &[Self::Op],
+        _base: &Self::Op,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
     /// This node learned that the hub's head is `head`, from a reply to its own request: if
     /// that is what it pushed last, the hub took it, though the base may not have moved to
     /// it yet, so that a `jj op abandon` of it must be noticed as one of the base would be.
@@ -422,9 +432,10 @@ impl<O: Clone + Ord + Hash + Debug> NodeCore<O> {
             "pushing {head:?}, which this node dropped"
         );
         repo.share()?;
-        repo.pushing(head)?;
         let known = self.known.1.clone();
         let ops = repo.ops_between(head, &known)?;
+        repo.permit_publication(&ops, &known)?;
+        repo.pushing(head)?;
         Ok(Request::Push {
             machine: repo.machine(),
             ops_attachment: repo.ops_attachment(&ops)?,

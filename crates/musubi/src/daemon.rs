@@ -94,6 +94,9 @@ pub struct Status {
     /// Whether the error is one that syncing again can't get past, as after `jj op abandon`.
     #[serde(default)]
     pub paused: bool,
+    /// Outgoing snapshot content needs a decision; receiving continues normally.
+    #[serde(default)]
+    pub publication_held: bool,
 }
 
 impl Status {
@@ -126,6 +129,7 @@ impl Status {
     fn set_error(&mut self, error: Option<&anyhow::Error>) {
         self.error = error.map(|err| format!("{err:#}"));
         self.paused = error.is_some_and(history_lost);
+        self.publication_held = error.is_some_and(publication_held);
     }
 
     /// Overwrites the status in place: it changes at every sync attempt, and ext4 writes out
@@ -146,6 +150,12 @@ impl Status {
         };
         write().ok();
     }
+}
+
+fn publication_held(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.is::<musubi_jj::node::PublicationHeld>())
 }
 
 pub fn now() -> u64 {
@@ -966,6 +976,10 @@ async fn serve_async(
         let started = std::time::Instant::now();
         // Reconnecting during the sync, which may miss announcements, calls for another.
         reconnections.seen();
+        let held_before = status
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .publication_held;
         let result = driver.sync().await;
         tracing::debug!("sync took {:?}", started.elapsed());
         let synced = known(&driver);
@@ -1021,6 +1035,16 @@ async fn serve_async(
                 }
             }
             Err(err) => {
+                if publication_held(&err) {
+                    if !held_before {
+                        tracing::warn!("{err:#}");
+                    }
+                    // No reconnect/reopen loop for a policy hold. Keep the immutable
+                    // accounting cache, and keep listening for incoming and local work.
+                    retry = false;
+                    backoff = Duration::from_millis(500);
+                    continue;
+                }
                 tracing::warn!("{err:#}");
                 // What failed may be that the copy is no longer there, as when it was moved
                 // or deleted during the sync: then open nothing there, which would write.

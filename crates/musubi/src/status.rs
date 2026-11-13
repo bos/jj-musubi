@@ -382,6 +382,9 @@ impl Hive {
 
     /// When the repository last synced.
     fn synced(&self) -> String {
+        if self.sync.as_ref().is_some_and(|sync| sync.publication_held) {
+            return "sending held: snapshot publication budget".to_owned();
+        }
         match self.sync.as_ref().and_then(|sync| sync.last_success) {
             Some(t) => format!(
                 "synced {} ago",
@@ -454,8 +457,15 @@ impl Hive {
     fn warn(&self, ui: &Ui, daemon: &Daemon) -> io::Result<()> {
         let failing = self.failing();
         if let Some(error) = self.sync.as_ref().and_then(|sync| sync.error.as_ref()) {
-            writeln!(ui.warning(), "Syncing fails: {error}")?;
-            if self.sync.as_ref().is_some_and(|sync| sync.paused) {
+            if self.sync.as_ref().is_some_and(|sync| sync.publication_held) {
+                writeln!(ui.warning(), "{error}")?;
+            } else {
+                writeln!(ui.warning(), "Syncing fails: {error}")?;
+            }
+            if self.sync.as_ref().is_some_and(|sync| sync.publication_held) {
+                // The stored hold already names the inspection command, and receiving
+                // still runs. It is not a connection failure to retry.
+            } else if self.sync.as_ref().is_some_and(|sync| sync.paused) {
                 writeln!(
                     ui.hint(),
                     "Retrying won't get past this; the warning says what will."

@@ -44,7 +44,7 @@ use crate::socket::uid;
 /// Changes whenever the control service does, or how commands find the daemon (its lock and
 /// the file beside it), so that a command and a daemon from different builds notice each
 /// other.
-pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "/control-4");
+pub const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "/control-5");
 
 /// What a successful sync reached: the hub's head.
 #[derive(Clone, Debug, Serialize, Deserialize)]

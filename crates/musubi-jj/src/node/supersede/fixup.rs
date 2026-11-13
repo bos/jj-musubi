@@ -67,6 +67,41 @@ pub(super) struct Work {
 }
 
 impl NodeRepo {
+    /// A cleanup is new local activity, retaining Git expectations, namespace and this
+    /// copy's lease. Other copies' complete causal presence is checked before publication;
+    /// recreating their work under new identities would change later concurrent merges.
+    pub(in crate::node) fn publication_state_attributes(
+        &self,
+        repo: &ReadonlyRepo,
+        head: &CanonicalOp,
+    ) -> Result<Vec<BTreeMap<String, String>>, NodeError> {
+        let known = self.pending_expected();
+        let history = git::History {
+            known: &known,
+            roots: std::slice::from_ref(&self.root_op_id().0),
+            is_join: &|op| self.is_join_point(op),
+            parents: &|_| Ok(None),
+        };
+        let expected = git::format_expected(&git::expected_values(
+            repo.store(),
+            repo.operation(),
+            &history,
+        )?);
+        let presence = self.presence(head)?;
+        let mut attrs = self.publication_namespace_facts(head)?;
+        // Cleanup is genuine activity by this copy. It must not invent new activity by
+        // other copies: their causal work/forget identities are checked before publishing.
+        attrs.insert(WORK_ATTRIBUTE.to_owned(), self.machine.key().to_owned());
+        attrs.insert(
+            FORGET_AFTER_ATTRIBUTE.to_owned(),
+            format_forget_after(presence.forget_after(self.machine.key())),
+        );
+        if let Some(expected) = expected {
+            attrs.insert(git::EXPECTED_ATTRIBUTE.to_owned(), expected);
+        }
+        Ok(vec![attrs])
+    }
+
     /// What the fix-up must write for the state at `new`, the node-space rewrite of `old`,
     /// to be as it was at `old`. Presence is as it was (docs/internals/design.md, "Presence
     /// through an abandon"), but where a copy's latest work, or the `musubi.forget-after` it

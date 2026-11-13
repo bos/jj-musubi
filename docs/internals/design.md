@@ -829,6 +829,83 @@ one. Commands that take a hive accept any unique prefix of its name, except
 
 `musubi clone <name>` creates a new colocated repository and joins it to the named hive.
 
+## Snapshot publication budgets
+
+The node gates a publication before `pushing` and before preparing or uploading attachments.
+Incoming replies and objects are applied first; a held sender remains a receiver. A filesystem
+publication lock serializes this path with inspection, exact approval and cleanup across
+processes. The local control protocol changes with this feature so a new CLI cannot hand an
+approval or cleanup to an older unguarded daemon.
+
+The budget measures content required only by outgoing recovery history, relative to the
+accepted basis and intentional change versions. Walk every required commit and its parents,
+then every raw tree side, including directory sides of conflicts and symlink targets. Count
+distinct extra paths and distinct extra content bytes. A new path pointing to already required
+content costs a path but no bytes. File and symlink object kinds are distinct; submodule links
+cost paths but no external repository content bytes. Equal versions retained by several
+operations contribute once to the total; per-operation contributions overlap.
+
+Intent comes from actual jj transaction records. Automatic snapshots and automatic divergent
+operation reconciliation create no intent. Explicit creation/rewrite outputs and selected
+history references do; a freshly created working-copy continuation with no predecessors is
+excluded, since `jj commit PATH` leaves its unselected remainder there. An unrelated explicit
+command does not bless unchanged automatically rebased descendants. Initial joining consults
+pre-join native operation facts, restricted to commit versions in the exported closure; it
+neither exports that whole recovery log nor blesses arbitrary current working-copy content.
+Selections come from intrinsic creation/rewrite records, parents chosen for fresh working-copy
+tips, and pinned command descriptions containing full commit ids or selected reference names.
+They never come from differences against parent views: native operation abandonment can replace
+those parents, and garbage collection can erase the original views before the first inspection.
+Unknown command records grant only their intrinsic write-output exemptions and block cleanup;
+exact publication approval remains available. Bootstrap joins use the same classification.
+The pinned jj argument encoding identifies explicit `jj git import/init/clone` invocations,
+including global options; unknown or ambiguous encodings are conservative. jj's quoting cannot
+distinguish some apostrophes and trailing backslashes, so those values grant no exemption.
+Automatic imports grant no
+write exemptions: they can rebase existing descendants or newly index a Git-only snapshot left
+by an interrupted export. Explicit Git imports freeze output roots before stripping private
+Git refs only when every possible selected Git target is already in those outputs' commit
+closure. Importing an existing unexplained target remains incomplete: unchanged Git refs can
+point to automatically moved
+working-copy bookmarks, so exempting the whole ref set would approve unrelated snapshots.
+
+The approval token hashes this copy's identity, accepted basis, applicable limits and exact
+outgoing operation ids, charged file-version set and byte count. Approval is exact; any change is
+rechecked. The sender records a compact frontier of every attempted publication *before*
+uploading, retaining incomparable histories. Only exact ancestry subsumes an older frontier
+entry: equal original ids after contraction
+cannot establish that an older uploaded ancestor was never shared. On activation in an existing
+copy, pre-activation heads and saved offers are conservatively frozen. Malformed or missing
+source bodies fail closed. Exclusive creation prevents a late initializer from replacing a
+sender's record, and a checksum detects mixed old/new records after an interrupted in-place
+write. This is provenance, not a durable network acknowledgement.
+
+Cleanup selects whole operations known never to have been offered. It never enlarges a user's
+selection. Before contracting native parents, freeze each survivor's source intent in
+`musubi.publication-intent` and preserve its namespace context. These hash-visible annotations
+are a separate body transformation from `Contract.cpar`; infer no new intent from the new
+parent relation. Declared roots must also be predecessor-record keys. Changed operations
+receive new physical identities, and preparation refuses coalescing identities.
+
+A fresh checkpoint retains the exact current view and every intentional commit version, with
+intentional predecessor links connected across removed automatic versions. It records genuine
+new local work and the local lease, expected Git-ref values, workspace namespace and private
+ownership. It does not invent activity for other copies. Before installing its op head under
+the op-head lock, canonicalize and read the prepared native bodies. Require exact current view,
+expected values and namespace/private ownership, full foreign causal presence, each survivor's
+view and frozen intent, retained intentional commit references, and the exact content set and
+bytes promised by the preview. Compare source heads again; an error leaves them untouched.
+
+Workspace records move only when their exact working-copy commit survives. A command finishing
+later on old ancestry may reintroduce recovery history, which is checked by the same gate.
+Pruning removes references, not physical object files; normal jj garbage collection reclaims
+unreachable objects. It is not retroactive secret removal.
+
+`Publication.lean` and its native/oracle conformance fixtures cover the accounting and cleanup
+contract. The existing sync safety checks remain applicable to permitted sends. Progress is
+conditional on publication holds eventually being resolved, disabled, or approved; the existing
+convergence theorem does not prove that a user will resolve a deliberate hold.
+
 ## Abandoning operations
 
 `jj op abandon` removes operations from the operation log. jj keeps every view, so the repository

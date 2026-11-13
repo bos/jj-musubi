@@ -717,6 +717,18 @@ impl NodeRepo {
         self.check_format(id, op)?;
         let view = self.loader.op_store().read_view(&op.view_id).block_on()?;
         let mut metadata = op.metadata.clone();
+        let mut commit_predecessors = op.commit_predecessors.clone();
+        if let Some(roots) = self.publication_git_intent(op, &view)? {
+            metadata.attributes.insert(
+                super::INTENT_ATTRIBUTE.to_owned(),
+                serde_json::to_string(&roots.iter().map(|id| id.hex()).collect::<Vec<_>>())
+                    .map_err(|err| NodeError::Publication(err.to_string()))?,
+            );
+            let records = commit_predecessors.get_or_insert_default();
+            for root in roots {
+                records.entry(root).or_default();
+            }
+        }
         metadata.attributes.remove(super::view::LOCAL_WORKSPACES);
         metadata.attributes.remove(super::view::RESERVED_WORKSPACES);
         if let Some((prefix, target)) = target_of(&metadata.description)
@@ -767,7 +779,7 @@ impl NodeRepo {
                 id,
                 view.clone(),
                 &source_parents,
-                op.commit_predecessors.as_ref(),
+                commit_predecessors.as_ref(),
                 &Kind::of(&metadata),
                 &metadata,
             )?;
@@ -781,7 +793,13 @@ impl NodeRepo {
             for parent in &parents {
                 known.extend(self.presence(parent)?.known().iter().cloned());
             }
-            if !changed_parents && context.known.is_subset(&known) {
+            if !changed_parents
+                && context.known.is_subset(&known)
+                && !metadata
+                    .attributes
+                    .contains_key(super::CHECKPOINT_ATTRIBUTE)
+                && !metadata.attributes.contains_key(super::INTENT_ATTRIBUTE)
+            {
                 metadata
                     .attributes
                     .remove(crate::canonical::namespace::ATTRIBUTE);
@@ -806,7 +824,7 @@ impl NodeRepo {
                     id,
                     view,
                     &parents,
-                    op.commit_predecessors.as_ref(),
+                    commit_predecessors.as_ref(),
                     &kind,
                     &metadata,
                 )?;
@@ -817,7 +835,7 @@ impl NodeRepo {
             view_id,
             parents: parents.into_iter().map(|parent| parent.0).collect(),
             metadata,
-            commit_predecessors: op.commit_predecessors.clone(),
+            commit_predecessors,
         };
         Ok((canonical_op, presence, kind))
     }

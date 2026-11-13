@@ -1908,6 +1908,8 @@
     "crates/musubi-jj/src/node/join.rs": "history",
     "crates/musubi-jj/src/node/originals.rs": "storage",
     "crates/musubi-jj/src/node/presence.rs": "history",
+    "crates/musubi-jj/src/node/publication.rs": "history",
+    "crates/musubi-jj/src/node/publication/cleanup.rs": "history",
     "crates/musubi-jj/src/node/realize.rs": "history",
     "crates/musubi-jj/src/node/settings.rs": "interface",
     "crates/musubi-jj/src/node/supersede.rs": "history",
@@ -1966,6 +1968,10 @@
     "crates/musubi/src/sync.rs": "coordination"
   },
   "oracleModels": {
+    "publication": [
+      "Publication",
+      "Contract"
+    ],
     "step": [
       "Safety",
       "Liveness",

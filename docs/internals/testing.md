@@ -339,6 +339,13 @@ then loses the cache and the last workspace move. Collecting its source instead 
 before publishing drops. Both the historical twin and its orphan are exercised with and
 without the cache.
 
+`translation::a_fresh_child_of_trimmed_parents_keeps_its_source_namespace` leaves the native
+parent intact while contracting its canonical image to root, then makes a new command.
+Warm and cold caches must agree that its foreign aliases are not owned workspaces.
+`node::view::tests::source_context_reserves_new_owned_literals_before_presence_is_applied`
+checks a source view with a newly owned foreign-looking literal and pre-command forgotten
+presence: both owned and foreign keys keep distinct local names.
+
 `translation::a_private_root_workspace_is_not_a_lost_shared_source` retains a join through
 one delayed command and returns to a private root through another. Even with a slash in its
 owned workspace name and no translation cache, that root stays private before source-loss
@@ -854,6 +861,22 @@ after such a move, or where jj's merge of two op heads that both changed the rec
 differing from `.git`, as after a command at an older operation (`--at-op`), which still writes
 HEAD ([races.md, "Known jj limitations"](races.md#known-jj-limitations)).
 
+For an operation whose parents a trim changed, the record checker uses its independently
+observed native body and original parents only when the rest of that body, including its
+view, matches exactly. It checks the original record history too, so an invalid record
+inherited from an erased ancestor still fails. Which physical branch touched a record still
+goes by the physical history and merge bases.
+`imports::trimmed_record_sources_preserve_provenance_without_hiding_invalid_ancestors` checks
+HEAD and ref records, altered bodies, missing or marked-only sources, invalid original
+transitions and invalid erased ancestors.
+
+Concurrent HEAD records can contain conflicts and even resolve by cancellation to a value
+no command wrote. The import checker traces possible physical values to native imports or
+commands that actually changed a scalar record, through original source parents. Merges and
+commands inheriting an unchanged scalar only carry those values.
+`imports::physical_head_writers_are_distinct_from_merge_record_terms` checks nested conflict
+cancellation with jj's ref merge, an unchanged scalar command, and a later actual write.
+
 At the end of a sequence, and at most once in the middle, the hive syncs to a fixed point,
 and the test checks that:
 
@@ -901,6 +924,15 @@ is never evidence for a new target.
 `reference::workspace_certificates_require_each_sources_existing_binding` checks these rules
 with real jj rewrites, including two divergent versions, missing or conflicting source
 bindings, owner deletion, all-dormant inputs, and a target visible only in the result.
+A previously witnessed merge birth keeps its name through a single-parent repair while the
+name is still present or private, even if its working-copy commit changes. This carries no
+certificate for the replacement payload; the binding controls above still reject it.
+Certificate dependencies and the source copies used for native replay are walked iteratively;
+the source history's depth does not consume the test thread's stack.
+`reference::workspace_witnesses_walk_deep_histories_without_recursing` checks 512 unchanged
+source operations, including binding, name, merged and dormant state, and exact copied ids.
+Another 512 root-parent fix-ups depend only on captured trim inputs, checking that those
+non-ancestral witness edges are preloaded too.
 `e2e_workspace_names_after_trim_match_native_jj` exercises a realized merge whose authenticated
 parents and local base let native jj witness a restored name. A realization's marker neither
 certifies that name nor disqualifies its independently checked replay.
@@ -967,15 +999,25 @@ realization of each operation has the hive's view of it, and no operation but a 
 anything diverge or conflict unless what it did explains it: a fetch, an undo or restore, or an
 import of git refs or of git's HEAD. A recorded native command can itself introduce divergence;
 translation may retain those exact versions and conflict terms, but add none beyond them.
+A native rewrite can also leave an older foreign working copy protected in the canonical
+view. This allowance requires an exact live input certificate, an unchanged output slot, and
+visibility in that same source; only that commit and its ancestors extend the captured native
+payload bound. Owned, dormant, hidden, altered and output-only targets cannot extend it.
 The snapshot-capture example checks both an accepted native divergence and a rejected extra
 canonical version using its captured commit versions.
 
 Workspace certificates distinguish an authenticated historical name from an exact canonical
 binding. A captured command can rebase another copy's working copy without moving that owner's
-canonical slot. It carries an input name only through its unambiguous raw alias; a global birth
-or a matching outgoing name alone supplies no certificate. Native merge replay uses the same
+canonical slot. Its unambiguous raw alias can carry an input name. If that alias was locally
+forgotten, an already-certified live foreign binding can instead remain unchanged or follow
+its unique visible successor from the command's captured predecessor map. An owned or dormant
+binding, a hidden successor, or several visible successors supplies no such witness. A global
+birth or a matching outgoing name alone supplies no certificate. Native merge replay uses the same
 copy's actual owned bindings in its base and ordered parents, for authenticated names only,
-and checks the output structurally. The pure namespace controls cover a missing input certificate,
+and checks the output structurally. With identical visible heads, replay can also omit an
+already-certified foreign slot absent from an exact captured native input. Only ownership
+certified at that source can exclude an apparent alias; a later workspace birth cannot.
+The pure namespace controls cover a missing input certificate,
 an owner rename, and an owned literal that collides with a foreign alias.
 
 To keep the search effective:

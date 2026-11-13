@@ -102,7 +102,7 @@ pub struct Imports {
 }
 
 /// A ref an import compares with `.git`.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum Kind {
     /// `x@git`, for bookmark `x`.
     Bookmark,
@@ -112,7 +112,7 @@ enum Kind {
     Tag,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 struct Ref {
     kind: Kind,
     name: String,
@@ -302,9 +302,129 @@ struct Log {
     ops: HashMap<OperationId, op_store::Operation>,
     views: HashMap<OperationId, View>,
     repos: HashMap<OperationId, Arc<ReadonlyRepo>>,
+    native_sources: BTreeMap<String, op_store::Operation>,
+    validated: HashSet<(OperationId, RecordKind)>,
+    head_writers: HashMap<(OperationId, String), Arc<HashSet<Option<CommitId>>>>,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum RecordKind {
+    Ref(Ref),
+    Head(String),
 }
 
 impl Log {
+    /// Possible physical HEAD values come from native writers, not from the value a merge
+    /// computes for jj's record. Even a resolved record can be synthesized by cancellation.
+    fn possible_heads(
+        &mut self,
+        id: &OperationId,
+        ws: &str,
+        setup: &HashSet<OperationId>,
+    ) -> Result<Arc<HashSet<Option<CommitId>>>, String> {
+        let wanted = (id.clone(), ws.to_owned());
+        let mut pending = vec![(wanted.clone(), false)];
+        let mut visiting = HashSet::new();
+        while let Some((key, ready)) = pending.pop() {
+            if self.head_writers.contains_key(&key) {
+                continue;
+            }
+            let (id, ws) = &key;
+            let op = self.record_operation(id);
+            let now = self.head(id, ws);
+            let renamed = op
+                .metadata
+                .description
+                .strip_prefix("Renamed workspace '")
+                .and_then(|rest| rest.strip_suffix(&format!("' to '{ws}'")));
+            let writes = renamed.is_none()
+                && op.parents.len() == 1
+                && !op.metadata.attributes.contains_key(CANONICAL_ATTRIBUTE)
+                && jj_command(&self.owner, &op)
+                && op
+                    .metadata
+                    .workspace_name
+                    .as_ref()
+                    .is_some_and(|name| name.as_str() == ws)
+                && (!now.is_absent() || own_head_import(&self.owner, &op))
+                && (own_head_import(&self.owner, &op) || self.head(&op.parents[0], ws) != now);
+            if now.is_resolved()
+                && (setup.contains(id) || writes || id == self.store.root_operation_id())
+            {
+                self.head_writers
+                    .insert(key, Arc::new(HashSet::from([now.as_normal().cloned()])));
+                continue;
+            }
+            let parents: Vec<_> = op
+                .parents
+                .iter()
+                .map(|parent| (parent.clone(), renamed.unwrap_or(ws).to_owned()))
+                .collect();
+            if ready {
+                let mut values = HashSet::new();
+                for parent in parents {
+                    values.extend(self.head_writers[&parent].iter().cloned());
+                }
+                self.head_writers.insert(key.clone(), Arc::new(values));
+                visiting.remove(&key);
+            } else {
+                if !visiting.insert(key.clone()) {
+                    return Err("physical HEAD provenance has a cycle".to_owned());
+                }
+                pending.push((key, true));
+                pending.extend(parents.into_iter().rev().map(|parent| (parent, false)));
+            }
+        }
+        Ok(self.head_writers[&wanted].clone())
+    }
+
+    fn record_operation(&mut self, id: &OperationId) -> op_store::Operation {
+        let op = self.op(id).clone();
+        self.native_sources
+            .get(&crate::world::merge_key(&op))
+            .filter(|source| !source.metadata.attributes.contains_key(CANONICAL_ATTRIBUTE))
+            .filter(|source| crate::world::same_source_body(source, &op))
+            .cloned()
+            .unwrap_or(op)
+    }
+
+    /// Validate the whole provenance of a record, including ancestors a trim erased from
+    /// physical history. A matching source body authenticates bytes, not their correctness.
+    fn validate_record(
+        &mut self,
+        id: &OperationId,
+        setup: &HashSet<OperationId>,
+        record: &RecordKind,
+    ) -> Result<(), String> {
+        let mut pending = vec![(id.clone(), false)];
+        let mut visiting = HashSet::new();
+        while let Some((id, ready)) = pending.pop() {
+            let key = (id.clone(), record.clone());
+            if id == *self.store.root_operation_id()
+                || setup.contains(&id)
+                || self.validated.contains(&key)
+            {
+                continue;
+            }
+            if ready {
+                self.validated.insert(key);
+                visiting.remove(&id);
+                continue;
+            }
+            if !visiting.insert(id.clone()) {
+                return Err("the record's source history has a cycle".to_owned());
+            }
+            match record {
+                RecordKind::Ref(r) => self.plausible(&id, r)?,
+                RecordKind::Head(ws) => self.head_plausible(&id, ws)?,
+            }
+            let op = self.record_operation(&id);
+            pending.push((id, true));
+            pending.extend(op.parents.into_iter().rev().map(|p| (p, false)));
+        }
+        Ok(())
+    }
+
     fn op(&mut self, id: &OperationId) -> &op_store::Operation {
         self.ops
             .entry(id.clone())
@@ -348,7 +468,7 @@ impl Log {
             if setup.contains(&id) {
                 continue;
             }
-            self.plausible(&id, r)?;
+            self.validate_record(&id, setup, &RecordKind::Ref(r.clone()))?;
             pending.extend(self.op(&id).parents.iter().cloned());
         }
         Ok(touched)
@@ -359,7 +479,7 @@ impl Log {
     /// parent's record or jj's merge of two. The remote's conflicts are exported by musubi
     /// instead.
     fn plausible(&mut self, id: &OperationId, r: &Ref) -> Result<(), String> {
-        let op = self.op(id).clone();
+        let op = self.record_operation(id);
         let now = self.record(id, r);
         let local = r.local(self.view(id));
         // As an export that wrote the ref leaves it: in step with `git_refs` and the bookmark,
@@ -431,33 +551,39 @@ impl Log {
             if setup.contains(&id) {
                 continue;
             }
+            self.validate_record(&id, setup, &RecordKind::Head(ws.to_owned()))?;
             let op = self.op(&id).clone();
-            let parents: Vec<RefTarget> = op.parents.iter().map(|p| self.head(p, ws)).collect();
-            let plausible = match parents.as_slice() {
-                [parent] => jj_command(&self.owner, &op) || *parent == now,
-                [left, right] if !parents.contains(&now) => {
-                    let bases = self.bases(&op.parents);
-                    let base_heads: Vec<RefTarget> =
-                        bases.iter().map(|b| self.head(b, ws)).collect();
-                    match base_heads.first() {
-                        Some(base) if base_heads.iter().all(|b| b == base) => {
-                            self.merge_targets(&id, left, base, right) == now
-                        }
-                        _ => false,
-                    }
-                }
-                _ => parents.contains(&now),
-            };
-            if !plausible {
-                return Err(format!(
-                    "{} made jj's record of {ws}'s HEAD {}, as jj doesn't",
-                    describe(&self.owner, &id, &op),
-                    show(&now)
-                ));
-            }
             pending.extend(op.parents.iter().cloned());
         }
         Ok(touched)
+    }
+
+    fn head_plausible(&mut self, id: &OperationId, ws: &str) -> Result<(), String> {
+        let op = self.record_operation(id);
+        let now = self.head(id, ws);
+        let parents: Vec<RefTarget> = op.parents.iter().map(|p| self.head(p, ws)).collect();
+        let plausible = match parents.as_slice() {
+            [parent] => jj_command(&self.owner, &op) || *parent == now,
+            [left, right] if !parents.contains(&now) => {
+                let bases = self.bases(&op.parents);
+                let base_heads: Vec<RefTarget> = bases.iter().map(|b| self.head(b, ws)).collect();
+                match base_heads.first() {
+                    Some(base) if base_heads.iter().all(|b| b == base) => {
+                        self.merge_targets(id, left, base, right) == now
+                    }
+                    _ => false,
+                }
+            }
+            _ => parents.contains(&now),
+        };
+        if !plausible {
+            return Err(format!(
+                "{} made jj's record of {ws}'s HEAD {}, as jj doesn't",
+                describe(&self.owner, id, &op),
+                show(&now)
+            ));
+        }
+        Ok(())
     }
 
     /// jj's three-way merge of the records of `r` at `left` and `right` against `base`, as
@@ -524,6 +650,303 @@ impl Log {
         let mut bases: Vec<OperationId> = common.difference(&below).cloned().collect();
         bases.sort();
         bases
+    }
+}
+
+#[test]
+fn physical_head_writers_are_distinct_from_merge_record_terms() {
+    use crate::world::{Naming, Setup};
+
+    let world = World::new(Setup {
+        nodes: 3,
+        naming: Naming::Default,
+        prejoin: false,
+        secondary: false,
+    });
+    let loader = world.fx.hive.members[0].adapter.repo().loader().clone();
+    let store = loader.op_store().clone();
+    let root = store.root_operation_id().clone();
+    let native = OperationId::try_from_hex(world.latest_op_head(0)).unwrap();
+    let template = block_on(store.read_operation(&native)).unwrap();
+    let base_view = block_on(store.read_view(&template.view_id)).unwrap();
+    let mut commits: Vec<_> = base_view.wc_commit_ids.values().cloned().collect();
+    commits.sort();
+    commits.dedup();
+    assert!(commits.len() >= 3);
+    let [a, x, c] = [0, 1, 2].map(|i| commits[i].clone());
+    let target = |id: &CommitId| RefTarget::normal(id.clone());
+    let make = |description: &str, record: RefTarget, parents: Vec<OperationId>, writer: bool| {
+        let mut op = template.clone();
+        op.metadata.attributes.clear();
+        op.metadata.workspace_name = writer.then(|| WorkspaceName::DEFAULT.to_owned());
+        op.metadata.description = description.to_owned();
+        op.metadata.time.end.timestamp.0 += 1000;
+        let mut view = base_view.clone();
+        view.git_heads
+            .insert(WorkspaceName::DEFAULT.to_owned(), record);
+        op.view_id = block_on(store.write_view(&view)).unwrap();
+        op.parents = parents;
+        block_on(store.write_operation(&op)).unwrap()
+    };
+    // Native writers can be imports after explicit HEAD moves. A merge changes only the
+    // record. jj's real ref merge below checks the cancellation counterexample.
+    let wrote_x = make("import git head: X", target(&x), vec![root.clone()], true);
+    let wrote_a = make(
+        "import git head: A",
+        target(&a),
+        vec![wrote_x.clone()],
+        true,
+    );
+    let wrote_c = make("import git head: C", target(&c), vec![wrote_x], true);
+    let conflict =
+        RefTarget::from_removes_adds([Some(x.clone())], [Some(a.clone()), Some(c.clone())]);
+    let base = make(
+        "reconcile divergent operations",
+        conflict,
+        vec![wrote_a, wrote_c.clone()],
+        false,
+    );
+    let a_again = make(
+        "import git head: A again",
+        target(&a),
+        vec![base.clone()],
+        true,
+    );
+    let c_again = make("import git head: C again", target(&c), vec![base], true);
+    let synthesized = make(
+        "reconcile divergent operations",
+        target(&x),
+        vec![a_again.clone(), c_again.clone()],
+        false,
+    );
+    let a_later = make("import git head: A later", target(&a), vec![wrote_c], true);
+    let nested =
+        RefTarget::from_removes_adds([Some(c.clone())], [Some(x.clone()), Some(a.clone())]);
+    let final_merge = make(
+        "reconcile divergent operations",
+        nested,
+        vec![synthesized.clone(), a_later],
+        false,
+    );
+    let inherited = make(
+        "describe commit without updating the working copy",
+        target(&x),
+        vec![synthesized.clone()],
+        true,
+    );
+    let wrote_after = make(
+        "reset git head after merge",
+        target(&x),
+        vec![final_merge.clone()],
+        true,
+    );
+    let mut log = Log {
+        owner: world.owner(0),
+        loader,
+        store,
+        ops: HashMap::new(),
+        views: HashMap::new(),
+        repos: HashMap::new(),
+        native_sources: BTreeMap::new(),
+        validated: HashSet::new(),
+        head_writers: HashMap::new(),
+    };
+    let setup = HashSet::from([root]);
+    log.validate_record(
+        &final_merge,
+        &setup,
+        &RecordKind::Head("default".to_owned()),
+    )
+    .unwrap();
+    let op = log.op(&synthesized).clone();
+    let bases = log.bases(&op.parents);
+    let base_target = log.head(&bases[0], "default");
+    assert_eq!(
+        log.merge_targets(&synthesized, &target(&a), &base_target, &target(&c)),
+        target(&x)
+    );
+    for id in [&synthesized, &final_merge, &inherited] {
+        let possible = log.possible_heads(id, "default", &setup).unwrap();
+        assert!(possible.contains(&Some(a.clone())));
+        assert!(possible.contains(&Some(c.clone())));
+        assert!(
+            !possible.contains(&Some(x.clone())),
+            "a synthesized record is no HEAD writer"
+        );
+    }
+    assert_eq!(
+        &*log.possible_heads(&wrote_after, "default", &setup).unwrap(),
+        &HashSet::from([Some(x)])
+    );
+}
+
+#[test]
+fn trimmed_record_sources_preserve_provenance_without_hiding_invalid_ancestors() {
+    use crate::world::{Naming, Setup};
+
+    let mut world = World::new(Setup {
+        nodes: 2,
+        naming: Naming::Default,
+        prejoin: true,
+        secondary: false,
+    });
+    world.jj(0, &["bookmark", "create", "kept", "-r", "@"]);
+    world.forget_copy(0, 1);
+    let native = OperationId::try_from_hex(world.latest_op_head(0)).unwrap();
+    let loader = world.fx.hive.members[0].adapter.repo().loader().clone();
+    let store = loader.op_store().clone();
+    let source = block_on(store.read_operation(&native)).unwrap();
+    assert_eq!(source.metadata.description, "musubi: forget beta");
+    world.trim_below_accepted_push(0);
+    let sources = world.native_record_sources(0);
+    let key = crate::world::merge_key(&source);
+    assert!(sources.contains_key(&key));
+    let root = store.root_operation_id().clone();
+    let mut trimmed = source.clone();
+    trimmed.parents = vec![root.clone()];
+    let trimmed_id = block_on(store.write_operation(&trimmed)).unwrap();
+    let view = block_on(store.read_view(&source.view_id)).unwrap();
+    assert!(!head(&view, "default").is_absent());
+    let records = [
+        RecordKind::Head("default".to_owned()),
+        RecordKind::Ref(Ref {
+            kind: Kind::Bookmark,
+            name: "kept".to_owned(),
+        }),
+    ];
+    let log = |native_sources| Log {
+        owner: world.owner(0),
+        loader: loader.clone(),
+        store: store.clone(),
+        ops: HashMap::new(),
+        views: HashMap::new(),
+        repos: HashMap::new(),
+        native_sources,
+        validated: HashSet::new(),
+        head_writers: HashMap::new(),
+    };
+    let setup = &world.imports.setup[0];
+    for record in &records {
+        log(sources.clone())
+            .validate_record(&trimmed_id, setup, record)
+            .unwrap();
+    }
+    let before = HashSet::from([root]);
+    let mut checked = log(sources.clone());
+    assert!(
+        checked
+            .head_touched(&trimmed_id, &before, setup, "default", &RefTarget::absent())
+            .unwrap()
+    );
+    assert!(
+        !checked
+            .head_touched(
+                &trimmed_id,
+                &before,
+                setup,
+                "default",
+                &head(&view, "default")
+            )
+            .unwrap()
+    );
+    assert!(
+        log(BTreeMap::new())
+            .validate_record(&trimmed_id, setup, &records[0])
+            .is_err()
+    );
+
+    let write = |mut op: op_store::Operation, view: &View| {
+        op.view_id = block_on(store.write_view(view)).unwrap();
+        let id = block_on(store.write_operation(&op)).unwrap();
+        (id, op)
+    };
+    let mut altered = view.clone();
+    let other = loader.store().root_commit_id().clone();
+    altered.git_heads.insert(
+        WorkspaceName::DEFAULT.to_owned(),
+        RefTarget::normal(other.clone()),
+    );
+    altered
+        .git_refs
+        .insert("refs/heads/kept".into(), RefTarget::normal(other));
+    let (altered_id, _) = write(trimmed.clone(), &altered);
+    let mut different_body = view.clone();
+    different_body.local_bookmarks.insert(
+        "extra".into(),
+        RefTarget::normal(loader.store().root_commit_id().clone()),
+    );
+    let (different_body_id, _) = write(trimmed.clone(), &different_body);
+    assert!(
+        log(sources.clone())
+            .validate_record(&different_body_id, setup, &records[0])
+            .is_err()
+    );
+    for record in &records {
+        assert!(
+            log(sources.clone())
+                .validate_record(&altered_id, setup, record)
+                .is_err(),
+            "altered record body"
+        );
+    }
+    let mut collision = trimmed.clone();
+    collision.metadata.username.push_str(" different user");
+    let collision_id = block_on(store.write_operation(&collision)).unwrap();
+    assert!(
+        log(sources.clone())
+            .validate_record(&collision_id, setup, &records[0])
+            .is_err()
+    );
+    let mut marked = sources.clone();
+    marked
+        .get_mut(&key)
+        .unwrap()
+        .metadata
+        .attributes
+        .insert(CANONICAL_ATTRIBUTE.to_owned(), "not independent".to_owned());
+    assert!(
+        log(marked)
+            .validate_record(&trimmed_id, setup, &records[0])
+            .is_err()
+    );
+
+    // An exact captured source can itself be invalid, or inherit an invalid record from
+    // an operation a trim removed. Validate both original histories rather than trusting
+    // equality with the captured view or just with its immediate parent.
+    let (_, invalid_source) = write(source.clone(), &altered);
+    let mut invalid = sources.clone();
+    invalid.insert(key.clone(), invalid_source);
+    for record in &records {
+        assert!(
+            log(invalid.clone())
+                .validate_record(&altered_id, setup, record)
+                .is_err(),
+            "invalid original transition"
+        );
+    }
+    let mut ancestor = source.clone();
+    ancestor.metadata.description = "musubi: forget hidden ancestor".to_owned();
+    let (ancestor_id, ancestor) = write(ancestor, &altered);
+    let mut inheriting = source;
+    inheriting.parents = vec![ancestor_id];
+    let (_, inheriting) = write(inheriting, &altered);
+    invalid.insert(key, inheriting);
+    invalid.insert(crate::world::merge_key(&ancestor), ancestor);
+    assert!(
+        log(invalid.clone())
+            .head_plausible(&altered_id, "default")
+            .is_ok()
+    );
+    if let RecordKind::Ref(r) = &records[1] {
+        assert!(log(invalid.clone()).plausible(&altered_id, r).is_ok());
+    }
+    for record in &records {
+        assert!(
+            log(invalid.clone())
+                .validate_record(&altered_id, setup, record)
+                .is_err(),
+            "invalid erased ancestor"
+        );
     }
 }
 
@@ -622,6 +1045,9 @@ impl World {
             ops: HashMap::new(),
             views: HashMap::new(),
             repos: HashMap::new(),
+            native_sources: BTreeMap::new(),
+            validated: HashSet::new(),
+            head_writers: HashMap::new(),
         };
         let root = log.store.root_operation_id().clone();
         let mut new: Vec<OperationId> = vec![];
@@ -669,12 +1095,17 @@ impl World {
             }
         }
         let mut failures = vec![];
+        let mut sources_loaded = false;
         for id in order {
             let refs = own_import(&log.owner, &log.ops[&id]);
             if (!refs && !own_head_import(&log.owner, &log.ops[&id]))
                 || !self.imports.judged[m].insert(judged_key(&log.ops[&id]))
             {
                 continue;
+            }
+            if !sources_loaded {
+                log.native_sources = self.native_record_sources(m);
+                sources_loaded = true;
             }
             // Reading the log fails only if musubi lost an operation file it refers to.
             let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -856,7 +1287,8 @@ impl World {
                     r.git_ref()
                 ));
             }
-            let op = log.op(&at).clone();
+            // Trace this record's origin, including its authenticated pre-trim parents.
+            let op = log.record_operation(&at);
             if own_import(&log.owner, &op) {
                 return Err(format!(
                     "git didn't move {}, and jj's record of {r}, {target}, is the same as at the \
@@ -997,7 +1429,7 @@ impl World {
             if self.imports.setup[m].contains(&at) {
                 return Err("the record is the same as at setup".to_owned());
             }
-            let op = log.op(&at).clone();
+            let op = log.record_operation(&at);
             let now = log.head(&at, &ws);
             if let [before] = op.parents.as_slice() {
                 let was = log.head(before, &ws);
@@ -1067,7 +1499,15 @@ impl World {
                 let (left, right) = (log.head(left, &ws), log.head(right, &ws));
                 let merged = log.merge_targets(&at, &left, &base, &right);
                 // `.git` has what the head that wrote HEAD last left.
-                if merged == now && (*taken == left || *taken == right) {
+                let possible = if merged == now && taken.is_resolved() {
+                    let left = log.possible_heads(&op.parents[0], &ws, &self.imports.setup[m])?;
+                    let right = log.possible_heads(&op.parents[1], &ws, &self.imports.setup[m])?;
+                    let taken = taken.as_normal().cloned();
+                    left.contains(&taken) || right.contains(&taken)
+                } else {
+                    false
+                };
+                if possible {
                     fired("import:concurrent_heads");
                     return Ok(());
                 }

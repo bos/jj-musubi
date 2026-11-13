@@ -844,31 +844,7 @@ impl NodeRepo {
                     .unwrap_or_default())
             })
             .collect::<Result<_, NodeError>>()?;
-        if worked.iter().all(|ops| *ops == worked[0]) {
-            return Ok(0);
-        }
-        'parents: for (index, mine) in worked.iter().enumerate() {
-            for theirs in &worked {
-                for op in theirs.difference(mine) {
-                    // Work an abandon dropped can't be placed: no parent is later for it.
-                    if op.op.is_none() {
-                        continue 'parents;
-                    }
-                    let mut seen = false;
-                    for later in mine {
-                        if op.below(&self.canonical, later)? {
-                            seen = true;
-                            break;
-                        }
-                    }
-                    if !seen {
-                        continue 'parents;
-                    }
-                }
-            }
-            return Ok(index);
-        }
-        Ok(0)
+        latest_work_index(&self.canonical, &worked)
     }
 
     /// This machine's own workspaces in a local view: every one but those named for another
@@ -1752,5 +1728,107 @@ pub(super) fn merge_base(
             tracing::warn!("merging the bases of a criss-cross merge: {reason}");
             Ok(first)
         }
+    }
+}
+
+/// Pick the branch whose concrete work includes every other branch's work. Dropped work
+/// is compared by the same relation as presence, rather than given a separate ordering.
+fn latest_work_index(
+    store: &crate::canonical::CanonicalStore,
+    worked: &[BTreeSet<crate::canonical::Work>],
+) -> Result<usize, NodeError> {
+    if worked.iter().all(|ops| *ops == worked[0]) {
+        return Ok(0);
+    }
+    'parents: for (index, mine) in worked.iter().enumerate() {
+        for theirs in worked {
+            for op in theirs.difference(mine) {
+                // Work an abandon dropped is below surviving concrete work, as
+                // presence defines it. Rejecting it here would prefer an older
+                // private namespace and resurrect names its owner removed.
+                let mut seen = false;
+                for later in mine {
+                    if op.below(store, later)? {
+                        seen = true;
+                        break;
+                    }
+                }
+                if !seen {
+                    continue 'parents;
+                }
+            }
+        }
+        return Ok(index);
+    }
+    Ok(0)
+}
+
+#[cfg(test)]
+mod latest_work_tests {
+    #![allow(clippy::unwrap_used)]
+    use std::collections::BTreeSet;
+
+    use musubi_testutil::TestEnv;
+
+    use super::latest_work_index;
+    use crate::canonical::Work;
+    use crate::node::NodeRepo;
+
+    #[test]
+    fn concrete_work_keeps_the_namespace_after_a_deletion() {
+        let env = TestEnv::new();
+        let repo = env.init_repo("owner");
+        repo.jj(&[
+            "workspace",
+            "add",
+            "--name",
+            "second",
+            env.root().join("second").to_str().unwrap(),
+        ]);
+        let mut node = NodeRepo::open(&repo.repo_path(), &repo.settings()).unwrap();
+        let old = node.canonical_heads().unwrap().pop().unwrap();
+        repo.jj(&["workspace", "forget", "second"]);
+        let current = node.canonical_heads().unwrap().pop().unwrap();
+        let store = node.canonical_store();
+        let second = format!("{}/second", node.machine().key());
+        let old_op = store.read_operation(&old).unwrap();
+        let current_op = store.read_operation(&current).unwrap();
+        assert!(
+            store
+                .read_view(&old_op.view_id)
+                .unwrap()
+                .wc_commit_ids
+                .keys()
+                .any(|key| key.as_str() == second)
+        );
+        assert!(
+            !store
+                .read_view(&current_op.view_id)
+                .unwrap()
+                .wc_commit_ids
+                .keys()
+                .any(|key| key.as_str() == second)
+        );
+        let mut dropped = Work::of(store, &old).unwrap();
+        // Contraction retains the original identity while removing its operation.
+        dropped.op = None;
+        let concrete = Work::of(store, &current).unwrap();
+        let old_names = BTreeSet::from([dropped.clone()]);
+        let deleted = BTreeSet::from([concrete]);
+        assert_eq!(
+            latest_work_index(store, &[old_names.clone(), deleted.clone()]).unwrap(),
+            1
+        );
+        assert_eq!(
+            latest_work_index(store, &[deleted, old_names.clone()]).unwrap(),
+            0
+        );
+        let mut other_dropped = Work::of(store, &current).unwrap();
+        other_dropped.op = None;
+        assert_eq!(
+            latest_work_index(store, &[old_names, BTreeSet::from([other_dropped])]).unwrap(),
+            0,
+            "two erased operations provide no ordering evidence"
+        );
     }
 }

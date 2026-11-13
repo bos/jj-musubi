@@ -117,15 +117,15 @@ musubi forget laptop
 A copy remains present if its last workspace was removed with `jj workspace forget`.
 `musubi status` still lists its name under Copies, and `musubi forget` accepts that name.
 
-The other machines stop showing `laptop/default@` as they sync, and the hub stops counting
-it. If the copy still exists after all, it comes back as soon as a `jj` command in it records
-an operation: one that changes something or snapshots a change to the working copy. Meanwhile
-its working copy moves as any machine's does when other machines rewrite the commits under it,
-so the first `jj` command there may find it stale ([what to
-do](working-across-machines.md#when-another-machine-rewrites-your-working-copy)). But if
-another machine runs `jj op abandon` while the copy is away, and every machine still in the
-hive has taken it, the copy can't sync again: it stops with "this repository's history no
-longer matches the hive's" ([what to
+The other machines stop showing `laptop/default@` as they sync, and the hub stops counting it. The
+copy keeps its remaining local workspaces. If it still exists after all, it comes back as soon as
+a `jj` command in it records an operation: one that changes something or snapshots a change to the
+working copy. Meanwhile its working copy moves as any machine's does when other machines rewrite
+the commits under it, so the first `jj` command there may find it stale ([what to
+do](working-across-machines.md#when-another-machine-rewrites-your-working-copy)). But if another
+machine runs `jj op abandon` while the copy is away, and every machine still in the hive has taken
+it, the copy can't sync again: it stops with "this repository's history no longer matches the
+hive's" ([what to
 do](../troubleshooting.md#this-repositorys-history-no-longer-matches-the-hives-so-it-cant-sync-again)).
 
 A copy deleted and cloned again on the same machine shows beside the new one, both under the

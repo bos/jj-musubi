@@ -11,7 +11,10 @@
 //! than realized there, agrees too where it is jj's merge of the parents as that machine had
 //! them, lacking the working-copy commit or local alias of another machine's workspace.
 //! An alias omission with the same visible commits requires an exact captured native
-//! input and an independently certified foreign binding (`merged_as_made`).
+//! input and an independently certified foreign binding (`merged_as_made`). A native replay
+//! can also use that same copy's actual owned bindings in the base and ordered parents,
+//! for certified names only, including a realized merge. Its full structural result must
+//! match the hive's; the realization's marker supplies no such evidence.
 //!
 //! Where jj's merge gives what the hive's did, the reference takes the hive's operation
 //! itself, so that it goes on agreeing exactly. Where it doesn't, the reference goes its own
@@ -554,7 +557,13 @@ fn native_payloads_allow_only_foreign_working_copies_retained_from_their_inputs(
                 old.clone()
             },
         );
-        let protected = reference.retained_foreign_targets(&world, &command, &output, &canonical);
+        let protected = reference.retained_foreign_targets(
+            &world,
+            &command.copy,
+            command.input.as_ref(),
+            &output,
+            &canonical,
+        );
         assert_eq!(protected.contains(&old), case == "retained", "{case}");
         let mut expected = command.made.clone();
         expected.head_ids.extend(protected);
@@ -1046,8 +1055,21 @@ impl Reference {
             // A drop can expand a command's parent frontier or contract it to the root.
             // Judge its payload against the actual input, whatever its new parent count.
             let command = world.commands.get(&merge_key(op));
-            let protected = command
-                .map(|command| reference.retained_foreign_targets(world, command, op, &view))
+            let kept = world.kept_operations.get(&merge_key(op));
+            let source_copy = command.map(|command| command.copy.as_str()).or_else(|| {
+                kept.filter(|source| source.native)
+                    .map(|source| source.copy.as_str())
+            });
+            let protected = source_copy
+                .map(|copy| {
+                    reference.retained_foreign_targets(
+                        world,
+                        copy,
+                        command.and_then(|c| c.input.as_ref()),
+                        op,
+                        &view,
+                    )
+                })
                 .unwrap_or_default();
             let with_foreign = |native: &View| {
                 let mut expected = native.clone();
@@ -1065,7 +1087,6 @@ impl Reference {
             // A `jj op abandon` survivor keeps its original view, whatever its parents
             // are now: it must be that source view, as the
             // realizations are held to theirs (`check_realizations`).
-            let kept = world.kept_operations.get(&merge_key(op));
             if let Some(replaced) = kept
                 && let Some(why) =
                     reference.unlike_replaced(&replaced.view, replaced.realized, &view)
@@ -1202,6 +1223,22 @@ impl Reference {
                     reference
                         .merged_as_made(world, &id, &op_parents, &replayed.view, &copies, &views)
                         .filter(|(merged, _)| reference.summary(merged, &known) == ours)
+                        .or_else(|| {
+                            let inputs: Vec<_> = op_parents
+                                .iter()
+                                .map(|parent| reference.workspace_certificate(world, parent))
+                                .collect();
+                            reference
+                                .workspace_private_replays(world, &id, &op_parents, &inputs)
+                                .into_iter()
+                                .find_map(|replay| {
+                                    let (maker, _) = replay.private?;
+                                    let m = (0..world.nodes())
+                                        .find(|&m| world.fx.machine_key(m) == maker)?;
+                                    (reference.summary(&replay.view, &known) == ours)
+                                        .then(|| (replay.view, world.machine(m)))
+                                })
+                        })
                 } else {
                     None
                 };
@@ -1322,18 +1359,19 @@ impl Reference {
         made
     }
 
-    /// Canonical views keep other copies' working copies visible even when a command
-    /// removes their local aliases. Only exact live input bindings retained unchanged
+    /// Canonical views keep other copies' working copies visible even when a native
+    /// operation removes their local aliases. Only exact live input bindings retained unchanged
     /// by the result can extend the native command's visible payload.
     fn retained_foreign_targets(
         &mut self,
         world: &World,
-        command: &crate::world::CommandSnapshot,
+        copy: &str,
+        command_input: Option<&CanonicalOp>,
         op: &op_store::Operation,
         view: &View,
     ) -> BTreeSet<CommitId> {
         let mut inputs = workspace_source_parents(op).unwrap_or_default();
-        inputs.extend(command.input.iter().cloned());
+        inputs.extend(command_input.cloned());
         inputs.sort();
         inputs.dedup();
         let mut targets = BTreeSet::new();
@@ -1357,7 +1395,7 @@ impl Reference {
                 let Some((owner, _)) = key.split_once('/') else {
                     continue;
                 };
-                if owner != command.copy
+                if owner != copy
                     && !certificate.dormant.contains(&key)
                     && source.wc_commit_ids.get(WorkspaceName::new(&key)) == Some(&target)
                     && view.wc_commit_ids.get(WorkspaceName::new(&key)) == Some(&target)

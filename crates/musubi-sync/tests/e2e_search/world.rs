@@ -176,8 +176,8 @@ pub struct CommandSnapshot {
     pub made: jj_lib::op_store::View,
 }
 
-/// How many operations a sequence may revert to get past jj failing to merge operations.
-const MAX_UNMERGEABLE_REVERTS: usize = 10;
+/// How many recovery commands a sequence may make before a repeated refusal is a finding.
+const MAX_RECOVERIES: usize = 10;
 
 /// An operation observed before replication can reparent it, independently of the eventual
 /// canonical view. Its source view remains the oracle for a later contraction's survivor.
@@ -189,10 +189,19 @@ struct OperationSource {
 /// Independent source data for a native operation whose parents later change.
 #[derive(Clone)]
 pub struct RetainedOperation {
+    pub copy: String,
+    pub native: bool,
     pub view: jj_lib::op_store::View,
     pub realized: bool,
     /// The original input, when the operation had one parent.
     pub parent: Option<jj_lib::op_store::View>,
+}
+
+struct RootRecordInput {
+    copy: String,
+    target: OpId,
+    heads: Vec<OpId>,
+    before: BTreeSet<OpId>,
 }
 
 struct WorkspaceTrim {
@@ -255,11 +264,12 @@ pub struct World {
     pub imports: Imports,
     /// Machines whose repository changed in ways no recorded command has loaded since.
     pub touched: BTreeSet<usize>,
-    /// Operations reverted so far to get past jj's failure to merge operations.
-    unmergeable_reverts: usize,
+    /// Recovery commands run so far after a supported refusal.
+    recovery_actions: usize,
     /// Those operations, and the ones reverting them wrote, which reverting again would
     /// only undo the recovery: hex ids.
     recovery_ops: BTreeSet<String>,
+    integrated_history: BTreeSet<(String, String)>,
     /// The change of every commit seen so far, for `fingerprint`.
     change_of: BTreeMap<String, String>,
     /// Whether the hub has restarted since it last pruned, for coverage.
@@ -375,8 +385,9 @@ impl World {
             ledger: Ledger::default(),
             imports: Imports::default(),
             touched: BTreeSet::new(),
-            unmergeable_reverts: 0,
+            recovery_actions: 0,
             recovery_ops: BTreeSet::new(),
+            integrated_history: BTreeSet::new(),
             change_of: BTreeMap::new(),
             restarted_since_prune: false,
             counter: 0,
@@ -1153,7 +1164,10 @@ impl World {
         let pruned = self.fx.hive.hub.store().pruned();
         let forgotten = self.forgotten_working_copies(m);
         let steps = loop {
-            match self.fx.hive.sync(m) {
+            let input = self.root_record_input(m);
+            let result = self.fx.hive.sync(m);
+            self.finish_root_record_input(m, input);
+            match result {
                 Ok(steps) => break steps,
                 Err(err) => self.recover(m, "sync", &err),
             }
@@ -1266,14 +1280,35 @@ impl World {
 
     /// Recovers from a sync of node `m` that failed, as a user would from what it says: from
     /// a stop behind records the hub pruned, by making a new copy (`stopped_behind_prune`);
-    /// or from a known jj limitation (docs/internals/races.md), where jj can't merge this
-    /// machine's operations with the hive's, so musubi pauses, by reverting the operation the
+    /// by integrating the history named by an ambiguous-abandon hint; or from a known jj
+    /// limitation (docs/internals/races.md), where jj can't merge this machine's operations
+    /// with the hive's, so musubi pauses, by reverting the operation the
     /// error names, or where it names none, as a user given its list would: the newest, other
     /// than the recovery's own. Fails the case on any other error, or if the operation to
     /// revert is one already reverted, or a revert the recovery made: reverting it would put
     /// back what it reverted.
     fn recover(&mut self, m: usize, what: &str, err: &anyhow::Error) {
         if self.stopped_behind_prune(m, what, err) {
+            return;
+        }
+        if let Some(target) = err
+            .chain()
+            .find_map(|e| match e.downcast_ref::<NodeError>() {
+                Some(NodeError::AmbiguousAbandon(target)) => Some(target.clone()),
+                _ => None,
+            })
+        {
+            if self.recovery_actions >= MAX_RECOVERIES
+                || !self
+                    .integrated_history
+                    .insert((self.fx.machine_key(m), target.clone()))
+            {
+                self.fail(&format!(
+                    "{what} keeps asking to restore the same history: {err:#}"
+                ));
+            }
+            self.recovery_actions += 1;
+            self.jj(m, &["op", "integrate", &target]);
             return;
         }
         let found = err
@@ -1309,13 +1344,13 @@ impl World {
                     })
             }),
         };
-        let Some(op) = op.filter(|_| self.unmergeable_reverts < MAX_UNMERGEABLE_REVERTS) else {
+        let Some(op) = op.filter(|_| self.recovery_actions < MAX_RECOVERIES) else {
             self.fail(&format!(
                 "{what} of {} keeps failing: {err:#}",
                 self.machine(m)
             ));
         };
-        self.unmergeable_reverts += 1;
+        self.recovery_actions += 1;
         self.jj(m, &["op", "revert", &op]);
         let written: Vec<String> = self
             .op_summaries(m)
@@ -1348,6 +1383,109 @@ impl World {
             Some((id.to_owned(), (parents, fields.next()?.to_owned())))
         })
         .collect()
+    }
+
+    fn root_record_input(&self, m: usize) -> Option<RootRecordInput> {
+        if m >= self.imports.preserved_heads.len() {
+            return None;
+        }
+        let node = self.fx.hive.members[m].adapter.repo();
+        let hub = self.fx.hive.hub.store();
+        let count = usize::try_from(node.record_state().0).ok()?;
+        if count < hub.pruned() {
+            return None;
+        }
+        let same_prefix = node.record_prefix().count == hub.pruned() as u64
+            && Some(&node.record_prefix().digest) == hub.digest(hub.pruned());
+        if same_prefix && node.applied_records() == hub.records() && !node.has_record_custody() {
+            return None;
+        }
+        let common = if same_prefix {
+            node.applied_records()
+                .iter()
+                .zip(hub.records())
+                .take_while(|(old, new)| old == new)
+                .count()
+        } else {
+            0
+        };
+        // Losing an opaque prefix alone does not reset the accepted base. An actual
+        // applied suffix must be lost, or the exact saved base must be entirely dropped.
+        let lost = common < node.applied_records().len();
+        if !lost {
+            let base = fs::read_to_string(node.repo_path().join("musubi/accepted_base")).ok()?;
+            let base = CanonicalOp(OpId::try_from_hex(base.trim())?);
+            let dropped: BTreeSet<_> = hub.records()[common..]
+                .iter()
+                .flat_map(|record| record.ops())
+                .map(|op| hub.canonical().original_id(&op.0))
+                .collect::<Result<_, _>>()
+                .ok()?;
+            let store = node.canonical_store();
+            let mut todo = vec![base];
+            let mut visited = BTreeSet::new();
+            while let Some(op) = todo.pop() {
+                if op == *store.root_operation_id() || !visited.insert(op.clone()) {
+                    continue;
+                }
+                if !dropped.contains(&store.original_id(&op).ok()?) {
+                    return None;
+                }
+                todo.extend(CanonicalOp::parents_of(&store.read_operation(&op).ok()?));
+            }
+        }
+        let heads: Vec<_> = self
+            .op_heads(m)
+            .iter()
+            .map(|s| OpId::try_from_hex(s).unwrap())
+            .collect();
+        let mut before = BTreeSet::new();
+        let mut todo = heads.clone();
+        while let Some(id) = todo.pop() {
+            if before.insert(id.clone()) {
+                let op = futures::executor::block_on(node.loader().op_store().read_operation(&id))
+                    .ok()?;
+                todo.extend(op.parents);
+            }
+        }
+        Some(RootRecordInput {
+            copy: self.fx.machine_key(m),
+            target: hub.head().1.clone(),
+            heads,
+            before,
+        })
+    }
+
+    fn finish_root_record_input(&mut self, m: usize, input: Option<RootRecordInput>) {
+        let Some(input) = input.filter(|input| input.copy == self.fx.machine_key(m)) else {
+            return;
+        };
+        let store = self.fx.hive.members[m].adapter.repo().loader().op_store();
+        let mut todo: Vec<_> = self
+            .op_heads(m)
+            .iter()
+            .map(|s| OpId::try_from_hex(s).unwrap())
+            .collect();
+        let mut seen = input.before;
+        while let Some(id) = todo.pop() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let Ok(op) = futures::executor::block_on(store.read_operation(&id)) else {
+                continue;
+            };
+            todo.extend(op.parents);
+            if op
+                .metadata
+                .attributes
+                .get(musubi_jj::node::CANONICAL_ATTRIBUTE)
+                .is_some_and(|target| *target == input.target.hex())
+            {
+                self.imports.preserved_heads[m]
+                    .entry(id)
+                    .or_insert_with(|| input.heads.clone());
+            }
+        }
     }
 
     /// Observe operations before and after receipt too. A publisher cannot observe an
@@ -1404,9 +1542,11 @@ impl World {
         }
     }
 
-    /// Unambiguous native bodies observed before history was rewritten. A first marked
-    /// realization is not independent evidence for the records that realization carries.
-    pub fn native_record_sources(&self, m: usize) -> BTreeMap<String, jj_lib::op_store::Operation> {
+    /// Unambiguous native bodies observed before rewriting, excluding marked renderings.
+    pub fn captured_record_sources(
+        &self,
+        m: usize,
+    ) -> BTreeMap<String, jj_lib::op_store::Operation> {
         self.operation_sources
             .iter()
             .filter_map(|((machine, key), source)| {
@@ -1464,7 +1604,7 @@ impl World {
         self.kept_operations
             .entry(key)
             .and_modify(|before| {
-                if before.realized && !source.realized {
+                if source.native && !before.native || before.realized && !source.realized {
                     *before = source.clone();
                 }
             })
@@ -1481,6 +1621,11 @@ impl World {
             None
         };
         RetainedOperation {
+            copy: self.fx.machine_key(m),
+            native: !op
+                .metadata
+                .attributes
+                .contains_key(musubi_jj::node::CANONICAL_ATTRIBUTE),
             view: futures::executor::block_on(store.read_view(&op.view_id)).unwrap(),
             realized: realized(op, repo),
             parent,
@@ -1571,6 +1716,7 @@ impl World {
             self.machine(m)
         ));
         self.merge_local_heads(m);
+        let record_input = self.root_record_input(m);
         let result = (|| -> anyhow::Result<()> {
             let poll = {
                 let member = &mut self.fx.hive.members[m];
@@ -1606,6 +1752,7 @@ impl World {
             }
             anyhow::bail!("never took the records and realized the hub's head")
         })();
+        self.finish_root_record_input(m, record_input);
         if let Err(err) = result {
             self.fail(&format!("{} taking records: {err:#}", self.machine(m)));
         }
@@ -1708,6 +1855,19 @@ impl World {
     }
 
     fn try_sync_partial(
+        &mut self,
+        m: usize,
+        steps: usize,
+        lose: Option<usize>,
+        realizing: Option<usize>,
+    ) -> anyhow::Result<()> {
+        let input = self.root_record_input(m);
+        let result = self.try_sync_partial_inner(m, steps, lose, realizing);
+        self.finish_root_record_input(m, input);
+        result
+    }
+
+    fn try_sync_partial_inner(
         &mut self,
         m: usize,
         steps: usize,
@@ -2706,4 +2866,119 @@ fn workspace_fixup_witnesses_require_the_native_source() {
     world.begin_workspace_trim(1);
     world.clone_copy(1);
     assert!(!world.workspace_trim_inputs.contains_key(&1));
+}
+
+#[test]
+fn root_record_inputs_distinguish_lost_work_from_an_opaque_prefix() {
+    let mut world = World::new(Setup {
+        nodes: 2,
+        naming: Naming::Default,
+        prejoin: true,
+        secondary: false,
+    });
+    assert!(world.root_record_input(0).is_none());
+    world.fx.hive.pruning = false;
+    let initial = world.hub_seq();
+    world.trim_below_accepted_push(1);
+    world.sync(0);
+    assert!(
+        !world.fx.hive.members[0]
+            .adapter
+            .repo()
+            .applied_records()
+            .is_empty()
+    );
+    world.hub_goes_back(usize::try_from(world.hub_seq() - initial).unwrap());
+    let input = world.root_record_input(0).unwrap();
+    assert_eq!(input.copy, world.fx.machine_key(0));
+    assert_eq!(&input.target, world.fx.hive.hub.store().head().1);
+    assert_eq!(
+        input.heads.iter().map(|id| id.hex()).collect::<Vec<_>>(),
+        world.op_heads(0)
+    );
+    world.fx.hive.sync_all().unwrap();
+    world.fx.hive.pruning = true;
+    world.an_hour_passes();
+    world.fx.hive.sync_all().unwrap();
+    assert!(world.fx.hive.hub.store().pruned() > 0);
+    world.clone_copy(world.nodes());
+    let m = world.nodes() - 1;
+    assert!(
+        world.fx.hive.members[m]
+            .adapter
+            .repo()
+            .record_prefix()
+            .count
+            > 0
+    );
+    assert!(
+        world.fx.hive.members[m]
+            .adapter
+            .repo()
+            .applied_records()
+            .is_empty()
+    );
+    world.remake_hub();
+    assert!(
+        world.root_record_input(m).is_none(),
+        "an opaque prefix is no lost applied suffix"
+    );
+}
+
+#[test]
+fn retained_sources_do_not_infer_native_ownership_from_a_shared_hostname() {
+    let world = World::new(Setup {
+        nodes: 2,
+        naming: Naming::SharedHostname,
+        prejoin: false,
+        secondary: false,
+    });
+    let mut checked = false;
+    for m in 0..world.nodes() {
+        let node = world.fx.hive.members[m].adapter.repo();
+        let mut todo: Vec<_> = world
+            .op_heads(m)
+            .iter()
+            .map(|s| OpId::try_from_hex(s).unwrap())
+            .collect();
+        let mut seen = BTreeSet::new();
+        while let Some(id) = todo.pop() {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            let op =
+                futures::executor::block_on(node.loader().op_store().read_operation(&id)).unwrap();
+            todo.extend(op.parents.iter().cloned());
+            if op.metadata.workspace_name.is_none()
+                && op.metadata.hostname == "mac"
+                && op
+                    .metadata
+                    .attributes
+                    .get(musubi_jj::node::CANONICAL_ATTRIBUTE)
+                    .and_then(OpId::try_from_hex)
+                    .and_then(|id| node.canonical_store().read_operation(&CanonicalOp(id)).ok())
+                    .is_some_and(|canonical| {
+                        musubi_jj::presence::Kind::of(&canonical.metadata)
+                            .work
+                            .is_none()
+                    })
+            {
+                let source = world.retained_source(m, &op);
+                assert!(
+                    !source.realized,
+                    "the shared hostname cannot identify its maker"
+                );
+                assert!(
+                    !source.native,
+                    "a received marker supplies no native ownership"
+                );
+                assert_eq!(source.copy, world.fx.machine_key(m));
+                checked = true;
+            }
+        }
+    }
+    assert!(
+        checked,
+        "the fixture must contain a marked merge on the other copy"
+    );
 }

@@ -826,11 +826,12 @@ branch jj hasn't imported, a node can stop halfway through a sync.
 - **Time**: an hour passes on the hub, which prunes nothing for that long after it opens its
   store, as after a restart, in case a machine was joining then.
 
-Every sync step must succeed, but for two stops a user recovers from as the error says. One is jj
-failing to merge a machine's operations with the hive's ([races.md, "Known jj
-limitations"](races.md#known-jj-limitations)), which the test gets past by reverting the operation
-named. The other is a copy that lacks the exact chain the hub pruned, identified by count and
-digest. The test records presence, known copies and reports at the actual prune. A refusal is
+Every sync step must succeed except for stops a user recovers from as the error says. If jj
+cannot merge a machine's operations with the hive's ([races.md, "Known jj
+limitations"](races.md#known-jj-limitations)), the test reverts the operation named. If an
+abandon is ambiguous, it runs `jj op integrate` with the exact operation the hint names. Both
+share a bounded repair count; a copy cannot integrate the same hint twice. A copy can also lack
+the exact chain the hub pruned, identified by count and digest. The test records presence, known copies and reports at the actual prune. A refusal is
 expected only if the hub did not wait for that copy then and the copy lacks that exact prefix.
 Holding another chain with the same count does not suffice. A later indirect push can make the
 copy present again, so current presence cannot decide this check. Anywhere else the refusal
@@ -876,6 +877,20 @@ commands that actually changed a scalar record, through original source parents.
 commands inheriting an unchanged scalar only carry those values.
 `imports::physical_head_writers_are_distinct_from_merge_record_terms` checks nested conflict
 cancellation with jj's ref merge, an unchanged scalar command, and a later actual write.
+
+When incoming records lose an applied suffix or drop the entire saved accepted base,
+the checker captures the exact native op heads before driving the receipt. A newly published
+realization of that exact hub target can inherit those HEAD records, rather than its rewritten
+parent's older record. This is scoped to the copy and physical operation id, keeps the first
+witness, and validates the entire captured source history without granting a new HEAD writer.
+The captured frontier explains only records matching jj's merge of it; a later merge or
+export of the same target still uses its own valid physical history.
+`imports::preserved_head_records_require_the_exact_captured_frontier` rejects a missing witness,
+a different body, a wrong value and an invalid source ancestor, including a carrier whose
+metadata names a local command. It also accepts a valid physical record differing from
+the earlier captured frontier.
+`world::root_record_inputs_distinguish_lost_work_from_an_opaque_prefix` checks the actual
+lost-record transition and rejects loss of only an opaque pruned prefix.
 
 At the end of a sequence, and at most once in the middle, the hive syncs to a fixed point,
 and the test checks that:
@@ -999,8 +1014,8 @@ realization of each operation has the hive's view of it, and no operation but a 
 anything diverge or conflict unless what it did explains it: a fetch, an undo or restore, or an
 import of git refs or of git's HEAD. A recorded native command can itself introduce divergence;
 translation may retain those exact versions and conflict terms, but add none beyond them.
-A native rewrite can also leave an older foreign working copy protected in the canonical
-view. This allowance requires an exact live input certificate, an unchanged output slot, and
+A native command or retained native operation can also leave an older foreign working copy
+protected in the canonical view. This allowance requires an exact live input certificate, an unchanged output slot, and
 visibility in that same source; only that commit and its ancestors extend the captured native
 payload bound. Owned, dormant, hidden, altered and output-only targets cannot extend it.
 The snapshot-capture example checks both an accepted native divergence and a rejected extra
@@ -1017,7 +1032,9 @@ copy's actual owned bindings in its base and ordered parents, for authenticated 
 and checks the output structurally. With identical visible heads, replay can also omit an
 already-certified foreign slot absent from an exact captured native input. Only ownership
 certified at that source can exclude an apparent alias; a later workspace birth cannot.
-The pure namespace controls cover a missing input certificate,
+Retained native origins are observed without a realization marker; sharing a hostname cannot
+turn a receiver into the maker.
+`world::retained_sources_do_not_infer_native_ownership_from_a_shared_hostname` checks this boundary. The pure namespace controls cover a missing input certificate,
 an owner rename, and an owned literal that collides with a foreign alias.
 
 To keep the search effective:

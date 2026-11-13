@@ -692,6 +692,7 @@ impl NodeRepo {
             }
             if let [node] = self.to_node_ids(&hub)?.as_slice()
                 && *node != hub
+                && self.canonical.original_id(node)? == self.canonical.original_id(&hub)?
             {
                 names.insert(node.clone(), hub);
             }
@@ -705,6 +706,7 @@ impl NodeRepo {
             for (hub, node, dropped) in to_node.worked_out() {
                 if let [node] = node.as_slice()
                     && !dropped
+                    && self.canonical.original_id(node)? == self.canonical.original_id(hub)?
                 {
                     names.entry(node.clone()).or_insert_with(|| hub.clone());
                 }

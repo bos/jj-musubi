@@ -468,6 +468,11 @@ it's away. If it hears nothing from the copy for that long while another machine
 `jj op abandon`, it stops waiting. If this copy was new to the hive, none of its work reached
 it, not even what it had before joining.
 
+This can also happen after `jj op abandon` removes all history below a command you have not
+synced, if `jj util gc` then removes its earlier form before musubi reads it. That history may
+be needed to tell this copy's workspace names from another machine's. musubi stops rather than
+assigning a workspace to the wrong machine. Bring the work into a new copy as described below.
+
 Otherwise, something removed operations from this repository that musubi couldn't account
 for, as when a power cut loses jj's latest update to its op heads. That's a bug: please report
 it at <https://github.com/bos/jj-musubi/issues>, with the daemon's log (`daemon.log`, in the

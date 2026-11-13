@@ -7,6 +7,18 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- Sync preserves workspace ownership when `jj op abandon` removes all history below a command
+  this machine has not yet sent, including after a restart during repair. If `jj util gc` has
+  already removed the history needed to tell whose workspace it is, sync stops rather than
+  assigning it to the wrong machine. The history-mismatch section of
+  [troubleshooting guide](docs/troubleshooting.md) explains how to bring the work into a new
+  copy.
+
+- Taking an abandon of another version of an operation already abandoned no longer abandons
+  its surviving parents too. A copy also keeps the right abandons to send after a lost reply
+  or a hub made again, avoiding a sync loop. These fixes change the protocol to 20: upgrade
+  the hub and every machine together.
+
 - After a restart, a `jj` command that finishes on an older operation no longer makes sync
   leave duplicate operations in the local operation log. No action is needed on upgrading.
 

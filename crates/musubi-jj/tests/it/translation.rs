@@ -139,6 +139,489 @@ fn repeated_restores_keep_distinct_identities_when_contracted() {
     assert!(!node.notice_abandon(&musubi_jj::records::HubOp(x)).unwrap());
 }
 
+/// Reparenting unpublished work to root must retain its actual namespace, including an
+/// owned literal that used to name another copy's workspace.
+#[test]
+fn an_orphaned_command_keeps_its_native_workspace_owners() {
+    use jj_lib::workspace::WorkspaceLoaderFactory as _;
+    use musubi_jj::records::{HubOp, Record, RecordPrefix};
+    use pollster::FutureExt as _;
+
+    for (own_alias, collect_source) in [(false, false), (true, false), (false, true)] {
+        let env = TestEnv::new();
+        let a = env.init_repo("alpha");
+        let b = env.init_repo("beta");
+        let mut node = open(&a);
+        let mut other = open(&b);
+        let first = single_canonical_head(&mut node);
+        sync(&node, &mut other, &first);
+        let joined = single_canonical_head(&mut other);
+        sync(&other, &mut node, &joined);
+        let basis = node.local_heads().unwrap().pop().unwrap();
+        let base = node.canonicalize(&basis).unwrap();
+        let foreign = node
+            .machine_workspaces()
+            .unwrap()
+            .into_iter()
+            .map(|(name, _)| name)
+            .find(|name| name.contains('/'))
+            .unwrap();
+        let foreign_key = format!(
+            "{}/{}",
+            other.machine().key(),
+            foreign.split_once('/').unwrap().1
+        );
+        let drops = node
+            .canonical_store()
+            .ancestors_until(&[base], |_| false)
+            .unwrap();
+        let root = node.canonical_store().root_operation_id().clone();
+        node.prepare_records(
+            &RecordPrefix::none(),
+            &[Record::new(drops.into_iter().map(HubOp))],
+        )
+        .unwrap();
+        node.crash_taking_records(false);
+        node.advance_to(&[root]).unwrap_err();
+        drop(node);
+
+        if own_alias {
+            a.jj(&["workspace", "forget", &foreign]);
+            a.jj(&[
+                "workspace",
+                "add",
+                "--name",
+                &foreign,
+                env.root().join("own-alias").to_str().unwrap(),
+            ]);
+        }
+        a.jj(&["describe", "-m", "unpublished survivor"]);
+        let source = a.jj(&[
+            "--ignore-working-copy",
+            "op",
+            "log",
+            "--no-graph",
+            "-n1",
+            "-T",
+            "id",
+        ]);
+        let source_id =
+            LocalOp(jj_lib::op_store::OperationId::try_from_hex(source.trim()).unwrap());
+        let node = open(&a);
+        let source_op = node
+            .loader()
+            .op_store()
+            .read_operation(&source_id.0)
+            .block_on()
+            .unwrap();
+        let source_view = node
+            .loader()
+            .op_store()
+            .read_view(&source_op.view_id)
+            .block_on()
+            .unwrap();
+        assert!(
+            source_view
+                .wc_commit_ids
+                .keys()
+                .any(|name| name.as_str() == foreign)
+        );
+        let target = source_view
+            .wc_commit_ids
+            .get(jj_lib::ref_name::WorkspaceName::new(&foreign))
+            .unwrap()
+            .clone();
+        drop(node);
+        a.jj(&["op", "abandon", &format!("..{}-", source.trim())]);
+        let working_copy = a.path().join(".jj/working_copy");
+        let saved_working_copy = env.root().join("working-copy-before-normalizing");
+        musubi_testutil::copy_tree(&working_copy, &saved_working_copy);
+        let mut node = open(&a);
+        let orphan = node.local_heads().unwrap().pop().unwrap();
+        let orphan_op = node
+            .loader()
+            .op_store()
+            .read_operation(&orphan.0)
+            .block_on()
+            .unwrap();
+        assert_eq!(
+            orphan_op.parents,
+            vec![node.loader().op_store().root_operation_id().clone()]
+        );
+        if collect_source {
+            a.jj(&["--ignore-working-copy", "util", "gc", "--expire", "now"]);
+            assert!(
+                !a.repo_path()
+                    .join("op_store/operations")
+                    .join(source.trim())
+                    .exists()
+            );
+            let error = node.canonical_heads().unwrap_err();
+            assert!(
+                matches!(error, musubi_jj::node::NodeError::UnreachableHistory),
+                "{error}"
+            );
+            assert!(node.pending_drops().is_empty());
+            continue;
+        }
+        let head = node.canonical_heads().unwrap().pop().unwrap();
+        let view = node.canonical_store().read_operation_view(&head).unwrap();
+        let own = format!("{}/{}", node.machine().key(), foreign);
+        let expected_key = if own_alias { &own } else { &foreign_key };
+        assert_eq!(
+            view.wc_commit_ids
+                .get(jj_lib::ref_name::WorkspaceName::new(expected_key)),
+            Some(&target)
+        );
+        assert_eq!(
+            view.wc_commit_ids
+                .contains_key(jj_lib::ref_name::WorkspaceName::new(&own)),
+            own_alias
+        );
+        // A power cut can retain the counted source aliases and new heads while losing
+        // the workspace move and final moving=false write.
+        drop(node);
+        std::fs::remove_dir_all(&working_copy).unwrap();
+        musubi_testutil::copy_tree(&saved_working_copy, &working_copy);
+        let records = a.repo_path().join("musubi/records.json");
+        let mut state: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&records).unwrap()).unwrap();
+        state["moving"] = true.into();
+        std::fs::write(&records, serde_json::to_vec(&state).unwrap()).unwrap();
+        std::fs::remove_file(a.repo_path().join("musubi/translation")).unwrap();
+        node = open(&a);
+        node.check_abandon().unwrap();
+        let workspace = jj_lib::workspace::DefaultWorkspaceLoaderFactory
+            .create(a.path())
+            .unwrap()
+            .load(
+                node.loader().settings(),
+                &jj_lib::default_backend_factories::default_backend_factories(),
+                &jj_lib::default_backend_factories::default_working_copy_factories(),
+            )
+            .unwrap();
+        let recorded = LocalOp(workspace.working_copy().operation_id().clone());
+        let mut reachable = BTreeSet::new();
+        let mut pending = node.local_heads().unwrap();
+        while let Some(local) = pending.pop() {
+            if reachable.insert(local.clone()) {
+                let op = node
+                    .loader()
+                    .op_store()
+                    .read_operation(&local.0)
+                    .block_on()
+                    .unwrap();
+                pending.extend(op.parents.into_iter().map(LocalOp));
+            }
+        }
+        assert!(
+            reachable.contains(&recorded),
+            "the recovered workspace must record a surviving native operation"
+        );
+        drop(workspace);
+
+        // Both native aliases must retain ownership, with a warm translation cache and
+        // after that disposable cache has gone.
+        for delayed_parent in [&source_id, &orphan] {
+            for lose_cache in [false, true] {
+                drop(node);
+                if lose_cache {
+                    std::fs::remove_file(a.repo_path().join("musubi/translation")).unwrap();
+                }
+                a.jj(&[
+                    "--ignore-working-copy",
+                    "--at-op",
+                    &delayed_parent.0.hex(),
+                    "describe",
+                    "-m",
+                    "delayed survivor",
+                ]);
+                node = open(&a);
+                let delayed = node.local_heads().unwrap();
+                let heads = node.canonical_heads().unwrap();
+                assert!(!heads.is_empty());
+                for local in delayed {
+                    let canonical = node.canonicalize(&local).unwrap();
+                    let view = node
+                        .canonical_store()
+                        .read_operation_view(&canonical)
+                        .unwrap();
+                    assert_eq!(
+                        view.wc_commit_ids
+                            .get(jj_lib::ref_name::WorkspaceName::new(expected_key)),
+                        Some(&target)
+                    );
+                    assert_eq!(
+                        view.wc_commit_ids.keys().any(|name| name.as_str() == own),
+                        own_alias
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// A root from private history is not an orphan whose ownership needs recovering.
+#[test]
+fn a_private_root_workspace_is_not_a_lost_shared_source() {
+    use musubi_jj::records::{HubOp, Record, RecordPrefix};
+    use pollster::FutureExt as _;
+
+    let env = TestEnv::new();
+    let repo = env.init_repo("alpha");
+    let node = open(&repo);
+    let root = node.loader().op_store().root_operation_id().hex();
+    drop(node);
+    repo.jj(&[
+        "--at-op",
+        &root,
+        "workspace",
+        "add",
+        "--name",
+        "own/slash",
+        env.root().join("private-workspace").to_str().unwrap(),
+    ]);
+    let mut node = open(&repo);
+    let mut ancestry = node.local_heads().unwrap();
+    let mut seen = BTreeSet::new();
+    let private = loop {
+        let head = ancestry.pop().expect("a root operation creates own/slash");
+        if !seen.insert(head.clone()) {
+            continue;
+        }
+        let op = node
+            .loader()
+            .op_store()
+            .read_operation(&head.0)
+            .block_on()
+            .unwrap();
+        if op.parents == [node.loader().op_store().root_operation_id().clone()] {
+            let view = node
+                .loader()
+                .op_store()
+                .read_view(&op.view_id)
+                .block_on()
+                .unwrap();
+            if view
+                .wc_commit_ids
+                .contains_key(jj_lib::ref_name::WorkspaceName::new("own/slash"))
+            {
+                break head;
+            }
+        }
+        ancestry.extend(op.parents.into_iter().map(LocalOp));
+    };
+    let operation = node
+        .loader()
+        .op_store()
+        .read_operation(&private.0)
+        .block_on()
+        .unwrap();
+    assert_eq!(
+        operation.parents,
+        vec![node.loader().op_store().root_operation_id().clone()]
+    );
+    let view = node
+        .loader()
+        .op_store()
+        .read_view(&operation.view_id)
+        .block_on()
+        .unwrap();
+    let commit = view.wc_commit_ids[jj_lib::ref_name::WorkspaceName::new("own/slash")].hex();
+    let joined = node.create_join_operation("musubi: alpha joins").unwrap();
+    let join_point = node.local_of(&joined).unwrap();
+    repo.jj(&["describe", "-m", "shared survivor"]);
+    let shared = node.canonical_heads().unwrap();
+    let dropped = node
+        .canonical_store()
+        .ancestors_until(&shared, |_| false)
+        .unwrap();
+    let root = node.canonical_store().root_operation_id().clone();
+    node.prepare_records(
+        &RecordPrefix::none(),
+        &[Record::new(dropped.into_iter().map(HubOp))],
+    )
+    .unwrap();
+    node.advance_to(&[root]).unwrap();
+    drop(node);
+    repo.jj(&[
+        "--ignore-working-copy",
+        "--at-op",
+        &join_point.0.hex(),
+        "describe",
+        "-r",
+        &commit,
+        "-m",
+        "delayed shared",
+    ]);
+    let before = open(&repo).local_heads().unwrap();
+    repo.jj(&[
+        "--ignore-working-copy",
+        "--at-op",
+        &private.0.hex(),
+        "describe",
+        "-r",
+        &commit,
+        "-m",
+        "delayed private",
+    ]);
+    let mut node = open(&repo);
+    let delayed = node
+        .local_heads()
+        .unwrap()
+        .into_iter()
+        .find(|head| !before.contains(head))
+        .unwrap();
+    drop(node);
+    std::fs::remove_file(repo.repo_path().join("musubi/translation")).unwrap();
+    node = open(&repo);
+    let error = node.canonicalize(&delayed).unwrap_err();
+    assert!(
+        matches!(error, musubi_jj::node::NodeError::BeforeJoin(_)),
+        "{error}"
+    );
+    assert!(node.pending_drops().is_empty());
+}
+
+/// A record can name a different version of a merge this copy already dropped.
+#[test]
+fn another_version_of_a_dropped_merge_does_not_drop_its_parents() {
+    use musubi_jj::canonical::Contraction;
+    use musubi_jj::records::{HubOp, Record, RecordPrefix};
+
+    let env = TestEnv::new();
+    let repo = env.init_repo("alpha");
+    let mut node = open(&repo);
+    let base = node.local_heads().unwrap().pop().unwrap();
+    node.canonicalize(&base).unwrap();
+    for name in ["left", "right"] {
+        repo.jj(&[
+            "--ignore-working-copy",
+            "--at-op",
+            &base.0.hex(),
+            "new",
+            "--no-edit",
+            "-m",
+            name,
+        ]);
+    }
+    let merge = node.merge_heads().unwrap();
+    let merge = node.canonicalize(&merge).unwrap();
+    let parents = node.canonical_store().parents(&merge).unwrap();
+    assert_eq!(parents.len(), 2);
+    repo.jj(&["bookmark", "create", "survivor", "-r", "root()"]);
+    node.canonical_heads().unwrap();
+    let mut contraction = Contraction::new(node.canonical_store(), [parents[1].clone()]).unwrap();
+    let alternate = contraction.images(node.canonical_store(), &merge).unwrap()[0].clone();
+    node.adopt_records(&RecordPrefix::none(), &[Record::new([HubOp(merge)])])
+        .unwrap();
+    // A peer joined after the parent's drop was pruned, then the hub was made again:
+    // it can publish this version's drop without the record that produced the version.
+    node.adopt_records(&RecordPrefix::none(), &[Record::new([HubOp(alternate)])])
+        .unwrap();
+    assert_eq!(
+        node.current(&parents[0]).unwrap(),
+        vec![musubi_jj::node::NodeOp(parents[0].clone())]
+    );
+}
+
+/// A dropped operation's one surviving parent is not another name for that operation.
+#[test]
+fn a_pending_drop_is_not_named_as_an_already_dropped_child() {
+    use musubi_jj::records::{HubOp, Record, RecordPrefix};
+
+    let env = TestEnv::new();
+    let repo = env.init_repo("alpha");
+    let mut node = open(&repo);
+    let start = node.local_heads().unwrap().pop().unwrap();
+    node.canonicalize(&start).unwrap();
+    repo.jj(&[
+        "--ignore-working-copy",
+        "--at-op",
+        &start.0.hex(),
+        "describe",
+        "-m",
+        "parent",
+    ]);
+    let local_parent = node.local_heads().unwrap().pop().unwrap();
+    let parent = node.canonicalize(&local_parent).unwrap();
+    repo.jj(&[
+        "--ignore-working-copy",
+        "--at-op",
+        &local_parent.0.hex(),
+        "describe",
+        "-m",
+        "child",
+    ]);
+    let local_child = node.local_heads().unwrap().pop().unwrap();
+    let child = node.canonicalize(&local_child).unwrap();
+    repo.jj(&[
+        "--ignore-working-copy",
+        "--at-op",
+        &start.0.hex(),
+        "describe",
+        "-m",
+        "sibling",
+    ]);
+    let local_sibling = node
+        .local_heads()
+        .unwrap()
+        .into_iter()
+        .find(|head| *head != local_child)
+        .unwrap();
+    let sibling = node.canonicalize(&local_sibling).unwrap();
+    assert_eq!(
+        node.canonical_store().generation(&parent).unwrap(),
+        node.canonical_store().generation(&sibling).unwrap()
+    );
+    node.merge_heads().unwrap();
+    repo.jj(&["bookmark", "create", "survivor", "-r", "root()"]);
+    let base = node.canonical_heads().unwrap().pop().unwrap();
+    node.adopt_records(&RecordPrefix::none(), &[Record::new([HubOp(child)])])
+        .unwrap();
+    // An existing sibling drop sets the reverse-name walk's floor at the parent:
+    // it visits the dropped child but stops before visiting the parent itself.
+    repo.jj(&["op", "abandon", &local_sibling.0.hex()]);
+    assert!(node.notice_abandon(&HubOp(base.clone())).unwrap());
+    assert_eq!(node.pending_drops(), &Record::new([HubOp(sibling.clone())]));
+    let current = node.current(&parent).unwrap().pop().unwrap();
+    let local_parent = node.local_of(&current.0).unwrap();
+    repo.jj(&["op", "abandon", &local_parent.0.hex()]);
+    assert!(node.notice_abandon(&HubOp(base)).unwrap());
+    assert_eq!(
+        node.pending_drops(),
+        &Record::new([HubOp(sibling), HubOp(parent)])
+    );
+}
+
+/// Losing a prepared record leaves its drop pending, even while taking another record.
+#[test]
+fn a_lost_receipt_keeps_the_dropped_original_pending() {
+    use musubi_jj::records::{HubOp, Record, RecordPrefix};
+
+    let env = TestEnv::new();
+    let repo = env.init_repo("alpha");
+    let mut node = open(&repo);
+    repo.jj(&["describe", "-m", "prepared drop"]);
+    let a = node.canonical_heads().unwrap().pop().unwrap();
+    repo.jj(&["describe", "-m", "incoming drop"]);
+    let b = node.canonical_heads().unwrap().pop().unwrap();
+    repo.jj(&["describe", "-m", "survives both drops"]);
+    node.canonical_heads().unwrap();
+    let lost = Record::new([HubOp(a)]);
+    node.prepare_records(&RecordPrefix::none(), std::slice::from_ref(&lost))
+        .unwrap();
+    assert!(node.has_record_custody());
+    assert!(node.applied_records().is_empty());
+    let incoming = Record::new([HubOp(b)]);
+    node.adopt_records(&RecordPrefix::none(), std::slice::from_ref(&incoming))
+        .unwrap();
+    assert_eq!(node.pending_drops(), &lost);
+    node.adopt_records(&RecordPrefix::none(), &[incoming, lost])
+        .unwrap();
+    assert!(node.pending_drops().is_empty());
+}
+
 #[test]
 fn taking_an_abandon_preserves_original_identity_after_cache_loss() {
     use musubi_jj::canonical::Contraction;

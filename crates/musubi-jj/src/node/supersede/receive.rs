@@ -295,7 +295,12 @@ impl NodeRepo {
                 {
                     continue;
                 }
-                to_drop.extend(self.to_node_ids(&shared)?);
+                let original = store.original_id(&shared)?;
+                for image in self.to_node_ids(&shared)? {
+                    if store.original_id(&image)? == original {
+                        to_drop.push(image);
+                    }
+                }
             }
             let mut contraction =
                 Contraction::new(store, names.iter().cloned())?.sharing(self.presences.clone());
@@ -323,7 +328,11 @@ impl NodeRepo {
                 }
                 let images = contraction.images(store, op)?;
                 if images == std::slice::from_ref(op) {
-                    renamed.extend(ours.images(store, op)?);
+                    if ours.drops(op) {
+                        renamed.push(op.clone());
+                    } else {
+                        renamed.extend(ours.images(store, op)?);
+                    }
                 } else {
                     renamed.extend(images);
                 }

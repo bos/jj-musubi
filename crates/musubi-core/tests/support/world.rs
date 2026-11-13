@@ -854,6 +854,7 @@ impl World {
     }
 
     pub fn crash_node(&mut self, node: usize) {
+        self.repos[node].restart();
         self.cores[node].restart();
         self.act(json!({"kind": "loseKnown", "node": node}));
     }

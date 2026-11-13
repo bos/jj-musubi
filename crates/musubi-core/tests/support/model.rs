@@ -435,6 +435,12 @@ pub struct FakeRepo {
 }
 
 impl FakeRepo {
+    /// A restarted process cannot finish an earlier receipt's pending crash injection.
+    pub fn restart(&mut self) {
+        self.crash_before_objects = false;
+        self.objects_lost = false;
+    }
+
     pub fn new(univ: SharedUniv, index: usize) -> Self {
         Self {
             univ,

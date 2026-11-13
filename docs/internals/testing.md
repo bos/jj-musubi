@@ -269,6 +269,11 @@ handling error keeps the hub adapter and reaches the requesting node as a failed
 Pruning upkeep errors keep the hub adapter without failing a node. Every case finishes with
 faults disabled and the usual convergence/retention checks.
 
+`storage_boundaries::an_interrupted_fetch_does_not_discard_a_later_object_reply` combines an
+armed mid-fetch crash with an error after operation staging. Restart clears both pending
+crash controls, so an object-only reply is retained. Removing the object-loss latch reset
+makes its oracle comparison fail instead of silently losing the next reply.
+
 `storage_boundaries::every_storage_boundary_recovers` sweeps every countdown in a fixed
 schedule of concurrent work, fetching, missing-object recovery, pruning and held-record
 adoption. Its coverage assertion requires 39 reachable fallible trait methods, nine

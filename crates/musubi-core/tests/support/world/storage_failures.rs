@@ -94,7 +94,6 @@ impl World {
         // (daemon.rs). All of this fake's store data survives reopen. A hub error is sent
         // back to the requesting node; the HubService retains its adapter.
         if let Some(node) = node {
-            self.repos[node].crash_before_objects = false;
             self.crash_node(node);
         }
         self.check_invariants();

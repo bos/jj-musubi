@@ -7,6 +7,10 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- A new command made while sync trims its parents keeps the workspace namespace it started
+  from. Another machine's workspace aliases no longer become workspaces owned by this copy.
+  This changes the protocol to 21: upgrade the hub and every machine together.
+
 - A copy the hive has forgotten keeps its own workspaces after another machine trims all
   their shared history, including when it renamed or forgot a workspace after sync prepared
   that history. Cached operations also keep the right parents after a restart.

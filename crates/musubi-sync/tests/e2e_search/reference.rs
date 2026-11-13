@@ -286,6 +286,225 @@ fn a_clones_workspace_witness_is_its_native_join_input() {
     );
 }
 
+#[test]
+fn workspace_certificates_require_each_sources_existing_binding() {
+    use crate::world::{Naming, Setup};
+
+    let mut world = World::new(Setup {
+        nodes: 2,
+        naming: Naming::Default,
+        prejoin: false,
+        secondary: false,
+    });
+    let key = format!("{}/default", world.fx.machine_key(0));
+    let store = world.fx.hive.members[0].adapter.repo().canonical_store();
+    let (base, mut operation, original) = store
+        .operation_ids()
+        .unwrap()
+        .into_iter()
+        .filter_map(|id| {
+            let op = store.read_operation(&id).unwrap();
+            let view = store.read_view(&op.view_id).unwrap();
+            (world.baseline_operation(&merge_key(&op))
+                && view.wc_commit_ids.contains_key(WorkspaceName::new(&key)))
+            .then_some((id, op, view))
+        })
+        .max_by_key(|(_, op, _)| op.metadata.time.end.timestamp)
+        .unwrap();
+    let old = original.wc_commit_ids[WorkspaceName::new(&key)].clone();
+    let native_base = world.latest_op_head(1);
+    world.jj(1, &["describe", &old.hex(), "-m", "rewritten elsewhere"]);
+    world.sync(1);
+    let replacement = CommitId::try_from_hex(
+        world
+            .raw_jj(
+                1,
+                &[
+                    "log",
+                    "-r",
+                    "description(substring:rewritten)",
+                    "--no-graph",
+                    "-T",
+                    "commit_id",
+                ],
+            )
+            .trim(),
+    )
+    .unwrap();
+    assert_eq!(replacement.as_bytes().len(), 20);
+    world.jj_at_op(
+        1,
+        &native_base,
+        &["describe", &old.hex(), "-m", "second rewrite"],
+    );
+    let second = CommitId::try_from_hex(
+        world
+            .raw_jj(
+                1,
+                &[
+                    "log",
+                    "-r",
+                    "description(substring:second)",
+                    "--no-graph",
+                    "-T",
+                    "commit_id",
+                ],
+            )
+            .trim(),
+    )
+    .unwrap();
+    assert_eq!(second.as_bytes().len(), 20);
+    let root = world.fx.hive.members[0]
+        .adapter
+        .repo()
+        .loader()
+        .store()
+        .root_commit_id()
+        .clone();
+    world.forget_copy(1, 0);
+    world.sync(1);
+    let departed = world.fx.hive.members[1]
+        .adapter
+        .repo()
+        .canonical_store()
+        .operation_ids()
+        .unwrap()
+        .into_iter()
+        .find(|id| {
+            let presence = world.fx.hive.members[1]
+                .adapter
+                .repo()
+                .presence(id)
+                .unwrap();
+            presence.known().contains(&world.fx.machine_key(0))
+                && !presence.is_present(&world.fx.machine_key(0))
+        })
+        .unwrap();
+    world.sync(0);
+    let store = world.fx.hive.members[0].adapter.repo().canonical_store();
+    let departure_store = world.fx.hive.members[1].adapter.repo().canonical_store();
+    let departure_op = departure_store.read_operation(&departed).unwrap();
+    let departure_view = departure_store.read_view(&departure_op.view_id).unwrap();
+    assert_eq!(
+        store.write_view(&departure_view).unwrap(),
+        departure_op.view_id
+    );
+    assert_eq!(store.write_operation(&departure_op).unwrap(), departed);
+    operation.metadata.attributes.clear();
+    operation.metadata.workspace_name = None;
+    operation.commit_predecessors = None;
+    operation.metadata.description = "certificate source".to_owned();
+    operation.metadata.time.end.timestamp.0 += 10_000;
+    operation.parents = vec![base.0.clone()];
+    // These are the certificate checker's inputs, not simulated musubi output: a proven
+    // name can still point at the hidden old commit before its owner repairs it.
+    for case in [
+        "unique",
+        "missing",
+        "visible",
+        "divergent",
+        "wrong",
+        "dormant",
+        "merge",
+        "omitted",
+        "all dormant",
+        "deleted",
+        "conflicting",
+        "output only",
+        "absent",
+    ] {
+        let mut reference = Reference::build(&world);
+        operation.parents = vec![if case == "absent" {
+            departed.0.clone()
+        } else {
+            base.0.clone()
+        }];
+        let mut source = original.clone();
+        source.head_ids = HashSet::from([replacement.clone()]);
+        if case == "visible" {
+            source.head_ids.insert(old.clone());
+        }
+        if case == "divergent" {
+            source.head_ids.insert(second.clone());
+        }
+        if case == "conflicting" {
+            source
+                .wc_commit_ids
+                .insert(key.clone().into(), root.clone());
+        }
+        if case == "output only" {
+            source.head_ids = HashSet::from([root.clone()]);
+        }
+        let target = if case == "omitted" || case == "all dormant" || case == "deleted" {
+            old.clone()
+        } else if case == "wrong" {
+            root.clone()
+        } else {
+            replacement.clone()
+        };
+        let mut proof = WorkspaceCertificate::default();
+        proof.keys.insert(key.clone(), old.clone());
+        proof.names.insert(key.clone());
+        proof.merged.insert(key.clone());
+        if case == "missing" || case == "deleted" {
+            proof.keys.clear();
+            proof.names.clear();
+        }
+        if ["dormant", "omitted", "all dormant", "deleted"].contains(&case) {
+            source.wc_commit_ids.remove(WorkspaceName::new(&key));
+            if case != "deleted" {
+                proof.dormant.insert(key.clone());
+            }
+        }
+        operation.view_id = store.write_view(&source).unwrap();
+        let parent = store.write_operation(&operation).unwrap();
+        reference
+            .workspace_certificates
+            .insert(parent.clone(), proof);
+        let mut output = operation.clone();
+        output.metadata.description = format!("certificate result: {case}");
+        output.parents = vec![parent.0];
+        let mut made = source.clone();
+        made.wc_commit_ids
+            .insert(key.clone().into(), target.clone());
+        if case == "output only" {
+            made.head_ids.insert(replacement.clone());
+        }
+        if ["merge", "omitted", "all dormant", "deleted"].contains(&case) {
+            let mut other = operation.clone();
+            other.metadata.description = format!("certificate other input: {case}");
+            let mut live = original.clone();
+            live.wc_commit_ids
+                .insert(key.clone().into(), target.clone());
+            if case == "all dormant" {
+                live.wc_commit_ids.remove(WorkspaceName::new(&key));
+            }
+            other.view_id = store.write_view(&live).unwrap();
+            let other = store.write_operation(&other).unwrap();
+            let mut proof = WorkspaceCertificate::default();
+            proof.keys.insert(key.clone(), target.clone());
+            proof.names.insert(key.clone());
+            if case == "all dormant" {
+                proof.dormant.insert(key.clone());
+            }
+            reference
+                .workspace_certificates
+                .insert(other.clone(), proof);
+            output.parents.push(other.0);
+        }
+        output.view_id = store.write_view(&made).unwrap();
+        let result = store.write_operation(&output).unwrap();
+        let certified = reference.workspace_certificate(&world, &result);
+        assert_eq!(
+            certified.keys.get(&key),
+            ["unique", "merge", "omitted"]
+                .contains(&case)
+                .then_some(&target),
+            "{case}"
+        );
+    }
+}
+
 struct WorkspaceReplay {
     view: View,
     parents: Vec<View>,
@@ -1381,6 +1600,78 @@ impl Reference {
                         result.dormant.insert(key.clone());
                         if inputs.iter().any(|input| input.merged.contains(key)) {
                             result.merged.insert(key.clone());
+                        }
+                    }
+                }
+            }
+        }
+        // Membership omission is not owner deletion. Every source must certify the name
+        // and the same binding, allowing a hidden target to follow its unique rewrite
+        // already visible in that source. No output object or metadata certifies itself.
+        if command.is_none() && !parents.is_empty() {
+            let sources: Option<Vec<_>> = parents
+                .iter()
+                .map(|parent| {
+                    let source = Self::workspace_source(world, parent)?;
+                    world.fx.hive.members.iter().find_map(|member| {
+                        let node = member.adapter.repo();
+                        Some((
+                            node.canonical_store().read_view(&source.view_id).ok()?,
+                            node.presence(parent).ok()?,
+                        ))
+                    })
+                })
+                .collect();
+            if let Some(sources) = sources {
+                for (name, actual) in &view.wc_commit_ids {
+                    let key = name.as_str();
+                    let Some((owner, _)) = key.split_once('/') else {
+                        continue;
+                    };
+                    if !presence.is_present(owner)
+                        || rewritten(actual)
+                        || !inputs
+                            .iter()
+                            .zip(&sources)
+                            .any(|(input, (_, source_presence))| {
+                                !input.dormant.contains(key)
+                                    && source_presence.is_present(owner)
+                                    && input.keys.contains_key(key)
+                            })
+                    {
+                        continue;
+                    }
+                    let agreed = inputs.iter().zip(&sources).all(|(input, (source, _))| {
+                        let Some(old) = input.keys.get(key) else {
+                            return false;
+                        };
+                        if input.dormant.contains(key) {
+                            return old == actual && !source.wc_commit_ids.contains_key(name);
+                        }
+                        if source.wc_commit_ids.get(name) != Some(old) {
+                            return false;
+                        }
+                        if old == actual {
+                            return true;
+                        }
+                        let visible = self.visible(source);
+                        if visible.contains(old) {
+                            return false;
+                        }
+                        let change = self.facts(old).change.clone();
+                        let rewrites: Vec<_> = visible
+                            .iter()
+                            .filter(|id| self.facts(id).change == change)
+                            .collect();
+                        rewrites.as_slice() == [actual]
+                    });
+                    if agreed {
+                        result.keys.insert(key.to_owned(), actual.clone());
+                        result.dormant.remove(key);
+                        if parents.len() > 1
+                            || inputs.iter().any(|input| input.merged.contains(key))
+                        {
+                            result.merged.insert(key.to_owned());
                         }
                     }
                 }

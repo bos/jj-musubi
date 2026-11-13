@@ -892,6 +892,15 @@ and after views, or jj's replay of authenticated source parents. A forgotten cop
 bindings require matching source views and an independent native merge witness; shared
 metadata naming a workspace is never its own certificate. Rewriting a dormant binding's
 commit revokes opaque inheritance unless independent replay certifies its result.
+An internal repair or merge can also inherit a binding certified by every source: each live
+source must already contain that exact target, or its hidden old target must have exactly
+one visible rewrite there, equal to the result. A dormant source must certify the unchanged
+target while omitting its slot. At least one source must have a live binding and a present
+owner; dormant omissions cannot certify a comeback by themselves. Visibility in the result
+is never evidence for a new target.
+`reference::workspace_certificates_require_each_sources_existing_binding` checks these rules
+with real jj rewrites, including two divergent versions, missing or conflicting source
+bindings, owner deletion, all-dormant inputs, and a target visible only in the result.
 `e2e_workspace_names_after_trim_match_native_jj` exercises a realized merge whose authenticated
 parents and local base let native jj witness a restored name. A realization's marker neither
 certifies that name nor disqualifies its independently checked replay.

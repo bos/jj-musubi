@@ -118,6 +118,23 @@ pub fn merge_key(op: &jj_lib::op_store::Operation) -> String {
     )
 }
 
+/// Reparenting preserves the source body; local identity and ownership annotations may
+/// be added afterward. In particular its view and workspace identity are never stripped.
+pub fn same_source_body(a: &jj_lib::op_store::Operation, b: &jj_lib::op_store::Operation) -> bool {
+    let strip = |mut op: jj_lib::op_store::Operation| {
+        op.parents.clear();
+        for key in [
+            musubi_jj::node::CANONICAL_ATTRIBUTE,
+            "musubi.workspace-context",
+            "musubi.local-workspaces",
+        ] {
+            op.metadata.attributes.remove(key);
+        }
+        op
+    };
+    strip(a.clone()) == strip(b.clone())
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum Naming {
     /// Each machine names its workspace after itself.
@@ -146,6 +163,7 @@ pub struct Workspace {
 
 /// What an actual jj command read and wrote, before canonicalization or abandonment can
 /// expand its parent. This is independent source evidence for the reference replay.
+#[derive(Clone)]
 pub struct CommandSnapshot {
     /// The native operation, before contraction or a per-machine export changes it.
     pub id: jj_lib::op_store::OperationId,
@@ -1363,16 +1381,7 @@ impl World {
             let source_key = (m, key.clone());
             match self.operation_sources.get(&source_key) {
                 Some(Some(source)) if source.operation.parents != op.parents => {
-                    let strip = |mut op: jj_lib::op_store::Operation| {
-                        op.parents.clear();
-                        op.metadata
-                            .attributes
-                            .remove(musubi_jj::node::CANONICAL_ATTRIBUTE);
-                        op.metadata.attributes.remove("musubi.workspace-context");
-                        op.metadata.attributes.remove("musubi.local-workspaces");
-                        op
-                    };
-                    if strip(source.operation.clone()) == strip(op.clone()) {
+                    if same_source_body(&source.operation, op) {
                         let retained = source.retained.clone();
                         self.remember_retained(key, retained);
                     } else {
@@ -1393,6 +1402,24 @@ impl World {
                 }
             }
         }
+    }
+
+    /// Unambiguous native bodies observed before history was rewritten. A first marked
+    /// realization is not independent evidence for the records that realization carries.
+    pub fn native_record_sources(&self, m: usize) -> BTreeMap<String, jj_lib::op_store::Operation> {
+        self.operation_sources
+            .iter()
+            .filter_map(|((machine, key), source)| {
+                let source = source.as_ref()?;
+                (*machine == m
+                    && !source
+                        .operation
+                        .metadata
+                        .attributes
+                        .contains_key(musubi_jj::node::CANONICAL_ATTRIBUTE))
+                .then(|| (key.clone(), source.operation.clone()))
+            })
+            .collect()
     }
 
     /// Canonicalization may replace a native fix-up at the heads with a marked version.

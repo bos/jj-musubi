@@ -9,8 +9,9 @@
 //! own merge of the same parents, in the same order, by `RepoLoader::merge_operations`, as
 //! concurrent processes on one machine would have it merged. A merge made on a machine, rather
 //! than realized there, agrees too where it is jj's merge of the parents as that machine had
-//! them, lacking the working-copy commit of another machine's workspace it forgot
-//! (`merged_as_made`).
+//! them, lacking the working-copy commit or local alias of another machine's workspace.
+//! An alias omission with the same visible commits requires an exact captured native
+//! input and an independently certified foreign binding (`merged_as_made`).
 //!
 //! Where jj's merge gives what the hive's did, the reference takes the hive's operation
 //! itself, so that it goes on agreeing exactly. Where it doesn't, the reference goes its own
@@ -92,6 +93,8 @@ struct Summary {
 #[derive(Clone, Default)]
 struct WorkspaceCertificate {
     keys: BTreeMap<String, CommitId>,
+    /// An independent merge witnessed this name's birth. The name can survive a later
+    /// working-copy repair even when `keys` cannot certify its replacement commit.
     merged: BTreeSet<String>,
     dormant: BTreeSet<String>,
     /// Names authenticated at this exact source history, independently of their current
@@ -100,6 +103,39 @@ struct WorkspaceCertificate {
 }
 
 impl WorkspaceCertificate {
+    fn foreign_binding_carried_by_command(
+        &self,
+        command: &crate::world::CommandSnapshot,
+        key: &str,
+        actual: &CommitId,
+        visible: &HashSet<CommitId>,
+    ) -> bool {
+        let Some((owner, _)) = key.split_once('/') else {
+            return false;
+        };
+        let Some(old) = self.keys.get(key) else {
+            return false;
+        };
+        if owner == command.copy || self.dormant.contains(key) {
+            return false;
+        }
+        let rewrites: Vec<_> = command
+            .predecessors
+            .iter()
+            .flat_map(|preds| preds.iter())
+            .filter(|(_, predecessors)| predecessors.contains(old))
+            .map(|(new, _)| new)
+            .collect();
+        if old == actual {
+            return rewrites.is_empty();
+        }
+        rewrites
+            .into_iter()
+            .filter(|new| visible.contains(*new))
+            .collect::<Vec<_>>()
+            == [actual]
+    }
+
     fn names_carried_by_command(
         &self,
         command: &crate::world::CommandSnapshot,
@@ -155,6 +191,141 @@ fn command_workspace_alias(
         [name] => Some(name.clone()),
         _ => None,
     }
+}
+
+fn workspace_fixup_input<'a>(
+    world: &'a World,
+    id: &CanonicalOp,
+    op: &'a op_store::Operation,
+) -> Option<(&'a str, &'a CanonicalOp)> {
+    let (trimmer, input) = world.workspace_fixup_inputs.get(&merge_key(op))?;
+    let owner = op.metadata.attributes.get("musubi.work")?;
+    (input != id && owner != trimmer).then_some((owner.as_str(), input))
+}
+
+/// The exact foreign alias is absent from this captured command's output. An owned
+/// literal never stands for a foreign slot, and an ambiguous foreign prefix is not absent.
+fn foreign_alias_absent(
+    command: &crate::world::CommandSnapshot,
+    source_names: &BTreeSet<String>,
+    key: &str,
+) -> bool {
+    let Some((owner, workspace)) = key.split_once('/') else {
+        return false;
+    };
+    owner != command.copy
+        && command.made.wc_commit_ids.keys().all(|name| {
+            source_names.contains(&format!("{}/{}", command.copy, name.as_str()))
+                || !name
+                    .as_str()
+                    .split_once('/')
+                    .is_some_and(|(prefix, shown)| {
+                        shown == workspace
+                            && musubi_jj::workspaces::could_be_shown_as(owner, prefix)
+                    })
+        })
+}
+
+#[test]
+fn foreign_commands_keep_bindings_after_their_local_aliases_are_forgotten() {
+    let commit = |byte| CommitId::new(vec![byte; 20]);
+    let mut command = crate::world::CommandSnapshot {
+        id: OperationId::new(vec![1; 64]),
+        copy: "alpha".to_owned(),
+        copies: BTreeSet::from(["alpha".to_owned(), "beta".to_owned()]),
+        parent: OperationId::new(vec![2; 64]),
+        input: None,
+        predecessors: None,
+        base: View::make_root(commit(0)),
+        made: View::make_root(commit(0)),
+    };
+    let mut proof = WorkspaceCertificate::default();
+    proof.keys.insert("beta/default".to_owned(), commit(1));
+    proof.names.insert("beta/default".to_owned());
+    let old = commit(1);
+    let new = commit(2);
+    let visible = HashSet::from([new.clone()]);
+    let carried = |proof: &WorkspaceCertificate,
+                   command: &crate::world::CommandSnapshot,
+                   target: &CommitId,
+                   visible: &HashSet<CommitId>| {
+        proof.foreign_binding_carried_by_command(command, "beta/default", target, visible)
+    };
+    assert!(carried(&proof, &command, &old, &visible));
+    command.predecessors = Some(BTreeMap::from([(new.clone(), vec![old.clone()])]));
+    assert!(carried(&proof, &command, &new, &visible));
+    assert!(!carried(&proof, &command, &old, &visible));
+    assert!(!carried(&proof, &command, &commit(3), &visible));
+    assert!(!carried(&proof, &command, &new, &HashSet::new()));
+    proof.dormant.insert("beta/default".to_owned());
+    assert!(!carried(&proof, &command, &new, &visible));
+    proof.dormant.clear();
+    proof.keys.clear();
+    assert!(!carried(&proof, &command, &new, &visible));
+    proof.keys.insert("beta/default".to_owned(), old.clone());
+    command.copy = "beta".to_owned();
+    assert!(!carried(&proof, &command, &new, &visible));
+    command.copy = "alpha".to_owned();
+    command
+        .predecessors
+        .as_mut()
+        .unwrap()
+        .insert(commit(3), vec![old.clone()]);
+    assert!(!carried(
+        &proof,
+        &command,
+        &new,
+        &HashSet::from([new.clone(), commit(3)])
+    ));
+}
+
+#[test]
+fn native_foreign_alias_omissions_do_not_erase_owned_names() {
+    let commit = CommitId::new(vec![1; 20]);
+    let mut command = crate::world::CommandSnapshot {
+        id: OperationId::new(vec![1; 64]),
+        copy: "alpha#aaaa".to_owned(),
+        copies: BTreeSet::from(["alpha#aaaa".to_owned(), "beta#bbbb".to_owned()]),
+        parent: OperationId::new(vec![2; 64]),
+        input: None,
+        predecessors: None,
+        base: View::make_root(commit.clone()),
+        made: View::make_root(commit.clone()),
+    };
+    let key = "beta#bbbb/default";
+    let mut source_names = BTreeSet::new();
+    assert!(foreign_alias_absent(&command, &source_names, key));
+    assert!(!foreign_alias_absent(
+        &command,
+        &source_names,
+        "alpha#aaaa/default"
+    ));
+    for alias in ["beta/default", "beta-bbbb/default", "beta-bbbb--/default"] {
+        command.made.wc_commit_ids.clear();
+        command
+            .made
+            .wc_commit_ids
+            .insert(alias.into(), commit.clone());
+        assert!(
+            !foreign_alias_absent(&command, &source_names, key),
+            "{alias}"
+        );
+    }
+    command.made.wc_commit_ids.clear();
+    command
+        .made
+        .wc_commit_ids
+        .insert("beta/second".into(), commit.clone());
+    assert!(foreign_alias_absent(&command, &source_names, key));
+    command
+        .made
+        .wc_commit_ids
+        .insert("beta/default".into(), commit);
+    // A later birth does not prove that this earlier slot was owned at this source.
+    let later_births = BTreeSet::from(["alpha#aaaa/beta/default".to_owned()]);
+    assert!(!foreign_alias_absent(&command, &source_names, key));
+    source_names.extend(later_births);
+    assert!(foreign_alias_absent(&command, &source_names, key));
 }
 
 #[test]
@@ -284,6 +455,194 @@ fn a_clones_workspace_witness_is_its_native_join_input() {
             .names
             .contains(&own)
     );
+}
+
+#[test]
+fn native_payloads_allow_only_foreign_working_copies_retained_from_their_inputs() {
+    use crate::world::{Naming, Setup};
+
+    let mut world = World::new(Setup {
+        nodes: 2,
+        naming: Naming::Default,
+        prejoin: false,
+        secondary: false,
+    });
+    let key = format!("{}/default", world.fx.machine_key(1));
+    let base = CanonicalOp(world.fx.hive.hub.store().head().1.clone());
+    let store = world.fx.hive.members[0].adapter.repo().canonical_store();
+    let template = store.read_operation(&base).unwrap();
+    let source_view = store.read_view(&template.view_id).unwrap();
+    let old = source_view.wc_commit_ids[WorkspaceName::new(&key)].clone();
+    let native_base = world.latest_op_head(0);
+    world.jj(0, &["describe", &old.hex(), "-m", "first foreign rewrite"]);
+    let first = OperationId::try_from_hex(world.latest_op_head(0)).unwrap();
+    world.jj_at_op(
+        0,
+        &native_base,
+        &["describe", &old.hex(), "-m", "second foreign rewrite"],
+    );
+    let second = OperationId::try_from_hex(world.latest_op_head(0)).unwrap();
+    let snapshot = |id: &OperationId| world.commands.values().find(|c| c.id == *id).unwrap();
+    let replacement = |id: &OperationId| {
+        snapshot(id)
+            .predecessors
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|(_, predecessors)| predecessors.contains(&old))
+            .unwrap()
+            .0
+            .clone()
+    };
+    let (first_version, second_version) = (replacement(&first), replacement(&second));
+    let mut command = snapshot(&first).clone();
+    command.made.head_ids = HashSet::from([first_version.clone()]);
+    let mut reference = Reference::build(&world);
+    let store = world.fx.hive.members[0].adapter.repo().canonical_store();
+    let root = world.fx.hive.members[0]
+        .adapter
+        .repo()
+        .loader()
+        .store()
+        .root_commit_id()
+        .clone();
+    for case in [
+        "retained",
+        "missing proof",
+        "dormant",
+        "missing slot",
+        "hidden",
+        "new target",
+        "own",
+    ] {
+        let mut source = source_view.clone();
+        let mut certificate = WorkspaceCertificate::default();
+        certificate.keys.insert(key.clone(), old.clone());
+        certificate.names.insert(key.clone());
+        if case == "missing proof" {
+            certificate.keys.clear();
+        }
+        if case == "dormant" {
+            certificate.dormant.insert(key.clone());
+        }
+        if case == "missing slot" {
+            source.wc_commit_ids.remove(WorkspaceName::new(&key));
+        }
+        if case == "hidden" {
+            source.head_ids = HashSet::from([root.clone()]);
+        }
+        let mut input = template.clone();
+        input.metadata.attributes.clear();
+        input.metadata.description = format!("foreign visibility input: {case}");
+        input.parents = vec![base.0.clone()];
+        input.view_id = store.write_view(&source).unwrap();
+        let input_id = store.write_operation(&input).unwrap();
+        reference
+            .workspace_certificates
+            .insert(input_id.clone(), certificate);
+        command.input = Some(input_id.clone());
+        command.copy = world.fx.machine_key(if case == "own" { 1 } else { 0 });
+        let mut output = input;
+        output.parents = vec![input_id.0];
+        let mut canonical = command.made.clone();
+        canonical.head_ids.insert(old.clone());
+        canonical.wc_commit_ids.insert(
+            key.clone().into(),
+            if case == "new target" {
+                second_version.clone()
+            } else {
+                old.clone()
+            },
+        );
+        let protected = reference.retained_foreign_targets(&world, &command, &output, &canonical);
+        assert_eq!(protected.contains(&old), case == "retained", "{case}");
+        let mut expected = command.made.clone();
+        expected.head_ids.extend(protected);
+        let unexpected =
+            reference.unexplained_command_changes(&command.base, &expected, &canonical);
+        assert_eq!(
+            unexpected.is_empty(),
+            case == "retained",
+            "{case}: {unexpected:?}"
+        );
+        if case == "retained" {
+            canonical.head_ids.insert(second_version.clone());
+            assert!(
+                !reference
+                    .unexplained_command_changes(&command.base, &expected, &canonical)
+                    .is_empty(),
+                "a third version is still extra"
+            );
+            canonical.head_ids.remove(&first_version);
+            assert!(
+                !reference
+                    .unexplained_command_changes(&command.base, &expected, &canonical)
+                    .is_empty(),
+                "equal counts cannot hide a different version"
+            );
+        }
+    }
+}
+
+#[test]
+fn workspace_witnesses_walk_deep_histories_without_recursing() {
+    use crate::world::{Naming, Setup};
+
+    let mut world = World::new(Setup {
+        nodes: 2,
+        naming: Naming::Default,
+        prejoin: false,
+        secondary: false,
+    });
+    let store = world.fx.hive.members[0].adapter.repo().canonical_store();
+    let mut head = CanonicalOp(world.fx.hive.hub.store().head().1.clone());
+    let mut operation = store.read_operation(&head).unwrap();
+    let mut reference = Reference::build(&world);
+    let original = reference.workspace_certificate(&world, &head);
+    assert!(!original.keys.is_empty());
+    operation.metadata.attributes.clear();
+    operation.metadata.workspace_name = None;
+    operation.commit_predecessors = None;
+    for n in 0..512 {
+        operation.parents = vec![head.0];
+        operation.metadata.description = format!("unchanged workspace source {n}");
+        head = store.write_operation(&operation).unwrap();
+    }
+    let certificate = reference.workspace_certificate(&world, &head);
+    assert_eq!(certificate.keys, original.keys);
+    assert_eq!(certificate.names, original.names);
+    assert_eq!(certificate.merged, original.merged);
+    assert_eq!(certificate.dormant, original.dormant);
+    assert_eq!(
+        reference.workspace_copy(&world, &head).unwrap().id(),
+        &head.0
+    );
+    // A trim witness can refer outside its new root-parent graph. These dependencies
+    // must be preloaded too, rather than recursing once per earlier trim.
+    let owner = world.fx.machine_key(1);
+    let key = format!("{owner}/default");
+    let target = original.keys[&key].clone();
+    operation.parents = vec![store.root_operation_id().0.clone()];
+    operation
+        .metadata
+        .attributes
+        .insert("musubi.work".to_owned(), owner);
+    for n in 0..512 {
+        operation.metadata.description = format!("trim workspace source {n}");
+        let next = store.write_operation(&operation).unwrap();
+        world
+            .workspace_fixup_inputs
+            .insert(merge_key(&operation), (world.fx.machine_key(0), head));
+        head = next;
+    }
+    let certificate = reference.workspace_certificate(&world, &head);
+    assert_eq!(certificate.keys.get(&key), Some(&target));
+    assert!(certificate.names.contains(&key));
+    assert_eq!(
+        certificate.merged.contains(&key),
+        original.merged.contains(&key)
+    );
+    assert!(!certificate.dormant.contains(&key));
 }
 
 #[test]
@@ -495,6 +854,13 @@ fn workspace_certificates_require_each_sources_existing_binding() {
         output.view_id = store.write_view(&made).unwrap();
         let result = store.write_operation(&output).unwrap();
         let certified = reference.workspace_certificate(&world, &result);
+        if output.parents.len() == 1 {
+            assert_eq!(
+                certified.merged.contains(&key),
+                !["missing", "deleted"].contains(&case),
+                "the name's independent birth survives payload changes: {case}"
+            );
+        }
         assert_eq!(
             certified.keys.get(&key),
             ["unique", "merge", "omitted"]
@@ -534,6 +900,7 @@ pub struct Reference {
     /// The hive's history, but for the root.
     history: Vec<CanonicalOp>,
     workspace_certificates: HashMap<CanonicalOp, WorkspaceCertificate>,
+    workspace_in_progress: HashSet<CanonicalOp>,
     workspace_copies: HashMap<CanonicalOp, Operation>,
     pub workspace_unmapped: BTreeSet<(String, OperationId)>,
 }
@@ -647,6 +1014,7 @@ impl Reference {
             unexplained: vec![],
             history: order.iter().map(|(.., id)| id.clone()).collect(),
             workspace_certificates: HashMap::new(),
+            workspace_in_progress: HashSet::new(),
             workspace_copies: HashMap::new(),
             workspace_unmapped: BTreeSet::new(),
         };
@@ -678,6 +1046,14 @@ impl Reference {
             // A drop can expand a command's parent frontier or contract it to the root.
             // Judge its payload against the actual input, whatever its new parent count.
             let command = world.commands.get(&merge_key(op));
+            let protected = command
+                .map(|command| reference.retained_foreign_targets(world, command, op, &view))
+                .unwrap_or_default();
+            let with_foreign = |native: &View| {
+                let mut expected = native.clone();
+                expected.head_ids.extend(protected.iter().cloned());
+                expected
+            };
             let is_merge = op_parents.len() > 1 && command.is_none();
             if is_merge {
                 for (new, predecessors) in op.commit_predecessors.iter().flatten() {
@@ -720,7 +1096,7 @@ impl Reference {
             }
             if let Some(source) = kept {
                 let made: Vec<String> = reference
-                    .made_divergent_or_conflicted(&source.view, &view)
+                    .made_divergent_or_conflicted(&with_foreign(&source.view), &view)
                     .iter()
                     .map(Made::to_string)
                     .collect();
@@ -753,8 +1129,11 @@ impl Reference {
             if let Some(command) = command
                 && !explained(op)
             {
-                let made =
-                    reference.unexplained_command_changes(&command.base, &command.made, &view);
+                let made = reference.unexplained_command_changes(
+                    &command.base,
+                    &with_foreign(&command.made),
+                    &view,
+                );
                 if !made.is_empty() {
                     reference.unexplained.push(format!(
                         "{}: {}",
@@ -943,6 +1322,54 @@ impl Reference {
         made
     }
 
+    /// Canonical views keep other copies' working copies visible even when a command
+    /// removes their local aliases. Only exact live input bindings retained unchanged
+    /// by the result can extend the native command's visible payload.
+    fn retained_foreign_targets(
+        &mut self,
+        world: &World,
+        command: &crate::world::CommandSnapshot,
+        op: &op_store::Operation,
+        view: &View,
+    ) -> BTreeSet<CommitId> {
+        let mut inputs = workspace_source_parents(op).unwrap_or_default();
+        inputs.extend(command.input.iter().cloned());
+        inputs.sort();
+        inputs.dedup();
+        let mut targets = BTreeSet::new();
+        for input in inputs {
+            let certificate = self.workspace_certificate(world, &input);
+            let Some(source) = Self::workspace_source(world, &input) else {
+                continue;
+            };
+            let Some(source) = world.fx.hive.members.iter().find_map(|member| {
+                member
+                    .adapter
+                    .repo()
+                    .canonical_store()
+                    .read_view(&source.view_id)
+                    .ok()
+            }) else {
+                continue;
+            };
+            let visible = self.visible(&source);
+            for (key, target) in certificate.keys {
+                let Some((owner, _)) = key.split_once('/') else {
+                    continue;
+                };
+                if owner != command.copy
+                    && !certificate.dormant.contains(&key)
+                    && source.wc_commit_ids.get(WorkspaceName::new(&key)) == Some(&target)
+                    && view.wc_commit_ids.get(WorkspaceName::new(&key)) == Some(&target)
+                    && visible.contains(&target)
+                {
+                    targets.insert(target);
+                }
+            }
+        }
+        targets
+    }
+
     /// How many visible commits each change has in `view`, by jj's change id.
     fn change_counts(&mut self, view: &View) -> BTreeMap<String, usize> {
         let mut counts = BTreeMap::new();
@@ -1066,39 +1493,48 @@ impl Reference {
     }
 
     fn workspace_copy(&mut self, world: &World, id: &CanonicalOp) -> Option<Operation> {
-        if id
-            == world.fx.hive.members[0]
-                .adapter
-                .repo()
-                .canonical_store()
-                .root_operation_id()
-        {
-            return Some(block_on(self.loader.root_operation()));
+        let root = world.fx.hive.members[0]
+            .adapter
+            .repo()
+            .canonical_store()
+            .root_operation_id();
+        self.workspace_copies
+            .entry(root.clone())
+            .or_insert_with(|| block_on(self.loader.root_operation()));
+        let mut pending = vec![(id.clone(), false)];
+        while let Some((next, ready)) = pending.pop() {
+            if self.workspace_copies.contains_key(&next) {
+                continue;
+            }
+            let mut op = Self::workspace_source(world, &next)?;
+            if !ready {
+                pending.push((next, true));
+                pending.extend(
+                    CanonicalOp::parents_of(&op)
+                        .into_iter()
+                        .rev()
+                        .map(|p| (p, false)),
+                );
+                continue;
+            }
+            let view = world.fx.hive.members.iter().find_map(|member| {
+                member
+                    .adapter
+                    .repo()
+                    .canonical_store()
+                    .read_view(&op.view_id)
+                    .ok()
+            })?;
+            let store = self.loader.op_store();
+            op.view_id = block_on(store.write_view(&view)).ok()?;
+            let copied = block_on(store.write_operation(&op)).ok()?;
+            if copied != next.0 {
+                return None;
+            }
+            let copied = block_on(self.loader.load_operation(&copied)).ok()?;
+            self.workspace_copies.insert(next, copied);
         }
-        if let Some(copied) = self.workspace_copies.get(id) {
-            return Some(copied.clone());
-        }
-        let mut op = Self::workspace_source(world, id)?;
-        let view = world.fx.hive.members.iter().find_map(|member| {
-            member
-                .adapter
-                .repo()
-                .canonical_store()
-                .read_view(&op.view_id)
-                .ok()
-        })?;
-        for parent in CanonicalOp::parents_of(&op) {
-            self.workspace_copy(world, &parent)?;
-        }
-        let store = self.loader.op_store();
-        op.view_id = block_on(store.write_view(&view)).ok()?;
-        let copied = block_on(store.write_operation(&op)).ok()?;
-        if copied != id.0 {
-            return None;
-        }
-        let copied = block_on(self.loader.load_operation(&copied)).ok()?;
-        self.workspace_copies.insert(id.clone(), copied.clone());
-        Some(copied)
+        self.workspace_copies.get(id).cloned()
     }
 
     /// Replay an authenticated local merge with that copy's actual owned bindings, for
@@ -1253,6 +1689,48 @@ impl Reference {
     }
 
     fn workspace_certificate(&mut self, world: &World, id: &CanonicalOp) -> WorkspaceCertificate {
+        // A certificate's frame contains merge views and witnesses. Keep history depth on
+        // the heap rather than one such frame per source operation on the test thread.
+        let mut pending = vec![(id.clone(), false)];
+        while let Some((next, ready)) = pending.pop() {
+            if self.workspace_certificates.contains_key(&next) {
+                continue;
+            }
+            if ready {
+                let certificate = self.workspace_certificate_of(world, &next);
+                self.workspace_certificates
+                    .insert(next.clone(), certificate);
+                self.workspace_in_progress.remove(&next);
+                continue;
+            }
+            assert!(
+                self.workspace_in_progress.insert(next.clone()),
+                "workspace source dependencies cycle at {next:?}"
+            );
+            pending.push((next.clone(), true));
+            if let Some(op) = Self::workspace_source(world, &next) {
+                let mut dependencies = workspace_source_parents(&op).unwrap_or_default();
+                if let Some(input) = world
+                    .commands
+                    .get(&merge_key(&op))
+                    .and_then(|c| c.input.as_ref())
+                {
+                    dependencies.push(input.clone());
+                }
+                if let Some((_, input)) = workspace_fixup_input(world, &next, &op) {
+                    dependencies.push(input.clone());
+                }
+                pending.extend(dependencies.into_iter().rev().map(|parent| (parent, false)));
+            }
+        }
+        self.workspace_certificates[id].clone()
+    }
+
+    fn workspace_certificate_of(
+        &mut self,
+        world: &World,
+        id: &CanonicalOp,
+    ) -> WorkspaceCertificate {
         if let Some(known) = self.workspace_certificates.get(id) {
             return known.clone();
         }
@@ -1292,19 +1770,8 @@ impl Reference {
         };
         // Contraction preserves the original parent identities. Use those source parents
         // to certify a retained operation, including a merge now represented on root.
-        let parents = match op.metadata.attributes.get("musubi.original-parents") {
-            Some(text) => {
-                let Some(parents) = text
-                    .split_whitespace()
-                    .map(OperationId::try_from_hex)
-                    .map(|id| id.map(CanonicalOp))
-                    .collect::<Option<Vec<_>>>()
-                else {
-                    return WorkspaceCertificate::default();
-                };
-                parents
-            }
-            None => CanonicalOp::parents_of(&op),
+        let Some(parents) = workspace_source_parents(&op) else {
+            return WorkspaceCertificate::default();
         };
         let inputs: Vec<_> = parents
             .iter()
@@ -1333,6 +1800,12 @@ impl Reference {
                         })
                         .cloned(),
                 );
+                // A proven merge birth authenticates the name independently of its
+                // current commit. Replacing an abandoned working copy does not create a
+                // new logical name; it also does not certify the replacement's payload.
+                result
+                    .merged
+                    .extend(input.merged.intersection(&result.names).cloned());
             }
         }
         for input in &inputs {
@@ -1374,11 +1847,7 @@ impl Reference {
         // A full native trim removes the ancestry of other copies' last work. Its
         // fix-up must preserve their accepted slots. Use the history observed before
         // the trim, never the fix-up's work marker alone, to certify an unchanged slot.
-        if let Some((trimmer, input)) = world.workspace_fixup_inputs.get(&merge_key(&op))
-            && input != id
-            && let Some(owner) = op.metadata.attributes.get("musubi.work")
-            && owner != trimmer
-        {
+        if let Some((owner, input)) = workspace_fixup_input(world, id, &op) {
             let source = self.workspace_certificate(world, input);
             for (key, target) in &source.keys {
                 if key.split_once('/').is_some_and(|(copy, _)| copy == owner)
@@ -1400,6 +1869,7 @@ impl Reference {
                 .and_then(|key| musubi_jj::workspaces::split_key(key.as_str()))
                 .is_some_and(|(owner, _)| owner == command.copy)
             {
+                let native_visible = self.visible(&command.made);
                 let mut command_inputs = inputs.clone();
                 if let Some(input) = &command.input {
                     command_inputs.push(self.workspace_certificate(world, input));
@@ -1415,6 +1885,25 @@ impl Reference {
                 }
                 for input in &command_inputs {
                     for (key, base) in &input.keys {
+                        if let Some(actual) = view.wc_commit_ids.get(WorkspaceName::new(key))
+                            && key
+                                .split_once('/')
+                                .is_some_and(|(owner, _)| presence.is_present(owner))
+                            && input.foreign_binding_carried_by_command(
+                                command,
+                                key,
+                                actual,
+                                &native_visible,
+                            )
+                        {
+                            result.names.insert(key.clone());
+                            result.keys.insert(key.clone(), actual.clone());
+                            result.dormant.remove(key);
+                            if input.merged.contains(key) {
+                                result.merged.insert(key.clone());
+                            }
+                            continue;
+                        }
                         let Some(alias) = command_workspace_alias(
                             command,
                             &world.workspace_births,
@@ -1729,7 +2218,11 @@ impl Reference {
     /// machine, moving bookmarks off it and rebasing work on it. So the parents, and their
     /// base, as the machine's merge found them, go in as the hive has them but with the heads
     /// the machine's views had, and without the workspaces whose commits those lacked, and
-    /// only where they lacked nothing else. The merge then gets back the commits jj's merge of
+    /// only where they lacked nothing else. An exact captured native input can also omit
+    /// an independently certified foreign slot while keeping its commit visible: whether a
+    /// commit is a working copy changes jj's merge too. A later workspace birth cannot prove
+    /// that omission; owned literals must be certified at the input itself.
+    /// The merge then gets back the commits jj's merge of
     /// the hive's parents (`canonical`) keeps. `None` where that differs from nothing, or the
     /// merge has several bases.
     fn merged_as_made(
@@ -1782,11 +2275,29 @@ impl Reference {
             return None;
         };
         let mut kept: HashSet<CommitId> = HashSet::new();
+        let mut omitted_workspace = false;
         let mut as_had = vec![];
         for local in [base, first, second] {
             let canonical_id = node.canonical_of(&LocalOp(local.id().clone()))?;
             let local_view = block_on(local.view()).unwrap().store_view().clone();
             let mut view = views.get(&canonical_id)?.clone();
+            let working_copies: HashSet<CommitId> = view.wc_commit_ids.values().cloned().collect();
+            // Forgetting a foreign alias locally leaves its canonical slot intact. Even
+            // with identical visible heads, that slot changes which empty working copies
+            // jj abandons while merging. Use only an independently captured native input,
+            // and omit only an existing certified foreign slot absent from that input.
+            if let Some(command) = world.commands.get(&merge_key(local.store_operation()))
+                && command.id == *local.id()
+                && command.copy == node.machine().key()
+            {
+                let certificate = self.workspace_certificate(world, &canonical_id);
+                view.wc_commit_ids.retain(|key, target| {
+                    let absent = certificate.keys.get(key.as_str()) == Some(target)
+                        && foreign_alias_absent(command, &certificate.names, key.as_str());
+                    omitted_workspace |= absent;
+                    !absent
+                });
+            }
             let visible = self.visible(&view);
             if !local_view
                 .head_ids
@@ -1799,7 +2310,6 @@ impl Reference {
                 .difference(&self.visible(&local_view))
                 .cloned()
                 .collect();
-            let working_copies: HashSet<&CommitId> = view.wc_commit_ids.values().collect();
             if !lacked.iter().all(|commit| working_copies.contains(commit)) {
                 return None;
             }
@@ -1810,7 +2320,7 @@ impl Reference {
             let copy = copies.get(&canonical_id)?;
             as_had.push(self.write_like(copy, &view, copy.parent_ids().to_vec()));
         }
-        if kept.is_empty() {
+        if kept.is_empty() && !omitted_workspace {
             return None;
         }
         let [base, first, second] = as_had.as_slice() else {
@@ -2276,6 +2786,17 @@ fn refs(view: &View) -> BTreeMap<String, RefTarget> {
         }
     }
     refs
+}
+
+fn workspace_source_parents(op: &op_store::Operation) -> Option<Vec<CanonicalOp>> {
+    match op.metadata.attributes.get("musubi.original-parents") {
+        Some(text) => text
+            .split_whitespace()
+            .map(OperationId::try_from_hex)
+            .map(|id| id.map(CanonicalOp))
+            .collect(),
+        None => Some(CanonicalOp::parents_of(op)),
+    }
 }
 
 fn show_target(target: Option<&RefTarget>) -> String {

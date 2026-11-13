@@ -1,5 +1,6 @@
 //! Canonicalizing local operations, and finding the local operation for a canonical one.
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
@@ -28,6 +29,12 @@ use crate::presence::Kind;
 use crate::presence::Presence;
 use crate::remote_url::without_credentials;
 use crate::workspaces;
+
+#[derive(Default)]
+pub(super) struct RecoveredSources {
+    pub(super) roots: HashMap<LocalOp, CanonicalOp>,
+    pub(super) twins: HashMap<LocalOp, CanonicalOp>,
+}
 
 impl NodeRepo {
     /// The canonical form of each local op head, but for one from before this repository
@@ -63,8 +70,7 @@ impl NodeRepo {
     fn reparent_late(&mut self) -> Result<(), NodeError> {
         let late = self.late.clone();
         let op_store = self.loader.op_store().clone();
-        let mut rewrites: std::collections::HashMap<LocalOp, LocalOp> =
-            std::collections::HashMap::new();
+        let mut rewrites: HashMap<LocalOp, LocalOp> = HashMap::new();
         for local in &late {
             let Some(canonical) = self.canonical_of(local) else {
                 continue;
@@ -118,6 +124,207 @@ impl NodeRepo {
             .map(|(old, new)| (old, vec![new]))
             .collect();
         self.move_workspaces(&rewrites)
+    }
+
+    /// Recover a command jj reparented to root after its accepted basis was already dropped.
+    /// Only its immutable native twin supplies the erased input, never an older hive view.
+    pub(super) fn unpublished_root_sources(
+        &mut self,
+        unmapped: &[(LocalOp, StoreOperation)],
+    ) -> Result<RecoveredSources, NodeError> {
+        let mut roots = HashMap::new();
+        for (id, op) in unmapped {
+            if op.parents == [self.root_op_id().0.clone()]
+                && op.metadata.workspace_name.is_some()
+                && !op.metadata.attributes.contains_key(CANONICAL_ATTRIBUTE)
+                && !op
+                    .metadata
+                    .attributes
+                    .contains_key(crate::canonical::namespace::ATTRIBUTE)
+                && self.records.source(id).is_none()
+                && !self.is_before_join(id, op)?
+                && roots.insert(fingerprint(op), id.clone()).is_some()
+            {
+                return Err(NodeError::AmbiguousAbandon(id.0.hex()));
+            }
+        }
+        if roots.is_empty() {
+            return Ok(RecoveredSources::default());
+        }
+        let path = self.repo_path.join("op_store/operations");
+        let files = fs::read_dir(&path).map_err(|source| NodeError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        let store = self.loader.op_store().clone();
+        let mut sources: HashMap<LocalOp, Vec<LocalOp>> = HashMap::new();
+        for file in files {
+            let file = file.map_err(|source| NodeError::Io {
+                path: path.clone(),
+                source,
+            })?;
+            let Some(id) = file
+                .file_name()
+                .to_str()
+                .and_then(OperationId::try_from_hex)
+            else {
+                continue;
+            };
+            let op = match store.read_operation(&id).block_on() {
+                Ok(op) => op,
+                Err(jj_lib::op_store::OpStoreError::ObjectNotFound { .. }) => continue,
+                Err(err) => return Err(err.into()),
+            };
+            if op.parents != [self.root_op_id().0.clone()]
+                && let Some(root) = roots.get(&fingerprint(&op))
+            {
+                sources.entry(root.clone()).or_default().push(LocalOp(id));
+            }
+        }
+        let mut found = RecoveredSources::default();
+        let mut historical = HashMap::new();
+        for (root, twins) in sources {
+            let mut target = None;
+            let mut authenticated = vec![];
+            let mut unanchored = false;
+            for twin in &twins {
+                let Some(original) = self.historical_native_source(twin, &mut historical)? else {
+                    unanchored = true;
+                    continue;
+                };
+                let images = self.current_ids(&original)?;
+                let [now] = images.as_slice() else {
+                    return Err(NodeError::AmbiguousAbandon(root.0.hex()));
+                };
+                if self.canonical.original_id(now)? != self.canonical.original_id(&original)?
+                    || target.as_ref().is_some_and(|old| old != now)
+                {
+                    return Err(NodeError::AmbiguousAbandon(root.0.hex()));
+                }
+                target = Some(now.clone());
+                authenticated.push((twin.clone(), original));
+            }
+            if let Some(target) = target {
+                if unanchored {
+                    return Err(NodeError::AmbiguousAbandon(root.0.hex()));
+                }
+                found.roots.insert(root, target);
+                found.twins.extend(authenticated);
+            }
+        }
+        // A root command alone cannot distinguish an owned literal from an old foreign
+        // alias. Once its source is gone, refuse that ambiguity instead of inventing an
+        // owner. Before joining, every native workspace belongs to this copy.
+        if !self.joins.is_empty() || !self.applied_records().is_empty() {
+            for (id, op) in unmapped {
+                if roots.values().any(|root| root == id) && !found.roots.contains_key(id) {
+                    let view = store.read_view(&op.view_id).block_on()?;
+                    if view
+                        .wc_commit_ids
+                        .keys()
+                        .any(|name| name.as_str().contains('/'))
+                    {
+                        return Err(NodeError::UnreachableHistory);
+                    }
+                }
+            }
+        }
+        Ok(found)
+    }
+
+    /// Rebuild an unpublished source on its actual historical inputs before dropping them.
+    /// A marked realization, join point or established source must anchor the native history.
+    fn historical_native_source(
+        &mut self,
+        local: &LocalOp,
+        memo: &mut HashMap<LocalOp, Option<CanonicalOp>>,
+    ) -> Result<Option<CanonicalOp>, NodeError> {
+        let store = self.loader.op_store().clone();
+        let mut active = HashSet::new();
+        let mut stack: Vec<(LocalOp, Option<StoreOperation>)> = vec![(local.clone(), None)];
+        while let Some((id, expanded)) = stack.pop() {
+            if memo.contains_key(&id) {
+                continue;
+            }
+            if id == *self.root_op_id() || self.before_join.contains(&id) {
+                memo.insert(id, None);
+                continue;
+            }
+            let Some(op) = expanded else {
+                if !active.insert(id.clone()) {
+                    return Err(NodeError::AmbiguousAbandon(id.0.hex()));
+                }
+                let op = store.read_operation(&id.0).block_on()?;
+                // Durable aliases establish identity, not a completed ancestry walk.
+                if self.records.source(&id).is_some() && self.map.canonical_of(&id).is_none() {
+                    self.canonicalize_unchecked(&id)?;
+                }
+                let known = self
+                    .records
+                    .source(&id)
+                    .cloned()
+                    .or_else(|| self.map.canonical_of(&id).cloned())
+                    .or_else(|| self.joins.get(&fingerprint(&op)).cloned());
+                if let Some(named) = op.metadata.attributes.get(CANONICAL_ATTRIBUTE) {
+                    for parent in LocalOp::parents_of(&op) {
+                        self.canonicalize_unchecked(&parent)?;
+                    }
+                    let named = OperationId::try_from_hex(named)
+                        .map(CanonicalOp)
+                        .filter(|id| self.canonical.has_operation(id))
+                        .ok_or_else(|| NodeError::DanglingAttribute {
+                            op: id.0.hex(),
+                            canonical: named.clone(),
+                        })?;
+                    if !self.original_realization(&named, &LocalOp::parents_of(&op))? {
+                        return Err(NodeError::RewrittenRealization);
+                    }
+                    self.insert_map(id.clone(), named.clone())?;
+                    memo.insert(id.clone(), Some(named));
+                    active.remove(&id);
+                    continue;
+                }
+                if let Some(known) = known {
+                    memo.insert(id.clone(), Some(known));
+                    active.remove(&id);
+                    continue;
+                }
+                let parents = LocalOp::parents_of(&op);
+                stack.push((id, Some(op)));
+                stack.extend(
+                    parents
+                        .into_iter()
+                        .filter(|parent| !memo.contains_key(parent))
+                        .map(|parent| (parent, None)),
+                );
+                continue;
+            };
+            let mut parents = vec![];
+            let mut anchored = false;
+            let mut complete = true;
+            for parent in LocalOp::parents_of(&op) {
+                if parent == *self.root_op_id() {
+                    parents.push(self.canonical.root_operation_id().clone());
+                } else if let Some(Some(canonical)) = memo.get(&parent) {
+                    anchored = true;
+                    if !parents.contains(canonical) {
+                        parents.push(canonical.clone());
+                    }
+                } else if !self.before_join.contains(&parent) {
+                    complete = false;
+                }
+            }
+            let result = if anchored && complete {
+                let canonical = self.write_canonical(&id, &op, parents)?;
+                self.insert_map(id.clone(), canonical.clone())?;
+                Some(canonical)
+            } else {
+                None
+            };
+            memo.insert(id.clone(), result);
+            active.remove(&id);
+        }
+        Ok(memo.get(local).cloned().flatten())
     }
 
     /// The canonical parents of a local operation, as they are now: what renamings

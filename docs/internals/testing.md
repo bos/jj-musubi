@@ -327,6 +327,36 @@ identities directly into the cache fails its assertion that recovery maps every 
 marked ancestor after a full trim: validating that ancestor as its contracted image instead of
 its original body rejects the delayed command.
 
+`translation::an_orphaned_command_keeps_its_native_workspace_owners` trims an unpublished
+command to the root after accepted history was already contracted. It checks exact owner and
+target, including a foreign-looking literal deliberately recreated as an owned workspace,
+then loses the cache and the last workspace move. Collecting its source instead must refuse
+before publishing drops. Both the historical twin and its orphan are exercised with and
+without the cache.
+
+`translation::a_private_root_workspace_is_not_a_lost_shared_source` retains a join through
+one delayed command and returns to a private root through another. Even with a slash in its
+owned workspace name and no translation cache, that root stays private before source-loss
+recovery decides whether it must refuse.
+
+`translation::another_version_of_a_dropped_merge_does_not_drop_its_parents` checks that a
+record naming another version of a locally dropped merge preserves its surviving parent.
+`translation::a_lost_receipt_keeps_the_dropped_original_pending` keeps a dropped original in
+custody across an unadopted record and a newer record.
+`translation::a_pending_drop_is_not_named_as_an_already_dropped_child` checks the reverse
+mapping used to publish pending drops: an expansion into a parent cannot name that parent
+as the child it came from.
+
+Removing each of the three drop-identity guards individually makes its regression name or
+drop the wrong operation. The parent-version test deliberately omits the record that produced
+that version, as a peer with a pruned prefix can after hub recreation. The reverse-name test
+first drops a sibling at the parent's generation, so the name walk visits the dropped child
+but stops before it can correct its mapping by visiting the parent.
+
+The orphan regression also fails independently without source reconstruction, without the
+same-identity workspace move, and without source-loss refusal. Removing the private-history
+exclusion makes the private-root regression report a history mismatch instead of `BeforeJoin`.
+
 ### The hub and the CLI
 
 `failure_logs_read_operation_heads_without_changing_them` checks that CLI failure diagnostics
@@ -860,6 +890,12 @@ commit revokes opaque inheritance unless independent replay certifies its result
 `e2e_workspace_names_after_trim_match_native_jj` exercises a realized merge whose authenticated
 parents and local base let native jj witness a restored name. A realization's marker neither
 certifies that name nor disqualifies its independently checked replay.
+
+A replacement clone's synthetic join has its own independently captured native input, keyed
+by the join's metadata identity. Only its exact owned workspace keys and commit targets can
+be certified from that input. `reference::a_clones_workspace_witness_is_its_native_join_input`
+rejects both a foreign key and a changed target on an otherwise valid synthetic join, and
+checks that removing the captured input revokes the certificate.
 
 Native trim fix-ups have a separate source witness: the accepted history observed before the
 trim. Only unchanged foreign bindings already certified there can be inherited.

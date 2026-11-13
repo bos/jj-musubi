@@ -590,7 +590,9 @@ impl NodeRepo {
             _ => {
                 let now = match self.canonical_of(&recorded) {
                     Some(canonical) => match self.current_ids(&canonical)?.as_slice() {
-                        [now] if *now != canonical => self.local_of(now),
+                        [now] if *now != canonical || self.records.source(&recorded).is_some() => {
+                            self.local_of(now)
+                        }
                         _ => None,
                     },
                     None => None,

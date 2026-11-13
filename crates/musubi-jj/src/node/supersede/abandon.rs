@@ -331,7 +331,16 @@ impl NodeRepo {
                 bases.extend(self.current_ids(&named)?);
             }
         }
-        let bases: Vec<CanonicalOp> = dedup(bases).into_iter().filter(|op| *op != root).collect();
+        let mut bases: Vec<CanonicalOp> =
+            dedup(bases).into_iter().filter(|op| *op != root).collect();
+        let recovered = bases.is_empty();
+        let mut historical_sources = HashMap::new();
+        if recovered {
+            let sources = self.unpublished_root_sources(&unmapped)?;
+            bases.extend(sources.roots.into_values());
+            historical_sources = sources.twins;
+            bases = dedup(bases);
+        }
         if bases.is_empty() || bases.iter().any(|op| !self.canonical.has_operation(op)) {
             return Ok(false);
         }
@@ -448,6 +457,7 @@ impl NodeRepo {
             let mut nothing = Contraction::new(&self.canonical, std::iter::empty())?;
             let locals =
                 self.rewrite_locals(&mut nothing, &heads, &counterparts, &unmapped, None)?;
+            counterparts.extend(historical_sources);
             self.add_step(HashMap::new(), &HashSet::new(), &counterparts)?;
             self.finish_local_move(&heads, &locals)?;
             return Ok(true);
@@ -473,12 +483,13 @@ impl NodeRepo {
         // it, so that operations jj rewrote stand for the hive's elsewhere than the hive has
         // them. Put them back where the hive has them, publishing nothing, as jj keeps what
         // came back on one machine.
-        if dropped.is_empty() && self.out_of_place(&counterparts, &unmapped)? {
+        if dropped.is_empty() && (recovered || self.out_of_place(&counterparts, &unmapped)?) {
             let mut nothing = Contraction::new(&self.canonical, std::iter::empty())?;
             let locals =
                 self.rewrite_locals(&mut nothing, &heads, &counterparts, &unmapped, None)?;
             // As below: a restart partway resumes the move, and jj's rewrites keep the
             // identities established here.
+            counterparts.extend(historical_sources);
             self.add_step(HashMap::new(), &HashSet::new(), &counterparts)?;
             self.records.moving = true;
             self.finish_local_move(&heads, &locals)?;
@@ -585,6 +596,7 @@ impl NodeRepo {
                 }
             }
         }
+        counterparts.extend(historical_sources);
         self.add_step(contraction.into_images(), &dropped_here, &counterparts)?;
         self.records.moving = true;
         self.finish_local_move(&heads, &locals)?;

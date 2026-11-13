@@ -639,6 +639,19 @@ Resolving that identity must also map its native parents before realization deci
 operations are missing; an identity-only alias is not evidence that its ancestry was walked.
 A second delayed command without another cache loss must also use the normalized local
 parent, even though its canonical identity has not changed.
+`an_orphaned_command_keeps_its_native_workspace_owners` reaches the case where both accepted
+bases already contract to the root before an unpublished command loses its native ancestry.
+Its immutable historical twin supplies the namespace, and ordinary counted source bindings
+complete the rewrite after cache loss or a lost workspace move. A collected twin instead
+causes refusal before pending drops. This is an adapter obligation to preserve the namespace
+that the abstract operations already contain.
+
+The three dropped-original regressions in [testing](testing.md#example-tests) distinguish
+original identity from contraction images when translating incoming records and outgoing
+pending drops. The protocol model assumes the intended original set was supplied; expanding
+a dropped operation into surviving parents cannot supply that set. These tests exercise that
+boundary with real jj histories and records, rather than changing the abstract contraction.
+
 `torn_steps_lose_only_themselves` generates the source rows too: no partial counted block can
 silently omit an alias that records depend on. These local translation and crash boundaries are
 tested runtime obligations, not additional theorems of the abstract protocol model.

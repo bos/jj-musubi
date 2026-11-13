@@ -968,6 +968,21 @@ The hub takes it with the push, in the push's compare-and-swap, and computes the
 itself, so the push carries only the machine's new operations. A supersede that loses the race, to
 another push or another supersede, is rewritten by what won, and pushed again.
 
+If the accepted histories already contract to the root, a new native command can lose every
+mapped ancestor in a further full trim. Its immutable pre-trim twin, matched by full nonparent
+content, supplies the missing input. The adapter reconstructs that twin on its actual historical
+parents, anchored by a validated realization, join or established source, before normalizing
+it through the applied and pending drops. An older accepted view cannot supply its namespace:
+the unpublished command may have forgotten a foreign workspace and created its own under the
+same literal name. Conflicting twins are refused. If gc removed the input needed to distinguish
+an owned literal from a foreign alias, the copy is refused rather than assigned guessed owners.
+
+Recovered sources go through the ordinary abandon calculation, fix-up and counted source
+binding. Historical twins retain their original canonical correspondence; the root rewrite
+names its surviving image. On restart, completing a workspace move uses the preferred physical
+realization even when the canonical identity stayed the same. A saved identity alone is neither
+a completed parent walk nor a completed workspace move.
+
 A machine publishes the drop of a push even if the hub has since gone back and lost it: another
 machine may have taken the push first, and would push it again. That costs a record and a
 [fix-up](#the-fix-up), and only after the hub loses heads.
@@ -996,6 +1011,12 @@ takes the record as part of the head move. This also handles a hub rollback to a
 machine has dropped locally. So applying a record never leaves a machine two heads to
 merge, and never repeats a merge another machine made. The hub never takes a head it has
 dropped, and a machine never advances to one.
+
+A drop declaration always names an original, including one retained in custody after a lost
+reply. Its expansion into surviving parents is not another name for that original. When a
+record names a version already dropped locally, only images with that same original can be
+added to the dropped set. Likewise, a singleton expansion can provide a hub name only if its
+original matches: otherwise it would rename a surviving parent as the dropped child.
 
 A machine takes the records that a reply about the head it knows announces, however old the
 reply: after a restart, or from a hive made again, that can be fewer records than it took, or

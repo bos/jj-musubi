@@ -7,6 +7,9 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- After `jj op abandon`, sync keeps a forgotten copy's newer workspace removals instead of
+  restoring names from older history. Nothing needs doing on upgrading.
+
 - A new command made while sync trims its parents keeps the workspace namespace it started
   from. Another machine's workspace aliases no longer become workspaces owned by this copy.
   This changes the protocol to 21: upgrade the hub and every machine together.

@@ -1996,6 +1996,43 @@ fn machines_whose_workspaces_are_all_default_can_join() {
     insta::assert_snapshot!(err, @"Error: no machine absent shows here in hive alpha; `musubi status` names those that do");
     let out = musubi_in(&env, &logs, &alpha, &["forget", "beta"]);
     insta::assert_snapshot!(out, @"Forgot beta");
+    insta::assert_snapshot!(musubi_in(&env, &logs, &alpha, &["forget", "--help"]), @"
+    Forget another machine's copy of this repository: the other machines stop showing its working
+    copies, and the hub stops counting it.
+    
+    For a machine that went away without `musubi leave`, as a short-lived machine can, or an earlier
+    copy on this machine, deleted without it. Its working-copy commit is abandoned if it's empty, and
+    otherwise stays as an ordinary commit. The copy keeps its remaining local workspaces. If it is still
+    there, the hive shows it again as soon as it's used. A copy with no workspaces can still be
+    forgotten, by its name in `musubi status`.
+    
+    Usage: musubi forget [OPTIONS] <MACHINE>
+    
+    Arguments:
+      <MACHINE>
+              The machine, as its working copies are named here: `laptop` for `laptop/default@`,
+              `laptop-1a2b` for `laptop-1a2b/default@`, or, where even the start of its id is another
+              machine's, its whole id, as in `laptop-1a2b3c4d/default@`. The name `musubi list` gives it
+              will do too, if no other machine could have that name
+    
+    Options:
+      -h, --help
+              Print help (see a summary with '-h')
+    
+    Global options:
+          --socket <SOCKET>
+              The daemon's control socket, in place of the usual one
+    
+          --log <FILTER>
+              What to log, as a filter in `RUST_LOG`'s syntax: `debug`, or `info,musubi_sync=debug`. It
+              applies to this command, not to a daemon it starts, which uses `musubi.daemon.log` in jj's
+              config
+    
+          --color <WHEN>
+              When to colour what it prints, as jj's `--color` does [default: as jj's `ui.color` says]
+              
+              [possible values: always, never, debug, auto]
+    ");
 }
 
 /// Two machines in one hive, with their daemons running.

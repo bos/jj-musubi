@@ -199,8 +199,9 @@ The next integration is a new child of main
 Only these two existing native fixtures are connected:
 
 - A: `custody_is_saved_before_named_write`, using actual `prepare_records`, its incoming
-  multi-ID record and prefix, exact stored custody at every native write, and complete Taking
-  output. The model independently computes contraction and locals before the observed map or
+  multi-ID record and prefix, exact stored custody at every native write, and the raw native
+  receipt projection (not every internal Taking field). The model independently computes
+  contraction and locals before the observed map or
   observed write sequence is consulted. Observed writes must have exactly the independently
   predicted body-ID set; their actual order selects the materialization sequence certified by
   `certifiedRun`. Parent readability is checked at every such model write. Canonical-store
@@ -225,8 +226,9 @@ The preferred translation map and Rust-selected ownership/overlap/source answers
 
 The codec derives model branch fields from those raw bodies. Native original candidates come
 from retained nonparent fingerprints plus ordered parent projection, not a chosen Rust map.
-Physical, canonical, original and commit IDs use distinct deterministic pools; physical pool
-byte order preserves native timestamp-tie ordering. Full normalized remaining body/view
+Physical, canonical, original and commit IDs use distinct deterministic pools. Physical pool
+byte order represents ID order, not timestamp-tie order for publication operands. Full remaining
+body/view
 content and full Git fields are interned by exact structural content, not lossy scalar HEADs
 or hash guesses. Post-call bodies are authenticated encoding observations consulted only after
 expected shapes are computed. Incomplete manifests/graphs, unsorted/duplicate label pools,
@@ -256,7 +258,7 @@ The two certified lists and their boundaries are explicit in `Json.reply`:
   The native body-ID set is checked against independently computed bodies before the observed
   order is used. The model's canonical write order precedes that native sequence; the actual
   cross-store order is not certified. Subsequent settling, publication, mutable identity-map
-  installation and cleanup are outside this certificate. Complete native Taking comparison
+  installation and cleanup are outside this certificate. Native receipt-projection comparison
   and the raw custody file observed at each actual native write are finite test evidence.
 - B runs `capture`, `planRender`, every computed `writeRender`, `commitRender` and
   `revalidate`. It ends before installing the refreshed incoming body, native merge, export,
@@ -274,6 +276,66 @@ be used as a whole-call safety result.
 
 The paired Rust module is `node/realize/native_lifecycle_conformance.rs`, registered only as a
 child of the existing native fixture module. Shared changes are limited to the ExecJson
-stateless dispatch, aggregate imports and axiom audit entries. Validation of this bridge is
-pending its single allocated serial oracle/Cargo target phase; no full suite or campaign is
-part of that phase. Remaining gates from the earlier sections are unchanged.
+stateless dispatch, aggregate imports and axiom audit entries.
+
+The frozen first bridge, `e63df1b44348`, compiled its codec, 103 model guards and oracle. Both
+actual Rust fixtures ran but failed during eager whole-corpus identity interpretation before
+either reached `certifiedRun`. Stored reconcile forms had the same retained nonparent
+fingerprint as a canonical original but reversed ordered parents. The raw captures, logs,
+patch and exact IDs are preserved in the coordinator's local evidence handoff. This was an
+interpretation gap, not a product defect or successful correspondence. The serial phase ended
+after 11 minutes 22 seconds, with no second oracle build or full suite.
+
+## Strict partial identities and publication operand order
+
+The child retains every raw native/canonical body, ordered parent and encoding candidate.
+Raw decoding validates both manifests, graph closures, unique body IDs and typed retained
+rows. Fatal structural errors still reject the snapshot. A separate total classification
+returns a qualified positive identity, a graph-checked prejoin witness, or a typed unresolved
+issue. Missing material is unresolved; it is never an absent counterpart or root identity.
+The raw retained fingerprints remain in `Evidence`, and each identity query recomputes its
+dependencies against current positive evidence. There is no cached negative result to erase.
+
+`installIdentities` checks the native body, canonical body, immutable original, marker and
+every existing positive classification before accepting a row. New evidence cannot replace
+a conflicting positive or a proved prejoin classification. Derived dependency failures can
+change only because a fresh query sees additional checked evidence; the retained raw corpus
+does not shrink. Native cryptographic/semantic authentication remains a separate gate.
+
+All optional-counterpart consumers now receive strict queries. This includes the receipt
+rewrite domain, contraction walk, maximal-head pruning and recovery's exact-frontier cases.
+An unresolved captured/recovery input is a model gap, not evidence that the physical head is
+unchanged, preserved, removed or canonical root. These are model interpretation restrictions,
+not new shipping Rust refusals. A helper can create an unqualified physical body, but that
+does not make a later identity query succeed.
+
+Source roles still enumerate full receipt locals, complete published ancestry and all stored
+fallback bodies. Unresolved members stay in their role's gap list. The selection lemmas
+derive a singleton qualified chosen role, no gaps in it, and empty, resolved higher roles
+from the actual computed priority decision. Domain and gap-membership lemmas connect that
+decision to the complete raw domains. Lower-role gaps remain unconsulted only when that
+computed precedence applies. Full-shape encoding searches still use all pre/post bodies,
+including unresolved bodies; native-fact applicability still uses its complete recorded graph.
+
+Publication now orders exactly `beside ++ [incoming]` by `(endTime, operandIndex)` in both
+the executable merge action and JSON comparison. Equal timestamps preserve operand order,
+matching the native stable sort, without using physical IDs as a tie-break. The head-set
+enumeration and broader `ownAtHeads` refinement are separate and unchanged in this slice.
+The two reversed equal-time guards establish model behavior, not the native sorting law.
+
+A can attempt construction beyond raw decoding, but may expose a further interpretation
+gap. B's target has only a fallback realization, so its all-body fallback remains unavailable
+while the reversed-parent forms lack independent identity/non-match evidence. Its expected
+native policy and positive conformance assertion are unchanged; an unavailable result is not
+a passing correspondence.
+
+The child validation compiled the codec and six new identity/selection lemmas, passed all
+122 model guards, and audited 18 declarations with only the expected logical axioms. One
+oracle build passed 182 jobs. Both existing native targets ran and failed: A advanced past
+raw decoding into `constructReceipt`, then lacked a matching computed canonical encoding;
+B reported a typed `unresolvedIdentity/noMatch` from its consulted fallback. Neither returned
+a completed construction or reached `certifiedRun`; no constructed-action prefix was
+certified by these native checks. The Rust assertions and native policy were not weakened.
+The serial window ran for 3 minutes 49 seconds, with no second oracle build, full suite or
+campaign. Full construction preservation, native simulation, cross-store order and the
+certified prefix limits above remain unchanged.

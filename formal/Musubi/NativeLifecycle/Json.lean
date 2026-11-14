@@ -11,7 +11,8 @@ open Lean (Json ToJson toJson)
 
 instance : ToJson Char where toJson c := Json.str (String.singleton c)
 deriving instance ToJson for Musubi.Names.Key
-deriving instance ToJson for Original, Canonical, Physical, WorkspaceKey, Namespace, Work, Gap
+deriving instance ToJson for Original, Canonical, Physical, WorkspaceKey, Namespace, Work
+deriving instance ToJson for IdentityIssue, Gap
 deriving instance ToJson for Stamp, CanonicalBody, NativeSource, NativeBody, IdentityKind, IdentityRow
 deriving instance ToJson for BaseObservation, Evidence, Record, Receipt, Intent, RetainedExport
 deriving instance ToJson for Persistent, ReceiptRequest, ReceiptBuild, Role, CandidateSet, Candidates
@@ -249,43 +250,6 @@ def decodeNative (ctx : Context) (raw : Json) : Except String NativeBody := do
 
 def query (value : Query α) : Except String α := value.mapError (fun gap => reprStr gap)
 
-/-- Original candidates come from complete retained fingerprint evidence, never the
-preferred translation map. Ordered native parents discriminate stored canonical versions. -/
-def identify (ctx : Context) (raw : Json) (e : Evidence) (originals joins : List Json) :
-    Nat → Physical → Except String (Option Canonical)
-  | 0, _ => .error "identity interpretation exhausted"
-  | fuel + 1, physical => do
-    if physical = e.physicalRoot then return some e.root
-    let body ← query (e.nativeBody physical)
-    if let some marker := body.marker then return some marker
-    let native ← rows raw "native"
-    let some observed := native.find? (fun row =>
-      (str row "id").toOption == some ctx.physical[physical.value]!)
-      | throw "incomplete raw native identity body"
-    let fingerprint ← str observed "fingerprint"
-    let joined ← joins.filterMapM fun row => do
-      if (← str row "fingerprint") = fingerprint then
-        return some (Canonical.mk (← label ctx.canonical (← str row "canonical")))
-      return none
-    match unique joined with
-    | [canonical] => return some canonical
-    | _ :: _ => throw "ambiguous retained join evidence"
-    | [] => pure ()
-    if ← query (prejoinInput e (e.native.length + 1) physical) then return none
-    let parents ← body.parents.mapM (identify ctx raw e originals joins fuel)
-    let parents := unique (parents.filterMap id)
-    let parents := if parents.isEmpty then [e.root] else parents
-    let origins ← originals.filterMapM fun row => do
-      if (← str row "fingerprint") = fingerprint then
-        return some (Original.mk (← label ctx.original (← str row "original")))
-      return none
-    let candidates := unique ((e.canonical.filter (fun candidate =>
-      origins.contains candidate.original && decide (candidate.parents = parents))).map (·.id))
-    match candidates with
-    | [canonical] => return some canonical
-    | [] => throw "unqualified native original: retained fingerprint/parents do not resolve it"
-    | _ => throw "ambiguous native original versions"
-
 def decodeEvidence (ctx : Context) (raw : Json) : Except String Evidence := do
   let canonicalRows ← rows raw "canonical"
   let nativeRows ← rows raw "native"
@@ -300,19 +264,28 @@ def decodeEvidence (ctx : Context) (raw : Json) : Except String Evidence := do
   let originals ← rows raw "originals"
   let joinInputs ← joins.mapM fun row => do
     return Physical.mk (← label ctx.physical (← str row "physical"))
-  let mut evidence : Evidence := {
+  let nativeFingerprints ← nativeRows.mapM fun row => do
+    return (Physical.mk (← label ctx.physical (← str row "id")),
+      ← label ctx.original (← str row "fingerprint"))
+  let originalFingerprints ← originals.mapM fun row => do
+    return (Original.mk (← label ctx.original (← str row "original")),
+      ← label ctx.original (← str row "fingerprint"))
+  let joinFingerprints ← joins.mapM fun row => do
+    let canonical := Canonical.mk (← label ctx.canonical (← str row "canonical"))
+    if !canonicalRows.any (fun row =>
+        (str row "id").toOption == some ctx.canonical[canonical.value]!) then
+      throw "retained join lacks its canonical body"
+    return (canonical, ← label ctx.original (← str row "fingerprint"))
+  let evidence : Evidence := {
     root := ⟨← label ctx.canonical (← str raw "canonicalRoot")⟩,
     physicalRoot := ⟨← label ctx.physical (← str raw "physicalRoot")⟩,
-    canonical, native, joinInputs }
+    canonical, native, joinInputs, nativeFingerprints, originalFingerprints, joinFingerprints }
   let fuel := native.length + canonical.length + 1
   let _ ← native.mapM fun body => query (nativeClosure evidence fuel body.id)
   let _ ← canonical.mapM fun body => query (canonicalClosure evidence fuel body.id)
-  for body in native do
-    let counterpart ← identify ctx raw evidence originals joins fuel body.id
-    if let some canonical := counterpart then
-      let original := (← query (evidence.canonicalBody canonical)).original
-      evidence := { evidence with identities := evidence.identities ++
-        [⟨body.id, canonical, original, if body.marker.isSome then .markedBody else .original⟩] }
+  -- Fatal structural errors still reject the snapshot. Unresolved identities are typed
+  -- classifications over the retained corpus, not missing or discarded native bodies.
+  let _ ← native.mapM fun body => query (classifyIdentity evidence fuel body.id)
   return evidence
 
 def decodeRecord (ctx : Context) (e : Evidence) (raw : Json) : Except String Record := do
@@ -366,9 +339,9 @@ def reply (request : Json) : Except String Json := do
   if (← str physical "scope") ≠ "refs/heads/x" then throw "finite physical projection scope"
   let physicalGit ← label ctx.contents physical.compress
   let after ← get request "after"
+  let observedBodies ← decodeEvidence ctx after
   let facts : NativeFacts := { encodings := {
-    canonical := ← (← rows after "canonical").mapM (decodeCanonical ctx),
-    native := ← (← rows after "native").mapM (decodeNative ctx) } }
+    canonical := observedBodies.canonical, native := observedBodies.native } }
   match ← str request "kind" with
   | "receipt" =>
     let incoming ← get request "incoming"
@@ -416,7 +389,7 @@ def reply (request : Json) : Except String Json := do
       else pure incoming
     let mergeEvidence := { final.evidence with
       native := unique (final.evidence.native ++ [adjusted]) }
-    let ordered ← query (orderedNativeInputs mergeEvidence (plan.beside ++ [adjusted.id]))
+    let ordered ← query (orderedPublicationInputs mergeEvidence (plan.beside ++ [adjusted.id]))
     return Json.mkObj [("ok", toJson true), ("computed", toJson build), ("git", toJson git),
       ("mergeBeforeExport", toJson plan.mergeBeforeExport), ("incoming", toJson plan.incoming),
       ("gitAdjustedIncoming", toJson adjusted), ("orderedMergeInputs", toJson ordered),

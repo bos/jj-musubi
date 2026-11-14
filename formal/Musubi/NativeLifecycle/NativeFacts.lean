@@ -90,6 +90,16 @@ def orderedNativeInputs (e : Evidence) (heads : List Physical) : Query (List Phy
     if a.endTime = b.endTime then decide (a.id.value ≤ b.id.value)
     else decide (a.endTime ≤ b.endTime)).map (·.id)
 
+/-- Publication receives an operand vector, not a head-set enumeration. The native stable
+timestamp sort preserves that vector on ties; explicit indices avoid relying on sort stability. -/
+def orderedPublicationInputs (e : Evidence) (operands : List Physical) :
+    Query (List Physical) := do
+  let bodies ← operands.mapM e.nativeBody
+  let indexed := (List.range bodies.length).zip bodies
+  return (indexed.mergeSort fun a b =>
+    if a.2.endTime = b.2.endTime then decide (a.1 ≤ b.1)
+    else decide (a.2.endTime ≤ b.2.endTime)).map (·.2.id)
+
 /-- This checks an observation's exact raw operands. Native semantic authentication is a
 separate gate, including the codec's embedding of physical-id tie order. -/
 def helperInputMatches (e : Evidence) (heads : List Physical) (fact : HelperFact) : Query Bool := do

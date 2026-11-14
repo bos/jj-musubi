@@ -609,3 +609,9 @@ open Musubi
 #print axioms NativeLifecycle.writeReceiptNative_records
 #print axioms NativeLifecycle.step_named_custody
 #print axioms NativeLifecycle.runs_named_custody
+#print axioms NativeLifecycle.sourceCounterpart_none
+#print axioms NativeLifecycle.matchingCandidates_gap
+#print axioms NativeLifecycle.chooseTier_selected
+#print axioms NativeLifecycle.chooseSource_selected
+#print axioms NativeLifecycle.candidates_complete
+#print axioms NativeLifecycle.computedSource_selected

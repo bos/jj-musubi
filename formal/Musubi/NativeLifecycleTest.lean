@@ -183,7 +183,7 @@ private def prejoinEvidence : Evidence :=
   .ok (.selected .published (p 0))
 #guard (candidates { prejoinEvidence with native := prejoinEvidence.native ++
   [{ id := p 3, parents := [p 0] }] } 20 [p 2, p 3] none (c 0)).map chooseSource =
-    .ok (.unavailable .published [(p 3, .identity (p 3))])
+    .ok (.unavailable .published [(p 3, .unresolvedIdentity (p 3) .missingFingerprint)])
 
 -- Hold keeps readable departed applied receipts, not merely the union of their drops.
 private def secondDrop : Record := { before := 1, identity := 2, drops := [o 2] }
@@ -215,8 +215,8 @@ private def lostOpaque : Persistent :=
 #guard (lostOpaque.earlier, lostOpaque.pending) = ([], [o 2])
 #guard heldRecords lostOpaque 2 2 = none
 
--- Recovery of A→A', B→B' moves only still-present old heads. C is new, unmapped native
--- work replacing A between attempts; it is admitted without giving C an invented identity.
+-- Recovery of A→A', B→B' moves classified heads. C is new native work replacing A;
+-- missing independent identity material now leaves this model call explicitly unresolved.
 private def recoveryEvidence : Evidence :=
   { root := c 0, physicalRoot := p 0,
     canonical := [
@@ -245,14 +245,16 @@ private def interruptedMove : State :=
     saved := { intent := some recoveryIntent } }
 
 #guard (run interruptedMove [.external [p 5, p 2] 0, .startRecovery, .finishMove]).map
-  (fun s => (s.heads, s.outside)) = .ok ([p 5, p 4], [])
+  (fun s => (s.heads, s.outside)) =
+    .error (.evidence (.unresolvedIdentity (p 5) .missingFingerprint))
 #guard (run interruptedMove [.external [p 5, p 2] 0, .startRecovery,
-  .addHead (p 3)]) = .error .intent
+  .addHead (p 3)]) = .error (.evidence (.unresolvedIdentity (p 5) .missingFingerprint))
 #guard (run interruptedMove [.external [p 5] 0, .startRecovery, .finishMove]).map
-  (·.heads) = .ok [p 5]
+  (·.heads) = .error (.evidence (.unresolvedIdentity (p 5) .missingFingerprint))
 #guard (run { interruptedMove with evidence := { recoveryEvidence with
   native := recoveryEvidence.native.filter (fun body => decide (body.id ≠ p 3)) } }
-    [.external [p 5] 0, .startRecovery, .finishMove]).map (·.heads) = .ok [p 5]
+    [.external [p 5] 0, .startRecovery, .finishMove]).map (·.heads) =
+      .error (.evidence (.unresolvedIdentity (p 5) .missingFingerprint))
 #guard (run interruptedMove [.startRecovery, .finishMove]).map (·.heads) = .ok [p 3, p 4]
 #guard (run interruptedMove [.external [p 4, p 3] 0, .startRecovery, .finishMove]).map
   (fun s => (s.heads, s.createdBodies)) = .ok ([p 4, p 3], 0)
@@ -329,8 +331,11 @@ private def normalizedJoin : NativeBody :=
 #guard (constructReceipt prejoinEvidence {} {} me [p 2] request).map
   (fun result => lookup result.computed.locals (p 2)) = .ok (some [p 0])
 private def unmarkedSurvivor : Evidence :=
-  { evidence with native := evidence.native.map fun body =>
-      if body.id = p 2 then { body with marker := none, context := none } else body }
+  { evidence with
+    native := evidence.native.map (fun body =>
+      if body.id = p 2 then { body with marker := none, context := none } else body),
+    identities := evidence.identities.map fun row =>
+      if row.physical = p 2 then { row with kind := .original } else row }
 #guard (constructReceipt unmarkedSurvivor receiptFacts saved me [p 2] request).map
   (fun result => (result.canonicalWrites, result.nativeWrites)) =
     .ok ([contracted], [rewritten])
@@ -451,7 +456,8 @@ private def helperState : State :=
   (fun s => (s.heads, s.outside, s.createdBodies, s.allocatedLabels,
     s.physicalGit, s.physicalKnown)) = .ok ([p 30], [], 1, 0, 7, true)
 #guard (run helperState [.helperEnter true, .ownHelper 0, .helperExit]).map
-  (fun s => s.evidence.counterpart (p 30)) = .ok (.ok none)
+  (fun s => s.evidence.counterpart (p 30)) =
+    .ok (.error (.unresolvedIdentity (p 30) .missingFingerprint))
 #guard (run { helperState with nativeFacts :=
     { helpers := [{ helperFact with physical := none }] } }
   [.helperEnter true, .ownHelper 0]).map
@@ -489,5 +495,62 @@ private def tied : Evidence :=
 -- Equal end times use native physical-id order, even when the raw frontier is reversed.
 #guard ownAtHeads tied 30 me [p 40, p 1] = ownAtHeads tied 30 me [p 1, p 40]
 #guard (ownAtHeads tied 30 me [p 40, p 1]).map (fun bindings => lookup bindings a) = .ok (some 10)
+
+-- Publication has a supplied operand vector. Tied times preserve it in either direction;
+-- these guards establish model behavior, not a native stable-sort law.
+#guard orderedPublicationInputs tied [p 40, p 1] = .ok [p 40, p 1]
+#guard orderedPublicationInputs tied [p 1, p 40] = .ok [p 1, p 40]
+
+private def unknownBody : NativeBody := { id := p 50, parents := [p 0] }
+private def partialIdentity : Evidence :=
+  { evidence with
+    native := evidence.native ++ [unknownBody, { id := p 51, parents := [p 50] }],
+    canonical := evidence.canonical ++ [
+      { id := c 50, original := o 50, originalParents := [o 0], parents := [c 0] },
+      { id := c 51, original := o 51, originalParents := [o 50], parents := [c 50] }],
+    nativeFingerprints := [(p 51, 51)], originalFingerprints := [(o 51, 51)] }
+
+-- Raw decoding can retain both bodies without inventing identities or losing fallback
+-- eligibility. Unknown identity is never a negative counterpart or a root namespace.
+#guard classifyIdentity partialIdentity 30 (p 50) = .ok (.unresolved .missingFingerprint)
+#guard classifyIdentity partialIdentity 30 (p 51) = .ok (.unresolved (.dependency (p 50)))
+#guard partialIdentity.counterpart (p 50) =
+  .error (.unresolvedIdentity (p 50) .missingFingerprint)
+#guard namespaceCanonical partialIdentity 30 (p 50) =
+  .error (.unresolvedIdentity (p 50) .missingFingerprint)
+#guard maximalPhysical partialIdentity 30 [p 1, p 50] =
+  .error (.unresolvedIdentity (p 50) .missingFingerprint)
+#guard recoveryDestination partialIdentity 30 [p 50] ⟨[], [], []⟩ =
+  .error (.unresolvedIdentity (p 50) .missingFingerprint)
+#guard receiptRewriteDomain partialIdentity 30 [] [p 50] =
+  .error (.unresolvedIdentity (p 50) .missingFingerprint)
+#guard constructReceipt partialIdentity {} {} me [p 50] ⟨0, 0, 0, []⟩ =
+  .error (.unresolvedIdentity (p 50) .missingFingerprint)
+#guard encodeNative partialIdentity {} unknownBody = .ok unknownBody
+
+-- Independent role priority can leave a lower tier unconsulted; consulting the same
+-- full fallback, or encountering an unresolved published member, cannot select a source.
+#guard (candidates partialIdentity 30 [p 1] none (c 1)).map chooseSource =
+  .ok (.selected .published (p 1))
+#guard (candidates partialIdentity 30 [p 0] none (c 1)).map chooseSource =
+  .ok (.unavailable .fallback [
+    (p 50, .unresolvedIdentity (p 50) .missingFingerprint),
+    (p 51, .unresolvedIdentity (p 51) (.dependency (p 50)))])
+#guard (candidates partialIdentity 30 [p 1, p 50] none (c 1)).map chooseSource =
+  .ok (.unavailable .published [(p 50, .unresolvedIdentity (p 50) .missingFingerprint)])
+
+-- New positive evidence is checked, and dependent classifications are recomputed from
+-- the retained fingerprint/parent material rather than clearing an old failure entry.
+#guard (partialIdentity.installIdentities [⟨p 50, c 50, o 50, .original⟩] >>= fun next =>
+  classifyIdentity next 30 (p 51)) = .ok (.known ⟨p 51, c 51, o 51, .original⟩)
+#guard (partialIdentity.installIdentities [⟨p 50, c 50, o 50, .original⟩] >>= fun next =>
+  next.installIdentities [⟨p 51, c 1, o 1, .original⟩]) =
+    .error (.malformed "new identity conflicts with established identity")
+#guard partialIdentity.installIdentities [⟨p 50, c 50, o 1, .original⟩] =
+  .error (.malformed "identity original differs")
+#guard evidence.installIdentities [⟨p 1, c 3, o 3, .original⟩] =
+  .error (.malformed "conflicting identity rows")
+#guard evidence.installIdentities [⟨p 4, c 3, o 3, .original⟩] =
+  .error (.malformed "identity differs from native marker")
 
 end Musubi.NativeLifecycle.Test

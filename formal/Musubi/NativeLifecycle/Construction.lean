@@ -194,6 +194,7 @@ def selectedPhysical (e : Evidence) (fuel : Nat) (heads : List Physical)
   match chooseSource (← candidates e fuel heads receipt canonical) with
   | .selected _ id => return id
   | .missing => throw (.source canonical)
+  | .unavailable _ ((_, gap) :: _) => throw gap
   | _ => throw (.malformed "source query outside U")
 
 structure ReceiptBuild where
@@ -265,7 +266,7 @@ def constructReceipt (before : Evidence) (facts : NativeFacts) (saved : Persiste
         if result.id ≠ physical then
           let row : IdentityRow := ⟨result.id, image, body.original, .markedBody⟩
           identities := unique (identities ++ [row])
-          evidence := { evidence with identities := unique (evidence.identities ++ [row]) }
+          evidence ← evidence.installIdentities [row]
         generated := put generated image result.id
         locals := put locals physical [result.id]
   return {
@@ -423,6 +424,7 @@ def constructRender (input : Evidence) (facts : NativeFacts) (me : Copy)
         if raw.parents = parents then pure raw.gitFields
         else inheritedFields evidence facts.fields parents
       | .missing => inheritedFields evidence facts.fields parents
+      | .unavailable _ ((_, gap) :: _) => throw gap
       | _ => throw (.malformed "render target outside U")
     let source ← renderedSource evidence fuel heads receipt generated body
     let p ← presence evidence fuel canonical
@@ -436,9 +438,8 @@ def constructRender (input : Evidence) (facts : NativeFacts) (me : Copy)
       reserved := reserved.mergeSort (fun a b => decide (String.ofList a ≤ String.ofList b)),
       authorWorkspace, presenceStamp := body.stamp, gitFields := fields, content := body.content }
     let identity : IdentityRow := ⟨result.id, canonical, body.original, .markedBody⟩
-    evidence := { evidence with
-      native := unique (evidence.native ++ [result]),
-      identities := unique (evidence.identities ++ [identity]) }
+    evidence := { evidence with native := unique (evidence.native ++ [result]) }
+    evidence ← evidence.installIdentities [identity]
     generated := put generated canonical result.id
     nodes := nodes ++ [{ canonical, selections, own, body := result, identity }]
   let result ← selectedPhysical evidence fuel heads receipt generated target

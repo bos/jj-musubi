@@ -46,10 +46,19 @@ def sameSet [DecidableEq α] (xs ys : List α) : Bool :=
 def uniqueKeys [DecidableEq α] (xs : List (α × β)) : Bool :=
   decide (xs.map (·.1)).Nodup
 
+inductive IdentityIssue where
+  | missingFingerprint
+  | noMatch
+  | ambiguous
+  | dependency (parent : Physical)
+  | exhausted
+deriving DecidableEq, Repr
+
 inductive Gap where
   | canonical (id : Canonical)
   | physical (id : Physical)
   | identity (id : Physical)
+  | unresolvedIdentity (id : Physical) (issue : IdentityIssue)
   | source (id : Canonical)
   | original (id : Original)
   | nativeBases (left : List Physical) (right : Physical)
@@ -165,6 +174,14 @@ structure IdentityRow where
   kind : IdentityKind
 deriving DecidableEq, Repr
 
+/-- A total classification keeps unknown identity distinct from proved prejoin history.
+The join input in `prejoin` is checked against the raw ancestry by the classifier. -/
+inductive IdentityClass where
+  | known (row : IdentityRow)
+  | prejoin (input : Physical)
+  | unresolved (issue : IdentityIssue)
+deriving DecidableEq, Repr
+
 structure BaseObservation where
   left : List Physical
   right : Physical
@@ -177,6 +194,11 @@ structure Evidence where
   canonical : List CanonicalBody := []
   native : List NativeBody := []
   identities : List IdentityRow := []
+  /-- Complete raw retained identity material. Fingerprints are interned exact hash bytes,
+  not preferred translations. Classification is recomputed when evidence grows. -/
+  nativeFingerprints : List (Physical × Nat) := []
+  originalFingerprints : List (Original × Nat) := []
+  joinFingerprints : List (Canonical × Nat) := []
   /-- Independently captured native inputs of joins, not arbitrary unknown operations. -/
   joinInputs : List Physical := []
   /-- Native order is retained, and checked against graph-derived closest-base membership. -/
@@ -198,26 +220,19 @@ def Evidence.nativeBody (e : Evidence) (id : Physical) : Query NativeBody :=
   | b :: rest => if rest.all (fun other => decide (other = b)) then .ok b
       else .error (.malformed "conflicting physical bodies")
 
-def Evidence.identity (e : Evidence) (id : Physical) : Query Canonical := do
-  let _ ← e.nativeBody id
-  if id = e.physicalRoot then return e.root
-  let rows := e.identities.filter (fun r => decide (r.physical = id))
-  match rows with
-  | [] => throw (.identity id)
-  | row :: rest =>
-    if !rest.all (fun r => decide (r.canonical = row.canonical ∧ r.original = row.original)) then
+def Evidence.checkIdentity (e : Evidence) (row : IdentityRow) : Query Unit := do
+  let native ← e.nativeBody row.physical
+  let canonical ← e.canonicalBody row.canonical
+  if canonical.original ≠ row.original then throw (.malformed "identity original differs")
+  if let some marker := native.marker then
+    if marker ≠ row.canonical then throw (.malformed "identity differs from native marker")
+  if row.kind = .markedBody && native.marker ≠ some row.canonical then
+    throw (.malformed "marked identity lacks its native marker")
+  if row.physical = e.physicalRoot && row.canonical ≠ e.root then
+    throw (.malformed "physical root identity differs")
+  for prior in e.identities.filter (fun prior => decide (prior.physical = row.physical)) do
+    if prior.canonical ≠ row.canonical || prior.original ≠ row.original then
       throw (.malformed "conflicting identity rows")
-    let body ← e.canonicalBody row.canonical
-    if body.original ≠ row.original then throw (.malformed "identity original differs")
-    return row.canonical
-
-/-- Absence of an identity row is an absent canonical counterpart, not a root identity.
-Callers that require a source certificate must account for that absence separately. -/
-def Evidence.counterpart (e : Evidence) (id : Physical) : Query (Option Canonical) :=
-  match e.identity id with
-  | .ok canonical => .ok (some canonical)
-  | .error (.identity _) => .ok none
-  | .error gap => .error gap
 
 abbrev Drops := List Original
 

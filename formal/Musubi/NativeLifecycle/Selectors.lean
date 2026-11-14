@@ -80,20 +80,97 @@ def prejoinInput (e : Evidence) (fuel : Nat) (id : Physical) : Query Bool := do
     if ← nativeAncestor e fuel id input then return true
   return false
 
+/-- Missing identity material is a typed result, not absence. Every recursive query uses
+the current positive rows and raw retained material, so new evidence rechecks dependencies. -/
+def classifyIdentity (e : Evidence) : Nat → Physical → Query IdentityClass
+  | 0, _ => .ok (.unresolved .exhausted)
+  | fuel + 1, id => do
+    let raw ← e.nativeBody id
+    let rows := e.identities.filter (fun row => decide (row.physical = id))
+    for row in rows do e.checkIdentity row
+    if let some row := rows.head? then return .known row
+    if id = e.physicalRoot then
+      return .known ⟨id, e.root, (← e.canonicalBody e.root).original, .original⟩
+    if let some marker := raw.marker then
+      return .known ⟨id, marker, (← e.canonicalBody marker).original, .markedBody⟩
+    let fingerprint := lookup e.nativeFingerprints id
+    if let some fingerprint := fingerprint then
+      let joins := unique ((e.joinFingerprints.filter (fun row => row.2 == fingerprint)).map (·.1))
+      match joins with
+      | [canonical] =>
+        return .known ⟨id, canonical, (← e.canonicalBody canonical).original, .original⟩
+      | _ :: _ => return .unresolved .ambiguous
+      | [] => pure ()
+    for input in e.joinInputs do
+      if ← nativeAncestor e (fuel + 1) id input then return .prejoin input
+    let some fingerprint := fingerprint | return .unresolved .missingFingerprint
+    let mut parents := []
+    for parent in raw.parents do
+      match ← classifyIdentity e fuel parent with
+      | .known row => parents := unique (parents ++ [row.canonical])
+      | .prejoin _ => pure ()
+      | .unresolved _ => return .unresolved (.dependency parent)
+    let canonicalParents := if parents.isEmpty then [e.root] else parents
+    let originals := (e.originalFingerprints.filter (fun row => row.2 == fingerprint)).map (·.1)
+    let candidates := unique ((e.canonical.filter (fun body =>
+      originals.contains body.original && decide (body.parents = canonicalParents))).map (·.id))
+    match candidates with
+    | [canonical] =>
+      return .known ⟨id, canonical, (← e.canonicalBody canonical).original, .original⟩
+    | [] => return .unresolved .noMatch
+    | _ => return .unresolved .ambiguous
+
+/-- New positive evidence must agree with all existing positive classification, including
+raw marker/fingerprint results. No retained material is erased; dependencies are recomputed. -/
+def Evidence.installIdentities (e : Evidence) (rows : List IdentityRow) : Query Evidence := do
+  let mut result := e
+  for row in rows do
+    result.checkIdentity row
+    match ← classifyIdentity result (result.native.length + result.canonical.length + 1) row.physical with
+    | .known prior =>
+      if prior.canonical ≠ row.canonical || prior.original ≠ row.original then
+        throw (.malformed "new identity conflicts with established identity")
+    | .prejoin _ => throw (.malformed "new identity conflicts with established prejoin")
+    | .unresolved _ => pure ()
+    result := { result with identities := unique (result.identities ++ [row]) }
+  return result
+
+def Evidence.identity (e : Evidence) (id : Physical) : Query Canonical := do
+  match ← classifyIdentity e (e.native.length + e.canonical.length + 1) id with
+  | .known row => return row.canonical
+  | .prejoin _ => throw (.identity id)
+  | .unresolved issue => throw (.unresolvedIdentity id issue)
+
+/-- Only independently established prejoin ancestry supplies a negative counterpart.
+An unresolved member remains a gap in every role domain that consults it. -/
+def sourceCounterpart (e : Evidence) (fuel : Nat) (id : Physical) : Query (Option Canonical) := do
+  match ← classifyIdentity e fuel id with
+  | .known row => return some row.canonical
+  | .prejoin _ => return none
+  | .unresolved issue => throw (.unresolvedIdentity id issue)
+
+def Evidence.counterpart (e : Evidence) (id : Physical) : Query (Option Canonical) :=
+  sourceCounterpart e (e.native.length + e.canonical.length + 1) id
+
+theorem sourceCounterpart_none {e : Evidence} {fuel : Nat} {id : Physical}
+    (success : sourceCounterpart e fuel id = .ok none) :
+    ∃ input, classifyIdentity e fuel id = .ok (.prejoin input) := by
+  cases classified : classifyIdentity e fuel id with
+  | error gap => simp [sourceCounterpart, classified, bind, Except.bind] at success
+  | ok result =>
+    cases result with
+    | known row => simp [sourceCounterpart, classified, bind, Except.bind,
+        pure, Except.pure] at success
+    | unresolved issue => simp [sourceCounterpart, classified, bind, Except.bind,
+        throw, throwThe, MonadExceptOf.throw] at success
+    | prejoin input => exact ⟨input, rfl⟩
+
 /-- A prejoin view has this copy's namespace. This interpretation does not give each
 prejoin operation the canonical root as an actual counterpart. -/
 def namespaceCanonical (e : Evidence) (fuel : Nat) (id : Physical) : Query Canonical := do
   let counterpart ← e.counterpart id
   if let some canonical := counterpart then return canonical
   if ← prejoinInput e fuel id then return e.root
-  throw (.identity id)
-
-/-- Source queries exclude known prejoin operations without a canonical counterpart.
-Other missing identities remain evidence gaps rather than shrinking a candidate set. -/
-def sourceCounterpart (e : Evidence) (fuel : Nat) (id : Physical) : Query (Option Canonical) := do
-  let counterpart ← e.counterpart id
-  if counterpart.isSome then return counterpart
-  if ← prejoinInput e fuel id then return none
   throw (.identity id)
 
 /-- Qualify before merging. Same-spelled foreign slots are removed using the complete
@@ -250,6 +327,13 @@ theorem matchingCandidates_member {e : Evidence} {fuel : Nat} {ids : List Physic
   have h' := List.mem_filter.1 h
   exact ⟨by simpa [unique] using h'.1, of_decide_eq_true h'.2⟩
 
+theorem matchingCandidates_gap {e : Evidence} {fuel : Nat} {ids : List Physical}
+    {canonical : Canonical} {id : Physical} {gap : Gap} (member : id ∈ ids)
+    (unresolved : sourceCounterpart e fuel id = .error gap) :
+    (id, gap) ∈ (matchingCandidates e fuel ids canonical).unresolved := by
+  apply List.mem_filterMap.mpr
+  exact ⟨id, by simpa [unique] using member, by simp [unresolved]⟩
+
 /-- Candidate enumeration walks complete physical ancestry and full receipt locals. A
 preferred translation-cache value is deliberately absent from this interface. -/
 def candidates (e : Evidence) (fuel : Nat) (heads : List Physical)
@@ -263,6 +347,25 @@ def candidates (e : Evidence) (fuel : Nat) (heads : List Physical)
     published := matchingCandidates e fuel reachable canonical,
     fallback := matchingCandidates e fuel (e.native.map (·.id)) canonical }
 
+theorem candidates_complete {e : Evidence} {fuel : Nat} {heads : List Physical}
+    {receipt : Option Receipt} {canonical : Canonical} {sources : Candidates}
+    (computed : candidates e fuel heads receipt canonical = .ok sources) :
+    ∃ reachable, nativeFrontierClosure e fuel heads = .ok reachable ∧
+      sources.prepared = matchingCandidates e fuel (match receipt with
+        | some r => if receiptMatches r heads then unique (r.locals.flatMap (·.2)) else []
+        | none => []) canonical ∧
+      sources.published = matchingCandidates e fuel reachable canonical ∧
+      sources.fallback = matchingCandidates e fuel (e.native.map (·.id)) canonical := by
+  unfold candidates at computed
+  cases walk : nativeFrontierClosure e fuel heads with
+  | error gap => simp [walk, bind, Except.bind] at computed
+  | ok reachable =>
+    simp only [walk, bind, Except.bind, pure, Except.pure] at computed
+    have same := Except.ok.inj computed
+    subst sources
+    refine ⟨reachable, rfl, ?_, rfl, rfl⟩
+    cases receipt <;> rfl
+
 inductive SourceChoice where
   | missing
   | unavailable (role : Role) (gaps : List (Physical × Gap))
@@ -270,23 +373,105 @@ inductive SourceChoice where
   | selected (role : Role) (physical : Physical)
 deriving DecidableEq, Repr
 
+def chooseTier (role : Role) (set : CandidateSet) : SourceChoice :=
+  if set.unresolved ≠ [] then .unavailable role set.unresolved
+  else match set.values with
+    | [] => .missing
+    | [id] => .selected role id
+    | _ => .ambiguous role set.values
+
 def chooseSource (sources : Candidates) : SourceChoice :=
-  let choose := fun (role : Role) (set : CandidateSet) =>
-    if !set.unresolved.isEmpty then SourceChoice.unavailable role set.unresolved
-    else match set.values with
-      | [] => .missing
-      | [id] => .selected role id
-      | _ => .ambiguous role set.values
-  if !sources.prepared.values.isEmpty || !sources.prepared.unresolved.isEmpty then
-    choose .prepared sources.prepared
-  else if !sources.published.values.isEmpty || !sources.published.unresolved.isEmpty then
-    choose .published sources.published
-  else choose .fallback sources.fallback
+  if sources.prepared.values ≠ [] ∨ sources.prepared.unresolved ≠ [] then
+    chooseTier .prepared sources.prepared
+  else if sources.published.values ≠ [] ∨ sources.published.unresolved ≠ [] then
+    chooseTier .published sources.published
+  else chooseTier .fallback sources.fallback
+
+def Candidates.domain (sources : Candidates) : Role → CandidateSet
+  | .prepared => sources.prepared
+  | .published => sources.published
+  | .fallback => sources.fallback
+  | .rendered => {}
+
+def Candidates.higherClear (sources : Candidates) : Role → Prop
+  | .prepared => True
+  | .published => sources.prepared.values = [] ∧ sources.prepared.unresolved = []
+  | .fallback => sources.prepared.values = [] ∧ sources.prepared.unresolved = [] ∧
+      sources.published.values = [] ∧ sources.published.unresolved = []
+  | .rendered => False
+
+theorem chooseTier_selected {tier role : Role} {set : CandidateSet} {id : Physical}
+    (success : chooseTier tier set = .selected role id) :
+    role = tier ∧ set.values = [id] ∧ set.unresolved = [] := by
+  cases gaps : set.unresolved with
+  | cons gap rest => simp [chooseTier, gaps] at success
+  | nil =>
+    cases values : set.values with
+    | nil => simp [chooseTier, gaps, values] at success
+    | cons first rest =>
+      cases rest with
+      | cons other more => simp [chooseTier, gaps, values] at success
+      | nil =>
+        simp only [chooseTier, gaps, ne_eq, not_true_eq_false, ↓reduceIte, values,
+          SourceChoice.selected.injEq] at success
+        obtain ⟨rfl, rfl⟩ := success
+        exact ⟨rfl, rfl, rfl⟩
+
+/-- Priority and completeness follow from the computed choice. Lower tiers remain in
+the corpus, but cannot block a positive higher tier that the model independently selects. -/
+theorem chooseSource_selected {sources : Candidates} {role : Role} {id : Physical}
+    (success : chooseSource sources = .selected role id) :
+    (sources.domain role).values = [id] ∧
+      (sources.domain role).unresolved = [] ∧ sources.higherClear role := by
+  unfold chooseSource at success
+  split at success
+  · obtain ⟨rfl, values, gaps⟩ := chooseTier_selected success
+    exact ⟨values, gaps, True.intro⟩
+  · rename_i inactivePrepared
+    have prepared : sources.prepared.values = [] ∧ sources.prepared.unresolved = [] := by
+      exact ⟨Classical.byContradiction (fun h => inactivePrepared (.inl h)),
+        Classical.byContradiction (fun h => inactivePrepared (.inr h))⟩
+    split at success
+    · obtain ⟨rfl, values, gaps⟩ := chooseTier_selected success
+      exact ⟨values, gaps, prepared⟩
+    · rename_i inactivePublished
+      have published : sources.published.values = [] ∧ sources.published.unresolved = [] := by
+        exact ⟨Classical.byContradiction (fun h => inactivePublished (.inl h)),
+          Classical.byContradiction (fun h => inactivePublished (.inr h))⟩
+      obtain ⟨rfl, values, gaps⟩ := chooseTier_selected success
+      exact ⟨values, gaps, prepared.1, prepared.2, published.1, published.2⟩
+
+theorem computedSource_selected {e : Evidence} {fuel : Nat} {heads : List Physical}
+    {receipt : Option Receipt} {canonical : Canonical} {sources : Candidates}
+    {role : Role} {id : Physical}
+    (computed : candidates e fuel heads receipt canonical = .ok sources)
+    (chosen : chooseSource sources = .selected role id) :
+    sourceCounterpart e fuel id = .ok (some canonical) ∧
+      (sources.domain role).unresolved = [] ∧ sources.higherClear role := by
+  obtain ⟨values, gaps, higher⟩ := chooseSource_selected chosen
+  have member : id ∈ (sources.domain role).values := by rw [values]; simp
+  obtain ⟨reachable, _, prepared, published, fallback⟩ := candidates_complete computed
+  have qualified : sourceCounterpart e fuel id = .ok (some canonical) := by
+    cases role with
+    | rendered => exact False.elim higher
+    | prepared =>
+      have included := member
+      simp only [Candidates.domain, prepared] at included
+      exact (matchingCandidates_member included).2
+    | published =>
+      have included := member
+      simp only [Candidates.domain, published] at included
+      exact (matchingCandidates_member included).2
+    | fallback =>
+      have included := member
+      simp only [Candidates.domain, fallback] at included
+      exact (matchingCandidates_member included).2
+  exact ⟨qualified, gaps, higher⟩
 
 theorem chooseSource_prepared (sources : Candidates) (id : Physical)
     (values : sources.prepared.values = [id]) (complete : sources.prepared.unresolved = []) :
     chooseSource sources = .selected .prepared id := by
-  simp [chooseSource, values, complete]
+  simp [chooseSource, chooseTier, values, complete]
 
 /-- U is a computed domain restriction, not a new runtime refusal or normalization guard. -/
 def uniqueSource (sources : Candidates) : Bool :=

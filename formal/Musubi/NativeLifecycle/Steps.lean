@@ -136,10 +136,12 @@ def maximalPhysical (e : Evidence) (fuel : Nat) (heads : List Physical) : Query 
   return result
 
 /-- Recovery applies only the saved mappings whose old heads still occur in the captured
-frontier. Exact from/to frontiers have their own full-move/no-op cases. An unmapped native
-head stays present even before its canonical identity has been learned. -/
+frontier. Even the exact-frontier cases require classified inputs: unknown identity is a
+model gap, not a certificate that an unqualified native head is unchanged or removed. -/
 def recoveryDestination (e : Evidence) (fuel : Nat) (captured : List Physical)
     (intent : Intent) : Query (List Physical) := do
+  let _ ← (unique (captured ++ intent.to ++ intent.fromHeads.flatMap
+    (fun row => row.1 :: row.2))).mapM e.counterpart
   if sameSet captured intent.to then return captured
   if sameSet captured (intent.fromHeads.map (·.1)) then return intent.to
   if captured.any (fun head => (lookup intent.fromHeads head).isSome) then
@@ -275,8 +277,7 @@ def installNative (e : Evidence) (observation : NativeObservation) :
     | none =>
       evidence := { evidence with native := evidence.native ++ [body] }
       nativeCount := nativeCount + 1
-  evidence := { evidence with identities := unique (evidence.identities ++ observation.identities) }
-  let _ ← liftQuery (observation.identities.mapM (fun row => evidence.identity row.physical))
+  evidence ← liftQuery (evidence.installIdentities observation.identities)
   let _ ← liftQuery (observation.heads.mapM evidence.nativeBody)
   return (evidence, nativeCount, canonicalCount)
 
@@ -548,10 +549,7 @@ def step (s : State) : Action → Except StepError State
     let some plan := s.publication | throw .phase
     if plan.beside.isEmpty || plan.merged.isSome ||
         (!plan.mergeBeforeExport && !plan.firstExported) then throw .phase
-    let bodies ← liftQuery ((plan.beside ++ [plan.incoming]).mapM s.evidence.nativeBody)
-    let ordered := (bodies.mergeSort fun a b =>
-      if a.endTime = b.endTime then decide (a.id.value ≤ b.id.value)
-      else decide (a.endTime ≤ b.endTime)).map (·.id)
+    let ordered ← liftQuery (orderedPublicationInputs s.evidence (plan.beside ++ [plan.incoming]))
     if inputs ≠ ordered then throw (.evidence (.malformed "native merge inputs"))
     let _ ← liftQuery (s.evidence.nativeBody output)
     return { s with publication := some { plan with merged := some output } }

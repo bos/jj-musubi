@@ -7,6 +7,11 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- A copy the hive has forgotten preserves its current Git refs and HEAD when taking shared
+  history that retains its private workspaces, including operations prepared before a local
+  Git change. Its next jj command no longer imports unchanged Git state as a move. Nothing
+  needs doing on upgrading.
+
 - Sync merges Git HEAD records as jj does when a concurrent operation removes a workspace.
   It no longer retains the forgotten workspace's old HEAD record. Nothing needs doing on
   upgrading.

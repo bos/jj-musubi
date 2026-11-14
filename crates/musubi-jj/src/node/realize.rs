@@ -1132,12 +1132,42 @@ impl NodeRepo {
         // root-based cached realization may have no Git fields, or ones from before a
         // concurrent command. Taking a trim must change neither this copy's record of Git
         // nor its physical Git state merely because that record's old ancestry disappeared.
-        if root_base {
-            let sources = self.local_heads()?;
+        // A known forgotten copy with retained private workspaces has the same missing
+        // shared authority even when its saved accepted base is non-root. Use its actual current
+        // Git bookkeeping, and merge shared payloads before the export below.
+        let sources = self.local_heads()?;
+        let mut private = vec![false; left.len()];
+        if !root_base {
+            let absent = left
+                .iter()
+                .map(|id| {
+                    let presence = self.presence(id)?;
+                    Ok(presence.known().contains(self.machine.key())
+                        && !presence.is_present(self.machine.key()))
+                })
+                .collect::<Result<Vec<_>, NodeError>>()?;
+            if absent.iter().any(|absent| *absent) {
+                let own = self.own_at_heads(&sources)?;
+                for (i, canonical) in left.iter().enumerate().filter(|(i, _)| absent[*i]) {
+                    let raw = self
+                        .loader
+                        .op_store()
+                        .read_operation(&realized[i].0)
+                        .block_on()?;
+                    let view = self.loader.op_store().read_view(&raw.view_id).block_on()?;
+                    let target_own = self.own_of_view(view.wc_commit_ids, canonical, &raw)?;
+                    private[i] = own.keys().any(|name| target_own.contains_key(name));
+                }
+            }
+        }
+        let current_git = root_base || private.iter().any(|kept| *kept);
+        if current_git {
             let fields = self.inherited_per_machine(&sources)?;
-            for (canonical, local) in left.iter().zip(&mut realized) {
-                *local = self.with_per_machine(local, &fields, canonical)?;
-                self.insert_map(local.clone(), canonical.clone())?;
+            for (i, (canonical, local)) in left.iter().zip(&mut realized).enumerate() {
+                if root_base || private[i] {
+                    *local = self.with_per_machine(local, &fields, canonical)?;
+                    self.insert_map(local.clone(), canonical.clone())?;
+                }
             }
         }
         let (canonical, primary) = (left[0].clone(), realized[0].clone());
@@ -1172,7 +1202,7 @@ impl NodeRepo {
         // shared ancestor's. Merge its shared payload before exporting: exporting the
         // incoming tip first could move Git backward, then merge its record forward without
         // writing Git again. Other realizations export beside the heads as usual.
-        let merge_before_export = root_base && !merging.is_empty();
+        let merge_before_export = current_git && !merging.is_empty();
         let head = match colocation {
             Some(colocation) if !merge_before_export => colocation.export_refs(
                 &self.loader,

@@ -1160,6 +1160,8 @@ fn root_realizations_keep_current_private_workspaces_without_a_receipt() {
         "restart child",
         "multi child",
         "noncolocated child",
+        "mixed private first",
+        "mixed present first",
     ] {
         let env = TestEnv::new();
         let a = env.init_repo("alpha");
@@ -1168,6 +1170,11 @@ fn root_realizations_keep_current_private_workspaces_without_a_receipt() {
         } else {
             env.init_repo("beta")
         };
+        let mixed = change.starts_with("mixed");
+        if mixed {
+            b.jj(&["new", "-m", "private Git basis"]);
+            b.jj(&["bookmark", "create", "local", "-r", "@"]);
+        }
         a.jj(&["workspace", "rename", "default"]);
         b.jj(&["workspace", "rename", "default"]);
         if change == "owned alias" {
@@ -1185,6 +1192,7 @@ fn root_realizations_keep_current_private_workspaces_without_a_receipt() {
         sync(&a_node, &mut b_node, &initial);
         let joined = single_canonical_head(&mut b_node);
         sync(&b_node, &mut a_node, &joined);
+        let before_forget = a_node.local_heads().unwrap()[0].clone();
         a_node.forget_copy(b_node.machine().key(), "beta").unwrap();
         a.jj(&["new", "--no-edit", "-m", "after forgetting beta"]);
         // Exporting this bookmark changes the published parent's Git record, while
@@ -1196,6 +1204,26 @@ fn root_realizations_keep_current_private_workspaces_without_a_receipt() {
             single_canonical_head(&mut a_node);
             a.jj(&["bookmark", "create", "last", "-r", "@"]);
             Some(single_canonical_head(&mut a_node))
+        } else {
+            None
+        };
+        let present = if mixed {
+            let before = a_node.local_heads().unwrap();
+            a.jj(&[
+                "--at-op",
+                &before_forget.0.hex(),
+                "new",
+                "--no-edit",
+                "-m",
+                "present sibling",
+            ]);
+            let head = a_node
+                .local_heads()
+                .unwrap()
+                .into_iter()
+                .find(|id| !before.contains(id))
+                .unwrap();
+            Some(a_node.canonicalize(&head).unwrap())
         } else {
             None
         };
@@ -1213,6 +1241,16 @@ fn root_realizations_keep_current_private_workspaces_without_a_receipt() {
             [store.root_operation_id().clone()]
         );
         let child = child.map(|id| contraction.images(store, &id).unwrap().pop().unwrap());
+        let present = present.map(|id| contraction.images(store, &id).unwrap().pop().unwrap());
+        if let Some(present) = &present {
+            assert_eq!(
+                store.parents(present).unwrap(),
+                [store.root_operation_id().clone()]
+            );
+            ship_objects(&a_node, &b_node, present);
+            ship_operations(&a_node, &b_node, present);
+            b_node.realize(present).unwrap();
+        }
         let middle = child
             .as_ref()
             .map(|id| store.parents(id).unwrap()[0].clone());
@@ -1308,6 +1346,86 @@ fn root_realizations_keep_current_private_workspaces_without_a_receipt() {
                 original_heads,
                 "realizing ahead publishes nothing"
             );
+        }
+        if let Some(present) = &present {
+            assert!(
+                b_node
+                    .presence(present)
+                    .unwrap()
+                    .is_present(b_node.machine().key())
+            );
+            // A command after preparation must win over both cached Git records.
+            b.jj(&["bookmark", "create", "late", "-r", "@-"]);
+            let fields = |node: &NodeRepo, id: &LocalOp| {
+                let store = node.loader().op_store();
+                let op = store.read_operation(&id.0).block_on().unwrap();
+                let mut view = store.read_view(&op.view_id).block_on().unwrap();
+                let git = view
+                    .remote_views
+                    .remove(jj_lib::git::REMOTE_NAME_FOR_LOCAL_GIT_REPO);
+                (view.git_refs, view.git_heads, git)
+            };
+            let before = fields(&b_node, &b_node.local_heads().unwrap()[0]);
+            assert!(!before.0.is_empty() && !before.1.is_empty() && before.2.is_some());
+            let physical_head = b.git(&["rev-parse", "HEAD"]);
+            let local_ref = b.git(&["rev-parse", "refs/heads/local"]);
+            let late_ref = b.git(&["rev-parse", "refs/heads/late"]);
+            let targets = if change == "mixed private first" {
+                [incoming.clone(), present.clone()]
+            } else {
+                [present.clone(), incoming.clone()]
+            };
+            b_node.advance_to(&targets).unwrap();
+            let private = b_node.local_of(&incoming).unwrap();
+            assert_eq!(
+                fields(&b_node, &private),
+                before,
+                "{change}: private target keeps current Git state"
+            );
+            let mut pending = b_node.local_heads().unwrap();
+            let mut seen = BTreeSet::new();
+            let mut canonicals = BTreeSet::new();
+            while let Some(local) = pending.pop() {
+                if !seen.insert(local.clone()) {
+                    continue;
+                }
+                canonicals.extend(b_node.canonical_of(&local));
+                let op = b_node
+                    .loader()
+                    .op_store()
+                    .read_operation(&local.0)
+                    .block_on()
+                    .unwrap();
+                pending.extend(LocalOp::parents_of(&op));
+            }
+            assert!(
+                targets.iter().all(|target| canonicals.contains(target)),
+                "both incomparable targets must survive publication"
+            );
+            assert_eq!(b.git(&["rev-parse", "HEAD"]), physical_head);
+            assert_eq!(b.git(&["rev-parse", "refs/heads/local"]), local_ref);
+            assert_eq!(b.git(&["rev-parse", "refs/heads/late"]), late_ref);
+            let old_heads = b_node.local_heads().unwrap();
+            b.jj(&["status"]);
+            let mut pending = b_node.local_heads().unwrap();
+            let mut seen = BTreeSet::new();
+            while let Some(local) = pending.pop() {
+                if old_heads.contains(&local) || !seen.insert(local.clone()) {
+                    continue;
+                }
+                let op = b_node
+                    .loader()
+                    .op_store()
+                    .read_operation(&local.0)
+                    .block_on()
+                    .unwrap();
+                assert!(
+                    !op.metadata.description.starts_with("import git"),
+                    "{change}: {}",
+                    op.metadata.description
+                );
+                pending.extend(LocalOp::parents_of(&op));
+            }
         }
         if change == "rename after" || change.ends_with("child") {
             b.jj(&["workspace", "rename", "private"]);

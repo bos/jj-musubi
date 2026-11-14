@@ -16,7 +16,8 @@
 //! independently recorded join point, but those native `jj op abandon` removed completely,
 //! which are on none; tags agree; each machine has its own workspaces, at visible
 //! commits; no divergence and no bookmark or tag conflict that jj wouldn't make of the same
-//! operations in one repository (`reference`), nor the same rebase done twice (`ledger`); and
+//! operations in one repository (`reference`), nor independent merges doing the same rebase
+//! twice (`ledger`); and
 //! every machine shows the others' workspaces at their working copies, and git never sees them.
 //!
 //! `e2e_smoke` runs in the default suite. The search, `e2e_search_shard_*`, runs with

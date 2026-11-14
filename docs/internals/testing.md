@@ -949,10 +949,16 @@ and the test checks that:
   above shared history;
 - no change diverges, and no bookmark or tag conflicts, unless jj makes the same of the same
   operations in one repository (the reference, below);
-- no change has two commits with the same parents and contents that two merges rewrote from
-  one commit: the same rebase done twice, which the hub's sequencing exists to prevent. A
+- no change has two commits with the same parents and contents that independent merges rewrote
+  from one commit: the same rebase done twice, which the hub's sequencing exists to prevent. A
   ledger (`e2e_search/ledger.rs`) of which machine's commands rewrote what tells this apart
-  from rewrites that commands make alike.
+  from rewrites that commands make alike. After an operation abandon, jj can rebase the original
+  again in a later merge whose inputs already contain the first result. The reference accepts
+  this serial case only when an independent jj replay agrees on the complete shared result and
+  the exact predecessor relation. Parent ancestry or a preserved merge view alone is insufficient.
+  `reference::a_native_serial_merge_can_repeat_a_rebase_after_abandon` demonstrates it in a
+  non-colocated native repository, checks recovery, and still rejects an independent repeat of
+  the first merge, including alongside a certified serial pair.
 
 Workspace names have a separate logical ledger from the directories used for edits. Native
 merges can restore a name whose directory was renamed or forgotten. The checker certifies a

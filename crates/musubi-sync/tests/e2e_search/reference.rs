@@ -1347,7 +1347,7 @@ pub struct Reference {
     pub deviations: Vec<String>,
     /// Every rewrite the hive's merges record: the merge, the new commit, and its
     /// predecessors.
-    rewrites: Vec<(CanonicalOp, CommitId, Vec<CommitId>)>,
+    rewrites: Vec<MergeRewrite>,
     /// Operations other than merges that made a change diverge or a bookmark or tag
     /// conflict, where nothing the operation did explains it (`explained`), and merges that
     /// did more of either than jj's merge of the same parents.
@@ -1358,6 +1358,37 @@ pub struct Reference {
     workspace_in_progress: HashSet<CanonicalOp>,
     workspace_copies: HashMap<CanonicalOp, Operation>,
     pub workspace_unmapped: BTreeSet<(String, OperationId)>,
+}
+
+#[derive(Clone)]
+struct MergeRewrite {
+    operation: OperationId,
+    new: CommitId,
+    predecessors: Vec<CommitId>,
+    /// Inputs of an independently replayed native merge that made this exact rewrite.
+    /// A result already visible there was not made by an independent concurrent merge.
+    native_inputs: Arc<HashSet<CommitId>>,
+}
+
+fn repeated_rebase(rewrites: &[MergeRewrite], keys: &HashMap<CommitId, u64>) -> bool {
+    let mut made: HashMap<(CommitId, u64), Vec<&MergeRewrite>> = HashMap::new();
+    for rewrite in rewrites {
+        for predecessor in &rewrite.predecessors {
+            let previous = made
+                .entry((predecessor.clone(), keys[&rewrite.new]))
+                .or_default();
+            if previous.iter().any(|other| {
+                other.operation != rewrite.operation
+                    && other.new != rewrite.new
+                    && !rewrite.native_inputs.contains(&other.new)
+                    && !other.native_inputs.contains(&rewrite.new)
+            }) {
+                return true;
+            }
+            previous.push(rewrite);
+        }
+    }
+    false
 }
 
 /// Settings for the reference's merges. The user is the tests' user; a seed of its own for
@@ -1379,6 +1410,197 @@ fn hash(value: impl Hash) -> u64 {
     let mut hasher = std::hash::DefaultHasher::new();
     value.hash(&mut hasher);
     hasher.finish()
+}
+
+#[test]
+fn a_native_serial_merge_can_repeat_a_rebase_after_abandon() {
+    let env = musubi_testutil::TestEnv::new();
+    // No Git working tree or branch import: this is unrelated to the snapshot/import
+    // divergence when Git points a branch at an unsnapshotted working copy (#41).
+    let repo = env.init_non_colocated_repo("native");
+    let op = || {
+        repo.jj(&[
+            "--ignore-working-copy",
+            "op",
+            "log",
+            "--no-graph",
+            "-n",
+            "1",
+            "-T",
+            "id",
+        ])
+        .trim()
+        .to_owned()
+    };
+    let commit = || {
+        CommitId::try_from_hex(
+            repo.jj(&[
+                "--ignore-working-copy",
+                "log",
+                "--no-graph",
+                "-r",
+                "@",
+                "-T",
+                "commit_id",
+            ])
+            .trim(),
+        )
+        .unwrap()
+    };
+    repo.jj(&["describe", "-m", "parent"]);
+    let parent = commit();
+    let base = op();
+    repo.jj(&["new", "-m", "child"]);
+    let original = commit();
+    let left = op();
+    repo.jj(&[
+        "--at-op",
+        &base,
+        "describe",
+        &parent.hex(),
+        "-m",
+        "rewritten parent",
+    ]);
+    repo.jj(&["status"]);
+    let first = commit();
+    let first_merge = op();
+
+    // The retained merge keeps its result after its child-creation parent disappears.
+    // A delayed command still has the old operation: native jj integrates that history.
+    repo.jj(&["op", "abandon", &left]);
+    repo.jj(&[
+        "--at-op",
+        &left,
+        "bookmark",
+        "create",
+        "delayed",
+        "-r",
+        &original.hex(),
+    ]);
+    repo.jj(&["status"]);
+    let serial_merge = op();
+    let visible: Vec<_> = repo
+        .jj(&[
+            "--ignore-working-copy",
+            "log",
+            "--no-graph",
+            "-r",
+            "description(substring:\"child\")",
+            "-T",
+            "commit_id ++ \"\\n\"",
+        ])
+        .lines()
+        .map(|id| CommitId::try_from_hex(id).unwrap())
+        .collect();
+    assert_eq!(
+        visible.len(),
+        2,
+        "notice when jj no longer makes this divergence"
+    );
+    let second = visible.iter().find(|id| **id != first).unwrap().clone();
+
+    let loader = RepoLoader::init_from_file_system(
+        &repo.settings(),
+        &repo.repo_path(),
+        &default_backend_factories(),
+    )
+    .unwrap();
+    let load = |id: &str| {
+        block_on(loader.load_operation(&OperationId::try_from_hex(id).unwrap())).unwrap()
+    };
+    let first_op = load(&first_merge);
+    let serial_op = load(&serial_merge);
+    let event = |op: &Operation, new: &CommitId| {
+        let native_inputs = block_on(op.parents())
+            .unwrap()
+            .iter()
+            .flat_map(|parent| {
+                block_on(parent.view())
+                    .unwrap()
+                    .store_view()
+                    .head_ids
+                    .clone()
+            })
+            .collect();
+        MergeRewrite {
+            operation: op.id().clone(),
+            new: new.clone(),
+            predecessors: op.store_operation().commit_predecessors.as_ref().unwrap()[new].clone(),
+            native_inputs: Arc::new(native_inputs),
+        }
+    };
+    let mut events = vec![event(&first_op, &first), event(&serial_op, &second)];
+    assert_eq!(events[0].predecessors, std::slice::from_ref(&original));
+    assert_eq!(events[1].predecessors, std::slice::from_ref(&original));
+    assert!(events[1].native_inputs.contains(&first));
+    assert!(!events[0].native_inputs.contains(&second));
+
+    // A second independent native merge of the first inputs is still the forbidden
+    // duplicate. It has neither result in its inputs, even beside the serial pair.
+    let (independent, rebased) = block_on(loader.merge_operations(
+        block_on(first_op.parents()).unwrap(),
+        None,
+        Some("independent merge"),
+        [],
+    ))
+    .unwrap();
+    assert_eq!(rebased, 1);
+    let duplicate = independent
+        .operation()
+        .store_operation()
+        .commit_predecessors
+        .as_ref()
+        .unwrap()
+        .iter()
+        .find(|(_, predecessors)| *predecessors == &vec![original.clone()])
+        .unwrap()
+        .0
+        .clone();
+    assert_ne!(duplicate, first);
+    assert_ne!(duplicate, second);
+    let expected = loader.store().get_commit(&first).unwrap();
+    for id in [&second, &duplicate] {
+        let actual = loader.store().get_commit(id).unwrap();
+        assert_eq!(actual.change_id(), expected.change_id());
+        assert_eq!(actual.parent_ids(), expected.parent_ids());
+        assert_eq!(actual.tree_ids(), expected.tree_ids());
+        assert_eq!(actual.description(), expected.description());
+        assert_eq!(actual.author(), expected.author());
+    }
+    let keys = HashMap::from([
+        (first.clone(), 0),
+        (second.clone(), 0),
+        (duplicate.clone(), 0),
+    ]);
+    assert!(!repeated_rebase(&events, &keys));
+    events.reverse();
+    assert!(
+        !repeated_rebase(&events, &keys),
+        "collection order does not grant evidence"
+    );
+    events[0].native_inputs = Arc::default();
+    assert!(
+        repeated_rebase(&events, &keys),
+        "missing native evidence must not forgive"
+    );
+    events[0] = event(&serial_op, &second);
+    events.push(event(independent.operation(), &duplicate));
+    assert!(
+        repeated_rebase(&events, &keys),
+        "independent merges remain forbidden"
+    );
+
+    repo.jj(&["abandon", &second.hex()]);
+    let remaining = repo.jj(&[
+        "--ignore-working-copy",
+        "log",
+        "--no-graph",
+        "-r",
+        "description(substring:\"child\")",
+        "-T",
+        "commit_id ++ \"\\n\"",
+    ]);
+    assert_eq!(remaining.trim(), first.hex());
 }
 
 impl Reference {
@@ -1525,9 +1747,12 @@ impl Reference {
             let is_merge = op_parents.len() > 1 && command.is_none();
             if is_merge {
                 for (new, predecessors) in op.commit_predecessors.iter().flatten() {
-                    reference
-                        .rewrites
-                        .push((id.clone(), new.clone(), predecessors.clone()));
+                    reference.rewrites.push(MergeRewrite {
+                        operation: id.0.clone(),
+                        new: new.clone(),
+                        predecessors: predecessors.clone(),
+                        native_inputs: Arc::default(),
+                    });
                 }
             }
             // A `jj op abandon` survivor keeps its original view, whatever its parents
@@ -1663,6 +1888,9 @@ impl Reference {
                     reference.changes_of(op_parents.iter().flat_map(|p| [&copies[p], &replays[p]]));
                 let ours = reference.summary(&view, &known);
                 let theirs = reference.summary(&replayed.view, &known);
+                if is_merge && agreed && ours == theirs {
+                    reference.certify_serial_rebases(&id, op, &replayed, &op_parents, &views);
+                }
                 // The same parents on both sides, but a different merge: it may be jj's own,
                 // on the machine that made it, of the parents as that machine had them.
                 let as_made = if is_merge && agreed && ours != theirs {
@@ -1877,34 +2105,60 @@ impl Reference {
         counts
     }
 
-    /// Whether two of the hive's merges rewrote one commit of `change` the same way: into
+    /// Record inputs only when an independent native replay has the entire shared result
+    /// and the exact predecessor relation. Neither ancestry, a retained view, nor an
+    /// earlier result visible in a parent alone certifies a serial native rebase.
+    fn certify_serial_rebases(
+        &mut self,
+        id: &CanonicalOp,
+        op: &op_store::Operation,
+        replayed: &Replayed,
+        parents: &[CanonicalOp],
+        views: &HashMap<CanonicalOp, View>,
+    ) {
+        let native = &replayed.op.store_operation().commit_predecessors;
+        let new: Vec<_> = op
+            .commit_predecessors
+            .iter()
+            .flatten()
+            .chain(native.iter().flatten())
+            .map(|(new, _)| new.clone())
+            .collect();
+        let keys = self.keys(&new, &|_| true);
+        let mut inputs = HashSet::new();
+        for parent in parents {
+            inputs.extend(self.visible(&views[parent]).iter().cloned());
+        }
+        let inputs = Arc::new(inputs);
+        for rewrite in self.rewrites.iter_mut().filter(|r| r.operation == id.0) {
+            if native.iter().flatten().any(|(new, predecessors)| {
+                keys[new] == keys[&rewrite.new] && *predecessors == rewrite.predecessors
+            }) {
+                rewrite.native_inputs = inputs.clone();
+            }
+        }
+    }
+
+    /// Whether two of the hive's independent merges rewrote one commit of `change` alike: into
     /// commits with the same contents, change id and parents (by structural key). That is the
     /// same rebase done twice, by two merges of the same operations, which the hub's
     /// sequencing exists to prevent. Two commits of a change can also end up alike when jj
     /// rebases two different rewrites of it onto the same parents, or when a command and a
     /// merge each rebase it the same way, as a `jj rebase -r` of its parent and a merge with
-    /// a concurrent abandon of that parent do; neither is it.
+    /// a concurrent abandon of that parent do; neither is it. A native merge can also rebase
+    /// the original again after an operation abandon, with the first result already visible
+    /// in its inputs. Only an independently replayed full result and predecessor relation
+    /// certify that serial case; independent duplicate merges remain forbidden.
     pub fn same_rebase_twice(&mut self, change: &str) -> bool {
-        let rewrites = self.rewrites.clone();
-        let ours: Vec<(CanonicalOp, CommitId, Vec<CommitId>)> = rewrites
+        let ours: Vec<_> = self
+            .rewrites
+            .clone()
             .into_iter()
-            .filter(|(_, new, _)| self.facts(new).change.reverse_hex() == change)
+            .filter(|rewrite| self.facts(&rewrite.new).change.reverse_hex() == change)
             .collect();
-        let ids: Vec<CommitId> = ours.iter().map(|(_, new, _)| new.clone()).collect();
+        let ids: Vec<CommitId> = ours.iter().map(|rewrite| rewrite.new.clone()).collect();
         let keys = self.keys(&ids, &|_| true);
-        let mut made: HashMap<(CommitId, u64), (CanonicalOp, CommitId)> = HashMap::new();
-        for (op, new, predecessors) in ours {
-            for predecessor in predecessors {
-                match made.get(&(predecessor.clone(), keys[&new])) {
-                    Some((other_op, other)) if *other_op != op && *other != new => return true,
-                    Some(_) => {}
-                    None => {
-                        made.insert((predecessor, keys[&new]), (op.clone(), new.clone()));
-                    }
-                }
-            }
-        }
-        false
+        repeated_rebase(&ours, &keys)
     }
 
     /// Every machine's realization of each of the hive's operations, the operation another

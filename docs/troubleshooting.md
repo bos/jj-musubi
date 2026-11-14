@@ -410,6 +410,20 @@ musubi join --lease 6h
 
 ## Syncing
 
+### Identical divergent copies after an operation abandon
+
+A command that finishes on an old operation after `jj op abandon` can make jj rebase a child
+again, even though an earlier merge already rebased it. The copies have the same parents and
+contents. This also happens in one jj repository without musubi. Inspect their parents and
+descriptions with `jj log -r '<first> | <second>'`, then compare their contents with
+`jj diff --from <first> --to <second>`. If they agree, keep either and remove the other:
+
+```sh
+jj abandon <unwanted-commit>
+```
+
+The [known jj limitations](internals/races.md#known-jj-limitations) describe this race.
+
 ### "jj cannot merge this machine's operations with the hive's (...)"
 
 jj 0.47 can't merge some combinations of concurrent operations, such as rebases on two

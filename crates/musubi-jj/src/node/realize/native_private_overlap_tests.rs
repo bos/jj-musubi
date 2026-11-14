@@ -22,7 +22,10 @@ fn disjoint_owned_names_do_not_select_current_git() {
         let inherited = PerMachine::of(&parent_view);
         let child = fx.node.realize(&fx.child).unwrap();
         let (cached_op, cached_view) = raw(&fx.node, &child);
-        assert_eq!(cached_op.parents, [parent.0.clone()]);
+        assert_eq!(
+            cached_op.parents.as_slice(),
+            std::slice::from_ref(&parent.0)
+        );
         assert_eq!(cached_view.wc_commit_ids, parent_view.wc_commit_ids);
         assert_eq!(PerMachine::of(&cached_view), inherited);
         assert_eq!(

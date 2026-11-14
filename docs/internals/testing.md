@@ -887,6 +887,11 @@ separate birth and initial-working-copy operations: only the latter exports its 
 even when its metadata names the previously active workspace. The same test checks that exact
 unmarked two-operation sequence, an unmatched initialization, a marked initialization and the
 birth operation with an inherited record.
+A single-base native merge can delete a workspace and prune its HEAD record even when only
+the other branch changed that record. When the scalar record model cannot explain the
+result, the checker uses the same exact isolated native replay and independent physical-writer
+proof as it uses for recursive bases. The test includes this deletion, an accepted actual
+writer and a rejected physical value that neither branch wrote.
 
 
 When incoming records lose an applied suffix or drop the entire saved accepted base,
@@ -894,6 +899,10 @@ the checker captures the exact native op heads before driving the receipt. A new
 realization of that exact hub target can inherit those HEAD records, rather than its rewritten
 parent's older record. This is scoped to the copy and physical operation id, keeps the first
 witness, and validates the entire captured source history without granting a new HEAD writer.
+The exact published carrier body is frozen with that observation. If contraction changes its
+native and canonical ids, a marked alias can reuse this witness only when its complete body
+still matches, including the view and original-parent evidence. Changed views, metadata or
+original parents and unmarked candidates cannot use it.
 The captured frontier explains only records matching jj's merge of it; a later merge or
 export of the same target still uses its own valid physical history.
 `imports::preserved_head_records_require_the_exact_captured_frontier` rejects a missing witness,

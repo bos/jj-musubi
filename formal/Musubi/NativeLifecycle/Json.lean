@@ -349,7 +349,18 @@ def reply (request : Json) : Except String Json := do
     let receiptRequest : ReceiptRequest := {
       identity := ← label ctx.digests (← str incoming "identity"),
       recordPrefix := ← label ctx.digests (← str incoming "prefixDigest"), records }
-    let build ← query (constructReceipt e facts saved me heads receiptRequest)
+    let build ← (constructReceipt e facts saved me heads receiptRequest).mapError fun gap =>
+      match gap with
+      | .encoding message =>
+        match Lean.Json.parse message with
+        | .ok diagnostic => (Lean.Json.mkObj [
+          ("encodingDiagnostic", diagnostic),
+          ("ids", (get request "ids").toOption.getD .null),
+          ("normalizedContent", toJson ctx.contents),
+          ("rawCanonicalBefore", (get raw "canonical").toOption.getD .null),
+          ("rawCanonicalAfter", (get after "canonical").toOption.getD .null)]).compress
+        | .error _ => reprStr gap
+      | _ => reprStr gap
     let observed ← decodeReceipt ctx e (← get after "receipt")
     if !receiptInputMatches build observed then throw "native receipt differs from computed construction"
     let actualWrites ← (← strings (← get request "observed") "writes").mapM fun id => do

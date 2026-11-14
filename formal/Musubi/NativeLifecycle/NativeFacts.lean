@@ -4,6 +4,7 @@ must come from independent native replay/encoding observations before Rust corre
 consumes them. Reference labels do not authenticate a table. No native law is asserted here.
 -/
 import Musubi.NativeLifecycle.Selectors
+import Lean
 
 namespace Musubi.NativeLifecycle
 
@@ -15,6 +16,64 @@ deriving DecidableEq, Repr, Inhabited
 def sameCanonicalShape (a b : CanonicalBody) : Bool := decide ({ a with id := b.id } = b)
 def sameNativeShape (a b : NativeBody) : Bool := decide ({ a with id := b.id } = b)
 
+/- Diagnostic-only serialization. Numeric labels and content tokens are expanded against
+the immutable raw request by the codec; this does not add an encoding candidate. -/
+namespace EncodingDiagnostic
+open Lean (Json toJson)
+
+def list (f : α → Json) (values : List α) : Json := .arr (values.map f).toArray
+def optional (f : α → Json) : Option α → Json
+  | none => .null
+  | some value => Json.mkObj [("some", f value)]
+def pair (f : α → Json) (g : β → Json) (value : α × β) : Json :=
+  .arr #[f value.1, g value.2]
+def copy (value : Copy) : Json := Json.mkObj [
+  ("name", toJson (String.ofList value.name)), ("suffix", toJson (String.ofList value.suffix))]
+def workspace (value : WorkspaceKey) : Json := Json.mkObj [
+  ("owner", copy value.owner), ("name", toJson (String.ofList value.name))]
+def stamp (value : Stamp) : Json := Json.mkObj [
+  ("known", list copy value.known),
+  ("latest", list (pair copy (list (fun id => toJson id.value))) value.latest),
+  ("worked", list (pair copy (list (fun id => toJson id.value))) value.worked),
+  ("forgetAfter", list (pair copy (list (pair (fun id => toJson id.value)
+    (optional toJson)))) value.forgetAfter)]
+def canonical (value : CanonicalBody) : Json := Json.mkObj [
+  ("id", toJson value.id.value), ("original", toJson value.original.value),
+  ("originalParents", list (fun id => toJson id.value) value.originalParents),
+  ("parents", list (fun id => toJson id.value) value.parents),
+  ("references", list (fun id => toJson id.value) value.references),
+  ("referenceRevert", toJson value.referenceRevert),
+  ("authorWorkspace", optional workspace value.authorWorkspace),
+  ("endTime", toJson value.endTime), ("work", optional copy value.work),
+  ("forgets", list copy value.forgets),
+  ("forgetAfter", optional (optional toJson) value.forgetAfter),
+  ("fixup", toJson value.fixup),
+  ("rewrites", list (pair toJson (list toJson)) value.rewrites),
+  ("stamp", optional stamp value.stamp),
+  ("workspaces", list (pair workspace toJson) value.workspaces),
+  ("content", toJson value.content)]
+def differences (a b : CanonicalBody) : List String :=
+  ([ ("original", decide (a.original = b.original)),
+     ("originalParents", decide (a.originalParents = b.originalParents)),
+     ("parents", decide (a.parents = b.parents)),
+     ("references", decide (a.references = b.references)),
+     ("referenceRevert", decide (a.referenceRevert = b.referenceRevert)),
+     ("authorWorkspace", decide (a.authorWorkspace = b.authorWorkspace)),
+     ("endTime", decide (a.endTime = b.endTime)), ("work", decide (a.work = b.work)),
+     ("forgets", decide (a.forgets = b.forgets)),
+     ("forgetAfter", decide (a.forgetAfter = b.forgetAfter)),
+     ("fixup", decide (a.fixup = b.fixup)), ("rewrites", decide (a.rewrites = b.rewrites)),
+     ("stamp", decide (a.stamp = b.stamp)),
+     ("workspaces", decide (a.workspaces = b.workspaces)),
+     ("content", decide (a.content = b.content)) ].filter (fun row => !row.2)).map (·.1)
+def failed (computed : CanonicalBody) (candidates : List CanonicalBody) : Json := Json.mkObj [
+  ("kind", toJson "canonical encoding failure"), ("computed", canonical computed),
+  ("candidates", list (fun observed => Json.mkObj [
+    ("body", canonical observed), ("differentFields", toJson (differences computed observed))])
+    candidates)]
+
+end EncodingDiagnostic
+
 /-- The independent encoding table is searched by the complete computed body, excluding
 only the hash result. An absent entry never allocates an invented identity. -/
 def encodeCanonical (e : Evidence) (table : EncodingTable) (body : CanonicalBody) :
@@ -22,7 +81,7 @@ def encodeCanonical (e : Evidence) (table : EncodingTable) (body : CanonicalBody
   let matching := (e.canonical ++ table.canonical).filter (sameCanonicalShape body)
   match unique matching with
   | [result] => return result
-  | [] => throw (.encoding "canonical body")
+  | [] => throw (.encoding ((EncodingDiagnostic.failed body (e.canonical ++ table.canonical)).compress))
   | _ => throw (.encoding "conflicting canonical hashes")
 
 def encodeNative (e : Evidence) (table : EncodingTable) (body : NativeBody) : Query NativeBody := do

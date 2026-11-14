@@ -231,7 +231,7 @@ machines.
 
 ## When snapshots pick up too much
 
-musubi holds sending when automatic snapshots retain more than 1000 file paths or 8 MiB
+musubi holds sending when automatic snapshots retain more than 100 file paths or 8 MiB
 beyond explicit change history and content already shared with the hive. Receiving continues.
 An explicit `jj commit`, `describe`, `split`, `squash`, or other command that creates or
 modifies changes makes those change versions intentional history: their content needs no

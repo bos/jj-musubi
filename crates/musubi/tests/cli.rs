@@ -3843,7 +3843,7 @@ fn op_abandon_syncs_but_history_otherwise_lost_stops_syncing() {
     retries from the hub's current state. Run `musubi sync` again to retry at once.
 
     Automatic snapshots may retain files you subsequently removed. Sending pauses if that content
-    exceeds 1000 paths or 8 MiB beyond explicit change history and shared content; receiving continues.
+    exceeds 100 paths or 8 MiB beyond explicit change history and shared content; receiving continues.
     Inspect with --outgoing, approve exactly what it shows with --approve TOKEN, or preview discarding
     selected unpublished operations with --prune OPERATION... . Apply a preview with --prune
     OPERATION... --apply TOKEN; current work and explicit change versions are retained, but earlier

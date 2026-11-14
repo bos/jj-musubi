@@ -286,7 +286,7 @@ pub enum Command {
     /// at once.
     ///
     /// Automatic snapshots may retain files you subsequently removed. Sending pauses if
-    /// that content exceeds 1000 paths or 8 MiB beyond explicit change history and shared
+    /// that content exceeds 100 paths or 8 MiB beyond explicit change history and shared
     /// content; receiving continues. Inspect with --outgoing, approve exactly what it shows
     /// with --approve TOKEN, or preview discarding selected unpublished operations with
     /// --prune OPERATION... . Apply a preview with --prune OPERATION... --apply TOKEN;

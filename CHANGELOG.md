@@ -7,7 +7,7 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
-- Sending pauses when automatic snapshots retain more than 1000 extra paths or 8 MiB beyond
+- Sending pauses when automatic snapshots retain more than 100 extra paths or 8 MiB beyond
   explicit change history and shared content; receiving continues. `musubi sync --outgoing`
   shows the content and retaining operations. Its exact `--approve TOKEN` override sends
   them; `--prune OPERATION...` previews removing selected unpublished operations, with

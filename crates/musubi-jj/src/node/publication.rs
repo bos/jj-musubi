@@ -91,7 +91,7 @@ impl PublicationLimits {
             files: config
                 .get("musubi.publication.max-files")
                 .optional()?
-                .unwrap_or(1_000),
+                .unwrap_or(100),
             bytes: config
                 .get_value_with(
                     "musubi.publication.max-bytes",

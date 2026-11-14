@@ -246,6 +246,41 @@ theorem revalidate_changed_heads (s : State) (captured : List Physical)
       .ok (.preparing, none, none, s.publication) := by
   simp [step, stepCore, phase, bound, changed, Except.map, pure, Except.pure]
 
+/-- Owned probe calls keep the captured plan and every historical origin slot. Their
+unpublished body writes and native context change neither heads nor saved responsibility. -/
+theorem preparationProbe_historical_frame {s t : State} {index : Nat}
+    (success : step s (.preparationProbe index) = .ok t) :
+    t.me = s.me ∧ t.receiptPlan = s.receiptPlan ∧ t.renderPlan = s.renderPlan ∧
+      t.prepared = s.prepared ∧ t.publication = s.publication ∧ t.heads = s.heads ∧
+      t.saved = s.saved := by
+  obtain ⟨next, accepted, rfl⟩ := step_core_success success
+  simp only [stepCore, bind, Except.bind, liftQuery, Except.mapError,
+    throw, throwThe, MonadExceptOf.throw, pure, Except.pure] at accepted
+  all_goals repeat' (split at accepted <;> try simp_all)
+  all_goals subst next
+  all_goals exact ⟨rfl, rfl, rfl, rfl, rfl, rfl, rfl⟩
+
+theorem preparationProbe_captured_records {s t : State} {index : Nat}
+    {prepared : Prepared} {receipt : Receipt}
+    (success : step s (.preparationProbe index) = .ok t)
+    (bound : s.prepared = some prepared) (captured : prepared.inputs.receipt = some receipt) :
+    ∀ record, record ∈ receipt.records → record ∈ s.saved.applied ++ s.saved.custody := by
+  obtain ⟨next, accepted, rfl⟩ := step_core_success success
+  cases held : receipt.records.all ((s.saved.applied ++ s.saved.custody).contains ·) with
+  | true =>
+    intro record member
+    exact List.contains_iff_mem.mp (List.all_eq_true.mp held record member)
+  | false =>
+    simp only [stepCore, bound, captured, held, bind, Except.bind,
+      throw, throwThe, MonadExceptOf.throw, Bool.not_false] at accepted
+    all_goals repeat' (split at accepted <;> try simp_all)
+    all_goals cases accepted
+
+theorem preparationProbe_source_routes {s t : State} {index : Nat}
+    (success : step s (.preparationProbe index) = .ok t) :
+    t.evidence.sourceRoutes = none :=
+  step_invalidates_source_routes success rfl
+
 theorem startRecovery_invalidates (s : State) :
     (step s .startRecovery).map (fun t =>
       (t.renderPlan, t.receiptPlan, t.prepared, t.receipt, t.saved)) =
@@ -433,6 +468,11 @@ theorem construction_step_preserves {s t : State} {action : Action}
     all_goals repeat' (split at accepted <;> try simp_all)
     all_goals subst next
     all_goals simp_all [ConstructionInvariant]
+  | preparationProbe index =>
+    obtain ⟨me, receipt, render, prepared, publication, _, _⟩ :=
+      preparationProbe_historical_frame success
+    simp only [ConstructionInvariant, me, receipt, render, prepared, publication]
+    exact ⟨receiptOrigin, renderOrigin, preparedOrigin, refreshOrigin⟩
   | receive _ | prepare _ _ | write _ | helperHeads _ =>
     simp [constructedAction] at admitted
   | _ =>

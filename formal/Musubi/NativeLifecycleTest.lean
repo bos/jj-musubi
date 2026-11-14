@@ -774,4 +774,67 @@ private def namedRefreshState : State :=
 #guard (step { namedRefreshState with saved := { custody := refreshTaking.records } }
   .refreshCurrentGit).map (·.createdBodies) = .ok 1
 
+private def probeOperand : NativeBody := { id := p 90, parents := [p 0], endTime := 5 }
+private def probeForward : NativeBody := { id := p 91, parents := [p 3, p 90] }
+private def probeReverse : NativeBody := { id := p 92, parents := [p 90, p 3] }
+private def probeEvidence : Evidence :=
+  { descriptionEvidence with native := descriptionEvidence.native ++ [probeOperand] }
+private def forwardProbeFact : PreparationProbeFact :=
+  { reference := "synthetic primitive example, not native evidence", contextBefore := 0,
+    nativeGraph := probeEvidence.native, orderedInputs := [p 3, p 90],
+    written := [probeForward], result := p 91, contextAfter := 1 }
+private def reverseProbeFact : PreparationProbeFact :=
+  { forwardProbeFact with contextBefore := 1,
+    nativeGraph := probeEvidence.native ++ [probeForward], orderedInputs := [p 90, p 3],
+    written := [probeReverse], result := p 92, contextAfter := 2 }
+private def probeState : State :=
+  { refreshState with evidence := probeEvidence, phase := .prepared, heads := [p 3],
+    nativeFacts := { preparationProbes := [forwardProbeFact, reverseProbeFact] },
+    prepared := refreshState.prepared.map fun prepared =>
+      { prepared with rendered := p 90, inputs := { prepared.inputs with heads := [p 3] } } }
+
+-- Probe guards isolate action semantics. Their synthetic prepared slot is not a supplied
+-- construction certificate; the generic historical-origin theorem derives that separately.
+#guard preparationProbeInputs probeEvidence [p 3] (p 90) 0 = .ok [p 3, p 90]
+#guard preparationProbeInputs probeEvidence [p 3] (p 90) 1 = .ok [p 90, p 3]
+#guard preparationProbeInputs probeEvidence [p 0] (p 90) 0 =
+  .error (.nativeFact "no preparation merge probe at this boundary")
+#guard preparationProbeInputs { probeEvidence with native :=
+  probeEvidence.native.map fun body => { body with endTime := 0 } } [p 3] (p 90) 0 =
+    .ok [p 3, p 90]
+#guard (run probeState [.preparationProbe 0, .preparationProbe 1]).map (fun s =>
+  (s.heads, s.evidence.native, s.evidence.identities, s.createdBodies, s.allocatedLabels,
+    s.createdCanonicals, s.evidence.repositoryContext, s.evidence.sourceRoutes)) =
+      .ok ([p 3], probeEvidence.native ++ [probeForward, probeReverse], probeEvidence.identities,
+        2, 0, 0, 2, none)
+#guard (run probeState [.preparationProbe 0, .preparationProbe 1]).map
+  (fun s => (s.prepared, s.saved, s.publication)) =
+    .ok (probeState.prepared, probeState.saved, probeState.publication)
+#guard (run probeState [.preparationProbe 0, .preparationProbe 1]).map
+  (fun s => classifyIdentity s.evidence 30 (p 91)) =
+    .ok (.ok (.unresolved .missingFingerprint))
+#guard (run probeState [.preparationProbe 0, .preparationProbe 1]).map
+  (fun s => encodeNative s.evidence {} probeForward) = .ok (.ok probeForward)
+#guard (constructPreparationProbe { probeEvidence with repositoryContext := 99 }
+  probeState.nativeFacts [p 3] (p 90) 0) =
+    .error (.nativeFact "independent preparation probe observation")
+#guard (constructPreparationProbe { probeEvidence with native :=
+  probeEvidence.native.filter (fun body => body.id != p 4) }
+  probeState.nativeFacts [p 3] (p 90) 0) =
+    .error (.nativeFact "independent preparation probe observation")
+#guard (constructPreparationProbe probeEvidence { preparationProbes :=
+  [{ forwardProbeFact with orderedInputs := [p 90, p 3] }] } [p 3] (p 90) 0) =
+    .error (.nativeFact "independent preparation probe observation")
+#guard step probeState (.preparationProbe 1) =
+  .error (.evidence (.nativeFact "independent preparation probe observation"))
+
+-- Empty captured receipt responsibility is vacuous in C. A named receipt is still checked
+-- after commitRender, even if the live receipt slot has since disappeared.
+private def namedProbeState : State :=
+  { probeState with receipt := none, prepared := probeState.prepared.map fun prepared =>
+    { prepared with inputs := { prepared.inputs with receipt := some taking } } }
+#guard step namedProbeState (.preparationProbe 0) = .error .custody
+#guard (step { namedProbeState with saved := { custody := taking.records } }
+  (.preparationProbe 0)).map (·.createdBodies) = .ok 1
+
 end Musubi.NativeLifecycle.Test

@@ -1047,6 +1047,13 @@ Constructing the full native event projection remains open. Labels for an unknow
 ancestry are ghost structural exposure, with availability still false until bytes or
 realizations arrive; receipt of a head alone does not supply its body.
 
+The native lifecycle B certificate covers six projected actions through current-Git refresh.
+It omits preparation's unpublished merge-probe writes, so it is not a complete physical trace
+or native simulation. The source-staged C extension models those writes explicitly, preserving
+the complete corpus and matching independently replayed native primitives against operands
+computed from the captured heads and rendered result. C's existing diagnostic established the
+two omitted bodies, not a successful certificate for that extension or for the whole call.
+
 Physical heads can alias a single canonical body too. The native
 `interrupted_git_export_can_leave_aliased_operation_heads` case makes a real export
 replacement and leaves both physical operations as heads through the shipping head store.

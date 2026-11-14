@@ -8,6 +8,9 @@ use jj_lib::content_hash::blake2b_hash;
 use jj_lib::op_store::{RefTarget, RemoteRefState};
 use serde_json::json;
 
+#[path = "native_preparation_probe_replay.rs"]
+mod preparation_probe_replay;
+
 fn bounded_native_command(repo: &TestRepo, args: &[&str]) -> Value {
     use std::process::Stdio;
     use std::time::{Duration, Instant};
@@ -61,11 +64,13 @@ fn interleaving_request(
     after: Value,
     target: Value,
     abandoned: &LocalOp,
+    probes: Vec<Value>,
 ) -> Value {
     let mut result = request("retry", me, before, after, Value::Null, target);
     result["prepared"] = prepared;
     result["postNative"] = post_native;
     result["abandoned"] = json!(abandoned.0.hex());
+    result["preparationProbeFacts"] = json!(probes);
     let snapshots = ["before", "prepared", "postNative", "after"];
     let ids = |kind: &str| {
         snapshots
@@ -782,6 +787,7 @@ fn second_name_publication_matches_lifecycle_oracle() {
 
 fn interleaving_snapshot(node: &NodeRepo, repo: &TestRepo) -> Value {
     let mut result = raw_capture(node, repo, &capture(node));
+    result["nativeContext"] = preparation_probe_replay::context(&node.loader, repo);
     // The model still labels its selected-ref projection explicitly. Keep the complete
     // physical Git directory separately, including HEAD/refs/index, as comparison evidence.
     result["physicalGitBytes"] = physical_git_bytes(repo);
@@ -799,12 +805,20 @@ fn interleaving_snapshot(node: &NodeRepo, repo: &TestRepo) -> Value {
 
 #[test]
 fn native_abandon_between_preparation_and_reread_retries() {
-    use super::super::super::native_contract::ObservePreparation;
+    use super::super::super::native_contract::{ObservePreparation, ObserveProbes};
 
-    let mut fx = Fixture::new();
-    fx.node.advance(&fx.incoming).unwrap();
+    let Fixture {
+        _env: environment,
+        repo,
+        mut node,
+        incoming,
+        child,
+        ..
+    } = Fixture::new();
+    let env = Arc::new(environment);
+    node.advance(&incoming).unwrap();
     let parent_command = bounded_native_command(
-        &fx.repo,
+        &repo,
         &[
             "--ignore-working-copy",
             "bookmark",
@@ -815,12 +829,12 @@ fn native_abandon_between_preparation_and_reread_retries() {
         ],
     );
     assert_eq!(parent_command["success"], true, "{parent_command}");
-    let mut heads = fx.node.local_heads().unwrap();
+    let mut heads = node.local_heads().unwrap();
     assert_eq!(heads.len(), 1);
     let abandoned = heads.pop().unwrap();
-    assert_eq!(raw(&fx.node, &abandoned).0.parents.len(), 1);
+    assert_eq!(raw(&node, &abandoned).0.parents.len(), 1);
     let leaf_command = bounded_native_command(
-        &fx.repo,
+        &repo,
         &[
             "--ignore-working-copy",
             "bookmark",
@@ -833,15 +847,15 @@ fn native_abandon_between_preparation_and_reread_retries() {
     assert_eq!(leaf_command["success"], true, "{leaf_command}");
     // Actor prelude authenticates the authored operations before the observed call.
     // The callback below never canonicalizes the command's newly reparented head.
-    head(&mut fx.node);
-    fx.node.settle().unwrap();
-    let before = interleaving_snapshot(&fx.node, &fx.repo);
-    assert!(capture(&fx.node).receipt.is_none());
+    head(&mut node);
+    node.settle().unwrap();
+    let before = interleaving_snapshot(&node, &repo);
+    assert!(capture(&node).receipt.is_none());
     assert_eq!(before["heads"].as_array().unwrap().len(), 1);
     assert_ne!(before["heads"][0], abandoned.0.hex());
     assert_eq!(
         raw(
-            &fx.node,
+            &node,
             &LocalOp(OperationId::try_from_hex(before["heads"][0].as_str().unwrap()).unwrap())
         )
         .0
@@ -856,7 +870,33 @@ fn native_abandon_between_preparation_and_reread_retries() {
     let events = Arc::new(Mutex::new(Vec::new()));
     let seen = events.clone();
     let _events = Observe::new(move |event| seen.lock().unwrap().push(event));
-    let command = fx.repo.another_copy(fx.repo.path());
+    let probes = Arc::new(Mutex::new(Vec::<preparation_probe_replay::Capture>::new()));
+    let captured_probes = probes.clone();
+    let probe_env = env.clone();
+    let probe_repo = repo.another_copy(repo.path());
+    let prepared_fired = fired.clone();
+    let _probes = ObserveProbes::new(move |node, inputs, outcome| {
+        if prepared_fired.load(Ordering::SeqCst) {
+            return;
+        }
+        let mut captures = captured_probes.lock().unwrap();
+        match outcome {
+            None => captures.push(preparation_probe_replay::before(
+                node,
+                &probe_repo,
+                &probe_env,
+                inputs,
+            )),
+            Some(outcome) => preparation_probe_replay::after(
+                captures.last_mut().unwrap(),
+                node,
+                &probe_repo,
+                inputs,
+                outcome,
+            ),
+        }
+    });
+    let command = repo.another_copy(repo.path());
     let snapshots = observations.clone();
     let result = command_result.clone();
     let after_command = post_native.clone();
@@ -884,9 +924,9 @@ fn native_abandon_between_preparation_and_reread_retries() {
             *after_command.lock().unwrap() = Some(interleaving_snapshot(node, &command));
         }
     });
-    let _stores = record_stores(&mut fx.node);
-    let outcome = fx.node.advance(&fx.child);
-    let after = interleaving_snapshot(&fx.node, &fx.repo);
+    let _stores = record_stores(&mut node);
+    let outcome = node.advance(&child);
+    let after = interleaving_snapshot(&node, &repo);
     assert!(
         fired.load(Ordering::SeqCst),
         "actual caller never reached the pre-read boundary: {outcome:?}, before={before}, after={after}"
@@ -894,15 +934,28 @@ fn native_abandon_between_preparation_and_reread_retries() {
     let prepared = observations.lock().unwrap().clone();
     let command = command_result.lock().unwrap().clone().unwrap();
     let post_native = post_native.lock().unwrap().clone().unwrap();
+    let facts = probes
+        .lock()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .map(|(index, captured)| preparation_probe_replay::replay(captured, index))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        facts.len(),
+        2,
+        "C first preparation must authenticate both native probe calls"
+    );
     let events = events.lock().unwrap();
     let mut request = interleaving_request(
-        fx.node.machine().key(),
+        node.machine().key(),
         before,
         prepared[0]["snapshot"].clone(),
         post_native,
         after,
-        json!(fx.child.0.hex()),
+        json!(child.0.hex()),
         &abandoned,
+        facts,
     );
     request["observed"] = json!({
         "preparations": prepared,
@@ -935,7 +988,7 @@ fn native_abandon_between_preparation_and_reread_retries() {
     );
     assert_eq!(
         request["observed"]["preparations"][0]["canonicals"],
-        json!([fx.child.0.hex()])
+        json!([child.0.hex()])
     );
     assert_eq!(
         request["observed"]["preparations"][0]["realized"]
@@ -946,10 +999,10 @@ fn native_abandon_between_preparation_and_reread_retries() {
     );
     let local =
         |value: &Value| LocalOp(OperationId::try_from_hex(value.as_str().unwrap()).unwrap());
-    let (old, old_view) = raw(&fx.node, &local(&request["prepared"]["heads"][0]));
-    let (new, new_view) = raw(&fx.node, &local(&request["postNative"]["heads"][0]));
+    let (old, old_view) = raw(&node, &local(&request["prepared"]["heads"][0]));
+    let (new, new_view) = raw(&node, &local(&request["postNative"]["heads"][0]));
     let mut expected = old;
-    expected.parents = raw(&fx.node, &abandoned).0.parents;
+    expected.parents = raw(&node, &abandoned).0.parents;
     assert_eq!(
         new, expected,
         "pinned native reparenting changes only the ordered parents"
@@ -1023,6 +1076,8 @@ fn native_abandon_between_preparation_and_reread_retries() {
     assert_eq!(reply["constructionPrepared"], false);
     assert_eq!(reply["historicalPreparedAssociation"], true);
     assert_eq!(reply["nativeIdentityRowsSupplied"], 0);
+    assert_eq!(reply["ownedProbeCalls"], 2);
+    assert_eq!(reply["preparedNativeCorpusExact"], true);
     assert_eq!(reply["nativeAliasUnresolved"], true);
     assert_eq!(reply["sourceRoutesInvalidated"], true);
     assert_eq!(

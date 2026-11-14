@@ -62,6 +62,8 @@ def NamedWriteCustody (s : State) : Action → Prop
       ∀ plan, s.receiptPlan = some plan → responsible s plan.computed.records
   | .writeRender _ => ∀ plan receipt, s.renderPlan = some plan →
       plan.receipt = some receipt → responsible s receipt.records
+  | .preparationProbe _ => ∀ prepared receipt, s.prepared = some prepared →
+      prepared.inputs.receipt = some receipt → responsible s receipt.records
   | .refreshCurrentGit => ∀ prepared plan git build receipt,
       s.prepared = some prepared → s.publication = some plan → s.git = some git →
       git.useCurrent = true →
@@ -76,6 +78,8 @@ theorem step_named_custody {s t : State} {action : Action}
   · intro plan bound; exact writeReceiptCanonical_records success bound
   · intro plan bound; exact writeReceiptNative_records success bound
   · intro plan receipt bound captured; exact writeRender_captured_records success bound captured
+  · intro prepared receipt bound captured
+    exact preparationProbe_captured_records success bound captured
   · intro prepared plan git build receipt bound publication choice uses computed writes captured
     exact refreshCurrentGit_records success bound publication choice uses computed writes captured
 

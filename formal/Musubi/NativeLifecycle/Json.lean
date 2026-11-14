@@ -20,7 +20,7 @@ deriving instance ToJson for SourceRoutes, DescriptionExclusion
 deriving instance ToJson for BaseObservation, Evidence, Record, Receipt, Intent, RetainedExport
 deriving instance ToJson for Persistent, ReceiptRequest, ReceiptBuild, Role, CandidateSet, Candidates
 deriving instance ToJson for SourceChoice, Suffix, ParentSelection, OwnSource, OwnSelection, GitChoice
-deriving instance ToJson for RenderNode, RenderBuild, CurrentGitBuild
+deriving instance ToJson for RenderNode, RenderBuild, CurrentGitBuild, PreparationProbeBuild
 
 def get (j : Json) (key : String) : Except String Json := j.getObjVal? key
 def str (j : Json) (key : String) : Except String String := j.getObjValAs? String key
@@ -85,7 +85,16 @@ def context (request : Json) : Except String Context := do
     else pure [before, after]
   let all ← snapshots.mapM fun snapshot => do
     return (← rows snapshot "canonical") ++ (← rows snapshot "native")
-  let all := all.flatten
+  let probes ← if interleaved then rows request "preparationProbeFacts" else pure []
+  let probeBodies ← probes.mapM fun probe => do
+    return (← rows probe "nativeGraph") ++ (← rows probe "written")
+  let all := all.flatten ++ probeBodies.flatten
+  let nativeContexts ← if interleaved then do
+      let snapshots ← snapshots.mapM (fun snapshot => get snapshot "nativeContext")
+      let calls ← probes.mapM fun probe => do
+        return [← get probe "contextBefore", ← get probe "contextAfter"]
+      pure (snapshots ++ calls.flatten)
+    else pure []
   let expected ← if interleaved then do
       let retained ← snapshots.mapM (fun snapshot => rows snapshot "expected")
       pure retained.flatten
@@ -96,7 +105,7 @@ def context (request : Json) : Except String Context := do
     original := ← sortedPool ids "original", commits := ← sortedPool ids "commits",
     digests := ← sortedPool ids "digests",
     contents := unique ((← all.mapM content) ++ expected.map (fun row => row.compress) ++
-      physical.map (fun row => row.compress)),
+      physical.map (fun row => row.compress) ++ nativeContexts.map (fun row => row.compress)),
     fields := unique (← all.mapM gitFields) }
 
 def copy (key : String) : Except String Copy :=
@@ -526,7 +535,10 @@ def decodeEvidence (ctx : Context) (raw : Json) : Except String Evidence := do
   let evidence : Evidence := {
     root := ⟨← label ctx.canonical (← str raw "canonicalRoot")⟩,
     physicalRoot := ⟨← label ctx.physical (← str raw "physicalRoot")⟩,
-    canonical, native, joinInputs, nativeFingerprints, originalFingerprints, joinFingerprints }
+    canonical, native, joinInputs, nativeFingerprints, originalFingerprints, joinFingerprints,
+    repositoryContext := ← match (get raw "nativeContext").toOption with
+      | some context => label ctx.contents context.compress
+      | none => pure 0 }
   let fuel := native.length + canonical.length + 1
   let _ ← native.mapM fun body => query (nativeClosure evidence fuel body.id)
   let _ ← canonical.mapM fun body => query (canonicalClosure evidence fuel body.id)
@@ -599,6 +611,19 @@ def observedHeadReparent (before after : Evidence) (oldHeads newHeads : List Phy
   if added ≠ [replacement] then throw "C must retain exactly one independently observed new body"
   return { native := [replacement], heads := newHeads, physicalGit }
 
+/-- These rows come only from the isolated native primitive replay. The constructor matches
+the full graph/context and independently computed operand order, never a validity Boolean. -/
+def decodePreparationProbe (ctx : Context) (raw : Json) : Except String PreparationProbeFact := do
+  return {
+    reference := ← str raw "reference",
+    contextBefore := ← label ctx.contents (← get raw "contextBefore").compress,
+    nativeGraph := ← (← rows raw "nativeGraph").mapM (decodeNative ctx),
+    orderedInputs := ← (← strings raw "orderedInputs").mapM fun id => do
+      return Physical.mk (← label ctx.physical id),
+    written := ← (← rows raw "written").mapM (decodeNative ctx),
+    result := ⟨← label ctx.physical (← str raw "result")⟩,
+    contextAfter := ← label ctx.contents (← get raw "contextAfter").compress }
+
 def reply (request : Json) : Except String Json := do
   if (← request.getObjValAs? Nat "schema") ≠ 1 then throw "native lifecycle schema version"
   let ctx ← context request
@@ -616,7 +641,10 @@ def reply (request : Json) : Except String Json := do
   let encodingRaw ← if (← str request "kind") = "retry" then get request "prepared" else pure after
   let observedBodies ← decodeEvidence ctx encodingRaw
   let facts : NativeFacts := { encodings := {
-    canonical := observedBodies.canonical, native := observedBodies.native } }
+    canonical := observedBodies.canonical, native := observedBodies.native },
+    preparationProbes := ← if (← str request "kind") = "retry" then
+      (← rows request "preparationProbeFacts").mapM (decodePreparationProbe ctx)
+      else pure [] }
   match ← str request "kind" with
   | "receipt" =>
     let incoming ← get request "incoming"
@@ -675,7 +703,8 @@ def reply (request : Json) : Except String Json := do
     let target : Canonical := ⟨← label ctx.canonical (← str request "target")⟩
     let build ← query (constructRender e facts me heads none target)
     let setup := [Action.capture, .planRender target] ++
-      (List.range build.nodes.length).map Action.writeRender ++ [.commitRender]
+      (List.range build.nodes.length).map Action.writeRender ++
+      [.commitRender, .preparationProbe 0, .preparationProbe 1]
     let attempted ← (run (rawInitial me e heads saved facts physicalGit) setup).mapError reprStr
     let preparedRaw ← get request "prepared"
     let nativeRaw ← get request "postNative"
@@ -688,7 +717,28 @@ def reply (request : Json) : Except String Json := do
     if !sameSet attempted.heads preparedHeads ||
         !sameSet attempted.evidence.native preparedEvidence.native ||
         !sameSet attempted.evidence.canonical preparedEvidence.canonical then
-      throw "actual prepared corpus differs from independently constructed prefix"
+      return Json.mkObj [("ok", toJson false), ("error", toJson
+        "native lifecycle interpretation gap: actual prepared corpus differs from independently constructed prefix"),
+        ("diagnosticOnly", toJson true), ("computedRenderBuild", toJson build),
+        ("computedHeads", toJson attempted.heads), ("actualPreparedHeads", toJson preparedHeads),
+        ("headsEqual", toJson (sameSet attempted.heads preparedHeads)),
+        ("nativeEqual", toJson (sameSet attempted.evidence.native preparedEvidence.native)),
+        ("canonicalEqual", toJson
+          (sameSet attempted.evidence.canonical preparedEvidence.canonical)),
+        ("computedNativeIds", toJson (attempted.evidence.native.map (·.id))),
+        ("computedCanonicalIds", toJson (attempted.evidence.canonical.map (·.id))),
+        ("actualPreparedNativeIds", toJson (preparedEvidence.native.map (·.id))),
+        ("actualPreparedCanonicalIds", toJson (preparedEvidence.canonical.map (·.id))),
+        ("computedNativeBodies", toJson attempted.evidence.native),
+        ("computedCanonicalBodies", toJson attempted.evidence.canonical),
+        ("actualPreparedNativeBodies", toJson preparedEvidence.native),
+        ("actualPreparedCanonicalBodies", toJson preparedEvidence.canonical),
+        ("actualPreparedRawNative", ← get preparedRaw "native"),
+        ("actualPreparedRawCanonical", ← get preparedRaw "canonical"),
+        ("physicalLabels", toJson ctx.physical), ("canonicalLabels", toJson ctx.canonical),
+        ("originalLabels", toJson ctx.original), ("commitLabels", toJson ctx.commits),
+        ("digestLabels", toJson ctx.digests), ("contentLabels", toJson ctx.contents),
+        ("fieldLabels", toJson ctx.fields)]
     if (← get preparedRaw "physical") != (← get nativeRaw "physical") ||
         (← get preparedRaw "identitySourceState") != (← get nativeRaw "identitySourceState") then
       throw "C head-only command changed observed physical/source state"
@@ -721,6 +771,8 @@ def reply (request : Json) : Except String Json := do
       ("historicalPreparedAssociation", toJson association),
       ("sourceRoutesInvalidated", toJson final.evidence.sourceRoutes.isNone),
       ("nativeIdentityRowsSupplied", toJson observation.identities.length),
+      ("ownedProbeCalls", toJson facts.preparationProbes.length),
+      ("preparedNativeCorpusExact", toJson true),
       ("nativeAliasUnresolved", toJson unresolved),
       ("constructedActions", toJson (actions.all constructedAction)),
       ("sameRunConstruction", toJson true), ("sameRunCustody", toJson true),

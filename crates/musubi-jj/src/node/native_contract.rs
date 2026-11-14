@@ -134,6 +134,56 @@ impl Drop for ObservePreparation {
     }
 }
 
+type ProbeObserver = Arc<
+    dyn Fn(&super::NodeRepo, &[LocalOp], Option<&Result<(LocalOp, usize), String>>) + Send + Sync,
+>;
+
+thread_local! {
+    static PROBE_OBSERVER: RefCell<Option<ProbeObserver>> = const { RefCell::new(None) };
+}
+
+pub(super) fn probe_before(
+    node: &super::NodeRepo,
+    operands: &[jj_lib::operation::Operation],
+) -> Option<Vec<LocalOp>> {
+    let observer = PROBE_OBSERVER.with(|slot| slot.borrow().clone())?;
+    let inputs = operands
+        .iter()
+        .map(|op| LocalOp(op.id().clone()))
+        .collect::<Vec<_>>();
+    observer(node, &inputs, None);
+    Some(inputs)
+}
+
+pub(super) fn probe_after(
+    node: &super::NodeRepo,
+    inputs: &[LocalOp],
+    outcome: &Result<(LocalOp, usize), String>,
+) {
+    if let Some(observer) = PROBE_OBSERVER.with(|slot| slot.borrow().clone()) {
+        observer(node, inputs, Some(outcome));
+    }
+}
+
+pub(super) struct ObserveProbes(Option<ProbeObserver>);
+
+impl ObserveProbes {
+    pub(super) fn new(
+        observer: impl Fn(&super::NodeRepo, &[LocalOp], Option<&Result<(LocalOp, usize), String>>)
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        Self(PROBE_OBSERVER.with(|slot| slot.replace(Some(Arc::new(observer)))))
+    }
+}
+
+impl Drop for ObserveProbes {
+    fn drop(&mut self) {
+        PROBE_OBSERVER.with(|slot| slot.replace(self.0.take()));
+    }
+}
+
 /// Raw receipt state, before a source-role selector consumes it. No chosen counterpart or
 /// prequalified owned map is supplied as an expected answer.
 #[derive(Clone, Debug, PartialEq, Eq)]

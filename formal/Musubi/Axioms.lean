@@ -637,3 +637,6 @@ open Musubi
 #print axioms NativeLifecycle.runs_construction
 #print axioms NativeLifecycle.certifiedConstructionRun
 #print axioms NativeLifecycle.revalidate_changed_heads
+#print axioms NativeLifecycle.preparationProbe_historical_frame
+#print axioms NativeLifecycle.preparationProbe_captured_records
+#print axioms NativeLifecycle.preparationProbe_source_routes

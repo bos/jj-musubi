@@ -1540,11 +1540,21 @@ impl NodeRepo {
         let reversed: Vec<_> = operations.iter().rev().cloned().collect();
         for order in [operations, reversed] {
             catch_jj_panic(|| {
-                self.loader
+                #[cfg(test)]
+                let probe = super::native_contract::probe_before(self, &order);
+                let outcome = self
+                    .loader
                     .merge_operations(order, None, Some("reconcile divergent operations"), [])
-                    .block_on()
-                    .map(|_| ())
-                    .map_err(|err| format!("{err:#}"))
+                    .block_on();
+                #[cfg(test)]
+                if let Some(inputs) = probe {
+                    let observed = outcome
+                        .as_ref()
+                        .map(|(repo, rebased)| (LocalOp(repo.operation().id().clone()), *rebased))
+                        .map_err(|error| format!("{error:#}"));
+                    super::native_contract::probe_after(self, &inputs, &observed);
+                }
+                outcome.map(|_| ()).map_err(|err| format!("{err:#}"))
             })?;
         }
         Ok(())

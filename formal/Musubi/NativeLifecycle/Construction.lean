@@ -427,7 +427,8 @@ def preparationProbeInputs (e : Evidence) (heads : List Physical) (rendered : Ph
   | _ => throw (.nativeFact "preparation probe index")
 
 def constructPreparationProbe (e : Evidence) (facts : NativeFacts)
-    (heads : List Physical) (rendered : Physical) (index : Nat) : Query PreparationProbeBuild := do
+    (heads : List Physical) (rendered : Physical) (index : Nat) :
+    Query PreparationProbeBuild := do
   let ordered ← preparationProbeInputs e heads rendered index
   let matching := facts.preparationProbes.filter fun fact =>
     fact.contextBefore == e.repositoryContext && sameSet fact.nativeGraph e.native &&

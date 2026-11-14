@@ -459,8 +459,10 @@ translation entry, and replaces `Publication.incoming` with the constructed phys
 changed write checks complete responsibility for the preparation's captured receipt. An equal
 field record is reused, including an unmarked original, without inventing a write. A later
 merge using current Git requires this installed operand; a missing action is an incomplete
-model prefix, not a new Rust refusal. B's certificate now ends after this action and before
-native merge/export. Ordered merge-input comparison reads the installed state directly.
+model prefix, not a new Rust refusal. B's projected certificate now ends after this action and
+before native publication merge/export. It omits preparation merge-probe writes, so it does
+not simulate the complete physical prefix. Ordered merge-input comparison reads the installed
+state directly.
 
 Current source observations are framed only for explicitly classified body, translation/cache,
 physical Git, planning and head-store effects. Receipt/record/checkpoint changes, recovery,
@@ -500,8 +502,11 @@ assertions observed different physical input/output IDs at the shipping refresh 
 matched the computed installed operand and forward/preferred translation entries, and checked
 the complete durable/memory snapshot before and after that write against the initial raw
 observation. The changed refresh comparison is nonvacuous. Its certificate contains the exact
-six actions: capture, planRender, one writeRender, commitRender, revalidate, refreshCurrentGit.
-Native merge/export and later effects remain outside it. B's custody component is still
+six projected actions: capture, planRender, one writeRender, commitRender, revalidate,
+refreshCurrentGit. This is a projection, not the complete physical native prefix: preparation
+merge probes can write unpublished native bodies between render and Prepared, and this B
+certificate does not include those writes. Native publication merge/export and later effects
+remain outside it. B's custody component is still
 vacuous. A retains its nonempty five-action receipt/custody prefix; its source observation is
 discarded after custody/checkpoint and receipt changes, not falsely framed as empty.
 
@@ -536,10 +541,11 @@ branches clear the affected slots through the existing transition, including ret
 empty, proves its initial invariant and returns `ConstructionRun` together with the existing
 source-route certificate. No correct-source, correct-receipt, fresh-output or native-refinement
 bundle is supplied. Both existing A/B codecs now consume this certificate for their unchanged
-five-action and six-action prefixes. Their Rust assertions require the construction reply;
+five-action and six-action projections. Their Rust assertions require the construction reply;
 B also compares the committed preparation's association with the independently computed plan.
 A has no committed preparation at its endpoint. Its record custody remains nonempty; B's
-receipt custody remains vacuous. B still ends before native merge/export and later effects.
+receipt custody remains vacuous. B omits preparation merge-probe writes and still ends before
+native publication merge/export and later effects; it is not a complete native simulation.
 
 The new guards exercise valid computed preparation and reject the same rendered result
 paired with a different owner, evidence snapshot, head vector, target or receipt. They also
@@ -654,3 +660,64 @@ The exact request/reply, complete snapshots, actual event order, failed logs and
 fixture recording are preserved externally. A new allocation must represent/authenticate the
 preparation probe effects without inventing positive source identities, then obtain a passing
 C comparison and its meaningful stale-revalidation control. C remains unlanded and incomplete.
+
+### Computed-corpus diagnostic and staged owned preparation probes
+
+A separate diagnostic-only child preserved the exact failed comparison predicate. One
+stateless replay of the archived, unmodified request used the same parse/decode/construct/run
+path and emitted the full computed render and corpus sets. This was re-evaluation, not a dump
+of intermediate arguments from the earlier native run. Computed native bodies numbered 19,
+actual prepared bodies 21; computed-only IDs and same-ID full-shape differences were empty.
+The only actual-only IDs were the two opposite-order probe bodies. The rendered child was
+exact, canonical bodies matched 17/17, and heads matched. The diagnostic took one oracle build
+and one replay; all jobs were observed ended after 3 minutes 8 seconds of its eight-minute
+window. It did not run another native fixture or establish a successful C certificate.
+
+The next source-staged increment adds `preparationProbe` as an adapter-owned action. Its
+constructor derives concurrent operands from the committed preparation's captured heads and
+the independently computed render result. It uses stable timestamp order, then the reverse,
+matching the single-rendered-operand shipping branch. Each native fact is keyed by that
+computed vector, the complete native graph and the captured repository context. An absent or
+different fact remains an interpretation gap. No Rust-selected prepared vector, policy bit,
+description filter or post-SUT body shape supplies the expected native result.
+
+Test-only observations surround each actual native primitive before the first Prepared
+boundary. The helper saves the complete pre-call test environment and replays the primitive
+in its own restored copy using a fresh loader and fresh settings from every captured config
+layer. Raw graph observations retain every operation's complete metadata, ordered parents and
+view. Context retains native backend, index, workspace and submodule files, physical Git bytes,
+head IDs, API arguments and fixed operation time. Operation bodies/views are the separate graph
+input; adapter files are retained by C's existing snapshots. Every replay `write_operation`
+call is recorded, including reused IDs and recursive writes. Complete replay input/output
+graphs, context and result must equal the actual primitive observations. Selected prepared
+vectors are comparison data only; the model independently checks the input vector.
+
+This native gate is scoped to C: fixed operation time, zero rebases and no RNG consumption by
+the isolated replay. Fresh replay/control settings detect RNG consumption without touching
+the actual actor's shared RNG. Unsupported scope or a raw comparison mismatch fails evidence
+collection, never changes shipping behavior into a modeled refusal. When dumping evidence,
+the input environment and raw replay/captured comparisons are saved before their assertions.
+No execution has yet established these new gates.
+
+The action installs every recorded native body without changing heads, canonical bodies or
+identity/source rows. Unknown probe bodies remain available to encoding and fallback queries;
+their unresolved identity is not converted into negative evidence. Each owned write checks
+responsibility for every record in the preparation's captured receipt, even after the live
+receipt slot disappears. C has no captured receipt, so this component is explicitly vacuous;
+the model guards also exercise a nonempty captured receipt.
+
+The new historical frame/custody lemmas extend actual step preservation and the same-run
+ConstructionAlong/CustodyAlong certificate. SourceRoutesAlong uses conservative invalidation
+for the new action. No correct-source, native-refinement or intermediate invariant is supplied
+by the caller. C's setup now includes both probe actions before the unchanged exact equality
+of the complete first prepared native/canonical corpus and heads. Its certificate still ends
+at the first changed-head retry. The earlier whole-call native success remains separate trace
+evidence; it does not prove later retry canonicalization or whole-publication safety.
+
+This extension is source-only and unvalidated. It adds fourteen executable model guards and
+three axiom queries. A/B's existing test bodies are retained; their model paths need an affected
+recheck because the shared codec changed. B's six-action certificate remains a projection that
+omits its preparation probe writes, rather than a complete physical trace or native simulation.
+A future allocated validation must check the new model/proofs and native replay gates, then
+obtain a passing C comparison before attempting the stale-revalidation control. No new build,
+native command, oracle replay, debugger or control has run during this source-only stage.

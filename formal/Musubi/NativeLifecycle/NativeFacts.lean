@@ -84,6 +84,20 @@ structure HelperFact where
   physical : Option PhysicalFact := none
 deriving DecidableEq, Repr
 
+/-- One independently replayed unpublished native merge call. The context label retains
+the full caller configuration and backend/index snapshot; the native graph and ordered
+operands are separate exact inputs. Written bodies are the replay's complete write sequence,
+not selected Rust outputs or a description-based subset of the physical corpus. -/
+structure PreparationProbeFact where
+  reference : String
+  contextBefore : Nat
+  nativeGraph : List NativeBody
+  orderedInputs : List Physical
+  written : List NativeBody
+  result : Physical
+  contextAfter : Nat
+deriving DecidableEq, Repr
+
 def orderedNativeInputs (e : Evidence) (heads : List Physical) : Query (List Physical) := do
   let bodies ← heads.mapM e.nativeBody
   return (bodies.mergeSort fun a b =>
@@ -111,6 +125,7 @@ structure NativeFacts where
   encodings : EncodingTable := {}
   fields : List FieldFact := []
   helpers : List HelperFact := []
+  preparationProbes : List PreparationProbeFact := []
 deriving DecidableEq, Repr, Inhabited
 
 end Musubi.NativeLifecycle

@@ -303,6 +303,8 @@ inductive Action where
   | planRender (target : Canonical)
   | writeRender (index : Nat)
   | commitRender
+  /-- One owned unpublished check_mergeable probe, before publication locks/revalidation. -/
+  | preparationProbe (index : Nat)
   | ownHelper (index : Nat)
   /-- Prototype observation-only entry points below are outside constructed preparation. -/
   | receive (receipt : Receipt)
@@ -468,6 +470,18 @@ def stepCore (s : State) : Action → Except StepError State
       rendered := plan.result, suffix := plan.suffix, selections, own,
       reserved := plan.reserved, inputs }
     return { s with prepared := some prepared, renderPlan := none, phase := .prepared }
+  | .preparationProbe index => do
+    if s.phase ≠ .prepared then throw .phase
+    let some prepared := s.prepared | throw .phase
+    if let some receipt := prepared.inputs.receipt then
+      if !receipt.records.all ((s.saved.applied ++ s.saved.custody).contains ·) then
+        throw .custody
+    let build ← liftQuery (constructPreparationProbe s.evidence s.nativeFacts
+      prepared.inputs.heads prepared.rendered index)
+    let (evidence, count, _) ← installNative s.evidence {
+      native := build.written, heads := s.heads, physicalGit := s.physicalGit }
+    return { s with evidence := { evidence with repositoryContext := build.contextAfter },
+      createdBodies := s.createdBodies + count }
   | .ownHelper index => do
     let result ← helperOutcome s index
     return { s with

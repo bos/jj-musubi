@@ -397,6 +397,57 @@ structure CurrentGitBuild where
   identity : IdentityRow
 deriving DecidableEq, Repr
 
+structure PreparationProbeBuild where
+  input : Evidence
+  capturedHeads : List Physical
+  rendered : Physical
+  orderedInputs : List Physical
+  written : List NativeBody
+  result : Physical
+  contextAfter : Nat
+deriving DecidableEq, Repr
+
+/-- The single-rendered-operand branch of shipping check_mergeable/try_merge. Captured H
+and the computed rendered operand determine the concurrent tuple. Timestamp sorting is
+stable over that tuple; the second native call uses its reverse. No Rust-selected vector
+or overlap Boolean supplies the result. -/
+def preparationProbeInputs (e : Evidence) (heads : List Physical) (rendered : Physical)
+    (index : Nat) : Query (List Physical) := do
+  let body ← e.nativeBody rendered
+  let mut concurrent := []
+  for head in heads do
+    if head ≠ rendered && !body.parents.contains head then
+      if !(← nativeAncestor e (e.native.length + e.canonical.length + 1) head rendered) then
+        concurrent := concurrent ++ [head]
+  if concurrent.isEmpty then throw (.nativeFact "no preparation merge probe at this boundary")
+  let ordered ← orderedPublicationInputs e (concurrent ++ [rendered])
+  match index with
+  | 0 => return ordered
+  | 1 => return ordered.reverse
+  | _ => throw (.nativeFact "preparation probe index")
+
+def constructPreparationProbe (e : Evidence) (facts : NativeFacts)
+    (heads : List Physical) (rendered : Physical) (index : Nat) : Query PreparationProbeBuild := do
+  let ordered ← preparationProbeInputs e heads rendered index
+  let matching := facts.preparationProbes.filter fun fact =>
+    fact.contextBefore == e.repositoryContext && sameSet fact.nativeGraph e.native &&
+      decide (fact.orderedInputs = ordered)
+  let [fact] := unique matching | throw (.nativeFact "independent preparation probe observation")
+  if fact.written.isEmpty || !fact.written.any (fun body => body.id == fact.result) then
+    throw (.nativeFact "native probe has no recorded result write")
+  if fact.written.any (fun body => body.marker.isSome) then
+    throw (.nativeFact "marked probe needs a separate native identity law")
+  let mut graph := e
+  for body in fact.written do
+    let _ ← body.parents.mapM graph.nativeBody
+    match graph.native.find? (fun old => old.id == body.id) with
+    | some old => if old ≠ body then throw (.malformed "native probe body conflict")
+    | none => graph := { graph with native := graph.native ++ [body] }
+  let result ← graph.nativeBody fact.result
+  if result.parents ≠ ordered then throw (.nativeFact "native probe ordered result parents")
+  return { input := e, capturedHeads := heads, rendered, orderedInputs := ordered,
+    written := fact.written, result := fact.result, contextAfter := fact.contextAfter }
+
 def CurrentGitBuild.writes (build : CurrentGitBuild) : Bool :=
   build.body.id != build.before.id
 

@@ -416,11 +416,18 @@ A command that finishes on an old operation after `jj op abandon` can make jj re
 again, even though an earlier merge already rebased it. The copies have the same parents and
 contents. This also happens in one jj repository without musubi. Inspect their parents and
 descriptions with `jj log -r '<first> | <second>'`, then compare their contents with
-`jj diff --from <first> --to <second>`. If they agree, keep either and remove the other:
+`jj diff --from <first> --to <second>`.
+
+You can remove an unused leaf copy: no descendants, bookmarks, tags, or working copies use it.
+Inspect its descendants with `jj log -r '<unwanted-commit>::'` and check its references and
+working copies before removing it:
 
 ```sh
 jj abandon <unwanted-commit>
 ```
+
+Leave a copy in place while other work or references use it. `jj abandon` rebases its descendants
+onto its parents and removes its bookmarks; it does not move them to the equivalent copy.
 
 The [known jj limitations](internals/races.md#known-jj-limitations) describe this race.
 

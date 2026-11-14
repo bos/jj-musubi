@@ -9,6 +9,9 @@
 #[path = "native_lifecycle_conformance.rs"]
 mod lifecycle_conformance;
 
+#[path = "native_private_overlap_tests.rs"]
+mod private_overlap;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::PathBuf;

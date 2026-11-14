@@ -957,8 +957,8 @@ and the test checks that:
   this serial case only when an independent jj replay agrees on the complete shared result and
   the exact predecessor relation. Parent ancestry or a preserved merge view alone is insufficient.
   `reference::a_native_serial_merge_can_repeat_a_rebase_after_abandon` demonstrates it in a
-  non-colocated native repository, checks recovery, and still rejects an independent repeat of
-  the first merge, including alongside a certified serial pair.
+  non-colocated native repository and still rejects an independent repeat of the first merge,
+  including alongside a certified serial pair.
 
 Workspace names have a separate logical ledger from the directories used for edits. Native
 merges can restore a name whose directory was renamed or forgotten. The checker certifies a

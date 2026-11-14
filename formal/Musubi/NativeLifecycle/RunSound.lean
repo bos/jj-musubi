@@ -1,7 +1,7 @@
 /-
 The actual executable action list, not a separately chosen abstract run. These results
-derive complete-record responsibility at every constructed body write. Native observation
-simulation and preservation of ConstructionInvariant along this same trace remain distinct.
+derive complete-record responsibility and historical construction policy along that trace.
+Native observation authentication and simulation remain distinct obligations.
 -/
 import Musubi.NativeLifecycle.ConstructionSound
 
@@ -115,9 +115,8 @@ def certifiedRun (initial : State) (actions : List Action) :
   | .ok final => .ok ⟨final, ⟨run_has_trace success,
       runs_named_custody (run_has_trace success), runs_source_routes (run_has_trace success)⟩⟩
 
-/-- This is the remaining same-run policy target, not an assumed precondition of the
-certificate above. Establishing custody along a run does not establish source-policy or
-prepared-origin preservation, nor its simulation by the actual native call. -/
+/-- Planning-state construction policy along the exact executed action list. Native
+authentication/simulation and policy recomputed after external mutations are separate. -/
 inductive ConstructionAlong : State → List Action → State → Prop where
   | nil {s : State} : ConstructionInvariant s → ConstructionAlong s [] s
   | cons {s t u : State} {action : Action} {actions : List Action} :
@@ -127,5 +126,40 @@ inductive ConstructionAlong : State → List Action → State → Prop where
 def ConstructionRun (initial : State) (actions : List Action) (final : State) : Prop :=
   Runs initial actions final ∧ ConstructionAlong initial actions final ∧
     CustodyAlong initial actions final
+
+theorem runs_construction {initial final : State} {actions : List Action}
+    (execution : Runs initial actions final) (admitted : actions.all constructedAction = true)
+    (initialConstruction : ConstructionInvariant initial) :
+    ConstructionAlong initial actions final := by
+  revert admitted initialConstruction
+  induction execution with
+  | nil =>
+    intro _ initialConstruction
+    exact .nil initialConstruction
+  | cons accepted _ ih =>
+    intro admitted initialConstruction
+    simp only [List.all_cons, Bool.and_eq_true] at admitted
+    have next := construction_step_preserves initialConstruction admitted.1 accepted
+    exact .cons initialConstruction accepted (ih admitted.2 next)
+
+/-- The public construction certificate starts from raw observations with every plan slot
+empty. Its initial invariant is proved here, not supplied by the caller. The only program
+restriction is the already declared four raw observation shortcuts. No source/receipt/
+output correctness or native-refinement bundle is accepted as a premise. -/
+def certifiedConstructionRun (me : Copy) (evidence : Evidence) (heads : List Physical)
+    (saved : Persistent) (facts : NativeFacts) (physicalGit : Nat) (actions : List Action) :
+    Except StepError { final : State //
+      ConstructionRun (rawInitial me evidence heads saved facts physicalGit) actions final ∧
+      SourceRoutesAlong (rawInitial me evidence heads saved facts physicalGit) actions final } :=
+  if admitted : actions.all constructedAction = true then
+    match success : run (rawInitial me evidence heads saved facts physicalGit) actions with
+    | .error gap => .error gap
+    | .ok final =>
+      let execution := run_has_trace success
+      .ok ⟨final, ⟨⟨execution,
+        runs_construction execution admitted
+          (rawInitial_construction me evidence heads saved facts physicalGit),
+        runs_named_custody execution⟩, runs_source_routes execution⟩⟩
+  else .error (.evidence (.nativeFact "raw shortcut outside constructed program"))
 
 end Musubi.NativeLifecycle

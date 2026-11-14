@@ -513,3 +513,54 @@ run now saves both requests and model replies directly; no pure replay was neede
 review, coordinator integration checks, full same-run ConstructionAlong preservation and
 native observation/frame simulation remain pending. Adding refresh origin to the invariant
 target is not a proof of that target.
+
+## Same-run construction preservation
+
+The next source increment proves `construction_step_preserves` for every action already
+admitted by `constructedAction`. It retains the four existing prototype exclusions: receive,
+prepare, write and helperHeads. The transition definitions have no new scheduling guard or
+refusal. The step argument uses the preceding invariant as an induction hypothesis; the
+public certificate does not ask its caller for an invariant at any prefix.
+
+`PreparedOrigin` now associates committed preparation with the exact computed render origin's
+owner, raw input evidence, captured head vector, canonical target and receipt, as well as its
+result, suffix and reserved names. Receipt/render origins fix the machine owner rather than
+existentially choosing one. These are source-policy facts computed at the historical planning
+state. External effects may change the current observation while the captured plan remains;
+preservation does not claim that recomputing policy at that later state gives the old answer.
+Refresh provenance continues to name the actual `constructCurrentGit` result. Invalidation
+branches clear the affected slots through the existing transition, including retry/recovery.
+
+`runs_construction` lifts step preservation over the exact successful action list.
+`certifiedConstructionRun` builds the raw initial state itself, with every construction slot
+empty, proves its initial invariant and returns `ConstructionRun` together with the existing
+source-route certificate. No correct-source, correct-receipt, fresh-output or native-refinement
+bundle is supplied. Both existing A/B codecs now consume this certificate for their unchanged
+five-action and six-action prefixes. Their Rust assertions require the construction reply;
+B also compares the committed preparation's association with the independently computed plan.
+A has no committed preparation at its endpoint. Its record custody remains nonempty; B's
+receipt custody remains vacuous. B still ends before native merge/export and later effects.
+
+The new guards exercise valid computed preparation and reject the same rendered result
+paired with a different owner, evidence snapshot, head vector, target or receipt. They also
+exercise historical preparation after an external head change, A's nonempty custody prefix
+and rejection of an existing raw shortcut. Native observation/frame authentication, simulation
+and whole-call safety remain separate open obligations; this increment proves the historical
+construction property only.
+
+The affected proof/codec build and all 166 executable guards passed. Six affected axiom queries
+reported only the expected logical axioms, with no `sorryAx` or native-law axiom. One oracle
+build and the one existing A/B native-target run passed. The saved actual replies require
+`sameRunConstruction` for both prefixes. A contains one canonical and one native write and no
+committed preparation at its endpoint. B contains one render node, requires its committed
+preparation association and retains the nonempty changed refresh comparison. Its receipt
+custody remains vacuous; native merge/export and later effects remain outside the certificate.
+
+The original twenty-minute window began at 20:46:57 UTC on November 14, 2026. All jobs were
+observed ended by 20:52:30, releasing the heavy slot after 5 minutes 33 seconds. The first
+affected check found tactic/injection and publication-projection goals; the second found only
+the placement of a proof-budget option relative to its documentation comment. Routine proof
+script corrections stayed inside the original window, and both failed logs are preserved.
+There was one oracle build, one native-target run, no native retry, no third fixture, no pure
+replay, no full suite and no campaign. Independent review and coordinator integration checks
+remain pending.

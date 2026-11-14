@@ -630,3 +630,9 @@ open Musubi
 #print axioms NativeLifecycle.step_source_routes
 #print axioms NativeLifecycle.step_invalidates_source_routes
 #print axioms NativeLifecycle.runs_source_routes
+#print axioms NativeLifecycle.commitRender_current
+#print axioms NativeLifecycle.commitRender_association
+#print axioms NativeLifecycle.rawInitial_construction
+#print axioms NativeLifecycle.construction_step_preserves
+#print axioms NativeLifecycle.runs_construction
+#print axioms NativeLifecycle.certifiedConstructionRun

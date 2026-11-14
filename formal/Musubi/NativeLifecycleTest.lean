@@ -398,6 +398,37 @@ private def renderFacts : NativeFacts :=
     (fun s => (s.prepared.map (·.rendered), s.createdBodies, s.closedPublication)) =
       .ok (some (p 22), 1, true)
 
+private def constructedRender : List Action :=
+  [.capture, .planRender (c 2), .writeRender 0, .commitRender, .revalidate]
+private def associationChecks : Query (List Bool) := do
+  let origin ← constructRender evidence renderFacts me [p 1] none (c 2)
+  let checked ← (certifiedConstructionRun me evidence [p 1] saved renderFacts 0
+    constructedRender).mapError (fun _ => .malformed "constructed render failed")
+  let some prepared := checked.val.prepared | throw (.malformed "no committed preparation")
+  return [prepared,
+    { prepared with inputs := { prepared.inputs with me := beta } },
+    { prepared with inputs :=
+      { prepared.inputs with evidence := { evidence with native := [] } } },
+    { prepared with inputs := { prepared.inputs with heads := [p 4] } },
+    { prepared with inputs := { prepared.inputs with target := c 1 } },
+    { prepared with inputs := { prepared.inputs with receipt := some receipt } }].map
+      (preparedMatchesOrigin me · origin)
+
+-- Equal result/suffix/reserved alone must not certify a different owner or planning input.
+#guard associationChecks = .ok [true, false, false, false, false, false]
+
+-- Historical preparation survives an actual external effect without adopting its new heads.
+#guard (certifiedConstructionRun me evidence [p 1] saved renderFacts 0
+  (constructedRender ++ [.external [p 4] 7])).map (fun checked =>
+    (checked.val.heads, checked.val.prepared.map (·.inputs.heads))) =
+      .ok ([p 4], some [p 1])
+#guard (certifiedConstructionRun me evidence [p 2] saved receiptFacts 0
+  [.planReceipt request, .saveCustody, .writeReceiptCanonical 0, .writeReceiptNative 0,
+    .commitReceipt observedReceipt]).map (fun checked => checked.val.saved.custody) = .ok [drop]
+#guard (certifiedConstructionRun me evidence [p 1] saved renderFacts 0
+  [.capture, .prepare (c 2) (p 22)]).map (fun checked => checked.val.prepared.isSome) =
+    .error (.evidence (.nativeFact "raw shortcut outside constructed program"))
+
 private def staleWriteBody : NativeBody :=
   { id := p 60, parents := [p 0], marker := some (c 20), presenceStamp := contracted.stamp }
 private def staleWriteStart : State :=

@@ -264,17 +264,30 @@ def constructedAction : Action → Bool
   | .receive _ | .prepare _ _ | .write _ | .helperHeads _ => false
   | _ => true
 
-def ReceiptOrigin (plan : ReceiptBuild) : Prop :=
-  ∃ before facts saved me heads request,
+def ReceiptOrigin (me : Copy) (plan : ReceiptBuild) : Prop :=
+  ∃ before facts saved heads request,
     constructReceipt before facts saved me heads request = .ok plan
 
-def RenderOrigin (plan : RenderBuild) : Prop :=
-  ∃ before facts me heads receipt target,
+def RenderOrigin (me : Copy) (plan : RenderBuild) : Prop :=
+  ∃ before facts heads receipt target,
     constructRender before facts me heads receipt target = .ok plan
+
+/-- The committed preparation retains the exact constructor's owner, input snapshot,
+captured head vector, target and receipt, as well as its result and suffix. These are
+historical planning inputs, not a claim that policy stays current after external effects. -/
+def preparedMatchesOrigin (me : Copy) (prepared : Prepared) (origin : RenderBuild) : Bool :=
+  decide (prepared.inputs.me = me ∧
+    prepared.rendered = origin.result ∧ prepared.suffix = origin.suffix ∧
+    prepared.reserved = origin.reserved ∧ prepared.inputs.evidence = origin.input ∧
+    prepared.inputs.heads = origin.heads ∧ prepared.inputs.target = origin.target ∧
+    prepared.inputs.receipt = origin.receipt)
+
+def PreparedOrigin (me : Copy) (prepared : Prepared) : Prop :=
+  ∃ origin, RenderOrigin me origin ∧ preparedMatchesOrigin me prepared origin = true
 
 theorem planReceipt_origin {s t : State} {request : ReceiptRequest}
     (success : step s (.planReceipt request) = .ok t) :
-    ∃ plan, t.receiptPlan = some plan ∧ ReceiptOrigin plan := by
+    ∃ plan, t.receiptPlan = some plan ∧ ReceiptOrigin s.me plan := by
   obtain ⟨next, accepted, rfl⟩ := step_core_success success
   cases computed : constructReceipt s.evidence s.nativeFacts s.saved s.me s.heads request with
   | error gap =>
@@ -284,8 +297,8 @@ theorem planReceipt_origin {s t : State} {request : ReceiptRequest}
     all_goals subst next
     all_goals simp_all
   | ok plan =>
-    have origin : ReceiptOrigin plan :=
-      ⟨s.evidence, s.nativeFacts, s.saved, s.me, s.heads, request, computed⟩
+    have origin : ReceiptOrigin s.me plan :=
+      ⟨s.evidence, s.nativeFacts, s.saved, s.heads, request, computed⟩
     simp only [stepCore, liftQuery, computed, Except.mapError, bind, Except.bind,
       throw, throwThe, MonadExceptOf.throw, pure, Except.pure] at accepted
     all_goals repeat' (split at accepted <;> try simp_all)
@@ -294,7 +307,7 @@ theorem planReceipt_origin {s t : State} {request : ReceiptRequest}
 
 theorem planRender_origin {s t : State} {target : Canonical}
     (success : step s (.planRender target) = .ok t) :
-    ∀ plan, t.renderPlan = some plan → RenderOrigin plan := by
+    ∀ plan, t.renderPlan = some plan → RenderOrigin s.me plan := by
   obtain ⟨next, accepted, rfl⟩ := step_core_success success
   cases computed : constructRender s.evidence s.nativeFacts s.me s.heads s.receipt target with
   | error gap =>
@@ -304,23 +317,127 @@ theorem planRender_origin {s t : State} {target : Canonical}
     all_goals subst next
     all_goals simp_all
   | ok result =>
-    have origin : RenderOrigin result :=
-      ⟨s.evidence, s.nativeFacts, s.me, s.heads, s.receipt, target, computed⟩
+    have origin : RenderOrigin s.me result :=
+      ⟨s.evidence, s.nativeFacts, s.heads, s.receipt, target, computed⟩
     simp only [stepCore, liftQuery, computed, Except.mapError, bind, Except.bind,
       throw, throwThe, MonadExceptOf.throw, pure, Except.pure] at accepted
     all_goals repeat' (split at accepted <;> try simp_all)
     all_goals subst next
     all_goals simp_all
 
-/-- This records a genuine dependency path, but is not yet a proved invariant: preservation
-must additionally connect committed plans, identity rows and native observation replay.
-Neither this proposition nor arbitrary native laws are accepted as step preconditions. -/
+/-- Construction policy is computed at the recorded planning state. Committed preparation
+must remain associated with that exact owner/input/target/receipt. Current-state policy and
+native observation authentication are distinct obligations, not premises of preservation. -/
 def ConstructionInvariant (s : State) : Prop :=
-  (∀ plan, s.receiptPlan = some plan → ReceiptOrigin plan) ∧
-  (∀ plan, s.renderPlan = some plan → RenderOrigin plan) ∧
-  (∀ plan, s.prepared = some plan →
-    ∃ origin : RenderBuild, RenderOrigin origin ∧ origin.result = plan.rendered ∧
-      origin.suffix = plan.suffix ∧ origin.reserved = plan.reserved) ∧
+  (∀ plan, s.receiptPlan = some plan → ReceiptOrigin s.me plan) ∧
+  (∀ plan, s.renderPlan = some plan → RenderOrigin s.me plan) ∧
+  (∀ plan, s.prepared = some plan → PreparedOrigin s.me plan) ∧
   (∀ plan build, s.publication = some plan → plan.refresh = some build → CurrentGitOrigin build)
+
+theorem commitRender_current {s t : State} {plan : RenderBuild}
+    (success : step s .commitRender = .ok t) (bound : s.renderPlan = some plan) :
+    renderPlanCurrent s plan = true := by
+  obtain ⟨next, accepted, rfl⟩ := step_core_success success
+  cases current : renderPlanCurrent s plan with
+  | true => rfl
+  | false =>
+    simp [stepCore, bound, current, bind, Except.bind, throw, throwThe,
+      MonadExceptOf.throw] at accepted
+
+theorem commitRender_association {s t : State} {origin : RenderBuild}
+    (success : step s .commitRender = .ok t) (bound : s.renderPlan = some origin) :
+    ∀ prepared, t.prepared = some prepared →
+      preparedMatchesOrigin s.me prepared origin = true := by
+  have current := commitRender_current success bound
+  have receipt := renderPlanCurrent_receipt current
+  obtain ⟨next, accepted, rfl⟩ := step_core_success success
+  simp only [stepCore, bound, current, bind, Except.bind, liftQuery, Except.mapError,
+    throw, throwThe, MonadExceptOf.throw, pure, Except.pure] at accepted
+  all_goals repeat' (split at accepted <;> try simp_all)
+  all_goals subst next
+  all_goals intro prepared associated
+  all_goals simp only [Option.some.injEq] at associated
+  all_goals subst prepared
+  all_goals simp [preparedMatchesOrigin]
+
+/-- The raw adapter supplies observations, never an existing plan or a correct-policy
+certificate. Every construction slot starts empty by this executable constructor. -/
+def rawInitial (me : Copy) (evidence : Evidence) (heads : List Physical) (saved : Persistent)
+    (facts : NativeFacts) (physicalGit : Nat) : State :=
+  { me, evidence, heads, saved, nativeFacts := facts, physicalGit }
+
+theorem rawInitial_construction (me : Copy) (evidence : Evidence) (heads : List Physical)
+    (saved : Persistent) (facts : NativeFacts) (physicalGit : Nat) :
+    ConstructionInvariant (rawInitial me evidence heads saved facts physicalGit) := by
+  simp [ConstructionInvariant, rawInitial]
+
+set_option maxHeartbeats 2000000 in
+/-- This is step preservation for the declared constructed sublanguage. No new phase or
+native-call rejection is added: the four existing observation shortcuts stay excluded.
+Origin and policy facts refer to their actual constructor/planning state, including across
+external effects; this does not assert native refinement or policy at the later state. -/
+theorem construction_step_preserves {s t : State} {action : Action}
+    (before : ConstructionInvariant s) (admitted : constructedAction action = true)
+    (success : step s action = .ok t) : ConstructionInvariant t := by
+  rcases before with ⟨receiptOrigin, renderOrigin, preparedOrigin, refreshOrigin⟩
+  cases action with
+  | planReceipt request =>
+    obtain ⟨plan, planned, origin⟩ := planReceipt_origin success
+    obtain ⟨next, accepted, rfl⟩ := step_core_success success
+    clear success
+    simp only [stepCore, bind, Except.bind, liftQuery, Except.mapError,
+      throw, throwThe, MonadExceptOf.throw, pure, Except.pure] at accepted
+    all_goals repeat' (split at accepted <;> try simp_all)
+    all_goals subst next
+    all_goals simp_all [ConstructionInvariant]
+  | planRender target =>
+    have planned := planRender_origin success
+    obtain ⟨next, accepted, rfl⟩ := step_core_success success
+    clear success
+    simp only [stepCore, bind, Except.bind, liftQuery, Except.mapError,
+      throw, throwThe, MonadExceptOf.throw, pure, Except.pure] at accepted
+    all_goals repeat' (split at accepted <;> try simp_all)
+    all_goals subst next
+    all_goals simp_all [ConstructionInvariant]
+  | commitRender =>
+    cases bound : s.renderPlan with
+    | none => simp [step, stepCore, bound, throw, throwThe,
+        MonadExceptOf.throw] at success
+    | some origin =>
+      have computed := renderOrigin origin bound
+      have associated := commitRender_association success bound
+      obtain ⟨next, accepted, rfl⟩ := step_core_success success
+      clear success
+      simp only [stepCore, bound, bind, Except.bind, liftQuery, Except.mapError,
+        throw, throwThe, MonadExceptOf.throw, pure, Except.pure] at accepted
+      all_goals repeat' (split at accepted <;> try simp_all)
+      all_goals subst next
+      all_goals refine ⟨?_, ?_, ?_, ?_⟩
+      all_goals try simp_all
+      all_goals exact ⟨origin, computed, associated⟩
+  | refreshCurrentGit =>
+    have computed := refreshCurrentGit_origin success
+    obtain ⟨next, accepted, rfl⟩ := step_core_success success
+    clear success
+    simp only [stepCore, bind, Except.bind, liftQuery, Except.mapError,
+      throw, throwThe, MonadExceptOf.throw, pure, Except.pure] at accepted
+    all_goals repeat' (split at accepted <;> try simp_all)
+    all_goals subst next
+    all_goals simp_all [ConstructionInvariant]
+  | receive _ | prepare _ _ | write _ | helperHeads _ =>
+    simp [constructedAction] at admitted
+  | _ =>
+    obtain ⟨next, accepted, rfl⟩ := step_core_success success
+    clear success
+    simp only [stepCore, noteExternal, bind, Except.bind, liftQuery, Except.mapError,
+      throw, throwThe, MonadExceptOf.throw, pure, Except.pure] at accepted
+    all_goals repeat' (split at accepted <;> try simp_all)
+    all_goals try simp only [Except.ok.injEq] at accepted
+    all_goals try subst next
+    all_goals simp_all [ConstructionInvariant]
+    all_goals intro plan build bound refreshed
+    all_goals subst plan
+    all_goals simp_all
+    all_goals exact refreshOrigin _ _ rfl refreshed
 
 end Musubi.NativeLifecycle

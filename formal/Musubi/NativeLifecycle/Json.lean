@@ -604,22 +604,24 @@ def reply (request : Json) : Except String Json := do
     let actions := [Action.planReceipt receiptRequest, .saveCustody] ++
       (List.range build.canonicalWrites.length).map Action.writeReceiptCanonical ++
       writeIndices.map Action.writeReceiptNative ++ [.commitReceipt observed]
-    let initial : State := { me, evidence := e, heads, saved, nativeFacts := facts, physicalGit }
-    let checked ← (certifiedRun initial actions).mapError reprStr
+    let checked ← (certifiedConstructionRun me e heads saved facts physicalGit actions).mapError reprStr
     let final := checked.val
     return Json.mkObj [("ok", toJson true), ("computed", toJson build),
       ("custody", toJson final.saved.custody), ("created", toJson final.createdBodies),
       ("constructedActions", toJson (actions.all constructedAction)),
-      ("sameRunCustody", toJson true), ("sameRunSourceRoutes", toJson true)]
+      ("sameRunCustody", toJson true), ("sameRunSourceRoutes", toJson true),
+      ("sameRunConstruction", toJson true), ("constructionPrepared", toJson final.prepared.isSome)]
   | "publication" =>
     let target : Canonical := ⟨← label ctx.canonical (← str request "target")⟩
     let build ← query (constructRender e facts me heads none target)
     let actions := [Action.capture, .planRender target] ++
       (List.range build.nodes.length).map Action.writeRender ++
       [.commitRender, .revalidate, .refreshCurrentGit]
-    let initial : State := { me, evidence := e, heads, saved, nativeFacts := facts, physicalGit }
-    let checked ← (certifiedRun initial actions).mapError reprStr
+    let checked ← (certifiedConstructionRun me e heads saved facts physicalGit actions).mapError reprStr
     let final := checked.val
+    let some prepared := final.prepared | throw "construction certificate lost committed preparation"
+    let association := preparedMatchesOrigin me prepared build
+    if !association then throw "committed preparation differs from computed planning inputs"
     let some git := final.git | throw "publication lacks computed Git policy"
     let some plan := final.publication | throw "publication lacks computed order"
     if !plan.refreshDone then throw "current Git refresh not installed by certified actions"
@@ -632,7 +634,9 @@ def reply (request : Json) : Except String Json := do
       ("preferredIncoming", toJson (lookup final.memo.preferred target)),
       ("gitAdjustedIncoming", toJson adjusted), ("orderedMergeInputs", toJson ordered),
       ("beside", toJson plan.beside), ("constructedActions", toJson (actions.all constructedAction)),
-      ("sameRunCustody", toJson true), ("sameRunSourceRoutes", toJson true)]
+      ("sameRunCustody", toJson true), ("sameRunSourceRoutes", toJson true),
+      ("sameRunConstruction", toJson true), ("constructionPrepared", toJson true),
+      ("preparedAssociation", toJson association)]
   | _ => throw "unknown finite native lifecycle fixture"
 
 end Musubi.NativeLifecycle.Json

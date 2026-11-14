@@ -408,6 +408,8 @@ fn receipt_custody_materialization_matches_lifecycle_oracle() {
     assert_eq!(reply["constructedActions"], true);
     assert_eq!(reply["sameRunCustody"], true);
     assert_eq!(reply["sameRunSourceRoutes"], true);
+    assert_eq!(reply["sameRunConstruction"], true);
+    assert_eq!(reply["constructionPrepared"], false);
     let receipt = after.receipt.as_ref().unwrap();
     assert_eq!(
         reply["computed"]["base"],
@@ -595,6 +597,9 @@ fn second_name_publication_matches_lifecycle_oracle() {
     assert_eq!(reply["constructedActions"], true);
     assert_eq!(reply["sameRunCustody"], true);
     assert_eq!(reply["sameRunSourceRoutes"], true);
+    assert_eq!(reply["sameRunConstruction"], true);
+    assert_eq!(reply["constructionPrepared"], true);
+    assert_eq!(reply["preparedAssociation"], true);
     assert_eq!(reply["refreshWrote"], true);
     let refresh = &request["observedCurrentGit"][0];
     assert_ne!(refresh["input"], refresh["output"]);

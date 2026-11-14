@@ -312,7 +312,6 @@ fn describe(owner: &Owner, id: &OperationId, op: &op_store::Operation) -> String
 struct Log {
     /// Whose its marked operations are.
     owner: Owner,
-    loader: RepoLoader,
     source_root: PathBuf,
     native_replay: Option<(tempfile::TempDir, RepoLoader)>,
     native_merge_views: HashMap<Vec<OperationId>, View>,
@@ -690,6 +689,26 @@ impl Log {
         Ok(())
     }
 
+    /// A Log spans one observation, with no actor commands between its queries. Copy
+    /// that complete source once, before any index-dependent load: even load_at can
+    /// materialize index links. Both scalar ref merges and native replay use this copy;
+    /// a missing operation or index fails here rather than loading in the actor.
+    fn replay_loader(&mut self) -> Result<&RepoLoader, String> {
+        if self.native_replay.is_none() {
+            let dir = musubi_testutil::tempdir();
+            let root = dir.path().join("repo");
+            musubi_testutil::copy_tree(&self.source_root, &root);
+            let loader = RepoLoader::init_from_file_system(
+                &crate::reference::settings(),
+                &root.join(".jj/repo"),
+                &default_backend_factories(),
+            )
+            .map_err(|err| format!("opening the native HEAD reference: {err}"))?;
+            self.native_replay = Some((dir, loader));
+        }
+        Ok(&self.native_replay.as_ref().unwrap().1)
+    }
+
     /// Replay an operation merge in an isolated copy. Merging differing closest bases
     /// uses jj's recursive merge, including its commit index, rather than picking a base.
     /// The copy keeps checker-created operations and randomness out of the tested copy.
@@ -699,19 +718,7 @@ impl Log {
         ws: &str,
     ) -> Result<RefTarget, String> {
         if !self.native_merge_views.contains_key(parents) {
-            if self.native_replay.is_none() {
-                let dir = musubi_testutil::tempdir();
-                let root = dir.path().join("repo");
-                musubi_testutil::copy_tree(&self.source_root, &root);
-                let loader = RepoLoader::init_from_file_system(
-                    &crate::reference::settings(),
-                    &root.join(".jj/repo"),
-                    &default_backend_factories(),
-                )
-                .map_err(|err| format!("opening the native HEAD reference: {err}"))?;
-                self.native_replay = Some((dir, loader));
-            }
-            let loader = &self.native_replay.as_ref().unwrap().1;
+            let loader = self.replay_loader()?;
             let operations = parents
                 .iter()
                 .map(|id| block_on(loader.load_operation(id)))
@@ -791,8 +798,9 @@ impl Log {
         right: &RefTarget,
     ) -> RefTarget {
         if !self.repos.contains_key(at) {
-            let op = block_on(self.loader.load_operation(at)).unwrap();
-            let repo = block_on(self.loader.load_at(&op)).unwrap();
+            let loader = self.replay_loader().unwrap();
+            let op = block_on(loader.load_operation(at)).unwrap();
+            let repo = block_on(loader.load_at(&op)).unwrap();
             self.repos.insert(at.clone(), repo);
         }
         block_on(merge_ref_targets(self.repos[at].index(), left, base, right)).unwrap()
@@ -835,371 +843,373 @@ impl Log {
 fn physical_head_writers_are_distinct_from_merge_record_terms() {
     use crate::world::{Naming, Setup};
 
-    let world = World::new(Setup {
-        nodes: 3,
-        naming: Naming::Default,
-        prejoin: false,
-        secondary: false,
-    });
-    let loader = world.fx.hive.members[0].adapter.repo().loader().clone();
-    let store = loader.op_store().clone();
-    let root = store.root_operation_id().clone();
-    let native = OperationId::try_from_hex(world.latest_op_head(0)).unwrap();
-    let template = block_on(store.read_operation(&native)).unwrap();
-    let base_view = block_on(store.read_view(&template.view_id)).unwrap();
-    let mut commits: Vec<_> = base_view.wc_commit_ids.values().cloned().collect();
-    commits.sort();
-    commits.dedup();
-    assert!(commits.len() >= 3);
-    let [a, x, c] = [0, 1, 2].map(|i| commits[i].clone());
-    let target = |id: &CommitId| RefTarget::normal(id.clone());
-    let make = |description: &str, record: RefTarget, parents: Vec<OperationId>, writer: bool| {
-        let mut op = template.clone();
-        op.metadata.attributes.clear();
-        op.metadata.workspace_name = writer.then(|| WorkspaceName::DEFAULT.to_owned());
-        op.metadata.description = description.to_owned();
-        op.metadata.time.end.timestamp.0 += 1000;
-        let mut view = base_view.clone();
-        view.git_heads
-            .insert(WorkspaceName::DEFAULT.to_owned(), record);
-        op.view_id = block_on(store.write_view(&view)).unwrap();
-        op.parents = parents;
-        block_on(store.write_operation(&op)).unwrap()
-    };
-    // Native writers can be imports after explicit HEAD moves. A merge changes only the
-    // record. jj's real ref merge below checks the cancellation counterexample.
-    let wrote_x = make("import git head: X", target(&x), vec![root.clone()], true);
-    let wrote_a = make(
-        "import git head: A",
-        target(&a),
-        vec![wrote_x.clone()],
-        true,
-    );
-    let wrote_c = make("import git head: C", target(&c), vec![wrote_x], true);
-    let conflict =
-        RefTarget::from_removes_adds([Some(x.clone())], [Some(a.clone()), Some(c.clone())]);
-    let base = make(
-        "reconcile divergent operations",
-        conflict.clone(),
-        vec![wrote_a.clone(), wrote_c.clone()],
-        false,
-    );
-    let a_again = make(
-        "import git head: A again",
-        target(&a),
-        vec![base.clone()],
-        true,
-    );
-    let c_again = make("import git head: C again", target(&c), vec![base], true);
-    let synthesized = make(
-        "reconcile divergent operations",
-        target(&x),
-        vec![a_again.clone(), c_again.clone()],
-        false,
-    );
-    let a_later = make(
-        "import git head: A later",
-        target(&a),
-        vec![wrote_c.clone()],
-        true,
-    );
-    let nested =
-        RefTarget::from_removes_adds([Some(c.clone())], [Some(x.clone()), Some(a.clone())]);
-    let final_merge = make(
-        "reconcile divergent operations",
-        nested,
-        vec![synthesized.clone(), a_later],
-        false,
-    );
-    let inherited = make(
-        "describe commit without updating the working copy",
-        target(&x),
-        vec![synthesized.clone()],
-        true,
-    );
-    let wrote_after = make(
-        "reset git head after merge",
-        target(&x),
-        vec![final_merge.clone()],
-        true,
-    );
-    let other_base = make(
-        "independent reconciliation",
-        RefTarget::from_removes_adds([Some(x.clone())], [Some(c.clone()), Some(a.clone())]),
-        vec![wrote_c, wrote_a],
-        false,
-    );
-    let other_c = make(
-        "import git head: C on other base",
-        target(&c),
-        vec![other_base],
-        true,
-    );
-    let criss_cross = make(
-        "criss-cross reconciliation",
-        target(&x),
-        vec![a_again.clone(), other_c.clone()],
-        false,
-    );
-    let corrupt_criss_cross = make(
-        "invalid criss-cross record",
-        RefTarget::absent(),
-        vec![a_again, other_c],
-        false,
-    );
-    // A workspace deletion wins over an unchanged binding on the other branch. jj
-    // prunes its HEAD record too, despite that other branch being its only HEAD writer.
-    let cleanup_base = make(
-        "HEAD cleanup base",
-        RefTarget::absent(),
-        vec![root.clone()],
-        false,
-    );
-    let deleted = make(
-        "forget default",
-        RefTarget::absent(),
-        vec![cleanup_base.clone()],
-        true,
-    );
-    let mut deleted_op = block_on(store.read_operation(&deleted)).unwrap();
-    let mut deleted_view = block_on(store.read_view(&deleted_op.view_id)).unwrap();
-    deleted_view.wc_commit_ids.remove(WorkspaceName::DEFAULT);
-    deleted_op.view_id = block_on(store.write_view(&deleted_view)).unwrap();
-    let deleted = block_on(store.write_operation(&deleted_op)).unwrap();
-    let written = make(
-        "import git head: cleanup C",
-        target(&c),
-        vec![cleanup_base],
-        true,
-    );
-    let (cleanup, _) = block_on(loader.merge_operations(
-        vec![
-            block_on(loader.load_operation(&written)).unwrap(),
-            block_on(loader.load_operation(&deleted)).unwrap(),
-        ],
-        None,
-        Some("native workspace HEAD cleanup"),
-        [],
-    ))
-    .unwrap();
-    assert!(head(cleanup.view().store_view(), "default").is_absent());
-    assert!(
-        !cleanup
-            .view()
-            .store_view()
-            .wc_commit_ids
-            .contains_key(WorkspaceName::DEFAULT)
-    );
-    let cleanup = cleanup.operation().id().clone();
-    let mut wrong_cleanup = block_on(store.read_operation(&cleanup)).unwrap();
-    wrong_cleanup.metadata.description = "wrong native cleanup record".to_owned();
-    let mut wrong_view = block_on(store.read_view(&wrong_cleanup.view_id)).unwrap();
-    wrong_view
-        .git_heads
-        .insert(WorkspaceName::DEFAULT.to_owned(), target(&c));
-    wrong_cleanup.view_id = block_on(store.write_view(&wrong_view)).unwrap();
-    let wrong_cleanup = block_on(store.write_operation(&wrong_cleanup)).unwrap();
-    // A real merge of three sibling imports also needs full replay: its conflicted
-    // record is none of its parents' records, and the scalar shortcut is binary.
-    let multi_base = make(
-        "multi-parent HEAD base",
-        RefTarget::absent(),
-        vec![root.clone()],
-        false,
-    );
-    let multi_parents: Vec<_> = [&a, &c, &x]
-        .iter()
-        .enumerate()
-        .map(|(i, id)| {
-            make(
-                &format!("import git head: multi {i}"),
-                target(id),
-                vec![multi_base.clone()],
-                true,
-            )
-        })
-        .collect();
-    let (multi, _) = block_on(
-        loader.merge_operations(
-            multi_parents
-                .iter()
-                .map(|id| block_on(loader.load_operation(id)).unwrap())
-                .collect(),
+    fn run(observe: bool) -> (Vec<jj_lib::backend::ChangeId>, String) {
+        let world = World::new(Setup {
+            nodes: 3,
+            naming: Naming::Default,
+            prejoin: false,
+            secondary: false,
+        });
+        let loader = world.fx.hive.members[0].adapter.repo().loader().clone();
+        let store = loader.op_store().clone();
+        let root = store.root_operation_id().clone();
+        let native = OperationId::try_from_hex(world.latest_op_head(0)).unwrap();
+        let template = block_on(store.read_operation(&native)).unwrap();
+        let base_view = block_on(store.read_view(&template.view_id)).unwrap();
+        let mut commits: Vec<_> = base_view.wc_commit_ids.values().cloned().collect();
+        commits.sort();
+        commits.dedup();
+        assert!(commits.len() >= 3);
+        let [a, x, c] = [0, 1, 2].map(|i| commits[i].clone());
+        let target = |id: &CommitId| RefTarget::normal(id.clone());
+        let make =
+            |description: &str, record: RefTarget, parents: Vec<OperationId>, writer: bool| {
+                let mut op = template.clone();
+                op.metadata.attributes.clear();
+                op.metadata.workspace_name = writer.then(|| WorkspaceName::DEFAULT.to_owned());
+                op.metadata.description = description.to_owned();
+                op.metadata.time.end.timestamp.0 += 1000;
+                let mut view = base_view.clone();
+                view.git_heads
+                    .insert(WorkspaceName::DEFAULT.to_owned(), record);
+                op.view_id = block_on(store.write_view(&view)).unwrap();
+                op.parents = parents;
+                block_on(store.write_operation(&op)).unwrap()
+            };
+        // Native writers can be imports after explicit HEAD moves. A merge changes only the
+        // record. jj's real ref merge below checks the cancellation counterexample.
+        let wrote_x = make("import git head: X", target(&x), vec![root.clone()], true);
+        let wrote_a = make(
+            "import git head: A",
+            target(&a),
+            vec![wrote_x.clone()],
+            true,
+        );
+        let wrote_c = make("import git head: C", target(&c), vec![wrote_x], true);
+        let conflict =
+            RefTarget::from_removes_adds([Some(x.clone())], [Some(a.clone()), Some(c.clone())]);
+        let base = make(
+            "reconcile divergent operations",
+            conflict.clone(),
+            vec![wrote_a.clone(), wrote_c.clone()],
+            false,
+        );
+        let a_again = make(
+            "import git head: A again",
+            target(&a),
+            vec![base.clone()],
+            true,
+        );
+        let c_again = make("import git head: C again", target(&c), vec![base], true);
+        let synthesized = make(
+            "reconcile divergent operations",
+            target(&x),
+            vec![a_again.clone(), c_again.clone()],
+            false,
+        );
+        let a_later = make(
+            "import git head: A later",
+            target(&a),
+            vec![wrote_c.clone()],
+            true,
+        );
+        let nested =
+            RefTarget::from_removes_adds([Some(c.clone())], [Some(x.clone()), Some(a.clone())]);
+        let final_merge = make(
+            "reconcile divergent operations",
+            nested,
+            vec![synthesized.clone(), a_later],
+            false,
+        );
+        let inherited = make(
+            "describe commit without updating the working copy",
+            target(&x),
+            vec![synthesized.clone()],
+            true,
+        );
+        let wrote_after = make(
+            "reset git head after merge",
+            target(&x),
+            vec![final_merge.clone()],
+            true,
+        );
+        let other_base = make(
+            "independent reconciliation",
+            RefTarget::from_removes_adds([Some(x.clone())], [Some(c.clone()), Some(a.clone())]),
+            vec![wrote_c, wrote_a],
+            false,
+        );
+        let other_c = make(
+            "import git head: C on other base",
+            target(&c),
+            vec![other_base],
+            true,
+        );
+        let criss_cross = make(
+            "criss-cross reconciliation",
+            target(&x),
+            vec![a_again.clone(), other_c.clone()],
+            false,
+        );
+        let corrupt_criss_cross = make(
+            "invalid criss-cross record",
+            RefTarget::absent(),
+            vec![a_again, other_c],
+            false,
+        );
+        // A workspace deletion wins over an unchanged binding on the other branch. jj
+        // prunes its HEAD record too, despite that other branch being its only HEAD writer.
+        let cleanup_base = make(
+            "HEAD cleanup base",
+            RefTarget::absent(),
+            vec![root.clone()],
+            false,
+        );
+        let deleted = make(
+            "forget default",
+            RefTarget::absent(),
+            vec![cleanup_base.clone()],
+            true,
+        );
+        let mut deleted_op = block_on(store.read_operation(&deleted)).unwrap();
+        let mut deleted_view = block_on(store.read_view(&deleted_op.view_id)).unwrap();
+        deleted_view.wc_commit_ids.remove(WorkspaceName::DEFAULT);
+        deleted_op.view_id = block_on(store.write_view(&deleted_view)).unwrap();
+        let deleted = block_on(store.write_operation(&deleted_op)).unwrap();
+        let written = make(
+            "import git head: cleanup C",
+            target(&c),
+            vec![cleanup_base],
+            true,
+        );
+        let (cleanup, _) = block_on(loader.merge_operations(
+            vec![
+                block_on(loader.load_operation(&written)).unwrap(),
+                block_on(loader.load_operation(&deleted)).unwrap(),
+            ],
             None,
-            Some("native three-parent HEAD merge"),
+            Some("native workspace HEAD cleanup"),
             [],
-        ),
-    )
-    .unwrap();
-    let multi_head = head(multi.view().store_view(), "default");
-    assert!(
-        [&a, &c, &x].iter().all(|id| multi_head != target(id)),
-        "the native record must differ from every input to exercise the arity fallback"
-    );
-    let multi = multi.operation().id().clone();
-    assert_eq!(
-        block_on(store.read_operation(&multi))
-            .unwrap()
-            .parents
-            .len(),
-        3
-    );
-    let path = world.fx.env.root().join("head-writer-work");
-    world.fx.repo(0).jj(&[
-        "workspace",
-        "add",
-        "--name",
-        "work",
-        "-r",
-        "@",
-        path.to_str().unwrap(),
-    ]);
-    let initialized = OperationId::try_from_hex(world.latest_op_head(0)).unwrap();
-    let initial_head = CommitId::try_from_hex(
-        world
-            .fx
-            .repo(0)
-            .git(&["-C", path.to_str().unwrap(), "rev-parse", "HEAD"])
-            .trim(),
-    )
-    .unwrap();
-    let initial = block_on(store.read_operation(&initialized)).unwrap();
-    let birth = block_on(store.read_operation(&initial.parents[0])).unwrap();
-    assert_eq!(
-        initial.metadata.description,
-        "create initial working-copy commit in workspace work"
-    );
-    assert_ne!(
-        initial.metadata.workspace_name.as_ref().unwrap().as_str(),
-        "work"
-    );
-    let mut orphan = initial.clone();
-    orphan.parents = vec![root.clone()];
-    let unmatched = block_on(store.write_operation(&orphan)).unwrap();
-    orphan.metadata.description = "restore to operation with a work slot".to_owned();
-    let restored = block_on(store.write_operation(&orphan)).unwrap();
-    let mut marked = initial.clone();
-    marked
-        .metadata
-        .attributes
-        .insert(CANONICAL_ATTRIBUTE.to_owned(), root.hex());
-    let marked = block_on(store.write_operation(&marked)).unwrap();
-    let mut stale = birth.clone();
-    let mut stale_view = block_on(store.read_view(&stale.view_id)).unwrap();
-    stale_view
-        .git_heads
-        .insert("work".into(), target(&initial_head));
-    stale.view_id = block_on(store.write_view(&stale_view)).unwrap();
-    let bare_add = block_on(store.write_operation(&stale)).unwrap();
-    let mut log = Log {
-        owner: world.owner(0),
-        loader,
-        source_root: world.fx.repo(0).path().to_path_buf(),
-        native_replay: None,
-        native_merge_views: HashMap::new(),
-        store,
-        ops: HashMap::new(),
-        views: HashMap::new(),
-        repos: HashMap::new(),
-        captured_sources: BTreeMap::new(),
-        preserved_heads: BTreeMap::new(),
-        validated: HashSet::new(),
-        head_writers: HashMap::new(),
-    };
-    let setup = HashSet::from([root]);
-    let operation_files = || {
-        std::fs::read_dir(world.fx.repo(0).repo_path().join("op_store/operations"))
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name())
-            .collect::<BTreeSet<_>>()
-    };
-    let source_operations = operation_files();
-    assert!(
-        log.possible_heads(&initialized, "work", &setup)
-            .unwrap()
-            .contains(&Some(initial_head.clone())),
-        "native workspace initialization writes its own physical HEAD"
-    );
-    for id in [&unmatched, &restored, &marked, &bare_add] {
+        ))
+        .unwrap();
+        assert!(head(cleanup.view().store_view(), "default").is_absent());
         assert!(
-            !log.possible_heads(id, "work", &setup)
+            !cleanup
+                .view()
+                .store_view()
+                .wc_commit_ids
+                .contains_key(WorkspaceName::DEFAULT)
+        );
+        let cleanup = cleanup.operation().id().clone();
+        let mut wrong_cleanup = block_on(store.read_operation(&cleanup)).unwrap();
+        wrong_cleanup.metadata.description = "wrong native cleanup record".to_owned();
+        let mut wrong_view = block_on(store.read_view(&wrong_cleanup.view_id)).unwrap();
+        wrong_view
+            .git_heads
+            .insert(WorkspaceName::DEFAULT.to_owned(), target(&c));
+        wrong_cleanup.view_id = block_on(store.write_view(&wrong_view)).unwrap();
+        let wrong_cleanup = block_on(store.write_operation(&wrong_cleanup)).unwrap();
+        // A real merge of three sibling imports also needs full replay: its conflicted
+        // record is none of its parents' records, and the scalar shortcut is binary.
+        let multi_base = make(
+            "multi-parent HEAD base",
+            RefTarget::absent(),
+            vec![root.clone()],
+            false,
+        );
+        let multi_parents: Vec<_> = [&a, &c, &x]
+            .iter()
+            .enumerate()
+            .map(|(i, id)| {
+                make(
+                    &format!("import git head: multi {i}"),
+                    target(id),
+                    vec![multi_base.clone()],
+                    true,
+                )
+            })
+            .collect();
+        let (multi, _) = block_on(
+            loader.merge_operations(
+                multi_parents
+                    .iter()
+                    .map(|id| block_on(loader.load_operation(id)).unwrap())
+                    .collect(),
+                None,
+                Some("native three-parent HEAD merge"),
+                [],
+            ),
+        )
+        .unwrap();
+        let multi_head = head(multi.view().store_view(), "default");
+        assert!(
+            [&a, &c, &x].iter().all(|id| multi_head != target(id)),
+            "the native record must differ from every input to exercise the arity fallback"
+        );
+        let multi = multi.operation().id().clone();
+        assert_eq!(
+            block_on(store.read_operation(&multi))
+                .unwrap()
+                .parents
+                .len(),
+            3
+        );
+        let path = world.fx.env.root().join("head-writer-work");
+        world.fx.repo(0).jj(&[
+            "workspace",
+            "add",
+            "--name",
+            "work",
+            "-r",
+            "@",
+            path.to_str().unwrap(),
+        ]);
+        let initialized = OperationId::try_from_hex(world.latest_op_head(0)).unwrap();
+        let initial_head = CommitId::try_from_hex(
+            world
+                .fx
+                .repo(0)
+                .git(&["-C", path.to_str().unwrap(), "rev-parse", "HEAD"])
+                .trim(),
+        )
+        .unwrap();
+        let initial = block_on(store.read_operation(&initialized)).unwrap();
+        let birth = block_on(store.read_operation(&initial.parents[0])).unwrap();
+        assert_eq!(
+            initial.metadata.description,
+            "create initial working-copy commit in workspace work"
+        );
+        assert_ne!(
+            initial.metadata.workspace_name.as_ref().unwrap().as_str(),
+            "work"
+        );
+        let mut orphan = initial.clone();
+        orphan.parents = vec![root.clone()];
+        let unmatched = block_on(store.write_operation(&orphan)).unwrap();
+        orphan.metadata.description = "restore to operation with a work slot".to_owned();
+        let restored = block_on(store.write_operation(&orphan)).unwrap();
+        let mut marked = initial.clone();
+        marked
+            .metadata
+            .attributes
+            .insert(CANONICAL_ATTRIBUTE.to_owned(), root.hex());
+        let marked = block_on(store.write_operation(&marked)).unwrap();
+        let mut stale = birth.clone();
+        let mut stale_view = block_on(store.read_view(&stale.view_id)).unwrap();
+        stale_view
+            .git_heads
+            .insert("work".into(), target(&initial_head));
+        stale.view_id = block_on(store.write_view(&stale_view)).unwrap();
+        let bare_add = block_on(store.write_operation(&stale)).unwrap();
+        let before = world.observer_state();
+        if !observe {
+            return (world.next_actor_randomness(), world.fingerprint());
+        }
+        let mut log = Log {
+            owner: world.owner(0),
+            source_root: world.fx.repo(0).path().to_path_buf(),
+            native_replay: None,
+            native_merge_views: HashMap::new(),
+            store,
+            ops: HashMap::new(),
+            views: HashMap::new(),
+            repos: HashMap::new(),
+            captured_sources: BTreeMap::new(),
+            preserved_heads: BTreeMap::new(),
+            validated: HashSet::new(),
+            head_writers: HashMap::new(),
+        };
+        let setup = HashSet::from([root]);
+        assert!(
+            log.possible_heads(&initialized, "work", &setup)
                 .unwrap()
                 .contains(&Some(initial_head.clone())),
-            "a copied record without the matching native initialization is no writer"
+            "native workspace initialization writes its own physical HEAD"
         );
-    }
-    world
-        .justify_head(0, &mut log, &cleanup, "default", &target(&c))
-        .unwrap();
-    assert!(
+        for id in [&unmatched, &restored, &marked, &bare_add] {
+            assert!(
+                !log.possible_heads(id, "work", &setup)
+                    .unwrap()
+                    .contains(&Some(initial_head.clone())),
+                "a copied record without the matching native initialization is no writer"
+            );
+        }
         world
-            .justify_head(0, &mut log, &cleanup, "default", &target(&a))
-            .is_err(),
-        "native cleanup removes a record but does not write an arbitrary physical HEAD"
-    );
-    assert!(
-        log.native_head_explanation(&wrong_cleanup, "default", &target(&c), &setup)
-            .is_err(),
-        "even a real writer cannot authenticate the wrong native replay result"
-    );
-    world
-        .justify_head(0, &mut log, &multi, "default", &target(&c))
-        .unwrap();
-    let criss_cross_parents = log.op(&criss_cross).parents.clone();
-    assert_eq!(log.bases(&criss_cross_parents).len(), 2);
-    log.validate_record(
-        &criss_cross,
-        &setup,
-        &RecordKind::Head("default".to_owned()),
-    )
-    .unwrap();
-    assert!(log.head_plausible(&corrupt_criss_cross, "default").is_err());
-    world
-        .justify_head(0, &mut log, &criss_cross, "default", &target(&a))
-        .unwrap();
-    assert!(
-        world
-            .justify_head(0, &mut log, &criss_cross, "default", &RefTarget::absent())
-            .is_err()
-    );
-    assert!(
-        world
-            .justify_head(0, &mut log, &criss_cross, "default", &target(&x))
-            .is_err(),
-        "a valid synthesized record is still no physical HEAD writer"
-    );
-    assert_eq!(
-        operation_files(),
-        source_operations,
-        "native replay writes only in its isolated copy"
-    );
-
-    log.validate_record(
-        &final_merge,
-        &setup,
-        &RecordKind::Head("default".to_owned()),
-    )
-    .unwrap();
-    let op = log.op(&synthesized).clone();
-    let bases = log.bases(&op.parents);
-    let base_target = log.head(&bases[0], "default");
-    assert_eq!(
-        log.merge_targets(&synthesized, &target(&a), &base_target, &target(&c)),
-        target(&x)
-    );
-    for id in [&synthesized, &final_merge, &inherited] {
-        let possible = log.possible_heads(id, "default", &setup).unwrap();
-        assert!(possible.contains(&Some(a.clone())));
-        assert!(possible.contains(&Some(c.clone())));
+            .justify_head(0, &mut log, &cleanup, "default", &target(&c))
+            .unwrap();
         assert!(
-            !possible.contains(&Some(x.clone())),
-            "a synthesized record is no HEAD writer"
+            world
+                .justify_head(0, &mut log, &cleanup, "default", &target(&a))
+                .is_err(),
+            "native cleanup removes a record but does not write an arbitrary physical HEAD"
         );
+        assert!(
+            log.native_head_explanation(&wrong_cleanup, "default", &target(&c), &setup)
+                .is_err(),
+            "even a real writer cannot authenticate the wrong native replay result"
+        );
+        world
+            .justify_head(0, &mut log, &multi, "default", &target(&c))
+            .unwrap();
+        let criss_cross_parents = log.op(&criss_cross).parents.clone();
+        assert_eq!(log.bases(&criss_cross_parents).len(), 2);
+        log.validate_record(
+            &criss_cross,
+            &setup,
+            &RecordKind::Head("default".to_owned()),
+        )
+        .unwrap();
+        assert!(log.head_plausible(&corrupt_criss_cross, "default").is_err());
+        world
+            .justify_head(0, &mut log, &criss_cross, "default", &target(&a))
+            .unwrap();
+        assert!(
+            world
+                .justify_head(0, &mut log, &criss_cross, "default", &RefTarget::absent())
+                .is_err()
+        );
+        assert!(
+            world
+                .justify_head(0, &mut log, &criss_cross, "default", &target(&x))
+                .is_err(),
+            "a valid synthesized record is still no physical HEAD writer"
+        );
+        world.assert_observer_state(&before);
+
+        log.validate_record(
+            &final_merge,
+            &setup,
+            &RecordKind::Head("default".to_owned()),
+        )
+        .unwrap();
+        let op = log.op(&synthesized).clone();
+        let bases = log.bases(&op.parents);
+        let base_target = log.head(&bases[0], "default");
+        assert_eq!(
+            log.merge_targets(&synthesized, &target(&a), &base_target, &target(&c)),
+            target(&x)
+        );
+        for id in [&synthesized, &final_merge, &inherited] {
+            let possible = log.possible_heads(id, "default", &setup).unwrap();
+            assert!(possible.contains(&Some(a.clone())));
+            assert!(possible.contains(&Some(c.clone())));
+            assert!(
+                !possible.contains(&Some(x.clone())),
+                "a synthesized record is no HEAD writer"
+            );
+        }
+        assert_eq!(
+            &*log.possible_heads(&wrote_after, "default", &setup).unwrap(),
+            &HashSet::from([Some(x)])
+        );
+        assert!(
+            log.native_replay.is_some(),
+            "the guard must exercise native replay"
+        );
+        world.assert_observer_state(&before);
+        (world.next_actor_randomness(), world.fingerprint())
     }
-    assert_eq!(
-        &*log.possible_heads(&wrote_after, "default", &setup).unwrap(),
-        &HashSet::from([Some(x)])
-    );
+    assert_eq!(run(false), run(true));
 }
 
 #[test]
@@ -1285,7 +1295,6 @@ fn preserved_head_records_require_the_exact_captured_frontier() {
     let claimed = block_on(store.write_operation(&claimed)).unwrap();
     let log = |preserved_heads: BTreeMap<OperationId, Vec<OperationId>>| Log {
         owner: world.owner(0),
-        loader: loader.clone(),
         source_root: world.fx.repo(0).path().to_path_buf(),
         native_replay: None,
         native_merge_views: HashMap::new(),
@@ -1438,7 +1447,6 @@ fn trimmed_record_sources_preserve_provenance_without_hiding_invalid_ancestors()
     ];
     let log = |captured_sources| Log {
         owner: world.owner(0),
-        loader: loader.clone(),
         source_root: world.fx.repo(0).path().to_path_buf(),
         native_replay: None,
         native_merge_views: HashMap::new(),
@@ -1681,7 +1689,6 @@ impl World {
         let mut log = Log {
             owner: self.owner(m),
             store: loader.op_store().clone(),
-            loader,
             source_root: self.fx.repo(m).path().to_path_buf(),
             native_replay: None,
             native_merge_views: HashMap::new(),

@@ -85,7 +85,7 @@ const ORIGIN: &str = "origin";
 /// and `op revert`.
 const RESTORES: &[&str] = &["undo", "redo", "restore to operation", "revert operation"];
 
-/// One receipt's independently observed frontier and its exact published carrier body.
+/// One publication's independently observed frontier and its exact carrier body.
 /// A later history rewrite can change its native and canonical ids without changing
 /// the record's origin. Keeping the body does not depend on a disposable translation map.
 #[derive(Clone)]
@@ -112,7 +112,7 @@ pub struct Imports {
     /// Each machine's HEAD, where git moved it through the branch it is a symbolic ref to,
     /// since jj last imported it, by its workspace's name: what HEAD had before each move.
     head_moved: Vec<BTreeMap<String, Vec<RefTarget>>>,
-    /// Exact published carriers of a root receipt's independently captured Git frontier.
+    /// Exact published carriers of independently captured native Git frontiers.
     pub(crate) preserved_heads: Vec<BTreeMap<OperationId, PreservedHeadInput>>,
 }
 
@@ -441,7 +441,7 @@ impl Log {
             None => vec![],
         };
         for input in inputs {
-            // A root receipt can carry the captured observation, but a later merge or
+            // A publication can carry the captured observation, but a later merge or
             // export of the same canonical target can legitimately change its record.
             // Both explanations must follow jj's rules and validate their source history.
             op.metadata.workspace_name = None;
@@ -1210,6 +1210,138 @@ fn physical_head_writers_are_distinct_from_merge_record_terms() {
         (world.next_actor_randomness(), world.fingerprint())
     }
     assert_eq!(run(false), run(true));
+}
+
+#[test]
+fn a_forgotten_nonroot_publication_keeps_its_observed_git_frontier() {
+    use crate::world::{Naming, Setup};
+
+    let mut world = World::new(Setup {
+        nodes: 2,
+        naming: Naming::Default,
+        prejoin: true,
+        secondary: false,
+    });
+    world.jj(1, &["new", "-m", "private HEAD"]);
+    world.forget_copy(0, 1);
+    world.sync(0);
+
+    let incoming = world.fx.hive.hub.store().head().1.hex();
+    let node = world.fx.hive.members[1].adapter.repo();
+    let store = node.loader().op_store().clone();
+    let base = std::fs::read_to_string(node.repo_path().join("musubi/accepted_base")).unwrap();
+    assert_ne!(
+        base.trim(),
+        node.canonical_store().root_operation_id().0.hex()
+    );
+    assert!(!node.has_record_custody());
+    assert!(node.applied_records().is_empty());
+    let presence = world.fx.hive.hub.store().presence().unwrap();
+    assert!(presence.known().contains(&world.fx.machine_key(1)));
+    assert!(!presence.is_present(&world.fx.machine_key(1)));
+    let frontier: Vec<_> = world
+        .op_heads(1)
+        .iter()
+        .map(|id| OperationId::try_from_hex(id).unwrap())
+        .collect();
+    let [source] = frontier.as_slice() else {
+        panic!("the native input must have one head");
+    };
+    let source_op = block_on(store.read_operation(source)).unwrap();
+    let source_view = block_on(store.read_view(&source_op.view_id)).unwrap();
+    let fields = |view: &View| {
+        (
+            view.git_refs.clone(),
+            view.git_heads.clone(),
+            view.remote_views
+                .get(REMOTE_NAME_FOR_LOCAL_GIT_REPO)
+                .cloned(),
+        )
+    };
+    let expected = fields(&source_view);
+    let physical = |world: &World| {
+        std::fs::read_to_string(world.fx.repo(1).path().join(".git/HEAD"))
+            .unwrap()
+            .trim()
+            .to_owned()
+    };
+    let before_head = physical(&world);
+    let physical_refs = |world: &World| {
+        world.fx.repo(1).git(&[
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/heads/",
+            "refs/remotes/",
+            "refs/tags/",
+        ])
+    };
+    let before_refs = physical_refs(&world);
+    assert_eq!(
+        head(&source_view, "default").as_normal().unwrap().hex(),
+        before_head
+    );
+    let before: HashSet<_> = std::fs::read_dir(node.repo_path().join("op_store/operations"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    world.sync(1);
+    assert_eq!(physical(&world), before_head);
+    assert_eq!(physical_refs(&world), before_refs);
+    let node = world.fx.hive.members[1].adapter.repo();
+    let carrier = std::fs::read_dir(node.repo_path().join("op_store/operations"))
+        .unwrap()
+        .filter_map(|entry| {
+            let name = entry.unwrap().file_name();
+            if before.contains(&name) {
+                return None;
+            }
+            let id = OperationId::try_from_hex(name.to_str()?)?;
+            let op = block_on(store.read_operation(&id)).unwrap();
+            if op.metadata.attributes.get(CANONICAL_ATTRIBUTE) != Some(&incoming) {
+                return None;
+            }
+            let [parent] = op.parents.as_slice() else {
+                return None;
+            };
+            let view = block_on(store.read_view(&op.view_id)).unwrap();
+            let parent = block_on(store.read_operation(parent)).unwrap();
+            let parent_view = block_on(store.read_view(&parent.view_id)).unwrap();
+            (fields(&view) == expected && fields(&parent_view) != expected).then_some(id)
+        })
+        .next()
+        .expect("a real non-root private carrier must preserve the current Git fields");
+    let observed = world.imports.preserved_heads[1].clone();
+    assert_eq!(observed[&carrier].heads, frontier);
+    let log = |preserved_heads| Log {
+        owner: world.owner(1),
+        source_root: world.fx.repo(1).path().to_path_buf(),
+        native_replay: None,
+        native_merge_views: HashMap::new(),
+        store: store.clone(),
+        ops: HashMap::new(),
+        views: HashMap::new(),
+        repos: HashMap::new(),
+        captured_sources: world.captured_record_sources(1),
+        preserved_heads,
+        validated: HashSet::new(),
+        head_writers: HashMap::new(),
+    };
+    let before = world.observer_state();
+    let setup = &world.imports.setup[1];
+    let record = RecordKind::Head("default".to_owned());
+    assert!(
+        log(BTreeMap::new())
+            .validate_record(&carrier, setup, &record)
+            .is_err()
+    );
+    let mut checked = log(observed);
+    checked.validate_record(&carrier, setup, &record).unwrap();
+    let native = checked.possible_heads(source, "default", setup).unwrap();
+    assert_eq!(
+        checked.possible_heads(&carrier, "default", setup).unwrap(),
+        native
+    );
+    world.assert_observer_state(&before);
 }
 
 #[test]

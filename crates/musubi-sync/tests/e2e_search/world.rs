@@ -273,11 +273,13 @@ pub struct RetainedOperation {
     pub parent: Option<jj_lib::op_store::View>,
 }
 
-struct RootRecordInput {
+struct GitRecordInput {
     copy: String,
     target: OpId,
     heads: Vec<OpId>,
     before: BTreeSet<OpId>,
+    /// Non-root preservation needs a private name retained by the published carrier.
+    private_names: Option<BTreeSet<String>>,
 }
 
 #[derive(Default)]
@@ -1272,9 +1274,9 @@ impl World {
         let pruned = self.fx.hive.hub.store().pruned();
         let forgotten = self.forgotten_working_copies(m);
         let steps = loop {
-            let input = self.root_record_input(m);
+            let input = self.git_record_input(m);
             let result = self.fx.hive.sync(m);
-            self.finish_root_record_input(m, input);
+            self.finish_git_record_input(m, input);
             match result {
                 Ok(steps) => break steps,
                 Err(err) => self.recover(m, "sync", &err),
@@ -1493,10 +1495,41 @@ impl World {
         .collect()
     }
 
-    fn root_record_input(&self, m: usize) -> Option<RootRecordInput> {
+    fn git_record_input(&self, m: usize) -> Option<GitRecordInput> {
         if m >= self.imports.preserved_heads.len() {
             return None;
         }
+        let private_names = if self.root_record_transition(m)? {
+            None
+        } else {
+            Some(self.private_git_names(m)?)
+        };
+        let node = self.fx.hive.members[m].adapter.repo();
+        let heads: Vec<_> = self
+            .op_heads(m)
+            .iter()
+            .map(|s| OpId::try_from_hex(s).unwrap())
+            .collect();
+        let mut before = BTreeSet::new();
+        let mut todo = heads.clone();
+        while let Some(id) = todo.pop() {
+            if before.insert(id.clone()) {
+                let op = futures::executor::block_on(node.loader().op_store().read_operation(&id))
+                    .ok()?;
+                todo.extend(op.parents);
+            }
+        }
+        Some(GitRecordInput {
+            copy: self.fx.machine_key(m),
+            target: self.fx.hive.hub.store().head().1.clone(),
+            heads,
+            before,
+            private_names,
+        })
+    }
+
+    /// Whether receipt can discard the accepted base. An opaque prefix alone cannot.
+    fn root_record_transition(&self, m: usize) -> Option<bool> {
         let node = self.fx.hive.members[m].adapter.repo();
         let hub = self.fx.hive.hub.store();
         let count = usize::try_from(node.record_state().0).ok()?;
@@ -1506,7 +1539,7 @@ impl World {
         let same_prefix = node.record_prefix().count == hub.pruned() as u64
             && Some(&node.record_prefix().digest) == hub.digest(hub.pruned());
         if same_prefix && node.applied_records() == hub.records() && !node.has_record_custody() {
-            return None;
+            return Some(false);
         }
         let common = if same_prefix {
             node.applied_records()
@@ -1537,34 +1570,48 @@ impl World {
                     continue;
                 }
                 if !dropped.contains(&store.original_id(&op).ok()?) {
-                    return None;
+                    return Some(false);
                 }
                 todo.extend(CanonicalOp::parents_of(&store.read_operation(&op).ok()?));
             }
         }
-        let heads: Vec<_> = self
-            .op_heads(m)
-            .iter()
-            .map(|s| OpId::try_from_hex(s).unwrap())
-            .collect();
-        let mut before = BTreeSet::new();
-        let mut todo = heads.clone();
-        while let Some(id) = todo.pop() {
-            if before.insert(id.clone()) {
-                let op = futures::executor::block_on(node.loader().op_store().read_operation(&id))
-                    .ok()?;
-                todo.extend(op.parents);
-            }
-        }
-        Some(RootRecordInput {
-            copy: self.fx.machine_key(m),
-            target: hub.head().1.clone(),
-            heads,
-            before,
-        })
+        Some(true)
     }
 
-    fn finish_root_record_input(&mut self, m: usize, input: Option<RootRecordInput>) {
+    /// The search creates plain workspace names, recording their births independently.
+    /// A known forgotten copy may preserve their current Git fields even without a trim.
+    fn private_git_names(&self, m: usize) -> Option<BTreeSet<String>> {
+        let copy = self.fx.machine_key(m);
+        let presence = self.fx.hive.hub.store().presence().ok()?;
+        if !presence.known().contains(&copy) || presence.is_present(&copy) {
+            return None;
+        }
+        let store = self.fx.hive.members[m].adapter.repo().loader().op_store();
+        let mut common: Option<BTreeSet<String>> = None;
+        for id in self.op_heads(m) {
+            let id = OpId::try_from_hex(&id)?;
+            let op = futures::executor::block_on(store.read_operation(&id)).ok()?;
+            let view = futures::executor::block_on(store.read_view(&op.view_id)).ok()?;
+            let names = view
+                .wc_commit_ids
+                .keys()
+                .filter(|name| {
+                    !name.as_str().contains('/')
+                        && self
+                            .workspace_births
+                            .contains(&format!("{copy}/{}", name.as_str()))
+                })
+                .map(|name| name.as_str().to_owned())
+                .collect::<BTreeSet<_>>();
+            common = Some(match common {
+                Some(old) => old.intersection(&names).cloned().collect(),
+                None => names,
+            });
+        }
+        common.filter(|names| !names.is_empty())
+    }
+
+    fn finish_git_record_input(&mut self, m: usize, input: Option<GitRecordInput>) {
         let Some(input) = input.filter(|input| input.copy == self.fx.machine_key(m)) else {
             return;
         };
@@ -1589,6 +1636,18 @@ impl World {
                 .get(musubi_jj::node::CANONICAL_ATTRIBUTE)
                 .is_some_and(|target| *target == input.target.hex())
             {
+                if let Some(names) = &input.private_names {
+                    let Ok(view) = futures::executor::block_on(store.read_view(&op.view_id)) else {
+                        continue;
+                    };
+                    if !view
+                        .wc_commit_ids
+                        .keys()
+                        .any(|name| names.contains(name.as_str()))
+                    {
+                        continue;
+                    }
+                }
                 self.imports.preserved_heads[m]
                     .entry(id)
                     .or_insert_with(|| crate::imports::PreservedHeadInput {
@@ -1945,7 +2004,7 @@ impl World {
             self.machine(m)
         ));
         self.merge_local_heads(m);
-        let record_input = self.root_record_input(m);
+        let record_input = self.git_record_input(m);
         let result = (|| -> anyhow::Result<()> {
             let poll = {
                 let member = &mut self.fx.hive.members[m];
@@ -1981,7 +2040,7 @@ impl World {
             }
             anyhow::bail!("never took the records and realized the hub's head")
         })();
-        self.finish_root_record_input(m, record_input);
+        self.finish_git_record_input(m, record_input);
         if let Err(err) = result {
             self.fail(&format!("{} taking records: {err:#}", self.machine(m)));
         }
@@ -2090,9 +2149,9 @@ impl World {
         lose: Option<usize>,
         realizing: Option<usize>,
     ) -> anyhow::Result<()> {
-        let input = self.root_record_input(m);
+        let input = self.git_record_input(m);
         let result = self.try_sync_partial_inner(m, steps, lose, realizing);
-        self.finish_root_record_input(m, input);
+        self.finish_git_record_input(m, input);
         result
     }
 
@@ -3337,14 +3396,103 @@ fn workspace_fixup_witnesses_require_the_native_source() {
 }
 
 #[test]
-fn root_record_inputs_distinguish_lost_work_from_an_opaque_prefix() {
+fn private_git_inputs_require_a_known_birth_and_a_retained_name() {
     let mut world = World::new(Setup {
         nodes: 2,
         naming: Naming::Default,
         prejoin: true,
         secondary: false,
     });
-    assert!(world.root_record_input(0).is_none());
+    assert!(
+        world.private_git_names(1).is_none(),
+        "a present copy is not private"
+    );
+    world.forget_copy(0, 1);
+    world.sync(0);
+    let birth = format!("{}/default", world.fx.machine_key(1));
+    assert!(world.workspace_births.remove(&birth));
+    assert!(
+        world.private_git_names(1).is_none(),
+        "a plain name needs its birth"
+    );
+    world.workspace_births.insert(birth);
+
+    let before = world.observer_state();
+    assert_eq!(world.root_record_transition(1), Some(false));
+    let initial = world.git_record_input(1).unwrap();
+    assert_eq!(
+        initial.private_names,
+        Some(BTreeSet::from(["default".to_owned()]))
+    );
+    world.assert_observer_state(&before);
+
+    // The current input has a newly renamed private slot, but an older representation
+    // of this target retains only default. The target label alone cannot bind the input.
+    world.rename_workspace(1, 0, "private");
+    assert_eq!(
+        world.private_git_names(1),
+        Some(BTreeSet::from(["private".to_owned()]))
+    );
+    let input = world.git_record_input(1).unwrap();
+    let target = input.target.hex();
+    let old = input.before.clone();
+    world.sync(1);
+    let store = world.fx.hive.members[1].adapter.repo().loader().op_store();
+    let mut todo: Vec<_> = world
+        .op_heads(1)
+        .iter()
+        .map(|id| OpId::try_from_hex(id).unwrap())
+        .collect();
+    let mut seen = old;
+    let mut carriers = vec![];
+    while let Some(id) = todo.pop() {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        let op = futures::executor::block_on(store.read_operation(&id)).unwrap();
+        todo.extend(op.parents.iter().cloned());
+        if op
+            .metadata
+            .attributes
+            .get(musubi_jj::node::CANONICAL_ATTRIBUTE)
+            == Some(&target)
+        {
+            let view = futures::executor::block_on(store.read_view(&op.view_id)).unwrap();
+            if !view
+                .wc_commit_ids
+                .keys()
+                .any(|name| name.as_str() == "private")
+            {
+                carriers.push(id);
+            }
+        }
+    }
+    assert!(
+        !carriers.is_empty(),
+        "the real target publication must be reached"
+    );
+    assert!(
+        carriers
+            .iter()
+            .all(|id| !world.imports.preserved_heads[1].contains_key(id))
+    );
+    world.finish_git_record_input(1, Some(input));
+    assert!(
+        carriers
+            .iter()
+            .all(|id| !world.imports.preserved_heads[1].contains_key(id))
+    );
+}
+
+#[test]
+fn git_record_inputs_distinguish_lost_work_from_an_opaque_prefix() {
+    let mut world = World::new(Setup {
+        nodes: 2,
+        naming: Naming::Default,
+        prejoin: true,
+        secondary: false,
+    });
+    assert!(world.git_record_input(0).is_none());
     world.fx.hive.pruning = false;
     let initial = world.hub_seq();
     world.trim_below_accepted_push(1);
@@ -3357,7 +3505,7 @@ fn root_record_inputs_distinguish_lost_work_from_an_opaque_prefix() {
             .is_empty()
     );
     world.hub_goes_back(usize::try_from(world.hub_seq() - initial).unwrap());
-    let input = world.root_record_input(0).unwrap();
+    let input = world.git_record_input(0).unwrap();
     assert_eq!(input.copy, world.fx.machine_key(0));
     assert_eq!(&input.target, world.fx.hive.hub.store().head().1);
     assert_eq!(
@@ -3388,7 +3536,7 @@ fn root_record_inputs_distinguish_lost_work_from_an_opaque_prefix() {
     );
     world.remake_hub();
     assert!(
-        world.root_record_input(m).is_none(),
+        world.git_record_input(m).is_none(),
         "an opaque prefix is no lost applied suffix"
     );
 }

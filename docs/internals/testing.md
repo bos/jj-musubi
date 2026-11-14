@@ -909,8 +909,18 @@ export of the same target still uses its own valid physical history.
 a different body, a wrong value and an invalid source ancestor, including a carrier whose
 metadata names a local command. It also accepts a valid physical record differing from
 the earlier captured frontier.
-`world::root_record_inputs_distinguish_lost_work_from_an_opaque_prefix` checks the actual
+`world::git_record_inputs_distinguish_lost_work_from_an_opaque_prefix` checks the actual
 lost-record transition and rejects loss of only an opaque pruned prefix.
+
+A known forgotten copy can also preserve current Git fields without a root-based receipt,
+when the incoming target retains a private workspace. The checker captures its native frontier
+before driving sync, using the hub's known/forgotten state and the intersection of independently
+recorded private names in its input views. It attaches that frontier only to an exact target
+carrier retaining one of those names. Expected HEAD values still come from the captured native
+history; the carrier gains no physical writer authority.
+`imports::a_forgotten_nonroot_publication_keeps_its_observed_git_frontier` uses a real publication
+whose physical parent has different Git fields. It compares the complete Git tuple and physical
+HEAD/refs, rejects the carrier without the witness, and checks its inherited native writer set.
 
 At the end of a sequence, and at most once in the middle, the hive syncs to a fixed point,
 and the test checks that:

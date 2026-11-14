@@ -179,7 +179,7 @@ private def prejoinEvidence : Evidence :=
 #guard namespaceCanonical prejoinEvidence 20 (p 1) = .ok (c 0)
 #guard prejoinEvidence.counterpart (p 1) = .ok none
 #guard (candidates prejoinEvidence 20 [p 2] none (c 0)).map (·.published) =
-  .ok ⟨[p 0], []⟩
+  .ok ⟨[p 0], [], []⟩
 #guard (candidates prejoinEvidence 20 [p 2] none (c 0)).map chooseSource =
   .ok (.selected .published (p 0))
 #guard (candidates { prejoinEvidence with native := prejoinEvidence.native ++
@@ -280,15 +280,6 @@ private def observedReceipt : Receipt :=
 private def receiptState : State :=
   { state with heads := [p 2], nativeFacts := receiptFacts }
 
-private def canonicalEncodingFailure (result : Query α) : Bool :=
-  match result with
-  | .error (.encoding message) =>
-    match Lean.Json.parse message with
-    | .ok diagnostic => decide
-        ((diagnostic.getObjValAs? String "kind").toOption = some "canonical encoding failure")
-    | .error _ => false
-  | _ => false
-
 -- Contraction derives both the presence stamp and physical map; raw locals are only compared.
 #guard (constructReceipt evidence receiptFacts saved me [p 2] request).map
   (fun result => (result.canonicalWrites, result.nativeWrites, result.base)) =
@@ -300,7 +291,8 @@ private def canonicalEncodingFailure (result : Query α) : Bool :=
 #guard (constructReceipt evidence receiptFacts saved me [p 2] request).map
   (fun result => receiptInputMatches result
     { observedReceipt with locals := observedReceipt.locals ++ [(p 88, [p 88])] }) = .ok false
-#guard canonicalEncodingFailure (constructReceipt evidence {} saved me [p 2] request)
+#guard (constructReceipt evidence {} saved me [p 2] request) =
+  .error (.encoding "canonical body")
 
 -- The shared accepted base follows incoming contractions, independently of local drops.
 #guard (constructReceipt evidence receiptFacts { saved with acceptedBase := some (c 2) }
@@ -360,8 +352,8 @@ private def durationContracted : CanonicalBody :=
 #guard (contractOne durationEvidence { canonical := [durationContracted] } [o 1] 30
   (c 2) { evidence := durationEvidence }).map (fun result => result.1.writes) =
     .ok [durationContracted]
-#guard canonicalEncodingFailure (contractOne durationEvidence { canonical := [contracted] }
-  [o 1] 30 (c 2) { evidence := durationEvidence })
+#guard contractOne durationEvidence { canonical := [contracted] } [o 1] 30
+  (c 2) { evidence := durationEvidence } = .error (.encoding "canonical body")
 
 #guard run receiptState [.planReceipt request, .writeReceiptCanonical 0] = .error .custody
 #guard (run receiptState [.planReceipt request, .saveCustody, .writeReceiptCanonical 0,
@@ -576,5 +568,88 @@ private def stampCodecValue : Stamp :=
 #guard decide ((Json.stamp stampCodecContext (Lean.Json.mkObj [("attributes", Lean.Json.mkObj [
   ("musubi.presence", Lean.Json.str (Json.stampText stampCodecContext stampCodecValue))])])).toOption =
     some (some stampCodecValue))
+
+private def emptySourceMemory : SourceMemory :=
+  { steps := 0, sources := [], superseded := [], dropped := [], realign := none,
+    moving := false, taking := false, fixup := false, recordCount := 0,
+    recordNames := [], joins := [], joinPoints := [], prejoin := [] }
+private def closedSourceRoutes : SourceRoutes :=
+  { checkpoint := {}, frames := [], countedSources := [], memory := emptySourceMemory,
+    accepted := [], hubRenamings := [] }
+private def ordinaryTarget : CanonicalBody :=
+  { id := c 52, original := o 52, originalParents := [o 0], parents := [c 0],
+    authorWorkspace := some (key a), description := "create bookmark child" }
+private def descriptionEvidence : Evidence :=
+  { partialIdentity with
+    sourceRoutes := some closedSourceRoutes,
+    canonical := partialIdentity.canonical ++ [ordinaryTarget] }
+private def exclusionProjection (e : Evidence) (target : Canonical := c 52) :=
+  (descriptionExclusion e (p 50) target).map (fun result => result.map (·.val))
+
+-- A target-specific negative needs complete, separately observed empty routes. It is not
+-- an identity for the unknown body, and does not transfer to a different drop survivor.
+#guard exclusionProjection descriptionEvidence = .ok (some {
+  physical := p 50, target := c 52, targetOriginal := o 52,
+  nativeDescription := "", originalDescription := "create bookmark child" })
+#guard descriptionEvidence.counterpart (p 50) =
+  .error (.unresolvedIdentity (p 50) .missingFingerprint)
+#guard (matchingCandidates descriptionEvidence 30 [p 50] (c 52)).unresolved = []
+#guard (matchingCandidates descriptionEvidence 30 [p 50] (c 52)).excluded.length = 1
+#guard exclusionProjection { descriptionEvidence with sourceRoutes := none } =
+  .error (.nativeFact "complete source-route snapshot missing")
+#guard exclusionProjection { descriptionEvidence with
+  sourceRoutes := some { closedSourceRoutes with
+    memory := { emptySourceMemory with sources := [(p 50, c 52)] } } } =
+    .error (.nativeFact "nonempty source/join/accepted route needs identity authentication")
+#guard exclusionProjection { descriptionEvidence with
+  sourceRoutes := some { closedSourceRoutes with checkpoint := { steps := 1 } } } =
+    .error (.nativeFact "nonempty source/join/accepted route needs identity authentication")
+#guard exclusionProjection { descriptionEvidence with
+  sourceRoutes := some { closedSourceRoutes with
+    memory := { emptySourceMemory with joins := [(50, c 52)] } } } =
+    .error (.nativeFact "nonempty source/join/accepted route needs identity authentication")
+#guard exclusionProjection { descriptionEvidence with joinInputs := [p 50] } =
+  .error (.nativeFact "nonempty source/join/accepted route needs identity authentication")
+#guard exclusionProjection { descriptionEvidence with canonical :=
+  partialIdentity.canonical ++ [{ ordinaryTarget with authorWorkspace := none }] } = .ok none
+#guard exclusionProjection { descriptionEvidence with canonical :=
+  partialIdentity.canonical ++ [{ ordinaryTarget with description := "" }] } = .ok none
+#guard exclusionProjection { descriptionEvidence with native :=
+  evidence.native ++ [{ unknownBody with description := "restore to operation 123" }] } = .ok none
+#guard exclusionProjection { descriptionEvidence with native :=
+  evidence.native ++ [{ unknownBody with marker := some (c 52) }] } = .ok none
+#guard exclusionProjection { descriptionEvidence with canonical :=
+  descriptionEvidence.canonical ++ [{ ordinaryTarget with
+    id := c 53, original := o 53, description := "" }] } (c 53) = .ok none
+
+private def sourceHash0 := String.ofList (List.replicate 128 '0')
+private def sourceHash1 := String.ofList (List.replicate 128 '1')
+private def sourceContext : Json.Context :=
+  { physical := [sourceHash0], canonical := [sourceHash0, sourceHash1],
+    original := [], commits := [], digests := [], contents := [], fields := [] }
+private def sourceFrameText (canonical : String) :=
+  s!"step 00000000000000000001 00000000000000000001\nsource {sourceHash0} {canonical}\n"
+
+-- Complete frames are retained; the checkpoint selects last-frame-per-number replay.
+-- Torn/unrecognized input stays an interpretation gap instead of silently proving absence.
+#guard decide (((Json.sourceFrames sourceContext evidence
+  (sourceFrameText sourceHash0 ++ sourceFrameText sourceHash1)).map (·.length)).toOption = some 2)
+#guard decide ((Json.sourceFrames sourceContext evidence
+  (sourceFrameText sourceHash0 ++ sourceFrameText sourceHash1) >>= Json.sourceCounted 1).toOption =
+    some [(p 0, c 1)])
+#guard (Json.sourceFrames sourceContext evidence
+  "step 00000000000000000001 00000000000000000001\n").toOption.isNone
+#guard (Json.sourceCounted 1 []).toOption.isNone
+#guard decide (((Json.sourceCheckpoint sourceContext evidence none).map (·.steps)).toOption = some 0)
+#guard !({ closedSourceRoutes with memory := { emptySourceMemory with
+  realign := some { fromHeads := [], to := [], canonical := [] } } }).closed
+#guard (Json.sourceCheckpoint sourceContext evidence (some
+  ("{\"applied\":[],\"pending\":[],\"fixup\":null," ++
+    "\"fixup_written\":false,\"steps\":0,\"steps\":0}"))).toOption.isNone
+#guard decide (((Json.sourceHubFrames sourceContext evidence
+  s!"record {sourceHash0} 00000000000000000001\n{sourceHash1} {sourceHash0}\n").map
+    (fun frames => frames.flatMap (·.renames))).toOption = some [(c 1, c 0)])
+#guard (Json.sourceHubFrames sourceContext evidence
+  s!"record {sourceHash0} 00000000000000000001\n").toOption.isNone
 
 end Musubi.NativeLifecycle.Test

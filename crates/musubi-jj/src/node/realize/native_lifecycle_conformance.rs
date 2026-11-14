@@ -127,6 +127,12 @@ fn selected_physical(repo: &TestRepo) -> Value {
 }
 
 fn raw_capture(node: &NodeRepo, repo: &TestRepo, inputs: &Inputs) -> Value {
+    let identity_file = |name: &str| {
+        inputs
+            .evidence
+            .get(std::path::Path::new(name))
+            .map(|bytes| std::str::from_utf8(bytes).unwrap())
+    };
     let evidence = |name: &str| {
         inputs
             .evidence
@@ -173,6 +179,17 @@ fn raw_capture(node: &NodeRepo, repo: &TestRepo, inputs: &Inputs) -> Value {
         .map(|(operation, values)| json!({"operation": operation, "values": values}))
         .collect::<Vec<_>>();
     json!({
+        "identitySourceState": {
+            "schema": 1,
+            "files": {
+                "checkpoint": identity_file("records.json"),
+                "steps": identity_file("superseded"),
+                "hubRenamings": identity_file("hub-renamings"),
+                "acceptedBase": identity_file("accepted_base"),
+                "acceptedPush": identity_file("accepted_push")
+            },
+            "memory": node.native_identity_state()
+        },
         "heads": inputs.heads.iter().map(|id| id.0.hex()).collect::<Vec<_>>(),
         "nativeManifest": inputs.native.keys().map(|id| id.0.hex()).collect::<Vec<_>>(),
         "canonicalManifest": inputs.canonical.keys().map(|id| id.0.hex()).collect::<Vec<_>>(),
@@ -228,6 +245,11 @@ fn raw_capture(node: &NodeRepo, repo: &TestRepo, inputs: &Inputs) -> Value {
 fn strings_in(value: &Value, size: usize, found: &mut BTreeSet<String>) {
     match value {
         Value::String(text) => {
+            if (text.starts_with('{') || text.starts_with('['))
+                && let Ok(raw_file) = serde_json::from_str::<Value>(text)
+            {
+                strings_in(&raw_file, size, found);
+            }
             for word in text.split_whitespace() {
                 if word.len() == size && word.bytes().all(|byte| byte.is_ascii_hexdigit()) {
                     found.insert(word.to_owned());

@@ -303,6 +303,7 @@ deriving DecidableEq, Repr
 structure CandidateSet where
   values : List Physical := []
   unresolved : List (Physical × Gap) := []
+  excluded : List DescriptionExclusion := []
 deriving DecidableEq, Repr, Inhabited
 
 structure Candidates where
@@ -311,12 +312,83 @@ structure Candidates where
   fallback : CandidateSet
 deriving DecidableEq, Repr
 
+/-- The finite ordinary route is closed only by independently parsed durable state AND
+the supplied memory relations. A missing observation or any alternate route remains a gap.
+The target is this exact canonical version/original, never its drop expansion. -/
+def descriptionExclusion (e : Evidence) (id : Physical) (target : Canonical) :
+    Query (Option { w : DescriptionExclusion // w.necessary }) := do
+  let raw ← e.nativeBody id
+  let body ← e.canonicalBody target
+  if raw.description = body.description then return none
+  if raw.marker.isSome || raw.source ≠ .parents ||
+      restoreDescription raw.description || restoreDescription body.description then return none
+  -- An explicit join can replace the description and maps its old head. Its canonical
+  -- constructor has no author workspace; this slice also requires an ordinary target.
+  if body.authorWorkspace.isNone then return none
+  let some routes := e.sourceRoutes | throw (.nativeFact "complete source-route snapshot missing")
+  if !routes.closed || !e.joinInputs.isEmpty || !e.joinFingerprints.isEmpty then
+    throw (.nativeFact "nonempty source/join/accepted route needs identity authentication")
+  if different : raw.description ≠ body.description then
+    return some ⟨{
+      physical := id, target, targetOriginal := body.original,
+      nativeDescription := raw.description, originalDescription := body.description }, different⟩
+  else return none
+
+theorem descriptionExclusion_necessary {e : Evidence} {id : Physical} {target : Canonical}
+    {w : { w : DescriptionExclusion // w.necessary }}
+    (_computed : descriptionExclusion e id target = .ok (some w)) :
+    ordinaryOriginalDescription w.val.nativeDescription ≠ w.val.originalDescription := w.property
+
+theorem descriptionExclusion_pinned {e : Evidence} {id : Physical} {target : Canonical}
+    {w : { w : DescriptionExclusion // w.necessary }}
+    (computed : descriptionExclusion e id target = .ok (some w)) :
+    w.val.physical = id ∧ w.val.target = target := by
+  cases native : e.nativeBody id with
+  | error gap => simp [descriptionExclusion, native, bind, Except.bind] at computed
+  | ok raw =>
+    cases canonical : e.canonicalBody target with
+    | error gap => simp [descriptionExclusion, native, canonical, bind, Except.bind] at computed
+    | ok body =>
+      simp only [descriptionExclusion, native, canonical, bind, Except.bind] at computed
+      split at computed <;> try simp_all [pure, Except.pure]
+      split at computed <;> try simp_all
+      split at computed <;> try simp_all
+      cases routes : e.sourceRoutes with
+      | none => simp [routes, throw, throwThe, MonadExceptOf.throw] at computed
+      | some value =>
+        simp only [routes] at computed
+        split at computed <;> try simp_all [throw, throwThe,
+          MonadExceptOf.throw]
+        rw [← computed]
+        exact ⟨rfl, rfl⟩
+
+inductive CandidateComparison where
+  | unrelated
+  | excluded (w : { w : DescriptionExclusion // w.necessary })
+  | unresolved (gap : Gap)
+
+def compareCandidate (e : Evidence) (fuel : Nat) (id : Physical) (target : Canonical) :
+    CandidateComparison :=
+  match sourceCounterpart e fuel id with
+  | .ok _ => .unrelated
+  | .error gap =>
+    match gap with
+    | .unresolvedIdentity _ _ =>
+      match descriptionExclusion e id target with
+      | .ok (some w) => .excluded w
+      | .ok none => .unresolved gap
+      | .error missing => .unresolved missing
+    | _ => .unresolved gap
+
 def matchingCandidates (e : Evidence) (fuel : Nat) (ids : List Physical)
     (canonical : Canonical) : CandidateSet :=
   { values := (unique ids).filter (fun id => decide (sourceCounterpart e fuel id = .ok (some canonical))),
-    unresolved := (unique ids).filterMap fun id => match sourceCounterpart e fuel id with
-      | .error gap => some (id, gap)
-      | .ok _ => none }
+    unresolved := (unique ids).filterMap fun id => match compareCandidate e fuel id canonical with
+      | .unresolved gap => some (id, gap)
+      | _ => none,
+    excluded := (unique ids).filterMap fun id => match compareCandidate e fuel id canonical with
+      | .excluded w => some w.val
+      | _ => none }
 
 /-- Membership comes from the supplied raw domain and the executable identity query. This
 does not assert that the native evidence rows have been authenticated. -/
@@ -329,10 +401,38 @@ theorem matchingCandidates_member {e : Evidence} {fuel : Nat} {ids : List Physic
 
 theorem matchingCandidates_gap {e : Evidence} {fuel : Nat} {ids : List Physical}
     {canonical : Canonical} {id : Physical} {gap : Gap} (member : id ∈ ids)
-    (unresolved : sourceCounterpart e fuel id = .error gap) :
+    (unresolved : compareCandidate e fuel id canonical = .unresolved gap) :
     (id, gap) ∈ (matchingCandidates e fuel ids canonical).unresolved := by
   apply List.mem_filterMap.mpr
   exact ⟨id, by simpa [unique] using member, by simp [unresolved]⟩
+
+theorem matchingCandidates_excluded_necessary {e : Evidence} {fuel : Nat}
+    {ids : List Physical} {canonical : Canonical} {w : DescriptionExclusion}
+    (member : w ∈ (matchingCandidates e fuel ids canonical).excluded) : w.necessary := by
+  obtain ⟨id, _, result⟩ := List.mem_filterMap.mp member
+  cases compared : compareCandidate e fuel id canonical with
+  | unrelated => simp [compared] at result
+  | unresolved gap => simp [compared] at result
+  | excluded checked =>
+    simp only [compared, Option.some.injEq] at result
+    subst w
+    exact checked.property
+
+theorem matchingCandidates_accounted {e : Evidence} {fuel : Nat} {ids : List Physical}
+    {canonical : Canonical} {id : Physical} (member : id ∈ ids) :
+    match compareCandidate e fuel id canonical with
+    | .unrelated => True
+    | .unresolved gap => (id, gap) ∈ (matchingCandidates e fuel ids canonical).unresolved
+    | .excluded checked => checked.val ∈ (matchingCandidates e fuel ids canonical).excluded ∧
+        checked.val.necessary := by
+  cases compared : compareCandidate e fuel id canonical with
+  | unrelated => trivial
+  | unresolved gap => exact matchingCandidates_gap member compared
+  | excluded checked =>
+    constructor
+    · apply List.mem_filterMap.mpr
+      exact ⟨id, by simpa [unique] using member, by simp [compared]⟩
+    · exact checked.property
 
 /-- Candidate enumeration walks complete physical ancestry and full receipt locals. A
 preferred translation-cache value is deliberately absent from this interface. -/

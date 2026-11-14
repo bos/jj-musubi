@@ -14,6 +14,9 @@ deriving instance ToJson for Musubi.Names.Key
 deriving instance ToJson for Original, Canonical, Physical, WorkspaceKey, Namespace, Work
 deriving instance ToJson for IdentityIssue, Gap
 deriving instance ToJson for Stamp, CanonicalBody, NativeSource, NativeBody, IdentityKind, IdentityRow
+deriving instance ToJson for SourceRealign, SourceRename, SourceFrame, SourceHubFrame,
+  SourceCheckpoint, SourceMemory
+deriving instance ToJson for SourceRoutes, DescriptionExclusion
 deriving instance ToJson for BaseObservation, Evidence, Record, Receipt, Intent, RetainedExport
 deriving instance ToJson for Persistent, ReceiptRequest, ReceiptBuild, Role, CandidateSet, Candidates
 deriving instance ToJson for SourceChoice, Suffix, ParentSelection, OwnSource, OwnSelection, GitChoice
@@ -29,9 +32,7 @@ def optionalString (j : Json) (key : String) : Except String (Option String) :=
   j.getObjValAs? (Option String) key
 
 def restoreReference (description : String) : Bool :=
-  ["undo: restore to operation ", "redo: restore to operation ",
-    "undo: revert operation ", "redo: revert operation ",
-    "restore to operation ", "revert operation "].any (fun leading => description.startsWith leading)
+  restoreDescription description
 
 def without (j : Json) (keys : List String) : Except String Json := do
   return Json.mkObj ((← j.getObj?).toList.filter fun row => !keys.contains row.1)
@@ -231,11 +232,12 @@ def decodeCanonical (ctx : Context) (raw : Json) : Except String CanonicalBody :
     work := owner, forgets := ← forgets.mapM copy, forgetAfter,
     fixup := (← readAttr metadata "musubi.fixup").isSome,
     rewrites, stamp := ← stamp ctx metadata, workspaces,
-    content := ← label ctx.contents (← content raw) }
+    content := ← label ctx.contents (← content raw), description }
 
 def decodeNative (ctx : Context) (raw : Json) : Except String NativeBody := do
   let metadata ← get raw "metadata"
-  if restoreReference (← str metadata "description") then
+  let description ← str metadata "description"
+  if restoreReference description then
     throw "native restore/revert is outside the two finite fixtures"
   let marker ← (← readAttr metadata "musubi.canonical").mapM fun id => do
     return Canonical.mk (← label ctx.canonical id)
@@ -253,9 +255,235 @@ def decodeNative (ctx : Context) (raw : Json) : Except String NativeBody := do
     authorWorkspace := (← optionalString metadata "workspaceName").map String.toList,
     presenceStamp := ← stamp ctx metadata,
     gitFields := ← label ctx.fields (← gitFields raw),
-    content := ← label ctx.contents (← content raw) }
+    content := ← label ctx.contents (← content raw), description }
 
 def query (value : Query α) : Except String α := value.mapError (fun gap => reprStr gap)
+
+def sourceHash (text : String) : Except String String := do
+  if text.length ≠ 128 || !text.toList.all (fun c =>
+      ('0' ≤ c && c ≤ '9') || ('a' ≤ c && c ≤ 'f')) then
+    throw "source state contains a noncanonical operation/digest hash"
+  return text
+
+def sourcePhysical (ctx : Context) (e : Evidence) (text : String) : Except String Physical := do
+  let id : Physical := ⟨← label ctx.physical (← sourceHash text)⟩
+  let _ ← query (e.nativeBody id)
+  return id
+
+def sourceCanonical (ctx : Context) (e : Evidence) (text : String) : Except String Canonical := do
+  let id : Canonical := ⟨← label ctx.canonical (← sourceHash text)⟩
+  let _ ← query (e.canonicalBody id)
+  return id
+
+def sourcePair (row : Json) : Except String (Json × Json) := do
+  let values ← row.getArr?
+  if values.size ≠ 2 then throw "source state pair has wrong arity"
+  return (values[0]!, values[1]!)
+
+def sourceDefault [Lean.FromJson α] (raw : Json) (key : String) (fallback : α) :
+    Except String α :=
+  match raw.getObjVal? key with
+  | .error _ => .ok fallback
+  | .ok value => Lean.fromJson? value
+
+def sourceAliases (ctx : Context) (e : Evidence) (values : List Json) :
+    Except String (List (Physical × Canonical)) := do
+  let result ← values.mapM fun row => do
+    let (physical, canonical) ← sourcePair row
+    return (← sourcePhysical ctx e (← physical.getStr?),
+      ← sourceCanonical ctx e (← canonical.getStr?))
+  if !uniqueKeys result then throw "duplicate supplied source relation key"
+  return result
+
+def sourceRealign (ctx : Context) (e : Evidence) (raw : Json) : Except String SourceRealign := do
+  let fromHeads ← (← rows raw "from").mapM fun row => do
+    let (old, values) ← sourcePair row
+    return (← sourcePhysical ctx e (← old.getStr?),
+      ← (← values.getArr?).toList.mapM fun id => do sourcePhysical ctx e (← id.getStr?))
+  if !uniqueKeys fromHeads then throw "duplicate source realign frontier key"
+  return {
+    fromHeads,
+    to := ← (← strings raw "to").mapM (sourcePhysical ctx e),
+    canonical := ← sourceAliases ctx e (← rows raw "canonical") }
+
+def sourceOptionalRealign (ctx : Context) (e : Evidence) (raw : Json) :
+    Except String (Option SourceRealign) :=
+  if raw == .null then .ok none else do return some (← sourceRealign ctx e raw)
+
+def sourceNumber (text : String) : Except String Nat := do
+  if text.length ≠ 20 || !text.toList.all (fun c => '0' ≤ c && c ≤ '9') then
+    throw "source step header has a noncanonical number"
+  let some value := text.toNat? | throw "source step number is unreadable"
+  return value
+
+def sourceFrameComplete (frame : SourceFrame) : Except String Unit := do
+  if frame.declaredLines ≠ frame.renames.length + frame.sources.length then
+    throw "source step block is incomplete or has extra lines"
+
+/-- A strict finite subset of the native framed-log parser. Torn/unrecognized input is
+an interpretation gap, not a new native refusal. All complete frames are retained. -/
+def sourceFrames (ctx : Context) (e : Evidence) (text : String) :
+    Except String (List SourceFrame) := do
+  let mut result := []
+  let mut current : Option SourceFrame := none
+  for line in text.splitOn "\n" do
+    if line.isEmpty then continue
+    match line.splitOn " " with
+    | ["step", number, count] =>
+      if let some frame := current then
+        sourceFrameComplete frame
+        result := result ++ [frame]
+      current := some { number := ← sourceNumber number, declaredLines := ← sourceNumber count }
+    | ["source", physical, canonical] =>
+      let some frame := current | throw "source row has no framed step"
+      current := some { frame with sources := frame.sources ++
+        [(← sourcePhysical ctx e physical, ← sourceCanonical ctx e canonical)] }
+    | [old, next] =>
+      let some frame := current | throw "renaming row has no framed step"
+      let dropped := old.startsWith "-"
+      let old := if dropped then String.ofList (old.toList.drop 1) else old
+      let next : Option Canonical ← if next = "-" then pure none else
+        some <$> sourceCanonical ctx e next
+      current := some { frame with renames := frame.renames ++
+        [{ old := ← sourceCanonical ctx e old, new := next, dropped }] }
+    | _ => throw "unsupported or torn source step line"
+  if let some frame := current then
+    sourceFrameComplete frame
+    result := result ++ [frame]
+  return result
+
+def sourceCounted (count : Nat) (frames : List SourceFrame) :
+    Except String (List (Physical × Canonical)) := do
+  let indexed := frames.foldl (fun acc frame => put acc frame.number frame) []
+  if count > indexed.length then throw "checkpoint counts missing source steps"
+  let mut result := []
+  for i in List.range count do
+    let some frame := lookup indexed (i + 1) | throw "checkpoint source step sequence has a hole"
+    result := frame.sources.foldl (fun acc row => put acc row.1 row.2) result
+  return result
+
+def sourceHubFrames (ctx : Context) (e : Evidence) (text : String) :
+    Except String (List SourceHubFrame) := do
+  let mut result := []
+  let mut current : Option SourceHubFrame := none
+  for line in text.splitOn "\n" do
+    if line.isEmpty then continue
+    match line.splitOn " " with
+    | ["record", digest, count] =>
+      if let some frame := current then
+        if frame.declaredLines ≠ frame.renames.length then throw "incomplete hub renaming frame"
+        result := result ++ [frame]
+      current := some { digest := ← sourceHash digest, declaredLines := ← sourceNumber count }
+    | [new, old] =>
+      let some frame := current | throw "hub renaming has no record frame"
+      current := some { frame with renames := frame.renames ++
+        [(← sourceCanonical ctx e new, ← sourceCanonical ctx e old)] }
+    | _ => throw "unsupported or torn hub renaming line"
+  if let some frame := current then
+    if frame.declaredLines ≠ frame.renames.length then throw "incomplete hub renaming frame"
+    result := result ++ [frame]
+  return result
+
+def sourceNames (ctx : Context) (e : Evidence) (values : List Json) :
+    Except String (List Canonical) :=
+  values.mapM fun value => do sourceCanonical ctx e (← value.getStr?)
+
+def sourceHistory (ctx : Context) (e : Evidence) (raw : Json) (checkpoint : Bool) :
+    Except String (Nat × List Canonical) := do
+  let applied ← rows raw "applied"
+  let appliedNames ← applied.mapM fun row => do sourceNames ctx e (← row.getArr?).toList
+  let pending ← sourceNames ctx e (← rows raw "pending")
+  let mut names := appliedNames.flatten ++ pending
+  let mut count := applied.length + pending.length
+  for field in ["earlier", "custody"] do
+    let values ← sourceDefault raw field (#[] : Array Json)
+    count := count + values.size
+    for row in values.toList do
+      let values ← if checkpoint then do
+          let (digest, values) ← sourcePair row
+          let _ ← sourceHash (← digest.getStr?)
+          pure values
+        else pure row
+      names := names ++ (← sourceNames ctx e (← values.getArr?).toList)
+  return (count, names)
+
+def sourceCheckpoint (ctx : Context) (e : Evidence) (text : Option String) :
+    Except String SourceCheckpoint := do
+  let some text := text | return {}
+  -- Relevant checkpoint strings are ASCII hashes. This finite parser rejects escapes
+  -- instead of allowing a duplicated/escaped object key to hide behind JSON map parsing.
+  if text.contains '\\' then throw "escaped checkpoint JSON is outside the finite source parser"
+  let raw ← Lean.Json.parse text
+  let fields := (← raw.getObj?).toList
+  let allowed := ["prefix", "applied", "pending", "fixup", "fixup_written", "fixup_from",
+    "moving", "realign", "steps", "fresh", "earlier", "custody"]
+  for (name, _) in fields do
+    if !allowed.contains name || (text.splitOn s!"\"{name}\"").length ≠ 2 then
+      throw "unknown or duplicate source checkpoint field"
+  let fixup ← get raw "fixup"
+  if fixup != .null then
+    throw "nonempty checkpoint fixup needs further source-route interpretation"
+  let (records, names) ← sourceHistory ctx e raw true
+  let storedPrefix := (get raw "prefix").toOption.getD .null
+  let prefixCount ← if storedPrefix == .null then pure 0 else do
+    let (count, digest) ← sourcePair storedPrefix
+    let _ ← sourceHash (← digest.getStr?)
+    count.getNat?
+  let fixupFrom ← sourceDefault raw "fixup_from" (none : Option String)
+  let fixupFrom ← fixupFrom.mapM (sourceCanonical ctx e)
+  let realign := (get raw "realign").toOption.getD .null
+  if realign != .null then
+    for key in ["from", "to", "canonical"] do
+      if (text.splitOn s!"\"{key}\"").length ≠ 2 then throw "duplicate realign object key"
+  return {
+    steps := ← sourceDefault raw "steps" 0,
+    realign := ← sourceOptionalRealign ctx e realign,
+    moving := ← sourceDefault raw "moving" false,
+    fixup := (← raw.getObjValAs? Bool "fixup_written") || fixupFrom.isSome,
+    recordCount := records + prefixCount, recordNames := names ++ fixupFrom.toList }
+
+def sourceMemory (ctx : Context) (e : Evidence) (raw : Json) : Except String SourceMemory := do
+  if (← str raw "provenance") ≠ "NodeRepo.records and join fields, exact supplied snapshot" then
+    throw "unrecognized supplied source-state provenance"
+  let superseded ← (← rows raw "superseded").mapM fun row => do
+    let (old, values) ← sourcePair row
+    return (← sourceCanonical ctx e (← old.getStr?),
+      ← sourceNames ctx e (← values.getArr?).toList)
+  if !uniqueKeys superseded then throw "duplicate supplied superseded key"
+  let joins ← (← rows raw "joins").mapM fun row => do
+    let (fingerprint, canonical) ← sourcePair row
+    return (← label ctx.original (← sourceHash (← fingerprint.getStr?)),
+      ← sourceCanonical ctx e (← canonical.getStr?))
+  if !uniqueKeys joins then throw "duplicate supplied join fingerprint"
+  let (records, names) ← sourceHistory ctx e raw false
+  let fixupFrom ← (← raw.getObjValAs? (Option String) "fixupFrom").mapM (sourceCanonical ctx e)
+  return {
+    steps := ← raw.getObjValAs? Nat "steps",
+    sources := ← sourceAliases ctx e (← rows raw "sources"), superseded,
+    dropped := ← sourceNames ctx e (← rows raw "dropped"),
+    realign := ← sourceOptionalRealign ctx e (← get raw "realign"),
+    moving := ← raw.getObjValAs? Bool "moving", taking := ← raw.getObjValAs? Bool "taking",
+    fixup := (← get raw "fixup") != .null ||
+      (← raw.getObjValAs? Bool "fixupWritten") || fixupFrom.isSome,
+    recordCount := records + (← raw.getObjValAs? Nat "prefixCount"),
+    recordNames := names ++ fixupFrom.toList,
+    joins, joinPoints := ← (← strings raw "joinPoints").mapM (sourcePhysical ctx e),
+    prejoin := ← (← strings raw "prejoin").mapM (sourcePhysical ctx e) }
+
+def sourceRoutes (ctx : Context) (e : Evidence) (raw : Json) : Except String SourceRoutes := do
+  let state ← get raw "identitySourceState"
+  if (← state.getObjValAs? Nat "schema") ≠ 1 then throw "source-state schema version"
+  let files ← get state "files"
+  let checkpoint ← sourceCheckpoint ctx e (← optionalString files "checkpoint")
+  let frames ← sourceFrames ctx e ((← optionalString files "steps").getD "")
+  let countedSources ← sourceCounted checkpoint.steps frames
+  let accepted ← ["acceptedBase", "acceptedPush"].filterMapM fun key => do
+    let some text ← optionalString files key | return none
+    return some (← sourceCanonical ctx e text.trimAscii.toString)
+  return {
+    checkpoint, frames, countedSources, memory := ← sourceMemory ctx e (← get state "memory"),
+    accepted, hubRenamings := ← sourceHubFrames ctx e
+      ((← optionalString files "hubRenamings").getD "") }
 
 def decodeEvidence (ctx : Context) (raw : Json) : Except String Evidence := do
   let canonicalRows ← rows raw "canonical"
@@ -267,6 +495,10 @@ def decodeEvidence (ctx : Context) (raw : Json) : Except String Evidence := do
   let native ← (← rows raw "native").mapM (decodeNative ctx)
   if !uniqueKeys (canonical.map fun body => (body.id, body)) ||
       !uniqueKeys (native.map fun body => (body.id, body)) then throw "duplicate raw bodies"
+  for body in canonical do
+    if canonical.any (fun other => other.original == body.original &&
+        (other.description != body.description || other.authorWorkspace != body.authorWorkspace)) then
+      throw "inconsistent immutable-original description/author lineage"
   let joins ← rows raw "joins"
   let originals ← rows raw "originals"
   let joinInputs ← joins.mapM fun row => do
@@ -290,6 +522,8 @@ def decodeEvidence (ctx : Context) (raw : Json) : Except String Evidence := do
   let fuel := native.length + canonical.length + 1
   let _ ← native.mapM fun body => query (nativeClosure evidence fuel body.id)
   let _ ← canonical.mapM fun body => query (canonicalClosure evidence fuel body.id)
+  let routes ← sourceRoutes ctx evidence raw
+  let evidence := { evidence with sourceRoutes := some routes }
   -- Fatal structural errors still reject the snapshot. Unresolved identities are typed
   -- classifications over the retained corpus, not missing or discarded native bodies.
   let _ ← native.mapM fun body => query (classifyIdentity evidence fuel body.id)
@@ -356,18 +590,7 @@ def reply (request : Json) : Except String Json := do
     let receiptRequest : ReceiptRequest := {
       identity := ← label ctx.digests (← str incoming "identity"),
       recordPrefix := ← label ctx.digests (← str incoming "prefixDigest"), records }
-    let build ← (constructReceipt e facts saved me heads receiptRequest).mapError fun gap =>
-      match gap with
-      | .encoding message =>
-        match Lean.Json.parse message with
-        | .ok diagnostic => (Lean.Json.mkObj [
-          ("encodingDiagnostic", diagnostic),
-          ("ids", (get request "ids").toOption.getD .null),
-          ("normalizedContent", toJson ctx.contents),
-          ("rawCanonicalBefore", (get raw "canonical").toOption.getD .null),
-          ("rawCanonicalAfter", (get after "canonical").toOption.getD .null)]).compress
-        | .error _ => reprStr gap
-      | _ => reprStr gap
+    let build ← query (constructReceipt e facts saved me heads receiptRequest)
     let observed ← decodeReceipt ctx e (← get after "receipt")
     if !receiptInputMatches build observed then throw "native receipt differs from computed construction"
     let actualWrites ← (← strings (← get request "observed") "writes").mapM fun id => do

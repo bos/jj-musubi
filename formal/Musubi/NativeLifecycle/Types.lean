@@ -135,6 +135,7 @@ structure CanonicalBody where
   workspaces : SharedBindings := []
   /-- All remaining hash-visible bytes, interned by exact content by the eventual codec. -/
   content : Nat := 0
+  description : String := ""
 deriving DecidableEq, Repr
 
 inductive NativeSource where
@@ -157,6 +158,7 @@ structure NativeBody where
   /-- Complete per-machine fields, compared by exact content rather than a scalar HEAD. -/
   gitFields : Nat := 0
   content : Nat := 0
+  description : String := ""
 deriving DecidableEq, Repr
 
 inductive IdentityKind where
@@ -188,6 +190,109 @@ structure BaseObservation where
   bases : List Physical
 deriving DecidableEq, Repr
 
+structure SourceRealign where
+  fromHeads : List (Physical × List Physical)
+  to : List Physical
+  canonical : List (Physical × Canonical)
+deriving DecidableEq, Repr
+
+structure SourceRename where
+  old : Canonical
+  new : Option Canonical
+  dropped : Bool
+deriving DecidableEq, Repr
+
+structure SourceFrame where
+  number : Nat
+  declaredLines : Nat
+  renames : List SourceRename := []
+  sources : List (Physical × Canonical) := []
+deriving DecidableEq, Repr
+
+structure SourceHubFrame where
+  digest : String
+  declaredLines : Nat
+  renames : List (Canonical × Canonical) := []
+deriving DecidableEq, Repr
+
+structure SourceCheckpoint where
+  steps : Nat := 0
+  realign : Option SourceRealign := none
+  moving : Bool := false
+  fixup : Bool := false
+  recordCount : Nat := 0
+  recordNames : List Canonical := []
+deriving DecidableEq, Repr
+
+structure SourceMemory where
+  steps : Nat
+  sources : List (Physical × Canonical)
+  superseded : List (Canonical × List Canonical)
+  dropped : List Canonical
+  realign : Option SourceRealign
+  moving : Bool
+  taking : Bool
+  fixup : Bool
+  recordCount : Nat
+  recordNames : List Canonical
+  joins : List (Nat × Canonical)
+  joinPoints : List Physical
+  prejoin : List Physical
+deriving DecidableEq, Repr
+
+/-- Parsed durable state and the separately supplied actual memory snapshot. No equality
+between them is assumed, and an absent file never supplies the memory relation. -/
+structure SourceRoutes where
+  checkpoint : SourceCheckpoint
+  frames : List SourceFrame
+  countedSources : List (Physical × Canonical)
+  memory : SourceMemory
+  accepted : List Canonical
+  hubRenamings : List SourceHubFrame
+deriving DecidableEq, Repr
+
+/-- This finite ordinary-route slice accounts for every alternative by requiring its
+independently observed relation to be empty. Nonempty routes remain interpretation gaps. -/
+def SourceRoutes.closed (s : SourceRoutes) : Bool :=
+  s.checkpoint.steps == 0 && s.frames.isEmpty && s.countedSources.isEmpty &&
+  s.checkpoint.realign.isNone && !s.checkpoint.moving && !s.checkpoint.fixup &&
+  s.checkpoint.recordCount == 0 && s.checkpoint.recordNames.isEmpty &&
+  s.memory.steps == 0 && s.memory.sources.isEmpty && s.memory.superseded.isEmpty &&
+  s.memory.dropped.isEmpty && s.memory.realign.isNone && !s.memory.moving &&
+  !s.memory.taking && !s.memory.fixup && s.memory.recordCount == 0 &&
+  s.memory.recordNames.isEmpty && s.memory.joins.isEmpty && s.memory.joinPoints.isEmpty &&
+  s.memory.prejoin.isEmpty &&
+  s.accepted.isEmpty && s.hubRenamings.isEmpty
+
+structure DescriptionExclusion where
+  physical : Physical
+  target : Canonical
+  targetOriginal : Original
+  nativeDescription : String
+  originalDescription : String
+deriving DecidableEq, Repr
+
+/-- The ordinary native canonicalization constructor copies description unchanged. Join,
+restore/revert and renaming routes are not this constructor and must be checked separately. -/
+def ordinaryOriginalDescription (native : String) : String := native
+
+/-- An overapproximation of the ordinary constructor: every other field is arbitrary,
+but its description is copied from the native input. This is not a join constructor. -/
+def ordinaryOriginalBody (nativeDescription : String) (other : CanonicalBody) : CanonicalBody :=
+  { other with description := ordinaryOriginalDescription nativeDescription }
+
+def DescriptionExclusion.necessary (w : DescriptionExclusion) : Prop :=
+  ordinaryOriginalDescription w.nativeDescription ≠ w.originalDescription
+
+theorem DescriptionExclusion.no_ordinary_body (w : DescriptionExclusion) (checked : w.necessary)
+    (other : CanonicalBody) :
+    (ordinaryOriginalBody w.nativeDescription other).description ≠ w.originalDescription := checked
+
+def restoreDescription (description : String) : Bool :=
+  ["undo: restore to operation ", "redo: restore to operation ",
+    "undo: revert operation ", "redo: revert operation ",
+    "restore to operation ", "revert operation "].any (fun start => description.startsWith start)
+
 structure Evidence where
   root : Canonical
   physicalRoot : Physical
@@ -199,6 +304,7 @@ structure Evidence where
   nativeFingerprints : List (Physical × Nat) := []
   originalFingerprints : List (Original × Nat) := []
   joinFingerprints : List (Canonical × Nat) := []
+  sourceRoutes : Option SourceRoutes := none
   /-- Independently captured native inputs of joins, not arbitrary unknown operations. -/
   joinInputs : List Physical := []
   /-- Native order is retained, and checked against graph-derived closest-base membership. -/

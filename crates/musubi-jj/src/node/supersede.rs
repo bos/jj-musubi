@@ -785,6 +785,91 @@ impl NodeRepo {
 
 #[cfg(test)]
 impl NodeRepo {
+    /// Raw test-only source state. This does not query canonical_of/local_of, choose a
+    /// realization, or expose Taking.locals as an input to the lifecycle oracle.
+    pub(in crate::node) fn native_identity_state(&self) -> serde_json::Value {
+        use jj_lib::object_id::ObjectId as _;
+        use serde_json::json;
+
+        let sources = |values: &HashMap<LocalOp, CanonicalOp>| {
+            let mut rows = values
+                .iter()
+                .map(|(local, canonical)| (local.0.hex(), canonical.0.hex()))
+                .collect::<Vec<_>>();
+            rows.sort();
+            rows
+        };
+        let names = |record: &Record| {
+            record
+                .ops()
+                .iter()
+                .map(|id| id.0.0.hex())
+                .collect::<Vec<_>>()
+        };
+        let mut superseded = self
+            .records
+            .superseded
+            .iter()
+            .map(|(old, new)| {
+                (
+                    old.0.hex(),
+                    new.iter().map(|id| id.0.hex()).collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        superseded.sort();
+        let mut dropped = self
+            .records
+            .dropped
+            .iter()
+            .map(|id| id.0.hex())
+            .collect::<Vec<_>>();
+        dropped.sort();
+        let mut joins = self
+            .joins
+            .iter()
+            .map(|(fingerprint, canonical)| (fingerprint.clone(), canonical.0.hex()))
+            .collect::<Vec<_>>();
+        joins.sort();
+        let mut join_points = self
+            .join_points
+            .iter()
+            .map(|id| id.0.hex())
+            .collect::<Vec<_>>();
+        join_points.sort();
+        let mut prejoin = self
+            .before_join
+            .iter()
+            .map(|id| id.0.hex())
+            .collect::<Vec<_>>();
+        prejoin.sort();
+        json!({
+            "provenance": "NodeRepo.records and join fields, exact supplied snapshot",
+            "steps": self.records.steps,
+            "sources": sources(&self.records.sources),
+            "superseded": superseded, "dropped": dropped,
+            "realign": self.records.realign.as_ref().map(|realign| {
+                let mut from = realign.from.iter().map(|(old, new)|
+                    (old.0.hex(), new.iter().map(|id| id.0.hex()).collect::<Vec<_>>()))
+                    .collect::<Vec<_>>();
+                from.sort();
+                json!({"from": from,
+                    "to": realign.to.iter().map(|id| id.0.hex()).collect::<Vec<_>>(),
+                    "canonical": sources(&realign.canonical)})
+            }),
+            "moving": self.records.moving, "taking": self.records.taking.is_some(),
+            "fixup": self.records.fixup,
+            "fixupFrom": self.records.fixup_from.as_ref().map(|id| id.0.hex()),
+            "fixupWritten": self.records.fixup_written, "fresh": self.records.fresh,
+            "prefixCount": self.records.prefix.count,
+            "applied": self.records.applied.iter().map(names).collect::<Vec<_>>(),
+            "pending": names(&self.records.pending),
+            "earlier": self.records.earlier.iter().map(|entry| names(&entry.record)).collect::<Vec<_>>(),
+            "custody": self.records.custody.iter().map(|entry| names(&entry.record)).collect::<Vec<_>>(),
+            "joins": joins, "joinPoints": join_points, "prejoin": prejoin
+        })
+    }
+
     pub(in crate::node) fn native_receipt(&self) -> Option<super::native_contract::Receipt> {
         self.records
             .taking

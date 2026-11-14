@@ -436,7 +436,8 @@ def constructRender (input : Evidence) (facts : NativeFacts) (me : Copy)
       id := ⟨0⟩, parents, endTime := body.endTime, workspaces := sortedBindings workspaces,
       marker := some canonical, context, source,
       reserved := reserved.mergeSort (fun a b => decide (String.ofList a ≤ String.ofList b)),
-      authorWorkspace, presenceStamp := body.stamp, gitFields := fields, content := body.content }
+      authorWorkspace, presenceStamp := body.stamp, gitFields := fields, content := body.content,
+      description := body.description }
     let identity : IdentityRow := ⟨result.id, canonical, body.original, .markedBody⟩
     evidence := { evidence with native := unique (evidence.native ++ [result]) }
     evidence ← evidence.installIdentities [identity]

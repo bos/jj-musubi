@@ -371,3 +371,75 @@ compare the codec result's option against the full expected stamp so errors fail
 failure and corrected logs are preserved. There was one oracle build and one existing A/B
 native-target run, with no new fixture, campaign or full suite. B's identity evidence and the
 full preservation/native-simulation obligations remain open.
+
+## Independently observed source routes and finite description exclusion
+
+The next child captures `identitySourceState` alongside the complete raw corpus. Its durable
+inputs are the exact optional checkpoint, framed `superseded` steps, `hub-renamings`, accepted
+base and accepted push files from the precall `Inputs` snapshot. The separately supplied
+memory observation names its provenance and contains actual `Records.sources`, superseded and
+dropped relations, realign frontiers/canonical aliases, record history names and phase/fixup
+state, plus joins, join points and prejoin bodies. `Taking.locals` and selected translations
+remain comparison targets. An absent checkpoint never supplies an empty memory relation.
+
+The codec independently parses the checkpoint and both framed logs, validates complete line
+counts, canonical hash/number spelling, referenced bodies, relation keys and checkpoint step
+replay. It retains every frame, including superseded frames; replay selects the last complete
+frame per number exactly for the checkpoint's counted prefix. The finite parser rejects torn,
+escaped or unsupported checkpoint/log forms as interpretation gaps. Nonempty fixup checkpoint
+contents also remain unsupported. This is not the production parser or a new native refusal.
+
+The executable negative check is intentionally restricted to an ordinary target and empty
+alternative routes, checked independently on disk and in memory. Every nonempty retained step,
+history, source, supersede, drop, realign, accepted, join or prejoin route keeps a gap. Missing
+route observations do too. Exact descriptions are read from hash-checked full bodies. Canonical
+versions sharing an immutable original must agree on description and author workspace. The
+certificate pins the exact physical ID, canonical version and immutable original; contraction
+to a different survivor cannot reuse it. Markers, non-parent source constructors, restore and
+revert are unsupported. A target without an author workspace is also excluded from this slice.
+
+The native law used is a necessary description projection of the ordinary constructor:
+`translate.rs::canonical_form` clones metadata and changes descriptions only for restore or
+revert targets. `canonical/origin.rs::identity` restores original parents and removes presence,
+leaving description unchanged. Native jj reparenting copies metadata unchanged. In contrast,
+`join.rs::create_join_operation_with_remotes` changes description and `record_join` maps the old
+head; the retained and in-memory join gates account for that counterexample rather than treating
+description mismatch alone as universal evidence. The ordinary target workspace requirement
+also excludes the explicit join constructor, which clears its author workspace.
+
+`ordinaryOriginalBody` overapproximates that ordinary constructor by allowing every other
+canonical field to vary while copying description. The local negative theorem excludes every
+such body from matching the target description. It has no correct-source or whole-preservation
+premise. The candidate-accounting theorem retains all unresolved members and all checked
+target-specific exclusions in the original complete domains. It does not assert a positive
+identity, a universal native original classifier or the soundness of every native route.
+
+The earlier diagnostic-only snapshots remain available. This child removes their large
+canonical encoding diagnostic payload and keeps the stamp representation correction and its
+guard. Full construction preservation, native-law authentication beyond these observations,
+native simulation and all certified-prefix limits remain open.
+
+This child passed 146 executable guards, 22 affected axiom queries and its one oracle build.
+The queries use only the expected logical axioms, with no `sorryAx` or native-law axiom. The
+single existing A/B native-target run passed both tests. A again checked its nonempty actual
+write set and complete disk custody through the receipt-commit certificate. B constructed
+one render node and reached its capture/render/revalidate certificate, then passed the
+separate ownership, complete Git fields, stable ordered merge, physical bookmark and native
+reread/export-order comparisons. The Rust policy assertions were unchanged.
+
+For B's actual precall observation, all five durable route files were absent and every
+separately captured memory relation/history was empty, with inactive phase/fixup flags. A
+read-only audit of that saved input recomputed the full fallback domain: one qualified source,
+two target-specific description exclusions and no unresolved members. Both excluded native
+bodies say `reconcile divergent operations`; the exact ordinary target/original says
+`create bookmark child pointing to commit ...`. Those bodies remain in the raw corpus and
+remain globally unresolved; their exclusions apply only to this target. Same-description,
+incomplete-route and explicit recorded-join cases continue to be gaps.
+
+The original bounded phase began at 16:09:40 UTC on November 14, 2026. Native jobs had ended
+by 16:18:10, releasing the heavy slot after 8 minutes 30 seconds. Saving pure oracle replies
+and the read-only candidate audit completed by 16:19:49, within the same twenty-minute cap.
+Routine elaboration and guard syntax corrections stayed inside that window, with failed
+logs preserved. There was one oracle build, one native-target run, no native retry, no new
+fixture, no full suite and no campaign. Coordinator integration still owns the final checks
+and independent reviews; the full preservation/native-simulation obligations remain open.

@@ -615,3 +615,8 @@ open Musubi
 #print axioms NativeLifecycle.chooseSource_selected
 #print axioms NativeLifecycle.candidates_complete
 #print axioms NativeLifecycle.computedSource_selected
+#print axioms NativeLifecycle.descriptionExclusion_necessary
+#print axioms NativeLifecycle.DescriptionExclusion.no_ordinary_body
+#print axioms NativeLifecycle.descriptionExclusion_pinned
+#print axioms NativeLifecycle.matchingCandidates_excluded_necessary
+#print axioms NativeLifecycle.matchingCandidates_accounted

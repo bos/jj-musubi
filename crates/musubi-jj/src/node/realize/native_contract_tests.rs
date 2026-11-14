@@ -514,10 +514,30 @@ fn custody_is_saved_before_named_write() {
     fx.repo
         .jj(&["describe", "-m", "unpublished native survivor"]);
     head(&mut fx.node);
+    let prefix = RecordPrefix::none();
+    assert!(fx.records.iter().any(|record| record.ops().len() > 1));
+    // Expected responsibility comes from the incoming receipt before the call, including
+    // every dropped original and its exact preceding digest in the receipt chain.
+    let mut before = prefix.digest.clone();
+    let expected: Vec<_> = fx
+        .records
+        .iter()
+        .map(|record| {
+            let entry = (
+                jj_lib::hex_util::encode_hex(before.bytes()),
+                record
+                    .ops()
+                    .iter()
+                    .map(|op| op.0.0.hex())
+                    .collect::<Vec<_>>(),
+            );
+            before = before.then(record);
+            entry
+        })
+        .collect();
+    let expected = serde_json::to_value(expected).unwrap();
     let effects = record_stores(&mut fx.node);
-    fx.node
-        .prepare_records(&RecordPrefix::none(), &fx.records)
-        .unwrap();
+    fx.node.prepare_records(&prefix, &fx.records).unwrap();
     fx.node.settle().unwrap();
     let effects = effects.lock().unwrap();
     let writes: Vec<_> = effects
@@ -533,11 +553,9 @@ fn custody_is_saved_before_named_write() {
     );
     for (op, saved) in writes {
         assert!(!op.parents.is_empty());
-        assert!(
-            saved["custody"]
-                .as_array()
-                .is_some_and(|entries| !entries.is_empty()),
-            "record responsibility must already be on disk at the native write"
+        assert_eq!(
+            saved["custody"], expected,
+            "the exact incoming responsibility must already be on disk at the native write"
         );
     }
 }

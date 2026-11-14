@@ -1097,6 +1097,8 @@ impl NodeRepo {
             }
             self.prepared = None;
             let mut heads = self.local_heads()?;
+            #[cfg(test)]
+            super::native_contract::emit(super::native_contract::Event::Captured(heads.clone()));
             let published = self.published_realizations(&heads)?;
             let own = self.own_for_root(&heads)?;
             let Some(prepared) = self.prepared_realizations(&heads) else {
@@ -1114,11 +1116,24 @@ impl NodeRepo {
             let (superseded, concurrent) = self.check_mergeable(&left, &realized, &heads)?;
             let colocation = self.colocation();
             let colocated = colocation.is_some();
+            #[cfg(test)]
+            super::native_contract::emit(super::native_contract::Event::Prepared);
             let lock = colocation.map(Colocation::lock).transpose()?;
+            #[cfg(test)]
+            if lock.is_some() {
+                super::native_contract::emit(super::native_contract::Event::GitLocked);
+            }
             let heads_lock = op_heads_store.lock().block_on()?;
+            #[cfg(test)]
+            super::native_contract::emit(super::native_contract::Event::HeadsLocked);
             let mut now = self.local_heads()?;
             heads.sort();
             now.sort();
+            #[cfg(test)]
+            super::native_contract::emit(super::native_contract::Event::Reread {
+                captured: heads.clone(),
+                actual: now.clone(),
+            });
             if now != heads {
                 drop(heads_lock);
                 drop(lock);
@@ -1136,6 +1151,8 @@ impl NodeRepo {
         // shared authority even when its saved accepted base is non-root. Use its actual current
         // Git bookkeeping, and merge shared payloads before the export below.
         let sources = self.local_heads()?;
+        #[cfg(test)]
+        super::native_contract::emit(super::native_contract::Event::Sources(sources.clone()));
         let mut private = vec![false; left.len()];
         if !root_base {
             let absent = left
@@ -1285,9 +1302,19 @@ impl NodeRepo {
                 .block_on()?;
         }
         drop(heads_lock);
+        #[cfg(test)]
+        super::native_contract::emit(super::native_contract::Event::HeadsUnlocked);
         drop(_lock);
+        #[cfg(test)]
+        if colocated {
+            super::native_contract::emit(super::native_contract::Event::GitUnlocked);
+        }
+        #[cfg(test)]
+        super::native_contract::emit(super::native_contract::Event::Cleanup);
         self.move_taken_workspaces()?;
         self.replace_abandoned_working_copies()?;
+        #[cfg(test)]
+        super::native_contract::emit(super::native_contract::Event::Complete);
         Ok(Some(head))
     }
 
@@ -1933,3 +1960,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod native_contract_tests;

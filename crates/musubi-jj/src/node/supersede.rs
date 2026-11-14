@@ -784,6 +784,24 @@ impl NodeRepo {
 }
 
 #[cfg(test)]
+impl NodeRepo {
+    pub(in crate::node) fn native_receipt(&self) -> Option<super::native_contract::Receipt> {
+        self.records
+            .taking
+            .as_ref()
+            .map(|taking| super::native_contract::Receipt {
+                heads: taking.heads.clone(),
+                locals: taking.locals.clone(),
+                sources: self.records.sources.clone(),
+                prefix: taking.prefix.clone(),
+                records: taking.records.clone(),
+                base: taking.base.clone(),
+                switched: taking.switched,
+            })
+    }
+}
+
+#[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
 

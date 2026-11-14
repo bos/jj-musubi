@@ -1370,6 +1370,19 @@ struct MergeRewrite {
     native_inputs: Arc<HashSet<CommitId>>,
 }
 
+/// Whether the native replay certifies this rewrite, including its complete shared result.
+fn native_rebase_matches<'a>(
+    results: (&Summary, &Summary),
+    key: u64,
+    predecessors: &[CommitId],
+    native: impl IntoIterator<Item = (u64, &'a [CommitId])>,
+) -> bool {
+    results.0 == results.1
+        && native.into_iter().any(|(native_key, native_predecessors)| {
+            native_key == key && native_predecessors == predecessors
+        })
+}
+
 fn repeated_rebase(rewrites: &[MergeRewrite], keys: &HashMap<CommitId, u64>) -> bool {
     let mut made: HashMap<(CommitId, u64), Vec<&MergeRewrite>> = HashMap::new();
     for rewrite in rewrites {
@@ -1572,6 +1585,54 @@ fn a_native_serial_merge_can_repeat_a_rebase_after_abandon() {
         (second.clone(), 0),
         (duplicate.clone(), 0),
     ]);
+
+    // In this native result, both children have structural key 0 and their common
+    // parent has key 1. Its only shared reference is the delayed bookmark at a child.
+    let native_refs = refs(block_on(serial_op.view()).unwrap().store_view());
+    assert_eq!(native_refs.len(), 1);
+    let (name, target) = native_refs.into_iter().next().unwrap();
+    assert!(visible.contains(target.as_normal().unwrap()));
+    let shared = Summary {
+        visible: BTreeMap::from([(0, visible.len()), (1, 1)]),
+        refs: BTreeMap::from([(name, (vec![Some(0)], vec![]))]),
+    };
+    let certify = |replayed: &Summary, relation: Option<&[CommitId]>| {
+        native_rebase_matches(
+            (&shared, replayed),
+            keys[&second],
+            &events[1].predecessors,
+            relation
+                .into_iter()
+                .map(|predecessors| (keys[&second], predecessors)),
+        )
+    };
+    let native_relation = events[1].predecessors.as_slice();
+    assert!(certify(&shared, Some(native_relation)));
+    assert!(events[1].native_inputs.contains(&first));
+    assert!(
+        !certify(&shared, Some(std::slice::from_ref(&parent))),
+        "a matching child with a different native predecessor cannot be certified"
+    );
+    assert!(
+        !certify(&shared, None),
+        "missing native predecessor evidence cannot be certified"
+    );
+    for changed in [
+        Summary {
+            visible: BTreeMap::from([(0, 1), (1, 1)]),
+            refs: shared.refs.clone(),
+        },
+        Summary {
+            visible: shared.visible.clone(),
+            refs: BTreeMap::new(),
+        },
+    ] {
+        assert!(
+            !certify(&changed, Some(native_relation)),
+            "a changed shared result cannot be certified even with the earlier result in the inputs"
+        );
+    }
+
     assert!(!repeated_rebase(&events, &keys));
     events.reverse();
     assert!(
@@ -1889,7 +1950,14 @@ impl Reference {
                 let ours = reference.summary(&view, &known);
                 let theirs = reference.summary(&replayed.view, &known);
                 if is_merge && agreed && ours == theirs {
-                    reference.certify_serial_rebases(&id, op, &replayed, &op_parents, &views);
+                    reference.certify_serial_rebases(
+                        &id,
+                        op,
+                        &replayed,
+                        &op_parents,
+                        &views,
+                        (&ours, &theirs),
+                    );
                 }
                 // The same parents on both sides, but a different merge: it may be jj's own,
                 // on the machine that made it, of the parents as that machine had them.
@@ -2115,6 +2183,7 @@ impl Reference {
         replayed: &Replayed,
         parents: &[CanonicalOp],
         views: &HashMap<CanonicalOp, View>,
+        results: (&Summary, &Summary),
     ) {
         let native = &replayed.op.store_operation().commit_predecessors;
         let new: Vec<_> = op
@@ -2131,9 +2200,15 @@ impl Reference {
         }
         let inputs = Arc::new(inputs);
         for rewrite in self.rewrites.iter_mut().filter(|r| r.operation == id.0) {
-            if native.iter().flatten().any(|(new, predecessors)| {
-                keys[new] == keys[&rewrite.new] && *predecessors == rewrite.predecessors
-            }) {
+            if native_rebase_matches(
+                results,
+                keys[&rewrite.new],
+                &rewrite.predecessors,
+                native
+                    .iter()
+                    .flatten()
+                    .map(|(new, predecessors)| (keys[new], predecessors.as_slice())),
+            ) {
                 rewrite.native_inputs = inputs.clone();
             }
         }

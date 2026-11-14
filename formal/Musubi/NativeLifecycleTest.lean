@@ -280,6 +280,15 @@ private def observedReceipt : Receipt :=
 private def receiptState : State :=
   { state with heads := [p 2], nativeFacts := receiptFacts }
 
+private def canonicalEncodingFailure (result : Query α) : Bool :=
+  match result with
+  | .error (.encoding message) =>
+    match Lean.Json.parse message with
+    | .ok diagnostic => decide
+        ((diagnostic.getObjValAs? String "kind").toOption = some "canonical encoding failure")
+    | .error _ => false
+  | _ => false
+
 -- Contraction derives both the presence stamp and physical map; raw locals are only compared.
 #guard (constructReceipt evidence receiptFacts saved me [p 2] request).map
   (fun result => (result.canonicalWrites, result.nativeWrites, result.base)) =
@@ -291,8 +300,7 @@ private def receiptState : State :=
 #guard (constructReceipt evidence receiptFacts saved me [p 2] request).map
   (fun result => receiptInputMatches result
     { observedReceipt with locals := observedReceipt.locals ++ [(p 88, [p 88])] }) = .ok false
-#guard (constructReceipt evidence {} saved me [p 2] request) =
-  .error (.encoding "canonical body")
+#guard canonicalEncodingFailure (constructReceipt evidence {} saved me [p 2] request)
 
 -- The shared accepted base follows incoming contractions, independently of local drops.
 #guard (constructReceipt evidence receiptFacts { saved with acceptedBase := some (c 2) }
@@ -352,8 +360,8 @@ private def durationContracted : CanonicalBody :=
 #guard (contractOne durationEvidence { canonical := [durationContracted] } [o 1] 30
   (c 2) { evidence := durationEvidence }).map (fun result => result.1.writes) =
     .ok [durationContracted]
-#guard contractOne durationEvidence { canonical := [contracted] } [o 1] 30
-  (c 2) { evidence := durationEvidence } = .error (.encoding "canonical body")
+#guard canonicalEncodingFailure (contractOne durationEvidence { canonical := [contracted] }
+  [o 1] 30 (c 2) { evidence := durationEvidence })
 
 #guard run receiptState [.planReceipt request, .writeReceiptCanonical 0] = .error .custody
 #guard (run receiptState [.planReceipt request, .saveCustody, .writeReceiptCanonical 0,
@@ -565,8 +573,8 @@ private def stampCodecValue : Stamp :=
 
 -- A canonical wire stamp must decode to the construction's map representation, preserving
 -- multiple owners, every set value, absent duration, zero and subsecond duration options.
-#guard Json.stamp stampCodecContext (Lean.Json.mkObj [("attributes", Lean.Json.mkObj [
-  ("musubi.presence", Lean.Json.str (Json.stampText stampCodecContext stampCodecValue))])]) =
-    .ok (some stampCodecValue)
+#guard decide ((Json.stamp stampCodecContext (Lean.Json.mkObj [("attributes", Lean.Json.mkObj [
+  ("musubi.presence", Lean.Json.str (Json.stampText stampCodecContext stampCodecValue))])])).toOption =
+    some (some stampCodecValue))
 
 end Musubi.NativeLifecycle.Test

@@ -352,4 +352,22 @@ construction's copy-key order, after the existing exact raw-byte roundtrip valid
 inner value, option and multiplicity remains untouched; duplicate/noncanonical byte rejection
 is unchanged. Ordered operation parents, predecessor lists and signed reference terms are not
 normalized. A single multiowner roundtrip guard includes every map and duration option. The
-diagnostic reporting remains separate from final landing, and native validation is pending.
+diagnostic reporting remains separate from final landing.
+
+The corrected child passed 123 model guards and its single oracle build. The existing native
+target then reported one pass and one interpretation failure. A completed receipt construction
+and the `certifiedRun` action list through receipt commit; its Rust assertions checked the
+computed native-write set, a nonempty actual write sequence and exact complete-record disk
+custody at every such write. This gives finite, nonvacuous evidence for that prefix. Actual
+cross-store order and the later native effects are still outside the certificate. B remained
+unavailable in its consulted all-body fallback and never reached `certifiedRun`; its positive
+policy assertion was not replaced with an expected-gap pass.
+
+Validation stayed inside the original ten-minute window (5 minutes 10 seconds). The first
+guard check exposed two assertions tied to the diagnostic parent's old error text and a
+missing decidable comparison in the new codec guard. Routine corrections within the same
+window check specifically the canonical diagnostic kind while retaining its details, and
+compare the codec result's option against the full expected stamp so errors fail. The first
+failure and corrected logs are preserved. There was one oracle build and one existing A/B
+native-target run, with no new fixture, campaign or full suite. B's identity evidence and the
+full preservation/native-simulation obligations remain open.

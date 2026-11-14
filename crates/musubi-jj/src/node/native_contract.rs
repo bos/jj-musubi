@@ -27,6 +27,10 @@ pub(super) enum Event {
         captured: Vec<LocalOp>,
         actual: Vec<LocalOp>,
     },
+    RevalidationRetry {
+        captured: Vec<LocalOp>,
+        actual: Vec<LocalOp>,
+    },
     HelperBranch {
         locked: bool,
         heads: Vec<LocalOp>,
@@ -85,6 +89,48 @@ impl Observe {
 impl Drop for Observe {
     fn drop(&mut self) {
         OBSERVER.with(|slot| slot.replace(self.0.take()));
+    }
+}
+
+type PreparationObserver =
+    Arc<dyn Fn(&super::NodeRepo, &[crate::op_id::CanonicalOp], &[LocalOp]) + Send + Sync>;
+
+thread_local! {
+    static PREPARATION_OBSERVER: RefCell<Option<PreparationObserver>> =
+        const { RefCell::new(None) };
+}
+
+/// This boundary is after preparation and before either publication lock or the head reread.
+/// The borrowed actor permits complete raw memory observations without copying a stale actor
+/// or exposing a query-answer callback. An observer may schedule the next real native actor.
+pub(super) fn prepared(
+    node: &super::NodeRepo,
+    canonicals: &[crate::op_id::CanonicalOp],
+    realized: &[LocalOp],
+) {
+    emit(Event::Prepared);
+    let observer = PREPARATION_OBSERVER.with(|slot| slot.borrow().clone());
+    if let Some(observer) = observer {
+        observer(node, canonicals, realized);
+    }
+}
+
+pub(super) struct ObservePreparation(Option<PreparationObserver>);
+
+impl ObservePreparation {
+    pub(super) fn new(
+        observer: impl Fn(&super::NodeRepo, &[crate::op_id::CanonicalOp], &[LocalOp])
+        + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        Self(PREPARATION_OBSERVER.with(|slot| slot.replace(Some(Arc::new(observer)))))
+    }
+}
+
+impl Drop for ObservePreparation {
+    fn drop(&mut self) {
+        PREPARATION_OBSERVER.with(|slot| slot.replace(self.0.take()));
     }
 }
 

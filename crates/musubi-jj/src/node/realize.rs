@@ -1117,7 +1117,7 @@ impl NodeRepo {
             let colocation = self.colocation();
             let colocated = colocation.is_some();
             #[cfg(test)]
-            super::native_contract::emit(super::native_contract::Event::Prepared);
+            super::native_contract::prepared(self, &left, &realized);
             let lock = colocation.map(Colocation::lock).transpose()?;
             #[cfg(test)]
             if lock.is_some() {
@@ -1135,6 +1135,11 @@ impl NodeRepo {
                 actual: now.clone(),
             });
             if now != heads {
+                #[cfg(test)]
+                super::native_contract::emit(super::native_contract::Event::RevalidationRetry {
+                    captured: heads.clone(),
+                    actual: now.clone(),
+                });
                 drop(heads_lock);
                 drop(lock);
                 continue;

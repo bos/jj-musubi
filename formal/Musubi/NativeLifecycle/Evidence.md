@@ -564,3 +564,59 @@ script corrections stayed inside the original window, and both failed logs are p
 There was one oracle build, one native-target run, no native retry, no third fixture, no pure
 replay, no full suite and no campaign. Independent review and coordinator integration checks
 remain pending.
+
+## Staged C: native head reparent before the locked reread
+
+The next source increment adds C in the existing lifecycle bridge. It authors a one-parent
+native operation and its current descendant before capture, then schedules pinned
+`jj --ignore-working-copy op abandon <ancestor>` after preparation. Pinned jj refuses to
+abandon a current head; this fixture instead abandons its valid ancestor and independently
+compares the descendant's replacement with the complete old operation, changing only ordered
+parents. The raw view, metadata and every old body remain available. These are staged
+preconditions and comparisons, not a claimed native result before the fixture has run.
+
+The small test-only `ObservePreparation` callback borrows the live actor and observes its
+actual prepared operands. Its wrapper retains the existing `Prepared` event, then invokes the
+callback before `Colocation::lock`, the operation-head lock and the underlying head reread.
+The later `Reread` event is only a comparison observation. The command has an eight-second
+deadline and is killed and reaped on timeout, with its actual status and output retained.
+An unsupported callback/lock boundary fails the fixture; it is not reported as a Rust refusal.
+No production behavior, writer-lock assumption or post-read detection guarantee is added.
+The test-only `RevalidationRetry` event is emitted inside the actual changed-head branch,
+with its captured and reread vectors; a mismatch event alone is not treated as branch evidence.
+
+C records complete before/prepared/post-command/final native and canonical corpora, ordered
+parents, raw source files and memory, retained expected observations and receipt state. It
+also records the complete physical Git directory bytes separately from the model's explicit
+selected-ref projection. All four corpora enter the label embedding; unknown identities and
+old aliases are retained. The actual operand vectors, command result, rereads, exports and
+whole-call success/error are comparison targets, never source-selection or policy premises.
+
+The certified prefix is capture, computed render planning, its individual writes, render
+commit, the observed native reparent and the first revalidation. The independent constructor
+uses precall raw facts and encoding observations from the first prepared corpus, without
+consulting the actual selected operands or a later retry's canonicalization. The named
+`observedHeadReparent` codec checks the exact parent-only replacement and complete old corpus,
+then supplies the existing `native` action with no identity rows or new fingerprint authority.
+The new alias can remain unresolved: changed-head retry needs no source query about it.
+
+No new admitted transition is needed. Existing derived construction preservation covers that
+native action and the same successful list; its historical preparation association survives
+the head change. The native action conservatively invalidates current source-route evidence,
+even though the newly captured files/memory are also retained as comparison observations.
+`revalidate_changed_heads` states the existing retry effect. C stops its model certificate at
+that real changed-head boundary. It records the actual caller's later outcome without claiming
+full retry canonicalization, native refusal correspondence or whole-publication simulation.
+
+Rust requires the real first reread to differ by exactly the observed old/new heads and
+forbids any export before a subsequent successful fresh reread. A successful actual call must
+reach that fresh read and completion. A model interpretation gap remains a failed comparison,
+not an expected native refusal. The planned control bypasses the stale-reread guard and must
+fail a meaningful stale-publication or retry assertion; its outcome has not been observed.
+
+This increment is source-only and unvalidated. No new fixture execution, proof build, oracle
+build or control run has occurred. The first validation needs the affected Lean guards and
+proof/axiom check, one oracle build, one C native run and a bounded selected stale-reread
+control after the baseline passes. Cache restart, multibase merge and full merge/export
+correspondence remain later work. E1/E2 still restrict the admitted final publication suffix
+and helper intervals; C adds no claim about writers after the final successful reread.

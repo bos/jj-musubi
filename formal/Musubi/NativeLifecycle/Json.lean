@@ -79,16 +79,23 @@ def context (request : Json) : Except String Context := do
   let ids ← get request "ids"
   let before ← get request "before"
   let after ← get request "after"
-  let all ← [before, after].mapM fun snapshot => do
+  let interleaved := (← str request "kind") == "retry"
+  let snapshots ← if interleaved then do
+      pure [before, ← get request "prepared", ← get request "postNative", after]
+    else pure [before, after]
+  let all ← snapshots.mapM fun snapshot => do
     return (← rows snapshot "canonical") ++ (← rows snapshot "native")
   let all := all.flatten
+  let expected ← if interleaved then do
+      return (← snapshots.mapM (fun snapshot => rows snapshot "expected")).flatten
+    else rows before "expected"
+  let physical ← snapshots.mapM (fun snapshot => get snapshot "physical")
   return {
     physical := ← sortedPool ids "physical", canonical := ← sortedPool ids "canonical",
     original := ← sortedPool ids "original", commits := ← sortedPool ids "commits",
     digests := ← sortedPool ids "digests",
-    contents := unique ((← all.mapM content) ++
-      (← rows before "expected").map (fun row => row.compress) ++
-      [(← get before "physical").compress, (← get after "physical").compress]),
+    contents := unique ((← all.mapM content) ++ expected.map (fun row => row.compress) ++
+      physical.map (fun row => row.compress)),
     fields := unique (← all.mapM gitFields) }
 
 def copy (key : String) : Except String Copy :=
@@ -568,6 +575,29 @@ def decodeReceipt (ctx : Context) (input : Evidence) (raw : Json) : Except Strin
     capturedHeads := ← (← strings raw "heads").mapM fun id => do return ⟨← label ctx.physical id⟩,
     input, locals, switched := ← raw.getObjValAs? Bool "switched" }
 
+/-- One scoped native reparent observation: retain the complete old corpus and compare
+the exact new body with its old body, changing only its id and ordered parents. No positive
+identity is supplied for the new alias, and no subsequent canonicalization law is asserted. -/
+def observedHeadReparent (before after : Evidence) (oldHeads newHeads : List Physical)
+    (abandoned : Physical) (physicalGit : Nat) : Except String NativeObservation := do
+  let ([old], [next]) := (oldHeads, newHeads) | throw "C needs one old and one new physical head"
+  if old = next then throw "native reparent did not change the physical head"
+  let prior ← query (before.nativeBody old)
+  let dropped ← query (before.nativeBody abandoned)
+  let replacement ← query (after.nativeBody next)
+  if before.root ≠ after.root || before.physicalRoot ≠ after.physicalRoot then
+    throw "native command changed a repository root observation"
+  if prior.parents ≠ [abandoned] || dropped.parents.length ≠ 1 then
+    throw "C abandon operand must be the current head's one-parent ancestor"
+  if replacement ≠ { prior with id := next, parents := dropped.parents } then
+    throw "native replacement differs beyond the exact ordered parent rewrite"
+  if !sameSet before.canonical after.canonical ||
+      !before.native.all (after.native.contains ·) then
+    throw "native command removed or changed an old immutable body"
+  let added := after.native.filter (fun body => !before.native.any (fun old => old.id == body.id))
+  if added ≠ [replacement] then throw "C must retain exactly one independently observed new body"
+  return { native := [replacement], heads := newHeads, physicalGit }
+
 def reply (request : Json) : Except String Json := do
   if (← request.getObjValAs? Nat "schema") ≠ 1 then throw "native lifecycle schema version"
   let ctx ← context request
@@ -580,7 +610,10 @@ def reply (request : Json) : Except String Json := do
   if (← str physical "scope") ≠ "refs/heads/x" then throw "finite physical projection scope"
   let physicalGit ← label ctx.contents physical.compress
   let after ← get request "after"
-  let observedBodies ← decodeEvidence ctx after
+  -- C certifies only its first changed-head retry. Later retry canonicalization and
+  -- publication remain raw observations, never an extra identity/encoding premise here.
+  let encodingRaw ← if (← str request "kind") = "retry" then get request "prepared" else pure after
+  let observedBodies ← decodeEvidence ctx encodingRaw
   let facts : NativeFacts := { encodings := {
     canonical := observedBodies.canonical, native := observedBodies.native } }
   match ← str request "kind" with
@@ -637,6 +670,60 @@ def reply (request : Json) : Except String Json := do
       ("sameRunCustody", toJson true), ("sameRunSourceRoutes", toJson true),
       ("sameRunConstruction", toJson true), ("constructionPrepared", toJson true),
       ("preparedAssociation", toJson association)]
+  | "retry" =>
+    let target : Canonical := ⟨← label ctx.canonical (← str request "target")⟩
+    let build ← query (constructRender e facts me heads none target)
+    let setup := [Action.capture, .planRender target] ++
+      (List.range build.nodes.length).map Action.writeRender ++ [.commitRender]
+    let attempted ← (run (rawInitial me e heads saved facts physicalGit) setup).mapError reprStr
+    let preparedRaw ← get request "prepared"
+    let nativeRaw ← get request "postNative"
+    let preparedEvidence ← decodeEvidence ctx preparedRaw
+    let nativeEvidence ← decodeEvidence ctx nativeRaw
+    let preparedHeads ← (← strings preparedRaw "heads").mapM fun id => do
+      return Physical.mk (← label ctx.physical id)
+    let nativeHeads ← (← strings nativeRaw "heads").mapM fun id => do
+      return Physical.mk (← label ctx.physical id)
+    if !sameSet attempted.heads preparedHeads ||
+        !sameSet attempted.evidence.native preparedEvidence.native ||
+        !sameSet attempted.evidence.canonical preparedEvidence.canonical then
+      throw "actual prepared corpus differs from independently constructed prefix"
+    if (← get preparedRaw "physical") ≠ (← get nativeRaw "physical") ||
+        (← get preparedRaw "identitySourceState") ≠ (← get nativeRaw "identitySourceState") then
+      throw "C head-only command changed observed physical/source state"
+    for name in ["originals", "joins", "receipt", "expected", "saved"] do
+      if (← get preparedRaw name) ≠ (← get nativeRaw name) then
+        throw s!"C head-only command changed retained {name}"
+    let abandoned : Physical := ⟨← label ctx.physical (← str request "abandoned")⟩
+    let observation ← observedHeadReparent preparedEvidence nativeEvidence
+      preparedHeads nativeHeads abandoned
+      (← label ctx.contents (← get nativeRaw "physical").compress)
+    let observed ← (step attempted (.native observation)).mapError reprStr
+    let some historical := observed.prepared |
+      throw "native observation lost historical preparation"
+    let association := preparedMatchesOrigin me historical build
+    if !association then throw "native observation detached the historical render origin"
+    let classifications ← nativeHeads.mapM fun id =>
+      query (classifyIdentity observed.evidence (queryFuel observed.evidence) id)
+    let unresolved := classifications.all fun value => match value with
+      | .unresolved _ => true
+      | _ => false
+    let actions := setup ++ [.native observation, .revalidate]
+    let checked ←
+      (certifiedConstructionRun me e heads saved facts physicalGit actions).mapError reprStr
+    let final := checked.val
+    if final.phase ≠ .preparing || final.prepared.isSome || final.captured.isSome ||
+        final.publication.isSome then throw "changed heads did not yield the modeled retry prefix"
+    return Json.mkObj [("ok", toJson true), ("preparedIncoming", toJson build.result),
+      ("retry", toJson true), ("retryHeads", toJson final.heads),
+      ("constructionPrepared", toJson final.prepared.isSome),
+      ("historicalPreparedAssociation", toJson association),
+      ("sourceRoutesInvalidated", toJson final.evidence.sourceRoutes.isNone),
+      ("nativeIdentityRowsSupplied", toJson observation.identities.length),
+      ("nativeAliasUnresolved", toJson unresolved),
+      ("constructedActions", toJson (actions.all constructedAction)),
+      ("sameRunConstruction", toJson true), ("sameRunCustody", toJson true),
+      ("sameRunSourceRoutes", toJson true)]
   | _ => throw "unknown finite native lifecycle fixture"
 
 end Musubi.NativeLifecycle.Json

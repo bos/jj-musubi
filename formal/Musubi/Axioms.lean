@@ -636,3 +636,4 @@ open Musubi
 #print axioms NativeLifecycle.construction_step_preserves
 #print axioms NativeLifecycle.runs_construction
 #print axioms NativeLifecycle.certifiedConstructionRun
+#print axioms NativeLifecycle.revalidate_changed_heads

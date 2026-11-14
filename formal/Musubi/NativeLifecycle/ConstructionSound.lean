@@ -237,6 +237,15 @@ theorem renderPlanCurrent_receipt {s : State} {plan : RenderBuild}
   simp only [renderPlanCurrent, Bool.and_eq_true] at current
   exact of_decide_eq_true current.2
 
+/-- A changed actual head set takes the retry branch without constructing a publication plan.
+This is the modeled pre-final-reread interval, not a claim about after-reread writers. -/
+theorem revalidate_changed_heads (s : State) (captured : List Physical)
+    (phase : s.phase = .prepared) (bound : s.captured = some captured)
+    (changed : sameSet captured s.heads = false) :
+    (step s .revalidate).map (fun t => (t.phase, t.prepared, t.captured, t.publication)) =
+      .ok (.preparing, none, none, s.publication) := by
+  simp [step, stepCore, phase, bound, changed, bind, Except.bind, pure, Except.pure]
+
 theorem startRecovery_invalidates (s : State) :
     (step s .startRecovery).map (fun t =>
       (t.renderPlan, t.receiptPlan, t.prepared, t.receipt, t.saved)) =

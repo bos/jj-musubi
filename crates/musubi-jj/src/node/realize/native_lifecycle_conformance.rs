@@ -1,4 +1,4 @@
-//! The two finite native fixtures against the executable lifecycle oracle. Raw immutable
+//! Finite native fixtures against the executable lifecycle oracle. Raw immutable
 //! bodies, retained fingerprints and native hash observations are inputs. Selected Rust
 //! maps, policy booleans and effect order are comparison targets, never oracle premises.
 
@@ -7,6 +7,88 @@ use crate::oracle::Oracle;
 use jj_lib::content_hash::blake2b_hash;
 use jj_lib::op_store::{RefTarget, RemoteRefState};
 use serde_json::json;
+
+fn bounded_native_command(repo: &TestRepo, args: &[&str]) -> Value {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let started = Instant::now();
+    let deadline = Duration::from_secs(8);
+    let mut child = repo
+        .program(std::path::Path::new("jj"))
+        .env("COLUMNS", "80")
+        .env("RAYON_NUM_THREADS", "1")
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let timed_out = loop {
+        if child.try_wait().unwrap().is_some() {
+            break false;
+        }
+        if started.elapsed() >= deadline {
+            child.kill().unwrap();
+            break true;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    // Both paths reap the real command. No detached thread or unbounded lock waiter survives.
+    let output = child.wait_with_output().unwrap();
+    json!({"args": args, "timedOut": timed_out, "deadlineMillis": deadline.as_millis(),
+        "elapsedMillis": started.elapsed().as_millis(), "success": output.status.success(),
+        "exitCode": output.status.code(), "stdout": String::from_utf8_lossy(&output.stdout),
+        "stderr": String::from_utf8_lossy(&output.stderr)})
+}
+
+fn physical_git_bytes(repo: &TestRepo) -> Value {
+    json!(
+        bytes(&repo.path().join(".git"))
+            .into_iter()
+            .map(|(path, content)| (
+                path.to_string_lossy().into_owned(),
+                jj_lib::hex_util::encode_hex(&content)
+            ))
+            .collect::<BTreeMap<_, _>>()
+    )
+}
+
+fn interleaving_request(
+    me: &str,
+    before: Value,
+    prepared: Value,
+    post_native: Value,
+    after: Value,
+    target: Value,
+    abandoned: &LocalOp,
+) -> Value {
+    let mut result = request("retry", me, before, after, Value::Null, target);
+    result["prepared"] = prepared;
+    result["postNative"] = post_native;
+    result["abandoned"] = json!(abandoned.0.hex());
+    let snapshots = ["before", "prepared", "postNative", "after"];
+    let ids = |kind: &str| {
+        snapshots
+            .iter()
+            .flat_map(|key| {
+                result[*key][kind]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|body| body["id"].as_str().unwrap().to_owned())
+            })
+            .collect::<BTreeSet<_>>()
+    };
+    let physical = ids("native");
+    let canonical = ids("canonical");
+    let mut original = BTreeSet::new();
+    let mut commits = BTreeSet::new();
+    strings_in(&result, 128, &mut original);
+    strings_in(&result, 40, &mut commits);
+    result["ids"] = json!({"physical": physical, "canonical": canonical,
+        "original": original, "commits": commits, "digests": original});
+    result
+}
 
 fn ref_target(target: &RefTarget) -> Value {
     // Preserve signs, order, multiplicity and absent terms; do not flatten to a commit set.
@@ -328,7 +410,7 @@ fn model_id(value: &Value) -> u64 {
     value["value"].as_u64().unwrap()
 }
 
-fn call(oracle: &mut Oracle, request: &Value) -> Value {
+fn dump_request(request: &Value) {
     if let Some(path) = std::env::var_os("MUSUBI_NATIVE_LIFECYCLE_DUMP") {
         let path = std::path::Path::new(&path);
         fs::create_dir_all(path).unwrap();
@@ -338,6 +420,10 @@ fn call(oracle: &mut Oracle, request: &Value) -> Value {
         )
         .unwrap();
     }
+}
+
+fn call(oracle: &mut Oracle, request: &Value) -> Value {
+    dump_request(request);
     let reply = oracle.call(request);
     if let Some(path) = std::env::var_os("MUSUBI_NATIVE_LIFECYCLE_DUMP") {
         let path = std::path::Path::new(&path);
@@ -692,4 +778,272 @@ fn second_name_publication_matches_lifecycle_oracle() {
     );
     assert_eq!(PerMachine::of(&raw(&fx.node, &published).1), expected);
     assert_eq!(request["before"]["physical"], request["after"]["physical"]);
+}
+
+fn interleaving_snapshot(node: &NodeRepo, repo: &TestRepo) -> Value {
+    let mut result = raw_capture(node, repo, &capture(node));
+    // The model still labels its selected-ref projection explicitly. Keep the complete
+    // physical Git directory separately, including HEAD/refs/index, as comparison evidence.
+    result["physicalGitBytes"] = physical_git_bytes(repo);
+    result["musubiBytes"] = json!(
+        bytes(&node.repo_path.join("musubi"))
+            .into_iter()
+            .map(|(path, content)| (
+                path.to_string_lossy().into_owned(),
+                jj_lib::hex_util::encode_hex(&content)
+            ))
+            .collect::<BTreeMap<_, _>>()
+    );
+    result
+}
+
+#[test]
+fn native_abandon_between_preparation_and_reread_retries() {
+    use super::super::super::native_contract::ObservePreparation;
+
+    let mut fx = Fixture::new();
+    fx.node.advance(&fx.incoming).unwrap();
+    let parent_command = bounded_native_command(
+        &fx.repo,
+        &[
+            "--ignore-working-copy",
+            "bookmark",
+            "create",
+            "interleave-parent",
+            "-r",
+            "@",
+        ],
+    );
+    assert_eq!(parent_command["success"], true, "{parent_command}");
+    let mut heads = fx.node.local_heads().unwrap();
+    assert_eq!(heads.len(), 1);
+    let abandoned = heads.pop().unwrap();
+    assert_eq!(raw(&fx.node, &abandoned).0.parents.len(), 1);
+    let leaf_command = bounded_native_command(
+        &fx.repo,
+        &[
+            "--ignore-working-copy",
+            "bookmark",
+            "create",
+            "interleave-leaf",
+            "-r",
+            "@",
+        ],
+    );
+    assert_eq!(leaf_command["success"], true, "{leaf_command}");
+    // Actor prelude authenticates the authored operations before the observed call.
+    // The callback below never canonicalizes the command's newly reparented head.
+    head(&mut fx.node);
+    fx.node.settle().unwrap();
+    let before = interleaving_snapshot(&fx.node, &fx.repo);
+    assert!(capture(&fx.node).receipt.is_none());
+    assert_eq!(before["heads"].as_array().unwrap().len(), 1);
+    assert_ne!(before["heads"][0], abandoned.0.hex());
+    assert_eq!(
+        raw(
+            &fx.node,
+            &LocalOp(OperationId::try_from_hex(before["heads"][0].as_str().unwrap()).unwrap())
+        )
+        .0
+        .parents,
+        std::slice::from_ref(&abandoned.0)
+    );
+
+    let observations = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let command_result = Arc::new(Mutex::new(None::<Value>));
+    let post_native = Arc::new(Mutex::new(None::<Value>));
+    let fired = Arc::new(AtomicBool::new(false));
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let seen = events.clone();
+    let _events = Observe::new(move |event| seen.lock().unwrap().push(event));
+    let command = fx.repo.another_copy(fx.repo.path());
+    let snapshots = observations.clone();
+    let result = command_result.clone();
+    let after_command = post_native.clone();
+    let ran = fired.clone();
+    let abandon_id = abandoned.0.hex();
+    let scheduled_events = events.clone();
+    let _prepared = ObservePreparation::new(move |node, canonicals, realized| {
+        let snapshot = interleaving_snapshot(node, &command);
+        snapshots.lock().unwrap().push(json!({
+            "snapshot": snapshot,
+            "canonicals": canonicals.iter().map(|id| id.0.hex()).collect::<Vec<_>>(),
+            "realized": realized.iter().map(|id| id.0.hex()).collect::<Vec<_>>()
+        }));
+        if !ran.swap(true, Ordering::SeqCst) {
+            // This callback is before Colocation::lock, the op-head lock and local_heads.
+            // Pinned op abandon refuses a current head, so abandon its one-parent ancestor.
+            let before_events = scheduled_events.lock().unwrap().len();
+            let mut native = bounded_native_command(
+                &command,
+                &["--ignore-working-copy", "op", "abandon", &abandon_id],
+            );
+            native["beforeEventCount"] = json!(before_events);
+            native["afterEventCount"] = json!(scheduled_events.lock().unwrap().len());
+            *result.lock().unwrap() = Some(native);
+            *after_command.lock().unwrap() = Some(interleaving_snapshot(node, &command));
+        }
+    });
+    let _stores = record_stores(&mut fx.node);
+    let outcome = fx.node.advance(&fx.child);
+    let after = interleaving_snapshot(&fx.node, &fx.repo);
+    assert!(
+        fired.load(Ordering::SeqCst),
+        "actual caller never reached the pre-read boundary: {outcome:?}, before={before}, after={after}"
+    );
+    let prepared = observations.lock().unwrap().clone();
+    let command = command_result.lock().unwrap().clone().unwrap();
+    let post_native = post_native.lock().unwrap().clone().unwrap();
+    let events = events.lock().unwrap();
+    let mut request = interleaving_request(
+        fx.node.machine().key(),
+        before,
+        prepared[0]["snapshot"].clone(),
+        post_native,
+        after,
+        json!(fx.child.0.hex()),
+        &abandoned,
+    );
+    request["observed"] = json!({
+        "preparations": prepared,
+        "preludeCommands": [parent_command, leaf_command],
+        "nativeCommand": command,
+        "outcome": match &outcome {
+            Ok(id) => json!({"kind": "ok", "published": id.0.hex()}),
+            Err(error) => json!({"kind": "error", "variant": format!("{error:?}"),
+                "message": error.to_string()}),
+        },
+        "events": events.iter().map(|event| format!("{event:?}")).collect::<Vec<_>>()
+    });
+    dump_request(&request);
+    assert_eq!(
+        request["observed"]["nativeCommand"]["timedOut"], false,
+        "unsupported native callback boundary, command killed and reaped: {request}"
+    );
+    assert_eq!(
+        request["observed"]["nativeCommand"]["success"], true,
+        "the native command itself must succeed, not become a modeled Rust refusal: {request}"
+    );
+    assert_ne!(request["prepared"]["heads"], request["postNative"]["heads"]);
+    assert_eq!(
+        request["prepared"]["physicalGitBytes"],
+        request["postNative"]["physicalGitBytes"]
+    );
+    assert_eq!(
+        request["prepared"]["identitySourceState"],
+        request["postNative"]["identitySourceState"]
+    );
+    assert_eq!(
+        request["observed"]["preparations"][0]["canonicals"],
+        json!([fx.child.0.hex()])
+    );
+    assert_eq!(
+        request["observed"]["preparations"][0]["realized"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let local =
+        |value: &Value| LocalOp(OperationId::try_from_hex(value.as_str().unwrap()).unwrap());
+    let (old, old_view) = raw(&fx.node, &local(&request["prepared"]["heads"][0]));
+    let (new, new_view) = raw(&fx.node, &local(&request["postNative"]["heads"][0]));
+    let mut expected = old;
+    expected.parents = raw(&fx.node, &abandoned).0.parents;
+    assert_eq!(
+        new, expected,
+        "pinned native reparenting changes only the ordered parents"
+    );
+    assert_eq!(new_view, old_view);
+
+    let reads = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| match event {
+            Event::Reread { captured, actual } => Some((index, captured, actual)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let (first_read, captured, actual) = reads[0];
+    let command_end = request["observed"]["nativeCommand"]["afterEventCount"]
+        .as_u64()
+        .unwrap() as usize;
+    assert!(command_end <= first_read);
+    assert!(events[..command_end].iter().all(|event| !matches!(
+        event,
+        Event::GitLocked | Event::HeadsLocked | Event::Reread { .. }
+    )));
+    assert_ne!(
+        captured, actual,
+        "the real pre-read command must invalidate capture"
+    );
+    assert_eq!(
+        json!(captured.iter().map(|id| id.0.hex()).collect::<Vec<_>>()),
+        request["prepared"]["heads"]
+    );
+    assert_eq!(
+        json!(actual.iter().map(|id| id.0.hex()).collect::<Vec<_>>()),
+        request["postNative"]["heads"]
+    );
+    let fresh_read = reads
+        .last()
+        .filter(|(_, old, now)| old == now)
+        .map(|(index, _, _)| *index);
+    let cutoff = fresh_read.unwrap_or(events.len());
+    assert!(
+        events[..cutoff]
+            .iter()
+            .all(|event| !matches!(event, Event::Export(_))),
+        "a stale attempt must not export before an actual successful fresh reread"
+    );
+    assert!(
+        events[..first_read]
+            .iter()
+            .all(|event| !matches!(event, Event::Export(_)))
+    );
+    assert!(events.iter().any(|event| matches!(event,
+        Event::RevalidationRetry { captured: old, actual: now } if old == captured && now == actual)),
+        "the actual shipping changed-head branch must take the first retry");
+    if outcome.is_ok() {
+        assert!(
+            fresh_read.is_some(),
+            "successful publication needs a subsequent fresh reread"
+        );
+        assert!(matches!(events.last(), Some(Event::Complete)));
+    }
+    let reply = call(&mut Oracle::spawn(), &request);
+    assert_eq!(
+        reply["ok"], true,
+        "C model interpretation gap, not a Rust refusal: {reply}"
+    );
+    assert_eq!(reply["sameRunConstruction"], true);
+    assert_eq!(reply["sameRunCustody"], true);
+    assert_eq!(reply["sameRunSourceRoutes"], true);
+    assert_eq!(reply["retry"], true);
+    assert_eq!(reply["constructionPrepared"], false);
+    assert_eq!(reply["historicalPreparedAssociation"], true);
+    assert_eq!(reply["nativeIdentityRowsSupplied"], 0);
+    assert_eq!(reply["nativeAliasUnresolved"], true);
+    assert_eq!(reply["sourceRoutesInvalidated"], true);
+    assert_eq!(
+        model_id(&reply["preparedIncoming"]),
+        ordinal(
+            &request,
+            "physical",
+            request["observed"]["preparations"][0]["realized"][0]
+                .as_str()
+                .unwrap()
+        )
+    );
+    assert_eq!(
+        reply["retryHeads"],
+        json!(
+            request["postNative"]["heads"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|id| json!({"value": ordinal(&request, "physical", id.as_str().unwrap())}))
+                .collect::<Vec<_>>()
+        )
+    );
 }

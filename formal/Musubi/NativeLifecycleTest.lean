@@ -429,6 +429,28 @@ private def associationChecks : Query (List Bool) := do
   [.capture, .prepare (c 2) (p 22)]).map (fun checked => checked.val.prepared.isSome) =
     .error (.evidence (.nativeFact "raw shortcut outside constructed program"))
 
+private def reparentedLeaf : NativeBody :=
+  { id := p 80, parents := [p 0], workspaces := [(a, 10)] }
+private def reparentedEvidence : Evidence :=
+  { evidence with native := evidence.native ++ [reparentedLeaf] }
+
+-- A native parent-only rewrite retains the old physical corpus and supplies no identity.
+#guard (Json.observedHeadReparent evidence reparentedEvidence [p 3] [p 80] (p 1) 0).map
+  (fun observed => (observed.native, observed.identities, observed.heads)) =
+    .ok ([reparentedLeaf], [], [p 80])
+#guard (Json.observedHeadReparent evidence { reparentedEvidence with
+  native := evidence.native ++ [{ reparentedLeaf with gitFields := 99 }] }
+  [p 3] [p 80] (p 1) 0).toOption.isNone
+#guard (Json.observedHeadReparent evidence { reparentedEvidence with
+  native := reparentedEvidence.native.filter (fun body => body.id != p 4) }
+  [p 3] [p 80] (p 1) 0).toOption.isNone
+#guard (certifiedConstructionRun me evidence [p 1] saved renderFacts 0
+  (constructedRender.take 4 ++ [.native {
+    native := [reparentedLeaf], heads := [p 80], physicalGit := 0 }, .revalidate])).map
+    (fun checked => (checked.val.phase, checked.val.prepared.isNone,
+      checked.val.evidence.sourceRoutes.isNone, checked.val.heads)) =
+        .ok (.preparing, true, true, [p 80])
+
 private def staleWriteBody : NativeBody :=
   { id := p 60, parents := [p 0], marker := some (c 20), presenceStamp := contracted.stamp }
 private def staleWriteStart : State :=

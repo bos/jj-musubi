@@ -1579,7 +1579,7 @@ impl World {
             let Ok(op) = futures::executor::block_on(store.read_operation(&id)) else {
                 continue;
             };
-            todo.extend(op.parents);
+            todo.extend(op.parents.iter().cloned());
             if op
                 .metadata
                 .attributes
@@ -1588,7 +1588,10 @@ impl World {
             {
                 self.imports.preserved_heads[m]
                     .entry(id)
-                    .or_insert_with(|| input.heads.clone());
+                    .or_insert_with(|| crate::imports::PreservedHeadInput {
+                        carrier: op,
+                        heads: input.heads.clone(),
+                    });
             }
         }
     }

@@ -85,6 +85,15 @@ const ORIGIN: &str = "origin";
 /// and `op revert`.
 const RESTORES: &[&str] = &["undo", "redo", "restore to operation", "revert operation"];
 
+/// One receipt's independently observed frontier and its exact published carrier body.
+/// A later history rewrite can change its native and canonical ids without changing
+/// the record's origin. Keeping the body does not depend on a disposable translation map.
+#[derive(Clone)]
+pub(crate) struct PreservedHeadInput {
+    pub carrier: op_store::Operation,
+    pub heads: Vec<OperationId>,
+}
+
 #[derive(Default)]
 pub struct Imports {
     /// Whether the setup's operations are recorded, and later ones checked.
@@ -104,7 +113,7 @@ pub struct Imports {
     /// since jj last imported it, by its workspace's name: what HEAD had before each move.
     head_moved: Vec<BTreeMap<String, Vec<RefTarget>>>,
     /// Exact published carriers of a root receipt's independently captured Git frontier.
-    pub(crate) preserved_heads: Vec<BTreeMap<OperationId, Vec<OperationId>>>,
+    pub(crate) preserved_heads: Vec<BTreeMap<OperationId, PreservedHeadInput>>,
 }
 
 /// A ref an import compares with `.git`.
@@ -312,7 +321,7 @@ struct Log {
     views: HashMap<OperationId, View>,
     repos: HashMap<OperationId, Arc<ReadonlyRepo>>,
     captured_sources: BTreeMap<String, op_store::Operation>,
-    preserved_heads: BTreeMap<OperationId, Vec<OperationId>>,
+    preserved_heads: BTreeMap<OperationId, PreservedHeadInput>,
     validated: HashSet<(OperationId, RecordKind)>,
     head_writers: HashMap<(OperationId, String), Arc<HashSet<Option<CommitId>>>>,
 }
@@ -422,13 +431,23 @@ impl Log {
 
     fn head_operation(&mut self, id: &OperationId, ws: &str) -> op_store::Operation {
         let mut op = self.captured_operation(id);
-        if let Some(parents) = self.preserved_heads.get(id).cloned() {
+        let inputs: Vec<_> = match self.preserved_heads.get(id) {
+            Some(input) => vec![input.clone()],
+            None if op.metadata.attributes.contains_key(CANONICAL_ATTRIBUTE) => self
+                .preserved_heads
+                .values()
+                .filter(|input| crate::world::same_source_body(&input.carrier, &op))
+                .cloned()
+                .collect(),
+            None => vec![],
+        };
+        for input in inputs {
             // A root receipt can carry the captured observation, but a later merge or
             // export of the same canonical target can legitimately change its record.
             // Both explanations must follow jj's rules and validate their source history.
             op.metadata.workspace_name = None;
             let mut captured = op.clone();
-            captured.parents = parents;
+            captured.parents = input.heads;
             if self.head_transition_matches(id, ws, &captured) {
                 return captured;
             }
@@ -639,13 +658,22 @@ impl Log {
                 match base_heads.first() {
                     Some(base) if base_heads.iter().all(|b| b == base) => {
                         self.merge_targets(id, left, base, right) == now
+                            || self
+                                .native_merged_head(&op.parents, ws)
+                                .is_ok_and(|merged| merged == now)
                     }
                     _ => self
                         .native_merged_head(&op.parents, ws)
                         .is_ok_and(|merged| merged == now),
                 }
             }
-            _ => parents.contains(&now),
+            _ => {
+                parents.contains(&now)
+                    || parents.len() > 1
+                        && self
+                            .native_merged_head(&op.parents, ws)
+                            .is_ok_and(|merged| merged == now)
+            }
         }
     }
 
@@ -700,6 +728,40 @@ impl Log {
                 .insert(parents.to_vec(), repo.view().store_view().clone());
         }
         Ok(head(&self.native_merge_views[parents], ws))
+    }
+
+    /// Full jj merging can remove a workspace and its HEAD record even when only
+    /// another input changed that record. The scalar record model does not describe that
+    /// dependency. Replay the exact source parents, still requiring a separate physical
+    /// writer and valid record ancestry; a merge result alone never proves a HEAD write.
+    fn native_head_explanation(
+        &mut self,
+        id: &OperationId,
+        ws: &str,
+        taken: &RefTarget,
+        setup: &HashSet<OperationId>,
+    ) -> Result<(), String> {
+        self.validate_record(id, setup, &RecordKind::Head(ws.to_owned()))?;
+        let op = self.head_operation(id, ws);
+        let now = self.head(id, ws);
+        let merged = self.native_merged_head(&op.parents, ws)?;
+        if merged == now && taken.is_resolved() {
+            for parent in &op.parents {
+                if self
+                    .possible_heads(parent, ws, setup)?
+                    .contains(&taken.as_normal().cloned())
+                {
+                    fired("import:concurrent_heads");
+                    return Ok(());
+                }
+            }
+        }
+        Err(format!(
+            "the native merge {} cannot explain record {} with physical HEAD {}",
+            describe(&self.owner, id, &op),
+            show(&now),
+            show(taken)
+        ))
     }
 
     /// jj's three-way merge of the records of `r` at `left` and `right` against `base`, as
@@ -885,6 +947,103 @@ fn physical_head_writers_are_distinct_from_merge_record_terms() {
         vec![a_again, other_c],
         false,
     );
+    // A workspace deletion wins over an unchanged binding on the other branch. jj
+    // prunes its HEAD record too, despite that other branch being its only HEAD writer.
+    let cleanup_base = make(
+        "HEAD cleanup base",
+        RefTarget::absent(),
+        vec![root.clone()],
+        false,
+    );
+    let deleted = make(
+        "forget default",
+        RefTarget::absent(),
+        vec![cleanup_base.clone()],
+        true,
+    );
+    let mut deleted_op = block_on(store.read_operation(&deleted)).unwrap();
+    let mut deleted_view = block_on(store.read_view(&deleted_op.view_id)).unwrap();
+    deleted_view.wc_commit_ids.remove(WorkspaceName::DEFAULT);
+    deleted_op.view_id = block_on(store.write_view(&deleted_view)).unwrap();
+    let deleted = block_on(store.write_operation(&deleted_op)).unwrap();
+    let written = make(
+        "import git head: cleanup C",
+        target(&c),
+        vec![cleanup_base],
+        true,
+    );
+    let (cleanup, _) = block_on(loader.merge_operations(
+        vec![
+            block_on(loader.load_operation(&written)).unwrap(),
+            block_on(loader.load_operation(&deleted)).unwrap(),
+        ],
+        None,
+        Some("native workspace HEAD cleanup"),
+        [],
+    ))
+    .unwrap();
+    assert!(head(cleanup.view().store_view(), "default").is_absent());
+    assert!(
+        !cleanup
+            .view()
+            .store_view()
+            .wc_commit_ids
+            .contains_key(WorkspaceName::DEFAULT)
+    );
+    let cleanup = cleanup.operation().id().clone();
+    let mut wrong_cleanup = block_on(store.read_operation(&cleanup)).unwrap();
+    wrong_cleanup.metadata.description = "wrong native cleanup record".to_owned();
+    let mut wrong_view = block_on(store.read_view(&wrong_cleanup.view_id)).unwrap();
+    wrong_view
+        .git_heads
+        .insert(WorkspaceName::DEFAULT.to_owned(), target(&c));
+    wrong_cleanup.view_id = block_on(store.write_view(&wrong_view)).unwrap();
+    let wrong_cleanup = block_on(store.write_operation(&wrong_cleanup)).unwrap();
+    // A real merge of three sibling imports also needs full replay: its conflicted
+    // record is none of its parents' records, and the scalar shortcut is binary.
+    let multi_base = make(
+        "multi-parent HEAD base",
+        RefTarget::absent(),
+        vec![root.clone()],
+        false,
+    );
+    let multi_parents: Vec<_> = [&a, &c, &x]
+        .iter()
+        .enumerate()
+        .map(|(i, id)| {
+            make(
+                &format!("import git head: multi {i}"),
+                target(id),
+                vec![multi_base.clone()],
+                true,
+            )
+        })
+        .collect();
+    let (multi, _) = block_on(
+        loader.merge_operations(
+            multi_parents
+                .iter()
+                .map(|id| block_on(loader.load_operation(id)).unwrap())
+                .collect(),
+            None,
+            Some("native three-parent HEAD merge"),
+            [],
+        ),
+    )
+    .unwrap();
+    let multi_head = head(multi.view().store_view(), "default");
+    assert!(
+        [&a, &c, &x].iter().all(|id| multi_head != target(id)),
+        "the native record must differ from every input to exercise the arity fallback"
+    );
+    let multi = multi.operation().id().clone();
+    assert_eq!(
+        block_on(store.read_operation(&multi))
+            .unwrap()
+            .parents
+            .len(),
+        3
+    );
     let path = world.fx.env.root().join("head-writer-work");
     world.fx.repo(0).jj(&[
         "workspace",
@@ -969,6 +1128,23 @@ fn physical_head_writers_are_distinct_from_merge_record_terms() {
             "a copied record without the matching native initialization is no writer"
         );
     }
+    world
+        .justify_head(0, &mut log, &cleanup, "default", &target(&c))
+        .unwrap();
+    assert!(
+        world
+            .justify_head(0, &mut log, &cleanup, "default", &target(&a))
+            .is_err(),
+        "native cleanup removes a record but does not write an arbitrary physical HEAD"
+    );
+    assert!(
+        log.native_head_explanation(&wrong_cleanup, "default", &target(&c), &setup)
+            .is_err(),
+        "even a real writer cannot authenticate the wrong native replay result"
+    );
+    world
+        .justify_head(0, &mut log, &multi, "default", &target(&c))
+        .unwrap();
     let criss_cross_parents = log.op(&criss_cross).parents.clone();
     assert_eq!(log.bases(&criss_cross_parents).len(), 2);
     log.validate_record(
@@ -1107,7 +1283,7 @@ fn preserved_head_records_require_the_exact_captured_frontier() {
         .insert(CANONICAL_ATTRIBUTE.to_owned(), own_canonical.0.hex());
     assert!(jj_command(&world.owner(0), &claimed));
     let claimed = block_on(store.write_operation(&claimed)).unwrap();
-    let log = |preserved_heads| Log {
+    let log = |preserved_heads: BTreeMap<OperationId, Vec<OperationId>>| Log {
         owner: world.owner(0),
         loader: loader.clone(),
         source_root: world.fx.repo(0).path().to_path_buf(),
@@ -1118,7 +1294,13 @@ fn preserved_head_records_require_the_exact_captured_frontier() {
         views: HashMap::new(),
         repos: HashMap::new(),
         captured_sources: BTreeMap::new(),
-        preserved_heads,
+        preserved_heads: preserved_heads
+            .into_iter()
+            .map(|(id, heads)| {
+                let carrier = block_on(store.read_operation(&id)).unwrap();
+                (id, PreservedHeadInput { carrier, heads })
+            })
+            .collect(),
         validated: HashSet::new(),
         head_writers: HashMap::new(),
     };
@@ -1137,10 +1319,56 @@ fn preserved_head_records_require_the_exact_captured_frontier() {
     )]))
     .validate_record(&inherited, setup, &record)
     .unwrap();
+    // A later contraction reidentifies the exact carrier on different native parents.
+    // The source frontier still proves its record, without another receipt or cache map.
+    let mut alias = block_on(store.read_operation(&carrier)).unwrap();
+    alias.parents = vec![store.root_operation_id().clone()];
+    alias
+        .metadata
+        .attributes
+        .insert(CANONICAL_ATTRIBUTE.to_owned(), "new image".to_owned());
+    let reidentified = block_on(store.write_operation(&alias)).unwrap();
+    let mut wrong_ancestry = alias.clone();
+    wrong_ancestry
+        .metadata
+        .attributes
+        .insert("musubi.original-parents".to_owned(), "other".to_owned());
+    let wrong_ancestry = block_on(store.write_operation(&wrong_ancestry)).unwrap();
+    let mut changed_view = alias.clone();
+    changed_view.view_id = block_on(store.read_operation(&wrong)).unwrap().view_id;
+    changed_view.parents = vec![historical.clone()];
+    let changed_view = block_on(store.write_operation(&changed_view)).unwrap();
+    let mut unmarked = alias;
+    unmarked.metadata.attributes.remove(CANONICAL_ATTRIBUTE);
+    let unmarked = block_on(store.write_operation(&unmarked)).unwrap();
     let valid = BTreeMap::from([(carrier.clone(), vec![original.clone()])]);
     log(valid.clone())
         .validate_record(&carrier, setup, &record)
         .unwrap();
+    log(valid.clone())
+        .validate_record(&reidentified, setup, &record)
+        .unwrap();
+    // Identical carriers can have different observed frontiers. Try each separately;
+    // joining those frontiers would invent an observation that never happened.
+    let mut multiple = log(valid.clone());
+    let mut other = multiple.preserved_heads[&carrier].clone();
+    other.heads = vec![historical.clone()];
+    multiple
+        .preserved_heads
+        .insert(OperationId::new(vec![0; 64]), other);
+    multiple
+        .validate_record(&reidentified, setup, &record)
+        .unwrap();
+
+    for id in [&wrong_ancestry, &changed_view, &unmarked] {
+        assert!(
+            log(valid.clone())
+                .validate_record(id, setup, &record)
+                .is_err(),
+            "an unchanged header or unmarked body cannot reuse a receipt witness"
+        );
+    }
+
     assert!(
         log(valid)
             .validate_record(&altered, setup, &record)
@@ -1888,26 +2116,7 @@ impl World {
                 ));
             };
             if base_heads.iter().any(|b| *b != base) {
-                log.validate_record(&at, &self.imports.setup[m], &RecordKind::Head(ws.clone()))?;
-                let merged = log.native_merged_head(&op.parents, &ws)?;
-                if merged == now && taken.is_resolved() {
-                    let mut possible = false;
-                    for parent in &op.parents {
-                        possible |= log
-                            .possible_heads(parent, &ws, &self.imports.setup[m])?
-                            .contains(&taken.as_normal().cloned());
-                    }
-                    if possible {
-                        fired("import:concurrent_heads");
-                        return Ok(());
-                    }
-                }
-                return Err(format!(
-                    "the native merge {} cannot explain record {} with physical HEAD {}",
-                    describe(&log.owner, &at, &op),
-                    show(&now),
-                    show(taken)
-                ));
+                return log.native_head_explanation(&at, &ws, taken, &self.imports.setup[m]);
             }
             let before = log.ancestors(bases.clone());
             let mut touched: Vec<OperationId> = vec![];
@@ -1918,13 +2127,7 @@ impl World {
             }
             if touched.len() > 1 {
                 let [left, right] = op.parents.as_slice() else {
-                    return Err(format!(
-                        "the merge {} of {} heads, several of which changed the record, made it \
-                         {}; such merges aren't modeled",
-                        describe(&log.owner, &at, &op),
-                        op.parents.len(),
-                        show(&now)
-                    ));
+                    return log.native_head_explanation(&at, &ws, taken, &self.imports.setup[m]);
                 };
                 let (left, right) = (log.head(left, &ws), log.head(right, &ws));
                 let merged = log.merge_targets(&at, &left, &base, &right);
@@ -1950,21 +2153,11 @@ impl World {
                         show(taken)
                     ));
                 }
-                return Err(format!(
-                    "the merge {} made the record {}, where jj's merge of its parents' makes {}",
-                    describe(&log.owner, &at, &op),
-                    show(&now),
-                    show(&merged)
-                ));
+                return log.native_head_explanation(&at, &ws, taken, &self.imports.setup[m]);
             }
             let next = touched.first().unwrap_or(&bases[0]).clone();
             if log.head(&next, &ws) != now {
-                return Err(format!(
-                    "the merge {} made the record {}, which neither the one parent that changed \
-                     it nor their common ancestor have",
-                    describe(&log.owner, &at, &op),
-                    show(&now)
-                ));
+                return log.native_head_explanation(&at, &ws, taken, &self.imports.setup[m]);
             }
             at = next;
         }

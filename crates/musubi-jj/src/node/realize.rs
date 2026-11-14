@@ -989,13 +989,15 @@ impl NodeRepo {
     /// them differs from its base, which the merge then takes: another machine's join
     /// operation's are its base's, the root's, as, usually, are those of other machines'
     /// operations. `None` where jj's merge must decide (`PerMachine::merged_trivially`), or
-    /// where a merge has several bases.
+    /// where a merge has several bases or changes workspace names: jj's workspace cleanup
+    /// can remove a Git HEAD record even when none of the per-machine fields changed.
     fn merged_trivially(
         &self,
         first_op: &Operation,
         rest: &[LocalOp],
     ) -> Result<Option<Arc<PerMachine>>, NodeError> {
-        let mut merged = fields_of(first_op)?;
+        let first_view = first_op.view().block_on()?;
+        let mut merged = PerMachine::of(first_view.store_view());
         let mut ops = vec![first_op.clone()];
         for other in rest {
             let other_op = self.loader.load_operation(&other.0).block_on()?;
@@ -1003,7 +1005,25 @@ impl NodeRepo {
             let Some(base) = single_base(&self.loader, &ops, &other_op)? else {
                 return Ok(None);
             };
-            let (base, theirs) = (fields_of(&base)?, fields_of(&other_op)?);
+            let base_view = base.view().block_on()?;
+            let other_view = other_op.view().block_on()?;
+            if !first_view
+                .store_view()
+                .wc_commit_ids
+                .keys()
+                .eq(base_view.store_view().wc_commit_ids.keys())
+                || !other_view
+                    .store_view()
+                    .wc_commit_ids
+                    .keys()
+                    .eq(base_view.store_view().wc_commit_ids.keys())
+            {
+                return Ok(None);
+            }
+            let (base, theirs) = (
+                PerMachine::of(base_view.store_view()),
+                PerMachine::of(other_view.store_view()),
+            );
             match PerMachine::merged_trivially(&base, merged, theirs) {
                 Some(next) => merged = next,
                 None => return Ok(None),
@@ -1764,7 +1784,7 @@ fn latest_work_index(
 }
 
 #[cfg(test)]
-mod latest_work_tests {
+mod tests {
     #![allow(clippy::unwrap_used)]
     use std::collections::BTreeSet;
 
@@ -1773,6 +1793,57 @@ mod latest_work_tests {
     use super::latest_work_index;
     use crate::canonical::Work;
     use crate::node::NodeRepo;
+
+    #[test]
+    fn forgetting_a_workspace_merges_its_git_head_as_jj() {
+        use super::{LocalOp, fields_of, merged_by_jj};
+        use jj_lib::op_store::RefTarget;
+        use jj_lib::ref_name::WorkspaceName;
+        use pollster::FutureExt as _;
+
+        let env = TestEnv::new();
+        let repo = env.init_repo("owner");
+        let node = NodeRepo::open(&repo.repo_path(), &repo.settings()).unwrap();
+        let loaded = node.loader().load_at_head(None).block_on().unwrap();
+        let workspace = WorkspaceName::new("owner");
+        let target = loaded.view().get_wc_commit_id(workspace).unwrap().clone();
+        let mut tx = loaded.start_transaction();
+        tx.repo_mut()
+            .set_git_head_target(workspace, RefTarget::normal(target));
+        let base = tx.commit("record HEAD").block_on().unwrap();
+        let ours = base
+            .start_transaction()
+            .commit("keep workspace")
+            .block_on()
+            .unwrap();
+        // A realization inherits this copy's Git records separately from its shared
+        // workspace map. Its HEAD can therefore survive the workspace's removal.
+        let mut view = base.view().store_view().clone();
+        view.wc_commit_ids.remove(workspace);
+        let mut tx = base.start_transaction();
+        tx.repo_mut().set_view(view);
+        let theirs = tx.commit("realize forgotten workspace").block_on().unwrap();
+        assert_eq!(
+            fields_of(ours.operation()).unwrap(),
+            fields_of(theirs.operation()).unwrap()
+        );
+        let rest = [LocalOp(theirs.operation().id().clone())];
+        assert!(
+            node.merged_trivially(ours.operation(), &rest)
+                .unwrap()
+                .is_none()
+        );
+        let merged = merged_by_jj(node.loader(), ours.operation().clone(), &rest).unwrap();
+        let mut expected = base.view().store_view().clone();
+        expected.git_heads.clear();
+        assert_eq!(*merged, super::PerMachine::of(&expected));
+        assert_eq!(
+            *node
+                .inherited_per_machine(&[LocalOp(ours.operation().id().clone()), rest[0].clone()])
+                .unwrap(),
+            *merged
+        );
+    }
 
     #[test]
     fn concrete_work_keeps_the_namespace_after_a_deletion() {

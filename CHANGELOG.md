@@ -7,6 +7,10 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- Sync merges Git HEAD records as jj does when a concurrent operation removes a workspace.
+  It no longer retains the forgotten workspace's old HEAD record. Nothing needs doing on
+  upgrading.
+
 - After `jj op abandon`, sync keeps a forgotten copy's newer workspace removals instead of
   restoring names from older history. Nothing needs doing on upgrading.
 

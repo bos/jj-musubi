@@ -1322,10 +1322,14 @@ links:
    merge, as `merged_by_jj` does. It requires jj's merge to be the model's `TSlot.merge`, as the
    oracle computes it,
    and the shortcut, wherever it applies, to be jj's (`shortcut_agrees`). Beside it are
-   tests of the two shapes of #56, where an unguarded shortcut disagrees with jj, and of a
+   tests of the two shapes of #56, where an unguarded shortcut disagrees with jj, and a
    criss-cross merge, where musubi must merge against the heads' closest common ancestors
    merged, as jj does, not the first of them (`firstBase_reverts`). That test's commits are
    beside each other, since jj resolves such a conflict where they are in a line.
+   In `node::realize::tests`,
+   `forgetting_a_workspace_merges_its_git_head_as_jj` checks that jj removes a workspace's
+   Git HEAD even if all parents' per-machine records agree. Workspace cleanup is outside
+   the refs model; the caller leaves changes in workspace names to jj.
 
 The tests have teeth: a model whose exports refuse an update to the value git already has
 fails `refs`, and merging per-machine fields against the first of several closest common

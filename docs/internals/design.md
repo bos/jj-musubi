@@ -183,7 +183,9 @@ Translation keeps per-machine fields per-machine:
   node catching up writes its realizations, and makes their views, in parallel; nothing names them
   until they are all written.
   - An operation that won't be an op head inherits its parent realization's per-machine fields, or
-    for a merge, their three-way merge, as jj's merge of the operations would make it. That makes
+    for a merge, their three-way merge, as jj's merge of the operations would make it. A
+    change in workspace names goes through jj's merge: removing a workspace can also remove
+    its Git HEAD record, even if those records agree in all parents. That makes
     realizing deterministic, given the op heads, whose own workspace names other machines'
     are shown clear of ([Which workspaces are this machine's
     own](#which-workspaces-are-this-machines-own)), so re-realizing after a crash rewrites

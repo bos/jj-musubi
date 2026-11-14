@@ -483,6 +483,8 @@ impl NodeRepo {
             })
             .collect();
         let prefixes = self.prefixes_with_own(view, presence, &own)?;
+        let mut known = self.machines_of(view, presence.known());
+        known.insert(self.machine.key().to_owned());
         Ok(Namespace {
             source: self.machine.key().to_owned(),
             names: self
@@ -490,7 +492,7 @@ impl NodeRepo {
                 .into_iter()
                 .map(|(key, name)| (name.as_str().to_owned(), key.as_str().to_owned()))
                 .collect(),
-            known: self.machines_of(view, presence.known()),
+            known,
         }
         .encode())
     }
@@ -1145,6 +1147,29 @@ mod tests {
                 .any(|(name, key)| { key == foreign.as_str() && name != "beta/x" })
         );
         assert_eq!(context.names.len(), view.wc_commit_ids.len());
+        // A source can observe root or a frontier containing only other copies. Its
+        // identity remains part of namespace evidence without reviving its presence.
+        let empty = Presence::default();
+        let root = node
+            .canonical
+            .read_operation_view(node.canonical.root_operation_id())
+            .unwrap();
+        for (with_foreign, mut view) in [(false, root.clone()), (true, root)] {
+            if with_foreign {
+                view.wc_commit_ids.insert(
+                    foreign.clone(),
+                    node.loader.store().root_commit_id().clone(),
+                );
+            }
+            let encoded = node.workspace_context_of_view(&view, &empty).unwrap();
+            let mut metadata = node.canonical.read_operation(&head).unwrap().metadata;
+            metadata
+                .attributes
+                .insert(crate::canonical::namespace::ATTRIBUTE.to_owned(), encoded);
+            let parsed = Namespace::read(&metadata).unwrap().unwrap();
+            assert!(parsed.known.contains(&owner));
+            assert!(!empty.is_present(&owner));
+        }
     }
 
     const X: &str = "refs/heads/x";

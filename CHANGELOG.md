@@ -7,6 +7,10 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- Sync no longer rejects a command made after a full history trim with "operation workspace
+  context is malformed", including when only other copies have workspace bindings. Nothing
+  needs doing on upgrading.
+
 - A copy the hive has forgotten preserves its current Git refs and HEAD when taking shared
   history that retains its private workspaces, including operations prepared before a local
   Git change. Its next jj command no longer imports unchanged Git state as a move. Nothing

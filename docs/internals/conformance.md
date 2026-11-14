@@ -1231,6 +1231,24 @@ then creates native `a` and moves physical Git forward. Its non-root child still
 `b`, while the complete current map is `{a,b}`. The actual first export must follow a shared
 merge and the child must retain the independently captured current Git fields.
 
+`private_overlap::disjoint_owned_names_do_not_select_current_git`, in the sibling module
+`node/realize/native_private_overlap_tests.rs`, checks the rejecting non-root case. It caches
+that child with owned target `{b}`, then adds native `a`, renames `b` to `c` and exports a
+bookmark change. Complete raw maps retain the independently owned foreign slot while current
+owned names are `{a,c}`. No receipt is active, so root-base fallback is off. The first export must
+have the captured published parent's single ordered edge and complete inherited Git fields,
+which differ from the current native fields; no `CurrentGit` event may carry them into the
+child. A selected control forcing private carry for every known-absent target fails at that
+independent first-export parent assertion, before the event-exclusion check.
+
+Both warm and translation-cache-erased/reopened executions check this per-trace boundary.
+The latter compares native and canonical bodies, heads, receipt and retained expected
+observations across reopening, requiring an empty expected map before erasure. It makes no
+cross-run local-ID equality claim: exact cache agreement would also need authenticated unique
+source roles U and equal relevant retained observations I. This finite native adapter test
+does not authenticate arbitrary sources, complete the selector's decision table or add a
+lifecycle theorem. Its raw event callback adds no separate byte/clock/RNG purity assertion.
+
 `receipt_parent_precedes_preferred_alias` and `changed_physical_parent_refreshes_git_fields`
 check renderer priority and refresh against explicitly constructed physical inputs. Their role
 arguments do not establish that an arbitrary receipt supplied the right candidates.

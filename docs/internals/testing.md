@@ -1032,6 +1032,13 @@ and present, change its Git record after preparation, and advance in both orders
 tip must keep the full current Git record, physical refs and HEAD must stay unchanged, and
 the next native status must import nothing.
 
+The native unit test `private_overlap::disjoint_owned_names_do_not_select_current_git`
+complements these cases with a cached non-root target `{b}` and current owned names `{a,c}`
+after a native rename. It checks rejection of current Git carry at the actual first export,
+using pre-call native fields and ordered parents. Warm and cache-erased modes check each
+trace's inputs; their [contract and limits](conformance.md#native-lifecycle-inputs-and-events)
+include the U/I restrictions on any broader exact-cache-agreement claim.
+
 A replacement clone's synthetic join has its own independently captured native input, keyed
 by the join's metadata identity. Only its exact owned workspace keys and commit targets can
 be certified from that input. `reference::a_clones_workspace_witness_is_its_native_join_input`

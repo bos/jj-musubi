@@ -114,8 +114,9 @@ impl Ledger {
     /// can do that too, by rewriting a commit the same way, as can a command at an older
     /// operation, or a snapshot of a commit git moved a branch to, which jj imports beside
     /// the snapshot; so can jj rebasing two rewrites of a change onto the same parents, or a
-    /// command and a merge rebasing it alike, which `Reference::same_rebase_twice` tells
-    /// apart.
+    /// command and a merge rebasing it alike. A native serial merge after an operation
+    /// abandon can repeat it too. `Reference::same_rebase_twice` tells these apart, with an
+    /// independent native replay required for the serial case.
     pub fn alike_commits(&self, view: &View, copy_of: impl Fn(&str, &str) -> bool) -> Vec<String> {
         let mut alike = vec![];
         for change in view.divergent() {

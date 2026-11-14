@@ -486,6 +486,10 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         Some(&["op_abandon", "at_op"]),
     ),
     (
+        "a_native_serial_merge_can_repeat_a_rebase_after_abandon",
+        Some(&["op_abandon", "at_op"]),
+    ),
+    (
         "an_offline_machine_comes_back_after_an_abandon",
         Some(&["op_abandon"]),
     ),

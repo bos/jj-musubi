@@ -1182,8 +1182,23 @@ impl NodeRepo {
             let fields = self.inherited_per_machine(&sources)?;
             for (i, (canonical, local)) in left.iter().zip(&mut realized).enumerate() {
                 if root_base || private[i] {
+                    #[cfg(test)]
+                    let source_before = super::native_contract::observer()
+                        .map(|_| (local.clone(), self.native_identity_snapshot()));
                     *local = self.with_per_machine(local, &fields, canonical)?;
                     self.insert_map(local.clone(), canonical.clone())?;
+                    #[cfg(test)]
+                    if let Some((input, source_before)) = source_before {
+                        super::native_contract::emit(super::native_contract::Event::CurrentGit {
+                            canonical: canonical.clone(),
+                            input,
+                            output: local.clone(),
+                            mapped: self.canonical_of(local),
+                            preferred: self.local_of(canonical),
+                            source_before,
+                            source_after: self.native_identity_snapshot(),
+                        });
+                    }
                 }
             }
         }

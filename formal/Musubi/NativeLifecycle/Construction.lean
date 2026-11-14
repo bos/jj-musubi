@@ -387,6 +387,45 @@ structure RenderBuild where
   result : Physical
 deriving DecidableEq, Repr
 
+structure CurrentGitBuild where
+  input : Evidence
+  heads : List Physical
+  canonical : Canonical
+  before : NativeBody
+  fields : Nat
+  body : NativeBody
+  identity : IdentityRow
+deriving DecidableEq, Repr
+
+def CurrentGitBuild.writes (build : CurrentGitBuild) : Bool :=
+  build.body.id != build.before.id
+
+def currentGitBody (before : NativeBody) (canonical : Canonical) (fields : Nat) : NativeBody :=
+  if before.gitFields = fields then before
+  else { before with gitFields := fields, marker := some canonical }
+
+def encodeCurrentGit (e : Evidence) (table : EncodingTable) (before : NativeBody)
+    (canonical : Canonical) (fields : Nat) : Query NativeBody :=
+  if before.gitFields = fields then .ok before
+  else encodeNative e table (currentGitBody before canonical fields)
+
+/-- `with_per_machine` reuses an equal field record verbatim. Otherwise it changes only
+the full per-machine projection and makes canonical identity explicit. The exact observed
+encoding is consulted only after this complete body has been computed. -/
+def constructCurrentGit (e : Evidence) (facts : NativeFacts) (heads : List Physical)
+    (canonical : Canonical) (incoming : Physical) : Query CurrentGitBuild := do
+  let before ← e.nativeBody incoming
+  let original := (← e.canonicalBody canonical).original
+  if (← e.identity incoming) ≠ canonical then
+    throw (.malformed "current Git input identity differs from prepared target")
+  let fields ← inheritedFields e facts.fields heads
+  let body ← encodeCurrentGit e facts.encodings before canonical fields
+  let identity : IdentityRow :=
+    ⟨body.id, canonical, original, if body.marker.isSome then .markedBody else .original⟩
+  let checked := { e with native := unique (e.native ++ [body]) }
+  checked.checkIdentity identity
+  return { input := e, heads, canonical, before, fields, body, identity }
+
 /-- Compute every hash-visible render field before looking up its independently observed
 hash. Cached Git records are reused only for identical ordered physical parents. -/
 def constructRender (input : Evidence) (facts : NativeFacts) (me : Copy)

@@ -620,3 +620,13 @@ open Musubi
 #print axioms NativeLifecycle.descriptionExclusion_pinned
 #print axioms NativeLifecycle.matchingCandidates_excluded_necessary
 #print axioms NativeLifecycle.matchingCandidates_accounted
+#print axioms NativeLifecycle.currentGitBody_fields
+#print axioms NativeLifecycle.currentGitBody_frame
+#print axioms NativeLifecycle.currentGitBody_marker
+#print axioms NativeLifecycle.encodeCurrentGit_shape
+#print axioms NativeLifecycle.constructCurrentGit_pinned
+#print axioms NativeLifecycle.refreshCurrentGit_records
+#print axioms NativeLifecycle.refreshCurrentGit_origin
+#print axioms NativeLifecycle.step_source_routes
+#print axioms NativeLifecycle.step_invalidates_source_routes
+#print axioms NativeLifecycle.runs_source_routes

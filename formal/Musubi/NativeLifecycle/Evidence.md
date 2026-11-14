@@ -443,3 +443,73 @@ Routine elaboration and guard syntax corrections stayed inside that window, with
 logs preserved. There was one oracle build, one native-target run, no native retry, no new
 fixture, no full suite and no campaign. Coordinator integration still owns the final checks
 and independent reviews; the full preservation/native-simulation obligations remain open.
+
+## Staged source-route freshness and current-Git installation
+
+The next source increment makes current-Git installation part of the executable B prefix.
+`currentGitBody` reuses an equal field record verbatim. For different fields it copies the
+complete per-machine projection and adds an explicit canonical marker, retaining every other
+body field. `constructCurrentGit` derives current fields from the actual current heads, checks
+the incoming identity against the prepared target, computes the complete body before encoding
+lookup, and derives its identity row from that target's immutable original. No selected Rust
+source, field, body or translation answer is a premise.
+
+The `refreshCurrentGit` action installs that body and identity, updates the disposable preferred
+translation entry, and replaces `Publication.incoming` with the constructed physical ID. A
+changed write checks complete responsibility for the preparation's captured receipt. An equal
+field record is reused, including an unmarked original, without inventing a write. A later
+merge using current Git requires this installed operand; a missing action is an incomplete
+model prefix, not a new Rust refusal. B's certificate now ends after this action and before
+native merge/export. Ordered merge-input comparison reads the installed state directly.
+
+Current source observations are framed only for explicitly classified body, translation/cache,
+physical Git, planning and head-store effects. Receipt/record/checkpoint changes, recovery,
+unclassified helper outcomes, evidence loss, external effects and partial failure discard the
+snapshot. The action still completes normally; later negative queries report missing evidence.
+Pure capture cannot resurrect an invalidated observation. Historical receipt/render inputs
+remain construction provenance and do not substitute for the current source-route observation.
+`step_source_routes` derives the frame/invalidation result from the successful actual step;
+`runs_source_routes` lifts it along the same `Runs` list used by `certifiedRun`. The certificate
+now includes `SourceRoutesAlong` as well as custody. This is a model transition result; full
+native frame authentication and same-run `ConstructionAlong` preservation remain pending.
+
+The source frame deliberately does not say that `insert_map` leaves all translation state
+unchanged. The shipping function writes `musubi/translation`, updates both lookup directions
+and can invalidate `published_history`. None of these is `Records.sources`, realign, the
+superseded/dropped relation, checkpoint/history/fixup phase, or join/join-point/prejoin state in
+`SourceRoutes`. The model installs its independently constructed positive identity and preferred
+entry. A test-only boundary event observes the actual affected forward/preferred entries and
+complete durable plus memory source snapshots before and after the shipping write/map update.
+These observations are comparison targets only. The existing B target requires a changed
+physical ID, matching constructed incoming/identity/preferred entry, unchanged complete source
+observation at that boundary, and refresh before export. It does not infer an internal frame
+from an observation made only after the entire call returned.
+
+The ordinary body/frame/marker, exact encoding, constructor pinning, captured-receipt custody
+and refresh-origin lemmas feed the existing construction/run proof path. The construction
+invariant target now includes the actual computed refresh origin. A still supplies nonempty
+record custody evidence. B still has no receipt records, so its custody component is vacuous;
+its changed refresh installation and source-frame comparisons must be nonempty. The existing
+two targets are unchanged in number. No production policy, protocol or testutil changes occur;
+the shipping boundary additions are compiled only for tests and read snapshots only when an
+observer is active.
+
+The bounded validation passed all 162 executable guards, 32 affected axiom queries, one oracle
+build and both existing native targets. No `sorryAx` or native-law axiom occurs. The new B
+assertions observed different physical input/output IDs at the shipping refresh boundary,
+matched the computed installed operand and forward/preferred translation entries, and checked
+the complete durable/memory snapshot before and after that write against the initial raw
+observation. The changed refresh comparison is nonvacuous. Its certificate contains the exact
+six actions: capture, planRender, one writeRender, commitRender, revalidate, refreshCurrentGit.
+Native merge/export and later effects remain outside it. B's custody component is still
+vacuous. A retains its nonempty five-action receipt/custody prefix; its source observation is
+discarded after custody/checkpoint and receipt changes, not falsely framed as empty.
+
+The original twenty-minute window began at 17:50:27 UTC on November 14, 2026. All jobs ended
+by 17:59:43, releasing the heavy slot after 9 minutes 16 seconds. The guard/proof elaboration
+corrections and all failed logs stayed inside that window. There was one oracle build, one
+native-target run, no retry, no third fixture, no full suite and no campaign. The actual native
+run now saves both requests and model replies directly; no pure replay was needed. Independent
+review, coordinator integration checks, full same-run ConstructionAlong preservation and
+native observation/frame simulation remain pending. Adding refresh origin to the invariant
+target is not a proof of that target.

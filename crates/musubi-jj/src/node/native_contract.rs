@@ -14,6 +14,15 @@ pub(super) enum Event {
     HeadsUnlocked,
     GitUnlocked,
     Sources(Vec<LocalOp>),
+    CurrentGit {
+        canonical: crate::op_id::CanonicalOp,
+        input: LocalOp,
+        output: LocalOp,
+        mapped: Option<crate::op_id::CanonicalOp>,
+        preferred: Option<LocalOp>,
+        source_before: serde_json::Value,
+        source_after: serde_json::Value,
+    },
     Reread {
         captured: Vec<LocalOp>,
         actual: Vec<LocalOp>,

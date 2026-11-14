@@ -55,6 +55,34 @@ theorem encodeCanonical_observed {e : Evidence} {table : EncodingTable}
       rw [hm] at h
       cases h
 
+theorem currentGitBody_fields (before : NativeBody) (canonical : Canonical) (fields : Nat) :
+    (currentGitBody before canonical fields).gitFields = fields := by
+  unfold currentGitBody
+  split <;> simp_all
+
+theorem currentGitBody_frame (before : NativeBody) (canonical : Canonical) (fields : Nat) :
+    { currentGitBody before canonical fields with
+      gitFields := before.gitFields, marker := before.marker } = before := by
+  unfold currentGitBody
+  split <;> rfl
+
+theorem currentGitBody_marker {before : NativeBody} {canonical : Canonical} {fields : Nat}
+    (changed : before.gitFields ≠ fields) :
+    (currentGitBody before canonical fields).marker = some canonical := by
+  simp [currentGitBody, changed]
+
+theorem encodeCurrentGit_shape {e : Evidence} {table : EncodingTable} {before result : NativeBody}
+    {canonical : Canonical} {fields : Nat}
+    (success : encodeCurrentGit e table before canonical fields = .ok result) :
+    sameNativeShape (currentGitBody before canonical fields) result = true := by
+  unfold encodeCurrentGit at success
+  split at success
+  · rename_i equal
+    cases success
+    simp only [currentGitBody, ite_eq_left equal]
+    simp [sameNativeShape]
+  · exact (encodeNative_observed success).2
+
 /-- Successful comparison retains every computed image, including changed mappings absent
 from a sparse raw map. This depends on computed locals, never a supplied correct-map premise. -/
 theorem receiptInputMatches_images {build : ReceiptBuild} {observed : Receipt}
@@ -78,11 +106,12 @@ theorem ownHelper_frame {s t : State} {index : Nat}
     (success : step s (.ownHelper index) = .ok t) :
     t.outside = s.outside ∧ t.allocatedLabels = s.allocatedLabels ∧
       t.createdCanonicals = s.createdCanonicals := by
+  obtain ⟨next, accepted, rfl⟩ := step_core_success success
   cases outcome : helperOutcome s index with
-  | error gap => simp [step, outcome, Functor.map, Except.map] at success
+  | error gap => simp [stepCore, outcome, Functor.map, Except.map] at accepted
   | ok result =>
-    simp [step, outcome, Functor.map, Except.map] at success
-    subst t
+    simp [stepCore, outcome, Functor.map, Except.map] at accepted
+    subst next
     exact ⟨rfl, rfl, rfl⟩
 
 /-- Successful execution requires responsibility for the plan's captured receipt, even
@@ -91,23 +120,117 @@ theorem writeRender_captured_records {s t : State} {index : Nat} {plan : RenderB
     {receipt : Receipt} (success : step s (.writeRender index) = .ok t)
     (bound : s.renderPlan = some plan) (captured : plan.receipt = some receipt) :
     ∀ record, record ∈ receipt.records → record ∈ s.saved.applied ++ s.saved.custody := by
+  obtain ⟨next, accepted, rfl⟩ := step_core_success success
   cases held : receipt.records.all ((s.saved.applied ++ s.saved.custody).contains ·) with
   | true =>
     intro record member
     exact List.contains_iff_mem.mp (List.all_eq_true.mp held record member)
   | false =>
     cases node : plan.nodes[index]? <;>
-      simp only [step, bound, captured, node, held, bind, Except.bind,
-        throw, throwThe, MonadExceptOf.throw, Bool.not_false] at success
-    all_goals repeat (split at success <;> simp_all)
+      simp only [stepCore, bound, captured, node, held, bind, Except.bind,
+        throw, throwThe, MonadExceptOf.throw, Bool.not_false] at accepted
+    all_goals repeat' (split at accepted <;> try simp_all)
 
 theorem writeRender_current {s t : State} {index : Nat} {plan : RenderBuild}
     (success : step s (.writeRender index) = .ok t) (bound : s.renderPlan = some plan) :
     renderPlanCurrent s plan = true := by
+  obtain ⟨next, accepted, rfl⟩ := step_core_success success
   cases current : renderPlanCurrent s plan with
   | true => rfl
   | false =>
-    simp [step, bound, current, bind, Except.bind, throw, throwThe, MonadExceptOf.throw] at success
+    simp [stepCore, bound, current, bind, Except.bind, throw, throwThe, MonadExceptOf.throw] at accepted
+
+/-- Only a changed refresh writes a body. It uses the receipt captured by preparation,
+not an arbitrary current receipt supplied by a later action. -/
+theorem refreshCurrentGit_records {s t : State} {prepared : Prepared} {plan : Publication}
+    {git : GitChoice} {build : CurrentGitBuild} {receipt : Receipt}
+    (success : step s .refreshCurrentGit = .ok t)
+    (bound : s.prepared = some prepared) (publication : s.publication = some plan)
+    (choice : s.git = some git) (uses : git.useCurrent = true)
+    (computed : constructCurrentGit s.evidence s.nativeFacts s.heads
+      prepared.inputs.target plan.incoming = .ok build)
+    (writes : build.writes = true) (captured : prepared.inputs.receipt = some receipt) :
+    ∀ record, record ∈ receipt.records → record ∈ s.saved.applied ++ s.saved.custody := by
+  obtain ⟨next, accepted, rfl⟩ := step_core_success success
+  cases held : receipt.records.all ((s.saved.applied ++ s.saved.custody).contains ·) with
+  | true =>
+    intro record member
+    exact List.contains_iff_mem.mp (List.all_eq_true.mp held record member)
+  | false =>
+    simp only [stepCore, bound, publication, choice, uses, computed, writes, captured,
+      held, liftQuery, Except.mapError, bind, Except.bind, throw, throwThe,
+      MonadExceptOf.throw, Bool.not_false] at accepted
+    all_goals repeat' (split at accepted <;> try simp_all)
+
+def CurrentGitOrigin (build : CurrentGitBuild) : Prop :=
+  ∃ before facts heads canonical incoming,
+    constructCurrentGit before facts heads canonical incoming = .ok build
+
+theorem constructCurrentGit_pinned {e : Evidence} {facts : NativeFacts}
+    {heads : List Physical} {canonical : Canonical} {incoming : Physical} {build : CurrentGitBuild}
+    (computed : constructCurrentGit e facts heads canonical incoming = .ok build) :
+    build.input = e ∧ build.heads = heads ∧ build.canonical = canonical := by
+  simp only [constructCurrentGit, bind, Except.bind, pure, Except.pure,
+    throw, throwThe, MonadExceptOf.throw] at computed
+  all_goals repeat' (split at computed <;> try simp_all)
+  all_goals subst build
+  all_goals exact ⟨rfl, rfl, rfl⟩
+
+/-- Installing the freshly computed body changes the incoming operand in the same action.
+This does not assert that native merge/export has happened. -/
+theorem refreshCurrentGit_origin {s t : State}
+    (success : step s .refreshCurrentGit = .ok t) :
+    ∀ plan build, t.publication = some plan → plan.refresh = some build →
+      CurrentGitOrigin build ∧ plan.incoming = build.body.id := by
+  obtain ⟨next, accepted, rfl⟩ := step_core_success success
+  intro finalPlan finalBuild bound refreshed
+  cases prepared : s.prepared with
+  | none =>
+    simp only [stepCore, prepared, bind, Except.bind, throw, throwThe,
+      MonadExceptOf.throw] at accepted
+    all_goals repeat' (split at accepted <;> try simp_all)
+    all_goals try subst next
+    all_goals simp_all
+  | some before =>
+    cases publication : s.publication with
+    | none =>
+      simp only [stepCore, publication, bind, Except.bind, throw, throwThe,
+        MonadExceptOf.throw] at accepted
+      all_goals repeat' (split at accepted <;> try simp_all)
+      all_goals try subst next
+      all_goals simp_all
+    | some plan =>
+      cases choice : s.git with
+      | none =>
+        simp only [stepCore, publication, choice, bind, Except.bind, throw, throwThe,
+          MonadExceptOf.throw] at accepted
+        all_goals repeat' (split at accepted <;> try simp_all)
+        all_goals try subst next
+        all_goals simp_all
+      | some git =>
+        cases computed : constructCurrentGit s.evidence s.nativeFacts s.heads
+            before.inputs.target plan.incoming with
+        | error gap =>
+          simp only [stepCore, prepared, publication, choice, computed, liftQuery,
+            Except.mapError, bind, Except.bind, throw, throwThe, MonadExceptOf.throw,
+            pure, Except.pure] at accepted
+          all_goals repeat' (split at accepted <;> try simp_all)
+          all_goals try subst next
+          all_goals simp only [Option.some.injEq] at bound
+          all_goals subst finalPlan
+          all_goals cases refreshed
+        | ok build =>
+          have origin : CurrentGitOrigin build :=
+            ⟨s.evidence, s.nativeFacts, s.heads, before.inputs.target, plan.incoming, computed⟩
+          simp only [stepCore, prepared, publication, choice, computed, liftQuery,
+            Except.mapError, bind, Except.bind, throw, throwThe, MonadExceptOf.throw,
+            pure, Except.pure] at accepted
+          all_goals repeat' (split at accepted <;> try simp_all)
+          all_goals try subst next
+          all_goals simp only [Option.some.injEq] at bound
+          all_goals subst finalPlan
+          all_goals cases refreshed
+          all_goals exact ⟨origin, rfl⟩
 
 theorem renderPlanCurrent_receipt {s : State} {plan : RenderBuild}
     (current : renderPlanCurrent s plan = true) : s.receipt = plan.receipt := by
@@ -127,11 +250,12 @@ theorem interrupt_invalidates (s : State) :
 theorem finish_invalidates {s t : State} (success : step s .finish = .ok t) :
     t.renderPlan = none ∧ t.receiptPlan = none ∧ t.prepared = none ∧
       t.receipt = none ∧ t.saved.custody = s.saved.custody := by
-  simp only [step, bind, Except.bind, throw, throwThe, MonadExceptOf.throw,
-    pure, Except.pure] at success
-  split at success
-  · cases success
-  · cases success
+  obtain ⟨next, accepted, rfl⟩ := step_core_success success
+  simp only [stepCore, bind, Except.bind, throw, throwThe, MonadExceptOf.throw,
+    pure, Except.pure] at accepted
+  split at accepted
+  · cases accepted
+  · cases accepted
     exact ⟨rfl, rfl, rfl, rfl, rfl⟩
 
 /-- The proof target for the constructed sublanguage is provenance plus policy facts about
@@ -151,39 +275,41 @@ def RenderOrigin (plan : RenderBuild) : Prop :=
 theorem planReceipt_origin {s t : State} {request : ReceiptRequest}
     (success : step s (.planReceipt request) = .ok t) :
     ∃ plan, t.receiptPlan = some plan ∧ ReceiptOrigin plan := by
+  obtain ⟨next, accepted, rfl⟩ := step_core_success success
   cases computed : constructReceipt s.evidence s.nativeFacts s.saved s.me s.heads request with
   | error gap =>
-    simp only [step, liftQuery, computed, Except.mapError, bind, Except.bind,
-      throw, throwThe, MonadExceptOf.throw] at success
-    all_goals repeat (split at success <;> simp_all)
-    all_goals subst t
+    simp only [stepCore, liftQuery, computed, Except.mapError, bind, Except.bind,
+      throw, throwThe, MonadExceptOf.throw] at accepted
+    all_goals repeat' (split at accepted <;> try simp_all)
+    all_goals subst next
     all_goals simp_all
   | ok plan =>
     have origin : ReceiptOrigin plan :=
       ⟨s.evidence, s.nativeFacts, s.saved, s.me, s.heads, request, computed⟩
-    simp only [step, liftQuery, computed, Except.mapError, bind, Except.bind,
-      throw, throwThe, MonadExceptOf.throw, pure, Except.pure] at success
-    all_goals repeat (split at success <;> simp_all)
-    all_goals subst t
+    simp only [stepCore, liftQuery, computed, Except.mapError, bind, Except.bind,
+      throw, throwThe, MonadExceptOf.throw, pure, Except.pure] at accepted
+    all_goals repeat' (split at accepted <;> try simp_all)
+    all_goals subst next
     all_goals simp_all
 
 theorem planRender_origin {s t : State} {target : Canonical}
     (success : step s (.planRender target) = .ok t) :
     ∀ plan, t.renderPlan = some plan → RenderOrigin plan := by
+  obtain ⟨next, accepted, rfl⟩ := step_core_success success
   cases computed : constructRender s.evidence s.nativeFacts s.me s.heads s.receipt target with
   | error gap =>
-    simp only [step, liftQuery, computed, Except.mapError, bind, Except.bind,
-      throw, throwThe, MonadExceptOf.throw, pure, Except.pure] at success
-    all_goals repeat (split at success <;> simp_all)
-    all_goals subst t
+    simp only [stepCore, liftQuery, computed, Except.mapError, bind, Except.bind,
+      throw, throwThe, MonadExceptOf.throw, pure, Except.pure] at accepted
+    all_goals repeat' (split at accepted <;> try simp_all)
+    all_goals subst next
     all_goals simp_all
   | ok result =>
     have origin : RenderOrigin result :=
       ⟨s.evidence, s.nativeFacts, s.me, s.heads, s.receipt, target, computed⟩
-    simp only [step, liftQuery, computed, Except.mapError, bind, Except.bind,
-      throw, throwThe, MonadExceptOf.throw, pure, Except.pure] at success
-    all_goals repeat (split at success <;> simp_all)
-    all_goals subst t
+    simp only [stepCore, liftQuery, computed, Except.mapError, bind, Except.bind,
+      throw, throwThe, MonadExceptOf.throw, pure, Except.pure] at accepted
+    all_goals repeat' (split at accepted <;> try simp_all)
+    all_goals subst next
     all_goals simp_all
 
 /-- This records a genuine dependency path, but is not yet a proved invariant: preservation
@@ -194,6 +320,7 @@ def ConstructionInvariant (s : State) : Prop :=
   (∀ plan, s.renderPlan = some plan → RenderOrigin plan) ∧
   (∀ plan, s.prepared = some plan →
     ∃ origin : RenderBuild, RenderOrigin origin ∧ origin.result = plan.rendered ∧
-      origin.suffix = plan.suffix ∧ origin.reserved = plan.reserved)
+      origin.suffix = plan.suffix ∧ origin.reserved = plan.reserved) ∧
+  (∀ plan build, s.publication = some plan → plan.refresh = some build → CurrentGitOrigin build)
 
 end Musubi.NativeLifecycle

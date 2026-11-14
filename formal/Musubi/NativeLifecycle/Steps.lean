@@ -64,6 +64,8 @@ structure Publication where
   merged : Option Physical := none
   firstExported : Bool := false
   mergeExported : Bool := false
+  refreshDone : Bool := false
+  refresh : Option CurrentGitBuild := none
 deriving DecidableEq, Repr
 
 structure State where
@@ -310,6 +312,8 @@ inductive Action where
   | allocateLabel
   | write (data : BodyWrite)
   | revalidate
+  /-- The conditional `with_per_machine` write and translation installation, before merge. -/
+  | refreshCurrentGit
   | observeExport (observation : ExportObservation)
   /-- Actual arguments/result of the native merge, not an assumed merge-result law. -/
   | merge (inputs : List Physical) (output : Physical)
@@ -335,6 +339,19 @@ inductive Action where
   | loseCanonicalEvidence (canonical : List Canonical)
   | failedCall
 deriving DecidableEq, Repr
+
+/-- These effects touch only immutable bodies, the disposable translation/expected cache,
+the physical Git projection or local planning/head state. Their native counterparts do not
+mutate Records/source/realign/join histories. Every other effect conservatively invalidates
+the observation, including unknown partial failure and externally supplied native effects.
+This is an evidence frame, not an additional scheduling restriction or native refusal. -/
+def Action.framesSourceRoutes : Action → Bool
+  | .planReceipt _ | .writeReceiptCanonical _ | .writeReceiptNative _ |
+    .planRender _ | .writeRender _ | .commitRender | .capture | .prepare _ _ |
+    .allocateLabel | .write _ | .revalidate | .refreshCurrentGit | .observeExport _ |
+    .merge _ _ | .bookkeeping _ _ | .planOrdinary _ _ | .addHead _ |
+    .helperEnter _ | .helperExit | .helperHeads _ | .eraseMemo => true
+  | _ => false
 
 def noteExternal (s : State) : State :=
   { s with outside := s.outside ++
@@ -372,7 +389,7 @@ def helperOutcome (s : State) (index : Nat) : Except StepError HelperResult := d
       pure (observed.after, true)
   return { evidence, heads := fact.afterHeads, physicalGit, physicalKnown, created := count }
 
-def step (s : State) : Action → Except StepError State
+def stepCore (s : State) : Action → Except StepError State
   | .planReceipt request => do
     if s.closedPublication || s.closedRecovery then throw .phase
     if !chainValid request.recordPrefix request.records then
@@ -517,6 +534,29 @@ def step (s : State) : Action → Except StepError State
     return { s with
       git := some git, publication := some publication,
       phase := .validated, closedPublication := true }
+  | .refreshCurrentGit => do
+    if s.phase ≠ .validated then throw .phase
+    let some plan := s.publication | throw .phase
+    let some git := s.git | throw .phase
+    let some prepared := s.prepared | throw .phase
+    if plan.refreshDone || plan.merged.isSome || plan.firstExported then throw .phase
+    if !git.useCurrent then
+      return { s with publication := some { plan with refreshDone := true, refresh := none } }
+    let build ← liftQuery (constructCurrentGit s.evidence s.nativeFacts s.heads
+      prepared.inputs.target plan.incoming)
+    if build.writes then
+      if let some receipt := prepared.inputs.receipt then
+        if !receipt.records.all ((s.saved.applied ++ s.saved.custody).contains ·) then
+          throw .custody
+    let _ ← liftQuery (build.body.parents.mapM s.evidence.nativeBody)
+    let (evidence, count, _) ← installNative s.evidence {
+      native := [build.body], identities := [build.identity], heads := s.heads,
+      physicalGit := s.physicalGit }
+    return { s with
+      evidence, createdBodies := s.createdBodies + count,
+      memo := { s.memo with preferred := put s.memo.preferred prepared.inputs.target build.body.id },
+      publication := some { plan with
+        incoming := build.body.id, refreshDone := true, refresh := some build } }
   | .observeExport observation => do
     if s.phase ≠ .validated && s.phase ≠ .cleanup && s.helper ≠ some .lockedExport then
       throw .phase
@@ -547,6 +587,9 @@ def step (s : State) : Action → Except StepError State
   | .merge inputs output => do
     if s.phase ≠ .validated then throw .phase
     let some plan := s.publication | throw .phase
+    let some git := s.git | throw .phase
+    if git.useCurrent && !plan.refreshDone then
+      throw (.evidence (.nativeFact "current Git refresh not installed in action prefix"))
     if plan.beside.isEmpty || plan.merged.isSome ||
         (!plan.mergeBeforeExport && !plan.firstExported) then throw .phase
     let ordered ← liftQuery (orderedPublicationInputs s.evidence (plan.beside ++ [plan.incoming]))
@@ -643,6 +686,44 @@ def step (s : State) : Action → Except StepError State
       evidence :=
       { s.evidence with canonical := s.evidence.canonical.filter (fun b => !ids.contains b.id) } }
   | .failedCall => .ok { s with outside := s.outside ++ [.failedCall] }
+
+/-- A snapshot can survive only a specifically framed effect. Route-changing and unknown
+effects complete normally and discard it; later identity queries report missing evidence.
+Historical plan inputs remain provenance, never a replacement for the current snapshot. -/
+def step (s : State) (action : Action) : Except StepError State :=
+  match stepCore s action with
+  | .error gap => .error gap
+  | .ok next => .ok { next with evidence := { next.evidence with
+      sourceRoutes := if action.framesSourceRoutes then s.evidence.sourceRoutes else none } }
+
+def SourceRouteTransition (s : State) (action : Action) (t : State) : Prop :=
+  t.evidence.sourceRoutes =
+    if action.framesSourceRoutes then s.evidence.sourceRoutes else none
+
+theorem step_core_success {s t : State} {action : Action}
+    (success : step s action = .ok t) :
+    ∃ next, stepCore s action = .ok next ∧
+      { next with evidence := { next.evidence with sourceRoutes :=
+          if action.framesSourceRoutes then s.evidence.sourceRoutes else none } } = t := by
+  cases core : stepCore s action with
+  | error gap => simp [step, core] at success
+  | ok next =>
+    simp only [step, core, Except.ok.injEq] at success
+    exact ⟨next, rfl, success⟩
+
+theorem step_source_routes {s t : State} {action : Action}
+    (success : step s action = .ok t) : SourceRouteTransition s action t := by
+  cases core : stepCore s action with
+  | error gap => simp [step, core] at success
+  | ok next =>
+    simp only [step, core, Except.ok.injEq] at success
+    subst t
+    rfl
+
+theorem step_invalidates_source_routes {s t : State} {action : Action}
+    (success : step s action = .ok t) (changed : action.framesSourceRoutes = false) :
+    t.evidence.sourceRoutes = none := by
+  simpa [SourceRouteTransition, changed] using step_source_routes success
 
 def run (initial : State) (actions : List Action) : Except StepError State :=
   actions.foldlM step initial

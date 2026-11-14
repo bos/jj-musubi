@@ -20,7 +20,7 @@ deriving instance ToJson for SourceRoutes, DescriptionExclusion
 deriving instance ToJson for BaseObservation, Evidence, Record, Receipt, Intent, RetainedExport
 deriving instance ToJson for Persistent, ReceiptRequest, ReceiptBuild, Role, CandidateSet, Candidates
 deriving instance ToJson for SourceChoice, Suffix, ParentSelection, OwnSource, OwnSelection, GitChoice
-deriving instance ToJson for RenderNode, RenderBuild
+deriving instance ToJson for RenderNode, RenderBuild, CurrentGitBuild
 
 def get (j : Json) (key : String) : Except String Json := j.getObjVal? key
 def str (j : Json) (key : String) : Except String String := j.getObjValAs? String key
@@ -610,32 +610,29 @@ def reply (request : Json) : Except String Json := do
     return Json.mkObj [("ok", toJson true), ("computed", toJson build),
       ("custody", toJson final.saved.custody), ("created", toJson final.createdBodies),
       ("constructedActions", toJson (actions.all constructedAction)),
-      ("sameRunCustody", toJson true)]
+      ("sameRunCustody", toJson true), ("sameRunSourceRoutes", toJson true)]
   | "publication" =>
     let target : Canonical := ⟨← label ctx.canonical (← str request "target")⟩
     let build ← query (constructRender e facts me heads none target)
     let actions := [Action.capture, .planRender target] ++
-      (List.range build.nodes.length).map Action.writeRender ++ [.commitRender, .revalidate]
+      (List.range build.nodes.length).map Action.writeRender ++
+      [.commitRender, .revalidate, .refreshCurrentGit]
     let initial : State := { me, evidence := e, heads, saved, nativeFacts := facts, physicalGit }
     let checked ← (certifiedRun initial actions).mapError reprStr
     let final := checked.val
     let some git := final.git | throw "publication lacks computed Git policy"
     let some plan := final.publication | throw "publication lacks computed order"
-    -- This finite comparison also checks the real pre-export with_per_machine copy.
-    -- Installing that publication effect is not yet part of the certified prefix.
-    let incoming ← query (final.evidence.nativeBody plan.incoming)
-    let adjusted ← if git.useCurrent then do
-      let fields ← query (inheritedFields final.evidence facts.fields final.heads)
-      query (encodeNative final.evidence facts.encodings { incoming with gitFields := fields })
-      else pure incoming
-    let mergeEvidence := { final.evidence with
-      native := unique (final.evidence.native ++ [adjusted]) }
-    let ordered ← query (orderedPublicationInputs mergeEvidence (plan.beside ++ [adjusted.id]))
+    if !plan.refreshDone then throw "current Git refresh not installed by certified actions"
+    let adjusted ← query (final.evidence.nativeBody plan.incoming)
+    let ordered ← query (orderedPublicationInputs final.evidence (plan.beside ++ [plan.incoming]))
     return Json.mkObj [("ok", toJson true), ("computed", toJson build), ("git", toJson git),
       ("mergeBeforeExport", toJson plan.mergeBeforeExport), ("incoming", toJson plan.incoming),
+      ("preparedIncoming", toJson build.result), ("currentGit", toJson plan.refresh),
+      ("refreshWrote", toJson ((plan.refresh.map (·.writes)).getD false)),
+      ("preferredIncoming", toJson (lookup final.memo.preferred target)),
       ("gitAdjustedIncoming", toJson adjusted), ("orderedMergeInputs", toJson ordered),
       ("beside", toJson plan.beside), ("constructedActions", toJson (actions.all constructedAction)),
-      ("sameRunCustody", toJson true)]
+      ("sameRunCustody", toJson true), ("sameRunSourceRoutes", toJson true)]
   | _ => throw "unknown finite native lifecycle fixture"
 
 end Musubi.NativeLifecycle.Json

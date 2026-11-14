@@ -785,6 +785,26 @@ impl NodeRepo {
 
 #[cfg(test)]
 impl NodeRepo {
+    /// A comparison-only observation at the current-Git write boundary. Files and actual
+    /// memory are read independently; no translation query or source selector is invoked.
+    pub(in crate::node) fn native_identity_snapshot(&self) -> serde_json::Value {
+        let file =
+            |name: &str| match std::fs::read_to_string(self.repo_path.join("musubi").join(name)) {
+                Ok(text) => Some(text),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => panic!("reading raw identity file {name}: {error}"),
+            };
+        serde_json::json!({
+            "schema": 1,
+            "files": {
+                "checkpoint": file("records.json"), "steps": file("superseded"),
+                "hubRenamings": file("hub-renamings"),
+                "acceptedBase": file("accepted_base"), "acceptedPush": file("accepted_push")
+            },
+            "memory": self.native_identity_state()
+        })
+    }
+
     /// Raw test-only source state. This does not query canonical_of/local_of, choose a
     /// realization, or expose Taking.locals as an input to the lifecycle oracle.
     pub(in crate::node) fn native_identity_state(&self) -> serde_json::Value {

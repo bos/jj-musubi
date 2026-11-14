@@ -652,4 +652,73 @@ private def sourceFrameText (canonical : String) :=
 #guard (Json.sourceHubFrames sourceContext evidence
   s!"record {sourceHash0} 00000000000000000001\n").toOption.isNone
 
+private def routeState : State := { state with evidence := descriptionEvidence }
+
+-- Pure capture/body/cache effects frame the observation. Route writes and unknown effects
+-- invalidate it, and another capture cannot silently resurrect an old empty relation.
+#guard (run routeState [.capture, .eraseMemo]).map (·.evidence.sourceRoutes) =
+  .ok (some closedSourceRoutes)
+#guard (run routeState [.external [p 1] 0, .capture]).map (·.evidence.sourceRoutes) = .ok none
+#guard (step { routeState with receipt := some taking } .saveCustody).map
+  (·.evidence.sourceRoutes) = .ok none
+#guard (step routeState .failedCall).map (·.evidence.sourceRoutes) = .ok none
+#guard ((step routeState (.external [p 1] 0)).map fun s =>
+  exclusionProjection s.evidence) =
+    .ok (.error (.nativeFact "complete source-route snapshot missing"))
+
+private def refreshInput : NativeBody :=
+  { id := p 70, parents := [p 1], workspaces := [(b, 20)], marker := some (c 2),
+    gitFields := 0, description := "ordinary render" }
+private def refreshOutput : NativeBody :=
+  { refreshInput with id := p 71, gitFields := 99 }
+private def refreshEvidence : Evidence :=
+  { descriptionEvidence with
+    native := descriptionEvidence.native ++ [refreshInput],
+    identities := descriptionEvidence.identities ++ [⟨p 70, c 2, o 2, .markedBody⟩] }
+private def refreshFacts : NativeFacts := { encodings := { native := [refreshOutput] } }
+private def refreshInputs : Inputs :=
+  { me, evidence := refreshEvidence, heads := [p 4], colocated := true,
+    physicalGit := 0, target := c 2, receipt := none, saved := {}, expected := [], exports := [] }
+private def refreshState : State :=
+  { me, evidence := refreshEvidence, nativeFacts := refreshFacts, heads := [p 4],
+    phase := .validated, closedPublication := true,
+    prepared := some {
+      rendered := p 70, suffix := {},
+      selections := { choices := [(c 1, .selected .published (p 1))] },
+      own := { source := .canonicalSlots, bindings := [] }, reserved := [], inputs := refreshInputs },
+    git := some {
+      currentOwned := [], targetOwned := [], rootBase := false, known := true,
+      present := false, overlap := true, useCurrent := true },
+    publication := some { incoming := p 70, beside := [p 4], mergeBeforeExport := true } }
+
+-- Equal fields reuse even an unmarked original. Changed fields make its identity explicit.
+#guard currentGitBody unknownBody (c 50) 0 = unknownBody
+#guard (constructCurrentGit evidence {} [p 1] (c 1) (p 1)).map
+  (fun build => (build.body.id, build.body.marker, build.writes)) = .ok (p 1, none, false)
+#guard (currentGitBody unknownBody (c 50) 99).marker = some (c 50)
+#guard (constructCurrentGit refreshEvidence refreshFacts [p 4] (c 2) (p 70)).map
+  (fun build => (build.body, build.identity, build.writes)) =
+    .ok (refreshOutput, ⟨p 71, c 2, o 2, .markedBody⟩, true)
+#guard (constructCurrentGit refreshEvidence {} [p 1] (c 2) (p 70)).map
+  (fun build => (build.body.id, build.writes)) = .ok (p 70, false)
+#guard constructCurrentGit refreshEvidence {} [p 4] (c 2) (p 70) =
+  .error (.encoding "native body")
+#guard (step refreshState .refreshCurrentGit).map (fun s =>
+  (s.publication.map (·.incoming), lookup s.memo.preferred (c 2),
+    s.evidence.native.contains refreshOutput, s.createdBodies, s.evidence.sourceRoutes)) =
+      .ok (some (p 71), some (p 71), true, 1, some closedSourceRoutes)
+#guard step refreshState (.merge [p 4, p 70] (p 4)) =
+  .error (.evidence (.nativeFact "current Git refresh not installed in action prefix"))
+#guard (run refreshState [.refreshCurrentGit, .merge [p 4, p 70] (p 4)]) =
+  .error (.evidence (.malformed "native merge inputs"))
+
+-- A real changed, record-named refresh requires the preparation's captured full receipt.
+private def refreshTaking : Receipt := { taking with input := refreshEvidence }
+private def namedRefreshState : State :=
+  { refreshState with prepared := refreshState.prepared.map fun plan =>
+    { plan with inputs := { plan.inputs with receipt := some refreshTaking } } }
+#guard step namedRefreshState .refreshCurrentGit = .error .custody
+#guard (step { namedRefreshState with saved := { custody := refreshTaking.records } }
+  .refreshCurrentGit).map (·.createdBodies) = .ok 1
+
 end Musubi.NativeLifecycle.Test

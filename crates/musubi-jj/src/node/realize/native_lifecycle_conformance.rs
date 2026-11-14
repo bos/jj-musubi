@@ -336,7 +336,16 @@ fn call(oracle: &mut Oracle, request: &Value) -> Value {
         )
         .unwrap();
     }
-    oracle.call(request)
+    let reply = oracle.call(request);
+    if let Some(path) = std::env::var_os("MUSUBI_NATIVE_LIFECYCLE_DUMP") {
+        let path = std::path::Path::new(&path);
+        fs::write(
+            path.join(format!("{}-reply.json", request["kind"].as_str().unwrap())),
+            serde_json::to_vec_pretty(&reply).unwrap(),
+        )
+        .unwrap();
+    }
+    reply
 }
 
 fn model_bindings(value: &Value) -> BTreeMap<String, u64> {
@@ -396,6 +405,7 @@ fn receipt_custody_materialization_matches_lifecycle_oracle() {
     );
     assert_eq!(reply["constructedActions"], true);
     assert_eq!(reply["sameRunCustody"], true);
+    assert_eq!(reply["sameRunSourceRoutes"], true);
     let receipt = after.receipt.as_ref().unwrap();
     assert_eq!(
         reply["computed"]["base"],
@@ -537,7 +547,34 @@ fn second_name_publication_matches_lifecycle_oracle() {
     let published = fx.node.advance(&fx.child).unwrap();
     let after = capture(&fx.node);
     let raw_after = raw_capture(&fx.node, &fx.repo, &after);
-    let request = request(
+    let refreshes = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|event| match event {
+            Event::CurrentGit {
+                canonical,
+                input,
+                output,
+                mapped,
+                preferred,
+                source_before,
+                source_after,
+            } => Some(json!({
+                "canonical": canonical.0.hex(), "input": input.0.hex(), "output": output.0.hex(),
+                "mapped": mapped.as_ref().map(|id| id.0.hex()),
+                "preferred": preferred.as_ref().map(|id| id.0.hex()),
+                "sourceBefore": source_before, "sourceAfter": source_after
+            })),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        refreshes.len(),
+        1,
+        "B must execute its current-Git branch once"
+    );
+    let mut request = request(
         "publication",
         fx.node.machine().key(),
         raw_before,
@@ -545,6 +582,9 @@ fn second_name_publication_matches_lifecycle_oracle() {
         Value::Null,
         json!(fx.child.0.hex()),
     );
+    // These shipping-boundary answers are compared after construction. The codec never
+    // consumes them to choose source, fields, body, identity or publication operand.
+    request["observedCurrentGit"] = json!(refreshes);
     let reply = call(&mut Oracle::spawn(), &request);
     assert_eq!(
         reply["ok"], true,
@@ -552,6 +592,31 @@ fn second_name_publication_matches_lifecycle_oracle() {
     );
     assert_eq!(reply["constructedActions"], true);
     assert_eq!(reply["sameRunCustody"], true);
+    assert_eq!(reply["sameRunSourceRoutes"], true);
+    assert_eq!(reply["refreshWrote"], true);
+    let refresh = &request["observedCurrentGit"][0];
+    assert_ne!(refresh["input"], refresh["output"]);
+    assert_eq!(refresh["canonical"], request["target"]);
+    assert_eq!(refresh["mapped"], request["target"]);
+    assert_eq!(refresh["preferred"], refresh["output"]);
+    assert_eq!(
+        ordinal(&request, "physical", refresh["input"].as_str().unwrap()),
+        model_id(&reply["preparedIncoming"])
+    );
+    assert_eq!(
+        ordinal(&request, "physical", refresh["output"].as_str().unwrap()),
+        model_id(&reply["incoming"])
+    );
+    assert_eq!(reply["preferredIncoming"], reply["incoming"]);
+    assert_eq!(refresh["sourceBefore"], refresh["sourceAfter"]);
+    assert_eq!(
+        refresh["sourceBefore"],
+        request["before"]["identitySourceState"]
+    );
+    assert_eq!(
+        model_id(&reply["currentGit"]["identity"]["canonical"]),
+        ordinal(&request, "canonical", refresh["mapped"].as_str().unwrap())
+    );
     let actual =
         |bindings: &BTreeMap<jj_lib::ref_name::WorkspaceNameBuf, jj_lib::backend::CommitId>| {
             bindings
@@ -590,6 +655,11 @@ fn second_name_publication_matches_lifecycle_oracle() {
         .iter()
         .position(|event| matches!(event, Event::Export(_)))
         .unwrap();
+    let refresh = events
+        .iter()
+        .position(|event| matches!(event, Event::CurrentGit { .. }))
+        .unwrap();
+    assert!(refresh < export);
     let reread = events
         .iter()
         .rposition(|event| matches!(event, Event::Reread { .. }))

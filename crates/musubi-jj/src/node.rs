@@ -43,6 +43,8 @@ mod expiry;
 mod git;
 mod git_config;
 mod join;
+#[cfg(test)]
+mod native_contract;
 mod originals;
 mod presence;
 mod realize;
@@ -480,8 +482,25 @@ impl NodeRepo {
     /// written one on another, an abandon noticed between which would rewrite those written.
     fn merged_repo_unchecked(&self) -> Result<Arc<ReadonlyRepo>, NodeError> {
         let colocation = match self.colocation() {
-            Some(colocation) if self.local_heads()?.len() > 1 => colocation,
-            _ => return self.load_at_head(),
+            Some(colocation)
+                if {
+                    let heads = self.local_heads()?;
+                    #[cfg(test)]
+                    native_contract::emit(native_contract::Event::HelperBranch {
+                        locked: heads.len() > 1,
+                        heads: heads.clone(),
+                    });
+                    heads.len() > 1
+                } =>
+            {
+                colocation
+            }
+            _ => {
+                let loaded = self.load_at_head();
+                #[cfg(test)]
+                native_contract::emit(native_contract::Event::HelperComplete);
+                return loaded;
+            }
         };
         let _lock = colocation.lock()?;
         let merged = self.load_at_head()?;
@@ -493,13 +512,18 @@ impl NodeRepo {
             &self.pending_expected(),
         )?;
         if exported.0 == *merged.op_id() {
+            #[cfg(test)]
+            native_contract::emit(native_contract::Event::HelperComplete);
             return Ok(merged);
         }
         self.loader
             .op_heads_store()
             .update_op_heads(std::slice::from_ref(merged.op_id()), &exported.0)
             .block_on()?;
-        self.repo_at(&exported)
+        let repo = self.repo_at(&exported)?;
+        #[cfg(test)]
+        native_contract::emit(native_contract::Event::HelperComplete);
+        Ok(repo)
     }
 
     /// The repository as of its local operation `id`.
@@ -512,7 +536,13 @@ impl NodeRepo {
     fn load_at_head(&self) -> Result<Arc<ReadonlyRepo>, NodeError> {
         let loaded = catch_jj_panic(|| Ok(self.loader.load_at_head(None).block_on()));
         match loaded {
-            Ok(Ok(repo)) => Ok(repo),
+            Ok(Ok(repo)) => {
+                #[cfg(test)]
+                native_contract::emit(native_contract::Event::Loaded(LocalOp(
+                    repo.op_id().clone(),
+                )));
+                Ok(repo)
+            }
             Ok(Err(err)) => Err(err.into()),
             Err(reason) => Err(self.unmergeable(&self.local_heads()?, None, reason)),
         }

@@ -221,6 +221,8 @@ impl Colocation {
         beside: &[Operation],
         pending: &Expected,
     ) -> Result<LocalOp, NodeError> {
+        #[cfg(test)]
+        super::native_contract::emit(super::native_contract::Event::Export(realized.clone()));
         let op = loader.load_operation(&realized.0).block_on()?;
         let repo: Arc<ReadonlyRepo> = loader.load_at(&op).block_on()?;
         let mut tx = repo.start_transaction();
@@ -290,6 +292,8 @@ impl Colocation {
         let view = tx.repo().view().store_view();
         if view == repo.view().store_view() {
             remember(realized);
+            #[cfg(test)]
+            super::native_contract::emit(super::native_contract::Event::Exported(realized.clone()));
             return Ok(realized.clone());
         }
         let mut store_op = op.store_operation().clone();
@@ -309,6 +313,8 @@ impl Colocation {
             tracing::warn!("indexing the exported operation: {err}");
         }
         remember(&exported);
+        #[cfg(test)]
+        super::native_contract::emit(super::native_contract::Event::Exported(exported.clone()));
         Ok(exported)
     }
 }
@@ -835,3 +841,10 @@ mod tests {
 #[cfg(test)]
 #[path = "git_expected_tests.rs"]
 mod expected_tests;
+
+#[cfg(test)]
+impl Colocation {
+    pub(in crate::node) fn native_expected(&self) -> Expected {
+        self.expected.lock().expect("not poisoned").clone()
+    }
+}

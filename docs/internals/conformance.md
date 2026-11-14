@@ -1213,6 +1213,64 @@ cargo nextest run -p musubi-jj -E 'test(/^presence::/)'
 oracle about a millisecond. Dropping the check that a parent whose history has a copy's work
 keeps it, which lets a forget's merge bring the copy back, fails within a few histories.
 
+### Native lifecycle inputs and events
+
+The unit tests in `node/realize/native_contract_tests.rs` exercise a bounded native boundary
+for the preparation-to-publication work tracked in
+[#151](https://github.com/bos/jj-musubi/issues/151). They use pinned jj, real repositories and
+the shipping adapter. A recording made once per test-binary build supplies each test with its
+own copy and resumed seed counter.
+
+`second_owned_name_survives_complete_native_capture` retains both owned names before a native
+command leaves only the second, then checks an observed empty map after deleting both.
+`foreign_spelling_is_not_owned_overlap` keeps foreign slots in the raw input while checking
+that they are excluded from this copy's owned bindings. These are native binding/namespace
+observations; they do not prove the full private-Git selector or its complete decision table.
+`second_owned_name_selects_current_git` separately publishes a forgotten parent with only `b`,
+then creates native `a` and moves physical Git forward. Its non-root child still inherits only
+`b`, while the complete current map is `{a,b}`. The actual first export must follow a shared
+merge and the child must retain the independently captured current Git fields.
+
+`receipt_parent_precedes_preferred_alias` and `changed_physical_parent_refreshes_git_fields`
+check renderer priority and refresh against explicitly constructed physical inputs. Their role
+arguments do not establish that an arbitrary receipt supplied the right candidates.
+`complete_candidates_keep_ambiguous_published_aliases` separately captures the complete native
+body/parent graph, canonical bodies, receipt heads and full `Taking.locals`, persistent source
+rows and retained export observations. It keeps both published aliases and a separate local
+body, invalidates the old receipt domain after a head change, and retains unmarked bodies.
+A marker is an observed label, not an authenticated source certificate. The later model must
+derive qualification and its unique-source restriction U from the complete facts; unknown
+identity evidence cannot be hidden by a preferred alias. Differing per-machine fields also
+remain visible, rather than asserting equal retained inputs I from equal canonical labels.
+
+Private test hooks record preparation, exact locked rereads, source heads, export start/result,
+lock release and cleanup. Delegating native stores add actual writes and raw head updates to
+the same observation stream, with persisted record state captured before the effect.
+`native_command_before_validation_forces_refresh` completes a real command between preparation
+and validation. `current_git_merge_precedes_first_export` checks the actual first export's
+shared merge and physical bookmark, then its position before head movement.
+`custody_is_saved_before_named_write` and `move_intent_precedes_old_head_removal` check persisted
+responsibility at real native effects, including an interrupted add-before-remove frontier
+and restart. They do not cover every mid-call error or assert automatic alias normalization.
+
+These schedules close E1 (the successful final reread through cleanup) and every included E2
+helper branch/load interval explicitly, including cleanup after publication locks are released.
+They do not establish a universal native writer lock. Abandon/integrate after-reread overlap
+and the one-to-multihead helper window remain separate characterization work.
+
+`complete_receipt_and_body_observation_is_pure` checks the exact raw-input observer against
+repository bytes (native, canonical, original evidence, records and physical Git), native heads,
+the actor seed clock and the next actual actor RNG draw against an unobserved restored control.
+It neither canonicalizes unknown operations nor changes the candidate graph. This does not
+discharge purity of the separate end-to-end search observers.
+
+Run this module with `cargo nextest run -p musubi-jj --lib -E 'test(/native_contract_tests::/)'`.
+`MUSUBI_NATIVE_CONTRACT_TRACE=1` prints raw native inputs and events for a selected control's log.
+For temporary selected mutations, `MUSUBI_NATIVE_CONTRACT_FIXTURE` may name a recording made by
+the unmutated binary, so a mutation is challenged at its assertion instead of corrupting its
+own setup. Keep that recording's producer and contents with the control result. The normal
+suite makes its own recording per build. Neither option changes shipping behavior.
+
 ## Per-machine refs
 
 In a colocated repository, each view records what jj last saw in this machine's `.git` (`git_refs`

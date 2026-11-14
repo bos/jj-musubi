@@ -20,8 +20,8 @@
 //! With no git move, the only allowed explanation is jj's merge of concurrent op heads
 //! that both changed `git_refs`, even if one changed it back (`concurrent_records_revert`).
 //! Every record along that history must come from a native import, export or fetch, or a
-//! merge of those records. Merges of more heads at once, or with closest common ancestors
-//! that disagree, aren't modeled, and fail as unexplained.
+//! merge of those records. For Git refs, merges of more heads at once or with differing
+//! closest bases aren't modeled, and fail as unexplained.
 //!
 //! Anything else is a finding: the operation that left the record differing from `.git`, if
 //! any, is named in the failure.
@@ -44,16 +44,20 @@
 //! record of it, as for a workspace renamed since; jj merges it with the operations made since.
 //! A record musubi got wrong would move a working copy with nobody having moved HEAD, and bring
 //! back any rewritten commit it moved onto, which then diverges.
+//! Two-head merges whose closest bases disagree about HEAD are replayed by native jj in an
+//! isolated copy; their record and possible physical writers are validated separately.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use futures::executor::block_on;
 use jj_lib::backend::CommitId;
+use jj_lib::default_backend_factories::default_backend_factories;
 use jj_lib::git::REMOTE_NAME_FOR_LOCAL_GIT_REPO;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store;
@@ -300,6 +304,9 @@ struct Log {
     /// Whose its marked operations are.
     owner: Owner,
     loader: RepoLoader,
+    source_root: PathBuf,
+    native_replay: Option<(tempfile::TempDir, RepoLoader)>,
+    native_merge_views: HashMap<Vec<OperationId>, View>,
     store: Arc<dyn op_store::OpStore>,
     ops: HashMap<OperationId, op_store::Operation>,
     views: HashMap<OperationId, View>,
@@ -317,6 +324,36 @@ enum RecordKind {
 }
 
 impl Log {
+    /// Workspace creation exports HEAD from a helper still attributed to the old
+    /// workspace. Authenticate its preceding native birth; the bare add transaction
+    /// only inherits a record and cannot itself prove a physical write.
+    fn initialized_head(&mut self, op: &op_store::Operation, ws: &str) -> bool {
+        if op.metadata.attributes.contains_key(CANONICAL_ATTRIBUTE)
+            || !jj_command(&self.owner, op)
+            || op.metadata.description
+                != format!("create initial working-copy commit in workspace {ws}")
+        {
+            return false;
+        }
+        let [parent] = op.parents.as_slice() else {
+            return false;
+        };
+        let birth = self.captured_operation(parent);
+        if birth.metadata.attributes.contains_key(CANONICAL_ATTRIBUTE)
+            || !jj_command(&self.owner, &birth)
+            || birth.metadata.description != format!("add workspace '{ws}'")
+            || birth.metadata.workspace_name != op.metadata.workspace_name
+        {
+            return false;
+        }
+        let [before] = birth.parents.as_slice() else {
+            return false;
+        };
+        let name = WorkspaceName::new(ws);
+        self.view(parent).wc_commit_ids.contains_key(name)
+            && !self.view(before).wc_commit_ids.contains_key(name)
+    }
+
     /// Possible physical HEAD values come from native writers, not from the value a merge
     /// computes for jj's record. Even a resolved record can be synthesized by cancellation.
     fn possible_heads(
@@ -340,17 +377,19 @@ impl Log {
                 .description
                 .strip_prefix("Renamed workspace '")
                 .and_then(|rest| rest.strip_suffix(&format!("' to '{ws}'")));
-            let writes = renamed.is_none()
-                && op.parents.len() == 1
-                && !op.metadata.attributes.contains_key(CANONICAL_ATTRIBUTE)
-                && jj_command(&self.owner, &op)
-                && op
-                    .metadata
-                    .workspace_name
-                    .as_ref()
-                    .is_some_and(|name| name.as_str() == ws)
-                && (!now.is_absent() || own_head_import(&self.owner, &op))
-                && (own_head_import(&self.owner, &op) || self.head(&op.parents[0], ws) != now);
+            let initialization = self.initialized_head(&op, ws);
+            let writes = initialization
+                || (renamed.is_none()
+                    && op.parents.len() == 1
+                    && !op.metadata.attributes.contains_key(CANONICAL_ATTRIBUTE)
+                    && jj_command(&self.owner, &op)
+                    && op
+                        .metadata
+                        .workspace_name
+                        .as_ref()
+                        .is_some_and(|name| name.as_str() == ws)
+                    && (!now.is_absent() || own_head_import(&self.owner, &op))
+                    && (own_head_import(&self.owner, &op) || self.head(&op.parents[0], ws) != now));
             if now.is_resolved()
                 && (setup.contains(id) || writes || id == self.store.root_operation_id())
             {
@@ -601,7 +640,9 @@ impl Log {
                     Some(base) if base_heads.iter().all(|b| b == base) => {
                         self.merge_targets(id, left, base, right) == now
                     }
-                    _ => false,
+                    _ => self
+                        .native_merged_head(&op.parents, ws)
+                        .is_ok_and(|merged| merged == now),
                 }
             }
             _ => parents.contains(&now),
@@ -619,6 +660,46 @@ impl Log {
             ));
         }
         Ok(())
+    }
+
+    /// Replay an operation merge in an isolated copy. Merging differing closest bases
+    /// uses jj's recursive merge, including its commit index, rather than picking a base.
+    /// The copy keeps checker-created operations and randomness out of the tested copy.
+    fn native_merged_head(
+        &mut self,
+        parents: &[OperationId],
+        ws: &str,
+    ) -> Result<RefTarget, String> {
+        if !self.native_merge_views.contains_key(parents) {
+            if self.native_replay.is_none() {
+                let dir = musubi_testutil::tempdir();
+                let root = dir.path().join("repo");
+                musubi_testutil::copy_tree(&self.source_root, &root);
+                let loader = RepoLoader::init_from_file_system(
+                    &crate::reference::settings(),
+                    &root.join(".jj/repo"),
+                    &default_backend_factories(),
+                )
+                .map_err(|err| format!("opening the native HEAD reference: {err}"))?;
+                self.native_replay = Some((dir, loader));
+            }
+            let loader = &self.native_replay.as_ref().unwrap().1;
+            let operations = parents
+                .iter()
+                .map(|id| block_on(loader.load_operation(id)))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|err| format!("loading native HEAD source parents: {err}"))?;
+            let (repo, _) = block_on(loader.merge_operations(
+                operations,
+                None,
+                Some("reference HEAD merge"),
+                [],
+            ))
+            .map_err(|err| format!("replaying the native HEAD merge: {err}"))?;
+            self.native_merge_views
+                .insert(parents.to_vec(), repo.view().store_view().clone());
+        }
+        Ok(head(&self.native_merge_views[parents], ws))
     }
 
     /// jj's three-way merge of the records of `r` at `left` and `right` against `base`, as
@@ -737,8 +818,8 @@ fn physical_head_writers_are_distinct_from_merge_record_terms() {
         RefTarget::from_removes_adds([Some(x.clone())], [Some(a.clone()), Some(c.clone())]);
     let base = make(
         "reconcile divergent operations",
-        conflict,
-        vec![wrote_a, wrote_c.clone()],
+        conflict.clone(),
+        vec![wrote_a.clone(), wrote_c.clone()],
         false,
     );
     let a_again = make(
@@ -754,7 +835,12 @@ fn physical_head_writers_are_distinct_from_merge_record_terms() {
         vec![a_again.clone(), c_again.clone()],
         false,
     );
-    let a_later = make("import git head: A later", target(&a), vec![wrote_c], true);
+    let a_later = make(
+        "import git head: A later",
+        target(&a),
+        vec![wrote_c.clone()],
+        true,
+    );
     let nested =
         RefTarget::from_removes_adds([Some(c.clone())], [Some(x.clone()), Some(a.clone())]);
     let final_merge = make(
@@ -775,9 +861,83 @@ fn physical_head_writers_are_distinct_from_merge_record_terms() {
         vec![final_merge.clone()],
         true,
     );
+    let other_base = make(
+        "independent reconciliation",
+        RefTarget::from_removes_adds([Some(x.clone())], [Some(c.clone()), Some(a.clone())]),
+        vec![wrote_c, wrote_a],
+        false,
+    );
+    let other_c = make(
+        "import git head: C on other base",
+        target(&c),
+        vec![other_base],
+        true,
+    );
+    let criss_cross = make(
+        "criss-cross reconciliation",
+        target(&x),
+        vec![a_again.clone(), other_c.clone()],
+        false,
+    );
+    let corrupt_criss_cross = make(
+        "invalid criss-cross record",
+        RefTarget::absent(),
+        vec![a_again, other_c],
+        false,
+    );
+    let path = world.fx.env.root().join("head-writer-work");
+    world.fx.repo(0).jj(&[
+        "workspace",
+        "add",
+        "--name",
+        "work",
+        "-r",
+        "@",
+        path.to_str().unwrap(),
+    ]);
+    let initialized = OperationId::try_from_hex(world.latest_op_head(0)).unwrap();
+    let initial_head = CommitId::try_from_hex(
+        world
+            .fx
+            .repo(0)
+            .git(&["-C", path.to_str().unwrap(), "rev-parse", "HEAD"])
+            .trim(),
+    )
+    .unwrap();
+    let initial = block_on(store.read_operation(&initialized)).unwrap();
+    let birth = block_on(store.read_operation(&initial.parents[0])).unwrap();
+    assert_eq!(
+        initial.metadata.description,
+        "create initial working-copy commit in workspace work"
+    );
+    assert_ne!(
+        initial.metadata.workspace_name.as_ref().unwrap().as_str(),
+        "work"
+    );
+    let mut orphan = initial.clone();
+    orphan.parents = vec![root.clone()];
+    let unmatched = block_on(store.write_operation(&orphan)).unwrap();
+    orphan.metadata.description = "restore to operation with a work slot".to_owned();
+    let restored = block_on(store.write_operation(&orphan)).unwrap();
+    let mut marked = initial.clone();
+    marked
+        .metadata
+        .attributes
+        .insert(CANONICAL_ATTRIBUTE.to_owned(), root.hex());
+    let marked = block_on(store.write_operation(&marked)).unwrap();
+    let mut stale = birth.clone();
+    let mut stale_view = block_on(store.read_view(&stale.view_id)).unwrap();
+    stale_view
+        .git_heads
+        .insert("work".into(), target(&initial_head));
+    stale.view_id = block_on(store.write_view(&stale_view)).unwrap();
+    let bare_add = block_on(store.write_operation(&stale)).unwrap();
     let mut log = Log {
         owner: world.owner(0),
         loader,
+        source_root: world.fx.repo(0).path().to_path_buf(),
+        native_replay: None,
+        native_merge_views: HashMap::new(),
         store,
         ops: HashMap::new(),
         views: HashMap::new(),
@@ -788,6 +948,56 @@ fn physical_head_writers_are_distinct_from_merge_record_terms() {
         head_writers: HashMap::new(),
     };
     let setup = HashSet::from([root]);
+    let operation_files = || {
+        std::fs::read_dir(world.fx.repo(0).repo_path().join("op_store/operations"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<BTreeSet<_>>()
+    };
+    let source_operations = operation_files();
+    assert!(
+        log.possible_heads(&initialized, "work", &setup)
+            .unwrap()
+            .contains(&Some(initial_head.clone())),
+        "native workspace initialization writes its own physical HEAD"
+    );
+    for id in [&unmatched, &restored, &marked, &bare_add] {
+        assert!(
+            !log.possible_heads(id, "work", &setup)
+                .unwrap()
+                .contains(&Some(initial_head.clone())),
+            "a copied record without the matching native initialization is no writer"
+        );
+    }
+    let criss_cross_parents = log.op(&criss_cross).parents.clone();
+    assert_eq!(log.bases(&criss_cross_parents).len(), 2);
+    log.validate_record(
+        &criss_cross,
+        &setup,
+        &RecordKind::Head("default".to_owned()),
+    )
+    .unwrap();
+    assert!(log.head_plausible(&corrupt_criss_cross, "default").is_err());
+    world
+        .justify_head(0, &mut log, &criss_cross, "default", &target(&a))
+        .unwrap();
+    assert!(
+        world
+            .justify_head(0, &mut log, &criss_cross, "default", &RefTarget::absent())
+            .is_err()
+    );
+    assert!(
+        world
+            .justify_head(0, &mut log, &criss_cross, "default", &target(&x))
+            .is_err(),
+        "a valid synthesized record is still no physical HEAD writer"
+    );
+    assert_eq!(
+        operation_files(),
+        source_operations,
+        "native replay writes only in its isolated copy"
+    );
+
     log.validate_record(
         &final_merge,
         &setup,
@@ -900,6 +1110,9 @@ fn preserved_head_records_require_the_exact_captured_frontier() {
     let log = |preserved_heads| Log {
         owner: world.owner(0),
         loader: loader.clone(),
+        source_root: world.fx.repo(0).path().to_path_buf(),
+        native_replay: None,
+        native_merge_views: HashMap::new(),
         store: store.clone(),
         ops: HashMap::new(),
         views: HashMap::new(),
@@ -998,6 +1211,9 @@ fn trimmed_record_sources_preserve_provenance_without_hiding_invalid_ancestors()
     let log = |captured_sources| Log {
         owner: world.owner(0),
         loader: loader.clone(),
+        source_root: world.fx.repo(0).path().to_path_buf(),
+        native_replay: None,
+        native_merge_views: HashMap::new(),
         store: store.clone(),
         ops: HashMap::new(),
         views: HashMap::new(),
@@ -1238,6 +1454,9 @@ impl World {
             owner: self.owner(m),
             store: loader.op_store().clone(),
             loader,
+            source_root: self.fx.repo(m).path().to_path_buf(),
+            native_replay: None,
+            native_merge_views: HashMap::new(),
             ops: HashMap::new(),
             views: HashMap::new(),
             repos: HashMap::new(),
@@ -1669,11 +1888,25 @@ impl World {
                 ));
             };
             if base_heads.iter().any(|b| *b != base) {
+                log.validate_record(&at, &self.imports.setup[m], &RecordKind::Head(ws.clone()))?;
+                let merged = log.native_merged_head(&op.parents, &ws)?;
+                if merged == now && taken.is_resolved() {
+                    let mut possible = false;
+                    for parent in &op.parents {
+                        possible |= log
+                            .possible_heads(parent, &ws, &self.imports.setup[m])?
+                            .contains(&taken.as_normal().cloned());
+                    }
+                    if possible {
+                        fired("import:concurrent_heads");
+                        return Ok(());
+                    }
+                }
                 return Err(format!(
-                    "the merge {}, whose closest common ancestors record it differently, made it \
-                     {}; criss-cross merges aren't modeled",
+                    "the native merge {} cannot explain record {} with physical HEAD {}",
                     describe(&log.owner, &at, &op),
-                    show(&now)
+                    show(&now),
+                    show(taken)
                 ));
             }
             let before = log.ancestors(bases.clone());

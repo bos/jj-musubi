@@ -44,16 +44,14 @@ impl World {
             }
             self.sync_everything();
         }
-        // `assert_converged` runs `jj status` everywhere, unrecorded: first, each workspace of a
-        // machine that abandoned an operation runs it as a user would, so that jj bringing that
-        // operation back through a stale working copy is seen as jj's.
-        let abandoning: BTreeSet<usize> = self.abandoned.iter().map(|(by, ..)| *by).collect();
-        for &m in &abandoning {
-            for ws in 0..self.workspaces[m].len() {
-                self.jj_in(m, ws, &["status"]);
+        // Native stale-workspace returns can happen on any copy, regardless of which
+        // copy declared an abandon. Observe them before the fixture's quiet-status check.
+        if !self.abandoned.is_empty() {
+            for m in 0..self.nodes() {
+                for ws in 0..self.workspaces[m].len() {
+                    self.jj_in(m, ws, &["status"]);
+                }
             }
-        }
-        if !abandoning.is_empty() {
             self.sync_everything();
         }
         // Visible commits with change ids and descriptions, local bookmarks (conflicted
@@ -177,16 +175,19 @@ impl World {
 
     /// Every replicated operation made since setup is in every machine's op log, but for
     /// those native `jj op abandon` removed completely, which are in none above the joins.
-    fn check_operations(&self) {
-        for m in 0..self.nodes() {
-            let keys = self.op_keys(m);
-            if let Some((by, key, _)) = self.abandoned.iter().find(|(_, key, _)| keys.contains(key))
-            {
-                self.fail(&format!(
-                    "{} has the operation {key:?}, which {} abandoned",
-                    self.machine(m),
-                    self.machine(*by)
-                ));
+    pub(crate) fn check_operations(&self) {
+        if !self.abandoned.is_empty() {
+            for m in 0..self.nodes() {
+                let history = self.operation_history(m, true);
+                if let Some(dropped) = self.abandoned.iter().find(|op| history.may_contain(op)) {
+                    self.fail(&format!(
+                        "{} has the operation {:?}, which {} abandoned: {}",
+                        self.machine(m),
+                        dropped.key,
+                        self.machine(dropped.by),
+                        history.explain(dropped)
+                    ));
+                }
             }
         }
         // A copy's join is, on the copy itself, the last operation it made before it joined,

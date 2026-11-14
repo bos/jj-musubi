@@ -435,9 +435,9 @@ private def reparentedEvidence : Evidence :=
   { evidence with native := evidence.native ++ [reparentedLeaf] }
 
 -- A native parent-only rewrite retains the old physical corpus and supplies no identity.
-#guard (Json.observedHeadReparent evidence reparentedEvidence [p 3] [p 80] (p 1) 0).map
-  (fun observed => (observed.native, observed.identities, observed.heads)) =
-    .ok ([reparentedLeaf], [], [p 80])
+#guard decide (((Json.observedHeadReparent evidence reparentedEvidence [p 3] [p 80] (p 1) 0).map
+  (fun observed => (observed.native, observed.identities, observed.heads))).toOption =
+    some ([reparentedLeaf], [], [p 80]))
 #guard (Json.observedHeadReparent evidence { reparentedEvidence with
   native := evidence.native ++ [{ reparentedLeaf with gitFields := 99 }] }
   [p 3] [p 80] (p 1) 0).toOption.isNone

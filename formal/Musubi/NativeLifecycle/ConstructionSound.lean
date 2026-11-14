@@ -244,7 +244,7 @@ theorem revalidate_changed_heads (s : State) (captured : List Physical)
     (changed : sameSet captured s.heads = false) :
     (step s .revalidate).map (fun t => (t.phase, t.prepared, t.captured, t.publication)) =
       .ok (.preparing, none, none, s.publication) := by
-  simp [step, stepCore, phase, bound, changed, bind, Except.bind, pure, Except.pure]
+  simp [step, stepCore, phase, bound, changed, Except.map, pure, Except.pure]
 
 theorem startRecovery_invalidates (s : State) :
     (step s .startRecovery).map (fun t =>

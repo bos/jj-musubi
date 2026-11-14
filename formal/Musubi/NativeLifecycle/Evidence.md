@@ -614,9 +614,43 @@ reach that fresh read and completion. A model interpretation gap remains a faile
 not an expected native refusal. The planned control bypasses the stale-reread guard and must
 fail a meaningful stale-publication or retry assertion; its outcome has not been observed.
 
-This increment is source-only and unvalidated. No new fixture execution, proof build, oracle
-build or control run has occurred. The first validation needs the affected Lean guards and
+At source staging this increment was unvalidated: no fixture execution, proof build, oracle
+build or control run had occurred. The proposed first validation needed the Lean guards and
 proof/axiom check, one oracle build, one C native run and a bounded selected stale-reread
 control after the baseline passes. Cache restart, multibase merge and full merge/export
 correspondence remain later work. E1/E2 still restrict the admitted final publication suffix
 and helper intervals; C adds no claim about writers after the final successful reread.
+
+### First C validation: real retry, unrepresented preparation probes
+
+The affected construction/run/codec build and all 170 guards passed after routine elaboration
+and guard-syntax corrections. Three affected axiom queries used only the expected logical
+axioms, with no `sorryAx` or native-law axiom. The single oracle build passed. The one C native
+run failed its model comparison; it is not a passing C certificate or a native refusal case.
+
+The real abandon succeeded in 205 ms, before either lock and before the first underlying
+reread. It changed one head by exactly the verified ordered-parent rewrite, retaining the
+complete body/view and the observed physical Git/source state. The first reread differed and
+the shipping changed-head branch emitted a retry. A second preparation reached an equal final
+reread, the first export followed that read, and the whole shipping call returned success.
+All pre-oracle Rust assertions, including stale-export absence, passed. This is finite actual
+trace evidence, not proof of general native interleavings or full publication correspondence.
+
+The model then reported `actual prepared corpus differs from independently constructed prefix`.
+Before the first preparation there were 18 native and 17 canonical bodies; at preparation
+there were 21 native and the same 17 canonical bodies, with no old body removed. Besides the
+actual prepared child, two new `reconcile divergent operations` bodies have opposite ordered
+parents: child/head and head/child. `check_mergeable` calls `try_merge`, which invokes native
+`merge_operations` in timestamp order and reverse; those real preparation probes write these
+unpublished bodies. The current constructed prefix has no corresponding probe effect. These
+unknown bodies remain in the observed corpus; dropping them to pass the comparison would hide
+the gap. Later retry canonicalization is not needed to explain this first-preparation mismatch.
+
+The original twenty-minute allocation began at 22:27:52 UTC on November 14, 2026. The native
+run ended at 22:33:50, and all jobs were observed ended by 22:35:33 (7 minutes 40 seconds from
+the original start). The heavy slot was released. The one-oracle rule stopped further work:
+no semantic model correction, second oracle build, native rerun or selected control occurred.
+The exact request/reply, complete snapshots, actual event order, failed logs and unmutated
+fixture recording are preserved externally. A new allocation must represent/authenticate the
+preparation probe effects without inventing positive source identities, then obtain a passing
+C comparison and its meaningful stale-revalidation control. C remains unlanded and incomplete.

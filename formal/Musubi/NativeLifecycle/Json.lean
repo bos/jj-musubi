@@ -87,7 +87,8 @@ def context (request : Json) : Except String Context := do
     return (← rows snapshot "canonical") ++ (← rows snapshot "native")
   let all := all.flatten
   let expected ← if interleaved then do
-      return (← snapshots.mapM (fun snapshot => rows snapshot "expected")).flatten
+      let retained ← snapshots.mapM (fun snapshot => rows snapshot "expected")
+      pure retained.flatten
     else rows before "expected"
   let physical ← snapshots.mapM (fun snapshot => get snapshot "physical")
   return {
@@ -688,11 +689,11 @@ def reply (request : Json) : Except String Json := do
         !sameSet attempted.evidence.native preparedEvidence.native ||
         !sameSet attempted.evidence.canonical preparedEvidence.canonical then
       throw "actual prepared corpus differs from independently constructed prefix"
-    if (← get preparedRaw "physical") ≠ (← get nativeRaw "physical") ||
-        (← get preparedRaw "identitySourceState") ≠ (← get nativeRaw "identitySourceState") then
+    if (← get preparedRaw "physical") != (← get nativeRaw "physical") ||
+        (← get preparedRaw "identitySourceState") != (← get nativeRaw "identitySourceState") then
       throw "C head-only command changed observed physical/source state"
     for name in ["originals", "joins", "receipt", "expected", "saved"] do
-      if (← get preparedRaw name) ≠ (← get nativeRaw name) then
+      if (← get preparedRaw name) != (← get nativeRaw name) then
         throw s!"C head-only command changed retained {name}"
     let abandoned : Physical := ⟨← label ctx.physical (← str request "abandoned")⟩
     let observation ← observedHeadReparent preparedEvidence nativeEvidence

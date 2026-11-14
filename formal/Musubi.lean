@@ -32,4 +32,8 @@ import Musubi.Expected
 import Musubi.ExpectedExec
 import Musubi.Copies
 import Musubi.Names
+import Musubi.NativeLifecycle
+import Musubi.NativeLifecycleTest
+import Musubi.NativeLifecycle.ConstructionSound
+import Musubi.NativeLifecycle.RunSound
 import Musubi.Axioms

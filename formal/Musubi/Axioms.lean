@@ -32,6 +32,8 @@ import Musubi.EarlyEntry
 import Musubi.RecoveryBridge
 import Musubi.HistoryWindow
 import Musubi.FreshObservation
+import Musubi.NativeLifecycle.ConstructionSound
+import Musubi.NativeLifecycle.RunSound
 import Musubi.EntryAssembly
 import Musubi.CallBatch
 import Musubi.HubHistory
@@ -594,3 +596,16 @@ open Musubi
 #print axioms Refs.Expected.eval_without_known_agrees
 #print axioms Refs.Expected.checkpoint
 #print axioms Refs.Expected.conflicted_import_agrees_of_history
+
+-- Finite native lifecycle fixtures: local execution and the same actual action list.
+#print axioms NativeLifecycle.encodeNative_observed
+#print axioms NativeLifecycle.encodeCanonical_observed
+#print axioms NativeLifecycle.writeRender_captured_records
+#print axioms NativeLifecycle.writeRender_current
+#print axioms NativeLifecycle.planReceipt_origin
+#print axioms NativeLifecycle.planRender_origin
+#print axioms NativeLifecycle.run_has_trace
+#print axioms NativeLifecycle.writeReceiptCanonical_records
+#print axioms NativeLifecycle.writeReceiptNative_records
+#print axioms NativeLifecycle.step_named_custody
+#print axioms NativeLifecycle.runs_named_custody

@@ -6,6 +6,9 @@
 
 #![allow(clippy::unwrap_used)]
 
+#[path = "native_lifecycle_conformance.rs"]
+mod lifecycle_conformance;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::PathBuf;

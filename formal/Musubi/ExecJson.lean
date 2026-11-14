@@ -23,6 +23,7 @@ import Musubi.ExpectedExec
 import Musubi.PacketAcceptance
 import Musubi.SysAcceptance
 import Musubi.NodeSysExec
+import Musubi.NativeLifecycle.Json
 
 namespace Musubi.Exec.Json
 
@@ -935,6 +936,10 @@ def handle (sess : Session) (line : String) : Json × Session :=
       match j.getObjVal? "table" >>= decodeTable, decodeCall j with
       | .error e, _ | _, .error e => (errReply s!"bad request: {e}", sess)
       | .ok tb, .ok call => (refsReply (Refs.Exec.run tb call), sess)
+    | .ok "nativeLifecycle" =>
+      match NativeLifecycle.Json.reply j with
+      | .error error => (errReply s!"native lifecycle interpretation gap: {error}", sess)
+      | .ok reply => (reply, sess)
     | .ok op => (errReply s!"bad request: unknown op {op}", sess)
 
 end Musubi.Exec.Json

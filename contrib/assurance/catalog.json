@@ -2052,6 +2052,9 @@
     ],
     "rawPush": [
       "PacketAcceptance"
+    ],
+    "nativeLifecycle": [
+      "NativeLifecycle"
     ]
   }
 }

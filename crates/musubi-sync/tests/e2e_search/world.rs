@@ -328,6 +328,8 @@ pub struct World {
     pub baseline_keys: Vec<BTreeSet<String>>,
     /// Each copy's join point, observed before joining, apart from its parents.
     join_points: Vec<OpId>,
+    /// Actual native inputs captured before the fixture joins or adds a copy.
+    join_inputs: Vec<OpId>,
     /// The keys of every machine's operations once the hive was set up: what a copy made
     /// later has of them is its baseline too.
     hive_baseline: BTreeSet<String>,
@@ -437,9 +439,9 @@ impl World {
                 workspaces
             })
             .collect();
-        let join_points: Vec<_> = repos.iter().map(native_head).collect();
+        let join_inputs: Vec<_> = repos.iter().map(native_head).collect();
         let fx = Fixture::join(env, repos);
-        let join_points = join_points
+        let join_points = join_inputs
             .iter()
             .zip(&fx.hive.members)
             .map(|(head, member)| {
@@ -470,6 +472,7 @@ impl World {
             baseline_ids: vec![],
             baseline_keys: vec![],
             join_points,
+            join_inputs,
             hive_baseline: BTreeSet::new(),
             baseline_merge_keys: BTreeSet::new(),
             abandoned: vec![],
@@ -2417,7 +2420,8 @@ impl World {
             .lines()
             .map(without_op_ids)
             .collect();
-        let join_point = native_head(&repo);
+        let join_input = native_head(&repo);
+        let join_point = join_input.clone();
         self.fx.add(repo);
         let node = self.fx.hive.members.last().unwrap().adapter.repo();
         let joined = node.canonical_of(&LocalOp(join_point.clone())).unwrap();
@@ -2464,8 +2468,10 @@ impl World {
             self.baseline_ids.push(BTreeSet::new());
             self.baseline_keys.push(BTreeSet::new());
             self.join_points.push(join_point.clone());
+            self.join_inputs.push(join_input.clone());
         }
         self.join_points[m] = join_point;
+        self.join_inputs[m] = join_input;
         self.logical_extras.resize_with(self.nodes(), BTreeSet::new);
         self.logical_extras[m].clear();
         for ws in &self.workspaces[m] {
@@ -3783,4 +3789,364 @@ fn marked_native_repairs_keep_their_author_after_cache_loss() {
         world.realized(0, &canonical, &alias),
         "a replacement cannot inherit the old copy's native origin"
     );
+}
+
+/// Tested repositories, their shared hub, retained copies and hermetic home. Replay's own
+/// temporary directories and the harness's in-memory evidence maps are outside this state.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ObserverState {
+    files: BTreeMap<PathBuf, Vec<u8>>,
+    heads: Vec<Vec<String>>,
+    clock: std::time::SystemTime,
+}
+
+impl World {
+    pub(crate) fn assert_observer_state(&self, before: &ObserverState) {
+        let after = self.observer_state();
+        assert_eq!(
+            after.clock, before.clock,
+            "observer consumed an actor seed/clock tick"
+        );
+        assert_eq!(
+            after.heads, before.heads,
+            "observer changed native op heads"
+        );
+        let paths: BTreeSet<_> = before.files.keys().chain(after.files.keys()).collect();
+        for path in paths {
+            assert!(
+                before.files.get(path) == after.files.get(path),
+                "observer changed source bytes or paths at {}",
+                path.display()
+            );
+        }
+    }
+
+    pub(crate) fn observer_state(&self) -> ObserverState {
+        fn collect(
+            root: &std::path::Path,
+            path: &std::path::Path,
+            out: &mut BTreeMap<PathBuf, Vec<u8>>,
+        ) {
+            let metadata = fs::symlink_metadata(path).unwrap();
+            if metadata.file_type().is_symlink() {
+                out.insert(
+                    path.strip_prefix(root).unwrap().to_path_buf(),
+                    fs::read_link(path)
+                        .unwrap()
+                        .as_os_str()
+                        .as_encoded_bytes()
+                        .to_vec(),
+                );
+            } else if metadata.is_dir() {
+                for entry in fs::read_dir(path).unwrap() {
+                    collect(root, &entry.unwrap().path(), out);
+                }
+            } else {
+                out.insert(
+                    path.strip_prefix(root).unwrap().to_path_buf(),
+                    fs::read(path).unwrap(),
+                );
+            }
+        }
+        let mut files = BTreeMap::new();
+        collect(self.fx.env.root(), self.fx.env.root(), &mut files);
+        ObserverState {
+            files,
+            heads: (0..self.nodes()).map(|m| self.op_heads(m)).collect(),
+            clock: self.fx.env.clock().now(),
+        }
+    }
+
+    /// A destructive probe, only after an observation window. Compare with a separate
+    /// fixture running the identical actor prefix without that observer, never rewind it.
+    pub(crate) fn next_actor_randomness(&self) -> Vec<jj_lib::backend::ChangeId> {
+        self.fx
+            .hive
+            .members
+            .iter()
+            .map(|member| {
+                member
+                    .adapter
+                    .repo()
+                    .loader()
+                    .settings()
+                    .get_rng()
+                    .new_change_id(16)
+            })
+            .collect()
+    }
+}
+
+#[test]
+fn replicated_history_stops_at_the_captured_join_after_native_reparenting() {
+    use futures::executor::block_on;
+
+    fn ancestry(world: &World, heads: Vec<OpId>) -> BTreeMap<OpId, jj_lib::op_store::Operation> {
+        let store = world.fx.hive.members[0].adapter.repo().loader().op_store();
+        let mut pending = heads;
+        let mut operations = BTreeMap::new();
+        while let Some(id) = pending.pop() {
+            if operations.contains_key(&id) {
+                continue;
+            }
+            let op = block_on(store.read_operation(&id)).unwrap();
+            pending.extend(op.parents.iter().cloned());
+            operations.insert(id, op);
+        }
+        operations
+    }
+    let mut fingerprints = vec![];
+    for _ in 0..2 {
+        // One joined copy isolates the cut: native abandon can also reparent a
+        // foreign shared branch onto private ancestors, legitimately bypassing it.
+        let mut world = World::new(Setup {
+            nodes: 1,
+            naming: Naming::Own,
+            prejoin: true,
+            secondary: false,
+        });
+        let join = world.join_inputs[0].clone();
+        let store = world.fx.hive.members[0]
+            .adapter
+            .repo()
+            .loader()
+            .op_store()
+            .clone();
+        let join_body = block_on(store.read_operation(&join)).unwrap();
+        let private = ancestry(&world, join_body.parents.clone());
+        let parent = join_body.parents[0].clone();
+        let grandparent = private[&parent].parents[0].clone();
+        assert!(
+            private.contains_key(&grandparent),
+            "the cut must hide surviving private history"
+        );
+        world.jj(0, &["describe", "-m", "known post-join work"]);
+        let first = native_head(world.fx.repo(0));
+        world.jj(0, &["bookmark", "create", "after-join", "-r", "@"]);
+        let second = native_head(world.fx.repo(0));
+        let heads = || {
+            world
+                .op_heads(0)
+                .iter()
+                .map(|id| OpId::try_from_hex(id).unwrap())
+                .collect()
+        };
+        let original = ancestry(&world, heads());
+        let expected: BTreeSet<_> = original
+            .keys()
+            .filter(|id| !private.contains_key(*id))
+            .cloned()
+            .collect();
+        assert!(expected.is_superset(&BTreeSet::from([
+            join.clone(),
+            first.clone(),
+            second.clone()
+        ])));
+        assert_eq!(
+            world
+                .replicated_history(0)
+                .into_keys()
+                .collect::<BTreeSet<_>>(),
+            expected
+        );
+        // Remove only the join's immediate parent. Its earlier ancestors remain, so
+        // walking through a join whose parents changed is observably wrong.
+        world.jj(
+            0,
+            &["--ignore-working-copy", "op", "abandon", &parent.hex()],
+        );
+        let rewritten = ancestry(
+            &world,
+            world
+                .op_heads(0)
+                .iter()
+                .map(|id| OpId::try_from_hex(id).unwrap())
+                .collect(),
+        );
+        assert!(rewritten.contains_key(&grandparent));
+        for old in [&join, &first, &second] {
+            let mut body = original[old].clone();
+            body.parents.clear();
+            let matches: Vec<_> = rewritten
+                .iter()
+                .filter(|(_, op)| {
+                    let mut candidate = (*op).clone();
+                    candidate.parents.clear();
+                    candidate == body
+                })
+                .collect();
+            let [(id, actual)] = matches.as_slice() else {
+                panic!("one exact reparented source body required");
+            };
+            assert_ne!(*id, old);
+            assert_ne!(actual.parents, original[old].parents);
+        }
+        let expected: BTreeSet<_> = rewritten
+            .keys()
+            .filter(|id| !private.contains_key(*id))
+            .cloned()
+            .collect();
+        let actual: BTreeSet<_> = world.replicated_history(0).into_keys().collect();
+        assert_eq!(actual, expected);
+        assert!(!expected.contains(&grandparent));
+        fingerprints.push(world.fingerprint());
+    }
+    assert_eq!(fingerprints[0], fingerprints[1]);
+}
+
+#[test]
+fn raw_source_collectors_leave_pending_and_known_native_operations_untouched() {
+    let run = |observe| {
+        let mut world = World::new(Setup {
+            nodes: 2,
+            naming: Naming::Default,
+            prejoin: false,
+            secondary: true,
+        });
+        world.jj(0, &["describe", "-m", "known source"]);
+        world.sync(0);
+        world.sync(1);
+        world.jj(0, &["describe", "-m", "unpublished source"]);
+        let pending = LocalOp(native_head(world.fx.repo(0)));
+        assert!(
+            world.fx.hive.members[0]
+                .adapter
+                .repo()
+                .canonical_of(&pending)
+                .is_none()
+        );
+        let before = world.observer_state();
+        if observe {
+            // Run twice: both discovering evidence and revisiting it must be passive.
+            for _ in 0..2 {
+                for m in 0..world.nodes() {
+                    world.observe_operation_sources(m);
+                    world.check_imports(m);
+                }
+                world.observe_published_operations();
+            }
+            assert!(!world.operation_sources.is_empty());
+            assert!(
+                world.fx.hive.members[0]
+                    .adapter
+                    .repo()
+                    .canonical_of(&pending)
+                    .is_none()
+            );
+        }
+        world.assert_observer_state(&before);
+        (world.fingerprint(), world.next_actor_randomness())
+    };
+    assert_eq!(run(false), run(true));
+}
+
+#[test]
+fn ambiguous_abandon_recovery_integrates_the_real_hint_once() {
+    use std::path::Path;
+
+    let mut fingerprints = vec![];
+    for _ in 0..2 {
+        let mut world = World::new(Setup {
+            nodes: 2,
+            naming: Naming::Own,
+            prejoin: false,
+            secondary: false,
+        });
+        let target = native_head(world.fx.repo(0));
+        // The pinned native regression: two restores with identical metadata/views,
+        // separated by real work, become indistinguishable after native contraction.
+        let restore = |world: &mut World| {
+            let history = world.command_history(0);
+            let before = world.seen(0);
+            let present = world.abandoned_present(0);
+            let stale = world.is_stale(0, 0);
+            world.record(format!(
+                "alpha: jj op restore {} (fixed native timestamp)",
+                target.hex()
+            ));
+            let output = world
+                .fx
+                .repo(0)
+                .program(Path::new("jj"))
+                .args(["--ignore-working-copy", "op", "restore", &target.hex()])
+                .env("JJ_OP_TIMESTAMP", "2001-02-03T04:05:06Z")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            world.record_commands(0, &history);
+            let after = world.seen(0);
+            let what = world.trace.last().unwrap().clone();
+            world.ledger.record(0, &what, &before, &after, stale);
+            world.forgive_jj_returns(0, present);
+            native_head(world.fx.repo(0))
+        };
+        world.jj(0, &["describe", "-m", "before"]);
+        let a = restore(&mut world);
+        world.jj(0, &["describe", "-m", "between"]);
+        let x = restore(&mut world);
+        assert_ne!(a, x);
+        world.sync(0);
+        world.jj(
+            0,
+            &[
+                "--ignore-working-copy",
+                "op",
+                "abandon",
+                &format!("{}-..{}-", a.hex(), x.hex()),
+            ],
+        );
+        assert_eq!(native_head(world.fx.repo(0)), a);
+        let err = world
+            .try_sync_partial(0, 100, None, None)
+            .unwrap_err()
+            .context("native restore/abandon prefix");
+        let hint = err
+            .chain()
+            .find_map(|err| match err.downcast_ref::<NodeError>() {
+                Some(NodeError::AmbiguousAbandon(target)) => Some(target.clone()),
+                _ => None,
+            })
+            .expect("context must retain the typed ambiguous-abandon hint");
+        assert_eq!(hint, x.hex());
+        let trace = world.trace.len();
+        let credit = world.recovery_actions;
+        world.recover(0, "sync", &err);
+        assert_eq!(world.recovery_actions, credit + 1);
+        assert_eq!(
+            &world.trace[trace..],
+            &[format!("alpha: jj op integrate {hint}")]
+        );
+        assert_eq!(
+            world.integrated_history,
+            BTreeSet::from([(world.fx.machine_key(0), hint.clone())])
+        );
+        world.try_sync_partial(0, 100, None, None).unwrap();
+        // These are driver-negative inputs reusing the captured real error, not a
+        // claim that the repaired native repository produces it again.
+        for exhausted in [false, true] {
+            if exhausted {
+                world.integrated_history.clear();
+                world.recovery_actions = MAX_RECOVERIES;
+            }
+            let before = world.observer_state();
+            let trace = world.trace.clone();
+            let credit = world.recovery_actions;
+            let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                world.recover(0, "replayed driver hint", &err);
+            }));
+            assert!(stopped.is_err());
+            assert_eq!(world.trace, trace);
+            assert_eq!(world.recovery_actions, credit);
+            world.assert_observer_state(&before);
+        }
+        // The general trace normalizer masks bare ids, not the trailing parent
+        // selectors in this fixed range. Normalize these two captured ids explicitly.
+        let range = format!("{}-..{}-", a.hex(), x.hex());
+        fingerprints.push(world.fingerprint().replace(&range, "<id>-..<id>-"));
+    }
+    assert_eq!(fingerprints[0], fingerprints[1]);
 }

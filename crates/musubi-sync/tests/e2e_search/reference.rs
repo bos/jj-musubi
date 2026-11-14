@@ -1062,156 +1062,143 @@ struct WorkspaceReplay {
 fn native_merge_replay_requires_its_source_and_complete_shared_inputs() {
     use crate::world::{Naming, Setup};
 
-    let mut world = World::new(Setup {
-        nodes: 2,
-        naming: Naming::Default,
-        prejoin: false,
-        secondary: false,
-    });
-    let base = world.fx.hive.members[0]
-        .adapter
-        .repo()
-        .local_heads()
-        .unwrap()[0]
-        .0
-        .hex();
-    world.jj(
-        0,
-        &[
-            "--ignore-working-copy",
-            "--at-op",
-            &base,
-            "new",
-            "--no-edit",
-            "-m",
-            "left",
-        ],
-    );
-    world.jj(
-        0,
-        &[
-            "--ignore-working-copy",
-            "--at-op",
-            &base,
-            "new",
-            "--no-edit",
-            "-m",
-            "right",
-        ],
-    );
-    world.jj(0, &["status"]);
-    world.converge();
-    let node = world.fx.hive.members[0].adapter.repo();
-    let store = node.canonical_store();
-    let id = store
-        .operation_ids()
-        .unwrap()
-        .into_iter()
-        .find(|id| {
-            let Some(local) = node.local_of(id) else {
-                return false;
-            };
-            let op = block_on(node.loader().op_store().read_operation(&local.0)).unwrap();
-            op.parents.len() == 2
-                && !op
-                    .metadata
-                    .attributes
-                    .contains_key(musubi_jj::node::CANONICAL_ATTRIBUTE)
-        })
-        .expect("the native command must reconcile the two heads");
-    let op = store.read_operation(&id).unwrap();
-    let parents = CanonicalOp::parents_of(&op);
-    let views: HashMap<_, _> = store
-        .operation_ids()
-        .unwrap()
-        .into_iter()
-        .chain([store.root_operation_id().clone()])
-        .map(|id| {
-            let view = store.read_operation_view(&id).unwrap();
-            (id, view)
-        })
-        .collect();
-    let output = views[&id].clone();
-    let mut reference = Reference::build(&world);
-    let copies: Vec<_> = parents
-        .iter()
-        .map(|id| reference.workspace_copy(&world, id).unwrap())
-        .collect();
-    let known = reference.changes_of(copies.iter());
-    let source_state = |world: &World| {
-        world
-            .fx
-            .hive
-            .members
-            .iter()
-            .map(|member| {
-                let node = member.adapter.repo();
-                let files = ["operations", "views"].map(|dir| {
-                    fs::read_dir(node.repo_path().join("op_store").join(dir))
-                        .unwrap()
-                        .map(|entry| entry.unwrap().file_name())
-                        .collect::<BTreeSet<_>>()
-                });
-                (node.local_heads().unwrap(), files)
+    fn run(observe: bool) -> (Vec<ChangeId>, String) {
+        let mut world = World::new(Setup {
+            nodes: 2,
+            naming: Naming::Default,
+            prejoin: false,
+            secondary: false,
+        });
+        let base = world.fx.hive.members[0]
+            .adapter
+            .repo()
+            .local_heads()
+            .unwrap()[0]
+            .0
+            .hex();
+        world.jj(
+            0,
+            &[
+                "--ignore-working-copy",
+                "--at-op",
+                &base,
+                "new",
+                "--no-edit",
+                "-m",
+                "left",
+            ],
+        );
+        world.jj(
+            0,
+            &[
+                "--ignore-working-copy",
+                "--at-op",
+                &base,
+                "new",
+                "--no-edit",
+                "-m",
+                "right",
+            ],
+        );
+        world.jj(0, &["status"]);
+        world.converge();
+        let node = world.fx.hive.members[0].adapter.repo();
+        let store = node.canonical_store();
+        let id = store
+            .operation_ids()
+            .unwrap()
+            .into_iter()
+            .find(|id| {
+                let Some(local) = node.local_of(id) else {
+                    return false;
+                };
+                let op = block_on(node.loader().op_store().read_operation(&local.0)).unwrap();
+                op.parents.len() == 2
+                    && !op
+                        .metadata
+                        .attributes
+                        .contains_key(musubi_jj::node::CANONICAL_ATTRIBUTE)
             })
-            .collect::<Vec<_>>()
-    };
-    let before = source_state(&world);
-    assert!(
-        reference
-            .native_merge_matches(&world, &id, &parents, &output, &known, &views)
-            .is_some()
-    );
-    assert_eq!(
-        source_state(&world),
-        before,
-        "native replay writes only in its copy"
-    );
-    let mut wrong = output.clone();
-    wrong.local_bookmarks.insert(
-        "invented".into(),
-        RefTarget::normal(output.head_ids.iter().next().unwrap().clone()),
-    );
-    assert!(
-        reference
-            .native_merge_matches(&world, &id, &parents, &wrong, &known, &views)
-            .is_none()
-    );
-    let mut reversed = parents.clone();
-    reversed.reverse();
-    assert!(
-        reference
-            .native_merge_matches(&world, &id, &reversed, &output, &known, &views)
-            .is_none()
-    );
-    let mut wrong_inputs = views.clone();
-    wrong_inputs.get_mut(&parents[0]).unwrap().local_bookmarks = wrong.local_bookmarks;
-    assert!(
-        reference
-            .native_merge_matches(&world, &id, &parents, &output, &known, &wrong_inputs)
-            .is_none()
-    );
-    let mut missing_workspace = views.clone();
-    missing_workspace
-        .get_mut(&parents[0])
-        .unwrap()
-        .wc_commit_ids
-        .pop_first()
-        .unwrap();
-    assert!(
-        reference
-            .native_merge_matches(&world, &id, &parents, &output, &known, &missing_workspace)
-            .is_none(),
-        "matching shared summaries cannot excuse different workspace bindings"
-    );
-    // Replacing the maker leaves only marked renderings of this operation. Those
-    // cannot turn the product's output into independent native evidence.
-    world.clone_copy(0);
-    assert!(
-        reference
-            .native_merge_matches(&world, &id, &parents, &output, &known, &views)
-            .is_none()
-    );
+            .expect("the native command must reconcile the two heads");
+        let op = store.read_operation(&id).unwrap();
+        let parents = CanonicalOp::parents_of(&op);
+        let views: HashMap<_, _> = store
+            .operation_ids()
+            .unwrap()
+            .into_iter()
+            .chain([store.root_operation_id().clone()])
+            .map(|id| {
+                let view = store.read_operation_view(&id).unwrap();
+                (id, view)
+            })
+            .collect();
+        let output = views[&id].clone();
+        let before = world.observer_state();
+        if !observe {
+            return (world.next_actor_randomness(), world.fingerprint());
+        }
+        let mut reference = Reference::build(&world);
+        let copies: Vec<_> = parents
+            .iter()
+            .map(|id| reference.workspace_copy(&world, id).unwrap())
+            .collect();
+        let known = reference.changes_of(copies.iter());
+        assert!(
+            reference
+                .native_merge_matches(&world, &id, &parents, &output, &known, &views)
+                .is_some()
+        );
+        world.assert_observer_state(&before);
+        let mut wrong = output.clone();
+        wrong.local_bookmarks.insert(
+            "invented".into(),
+            RefTarget::normal(output.head_ids.iter().next().unwrap().clone()),
+        );
+        assert!(
+            reference
+                .native_merge_matches(&world, &id, &parents, &wrong, &known, &views)
+                .is_none()
+        );
+        let mut reversed = parents.clone();
+        reversed.reverse();
+        assert!(
+            reference
+                .native_merge_matches(&world, &id, &reversed, &output, &known, &views)
+                .is_none()
+        );
+        let mut wrong_inputs = views.clone();
+        wrong_inputs.get_mut(&parents[0]).unwrap().local_bookmarks = wrong.local_bookmarks;
+        assert!(
+            reference
+                .native_merge_matches(&world, &id, &parents, &output, &known, &wrong_inputs)
+                .is_none()
+        );
+        let mut missing_workspace = views.clone();
+        missing_workspace
+            .get_mut(&parents[0])
+            .unwrap()
+            .wc_commit_ids
+            .pop_first()
+            .unwrap();
+        assert!(
+            reference
+                .native_merge_matches(&world, &id, &parents, &output, &known, &missing_workspace)
+                .is_none(),
+            "matching shared summaries cannot excuse different workspace bindings"
+        );
+        world.assert_observer_state(&before);
+        let result = (world.next_actor_randomness(), world.fingerprint());
+        // Replacing the maker leaves only marked renderings of this operation. Those
+        // cannot turn the product's output into independent native evidence.
+        world.clone_copy(0);
+        assert!(
+            reference
+                .native_merge_matches(&world, &id, &parents, &output, &known, &views)
+                .is_none()
+        );
+        result
+    }
+    assert_eq!(run(false), run(true));
 }
 
 #[test]

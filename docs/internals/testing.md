@@ -344,7 +344,9 @@ parent intact while contracting its canonical image to root, then makes a new co
 Warm and cold caches must agree that its foreign aliases are not owned workspaces.
 `node::view::tests::source_context_reserves_new_owned_literals_before_presence_is_applied`
 checks a source view with a newly owned foreign-looking literal and pre-command forgotten
-presence: both owned and foreign keys keep distinct local names.
+presence: both owned and foreign keys keep distinct local names. It also round-trips a root
+or foreign-only source through the namespace reader: the maker is a known identity without
+being present.
 
 `translation::a_private_root_workspace_is_not_a_lost_shared_source` retains a join through
 one delayed command and returns to a private root through another. Even with a slash in its
@@ -877,6 +879,15 @@ commands that actually changed a scalar record, through original source parents.
 commands inheriting an unchanged scalar only carry those values.
 `imports::physical_head_writers_are_distinct_from_merge_record_terms` checks nested conflict
 cancellation with jj's ref merge, an unchanged scalar command, and a later actual write.
+It also checks two independent reconciliations with differing closest bases. That rare case
+uses jj's recursive merge in a lazy isolated copy, with independent settings and randomness.
+The entire source history must validate; a correct merged record still supplies no physical
+HEAD writer, including a scalar synthesized by cancellation. A native workspace add has
+separate birth and initial-working-copy operations: only the latter exports its initial HEAD,
+even when its metadata names the previously active workspace. The same test checks that exact
+unmarked two-operation sequence, an unmatched initialization, a marked initialization and the
+birth operation with an inherited record.
+
 
 When incoming records lose an applied suffix or drop the entire saved accepted base,
 the checker captures the exact native op heads before driving the receipt. A newly published
@@ -911,8 +922,19 @@ and the test checks that:
   `jj op log`, down to independently recorded join points, except a copy's join, which on the
   copy itself is its last operation before joining, and operations `jj op abandon` removed
   completely. Removing one native alias while another remains does not remove that operation.
-  Dropped operations appear in none, unless jj brought one back on the abandoning machine
-  through a stale working copy
+  The checker captures an already-known immutable original before abandonment, qualifying
+  its native alias by metadata. Different originals may share metadata after native parent
+  rewrites; every exact dropped original must still disappear. An alias already reachable
+  immediately after the native abandon can be qualified after an ordinary sync establishes
+  its mapping. Exact parent rewrites in later native abandons extend that witness; sync
+  cannot. The first identity learned for each immutable native survivor stays fixed.
+  Unwitnessed matching versions remain forbidden even when the dropped identity is unknown.
+  A command removed before publication forbids its exact native source and any original that
+  source later acquires. Other matching versions require a qualified native survivor or return
+  witness, scoped to its copy and raw operation id. A marked source can recover its already
+  stored original after cache loss without canonicalizing anything. Retention and clone
+  cleanup use the same observation. A native return requires proven absence before the
+  command and exact presence afterward, including through a stale working copy
   ([races.md, "Known jj limitations"](races.md#known-jj-limitations)).
   History below a join point stays private even if a native abandon reparents that join point
   above shared history;
@@ -932,13 +954,33 @@ metadata naming a workspace is never its own certificate. Rewriting a dormant bi
 commit revokes opaque inheritance unless independent replay certifies its result.
 An internal repair or merge can also inherit a binding certified by every source: each live
 source must already contain that exact target, or its hidden old target must have exactly
-one visible rewrite there, equal to the result. A dormant source must certify the unchanged
-target while omitting its slot. At least one source must have a live binding and a present
-owner; dormant omissions cannot certify a comeback by themselves. Visibility in the result
+one visible rewrite there, equal to the result. Only source parents where the owner is present
+contribute its bindings; a forgotten branch's stale target cannot veto newer live work.
+A dormant source among the present parents must certify the unchanged target while omitting
+its slot. At least one source must have a live binding and a present owner; dormant omissions
+cannot certify a comeback by themselves. Visibility in the result
 is never evidence for a new target.
 `reference::workspace_certificates_require_each_sources_existing_binding` checks these rules
 with real jj rewrites, including two divergent versions, missing or conflicting source
-bindings, owner deletion, all-dormant inputs, and a target visible only in the result.
+bindings, owner deletion, all-dormant inputs, a target visible only in the result, and newer
+live work with a different change from the forgotten branch's stale binding.
+The private-workspace parent selector's
+`node::realize::tests::concrete_work_keeps_the_namespace_after_a_deletion`
+uses an actual native workspace add and forget, then an erased original marker, to check
+that concrete work wins in either parent order while two erased identities stay unordered.
+`world::abandoned_originals_do_not_include_other_native_parent_versions` constructs two native
+parent versions with equal metadata, verifies that an exact dropped original still fails
+before propagation, preserves the alternate original after convergence and clone replacement,
+and rejects matching metadata without its original witness.
+`world::private_abandons_still_reject_their_first_published_rendering` deliberately republishes
+an unpublished discarded source through the real adapter and syncs. The checker rejects it
+both when its source can be translated and when only its cached canonical form survives
+translation-cache loss.
+`world::a_native_return_allows_only_the_parent_version_jj_brought_back` returns an older native
+parent version through a real jj command, then verifies that the different abandoned version
+still fails if the adapter republishes it. Neither matching metadata nor prior publication
+widens that exact return witness.
+
 A previously witnessed merge birth keeps its name through a single-parent repair while the
 name is still present or private, even if its working-copy commit changes. This carries no
 certificate for the replacement payload; the binding controls above still reject it.
@@ -958,6 +1000,10 @@ It covers native renames, deletion of every workspace, owned slash names beside 
 aliases, cached children of refreshed parents, reopening, a multi-target advance, and a
 non-colocated repository. It also requires one reachable native realization per canonical
 operation; checking names alone would miss a stale target or a duplicated physical prefix.
+Two mixed-target cases cache incomparable tips where the receiver is respectively absent
+and present, change its Git record after preparation, and advance in both orders. The private
+tip must keep the full current Git record, physical refs and HEAD must stay unchanged, and
+the next native status must import nothing.
 
 A replacement clone's synthetic join has its own independently captured native input, keyed
 by the join's metadata identity. Only its exact owned workspace keys and commit targets can
@@ -1029,13 +1075,54 @@ its unique visible successor from the command's captured predecessor map. An own
 binding, a hidden successor, or several visible successors supplies no such witness. A global
 birth or a matching outgoing name alone supplies no certificate. Native merge replay uses the same
 copy's actual owned bindings in its base and ordered parents, for authenticated names only,
-and checks the output structurally. With identical visible heads, replay can also omit an
-already-certified foreign slot absent from an exact captured native input. Only ownership
-certified at that source can exclude an apparent alias; a later workspace birth cannot.
-Retained native origins are observed without a realization marker; sharing a hostname cannot
-turn a receiver into the maker.
-`world::retained_sources_do_not_infer_native_ownership_from_a_shared_hostname` checks this boundary. The pure namespace controls cover a missing input certificate,
-an owner rename, and an owned literal that collides with a foreign alias.
+and checks the output structurally. Multiple closest bases retain their separate projections
+and source-parent graphs, then jj recursively merges them in the order it found them. A base
+whose required source, command-input or fix-up dependency closure reaches an active proof
+cannot provide a new replay candidate. This preflight changes no certificates and rejects
+circular evidence before replay; completed certificates stop the walk.
+Existing marked source identities remain usable after their disposable cache mappings disappear;
+only already stored source bodies qualify them. An image where the maker is absent can retain
+actual owned literals whose names are authenticated by another input of this same merge.
+Present images retain their per-source name restriction, and bases supply no names to that
+frontier. The new target still requires native replay and structural equality.
+`reference::private_workspace_replay_merges_all_native_bases` checks a real native criss-cross
+frontier after cache loss. The pure private-projection control rejects missing frontier proof,
+present-source borrowing and missing raw slots, and keeps foreign aliases separate from owned
+slash names.
+
+Names and exact bindings remain separate: a command cannot delete another owner's authenticated
+namespace by forgetting its local alias. Later commands carry that name and its prior merge-birth
+provenance even with the alias absent from both native inputs. An independent native merge can
+carry such a name without certifying its unknown replacement target. The binding controls cover
+forgotten and already absent aliases, a missing name certificate, and a command by the owner that
+actually deletes the name. With identical visible heads, replay can also omit an already-certified
+foreign slot absent from an exact captured native input. Only ownership certified at that source
+can exclude an apparent alias; a later workspace birth cannot.
+
+When rebuilding the same views changes jj's result, the reference can replay the actual
+native operation DAG and index in an isolated full repository copy. Its producer must be
+unmarked, its ordered parents must map to the canonical parents, and every native parent and
+closest base must structurally match an already checked shared input. This fallback requires
+one closest base; recursive base merges stay with the other replay paths. Native workspace
+slots must bijectively match exact certified canonical bindings through unambiguous aliases;
+matching visible commits and namespace names alone are insufficient. The complete replay,
+including signed conflict multiplicity, must match the output; no merge payload is a replay
+input. Reference settings keep checker operations and randomness out of the tested copy.
+`reference::native_merge_replay_requires_its_source_and_complete_shared_inputs` checks a real
+native merge, rejects changed output and input refs, a workspace-only input change, reversed
+parents and marked-only sources, and verifies that source heads and operation/view files do
+not change.
+
+Native origins are captured from unmarked local operations and qualified only by an existing
+original identity. A later canonical marker does not make the author's own operation a foreign
+realization: a repair can carry another copy's work marker. The captured header and entire
+shared view must still match; only private workspace and Git fields can differ. Qualified
+origins survive cache loss, but never pass to a replacement copy. Observing an unknown source
+must not canonicalize it. `world::marked_native_repairs_keep_their_author_after_cache_loss`
+checks these boundaries, including a receiver with the same hostname, altered heads and a
+non-Git remote. `world::retained_sources_do_not_infer_native_ownership_from_a_shared_hostname`
+checks retained-source classification. The pure namespace controls cover a missing input
+certificate, an owner rename, and an owned literal that collides with a foreign alias.
 
 To keep the search effective:
 
@@ -1136,3 +1223,4 @@ failure-path controls are recorded with its
 checkpoints and mutation results, and rebuilds the code graph with a deterministic layout.
 Its collector passes `LLVM_PROFILE_FILE` through test subprocess environments; normal test
 runs stay hermetic.
+

@@ -78,35 +78,6 @@ fn single(ids: Option<&BTreeSet<String>>) -> Option<&String> {
 /// its times, to the millisecond, and description.
 const MERGE_KEY_TEMPLATE: &str = r#"time.start().format("%s%3f") ++ " " ++ time.end().format("%s%3f") ++ " " ++ description.first_line()"#;
 
-/// Whether `op`, an operation of `node`'s, is a realization of another machine's. musubi marks
-/// a realization with the canonical operation it realizes, but marks so too every rewrite of
-/// the machine's own operations: whose it is, the canonical operation's work says, or for
-/// one that is no copy's work, as a merge, its host (machines can share a host here, which
-/// then takes a realization for the machine's own: a weaker check, not a false failure). A
-/// fix-up's work, which another machine may write for a copy, counts as that copy's; and an
-/// operation whose canonical one can't be read, as a realization.
-pub fn realized(op: &jj_lib::op_store::Operation, node: &musubi_jj::node::NodeRepo) -> bool {
-    let Some(canonical) = op
-        .metadata
-        .attributes
-        .get("musubi.canonical")
-        .and_then(jj_lib::op_store::OperationId::try_from_hex)
-    else {
-        return false;
-    };
-    let key = node.machine().key();
-    match node
-        .canonical_store()
-        .read_operation(&CanonicalOp(canonical))
-    {
-        Ok(canonical) => match musubi_jj::presence::Kind::of(&canonical.metadata).work {
-            Some(work) => work != key,
-            None => op.metadata.hostname != musubi_jj::workspaces::machine_name(key),
-        },
-        Err(_) => true,
-    }
-}
-
 /// An operation's key, as `MERGE_KEY_TEMPLATE` gives it.
 pub fn merge_key(op: &jj_lib::op_store::Operation) -> String {
     let metadata = &op.metadata;
@@ -153,6 +124,111 @@ pub struct Setup {
     pub prejoin: bool,
     /// Each machine has a secondary workspace, `second`, from the start.
     pub secondary: bool,
+}
+
+pub struct AbandonedOperation {
+    pub by: usize,
+    pub key: String,
+    pub merge: String,
+    native: OpId,
+    copy: String,
+    /// Whether this command could already denote a shared operation. A private command
+    /// removed before publication does not forbid later versions with different parents.
+    shared: bool,
+    /// Copy-qualified native versions kept by an abandon or introduced by a later native
+    /// command from a history where that version was absent. Only exact native parent
+    /// rewrites extend these witnesses. First learned identities stay fixed; sync adds none.
+    native_witnesses: BTreeMap<(String, OpId), Option<OpId>>,
+    header: (String, String, String),
+    /// The immutable identity known before the native abandon. Different native
+    /// reparentings can share metadata while naming different original operations.
+    pub originals: Option<BTreeSet<OpId>>,
+}
+
+impl AbandonedOperation {
+    fn qualify_native(&mut self, id: &(String, OpId), original: OpId) {
+        let known = self
+            .native_witnesses
+            .get_mut(id)
+            .expect("a frozen native survivor");
+        if let Some(previous) = known {
+            assert_eq!(
+                *previous, original,
+                "an immutable native survivor changed original identity"
+            );
+        } else {
+            *known = Some(original);
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct OperationHistory {
+    copy: Option<String>,
+    native: BTreeSet<OpId>,
+    native_by_header: BTreeMap<(String, String, String), BTreeSet<OpId>>,
+    native_originals: BTreeMap<OpId, OpId>,
+    headers: BTreeSet<(String, String, String)>,
+    originals: BTreeSet<OpId>,
+    originals_by_header: BTreeMap<(String, String, String), BTreeSet<OpId>>,
+    unknown: BTreeSet<(String, String, String)>,
+}
+
+impl OperationHistory {
+    pub(crate) fn may_contain(&self, op: &AbandonedOperation) -> bool {
+        match &op.originals {
+            Some(_) => self.proves_present(op) || self.unknown.contains(&op.header),
+            None => {
+                self.has_native_source(op)
+                    || (self.headers.contains(&op.header)
+                        && (self.unknown.contains(&op.header)
+                            || self.originals_by_header.get(&op.header).is_none_or(|ids| {
+                                ids.iter().any(|id| {
+                                    !op.native_witnesses
+                                        .values()
+                                        .any(|known| known.as_ref() == Some(id))
+                                })
+                            })))
+            }
+        }
+    }
+
+    pub(crate) fn explain(&self, op: &AbandonedOperation) -> String {
+        format!(
+            "wanted originals={:?}, wanted native={}, retained native={}, matching originals={:?}, unknown matching metadata={}",
+            op.originals,
+            op.native.hex(),
+            self.has_native_source(op),
+            self.originals
+                .iter()
+                .filter(|id| op
+                    .originals
+                    .as_ref()
+                    .is_some_and(|wanted| wanted.contains(*id)))
+                .collect::<Vec<_>>(),
+            self.unknown.contains(&op.header)
+        )
+    }
+
+    fn has_native_source(&self, op: &AbandonedOperation) -> bool {
+        self.copy.as_deref() == Some(op.copy.as_str()) && self.native.contains(&op.native)
+    }
+
+    fn proves_present(&self, op: &AbandonedOperation) -> bool {
+        self.has_native_source(op)
+            || op
+                .originals
+                .as_ref()
+                .is_some_and(|ids| ids.iter().any(|id| self.originals.contains(id)))
+    }
+}
+
+fn operation_header(op: &jj_lib::op_store::Operation) -> (String, String, String) {
+    (
+        without_op_ids(&merge_key(op)),
+        op.metadata.hostname.clone(),
+        op.metadata.username.clone(),
+    )
 }
 
 pub struct Workspace {
@@ -204,6 +280,28 @@ struct RootRecordInput {
     before: BTreeSet<OpId>,
 }
 
+#[derive(Default)]
+struct NativeOrigins {
+    copy: String,
+    seen: BTreeSet<OpId>,
+    pending: BTreeMap<OpId, (jj_lib::op_store::Operation, jj_lib::op_store::View)>,
+    known: BTreeMap<OpId, Vec<NativeOrigin>>,
+}
+
+struct NativeOrigin {
+    header: (String, String, String),
+    view: jj_lib::op_store::View,
+}
+
+fn shared_origin_view(mut view: jj_lib::op_store::View) -> jj_lib::op_store::View {
+    view.wc_commit_ids.clear();
+    view.git_refs.clear();
+    view.git_heads.clear();
+    view.remote_views
+        .remove(jj_lib::git::REMOTE_NAME_FOR_LOCAL_GIT_REPO);
+    view
+}
+
 struct WorkspaceTrim {
     copy: String,
     input: CanonicalOp,
@@ -236,7 +334,7 @@ pub struct World {
     baseline_merge_keys: BTreeSet<String>,
     /// The key of each operation a `jj op abandon` dropped, with the machine that ran it and
     /// its `merge_key`: none comes back, unless jj brings it back there.
-    pub abandoned: Vec<(usize, String, String)>,
+    pub abandoned: Vec<AbandonedOperation>,
     /// The key of every copy a machine forgot, with the forget's `merge_key`, until the hub's
     /// history has the forget and shows the copy again, by work it did since: an abandon can
     /// drop the forget from the history, but not its effect (docs/internals/design.md,
@@ -247,6 +345,9 @@ pub struct World {
     pub kept_operations: BTreeMap<String, RetainedOperation>,
     operation_sources: BTreeMap<(usize, String), Option<OperationSource>>,
     operation_seen: Vec<BTreeSet<jj_lib::op_store::OperationId>>,
+    native_origins: Vec<NativeOrigins>,
+    published_seen: BTreeSet<CanonicalOp>,
+    published_headers: BTreeSet<(String, String, String)>,
     pub commands: BTreeMap<String, CommandSnapshot>,
     /// The accepted history observed before a native trim, independent of its later fix-up.
     workspace_trim_inputs: BTreeMap<usize, WorkspaceTrim>,
@@ -376,6 +477,9 @@ impl World {
             kept_operations: BTreeMap::new(),
             operation_sources: BTreeMap::new(),
             operation_seen: vec![],
+            native_origins: vec![],
+            published_seen: BTreeSet::new(),
+            published_headers: BTreeSet::new(),
             commands: BTreeMap::new(),
             workspace_trim_inputs: BTreeMap::new(),
             workspace_fixup_inputs: BTreeMap::new(),
@@ -412,6 +516,7 @@ impl World {
         let view = world.view_at_head(0);
         world.ledger.reset(&view);
         world.start_imports();
+        world.observe_published_operations();
         for m in 0..world.nodes() {
             world.observe_operation_sources(m);
         }
@@ -1491,6 +1596,7 @@ impl World {
     /// Observe operations before and after receipt too. A publisher cannot observe an
     /// offline copy's old operation, but a received trim keeps its view while reparenting it.
     fn observe_operation_sources(&mut self, m: usize) {
+        self.observe_native_origins(m);
         self.observe_workspace_fixups(m);
         self.operation_seen.resize_with(self.nodes(), BTreeSet::new);
         let store = self.fx.hive.members[m]
@@ -1540,6 +1646,115 @@ impl World {
                 }
             }
         }
+    }
+
+    /// Observe native creation independently of work ownership: a copy can write a
+    /// repair carrying another copy's last-use marker. Freeze already established original
+    /// identities before caches or native files disappear; never mint one to observe it.
+    fn observe_native_origins(&mut self, m: usize) {
+        self.native_origins
+            .resize_with(self.nodes(), NativeOrigins::default);
+        let copy = self.fx.machine_key(m);
+        if self.native_origins[m].copy != copy {
+            self.native_origins[m] = NativeOrigins {
+                copy,
+                ..NativeOrigins::default()
+            };
+        }
+        let node = self.fx.hive.members[m].adapter.repo();
+        let store = node.loader().op_store().clone();
+        for file in fs::read_dir(node.repo_path().join("op_store/operations"))
+            .unwrap()
+            .flatten()
+        {
+            let Some(id) = file.file_name().to_str().and_then(OpId::try_from_hex) else {
+                continue;
+            };
+            if self.native_origins[m].seen.contains(&id) {
+                continue;
+            }
+            let Ok(op) = futures::executor::block_on(store.read_operation(&id)) else {
+                continue;
+            };
+            if !op
+                .metadata
+                .attributes
+                .contains_key(musubi_jj::node::CANONICAL_ATTRIBUTE)
+            {
+                let Ok(view) = futures::executor::block_on(store.read_view(&op.view_id)) else {
+                    continue;
+                };
+                self.native_origins[m]
+                    .pending
+                    .insert(id.clone(), (op, shared_origin_view(view)));
+            }
+            self.native_origins[m].seen.insert(id);
+        }
+        let learned: Vec<_> = self.native_origins[m]
+            .pending
+            .keys()
+            .filter_map(|id| {
+                self.known_original(m, id)
+                    .map(|original| (id.clone(), original))
+            })
+            .collect();
+        for (id, original) in learned {
+            let (op, view) = self.native_origins[m].pending.remove(&id).unwrap();
+            self.native_origins[m]
+                .known
+                .entry(original)
+                .or_default()
+                .push(NativeOrigin {
+                    header: operation_header(&op),
+                    view,
+                });
+        }
+    }
+
+    /// A canonical marker names an alias, not its native author. Only independently
+    /// observed local creation of this original and unchanged shared payload establish
+    /// native origin. Work ownership and hostnames cannot identify the maker.
+    pub(crate) fn realized(
+        &self,
+        m: usize,
+        id: &CanonicalOp,
+        op: &jj_lib::op_store::Operation,
+    ) -> bool {
+        if !op
+            .metadata
+            .attributes
+            .contains_key(musubi_jj::node::CANONICAL_ATTRIBUTE)
+        {
+            return false;
+        }
+        let Some(origins) = self
+            .native_origins
+            .get(m)
+            .filter(|origins| origins.copy == self.fx.machine_key(m))
+        else {
+            return true;
+        };
+        let Some(original) = self
+            .fx
+            .hive
+            .members
+            .iter()
+            .find_map(|member| member.adapter.repo().canonical_store().original_id(id).ok())
+        else {
+            return true;
+        };
+        let Some(witnesses) = origins.known.get(&original) else {
+            return true;
+        };
+        let node = self.fx.hive.members[m].adapter.repo();
+        let Ok(view) = futures::executor::block_on(node.loader().op_store().read_view(&op.view_id))
+        else {
+            return true;
+        };
+        let shared = shared_origin_view(view);
+        !witnesses
+            .iter()
+            .any(|source| source.header == operation_header(op) && source.view == shared)
     }
 
     /// Unambiguous native bodies observed before rewriting, excluding marked renderings.
@@ -1627,7 +1842,13 @@ impl World {
                 .attributes
                 .contains_key(musubi_jj::node::CANONICAL_ATTRIBUTE),
             view: futures::executor::block_on(store.read_view(&op.view_id)).unwrap(),
-            realized: realized(op, repo),
+            realized: op
+                .metadata
+                .attributes
+                .get(musubi_jj::node::CANONICAL_ATTRIBUTE)
+                .and_then(OpId::try_from_hex)
+                .map(CanonicalOp)
+                .is_some_and(|id| self.realized(m, &id, op)),
             parent,
         }
     }
@@ -1635,6 +1856,8 @@ impl World {
     /// Records the commits node `m`'s merges made, after a sync.
     pub fn record_merges(&mut self, m: usize) {
         self.observe_operation_sources(m);
+        self.observe_published_operations();
+        self.resolve_retained_operations(m);
         self.finish_workspace_trim(m);
         let after = self.seen(m);
         let what = format!("{}: merge by its node", self.machine(m));
@@ -2222,13 +2445,14 @@ impl World {
             self.seen[m] = None;
             // Its abandons that never reached the hive, whose operations the hub or another
             // machine still has, are gone with it; the rest stay checked.
-            let mut others: Vec<BTreeSet<String>> = (0..self.nodes())
+            let exact = !self.abandoned.is_empty();
+            let mut others: Vec<_> = (0..self.nodes())
                 .filter(|&o| o != m)
-                .map(|o| self.merge_keys(o))
+                .map(|o| self.operation_history(o, exact))
                 .collect();
-            others.push(self.hub_merge_keys());
-            self.abandoned.retain(|(by, _, merge)| {
-                *by != m || !others.iter().any(|keys| keys.contains(merge))
+            others.push(self.hub_operation_history());
+            self.abandoned.retain(|op| {
+                op.by != m || !others.iter().any(|history| history.proves_present(op))
             });
         } else {
             self.dirty.push(false);
@@ -2294,33 +2518,57 @@ impl World {
             .any(|r| r == "origin")
     }
 
-    /// Takes an operation machine `m` abandoned that a `jj` command there brought back into its
+    /// Takes an abandoned operation that a `jj` command on machine `m` brought back into its
     /// history, absent before it, for jj's doing, not musubi's, which runs no command: with
     /// auto-update-stale, a command in a workspace whose working copy recorded an operation
     /// `jj op abandon` rewrote brings back what it abandoned, as on one machine
     /// (docs/internals/races.md, "Known jj limitations"). jj leaves a working copy so where
     /// the abandon ran in another workspace, or where an operation came after its last
     /// command, as musubi's do. `before` is `abandoned_present` from before the command.
-    fn forgive_jj_returns(&mut self, m: usize, before: Option<BTreeSet<String>>) {
+    fn forgive_jj_returns(&mut self, m: usize, before: Option<OperationHistory>) {
         let Some(before) = before else {
             return;
         };
-        let keys: BTreeSet<_> = self.replicated_history(m).into_values().collect();
+        let exact = !self.abandoned.is_empty();
+        let after = self.operation_history(m, exact);
+        let copy = self.fx.machine_key(m);
+        for op in self
+            .abandoned
+            .iter_mut()
+            .filter(|op| op.originals.is_none())
+        {
+            for id in after.native_by_header.get(&op.header).into_iter().flatten() {
+                if before.native.contains(id) {
+                    continue;
+                }
+                let original = after.native_originals.get(id);
+                let absent = match original {
+                    Some(id) => {
+                        !before.originals.contains(id) && !before.unknown.contains(&op.header)
+                    }
+                    None => !before.headers.contains(&op.header),
+                };
+                if absent {
+                    let key = (copy.clone(), id.clone());
+                    op.native_witnesses.entry(key.clone()).or_insert(None);
+                    if let Some(original) = original {
+                        op.qualify_native(&key, original.clone());
+                    }
+                }
+            }
+        }
         let count = self.abandoned.len();
         self.abandoned
-            .retain(|(by, _, merge)| *by != m || before.contains(merge) || !keys.contains(merge));
+            .retain(|op| before.may_contain(op) || !after.proves_present(op));
         if self.abandoned.len() < count {
-            self.record("  (jj brought back an operation it abandoned)".to_owned());
+            self.record("  (jj brought back an abandoned operation)".to_owned());
         }
     }
 
-    /// What `forgive_jj_returns` needs before a `jj` command on machine `m`: if `m` abandoned
-    /// anything, the keys of what is in its history now.
-    fn abandoned_present(&self, m: usize) -> Option<BTreeSet<String>> {
-        self.abandoned
-            .iter()
-            .any(|(by, ..)| *by == m)
-            .then(|| self.replicated_history(m).into_values().collect())
+    /// A native command can resume old history on any copy. Unknown aliases prevent
+    /// proving prior absence; only an exact native id or original proves a return.
+    fn abandoned_present(&self, m: usize) -> Option<OperationHistory> {
+        (!self.abandoned.is_empty()).then(|| self.operation_history(m, true))
     }
 
     /// The `merge_key` of every operation in machine `m`'s history, read in process: a `jj`
@@ -2404,30 +2652,198 @@ impl World {
         (base, dropped)
     }
 
+    pub(crate) fn operation_history(&self, m: usize, exact: bool) -> OperationHistory {
+        let mut result = OperationHistory {
+            copy: Some(self.fx.machine_key(m)),
+            ..OperationHistory::default()
+        };
+        let store = self.fx.hive.members[m].adapter.repo().loader().op_store();
+        for id in self.replicated_history(m).into_keys() {
+            let op = futures::executor::block_on(store.read_operation(&id)).unwrap();
+            let header = operation_header(&op);
+            result.native.insert(id.clone());
+            result
+                .native_by_header
+                .entry(header.clone())
+                .or_default()
+                .insert(id.clone());
+            result.headers.insert(header.clone());
+            if exact {
+                match self.known_original(m, &id) {
+                    Some(original) => {
+                        result.native_originals.insert(id.clone(), original.clone());
+                        result
+                            .originals_by_header
+                            .entry(header)
+                            .or_default()
+                            .insert(original.clone());
+                        result.originals.insert(original);
+                    }
+                    None => {
+                        result.unknown.insert(header);
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    fn hub_operation_history(&self) -> OperationHistory {
+        let store = self.fx.hive.hub.store();
+        let canonical = store.canonical();
+        let head = CanonicalOp(store.head().1.clone());
+        let mut result = OperationHistory::default();
+        for id in canonical.ancestors_until(&[head], |_| false).unwrap() {
+            let op = canonical.read_operation(&id).unwrap();
+            result.headers.insert(operation_header(&op));
+            result.originals.insert(canonical.original_id(&id).unwrap());
+        }
+        result
+    }
+
+    /// Remember only histories actually accepted by the hub, including ones a later
+    /// rollback or trim removes. A local command with similar metadata is not publication.
+    fn observe_published_operations(&mut self) {
+        let store = self.fx.hive.hub.store();
+        let canonical = store.canonical();
+        let mut pending = vec![CanonicalOp(store.head().1.clone())];
+        while let Some(id) = pending.pop() {
+            if !self.published_seen.insert(id.clone()) {
+                continue;
+            }
+            let op = canonical.read_operation(&id).unwrap();
+            self.published_headers.insert(operation_header(&op));
+            pending.extend(op.parents.into_iter().map(CanonicalOp));
+        }
+    }
+
+    /// Native abandonment can leave another alias whose mapping musubi has not yet read.
+    /// Resolve only frozen native survivors, including exact links through later native
+    /// abandons. This cannot excuse an alias created by a sync that resurrected the operation.
+    fn resolve_retained_operations(&mut self, m: usize) {
+        let copy = self.fx.machine_key(m);
+        let mut learned = vec![];
+        for (i, op) in self.abandoned.iter().enumerate() {
+            for key in op
+                .native_witnesses
+                .keys()
+                .filter(|(owner, _)| *owner == copy)
+            {
+                if let Some(original) = self.known_original(m, &key.1) {
+                    learned.push((i, key.clone(), original));
+                }
+            }
+        }
+        for (i, key, original) in learned {
+            self.abandoned[i].qualify_native(&key, original);
+        }
+        // A private operation may first acquire a mapping during the sync. Learning the
+        // identity of the exact removed source strengthens its obligation; it never excuses
+        // a new rendering. Keep a published source's pre-fault identity unchanged.
+        let newly_known: Vec<_> = self
+            .abandoned
+            .iter()
+            .enumerate()
+            .filter_map(|(i, op)| {
+                (op.copy == copy && !op.shared && op.originals.is_none())
+                    .then(|| self.known_original(m, &op.native).map(|id| (i, id)))
+                    .flatten()
+            })
+            .collect();
+        for (i, id) in newly_known {
+            self.abandoned[i].originals = Some(BTreeSet::from([id]));
+        }
+        let resolved: BTreeSet<_> = self
+            .abandoned
+            .iter()
+            .enumerate()
+            .filter_map(|(i, op)| {
+                let wanted = op.originals.as_ref()?;
+                (op.native_witnesses
+                    .values()
+                    .flatten()
+                    .any(|id| wanted.contains(id)))
+                .then_some(i)
+            })
+            .collect();
+        let mut i = 0;
+        self.abandoned.retain(|_| {
+            let keep = !resolved.contains(&i);
+            i += 1;
+            keep
+        });
+    }
+
+    /// Qualify an already-known native alias before using its immutable original identity.
+    /// A mapping to an unrelated current parent is not evidence about this operation.
+    pub(crate) fn known_original(&self, m: usize, id: &OpId) -> Option<OpId> {
+        let node = self.fx.hive.members[m].adapter.repo();
+        let native =
+            futures::executor::block_on(node.loader().op_store().read_operation(id)).ok()?;
+        let marked = native
+            .metadata
+            .attributes
+            .get(musubi_jj::node::CANONICAL_ATTRIBUTE)
+            .and_then(OpId::try_from_hex)
+            .map(CanonicalOp);
+        // An explicit stored identity survives loss of the disposable translation cache.
+        // Read only established bodies; never canonicalize or mint an identity for proof.
+        node.canonical_of(&LocalOp(id.clone()))
+            .into_iter()
+            .chain(marked)
+            .find_map(|canonical| {
+                let source = node.canonical_store().read_operation(&canonical).ok()?;
+                (operation_header(&native) == operation_header(&source))
+                    .then(|| node.canonical_store().original_id(&canonical).ok())
+                    .flatten()
+            })
+    }
+
     /// `jj op abandon` of `spec` on machine `m`: one operation, or a range `x..y`, which drops
     /// the native operations `dropped`. An operation with another reachable local version
     /// has not been removed from the replicated history.
     pub fn abandon_ops(&mut self, m: usize, spec: &str, dropped: &[String]) {
         self.begin_workspace_trim(m);
+        self.observe_published_operations();
         let store = self.fx.hive.members[m]
             .adapter
             .repo()
             .loader()
             .op_store()
             .clone();
-        let dropped: Vec<(String, String)> = dropped
+        let dropped: Vec<_> = dropped
             .iter()
             .map(|op| {
-                let at = jj_lib::op_store::OperationId::try_from_hex(op).unwrap();
-                let op_store = futures::executor::block_on(store.read_operation(&at)).unwrap();
-                (self.op_key(m, op), merge_key(&op_store))
+                let at = OpId::try_from_hex(op).unwrap();
+                let body = futures::executor::block_on(store.read_operation(&at)).unwrap();
+                AbandonedOperation {
+                    by: m,
+                    key: self.op_key(m, op),
+                    merge: merge_key(&body),
+                    header: operation_header(&body),
+                    copy: self.fx.machine_key(m),
+                    shared: self.published_headers.contains(&operation_header(&body)),
+                    native_witnesses: BTreeMap::new(),
+                    originals: self.known_original(m, &at).map(|id| BTreeSet::from([id])),
+                    native: at,
+                }
             })
             .collect();
         // Every survivor keeps its view when jj changes its parents, including commands
         // and internal fix-ups with one parent. Pin that independent source for the reference.
         let before = self.ops_by_key(m);
+        let prior_originals: BTreeMap<_, _> = before
+            .values()
+            .flatten()
+            .map(|hex| {
+                let id = OpId::try_from_hex(hex).unwrap();
+                let original = self.known_original(m, &id);
+                (id, original)
+            })
+            .collect();
         self.jj(m, &["op", "abandon", spec]);
         let after = self.ops_by_key(m);
+        let mut survivor_links = BTreeMap::new();
         for (key, old) in &before {
             // Only a key one operation had before, and has after: operations sharing a key,
             // as two merges a node makes at one tick of its clock can, can't be told apart,
@@ -2440,15 +2856,57 @@ impl World {
             }
             let id = jj_lib::op_store::OperationId::try_from_hex(old).unwrap();
             let op = futures::executor::block_on(store.read_operation(&id)).unwrap();
+            let new_id = OpId::try_from_hex(new).unwrap();
+            let mut new_body = futures::executor::block_on(store.read_operation(&new_id)).unwrap();
+            new_body.parents = op.parents.clone();
+            if new_body == op {
+                survivor_links.insert(new_id.clone(), (id.clone(), prior_originals[&id].clone()));
+                let copy = self.fx.machine_key(m);
+                for dropped in &mut self.abandoned {
+                    let key = (copy.clone(), id.clone());
+                    if dropped.native_witnesses.contains_key(&key) {
+                        if let Some(original) = &prior_originals[&id] {
+                            dropped.qualify_native(&key, original.clone());
+                        }
+                        dropped
+                            .native_witnesses
+                            .entry((copy.clone(), new_id.clone()))
+                            .or_insert(None);
+                    }
+                }
+            }
             let replaced = self.retained_source(m, &op);
             self.remember_retained(key.clone(), replaced);
         }
-        let retained: BTreeSet<_> = self.replicated_history(m).into_values().collect();
-        for (key, merge) in dropped {
-            // Native abandonment of one physical alias can leave another reachable.
-            // The logical operation remains part of the history in that case.
-            if !retained.contains(&merge) {
-                self.abandoned.push((m, key, merge));
+        let retained = self.operation_history(m, true);
+        let copy = self.fx.machine_key(m);
+        for mut op in dropped {
+            op.native_witnesses = retained
+                .native_by_header
+                .get(&op.header)
+                .into_iter()
+                .flatten()
+                .map(|id| {
+                    (
+                        (copy.clone(), id.clone()),
+                        retained.native_originals.get(id).cloned(),
+                    )
+                })
+                .collect();
+            // A native parent rewrite preserves the source body. Its already-established
+            // identity was kept too, even if the new physical alias has no mapping yet.
+            // Record the old id's identity, never assign it to the new native id: a new
+            // parent version can acquire a different original when first canonicalized.
+            for (_, id) in op.native_witnesses.keys().cloned().collect::<Vec<_>>() {
+                if let Some((source, original)) = survivor_links.get(&id) {
+                    op.native_witnesses
+                        .insert((copy.clone(), source.clone()), original.clone());
+                }
+            }
+            // Only a surviving alias of this original suppresses the obligation. An
+            // independently reparented original with the same metadata does not.
+            if !retained.proves_present(&op) {
+                self.abandoned.push(op);
             }
         }
     }
@@ -2534,6 +2992,7 @@ impl World {
     /// files, as if it crashed between a view and its operation. Returns how many it was
     /// writing.
     pub fn crash(&mut self, m: usize, lose_cache: bool, stopped: u64) -> usize {
+        self.observe_native_origins(m);
         let in_flight = self.fx.hive.members[m]
             .adapter
             .repo_mut()
@@ -2628,7 +3087,7 @@ impl World {
     }
 
     /// Native ids and merge keys above the independently observed join boundary.
-    fn replicated_history(&self, m: usize) -> BTreeMap<OpId, String> {
+    pub(crate) fn replicated_history(&self, m: usize) -> BTreeMap<OpId, String> {
         let store = self.fx.hive.members[m].adapter.repo().loader().op_store();
         let mut pending = self.fx.hive.members[m]
             .adapter
@@ -2965,10 +3424,6 @@ fn retained_sources_do_not_infer_native_ownership_from_a_shared_hostname() {
             {
                 let source = world.retained_source(m, &op);
                 assert!(
-                    !source.realized,
-                    "the shared hostname cannot identify its maker"
-                );
-                assert!(
                     !source.native,
                     "a received marker supplies no native ownership"
                 );
@@ -2980,5 +3435,349 @@ fn retained_sources_do_not_infer_native_ownership_from_a_shared_hostname() {
     assert!(
         checked,
         "the fixture must contain a marked merge on the other copy"
+    );
+}
+
+#[test]
+fn abandoned_originals_do_not_include_other_native_parent_versions() {
+    let mut world = World::new(Setup {
+        nodes: 2,
+        naming: Naming::Default,
+        prejoin: false,
+        secondary: false,
+    });
+    world.jj(0, &["bookmark", "create", "ancestor", "-r", "@"]);
+    let ancestor = world.latest_op_head(0);
+    world.jj(0, &["bookmark", "create", "survivor", "-r", "@"]);
+    let old = world.latest_op_head(0);
+    world.fx.node(0).canonical_heads().unwrap();
+    let old_original = world
+        .known_original(0, &OpId::try_from_hex(&old).unwrap())
+        .unwrap();
+    let store = world.fx.hive.members[0].adapter.repo().loader().op_store();
+    let body =
+        futures::executor::block_on(store.read_operation(&OpId::try_from_hex(&old).unwrap()))
+            .unwrap();
+    let merge = merge_key(&body);
+    world.op_abandon(0, &ancestor);
+    world.sync(0);
+    world.sync(1);
+    // Resume the older immutable branch locally while only the reparented version has
+    // been shared. Both native versions have the same command metadata and view.
+    world.jj_at_op(0, &old, &["bookmark", "create", "old-branch", "-r", "@"]);
+    world.jj(1, &["bookmark", "create", "after", "-r", "@"]);
+    let versions = &world.ops_by_key(1)[&merge];
+    assert_eq!(versions.len(), 1);
+    let shared = versions.iter().next().unwrap().clone();
+    world.crash(1, true, 0);
+    world.op_abandon(1, &shared);
+    let dropped = world
+        .abandoned
+        .iter()
+        .find(|op| op.by == 1 && op.merge == merge)
+        .unwrap();
+    let originals = dropped.originals.clone().unwrap();
+    assert!(!originals.contains(&old_original));
+    // Before the drop reaches the first copy, its exact original is still reachable.
+    let rejected =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| world.check_operations()))
+            .unwrap_err();
+    let message = rejected.downcast_ref::<String>().unwrap();
+    assert!(
+        message.contains("has the operation") && message.contains("which beta abandoned"),
+        "{message}"
+    );
+    world.converge();
+    assert!(
+        world
+            .replicated_history(0)
+            .keys()
+            .any(|id| world.known_original(0, id) == Some(old_original.clone()))
+    );
+    assert!(!world.replicated_history(0).keys().any(|id| {
+        world
+            .known_original(0, id)
+            .is_some_and(|id| originals.contains(&id))
+    }));
+    let dropped = world
+        .abandoned
+        .iter()
+        .find(|op| op.by == 1 && op.merge == merge)
+        .unwrap();
+    let alternate = world.operation_history(0, true);
+    assert!(
+        !alternate.proves_present(dropped),
+        "an alternate original proves no native return"
+    );
+    assert!(
+        !alternate.may_contain(dropped),
+        "known alternate metadata is not uncertain source identity"
+    );
+    let mut foreign = OperationHistory {
+        copy: Some("another-copy".to_owned()),
+        ..OperationHistory::default()
+    };
+    foreign.native.insert(dropped.native.clone());
+    assert!(
+        !foreign.proves_present(dropped),
+        "equal native bytes on a different copy prove no return"
+    );
+    let mut unknown = OperationHistory::default();
+    unknown.unknown.insert(dropped.header.clone());
+    assert!(
+        unknown.may_contain(dropped),
+        "uncertain matching metadata prevents absence proof"
+    );
+    assert!(
+        !unknown.proves_present(dropped),
+        "uncertain metadata cannot suppress or discharge a drop"
+    );
+    world.clone_copy(1);
+    let at = world
+        .abandoned
+        .iter()
+        .position(|op| op.by == 1 && op.merge == merge)
+        .unwrap();
+    world.abandoned[at].originals = None;
+    let rejected =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| world.check_operations()))
+            .unwrap_err();
+    let message = rejected.downcast_ref::<String>().unwrap();
+    assert!(
+        message.contains("has the operation") && message.contains("which beta abandoned"),
+        "matching metadata is rejected without an exact original witness: {message}"
+    );
+}
+
+#[test]
+fn private_abandons_still_reject_their_first_published_rendering() {
+    for lose_cache in [false, true] {
+        let mut world = World::new(Setup {
+            nodes: 2,
+            naming: Naming::Default,
+            prejoin: false,
+            secondary: false,
+        });
+        world.jj(0, &["bookmark", "create", "private", "-r", "@"]);
+        let source = world.latest_op_head(0);
+        let native = LocalOp(OpId::try_from_hex(&source).unwrap());
+        let cached = lose_cache.then(|| world.fx.node(0).canonicalize(&native).unwrap());
+        world.jj(0, &["bookmark", "create", "after", "-r", "@"]);
+        if lose_cache {
+            world.crash(0, true, 0);
+        }
+        world.op_abandon(0, &source);
+        let at = world
+            .abandoned
+            .iter()
+            .position(|op| op.native.hex() == source)
+            .unwrap();
+        assert!(!world.abandoned[at].shared);
+        assert!(world.abandoned[at].originals.is_none());
+        // Negative control: publish the discarded source with the real adapter, without
+        // a native command that legitimately resumes old history. In the cache-loss case,
+        // use its stored canonical form without asking the adapter to translate the source.
+        let canonical = cached.unwrap_or_else(|| world.fx.node(0).canonicalize(&native).unwrap());
+        world.fx.node(0).advance(&canonical).unwrap();
+        world.sync(0);
+        world.sync(1);
+        if lose_cache {
+            assert!(
+                world.abandoned[at].originals.is_none(),
+                "the stored rendering must not requalify the removed native source"
+            );
+        }
+        let rejected =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| world.check_operations()))
+                .unwrap_err();
+        let message = rejected.downcast_ref::<String>().unwrap();
+        assert!(
+            message.contains("has the operation") && message.contains("which alpha abandoned"),
+            "{message}"
+        );
+    }
+}
+
+#[test]
+fn a_native_return_allows_only_the_parent_version_jj_brought_back() {
+    let mut world = World::new(Setup {
+        nodes: 2,
+        naming: Naming::Default,
+        prejoin: false,
+        secondary: false,
+    });
+    world.jj(0, &["bookmark", "create", "ancestor", "-r", "@"]);
+    let ancestor = world.latest_op_head(0);
+    world.jj(0, &["bookmark", "create", "survivor", "-r", "@"]);
+    let old = world.latest_op_head(0);
+    world.op_abandon(0, &ancestor);
+    let removed = world.latest_op_head(0);
+    assert_ne!(removed, old);
+    world.jj(0, &["bookmark", "create", "after", "-r", "@"]);
+    world.op_abandon(0, &removed);
+    world.jj_at_op(0, &old, &["bookmark", "create", "resumed", "-r", "@"]);
+    world.converge();
+    let dropped = world
+        .abandoned
+        .iter_mut()
+        .find(|op| op.native.hex() == removed)
+        .unwrap();
+    assert!(dropped.originals.is_none());
+    // Exact native-return proof also applies when a published source's identity was lost.
+    dropped.shared = true;
+    world.check_operations();
+    // The older version was restored by jj. Republishing the other parent version through
+    // the adapter still violates its own abandon, despite the matching command metadata.
+    let canonical = world
+        .fx
+        .node(0)
+        .canonicalize(&LocalOp(OpId::try_from_hex(&removed).unwrap()))
+        .unwrap();
+    world.fx.node(0).advance(&canonical).unwrap();
+    world.sync(0);
+    world.sync(1);
+    let rejected =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| world.check_operations()))
+            .unwrap_err();
+    let message = rejected.downcast_ref::<String>().unwrap();
+    assert!(
+        message.contains("has the operation") && message.contains("which alpha abandoned"),
+        "{message}"
+    );
+}
+
+#[test]
+fn marked_native_repairs_keep_their_author_after_cache_loss() {
+    let mut world = World::new(Setup {
+        nodes: 2,
+        naming: Naming::SharedHostname,
+        prejoin: false,
+        secondary: false,
+    });
+    let parent = OpId::try_from_hex(world.latest_op_head(0)).unwrap();
+    let loader = world.fx.hive.members[0].adapter.repo().loader().clone();
+    let store = loader.op_store().clone();
+    let mut op = futures::executor::block_on(store.read_operation(&parent)).unwrap();
+    let view = futures::executor::block_on(store.read_view(&op.view_id)).unwrap();
+    op.parents = vec![parent];
+    op.metadata.attributes.clear();
+    op.metadata.workspace_name = None;
+    op.metadata.description = "native repair carrying another copy's work".to_owned();
+    op.metadata.time.start.timestamp.0 += 1000;
+    op.metadata.time.end.timestamp.0 += 1000;
+    op.metadata
+        .attributes
+        .insert("musubi.fixup".to_owned(), "1".to_owned());
+    op.metadata
+        .attributes
+        .insert("musubi.work".to_owned(), world.fx.machine_key(1));
+    op.metadata.attributes.insert(
+        "musubi.worked-at".to_owned(),
+        op.metadata.time.end.timestamp.0.to_string(),
+    );
+    let raw = futures::executor::block_on(store.write_operation(&op)).unwrap();
+    // Creating the fixture's operation is an actor action; observing it below must
+    // neither canonicalize another source nor write a new native operation.
+    let canonical = world.fx.node(0).canonicalize(&LocalOp(raw)).unwrap();
+    world.observe_native_origins(0);
+    let data = world.fx.hive.members[0].adapter.repo().canonical_store();
+    let canonical_op = data.read_operation(&canonical).unwrap();
+    let canonical_view = data.read_view(&canonical_op.view_id).unwrap();
+    // A second copy can already hold immutable staged data before advancing to it.
+    let receiver = world.fx.hive.members[1].adapter.repo().canonical_store();
+    assert_eq!(
+        receiver.write_view(&canonical_view).unwrap(),
+        canonical_op.view_id
+    );
+    assert_eq!(receiver.write_operation(&canonical_op).unwrap(), canonical);
+    let mut alias = op.clone();
+    alias.metadata.attributes.insert(
+        musubi_jj::node::CANONICAL_ATTRIBUTE.to_owned(),
+        canonical.0.hex(),
+    );
+    assert!(
+        !world.realized(0, &canonical, &alias),
+        "work ownership is not the native author"
+    );
+    assert!(
+        world.realized(1, &canonical, &alias),
+        "a shared hostname and own-work marker prove no local creation"
+    );
+    let mut private = view.clone();
+    private.wc_commit_ids.clear();
+    private.git_heads.clear();
+    private.git_refs.clear();
+    private
+        .remote_views
+        .remove(jj_lib::git::REMOTE_NAME_FOR_LOCAL_GIT_REPO);
+    alias.view_id = futures::executor::block_on(store.write_view(&private)).unwrap();
+    assert!(
+        !world.realized(0, &canonical, &alias),
+        "private export/projection changes do not change authorship"
+    );
+    let mut wrong = private.clone();
+    wrong.head_ids.clear();
+    let mut changed = alias.clone();
+    changed.view_id = futures::executor::block_on(store.write_view(&wrong)).unwrap();
+    assert!(
+        world.realized(0, &canonical, &changed),
+        "native origin cannot excuse changed shared heads"
+    );
+    let mut wrong = private;
+    let mut remote = jj_lib::op_store::RemoteView::default();
+    remote.bookmarks.insert(
+        "extra".into(),
+        jj_lib::op_store::RemoteRef {
+            target: jj_lib::op_store::RefTarget::normal(
+                view.head_ids.iter().next().unwrap().clone(),
+            ),
+            state: jj_lib::op_store::RemoteRefState::Tracked,
+        },
+    );
+    wrong.remote_views.insert("other".into(), remote);
+    changed.view_id = futures::executor::block_on(store.write_view(&wrong)).unwrap();
+    assert!(
+        world.realized(0, &canonical, &changed),
+        "non-Git remote changes remain shared payload"
+    );
+    let mut unknown = op;
+    unknown.metadata.description = "unpublished unknown native source".to_owned();
+    let unknown = futures::executor::block_on(store.write_operation(&unknown)).unwrap();
+    let before: BTreeSet<_> = world.fx.hive.members[0]
+        .adapter
+        .repo()
+        .canonical_store()
+        .operation_ids()
+        .unwrap()
+        .into_iter()
+        .collect();
+    world.observe_native_origins(0);
+    assert!(
+        world.fx.hive.members[0]
+            .adapter
+            .repo()
+            .canonical_of(&LocalOp(unknown))
+            .is_none()
+    );
+    assert_eq!(
+        world.fx.hive.members[0]
+            .adapter
+            .repo()
+            .canonical_store()
+            .operation_ids()
+            .unwrap()
+            .into_iter()
+            .collect::<BTreeSet<_>>(),
+        before
+    );
+    world.crash(0, true, 0);
+    assert!(
+        !world.realized(0, &canonical, &alias),
+        "qualified native origin survives cache loss"
+    );
+    world.clone_copy(0);
+    assert!(
+        world.realized(0, &canonical, &alias),
+        "a replacement cannot inherit the old copy's native origin"
     );
 }

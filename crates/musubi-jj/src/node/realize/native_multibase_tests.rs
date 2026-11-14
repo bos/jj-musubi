@@ -32,7 +32,7 @@ fn native_merge(node: &NodeRepo, parents: &[LocalOp]) -> (LocalOp, View) {
         .iter()
         .map(|id| node.loader().load_operation(&id.0).block_on().unwrap())
         .collect();
-    let (merged, _) = node
+    let (merged, rebased) = node
         .loader()
         .merge_operations(
             operations,
@@ -42,6 +42,12 @@ fn native_merge(node: &NodeRepo, parents: &[LocalOp]) -> (LocalOp, View) {
         )
         .block_on()
         .unwrap();
+    // Pinned native merge creates commits through rebase_descendants; transaction.write
+    // otherwise hashes an operation/view from settings. This finite path must rebase none.
+    assert_eq!(
+        rebased, 0,
+        "authored native replay may not mint RNG-dependent commits"
+    );
     (
         LocalOp(merged.op_id().clone()),
         merged.view().store_view().clone(),
@@ -195,7 +201,33 @@ fn cached_suffix_after_contraction_uses_both_ordered_native_bases() {
     env.save(saved.path());
     let replay_env = TestEnv::restore(saved.path());
     let replay_repo = replay_env.repo_handle("alpha");
-    let mut replay = open(&replay_repo);
+    let before_replay = bytes(repo.path());
+    let actor_clock = env.clock().now();
+    assert_eq!(
+        bytes(replay_repo.path()),
+        before_replay,
+        "copy the complete native source bytes"
+    );
+    assert_eq!(
+        bytes(&replay_env.root().join("home")),
+        bytes(&env.root().join("home"))
+    );
+    let replay_settings = jj_lib::settings::UserSettings::from_config_and_home_dir(
+        node.loader().settings().config().clone(),
+        Some(replay_env.root().join("home")),
+    )
+    .unwrap();
+    let mut replay = NodeRepo::open(&replay_repo.repo_path(), &replay_settings).unwrap();
+    assert_eq!(
+        bytes(repo.path()),
+        before_replay,
+        "opening the replay changes no actor bytes"
+    );
+    assert_eq!(
+        env.clock().now(),
+        actor_clock,
+        "replay opening consumes no actor seed"
+    );
     let (source_suffix, source_view) = native_merge(&replay, &[ours.clone(), theirs.clone()]);
     let (_, reversed_view) = native_merge(&replay, &[theirs.clone(), ours.clone()]);
     assert_eq!(
@@ -381,6 +413,91 @@ fn cached_suffix_after_contraction_uses_both_ordered_native_bases() {
             .unwrap(),
         loaded.store().root_commit_id()
     );
+    // Independently capture the original command's canonical projection on its authored
+    // old parent before any contracted publication. Supplying that actual source body is
+    // an explicit mapped-original precondition, not a choice from the SUT's final heads.
+    let command_view_id = replay
+        .loader()
+        .op_store()
+        .write_view(&command_view)
+        .block_on()
+        .unwrap();
+    assert_eq!(command_view_id, command_body.view_id);
+    assert_eq!(
+        replay
+            .loader()
+            .op_store()
+            .write_operation(&command_body)
+            .block_on()
+            .unwrap(),
+        command.0
+    );
+    assert_eq!(
+        command_view
+            .wc_commit_ids
+            .keys()
+            .map(|name| name.as_str())
+            .collect::<Vec<_>>(),
+        ["alpha"]
+    );
+    assert_eq!(
+        command_body.metadata.workspace_name.as_deref(),
+        Some(WorkspaceName::new("alpha"))
+    );
+    // This one-copy literal projection supplies no ownership/source-selection oracle.
+    // All native command fields stay fixed; only the declared per-machine fields and
+    // alpha's known canonical key differ in the canonical encoding.
+    let key = format!("{}/alpha", replay.machine().key());
+    let mut command_canonical_view = command_view.clone();
+    command_canonical_view.git_refs.clear();
+    command_canonical_view.git_heads.clear();
+    command_canonical_view
+        .remote_views
+        .remove(jj_lib::git::REMOTE_NAME_FOR_LOCAL_GIT_REPO);
+    command_canonical_view.wc_commit_ids = BTreeMap::from([(
+        key.clone().into(),
+        command_view.wc_commit_ids[WorkspaceName::new("alpha")].clone(),
+    )]);
+    let mut original_command = command_body.clone();
+    original_command.parents = vec![canonical[5].0.clone()];
+    original_command.view_id = replay
+        .canonical
+        .write_view(&command_canonical_view)
+        .unwrap();
+    original_command.metadata.workspace_name = Some(key.into());
+    original_command
+        .metadata
+        .attributes
+        .insert("musubi.original-parents".to_owned(), canonical[5].0.hex());
+    let command_canonical = CanonicalOp(OperationId::new(blake2b_hash(&original_command).to_vec()));
+    assert_eq!(replay.canonicalize(command).unwrap(), command_canonical);
+    assert_eq!(
+        replay.canonical.read_operation(&command_canonical).unwrap(),
+        original_command
+    );
+    transfer(&replay, &mut node, &command_canonical);
+    assert_eq!(
+        node.canonicalize(command).unwrap(),
+        command_canonical,
+        "the native late leaf has its independently captured original projection"
+    );
+    let mut contracted_command = original_command.clone();
+    contracted_command.parents = vec![expected_canonical[5].0.clone()];
+    let late_canonical = CanonicalOp(OperationId::new(blake2b_hash(&contracted_command).to_vec()));
+    let mut late_body = command_body.clone();
+    late_body.parents = vec![expected_physical[5].0.clone()];
+    late_body
+        .metadata
+        .attributes
+        .insert(CANONICAL_ATTRIBUTE.to_owned(), late_canonical.0.hex());
+    let late = LocalOp(
+        replay
+            .loader()
+            .op_store()
+            .write_operation(&late_body)
+            .block_on()
+            .unwrap(),
+    );
     drop(node);
     fs::remove_file(repo.repo_path().join("musubi/translation")).unwrap();
     node = open(&repo);
@@ -404,9 +521,114 @@ fn cached_suffix_after_contraction_uses_both_ordered_native_bases() {
             .is_none_or(|base| base.0 != *node.canonical.root_operation_id()),
         "this is a non-root source graph, without current-Git root fallback"
     );
+    assert_eq!(
+        raw(&node, &late),
+        (late_body.clone(), command_view.clone()),
+        "the mapped late leaf is reparented on the fixed ours-prime edge"
+    );
+    // The suffix is an intermediate realization, not the final published head. Build its
+    // entire expected body from the supplied immutable suffix input and declared edges.
+    let mut metadata = suffix_body.metadata.clone();
+    metadata.workspace_name = source_body.metadata.workspace_name.clone();
+    metadata
+        .attributes
+        .insert(CANONICAL_ATTRIBUTE.to_owned(), incoming.0.hex());
+    metadata.attributes.insert(
+        "musubi.reserved-workspaces".to_owned(),
+        "[\"alpha\"]".to_owned(),
+    );
+    let expected_suffix_native = RawOperation {
+        view_id: ViewId::new(blake2b_hash(&expected_view).to_vec()),
+        parents: ordered.iter().map(|id| id.0.clone()).collect(),
+        metadata,
+        commit_predecessors: source_body.commit_predecessors.clone(),
+    };
+    assert_eq!(
+        replay
+            .loader()
+            .op_store()
+            .write_view(&expected_view)
+            .block_on()
+            .unwrap(),
+        expected_suffix_native.view_id
+    );
+    let suffix_prime = LocalOp(
+        replay
+            .loader()
+            .op_store()
+            .write_operation(&expected_suffix_native)
+            .block_on()
+            .unwrap(),
+    );
+    // Use the actual actor loader's full post-restart configuration and copied home, not
+    // TestRepo::settings (which allocates a seed). The RNG is independent; the zero-rebase
+    // result and pinned transaction-write path bound this fixture's RNG-sensitive effects.
+    let actor_bytes = bytes(repo.path());
+    let actor_seed = env.clock().now();
+    let settings = jj_lib::settings::UserSettings::from_config_and_home_dir(
+        node.loader().settings().config().clone(),
+        Some(replay_env.root().join("home")),
+    )
+    .unwrap();
+    replay.set_settings(settings);
+    let mut final_inputs = [late.clone(), suffix_prime.clone()];
+    let end = |id: &LocalOp| raw(&replay, id).0.metadata.time.end.timestamp;
+    assert_ne!(
+        end(&final_inputs[0]),
+        end(&final_inputs[1]),
+        "native cleanup order has no tie"
+    );
+    final_inputs.sort_by_key(end);
+    let inputs = final_inputs
+        .iter()
+        .map(|id| replay.loader().load_operation(&id.0).block_on().unwrap())
+        .collect();
+    // Match RepoLoader::load_at_head(None)'s native resolver, not native_merge's authoring
+    // workspace/description. The caller filters covered heads and sorts by end time.
+    let (final_replay, rebased) = replay
+        .loader()
+        .merge_operations(inputs, None, Some("reconcile divergent operations"), [])
+        .block_on()
+        .unwrap();
+    assert_eq!(
+        rebased, 0,
+        "final replay must create no RNG-dependent rebased commits"
+    );
+    let expected_final_id = LocalOp(final_replay.op_id().clone());
+    let expected_final = raw(&replay, &expected_final_id);
+    // These existing visible heads need no hidden-working-copy repair after the merge.
+    // Alongside native rebased=0 and the operation-only transaction.write path, this is
+    // the scoped no-new-commit witness; no general RNG-state equivalence is asserted.
+    for binding in expected_final.1.wc_commit_ids.values() {
+        assert!(expected_final.1.head_ids.contains(binding));
+    }
+    assert_eq!(
+        expected_final.0.parents,
+        final_inputs
+            .iter()
+            .map(|id| id.0.clone())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        expected_final.1.local_bookmarks[RefName::new("late")]
+            .as_normal()
+            .unwrap(),
+        loaded.store().root_commit_id()
+    );
+    assert_eq!(
+        bytes(repo.path()),
+        actor_bytes,
+        "final replay cannot write actor source bytes"
+    );
+    assert_eq!(
+        env.clock().now(),
+        actor_seed,
+        "final replay cannot consume an actor seed"
+    );
     let events = Arc::new(Mutex::new(vec![]));
     let seen = events.clone();
     let _observe = Observe::new(move |event| seen.lock().unwrap().push(event));
+    let _stores = record_stores(&mut node);
     let actual = node.advance(&incoming).unwrap();
     let events = events.lock().unwrap();
     assert!(events.iter().any(|event| matches!(event,
@@ -414,6 +636,11 @@ fn cached_suffix_after_contraction_uses_both_ordered_native_bases() {
     assert!(!events.iter().any(|event| matches!(event,
         Event::CurrentGit { canonical, .. } if canonical == &incoming)));
     assert!(matches!(events.last(), Some(Event::Complete)));
+    assert!(
+        events.iter().any(|event| matches!(event,
+        Event::Write { op, .. } if op == &expected_suffix_native)),
+        "the SUT must actually write this new suffix on the witnessed two-base inputs"
+    );
     let (actual_body, actual_view) = raw(&node, &actual);
     assert_eq!(
         actual_body.parents,
@@ -423,23 +650,28 @@ fn cached_suffix_after_contraction_uses_both_ordered_native_bases() {
         actual_view, expected_view,
         "full native replay, including bindings and Git fields"
     );
-    let mut metadata = suffix_body.metadata.clone();
-    metadata.workspace_name = source_body.metadata.workspace_name;
-    metadata
-        .attributes
-        .insert(CANONICAL_ATTRIBUTE.to_owned(), incoming.0.hex());
-    metadata.attributes.insert(
-        "musubi.reserved-workspaces".to_owned(),
-        "[\"alpha\"]".to_owned(),
-    );
-    assert_eq!(actual_body.metadata, metadata);
     assert_eq!(
-        actual_body.commit_predecessors,
-        source_body.commit_predecessors
+        actual_body, expected_suffix_native,
+        "returned primary suffix is intermediate"
     );
+    // Release the observer and its mutex before inspecting final history. Reading the
+    // raw frontier must not call a helper which silently performs another native merge.
+    drop(events);
+    drop(_observe);
+    let final_heads = node.local_heads().unwrap();
+    assert_eq!(final_heads, [expected_final_id]);
+    let actual_final = raw(&node, &final_heads[0]);
     assert_eq!(
-        actual_body.view_id,
-        ViewId::new(blake2b_hash(&expected_view).to_vec())
+        actual_final, expected_final,
+        "full final native inputs retain the late leaf"
+    );
+    assert!(actual_final.0.parents.contains(&late.0));
+    assert!(actual_final.0.parents.contains(&suffix_prime.0));
+    assert_eq!(
+        actual_final.1.local_bookmarks[RefName::new("late")]
+            .as_normal()
+            .unwrap(),
+        loaded.store().root_commit_id()
     );
     assert!(actual_view.local_bookmarks.contains_key(RefName::new("x")));
     assert!(

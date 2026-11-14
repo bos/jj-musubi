@@ -153,6 +153,11 @@ def stampText (ctx : Context) (value : Stamp) : String := Id.run do
       lines := lines ++ [s!"forget-after {copyText owner} {origin id} {after}"]
   return String.intercalate "\n" lines
 
+/-- Stamp maps use the construction's key order internally. Keep each complete value
+unchanged; raw byte canonicality is checked before applying this representation choice. -/
+def orderStampRows (values : List (Copy × α)) : List (Copy × α) :=
+  values.mergeSort (fun a b => decide (copyText a.1 ≤ copyText b.1))
+
 def stamp (ctx : Context) (metadata : Json) : Except String (Option Stamp) := do
   let some text ← readAttr metadata "musubi.presence" | return none
   let mut known := []
@@ -178,7 +183,9 @@ def stamp (ctx : Context) (metadata : Json) : Except String (Option Stamp) := do
       !(latest ++ worked).all (fun row => known.contains row.1) ||
       !forgetAfter.all (fun row => known.contains row.1) then
     throw "noncanonical raw presence stamp"
-  return some value
+  return some { value with
+    latest := orderStampRows value.latest, worked := orderStampRows value.worked,
+    forgetAfter := orderStampRows value.forgetAfter }
 
 def bindings (ctx : Context) (view : Json) : Except String Bindings := do
   let bindings ← rows view "workspaces"

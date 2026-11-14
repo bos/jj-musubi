@@ -339,3 +339,17 @@ certified by these native checks. The Rust assertions and native policy were not
 The serial window ran for 3 minutes 49 seconds, with no second oracle build, full suite or
 campaign. Full construction preservation, native simulation, cross-store order and the
 certified prefix limits above remain unchanged.
+
+The subsequent diagnostic-only child captured A's exact failed canonical argument and every
+candidate without changing shape equality. Its nearest actual body differed only because
+the raw stamp decoder prepended owner-map rows, whereas `stampOf` orders them. The captured
+stamp and actual stamp serialize to exactly the same native bytes, and the reconstructed raw
+operation shape matches the actual body, including its full view and predecessor option/list.
+This is a codec representation mismatch, not evidence of a native presence-policy defect.
+
+The next child orders only decoded stamp map rows (`latest`, `worked`, `forgetAfter`) by the
+construction's copy-key order, after the existing exact raw-byte roundtrip validation. Every
+inner value, option and multiplicity remains untouched; duplicate/noncanonical byte rejection
+is unchanged. Ordered operation parents, predecessor lists and signed reference terms are not
+normalized. A single multiowner roundtrip guard includes every map and duration option. The
+diagnostic reporting remains separate from final landing, and native validation is pending.

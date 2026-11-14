@@ -5,6 +5,7 @@ record custody, stale captures and the separate schedule restrictions of accepte
 -/
 import Musubi.NativeLifecycle
 import Musubi.NativeLifecycle.ConstructionSound
+import Musubi.NativeLifecycle.Json
 
 namespace Musubi.NativeLifecycle.Test
 
@@ -552,5 +553,20 @@ private def partialIdentity : Evidence :=
   .error (.malformed "conflicting identity rows")
 #guard evidence.installIdentities [⟨p 4, c 3, o 3, .original⟩] =
   .error (.malformed "identity differs from native marker")
+
+private def stampCodecContext : Json.Context :=
+  { physical := [], canonical := [],
+    original := [String.ofList (List.replicate 128 '0'), String.ofList (List.replicate 128 '1')],
+    commits := [], digests := [], contents := [], fields := [] }
+private def stampCodecValue : Stamp :=
+  { known := [me, beta], latest := [(me, [o 0, o 1]), (beta, [o 1])],
+    worked := [(me, [o 0]), (beta, [o 0, o 1])],
+    forgetAfter := [(me, [(o 0, none), (o 1, some 1000000007)]), (beta, [(o 0, some 0)])] }
+
+-- A canonical wire stamp must decode to the construction's map representation, preserving
+-- multiple owners, every set value, absent duration, zero and subsecond duration options.
+#guard Json.stamp stampCodecContext (Lean.Json.mkObj [("attributes", Lean.Json.mkObj [
+  ("musubi.presence", Lean.Json.str (Json.stampText stampCodecContext stampCodecValue))])]) =
+    .ok (some stampCodecValue)
 
 end Musubi.NativeLifecycle.Test

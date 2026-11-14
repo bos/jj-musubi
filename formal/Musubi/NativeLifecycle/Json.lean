@@ -640,8 +640,8 @@ def reply (request : Json) : Except String Json := do
   -- publication remain raw observations, never an extra identity/encoding premise here.
   let encodingRaw ← if (← str request "kind") = "retry" then get request "prepared" else pure after
   let observedBodies ← decodeEvidence ctx encodingRaw
-  let facts : NativeFacts := { encodings := {
-    canonical := observedBodies.canonical, native := observedBodies.native },
+  let facts : NativeFacts := {
+    encodings := { canonical := observedBodies.canonical, native := observedBodies.native },
     preparationProbes := ← if (← str request "kind") = "retry" then
       (← rows request "preparationProbeFacts").mapM (decodePreparationProbe ctx)
       else pure [] }

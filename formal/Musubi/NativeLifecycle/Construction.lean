@@ -446,7 +446,8 @@ def constructPreparationProbe (e : Evidence) (facts : NativeFacts)
     | none => graph := { graph with native := graph.native ++ [body] }
   let result ← graph.nativeBody fact.result
   if result.parents ≠ ordered then throw (.nativeFact "native probe ordered result parents")
-  return { input := e, capturedHeads := heads, rendered, orderedInputs := ordered,
+  return {
+    input := e, capturedHeads := heads, rendered := rendered, orderedInputs := ordered,
     written := fact.written, result := fact.result, contextAfter := fact.contextAfter }
 
 def CurrentGitBuild.writes (build : CurrentGitBuild) : Bool :=

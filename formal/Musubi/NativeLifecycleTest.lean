@@ -784,11 +784,13 @@ private def forwardProbeFact : PreparationProbeFact :=
     nativeGraph := probeEvidence.native, orderedInputs := [p 3, p 90],
     written := [probeForward], result := p 91, contextAfter := 1 }
 private def reverseProbeFact : PreparationProbeFact :=
-  { forwardProbeFact with contextBefore := 1,
+  { forwardProbeFact with
+    contextBefore := 1,
     nativeGraph := probeEvidence.native ++ [probeForward], orderedInputs := [p 90, p 3],
     written := [probeReverse], result := p 92, contextAfter := 2 }
 private def probeState : State :=
-  { refreshState with evidence := probeEvidence, phase := .prepared, heads := [p 3],
+  { refreshState with
+    evidence := probeEvidence, phase := .prepared, heads := [p 3],
     nativeFacts := { preparationProbes := [forwardProbeFact, reverseProbeFact] },
     prepared := refreshState.prepared.map fun prepared =>
       { prepared with rendered := p 90, inputs := { prepared.inputs with heads := [p 3] } } }
@@ -799,14 +801,17 @@ private def probeState : State :=
 #guard preparationProbeInputs probeEvidence [p 3] (p 90) 1 = .ok [p 90, p 3]
 #guard preparationProbeInputs probeEvidence [p 0] (p 90) 0 =
   .error (.nativeFact "no preparation merge probe at this boundary")
-#guard preparationProbeInputs { probeEvidence with native :=
-  probeEvidence.native.map fun body => { body with endTime := 0 } } [p 3] (p 90) 0 =
+private def tiedProbeEvidence : Evidence :=
+  { probeEvidence with
+    native := probeEvidence.native.map fun body => { body with endTime := 0 } }
+#guard preparationProbeInputs tiedProbeEvidence [p 3] (p 90) 0 =
     .ok [p 3, p 90]
 #guard (run probeState [.preparationProbe 0, .preparationProbe 1]).map (fun s =>
-  (s.heads, s.evidence.native, s.evidence.identities, s.createdBodies, s.allocatedLabels,
-    s.createdCanonicals, s.evidence.repositoryContext, s.evidence.sourceRoutes)) =
-      .ok ([p 3], probeEvidence.native ++ [probeForward, probeReverse], probeEvidence.identities,
-        2, 0, 0, 2, none)
+  decide (s.heads = [p 3]) &&
+    decide (s.evidence.native = probeEvidence.native ++ [probeForward, probeReverse]) &&
+    decide (s.evidence.identities = probeEvidence.identities) &&
+    s.createdBodies == 2 && s.allocatedLabels == 0 && s.createdCanonicals == 0 &&
+    s.evidence.repositoryContext == 2 && s.evidence.sourceRoutes.isNone) = .ok true
 #guard (run probeState [.preparationProbe 0, .preparationProbe 1]).map
   (fun s => (s.prepared, s.saved, s.publication)) =
     .ok (probeState.prepared, probeState.saved, probeState.publication)
@@ -818,8 +823,8 @@ private def probeState : State :=
 #guard (constructPreparationProbe { probeEvidence with repositoryContext := 99 }
   probeState.nativeFacts [p 3] (p 90) 0) =
     .error (.nativeFact "independent preparation probe observation")
-#guard (constructPreparationProbe { probeEvidence with native :=
-  probeEvidence.native.filter (fun body => body.id != p 4) }
+#guard (constructPreparationProbe
+  { probeEvidence with native := probeEvidence.native.filter (fun body => body.id != p 4) }
   probeState.nativeFacts [p 3] (p 90) 0) =
     .error (.nativeFact "independent preparation probe observation")
 #guard (constructPreparationProbe probeEvidence { preparationProbes :=
@@ -831,7 +836,8 @@ private def probeState : State :=
 -- Empty captured receipt responsibility is vacuous in C. A named receipt is still checked
 -- after commitRender, even if the live receipt slot has since disappeared.
 private def namedProbeState : State :=
-  { probeState with receipt := none, prepared := probeState.prepared.map fun prepared =>
+  { probeState with
+    receipt := none, prepared := probeState.prepared.map fun prepared =>
     { prepared with inputs := { prepared.inputs with receipt := some taking } } }
 #guard step namedProbeState (.preparationProbe 0) = .error .custody
 #guard (step { namedProbeState with saved := { custody := taking.records } }

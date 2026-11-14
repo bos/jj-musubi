@@ -480,7 +480,8 @@ def stepCore (s : State) : Action → Except StepError State
       prepared.inputs.heads prepared.rendered index)
     let (evidence, count, _) ← installNative s.evidence {
       native := build.written, heads := s.heads, physicalGit := s.physicalGit }
-    return { s with evidence := { evidence with repositoryContext := build.contextAfter },
+    return { s with
+      evidence := { evidence with repositoryContext := build.contextAfter },
       createdBodies := s.createdBodies + count }
   | .ownHelper index => do
     let result ← helperOutcome s index

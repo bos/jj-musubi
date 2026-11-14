@@ -916,7 +916,9 @@ already changed that parent's canonical image. Before interpreting the command o
 canonical parents, musubi derives its source namespace from the original canonical parents.
 This records translation evidence only: their old membership and workspace bindings do not
 become the new operation's parents or presence. Literal names actually owned in that source
-view reserve their prefixes even if the command is bringing a forgotten copy back.
+view reserve their prefixes even if the command is bringing a forgotten copy back. The
+source copy is always a known identity in this namespace, even at the operation root or when
+all bindings belong to other copies. Knowing its identity does not assert its presence.
 
 A receiving machine also captures and canonicalizes the exact native heads that exist when
 it prepares a trim, before contracting them. This covers commands that finished after the

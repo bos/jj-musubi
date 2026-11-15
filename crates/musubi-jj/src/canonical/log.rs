@@ -386,7 +386,7 @@ impl Log {
         self.scan(&mut index)?;
         let stored = index
             .ops
-            .range(OperationId::from_bytes(prefix.min_prefix_bytes())..)
+            .range(OperationId::from_bytes(prefix.lower_bound_bytes())..)
             .map(|(id, _)| id)
             .take_while(|id| prefix.matches(*id));
         let mut matches = prefix

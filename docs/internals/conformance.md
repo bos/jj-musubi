@@ -1526,7 +1526,7 @@ links:
    | `git update-ref` moves or deletes `refs/heads/x`, `refs/tags/t` or `refs/remotes/origin/y` | `gitMove` |
    | A `jj` command moves `x`, `y` or `t` (`jj bookmark set`, `jj bookmark delete`, `jj tag set`, `jj tag delete`), or changes nothing (`jj status`) | `jjImport` of each ref whose physical value differs from `git_refs`; `jjExport` of every ref even when importing changed nothing; then, if the command moves a bookmark, `set` and `jjExport` of every ref |
    | `y` moves in `origin`, and `jj git fetch` fetches it | as a `jj` command, whose change is `RStep.fetch` |
-   | A `jj` command at the operation before the latest action (`--at-op`) moves `x` or `y`, and `jj status` follows | on the older operation's slots, `set` and `jjExport` of every ref (it imports nothing); then `TSlot.merge` of the head with them against the older operation's, in the order of the merge operation's parents, then as a `jj` command that changes nothing |
+   | A `jj` command at the operation before the latest action (`--at-op`) moves `x` or `y`, and `jj status` follows | on the older operation's slots, `set` only (neither Git import nor export); then `TSlot.merge` of the head with them against the older operation's, in the order of the merge operation's parents, then as a `jj` command that changes nothing |
    | `jj undo`, or `jj op restore` to the operation before the latest action or to the one both machines last synced at | as a `jj` command that changes nothing; then, if it restored an operation, which its description names, every ref's slot but `K` from that operation's view (`restoreLocal`, `restoreRemote`), the expected value the head's (`restoreC`), and `jjExport` of every ref |
    | The other machine moves `x` or `t` or fetches `y`, and both sync, with `refs/heads/x.lock` held here or not | `LStep.advance` of `x`, `y` and `t` and `CStep.advance` of `y@origin`, with this machine's expected value, then `jjExport` of every ref, except where the lock makes `x`'s update fail, then `exportConflicted` of `y@origin`; nothing if there was nothing to realize |
    | The other machine moves `x` or `t` or fetches `y` before it has this machine's latest operations, merges them with its own as it syncs, and this machine syncs | the other's operation realized from the slots both last synced at, and `realizeMerge` of it with the head, against those slots, in the order of the merge's parents, which is `TSlot.merge`; then the exports, as above. Two fetches that moved `y@origin` to different values merge to a conflict, whose expected value is its side; a conflict from one parent keeps that parent's, and a merge that resolves it has the remote bookmark itself |
@@ -1534,7 +1534,7 @@ links:
 
    The mapping follows what jj does. jj imports `x@git`, `y@git` and `y@origin` in that
    order, and the two refs of `y` share the bookmark, so an import of one that sets the
-   bookmark is a `set` of the other. An integrated command exports after its import phase
+   bookmark is a `set` of the other. A head command exports after its import phase
    even when importing changed nothing. This completes pending exports after native op-head
    merges, and exports that failed earlier, as where git's lock on a ref was held; the
    command's own transaction still exports only if it changes the view.
@@ -1542,6 +1542,14 @@ links:
    with concurrent fetches followed by a bookmark command at an older operation, and
    `a_restore_first_exports_what_a_lock_held_back` with a realization whose export git's lock
    refused, followed by `jj op restore`.
+
+   On jj's main branch, an explicit operation id passed to `--at-op` suppresses automatic
+   Git import and export. `--ignore-working-copy` also suppresses automatic export. See upstream
+   [ef15b128](https://github.com/jj-vcs/jj/commit/ef15b1280235ae81f0c75f6e44c017affc4c3b38).
+   `non_head_commands_leave_git_refs_unexported` pins the two-command counterexample:
+   `x` first moves to the unexportable root, then to `base` from the same earlier operation.
+   The merged local bookmark conflicts, while the remote bookmark, Git record and physical
+   ref keep `one`. The ordinary head command still performs its import/export phases.
 
    After every action the test requires, for each ref, the bookmark, the remote bookmark
    and its tracking state, its `git_refs` entry and the git ref to be the model's, `LInv`

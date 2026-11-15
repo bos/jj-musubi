@@ -379,11 +379,11 @@ impl Refs {
         imported.get(bookmark).v.l.clone()
     }
 
-    /// A `jj` command at the operation before the latest action (`--at-op`) moves `bookmark`
-    /// to `l`, which must be somewhere else there. It imports nothing, but exports, against
-    /// that operation's record. The next `jj` command merges its operation with the head,
-    /// against the older operation, as `TSlot.merge`, then imports and exports. If the latest
-    /// action made no operation, the command's operation is simply the next.
+    /// A `jj` command at an explicit operation id (`--at-op`) moves `bookmark` to `l`,
+    /// which must be somewhere else there. It neither imports nor exports Git refs. The
+    /// next head command merges its operation with the head against the older operation,
+    /// as `TSlot.merge`, then imports and exports. If the latest action made no operation,
+    /// the command's operation is simply the next.
     fn jj_sets_at_older_op(&mut self, bookmark: Ref, l: RefTarget) {
         let ModelAtOperation {
             op: old,
@@ -398,11 +398,6 @@ impl Refs {
             theirs.at(r).g = self.model.get(r).g.clone();
         }
         theirs.bookmark_set(&self.alg, bookmark, l);
-        theirs.export(&self.alg, false, false);
-        for r in Ref::ALL {
-            let g = theirs.get(r).g.clone();
-            self.model.at(r).g = g;
-        }
         self.fixture.repo(HERE).jj(&["status"]);
         let merged = if old == head {
             theirs.slots().try_into().unwrap()

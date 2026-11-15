@@ -249,6 +249,11 @@ not interrupt Git export's physical head replacement.
 These are jj 0.47 behaviors, reproducible on one machine with concurrent `jj` processes or
 `--at-op`. musubi doesn't cause them, but more concurrency makes them likelier.
 
+The rows describe the pinned jj 0.47.1. On jj's main branch, commands at an explicit operation
+id passed to `--at-op`, or with `--ignore-working-copy`, no longer export Git HEAD or refs
+automatically. `--at-op=@` remains a head command. This change does not cover a command that
+started at the head before another operation was published.
+
 When a test or the search finds a jj bug, report it in three steps:
 
 1. File a tracking issue in jj-musubi, labeled `jj` and titled for what jj should do

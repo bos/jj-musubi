@@ -31,17 +31,17 @@
 //! and views, and an import judged again against its new parent would seem to make what the
 //! abandoned operation made.
 //!
-//! Imports of git's HEAD are checked the same way. Every `jj` command first compares its op
-//! head's record of the workspace's HEAD (`git_heads`) with `.git`'s, and where they differ
-//! writes "import git head", which takes `.git`'s and moves the working copy onto it, making a
-//! new working-copy commit (`import_git_head` in jj-cli's `cli_util.rs`). git moves HEAD here
+//! Imports of git's HEAD are checked the same way. An ordinary head command first compares
+//! its op head's record of the workspace's HEAD (`git_heads`) with `.git`'s. Where they differ,
+//! it writes "import git head", which takes `.git`'s and moves the working copy onto it, making
+//! a new working-copy commit (`import_git_head` in jj-cli's `cli_util.rs`). git moves HEAD here
 //! only where it is still a symbolic ref to the branch git moves, as it is in a new repository
 //! until jj first writes it; the import then takes that move, as for a ref. Otherwise jj writes
 //! HEAD only as it records it, in the same operation (`reset_head` in jj-lib's `git.rs`), so
 //! the record matches `.git` but where jj's merge of two op heads that both changed it made it
-//! something else, `.git` having one head's: as after a command at an older operation
-//! (`--at-op`), which still writes HEAD, without checking it where the older operation has no
-//! record of it, as for a workspace renamed since; jj merges it with the operations made since.
+//! something else, with `.git` retaining one head's value. The pinned jj 0.47.1 can write HEAD
+//! from an older operation (`--at-op`) before merging it with newer operations. On jj's main
+//! branch, an explicit operation id or `--ignore-working-copy` suppresses automatic export.
 //! A record musubi got wrong would move a working copy with nobody having moved HEAD, and bring
 //! back any rewritten commit it moved onto, which then diverges.
 //! Two-head merges whose closest bases disagree about HEAD are replayed by native jj in an

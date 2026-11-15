@@ -634,10 +634,8 @@ fn cached_suffix_after_contraction_uses_both_ordered_native_bases() {
     metadata
         .attributes
         .insert(CANONICAL_ATTRIBUTE.to_owned(), incoming.0.hex());
-    metadata.attributes.insert(
-        "musubi.reserved-workspaces".to_owned(),
-        "[\"alpha\"]".to_owned(),
-    );
+    // The authored namespace contains only bare alpha. Reserved names are the owned
+    // literals containing '/', so this fixture's empty set adds no reservation attribute.
     let expected_suffix_native = RawOperation {
         view_id: ViewId::new(blake2b_hash(&expected_view).to_vec()),
         parents: ordered.iter().map(|id| id.0.clone()).collect(),

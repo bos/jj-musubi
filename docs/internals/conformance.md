@@ -1249,6 +1249,26 @@ source roles U and equal relevant retained observations I. This finite native ad
 does not authenticate arbitrary sources, complete the selector's decision table or add a
 lifecycle theorem. Its raw event callback adds no separate byte/clock/RNG purity assertion.
 
+`multibase::cached_suffix_after_contraction_uses_both_ordered_native_bases`, in the sibling
+`node/realize/native_multibase_tests.rs`, checks one authored native criss-cross after dropping
+an ancestor. A fixed edge table and captured original canonical bodies specify the contracted
+inputs. An isolated native replay merges both ordered closest bases and checks the complete
+expected suffix body and view; reversed inputs and a first-base-only replay differ. The test
+caches the old suffix, prepares the incoming record, completes a native bookmark command at
+the old operation, erases the translation cache, reopens and prepares again. It requires an
+actual write of the new suffix, checks the complete returned suffix, and separately checks the
+final native head against a replay that retains the late command and its bookmark.
+
+The selected first-base control changes the shipping merge only for the marked contracted
+inputs. A temporary full-view assertion before the unchanged write witness fails on conflicting
+Git fields where independent recursive replay expects a normal target. Exact restoration and
+a normal rebuild pass. This is one non-colocated trace with one bare workspace name and no
+rebased commits. It does not cover physical Git HEAD, universal writer exclusion, arbitrary
+source authentication, equal retained observations or exact cache agreement across histories.
+Copied replay settings, unchanged actor bytes and clock, and the zero-rebase checks bound this
+fixture's observer effects; they do not establish general RNG-state equivalence or a new Lean
+lifecycle theorem.
+
 `receipt_parent_precedes_preferred_alias` and `changed_physical_parent_refreshes_git_fields`
 check renderer priority and refresh against explicitly constructed physical inputs. Their role
 arguments do not establish that an arbitrary receipt supplied the right candidates.

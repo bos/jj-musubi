@@ -1039,6 +1039,16 @@ using pre-call native fields and ordered parents. Warm and cache-erased modes ch
 trace's inputs; their [contract and limits](conformance.md#native-lifecycle-inputs-and-events)
 include the U/I restrictions on any broader exact-cache-agreement claim.
 
+`multibase::cached_suffix_after_contraction_uses_both_ordered_native_bases` checks a cached
+suffix over an authored native criss-cross, an ancestor contraction, a late native bookmark
+command and translation-cache loss. A fixed contracted edge table and independent native
+replay judge the actual suffix write, its complete returned body and view, and a separate final
+head retaining the late command. A selected first-base-only shipping-merge control fails on
+the returned Git fields; exact restoration and a normal rebuild pass. The test covers one
+non-colocated, zero-rebase trace. Its
+[contract and limits](conformance.md#native-lifecycle-inputs-and-events) do not imply arbitrary
+source qualification, general observer purity or exact cache agreement.
+
 A replacement clone's synthetic join has its own independently captured native input, keyed
 by the join's metadata identity. Only its exact owned workspace keys and commit targets can
 be certified from that input. `reference::a_clones_workspace_witness_is_its_native_join_input`

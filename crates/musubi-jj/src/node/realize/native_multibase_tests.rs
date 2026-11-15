@@ -75,102 +75,6 @@ fn slot(view: &View, local: &CommitId, recorded: &CommitId, workspace: &CommitId
     view
 }
 
-// Read immutable native storage directly; no head loader, canonicalizer or identity query.
-fn operation_corpus(node: &NodeRepo) -> BTreeSet<LocalOp> {
-    fs::read_dir(node.repo_path.join("op_store/operations"))
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-        .filter_map(|name| OperationId::try_from_hex(&name))
-        .map(LocalOp)
-        .chain([node.root_op_id().clone()])
-        .collect()
-}
-
-fn dump_native_difference(
-    label: &str,
-    id: &LocalOp,
-    body: &RawOperation,
-    view: &View,
-    expected: (&RawOperation, &View),
-) {
-    eprintln!(
-        "G2 {label}: id={} contentHash={}\nbody={body:#?}\nview={view:#?}",
-        id.0.hex(),
-        OperationId::new(blake2b_hash(body).to_vec()).hex()
-    );
-    macro_rules! difference {
-        ($name:expr, $actual:expr, $expected:expr) => {
-            if $actual != $expected {
-                eprintln!(
-                    "G2 {label} DIFF {}: expected={:#?}\nactual={:#?}",
-                    $name, $expected, $actual
-                );
-            }
-        };
-    }
-    difference!("parents", body.parents, expected.0.parents);
-    difference!("view_id", body.view_id, expected.0.view_id);
-    difference!(
-        "predecessors",
-        body.commit_predecessors,
-        expected.0.commit_predecessors
-    );
-    difference!(
-        "metadata.time",
-        body.metadata.time,
-        expected.0.metadata.time
-    );
-    difference!(
-        "metadata.description",
-        body.metadata.description,
-        expected.0.metadata.description
-    );
-    difference!(
-        "metadata.hostname",
-        body.metadata.hostname,
-        expected.0.metadata.hostname
-    );
-    difference!(
-        "metadata.username",
-        body.metadata.username,
-        expected.0.metadata.username
-    );
-    difference!(
-        "metadata.is_snapshot",
-        body.metadata.is_snapshot,
-        expected.0.metadata.is_snapshot
-    );
-    difference!(
-        "metadata.workspace_name",
-        body.metadata.workspace_name,
-        expected.0.metadata.workspace_name
-    );
-    difference!(
-        "metadata.attributes",
-        body.metadata.attributes,
-        expected.0.metadata.attributes
-    );
-    difference!("view.head_ids", view.head_ids, expected.1.head_ids);
-    difference!(
-        "view.local_bookmarks",
-        view.local_bookmarks,
-        expected.1.local_bookmarks
-    );
-    difference!("view.local_tags", view.local_tags, expected.1.local_tags);
-    difference!(
-        "view.remote_views",
-        view.remote_views,
-        expected.1.remote_views
-    );
-    difference!("view.git_refs", view.git_refs, expected.1.git_refs);
-    difference!("view.git_heads", view.git_heads, expected.1.git_heads);
-    difference!(
-        "view.workspaces",
-        view.wc_commit_ids,
-        expected.1.wc_commit_ids
-    );
-}
-
 #[test]
 fn cached_suffix_after_contraction_uses_both_ordered_native_bases() {
     let env = TestEnv::new();
@@ -465,10 +369,8 @@ fn cached_suffix_after_contraction_uses_both_ordered_native_bases() {
     );
     transfer(&replay, &mut node, &incoming);
     let records = [Record::new([HubOp(canonical[0].clone())])];
-    let mut corpus_checkpoints = vec![("before-first-prepare", operation_corpus(&node))];
     node.prepare_records(&RecordPrefix::none(), &records)
         .unwrap();
-    corpus_checkpoints.push(("after-first-prepare", operation_corpus(&node)));
     for (i, (canonical_body, native_body, view)) in expected_bodies.iter().enumerate() {
         assert_eq!(
             node.canonical
@@ -596,11 +498,9 @@ fn cached_suffix_after_contraction_uses_both_ordered_native_bases() {
             .block_on()
             .unwrap(),
     );
-    corpus_checkpoints.push(("before-reopen", operation_corpus(&node)));
     drop(node);
     fs::remove_file(repo.repo_path().join("musubi/translation")).unwrap();
     node = open(&repo);
-    corpus_checkpoints.push(("reopened", operation_corpus(&node)));
     assert!(
         node.has_record_custody(),
         "restart retains the actual incoming responsibility"
@@ -611,7 +511,6 @@ fn cached_suffix_after_contraction_uses_both_ordered_native_bases() {
     );
     node.prepare_records(&RecordPrefix::none(), &records)
         .unwrap();
-    corpus_checkpoints.push(("reprepared", operation_corpus(&node)));
     let receipt = node
         .native_receipt()
         .expect("reprepare from retained record bodies");
@@ -728,81 +627,14 @@ fn cached_suffix_after_contraction_uses_both_ordered_native_bases() {
     let seen = events.clone();
     let _observe = Observe::new(move |event| seen.lock().unwrap().push(event));
     let _stores = record_stores(&mut node);
-    corpus_checkpoints.push(("before-advance", operation_corpus(&node)));
     let actual = node.advance(&incoming).unwrap();
-    // Copy the completed event stream, releasing its mutex before all diagnostic reads.
+    // Copy the completed event stream, releasing its mutex before raw postcondition reads.
     let events = events.lock().unwrap().clone();
     assert!(events.iter().any(|event| matches!(event,
         Event::Reread { captured, actual } if captured == &command_heads && actual == &command_heads)));
     assert!(!events.iter().any(|event| matches!(event,
         Event::CurrentGit { canonical, .. } if canonical == &incoming)));
     assert!(matches!(events.last(), Some(Event::Complete)));
-    // Diagnostic facts only: preserve the exact feasibility predicate below. No read here
-    // loads/merges heads or supplies a replacement expected value.
-    dump_native_difference(
-        "expected suffix",
-        &suffix_prime,
-        &expected_suffix_native,
-        &expected_view,
-        (&expected_suffix_native, &expected_view),
-    );
-    eprintln!("G2 original IDs={original:#?} original bodies/views={bodies:#?}");
-    eprintln!("G2 expected ordered inputs={ordered:#?} expected sources={expected_bodies:#?}");
-    for (checkpoint, corpus) in &corpus_checkpoints {
-        eprintln!(
-            "G2 corpus {checkpoint}: expectedSuffixPresent={} IDs={corpus:#?}",
-            corpus.contains(&suffix_prime)
-        );
-    }
-    let current_corpus = operation_corpus(&node);
-    if current_corpus.contains(&suffix_prime) {
-        let (body, view) = raw(&node, &suffix_prime);
-        dump_native_difference(
-            "expected ID found in actor corpus",
-            &suffix_prime,
-            &body,
-            &view,
-            (&expected_suffix_native, &expected_view),
-        );
-    }
-    for (index, event) in events.iter().enumerate() {
-        if let Event::Write { op, .. } = event {
-            let id = LocalOp(OperationId::new(blake2b_hash(op).to_vec()));
-            let view = node
-                .loader()
-                .op_store()
-                .read_view(&op.view_id)
-                .block_on()
-                .unwrap();
-            dump_native_difference(
-                &format!("write event {index}"),
-                &id,
-                op,
-                &view,
-                (&expected_suffix_native, &expected_view),
-            );
-        }
-    }
-    let (returned_body, returned_view) = raw(&node, &actual);
-    dump_native_difference(
-        "returned incoming",
-        &actual,
-        &returned_body,
-        &returned_view,
-        (&expected_suffix_native, &expected_view),
-    );
-    let diagnostic_heads = node.local_heads().unwrap();
-    eprintln!("G2 final raw heads={diagnostic_heads:#?}");
-    for id in diagnostic_heads {
-        let (body, view) = raw(&node, &id);
-        dump_native_difference(
-            "final raw head",
-            &id,
-            &body,
-            &view,
-            (&expected_final.0, &expected_final.1),
-        );
-    }
     assert!(
         events.iter().any(|event| matches!(event,
         Event::Write { op, .. } if op == &expected_suffix_native)),

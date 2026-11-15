@@ -199,6 +199,13 @@ private structure CachedMessage where
 
 private def cacheMessage (j : Json) : CachedMessage := ⟨msgKey j, j, rfl⟩
 
+private theorem cacheMessage_values (js : List Json) :
+    (js.map cacheMessage).map CachedMessage.value = js := by
+  induction js with
+  | nil => rfl
+  | cons j js ih =>
+    simpa only [List.map_cons, cacheMessage] using congrArg (List.cons j) ih
+
 private def appendDistinctMessage (j : Json) (acc : List Json) : List Json :=
   match acc with
   | next :: _ => if j.compress == next.compress then acc else j :: acc
@@ -231,7 +238,7 @@ private theorem appendDistinctCached_values (j : CachedMessage) (acc : List Cach
 private theorem cachedDedup_values (js : List CachedMessage) :
     (js.foldr appendDistinctCached []).map CachedMessage.value =
       (js.map CachedMessage.value).foldr appendDistinctMessage [] := by
-  simpa only [List.foldr_map] using
+  simpa only [List.foldr_map, List.map_nil] using
     (List.foldr_hom (fun acc : List CachedMessage => acc.map CachedMessage.value)
       (g₁ := appendDistinctCached)
       (g₂ := fun j acc => appendDistinctMessage j.value acc)
@@ -250,9 +257,9 @@ invariant, ordering hypothesis or native law is needed for this representation o
 theorem encodeNet_eq_reference (N : Nat) (net : List EMsg) (extra : List Json) :
     encodeNet N net extra = encodeNetReference N net extra := by
   unfold encodeNet encodeNetReference
-  rw [cachedDedup_values, cachedSort_values]
-  simp only [List.map_map, Function.comp_def, cacheMessage, List.map_id,
-    appendDistinctMessage]
+  dsimp only
+  rw [cachedDedup_values, cachedSort_values, cacheMessage_values]
+  rfl
 
 theorem encodeNet_compress_eq_reference (N : Nat) (net : List EMsg) (extra : List Json) :
     (encodeNet N net extra).compress = (encodeNetReference N net extra).compress :=

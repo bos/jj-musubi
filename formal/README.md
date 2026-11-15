@@ -1049,10 +1049,11 @@ realizations arrive; receipt of a head alone does not supply its body.
 
 The native lifecycle B certificate covers six projected actions through current-Git refresh.
 It omits preparation's unpublished merge-probe writes, so it is not a complete physical trace
-or native simulation. The source-staged C extension models those writes explicitly, preserving
-the complete corpus and matching independently replayed native primitives against operands
-computed from the captured heads and rendered result. C's existing diagnostic established the
-two omitted bodies, not a successful certificate for that extension or for the whole call.
+or native simulation. C models those writes explicitly, preserving the complete corpus and
+matching independently replayed native primitives against operands computed from captured
+heads and the rendered result. Its passing finite comparison ends at the first changed-head
+retry. Bypassing the actual retry guard makes C detect an export before a fresh successful
+reread. Later retry canonicalization and whole-publication simulation remain open.
 
 Physical heads can alias a single canonical body too. The native
 `interrupted_git_export_can_leave_aliased_operation_heads` case makes a real export

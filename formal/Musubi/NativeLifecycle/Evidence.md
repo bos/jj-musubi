@@ -697,7 +697,7 @@ the isolated replay. Fresh replay/control settings detect RNG consumption withou
 the actual actor's shared RNG. Unsupported scope or a raw comparison mismatch fails evidence
 collection, never changes shipping behavior into a modeled refusal. When dumping evidence,
 the input environment and raw replay/captured comparisons are saved before their assertions.
-No execution has yet established these new gates.
+At source freezing, no execution had established these new gates.
 
 The action installs every recorded native body without changing heads, canonical bodies or
 identity/source rows. Unknown probe bodies remain available to encoding and fallback queries;
@@ -714,10 +714,64 @@ of the complete first prepared native/canonical corpus and heads. Its certificat
 at the first changed-head retry. The earlier whole-call native success remains separate trace
 evidence; it does not prove later retry canonicalization or whole-publication safety.
 
-This extension is source-only and unvalidated. It adds fourteen executable model guards and
-three axiom queries. A/B's existing test bodies are retained; their model paths need an affected
-recheck because the shared codec changed. B's six-action certificate remains a projection that
-omits its preparation probe writes, rather than a complete physical trace or native simulation.
-A future allocated validation must check the new model/proofs and native replay gates, then
-obtain a passing C comparison before attempting the stale-revalidation control. No new build,
-native command, oracle replay, debugger or control has run during this source-only stage.
+At source freezing, this extension was unvalidated. It added fourteen executable model guards
+and three axiom queries. A/B's existing test bodies were retained; their model paths needed an
+affected recheck because the shared codec changed. B's six-action certificate remains a
+projection that omits its preparation probe writes, rather than a complete physical trace or
+native simulation. The next allocated validation needed the new model/proofs and native replay
+gates, then a passing C comparison before the stale-revalidation control. No build, native
+command, oracle replay, debugger or control ran during that source-only stage.
+
+### Owned-probe validation and actual stale-revalidation control
+
+The single twenty-minute allocation began at 00:00:09 UTC on November 15, 2026 (4:00:09 p.m.
+Pacific on November 14). All 184 executable guards and the affected model, construction, run
+and codec proofs passed. The three new axiom reports contain only `propext`, `Classical.choice`
+and `Quot.sound`. Six failed elaboration attempts are retained: corrections addressed record
+layout and explicit guard elaboration, preserving every original corpus, identity, allocation,
+custody and ordering comparison. No native evidence gap was encountered or weakened.
+
+One oracle build passed. Its C compiler was explicitly serialized and Lean used one thread;
+Rust used at most two compiler jobs, with one nextest/Rayon thread and low-priority attached
+processes throughout. The single baseline invocation selected and ran exactly A, B and C:
+three passed, with 112 unrelated tests filtered out. C took 4.930 seconds; A took 0.674 seconds
+and B 1.025 seconds; the nextest summary was 6.631 seconds. The preserved unmutated fixture
+producer was used directly and all 204 archived files remained byte-identical.
+
+Both independent C primitive replays matched complete input/output operation graphs, raw
+context and result. Each recorded one native operation write, zero rebases and no RNG
+consumption, with unchanged heads. Input graphs numbered 19 and 20; output graphs 20 and 21.
+The initial captured context equaled the first primitive input context, and its output context
+equaled the second input. Native metadata/views and the complete backend/index/workspace/Git
+byte comparisons were nonempty and exact. C's first prepared corpus matched all 21 native and
+17 canonical bodies after 18/17 before preparation; no probe body was discarded or assigned an
+identity. The model reply reported two owned probe calls, exact prepared corpus, historical
+preparation association and the derived same-run construction/custody/source-route certificate.
+
+The actual abandon succeeded in 107 ms. The first mismatch reread was event 7, actual retry
+event 8, second capture event 9, equal final reread event 15, first export event 20 and completion
+event 30. The whole shipping call returned success again. This later success is separate
+finite trace evidence; the model certificate ends at the first changed-head retry. C's actual
+captured receipt is absent, so native probe custody responsibility is vacuous. The nonempty
+captured-receipt checks are executable model guards and derived theorems, not a new nonempty
+native probe fixture. A retains its existing nonempty native receipt/custody evidence.
+
+Only after that baseline passed, one selected control changed the actual changed-head guard
+from `if now != heads` to `if false && now != heads`, retaining the Reread observation. C alone
+ran once and failed at the assertion `a stale attempt must not export before an actual
+successful fresh reread`. It observed the mismatch at event 7, no retry or later fresh reread,
+and exports at events 12 and 23. The actual mutated call still returned success and completed
+at event 26. Thus the failure detects stale publication order even when the eventual result
+ID and success coincide. The control took 5.206 seconds, with a 5.214-second summary and exit
+100, before reaching model comparison. Its complete request and primitive replay comparisons
+remain available. The exact original source was restored; no control mutation remains.
+
+All attached jobs were observed ended and source restoration verified by 00:12:00.683 UTC,
+11 minutes 51.683 seconds after the original start, releasing the heavy slot. There was one
+oracle build, one three-target baseline and one C control, with no second oracle, new fixture
+recording, debugger, full suite or campaign. Logs, source hashes, compiled model/oracle hashes,
+requests/replies, full primitive input environments and raw comparisons are preserved externally.
+The code/proof tree tested by the baseline is retained separately from this results-only
+documentation update. Independent review and final required integration checks remain pending.
+Universal native observation/frame simulation, later retry canonicalization, nonempty native
+probe custody and whole-publication safety remain open.

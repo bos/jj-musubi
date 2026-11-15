@@ -58,14 +58,12 @@ fn physical_git_bytes(repo: &TestRepo) -> Value {
 
 fn interleaving_request(
     me: &str,
-    before: Value,
-    prepared: Value,
-    post_native: Value,
-    after: Value,
+    snapshots: [Value; 4],
     target: Value,
     abandoned: &LocalOp,
     probes: Vec<Value>,
 ) -> Value {
+    let [before, prepared, post_native, after] = snapshots;
     let mut result = request("retry", me, before, after, Value::Null, target);
     result["prepared"] = prepared;
     result["postNative"] = post_native;
@@ -949,10 +947,7 @@ fn native_abandon_between_preparation_and_reread_retries() {
     let events = events.lock().unwrap();
     let mut request = interleaving_request(
         node.machine().key(),
-        before,
-        prepared[0]["snapshot"].clone(),
-        post_native,
-        after,
+        [before, prepared[0]["snapshot"].clone(), post_native, after],
         json!(child.0.hex()),
         &abandoned,
         facts,

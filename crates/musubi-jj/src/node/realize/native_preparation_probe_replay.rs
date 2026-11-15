@@ -90,6 +90,8 @@ fn graph(loader: &RepoLoader, repo: &TestRepo) -> Value {
     )
 }
 
+type ProbeObservation = (Value, Value, Result<(LocalOp, usize), String>);
+
 pub(super) struct Capture {
     snapshot: tempfile::TempDir,
     relative_repo: PathBuf,
@@ -98,7 +100,7 @@ pub(super) struct Capture {
     inputs: Vec<LocalOp>,
     before_graph: Value,
     before_context: Value,
-    after: Option<(Value, Value, Result<(LocalOp, usize), String>)>,
+    after: Option<ProbeObservation>,
 }
 
 pub(super) fn before(

@@ -361,7 +361,7 @@ fn cached_suffix_after_contraction_uses_both_ordered_native_bases() {
     let mut contraction = Contraction::new(&replay.canonical, [canonical[0].clone()]).unwrap();
     assert_eq!(
         contraction.images(&replay.canonical, &suffix).unwrap(),
-        [incoming.clone()]
+        std::slice::from_ref(&incoming)
     );
     assert_eq!(
         replay.canonical.read_operation(&incoming).unwrap(),

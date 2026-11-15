@@ -5,6 +5,10 @@ extend-exclude = ["formal/.lake", "target", "Cargo.lock"]
 # The 32-column terminal snapshot clips ISSUES at the right edge.
 extend-ignore-re = ['" HEAD IN/ OUT/ OPS COMM MAC ISSU"']
 
+[default.extend-identifiers]
+# The core Lean fold homomorphism theorem.
+foldr_hom = "foldr_hom"
+
 [default.extend-words]
 # The terminal UI library.
 ratatui = "ratatui"

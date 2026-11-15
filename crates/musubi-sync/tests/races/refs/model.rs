@@ -390,7 +390,7 @@ impl Model {
         })
     }
 
-    /// An integrated `jj` command imports, then exports even when importing changed
+    /// A head `jj` command imports, then exports even when importing changed
     /// nothing. Its own transaction, `change`, exports only if that changed the view.
     pub(super) fn jj(&mut self, alg: &Alg, change: impl FnOnce(&mut Self)) {
         self.import(alg, &Ref::ALL);

@@ -221,7 +221,44 @@ fn an_unchanged_import_exports_a_bookmark_selected_by_a_merge() {
     refs.jj_sets_at_older_op(Ref::Y, one);
 }
 
-/// A restore first exports what an earlier export left undone, as any integrated command
+/// Non-head commands leave Git unchanged, even if their bookmark could be exported. A root
+/// bookmark beside a move to `base` merges to a local conflict, while Git and both records
+/// retain `one`. Simulating an export by the non-head command fails the native comparison.
+#[test]
+fn non_head_commands_leave_git_refs_unexported() {
+    let mut refs = Refs::new();
+    let Commits {
+        root, base, one, ..
+    } = refs.commits.clone();
+    let id = |target: &RefTarget| target.as_normal().unwrap().clone();
+    let conflict = RefTarget::from_legacy_form([id(&one)], [id(&root), id(&base)]);
+    let (initial, git) = read(&refs.fixture.load(HERE), Ref::X);
+    assert_eq!(
+        initial,
+        Slot {
+            l: one.clone(),
+            r: one.clone(),
+            k: one.clone(),
+            tr: true,
+        }
+    );
+    assert_eq!(git, one);
+    refs.jj_sets_at_older_op(Ref::X, root);
+    refs.jj_sets_at_older_op(Ref::X, base);
+    let (actual, git) = read(&refs.fixture.load(HERE), Ref::X);
+    assert_eq!(
+        actual,
+        Slot {
+            l: conflict,
+            r: one.clone(),
+            k: one.clone(),
+            tr: true,
+        }
+    );
+    assert_eq!(git, one);
+}
+
+/// A restore first exports what an earlier export left undone, as any head command
 /// does, in a shorter form of the case Hegel found. `x` moves to the root, which jj can't
 /// export, then the other machine moves it to `base`, which musubi realizes here while git's
 /// lock on `refs/heads/x` is held, so that `.git` and the record keep `one`. `jj op restore`

@@ -1074,8 +1074,11 @@ same way against jj's record of each workspace's HEAD (`git_heads`). git moves H
 it is still a symbolic ref to the branch git moves, as in a new repository until jj first writes
 HEAD, and jj writes HEAD only as it records it, so such an import may change the record only
 after such a move, or where jj's merge of two op heads that both changed the record left it
-differing from `.git`, as after a command at an older operation (`--at-op`), which still writes
-HEAD ([races.md, "Known jj limitations"](races.md#known-jj-limitations)).
+differing from `.git` ([races.md, "Known jj limitations"](races.md#known-jj-limitations)).
+On the pinned jj 0.47.1, a command at an older operation (`--at-op`) can still write HEAD.
+Against jj's main branch, commands at an explicit operation id passed to `--at-op`, or with
+`--ignore-working-copy`, no longer export HEAD or refs automatically.
+`--at-op=@` remains a head command.
 jj writes HEAD unborn, and records it absent, where a command leaves the working copy's parent the
 root commit, so such a command is a physical writer of the absent HEAD; one that drops the
 workspace, or an undo, redo, restore or revert, is not

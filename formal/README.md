@@ -380,6 +380,11 @@ the oracle, not claims that every fetch succeeds, that a failed call has no comp
 or that cached observations have a total order. The CLI and generated join regressions listed
 in [conformance](../docs/internals/conformance.md#per-machine-refs) check the command boundary.
 
+Against jj's main branch, the conformance driver maps a command at an explicit operation id
+to its bookmark change without Git import or export. The following head command merges and
+imports/exports normally. `non_head_commands_leave_git_refs_unexported` checks this native
+contract. The slot functions and their theorems are unchanged.
+
 - `noSpuriousRevert`: an import changes a local bookmark only if git moved its ref, whatever
   musubi realizes and whether or not its export succeeds. `remoteNoSpuriousRevert`: the same
   for a remote bookmark, as long as every realization is exported before a `jj` command can

@@ -38,18 +38,18 @@
 //! and views, and an import judged again against its new parent would seem to make what the
 //! abandoned operation made.
 //!
-//! Imports of git's HEAD are checked the same way. Every `jj` command first compares its op
-//! head's record of the workspace's HEAD (`git_heads`) with `.git`'s, and where they differ
-//! writes "import git head", which takes `.git`'s and moves the working copy onto it, making a
-//! new working-copy commit (`import_git_head` in jj-cli's `cli_util.rs`). git moves HEAD here
+//! Imports of git's HEAD are checked the same way. An ordinary head command first compares
+//! its op head's record of the workspace's HEAD (`git_heads`) with `.git`'s. Where they differ,
+//! it writes "import git head", which takes `.git`'s and moves the working copy onto it, making
+//! a new working-copy commit (`import_git_head` in jj-cli's `cli_util.rs`). git moves HEAD here
 //! only where it is still a symbolic ref to the branch git moves, as it is in a new repository
 //! until jj first writes it; the import then takes that move, as for a ref. Otherwise jj writes
 //! HEAD only as it records it, in the same operation (`reset_head` in jj-lib's `git.rs`),
 //! unborn, and recorded absent, where the working copy's parent is the root commit, so
 //! the record matches `.git` but where jj's merge of two op heads that both changed it made it
-//! something else, `.git` having one head's: as after a command at an older operation
-//! (`--at-op`), which still writes HEAD, without checking it where the older operation has no
-//! record of it, as for a workspace renamed since; jj merges it with the operations made since.
+//! something else, with `.git` retaining one head's value. The pinned jj 0.47.1 can write HEAD
+//! from an older operation (`--at-op`) before merging it with newer operations. On jj's main
+//! branch, an explicit operation id or `--ignore-working-copy` suppresses automatic export.
 //! An import that finds HEAD unborn, as a command at an older operation can leave it, checks
 //! nothing out, and the command's finish resets HEAD to the working copy's parent, writing
 //! `.git` and recording that: it is judged as taking the unborn HEAD
@@ -2400,12 +2400,17 @@ impl World {
                 git(&["update-ref", "-d", name]);
             }
         }
-        let output = repo.checker_jj(&root, &["--ignore-working-copy", "git", "import"]);
-        if !output.status.success() {
-            return Err(format!(
-                "plain jj failed to import the same moves: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ));
+        // jj's main branch exports after a head command only: `--ignore-working-copy` stops
+        // the automatic export that the pinned jj makes, so export explicitly, which changes
+        // nothing where jj already has.
+        for verb in ["import", "export"] {
+            let output = repo.checker_jj(&root, &["--ignore-working-copy", "git", verb]);
+            if !output.status.success() {
+                return Err(format!(
+                    "plain jj failed to {verb} the same moves: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                ));
+            }
         }
         let loader = RepoLoader::init_from_file_system(
             &crate::reference::settings(),

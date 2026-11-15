@@ -3,6 +3,7 @@ JSON codec for the oracle (`docs/internals/conformance.md`, "Wire format"). Deco
 only; no protocol logic.
 -/
 import Lean.Data.Json
+import Init.Data.List.Sort.Lemmas
 import Musubi.Exec
 import Musubi.SupersedeExec
 import Musubi.PresenceExec
@@ -179,7 +180,8 @@ def msgKey (j : Json) : String × Nat × String :=
 def keyLe (a b : String × Nat × String) : Bool :=
   a.1 < b.1 || (a.1 == b.1 && (a.2.1 < b.2.1 || (a.2.1 == b.2.1 && a.2.2 ≤ b.2.2)))
 
-def encodeNet (N : Nat) (net : List EMsg) (extra : List Json) : Json :=
+/-- The original encoder, retained as the exact specification for key caching below. -/
+def encodeNetReference (N : Nat) (net : List EMsg) (extra : List Json) : Json :=
   let js := (net.flatMap (encodeMsg N) ++ extra).mergeSort
     (fun a b => keyLe (msgKey a) (msgKey b))
   let dedup := js.foldr (fun j acc =>
@@ -187,6 +189,74 @@ def encodeNet (N : Nat) (net : List EMsg) (extra : List Json) : Json :=
     | j' :: _ => if j.compress == j'.compress then acc else j :: acc
     | [] => [j]) []
   Json.arr dedup.toArray
+
+/-- The equality is a construction fact, erased at runtime. The key and original JSON are
+stored together so sorting and deduplication never recompute a message's compressed text. -/
+private structure CachedMessage where
+  key : String × Nat × String
+  value : Json
+  key_eq : key = msgKey value
+
+private def cacheMessage (j : Json) : CachedMessage := ⟨msgKey j, j, rfl⟩
+
+private def appendDistinctMessage (j : Json) (acc : List Json) : List Json :=
+  match acc with
+  | next :: _ => if j.compress == next.compress then acc else j :: acc
+  | [] => [j]
+
+private def appendDistinctCached (j : CachedMessage) (acc : List CachedMessage) :
+    List CachedMessage :=
+  match acc with
+  | next :: _ => if j.key.2.2 == next.key.2.2 then acc else j :: acc
+  | [] => [j]
+
+private theorem cachedSort_values (js : List CachedMessage) :
+    (js.mergeSort (fun a b => keyLe a.key b.key)).map CachedMessage.value =
+      (js.map CachedMessage.value).mergeSort (fun a b => keyLe (msgKey a) (msgKey b)) := by
+  apply List.map_mergeSort
+  intro a _ b _
+  rw [a.key_eq, b.key_eq]
+
+private theorem appendDistinctCached_values (j : CachedMessage) (acc : List CachedMessage) :
+    appendDistinctMessage j.value (acc.map CachedMessage.value) =
+      (appendDistinctCached j acc).map CachedMessage.value := by
+  cases acc with
+  | nil => rfl
+  | cons next rest =>
+    simp only [appendDistinctMessage, appendDistinctCached, List.map_cons]
+    rw [j.key_eq, next.key_eq]
+    simp only [msgKey]
+    split <;> simp_all
+
+private theorem cachedDedup_values (js : List CachedMessage) :
+    (js.foldr appendDistinctCached []).map CachedMessage.value =
+      (js.map CachedMessage.value).foldr appendDistinctMessage [] := by
+  simpa only [List.foldr_map] using
+    (List.foldr_hom (fun acc : List CachedMessage => acc.map CachedMessage.value)
+      (g₁ := appendDistinctCached)
+      (g₂ := fun j acc => appendDistinctMessage j.value acc)
+      (l := js) (init := []) appendDistinctCached_values).symm
+
+/-- Cache the unchanged sort key once, retain the stable sort and the original foldr
+duplicate representative, and return the original JSON values. -/
+def encodeNet (N : Nat) (net : List EMsg) (extra : List Json) : Json :=
+  let js := ((net.flatMap (encodeMsg N) ++ extra).map cacheMessage).mergeSort
+    (fun a b => keyLe a.key b.key)
+  let dedup := js.foldr appendDistinctCached []
+  Json.arr (dedup.map CachedMessage.value).toArray
+
+/-- Exact JSON equality for every network and arbitrary extra JSON messages. No model-state
+invariant, ordering hypothesis or native law is needed for this representation optimization. -/
+theorem encodeNet_eq_reference (N : Nat) (net : List EMsg) (extra : List Json) :
+    encodeNet N net extra = encodeNetReference N net extra := by
+  unfold encodeNet encodeNetReference
+  rw [cachedDedup_values, cachedSort_values]
+  simp only [List.map_map, Function.comp_def, cacheMessage, List.map_id,
+    appendDistinctMessage]
+
+theorem encodeNet_compress_eq_reference (N : Nat) (net : List EMsg) (extra : List Json) :
+    (encodeNet N net extra).compress = (encodeNetReference N net extra).compress :=
+  congrArg Json.compress (encodeNet_eq_reference N net extra)
 
 /-- Records, each sorted. -/
 def recsJson (R : List Rec) : Json := Json.arr (R.map nats).toArray

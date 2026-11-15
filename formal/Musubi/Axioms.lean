@@ -9,6 +9,7 @@ import Musubi.Regress
 import Musubi.Chunks
 import Musubi.Scenario
 import Musubi.ExecSound
+import Musubi.ExecJson
 import Musubi.SupersedeExecSound
 import Musubi.RecordLiveness
 import Musubi.AsyncLiveness
@@ -640,3 +641,5 @@ open Musubi
 #print axioms NativeLifecycle.preparationProbe_historical_frame
 #print axioms NativeLifecycle.preparationProbe_captured_records
 #print axioms NativeLifecycle.preparationProbe_source_routes
+#print axioms Musubi.Exec.Json.encodeNet_eq_reference
+#print axioms Musubi.Exec.Json.encodeNet_compress_eq_reference

@@ -38,5 +38,4 @@ To log the daemon's requests, run `musubi daemon stop`, then
 `musubi --log musubi_sync=debug daemon` in the foreground. Stop it when finished and run
 `musubi daemon start` to resume background syncing.
 
-Don't delete `.jj/repo/musubi/` or the hub's directory as a debugging step. Upgrade jj and
-musubi together: each musubi release supports one jj release.
+Don't delete `.jj/repo/musubi/` or the hub's directory as a debugging step.

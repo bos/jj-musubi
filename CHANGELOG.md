@@ -3,7 +3,7 @@
 What changes in each release, and what to do on upgrading.
 
 Until 1.0, a release may change the protocol, so run the same release on the hub and every
-machine (see [Upgrading](README.md#upgrading)).
+machine (see [Upgrading](docs/guides/upgrading.md)).
 
 ## Unreleased
 
@@ -148,7 +148,7 @@ machine (see [Upgrading](README.md#upgrading)).
   drop them, stop the hub, delete `index.json` in each hive's directory, the one named by its
   id in the hub's directory, and start the hub again, which rebuilds each.
 
-- musubi now syncs repositories whose git names objects with SHA-256. A hive takes the hash
+- jj-musubi now syncs repositories whose git names objects with SHA-256. A hive takes the hash
   of the copy that creates it, and the hub makes the hive's store with it, whatever git's
   default is. Before, the hub's store took git's default, so a SHA-256 copy, or every copy once
   git defaults to SHA-256, failed every sync with "final sha1 did not match". `musubi join`
@@ -161,7 +161,7 @@ machine (see [Upgrading](README.md#upgrading)).
 - `musubi clone` makes the new repository itself, rather than running `jj git init`, so a
   destination starting with `-` works. Nothing needs doing on upgrading.
 
-- Large syncs finish over links with as little as about 70 kbit/s to spare for musubi, a
+- Large syncs finish over links with as little as about 70 kbit/s to spare for jj-musubi, a
   megabyte in two minutes. A machine now waits two minutes for each reply rather than 30
   seconds, and still gives up with "request timed out" after about ten minutes in which
   nothing moves. ssh now waits a minute without a word from the hub's machine, rather than 30
@@ -242,7 +242,7 @@ machine (see [Upgrading](README.md#upgrading)).
   such a setting as an absolute path, or from `~/`; if `musubi daemon install` ran with a
   relative `MUSUBI_SOCKET`, run it again after fixing that.
 
-- musubi makes its state directory readable and writable by you alone, whatever your umask.
+- jj-musubi makes its state directory readable and writable by you alone, whatever your umask.
   Previously, under a umask such as `002`, a daemon with `MUSUBI_STATE_DIR` set refused to
   start, as its socket was in a directory others could write to, and removing the directory
   didn't help. If a `MUSUBI_STATE_DIR` made before is writable by others, `chmod 700` it.
@@ -269,7 +269,7 @@ machine (see [Upgrading](README.md#upgrading)).
 - A workspace of your own named like another machine's, as `beta/x` where a machine named
   beta has a workspace `x`, now stays yours: when you add it while beta adds `x` or joins the
   hive, when you add it, or rename one to it, after `jj workspace forget beta/x`, and through
-  `jj undo` of forgetting it. Previously musubi could take it for beta's `x`: it got beta's
+  `jj undo` of forgetting it. Previously jj-musubi could take it for beta's `x`: it got beta's
   working-copy commit, and editing in it moved beta's working copy, changing beta's files.
   While yours has that name, this machine shows all of beta's workspaces under a longer name,
   as `beta-1a2b/x` and `beta-1a2b/default`. A workspace already taken for beta's stays so on
@@ -346,7 +346,7 @@ machine (see [Upgrading](README.md#upgrading)).
   this machine. Previously, restarting it through another path to the same directory could
   ask for `--hub` unnecessarily. Nothing needs doing on upgrading.
 
-- musubi exports bookmarks to git where jj does: in a repository with a workspace that is also
+- jj-musubi exports bookmarks to git where jj does: in a repository with a workspace that is also
   a working tree of its git repository. Before, it exported them to any external git
   repository named `.git`, where jj writes them only on `jj git export`, and none for a
   workspace made with `jj workspace add --colocate` in a repository whose git store is inside
@@ -398,7 +398,7 @@ machine (see [Upgrading](README.md#upgrading)).
   with unsnapshotted edits. A later stale update can no longer load the empty operation root
   as that workspace's previous snapshot and panic.
 
-- musubi now supports jj 0.47.1. Upgrade jj on every machine, and upgrade the hub and every
+- jj-musubi now supports jj 0.47.1. Upgrade jj on every machine, and upgrade the hub and every
   machine together, then restart their daemons. Builds using jj 0.47.0 or earlier cannot
   sync with this build. The 0.47.1 release fixes the static Linux binary failure in 0.47.0.
   Ordinary jj commands leave remote-bookmark conflicts unchanged when their Git refs have
@@ -466,19 +466,19 @@ machine (see [Upgrading](README.md#upgrading)).
   if the hub then loses it. Previously that machine could retry the same rejected push
   indefinitely until another machine synced. Restarting while applying the abandon also
   resumes moving its operation heads and workspace records.
-- A build of musubi's source can go to every machine between releases. Push it, then on the
+- A build of jj-musubi's source can go to every machine between releases. Push it, then on the
   hub's machine, `upgrade-from-source --deploy` (in [contrib](contrib/upgrade-from-source))
   deploys `main`, or the revision you name, as a build named for the release it follows, the
   time and its commit, such as `musubi 0.3.0+20261102153012.4a0db205e1f0`. Restart the hub,
   and machines whose upgrade command is `upgrade-from-source` follow it, building that commit.
   Told a release, `upgrade-from-source` builds its tag, such as `v0.6.0`, not `main`. See
-  [Deploy a build from source](docs/guides/manage.md#deploy-a-build-from-source).
+  [Deploy a build from source](docs/guides/upgrading.md#deploy-a-build-from-source).
 - Contracting operation history now keeps each operation's original identity even when two
   operations have identical views and metadata. This changes the canonical encoding and ids
   (protocol 9, release 0.6.0, the first since 0.1.0): upgrade the hub and every machine
-  together. Existing hives and their local musubi state must be recreated from preserved jj
+  together. Existing hives and their local jj-musubi state must be recreated from preserved jj
   repositories: follow
-  [Recreate hives when upgrading to 0.6.0](docs/guides/manage.md#recreate-hives-when-upgrading-to-060).
+  [Recreate hives when upgrading to 0.6.0](docs/guides/upgrading.md#recreate-hives-and-local-state).
   If jj itself coalesces two operation ids while abandoning history, syncing stops with a
   command to restore the missing history.
 - The hub forgets a `jj op abandon` once every machine still in the hive has taken it, so trimming
@@ -493,12 +493,12 @@ machine (see [Upgrading](README.md#upgrading)).
   hand, then run `musubi daemon restart` on each machine. The error that said a repository
   lost history the hive has now says its history no longer matches the hive's, and means a
   bug.
-- A machine can upgrade musubi by itself to follow its hub: set `musubi.upgrade-command` to a
+- A machine can upgrade jj-musubi by itself to follow its hub: set `musubi.upgrade-command` to a
   command that installs the release in `$MUSUBI_UPGRADE_TO`, and the daemon runs it when a
   hub runs a newer release, then starts again from it. See [Upgrade
-  musubi](docs/guides/manage.md#upgrade-musubi). Every message now carries the sender's
+  jj-musubi](docs/guides/upgrading.md). Every message now carries the sender's
   release, so this release talks to no hub or machine of an earlier one: upgrade them all
-  together, by hand this once. For musubi built from a jj repository of its source,
+  together, by hand this once. For jj-musubi built from a jj repository of its source,
   [contrib/upgrade-from-source](contrib/upgrade-from-source) is such a command.
 - On a terminal, `musubi create`, `join`, `clone` and `sync` show what the sync they wait on
   is doing: bytes sent or received, with a bar, commits being imported, operations applied,
@@ -536,11 +536,11 @@ machine (see [Upgrading](README.md#upgrading)).
   [Keep the hub running](docs/guides/setup.md#keep-the-hub-running).
 - Added `skills/jj-musubi` to help coding agents work in a hive.
   See [Coding agents](docs/guides/working-across-machines.md#coding-agents).
-- musubi tells a copy from a repository made by copying its files, with `cp -a`, `rsync` or a
+- jj-musubi tells a copy from a repository made by copying its files, with `cp -a`, `rsync` or a
   backup, and doesn't sync the duplicate, where two repositories synced as one machine and
   overwrote each other's working copy. `musubi join --original` syncs a repository as the
   copy it was made from, once that is gone, as after restoring a backup onto a new machine.
-  See [Move, copy or restore a repository](docs/guides/manage.md#move-copy-or-restore-a-repository).
+  See [Move, copy or restore a repository](docs/guides/manage.md#move-copy-or-restore-a-repo).
 - The daemon follows a copy moved with `mv`, once jj runs in it. It stops syncing a copy that
   is deleted or missing, or whose directory comes to hold another repository, writing
   nothing there, where it retried forever and wrote into whatever it found; a directory
@@ -553,10 +553,10 @@ machine (see [Upgrading](README.md#upgrading)).
   joined, left, or its hive was removed.
 - A copy that joins or starts a hive other than the one its history came from forgets the
   other copies that history brings, which the new hive used to list as members.
-- musubi refuses to run in a repository another user owns, as under `sudo`, which left files
+- jj-musubi refuses to run in a repository another user owns, as under `sudo`, which left files
   the owner couldn't read.
 - `musubi status` is a command of its own, no longer another name for `musubi list`. It shows
-  what musubi does with the repository you're in: its hive, hub and machine name, its last
+  what jj-musubi does with the repository you're in: its hive, hub and machine name, its last
   sync, whether the hub has this machine's latest work, every machine's working copies, each
   copy in the hive, and the daemon's process, socket and log. It warns of what keeps the
   repository from syncing, saying what to do, and never starts the daemon or asks the hub, so
@@ -569,7 +569,7 @@ machine (see [Upgrading](README.md#upgrading)).
   than the one it joined from, act on the repository the daemon serves: `sync` goes through
   the daemon rather than syncing alongside it, `leave` stops the daemon serving it, and `join`
   no longer has the daemon serve it twice.
-- musubi prints through jj's own formatting: it colours what it prints as jj's `ui.color` and
+- `musubi` prints through jj's own formatting: it colours what it prints as jj's `ui.color` and
   `colors` config say, and takes jj's `--color` flag (see
   [Colours](docs/reference/configuration.md#colours)); errors, warnings and hints read as
   jj's do, with hints and warnings on stderr. Logs are coloured only on a terminal, so
@@ -617,7 +617,7 @@ machine (see [Upgrading](README.md#upgrading)).
 - `musubi forget <machine>` forgets a machine that went away without leaving. The other
   machines stop showing its working copy, and the hub stops counting it. If it's still
   there, it comes back as soon as it's used. See
-  [Take a repository or machine out](docs/guides/manage.md#take-a-repository-or-machine-out).
+  [Take a repository or machine out](docs/guides/manage.md#take-a-repo-or-machine-out).
 - Two machines that share a name are shown as `laptop-1a2b/default@` and
   `laptop-3c4d/default@` from then on, even after one leaves, so that a name never moves to
   another machine. On upgrading, a machine that shares its name with any machine its hive
@@ -627,7 +627,7 @@ machine (see [Upgrading](README.md#upgrading)).
   stops showing on the other machines until one does: earlier releases didn't record joining
   as the copy's own. Upgrade every machine together: a machine on an earlier release that
   another forgets loses its own working copy.
-- musubi completes its commands, flags, and hive and hub names in your shell, once you add a
+- jj-musubi completes its commands, flags, and hive and hub names in your shell, once you add a
   line to your shell's startup file, and `musubi completion <shell>` prints a completion
   script. See
   [Complete commands in your shell](docs/reference/commands.md#complete-commands-in-your-shell).
@@ -641,15 +641,15 @@ machine (see [Upgrading](README.md#upgrading)).
 - `musubi top` watches what flows through the hubs as it happens: each hive's bytes a second
   in and out, the operations and commits that came in, and which machines are offline,
   behind, or failing to sync. Daemons now report to the hub after every sync for it. See
-  [Watch every machine](docs/guides/manage.md#watch-every-machine).
-- musubi has no config file of its own any more: its settings are jj's, under `musubi`, so
-  `jj config list musubi` shows them. `[daemon] log` and `socket` in musubi's `config.toml`
+  [Watch every machine](docs/guides/manage.md#check-syncing).
+- jj-musubi has no config file of its own any more: its settings are jj's, under `musubi`, so
+  `jj config list musubi` shows them. `[daemon] log` and `socket` in jj-musubi's `config.toml`
   are now `musubi.daemon.log` and `musubi.daemon.socket` in jj's user config, where
-  `musubi.hub` chooses another default hub than the one the first join saved. What musubi
+  `musubi.hub` chooses another default hub than the one the first join saved. What jj-musubi
   records for itself, the repositories the daemon serves and that saved hub, is now
   `state.toml` in its state directory. `MUSUBI_CONFIG_DIR` is now `MUSUBI_STATE_DIR`, which
-  no longer separates a second musubi's settings: give it a `JJ_CONFIG` of its own too. On
-  upgrading:
+  no longer separates a second `musubi` instance's settings: give it a `JJ_CONFIG` of its own too.
+  On upgrading:
 
   1. Move the file. On Linux and macOS, unless you set `XDG_CONFIG_HOME` or
      `XDG_STATE_HOME`:
@@ -666,7 +666,7 @@ machine (see [Upgrading](README.md#upgrading)).
      finds jj's config as your shell does, or else `musubi daemon restart`.
 
   See [Configuration](docs/reference/configuration.md#settings).
-- Adding musubi's ssh key on the hub's machine no longer joins it to the last line of an
+- Adding jj-musubi's ssh key on the hub's machine no longer joins it to the last line of an
   `~/.ssh/authorized_keys` that doesn't end in a newline, which spoiled both keys and could
   lock you out of that machine.
 - The daemon keeps one connection to each hub, shared by every repository it serves there,
@@ -685,9 +685,9 @@ machine (see [Upgrading](README.md#upgrading)).
 - The daemon and the hub log only warnings from jj's library, whose notes on every lock it
   took and index it built made up most of `daemon.log`. `--log info` brings them back, as
   does `musubi.daemon.log = "info"` for the daemon.
-- A ref's lock file, left by a `git`, `jj` or musubi killed partway through updating refs,
-  no longer stops musubi updating that ref, or exporting its bookmark to `.git`, until you
-  delete it: once the lock is ten minutes old, musubi removes it the next time it gets in
+- A ref's lock file, left by a `git`, `jj` or `musubi` killed partway through updating refs,
+  no longer stops jj-musubi updating that ref, or exporting its bookmark to `.git`, until you
+  delete it: once the lock is ten minutes old, jj-musubi removes it the next time it gets in
   the way, noting it in the daemon's log, and the update works at once, or for a bookmark,
   at the next export.
 - The hub and machines talk differently, so upgrade the hub and every machine together.
@@ -697,7 +697,7 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## 0.1.0
 
-The first release. musubi keeps a jj repository in sync across your machines by replicating
+The first release. jj-musubi keeps a jj repository in sync across your machines by replicating
 its operation log, through a hub on one machine that the others reach over ssh.
 
 - `musubi hub` runs a hub, which serves any number of repositories, each its own hive.
@@ -709,7 +709,7 @@ its operation log, through a hub on one machine that the others reach over ssh.
 - `musubi list` shows the hub's hives and how each copy's syncing goes, `musubi sync` syncs
   now, and `musubi leave` stops syncing a repository. `musubi hub rename` and `musubi hub rm`
   manage the hub's hives.
-- musubi works with jj 0.46.0. It stops with an error rather than sync an operation that a
+- jj-musubi works with jj 0.46.0. It stops with an error rather than sync an operation that a
   newer `jj` wrote with fields jj 0.46.0 doesn't know.
 - Builds for Linux (static, x86_64 and aarch64), macOS (x86_64 and aarch64), and Windows
   (x86_64 and aarch64).

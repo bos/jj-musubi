@@ -1,61 +1,88 @@
 # Set up a hub and machines
 
-Choose the hub's machine, share a repository, and add the other machines over ssh.
+The **hub** stores shared history and passes updates over ssh. A background **daemon** on each
+machine syncs its repositories with the hub. Copies of one repo form a **hive**; a hub
+can serve several hives.
 
-The **hub** is a musubi process on a machine that's usually on. It stores shared repository
-history and passes updates between machines over ssh. Each machine you work on runs a
-**daemon**, a background process that syncs its repositories with the hub. The copies of one
-repository form a **hive**; a hub can serve several hives, one per project.
-
-The examples use `devbox` for the hub's ssh name and `app` for the project. Replace them with
-yours. Start on the machine with your existing jj repository, and keep a terminal available
-on the devbox too. The [quick start](../../README.md#quick-start) has the shorter route.
+Choose what machine the hub will run on, share a repo, and add other machines. These
+examples use `devbox` for the hub's ssh name and `app` for the project.
+Replace them with yours.
 
 ## Before you start
 
 You need, on every machine:
 
-- `musubi`. See [Install](../../README.md#install).
-- `jj` 0.47.1, and `git`. musubi runs the `git` that jj's `git.executable-path` names; the
-  hub runs the `git` on its `PATH`.
-- ssh access to the hub's machine: if `ssh devbox` works, so does musubi. Your
-  `~/.ssh/config` applies, with its aliases, `ProxyCommand` and `ProxyJump`.
+- jj-musubi, which provides the `musubi` command. See [Install jj-musubi](#install-jj-musubi).
+- `jj` and `git`.
+- [ssh access](#connect-over-ssh) from every machine to the hub machine.
 
-You also need a jj repository with at least one commit and all of its history. musubi refuses a
-shallow or partial clone, since it couldn't send other machines everything they need. A
-`jj git clone <url> <dir>` without `--depth` is fine. For a first trial, use a disposable project
-whose history and files you're comfortable sharing. Check its ignore rules before joining:
-new files normally enter jj's next snapshot too.
+Use a jj repo with at least one commit and complete history (shallow and partial clones
+are not supported). For a trial, use a disposable clone of a project.
 
-## Choose the hub's machine
+## Install jj-musubi
 
-Run the hub on a machine that is usually on and that every other machine can reach over ssh: a
-devbox, a home server, or anything else that never sleeps. A laptop is a poor choice, since the
-others can't sync while it sleeps. The hub's machine can have copies of the repositories too: a
-devbox you work on is a fine hub.
+Install jj-musubi on every working machine and the hub machine. Download an archive from the
+[latest release](https://github.com/bos/jj-musubi/releases/latest) and put its `musubi`
+executable on your `PATH`. There are builds for Linux (static), macOS and Windows, each for
+x86_64 and aarch64.
 
-## Start the hub
+The release's `SHA256SUMS` lists each archive's checksum. To check that this repo's
+release workflow built an archive, run `gh attestation verify <archive> --repo bos/jj-musubi`.
 
-Other machines run `musubi` on the hub's machine over ssh, so it must be on the `PATH` of
-non-interactive shells there. Check from another machine:
+On macOS, downloads via browser will not run by default because `musubi` isn't notarized. Use
+`curl -LO`, or clear the browser's mark with `xattr -d com.apple.quarantine musubi`.
+
+To build a release from source, install Rust 1.97.1 or later, then run:
+
+```sh
+cargo install --locked jj-musubi
+```
+
+## Choose the hub machine
+
+Choose a machine that's usually available and reachable over ssh, such as a devbox or home
+server. When it's unavailable (e.g. sleeping, shut down), other machines can't sync.
+
+The hub can coexist on a machine alongside the daemons.
+
+## Connect over ssh
+
+The hub may not know the hostname under which other machines can reach it, or you may have an
+ssh alias for it. `musubi hub --advertise <name>` makes it use your preferred hostname.
+
+On the hub machine, that name or `localhost` reaches the default hub through its local
+directory, without ssh.
+
+The hub's `musubi` must be on the `PATH` of non-interactive shells. Check from another machine:
 
 ```sh
 ssh devbox musubi --version
 ```
 
-If that says `musubi: command not found`, put its directory on the `PATH` in `~/.zshenv`, or
-near the top of `~/.bashrc`, before any line that returns early for non-interactive shells.
+If that says `musubi: command not found`, put its directory on the `PATH` in your shell's
+startup file, before any line that returns early for non-interactive shells.
 
-Then, on the hub's machine:
+The first time a machine uses a hub over ssh, jj-musubi authorizes a key restricted to
+reaching the hub. It adds the key through your own ssh, so ssh may ask for your password that
+once. After that, the daemon uses this key and never prompts.
+
+Anyone who can reach a hub can read and write every hive on it
+([SECURITY.md](../../SECURITY.md)). See [SSH configuration](../reference/configuration.md#ssh)
+for key files, agent access and an absolute-command-path workaround.
+
+## Start the hub
+
+Then, on the hub machine, start the hub:
 
 ```sh
 musubi hub
 ```
 
-Leave this terminal open. The command runs until you stop it; use another terminal for
-repository commands on the same machine.
+The hub will keep running until you stop it. Leave this terminal open for now.
+You can [install a service](#keep-the-hub-running) after checking your first sync.
 
-The first time, it creates `~/musubi-hub` and prints what to run elsewhere:
+The first time you start a hub, it creates `~/musubi-hub` for data, and prints what to run
+elsewhere:
 
 ```text
 Created a new hub in /home/you/musubi-hub
@@ -66,22 +93,87 @@ Other machines reach this hub over ssh: use the name they ssh to this machine by
 On this machine, leave out --hub.
 ```
 
-The `--hub` it suggests is this machine's host name. If other machines reach it by another
-name, such as an alias in their `~/.ssh/config`, use that instead; `musubi hub --advertise
-<name>` makes the hub print that name from then on. On the hub's own machine, use that name
-or `localhost`. Commands reach the default hub through its local directory, without ssh.
+The `musubi-hub` directory contains jj-musubi's data. Use `--dir` to point at a different hub
+directory (you can omit it unless you run several hubs).
 
-To serve the same hives later, run `musubi hub` again, with the same `--dir` if you gave one.
-Machines reconnect by themselves.
+## Share a repo
 
-`--dir` keeps the hub's directory somewhere else. Leave it out unless you run more than one
-hub on the machine: other machines' ssh connections reach only the hub last started without
-it.
+In the repo on one machine, start a hive from it (on the hub's machine, leave out
+`--hub`). Choose any [clone defaults](#choose-clone-defaults) before creating the hive:
 
-### Keep the hub running
+```sh
+musubi create --hub devbox
+```
 
-`musubi hub` runs in the foreground until you stop it. To start it now and at each login,
-stop it and run:
+The hive is named after the repo's `origin` remote (`app` for `github.com/you/app`), or
+its directory if it has no remotes. If you'd prefer a different name, supply it:
+`musubi create work-app`.
+
+Sharing starts with the current repo state. To share earlier undo history too, see
+[Bring the operation history](#bring-the-operation-history).
+
+`create` starts the daemon if it isn't running, and returns once the repo has synced.
+
+When you first join a hub, it becomes this machine's default; later commands need no `--hub`.
+
+## Add other machines
+
+On each other machine, in its copy of the repo:
+
+```sh
+musubi join --hub devbox
+```
+
+The hub matches the hive by the copy's history and remotes; you needn't name it.
+
+```text
+Joined hive app (matched remote origin), 2 machines
+```
+
+If the repo you're trying to join from doesn't match a hive, or matches more than one, `join`
+stops and says why. See [Joining is refused](../troubleshooting.md#joining-is-refused).
+
+On a machine that doesn't yet have a copy of the repo, clone the hive. This creates a colocated
+repo, joins and syncs it, then checks out `trunk()` using this machine's jj config:
+
+```sh
+musubi clone app ~/src/app --hub devbox
+```
+
+A small amount of repo-local config is copied during a clone. For instance, if your machine
+doesn't have name or email settings in its jj config, they'll come from the hive's creation
+defaults. For Git remotes, see [Fetch and
+push](working-across-machines.md#fetch-and-push).
+
+## Your first sync
+
+In each copy, run:
+
+```sh
+musubi status
+```
+
+Look for `Daemon: running`, `serving this repository`, a recent `synced ... ago`, and
+`the hub has all its work`. `musubi status` doesn't contact the hub, so it should return
+immediately even if e.g. your laptop isn't on a network.
+Read the report: its exit status is 0 even when it warns.
+
+To see a sync happen, edit some files, then run `jj status` to snapshot those edits. You can
+then either wait a moment or run `musubi sync` (to be sure the send part of a sync
+has completed). In the devbox's repo, again either wait a moment or run `musubi sync` (to ensure
+that the receive side of the sync has completed), then `jj log`. The laptop's in-progress commit
+should appear as `laptop/default@`, using the machine name from `musubi status`. You can inspect
+its contents using `jj diff -r laptop/default@`. jj-musubi won't update your working
+copy, so its files stay put until you [pick up the
+work](working-across-machines.md#pick-up-on-another-machine).
+
+I almost never run `musubi sync` by hand. It's occasionally convenient for debugging, because it
+will report holds and failures. For a hold or other warning, see
+[Troubleshooting](../troubleshooting.md#start-with-this-copy).
+
+## Keep the hub running
+
+Stop the foreground hub, then install a service that will start it now and at login:
 
 ```sh
 musubi hub install
@@ -100,185 +192,44 @@ To start the hub at boot and keep it running after logout, on macOS or Linux:
 musubi hub install --at-boot
 ```
 
-Run this as your normal user, without `sudo`: it asks for administrator permission to install
-and manage the service. The hub runs as you, using your home and state directory. On macOS
-this installs a launchd daemon; on Linux, a systemd system unit. It starts only the hub at
-boot; it doesn't enable Linux lingering for your other services. The hub's executable and
-data must be available before login. A sleeping machine remains unreachable.
+Run this as your normal user, without `sudo`. It will ask for administrator permission to
+install and manage the service as you, using your home and state directory. On macOS this
+installs a launchd daemon; on Linux, a systemd system unit.
 
-Keep your existing `--dir` if you use one. Reinstall with `--at-boot` to keep boot startup, or
-without it to switch back to login startup.
-`musubi hub uninstall` stops the hub and removes either kind of service, asking for
-administrator permission when removing a boot service.
-
-Without `--at-boot`, macOS needs a logged-in user session. On Linux, you can also keep the login
-service running without a login using `loginctl enable-linger`; this affects all your user
-services. Windows has no hub installation command.
+Without `--at-boot`, macOS needs a logged-in user session. This is also the default on Linux,
+but you can keep the login service running using `loginctl enable-linger` (this affects *all*
+of your user services).
 
 On macOS the hub logs to `hub.log` in jj-musubi's state directory. On Linux use
 `journalctl --user -u musubi-hub` for a login service, or
 `sudo journalctl -u musubi-hub-$(id -u).service` for a boot service.
 
-## Share a repository
-
-In the repository on one machine, start a hive from it (on the hub's machine, leave out
-`--hub`):
-
-```sh
-musubi create --hub devbox
-```
-
-The hive is named after the repository's `origin` remote (`app` for `github.com/you/app`), or
-its directory if it has no remotes. To choose another name, pass it: `musubi create work-app`.
-
-By default, the hive starts with this copy's current repository state. Earlier operations,
-which jj uses for undo, stay local. Use `musubi create --full-history --hub devbox` if you want
-to share that earlier operation history too; `musubi join` accepts `--full-history` as well.
-
-`create` starts the daemon if it isn't running, and returns once the repository has synced:
-
-```text
-Created an ssh key for musubi: /home/you/.local/state/musubi/hub_key
-Adding it to ~/.ssh/authorized_keys on devbox, allowed only to run `musubi hub connect`. ssh may ask for your password.
-Created hive app
-```
-
-The first hub a machine uses becomes its default, so later commands need no `--hub`. The
-ssh key is explained [below](#the-ssh-key-musubi-adds). Concurrent joins on this machine reuse
-the same completed key pair; each hub may still ask you to authorize it.
-
-## Add other machines
-
-On each other machine, in its copy of the repository:
-
-```sh
-musubi join --hub devbox
-```
-
-You don't need to name the hive: the hub picks the one that has some of the copy's history
-and one of its remotes' URLs.
-
-```text
-Joined hive app (matched remote origin), 2 machines
-```
-
-The copies' histories are merged as jj merges concurrent operations: commits both copies have
-are sent only once, and a bookmark that points to different commits in the two copies is
-conflicted until you move it.
-
-If the copy matches no hive, or more than one, `join` refuses and says why. See [Joining is
-refused](../troubleshooting.md#joining-is-refused).
-
-For a machine with no copy yet, clone the hive instead. This makes a new colocated
-repository, joins it to the hive, syncs it, and checks out `trunk()` using this machine's jj
-config:
-
-```sh
-musubi clone app ~/src/app --hub devbox
-```
-
-Without a directory, as in `musubi clone app --hub devbox`, it makes the copy in a new directory
-named after the hive, in the current directory: `app`, or `dotfiles` for a hive named
-`bos/dotfiles`.
-
-The new copy uses this machine's jj configuration. If its name or email is missing, musubi
-fills it from defaults saved when the hive was created. Git remotes stay local: before fetching
-or pushing from the new copy, configure one if this machine's Git config doesn't supply it:
-
-```sh
-jj git remote add origin https://github.com/you/app.git
-```
-
-The destination must be new or empty. To share a repository you already have, run
-`musubi join` in it instead.
-
-## Check your first sync
-
-In each copy, run:
-
-```sh
-musubi status
-```
-
-Look for `Daemon: running`, `serving this repository`, a recent `synced ... ago`, and
-`the hub has all its work`. The last phrase means the work jj has already recorded. Neither
-`musubi status` nor `musubi sync --outgoing` records new edits on disk.
-
-To check a handoff, first make sure ignored and generated files are excluded on the laptop.
-Run `jj status` there to record saved edits, followed by `musubi sync`. On the devbox, run
-`musubi sync` inside its copy, then `jj log`: the laptop's working-copy commit should appear
-as `laptop/default@`, using the
-machine name its `musubi status` reports. Compare it with `jj diff -r laptop/default@`.
-Your checked-out files on the devbox stay put; [pick up that
-work](working-across-machines.md#pick-up-on-another-machine) when you're ready.
-
-`musubi status` reports the last known sync without contacting the hub and exits successfully
-even when it reports a problem. `musubi sync` makes a fresh attempt and reports an error if
-it fails. For a sending hold or any other warning, start with
-[Troubleshooting](../troubleshooting.md#start-with-this-copy).
-
-If this was a trial, you can [pause syncing or leave](manage.md#pause-syncing-or-leave) while
-keeping the repository and files.
+`musubi hub uninstall` stops the hub and removes the service.
 
 ## Start the daemon at login
 
-`create`, `join` and `clone` start the daemon, but it doesn't survive a reboot. To start it
-at login from now on:
+`create`, `join` and `clone` start the daemon. To start it at login too:
 
 ```sh
 musubi daemon install
 ```
 
-This installs a launchd agent on macOS, a systemd user unit on Linux, or an entry under the
-`Run` registry key on Windows, and starts the daemon. On Linux, the daemon stops when you log
-out unless you also run `loginctl enable-linger`; a server you reach only over ssh needs it.
+This starts the daemon and installs a launchd agent on macOS, a systemd user unit on Linux,
+or a Windows `Run` registry entry. The [user-service requirements](#keep-the-hub-running) apply.
 
-On macOS and Linux, the service runs the `musubi` that `daemon install` found, with the
-`PATH` you ran it with. If you move `musubi`, or the `git` it runs, run `musubi daemon
-install` again.
+## Choose clone defaults
 
-## Clone settings and remote checks
+Before creating a hive, choose the settings future clones may inherit. Name and email are
+the defaults; for example, add an alias:
 
-Clone fills missing selected settings once; it never keeps config in sync. Choose other
-defaults with `musubi.clone-config` before creating the hive, and set local rewrite and push
-protections on every machine where you need them. See
-[Configure each machine](working-across-machines.md#configure-each-machine).
-
-Joining checks that a configured remote name means the same fetch and push destinations as
-it does in the hive. `--hive` chooses a hive but cannot bypass a mismatch. Cloning checks
-inherited remotes before creating the destination. [Fetch and
-push](working-across-machines.md#fetch-and-push) explains how to use distinct names for a fork.
-
-git names objects with SHA-1 or SHA-256, chosen when a repository is made. musubi supports
-either, but all copies in a hive must use the same one. `git rev-parse --show-object-format`
-reports it; `musubi clone` makes the copy with the hive's format.
-
-## The ssh key musubi adds
-
-The first time a machine uses a hub over ssh, musubi creates an ssh key for itself, `hub_key`
-in its state directory (`~/.local/state/musubi` on Linux and macOS), and adds it to
-`~/.ssh/authorized_keys` on the hub's machine:
-
-```text
-restrict,command="musubi hub connect" ssh-ed25519 AAAA... musubi@laptop
+```sh
+jj config set --repo musubi.clone-config '["user.name", "user.email", "aliases.l"]'
 ```
 
-If setup fails, retry the command once the reported problem is fixed. A new key becomes active
-only when both key files are ready. Musubi preserves an existing private key and recreates its
-public-key file if missing or empty.
-
-`command=` means the key can reach the hub and nothing else on that machine. musubi adds it
-through your own ssh, so ssh may ask for your password that once. After that, the daemon uses
-this key and never prompts. It needs an ssh agent only for a `ProxyJump` host, or to sign
-commits with a key the agent holds. On Unix, a daemon started by a command uses the latest
-responsive agent supplied by a `musubi` command. Commands inheriting that agent keep using it,
-including through symbolic links.
-
-Anyone who can reach a hub can read and write every hive on it, so other machines reach it
-only over ssh, with keys that can do nothing else ([SECURITY.md](../../SECURITY.md)).
-
-If `musubi` isn't on the `PATH` of non-interactive shells on the hub's machine, you can give
-its absolute path in that line instead: `command="/opt/musubi/bin/musubi hub connect"`.
+Choose portable settings. Keep signing keys, tool paths and watchers local; include any
+aliases or remote names your chosen settings depend on. See
+[`musubi.clone-config`](../reference/configuration.md#each-repos) for override rules
+and behavior when a hive is recreated.
 
 ## Name machines
 
@@ -290,32 +241,27 @@ choose another, pass `--machine` to `create`, `join` or `clone`:
 musubi join --machine work-laptop
 ```
 
-Two machines may share a name: musubi tells them apart by an id of its own, and shows them as
-`laptop-1a2b/default@` and `laptop-3c4d/default@` from then on, even once one has left. So
-may two copies on one machine, as when a copy deleted without `musubi leave` is cloned again:
-`musubi list` and `musubi status` say which name a copy here has in the hive's list. A machine
-where a workspace of your own has a name starting `laptop/` shows the laptop so too.
+Duplicate names get id suffixes, such as `laptop-1a2b/default@` and `laptop-3c4d/default@`,
+even after one leaves. This includes a copy deleted without `musubi leave` and cloned again.
+`musubi list` and `musubi status` identify the copy here. A workspace of your own starting
+`laptop/` also makes this machine show the laptop with a suffix.
 
 ## Bring the operation history
 
-By default, a machine that creates or joins a hive shares its repository's current state.
-Other machines' `jj op log` starts from the join. A repository used for years can have tens of
-thousands of past operations, keeping old working-copy snapshots and other unused commits
-alive; leaving these out keeps the hive smaller.
+By default, creating or joining shares the current state; other machines' `jj op log` starts
+from the join. Leaving out older operations keeps unused snapshots and commits out of the hive.
 
-To share the whole operation history instead, pass `--full-history` to `create` or `join`.
+To share the whole operation history, use `musubi create --full-history --hub devbox`, or pass
+`--full-history` to `join`.
 
-## More repositories, forks, and hubs
+## More repos, forks, and hubs
 
-One hub serves any number of repositories, each its own hive, and one daemon per machine
-serves them all. Run `musubi create` in each repository you want to share, and `musubi join`
-in its other copies.
+One hub can serve several repos, with one daemon on each working machine. Run
+`musubi create` in each repo, and `musubi join` in its other copies.
 
-A fork shares history with the original but has remotes of its own, so `musubi join` won't
-put it in the original's hive. Run `musubi create` in it to give it a hive of its own, or
-`musubi join --hive <name>` to choose a particular hive. It still checks each configured
-remote name against the hive's fetch and push destinations; use distinct remote names for
-different destinations. See [Fetch and push](working-across-machines.md#fetch-and-push).
+A fork's different remotes keep it out of the original hive. Give it a hive with `musubi create`,
+or choose one with `musubi join --hive <name>`. Remote checks still apply; use distinct names
+for different destinations ([Fetch and push](working-across-machines.md#fetch-and-push)).
 
 A machine can use more than one hub. Pass `--hub` to `create`, `join` or `clone` to use one
-other than the default. Each repository remembers its own hub.
+other than the default. Each repo remembers its own hub.

@@ -635,7 +635,7 @@ axioms, with no `sorryAx` or native-law axiom. The single oracle build passed. T
 run failed its model comparison; it is not a passing C certificate or a native refusal case.
 
 The real abandon succeeded in 205 ms, before either lock and before the first underlying
-reread. It changed one head by exactly the verified ordered-parent rewrite, retaining the
+reread. It changed one head by the ordered-parent rewrite, retaining the
 complete body/view and the observed physical Git/source state. The first reread differed and
 the shipping changed-head branch emitted a retry. A second preparation reached an equal final
 reread, the first export followed that read, and the whole shipping call returned success.
@@ -766,7 +766,7 @@ ID and success coincide. The control took 5.206 seconds, with a 5.214-second sum
 100, before reaching model comparison. Its complete request and primitive replay comparisons
 remain available. The exact original source was restored; no control mutation remains.
 
-All attached jobs were observed ended and source restoration verified by 00:12:00.683 UTC,
+All attached jobs had ended and the source matched its original contents by 00:12:00.683 UTC,
 11 minutes 51.683 seconds after the original start, releasing the heavy slot. There was one
 oracle build, one three-target baseline and one C control, with no second oracle, new fixture
 recording, debugger, full suite or campaign. Logs, source hashes, compiled model/oracle hashes,

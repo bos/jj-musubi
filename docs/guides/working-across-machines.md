@@ -2,72 +2,85 @@
 
 See other machines' work, update a stale working copy, undo, and configure each copy.
 
-Once a repository is in a hive, keep using `jj` as you always do. Its daemon keeps it in sync
-with the other machines. A hive is the group of copies of one project; their background
-daemons exchange history through the hub. Each machine keeps its own checkout files.
+Keep using `jj` after joining a hive, the group of copies of one project. Their daemons exchange
+history through the hub; each machine keeps its own checkout files.
 
 ## Pick up on another machine
 
-Stop work on the laptop, and pick it up on the devbox. In the same repository there, the change
-the laptop was working on is already in `jj log`, as `laptop/default@`. Carry on from it:
+First record and send the source machine's work, then receive and inspect it on the destination.
+The examples hand off from a laptop to a devbox; use the workspace names from `musubi status`.
+If jj reports a stale working copy, [update it](#when-another-machine-rewrites-your-working-copy)
+before continuing.
 
-```sh
-jj new laptop/default@   # a new change on top of the laptop's
-```
+1. On the laptop, save your edits and exclude generated or accidental files before recording:
 
-This creates a new child change on the devbox, based on the laptop's recorded change. It
-checks out that content here and leaves the original change as its parent. You can build on
-unfinished work without moving the laptop's checkout.
+   ```sh
+   jj status
+   musubi sync
+   musubi status
+   ```
 
-When you open the laptop again, its daemon receives the devbox's history. The laptop's files
-still stay put. To continue on top of the devbox's latest work, run there:
+   Check for a recent successful sync and `the hub has all its work`. This covers recorded
+   work, not later edits. If sending is held, follow [snapshot recovery](snapshots.md) before
+   switching machines. Keep secrets ignored; small accidental files can still sync.
+
+2. In the devbox's copy, receive and inspect the laptop's recorded change:
+
+   ```sh
+   musubi sync
+   musubi status
+   jj log
+   jj diff -r laptop/default@
+   ```
+
+   Check the sync report for errors and compare the change with the work you expected.
+   A sender reporting that its work was sent doesn't establish that this receiver has it.
+
+3. Build on it here:
+
+   ```sh
+   jj new laptop/default@   # a new change on top of the laptop's
+   ```
+
+   This checks out a child of the laptop's change without moving the laptop's checkout.
+
+To return to the laptop, repeat the record/send and receive/inspect steps in the other direction,
+then continue there with:
 
 ```sh
 jj new devbox/default@
 ```
 
-Use the machine and workspace names shown by `musubi status`. If jj first reports a stale
-working copy, [update it](#when-another-machine-rewrites-your-working-copy) before proceeding.
+### Record saves automatically
 
-What reaches the devbox is the laptop's work as of its last `jj` command, since that's when
-jj records edits. To have jj record them each time you save a file, without running a command,
-turn on its [watchman](https://facebook.github.io/watchman/) trigger, with watchman installed:
+Edits sync after jj records them. To record each save, install
+[watchman](https://facebook.github.io/watchman/) and enable its jj trigger:
 
 ```sh
 jj config set --user fsmonitor.backend watchman
 jj config set --user fsmonitor.watchman.register-snapshot-trigger true
 ```
 
-If the laptop's work hasn't arrived, run `musubi status` there. Sending pauses when outgoing
-snapshots retain more than 100 extra file paths or 8 MiB; [inspect the held work, then approve
-or clean it up](#when-snapshots-pick-up-too-much) before switching machines. Keep secrets in
-ignored files: smaller accidental files can still sync.
-
 ## Coding agents
 
-Agents working on several machines in one repository see each other's work as you do. Give
-each agent on a machine its own jj workspace, with `jj workspace add`, so that agents don't
-share files; every machine then shows the change each agent is working on, as
-`devbox/default@` or `laptop/agent-2@`. From any machine:
+Give each agent a workspace with `jj workspace add` so agents don't share files. Their work
+appears on every machine as `devbox/default@` or `laptop/agent-2@`. Review it from any machine:
 
 ```sh
 jj log -r 'working_copies()'   # what every agent on every machine is working on
 jj diff -r devbox/default@     # review one agent's change
-jj new devbox/default@         # build on it here, or hand it to another agent
 ```
 
-`musubi status` answers at once, so an agent can check that its repository syncs, and see the
-other machines' working copies, before it starts. Persistent copies stay in the hive until
-you take them out. For a short-lived devbox, use `musubi join --lease 6h` or
-`musubi clone <hive> <dir> --lease 6h`: the hive forgets that copy after six hours without a
-local operation, so it doesn't linger in every machine's `jj log`.
+[Pick up an agent's work](#pick-up-on-another-machine) as you would another machine's.
 
-Another machine's rewrites can repeatedly make a coding agent's working copy stale. The
-[`jj-musubi` skill](../../skills/jj-musubi/SKILL.md) helps agents choose a stable base, avoid
-disrupting other machines, and handle stale copies and sync failures.
+Use `musubi status` to [check syncing](#see-what-other-machines-are-doing) before starting.
+Copies stay in the hive until removed. For a temporary devbox, use `musubi join --lease 6h`
+or `musubi clone <hive> <dir> --lease 6h` to forget it after six hours without a local operation.
 
-To install it, link it into your agent's skills directory. Replace `~/src/jj-musubi` with the
-path to your clone:
+The [`jj-musubi` skill](../../skills/jj-musubi/SKILL.md) helps agents choose a stable base,
+avoid disrupting other machines, and handle stale copies and sync failures.
+
+Link it into your agent's skills directory, replacing `~/src/jj-musubi` with your clone's path:
 
 ```sh
 ln -s ~/src/jj-musubi/skills/jj-musubi ~/.claude/skills/jj-musubi   # Claude Code
@@ -76,44 +89,18 @@ ln -s ~/src/jj-musubi/skills/jj-musubi ~/.codex/skills/jj-musubi    # Codex
 
 ## See what other machines are doing
 
-`jj log` shows each other machine's working copy as a workspace named after the machine, such
-as `laptop/default@`. Use it like any revision:
-
-```sh
-jj diff -r laptop/default@   # what the laptop is working on
-jj new laptop/default@       # build on it here
-```
-
-This is what the laptop last snapshotted, when a `jj` command last ran there. Edits it hasn't
-snapshotted yet stay on the laptop.
-
-`jj op log` shows every machine's operations, each with the workspace that made it, such as
+Workspace names in `jj log` show recorded work; unsnapshotted edits stay on their machine.
+`jj op log` shows each machine's operations with the workspace that made them, such as
 `laptop/default`.
 
-`musubi status`, run in the repository, shows each machine's working copy at a glance, when
-this copy last synced, and whether the hub has its latest recorded work. It doesn't contact
-the hub or record edits on disk. Its successful exit status can accompany a warning; read
-the report. For example:
-
-```text
-Hive: app on devbox
-This machine: devbox, synced 3s ago; the hub has all its work
-Working copies:
-default@: kxqpwzlm 3f2a1c9e fix the parser
-laptop/default@: vruxwmqv 8d0b4e11 (no description set)
-Copies:
-devbox (this machine): used 1m ago, never forgotten
-laptop: used 2h ago, never forgotten
-Daemon: running (pid 4182), serving this repository; starts at login
-Daemon socket: /run/user/1000/musubi/daemon.sock
-Daemon log: /home/you/.local/state/musubi/daemon.log
-```
+`musubi status` reports this copy's last known sync and working copies without contacting the
+hub or recording edits. It exits 0 even when reporting a problem. For all-machine reports,
+logs and unattended checks, see [Monitor syncing](manage.md#check-syncing).
 
 ## When another machine rewrites your working copy
 
-If another machine changes the commit your working copy is on, say by rebasing it or squashing
-it into its parent, jj here treats the working copy as stale, as it would after the same
-change in another workspace. The next `jj` command stops and says so:
+A rebase or squash on another machine can make your working copy stale. The next `jj` command
+stops and says so:
 
 ```text
 Error: The working copy is stale (not updated since operation dc4042ec91bd).
@@ -121,32 +108,29 @@ Hint: Run `jj workspace update-stale` to update it.
 See https://docs.jj-vcs.dev/latest/working-copy/#stale-working-copy for more information.
 ```
 
-Run `jj workspace update-stale` to update the files. Edits that `jj` hadn't snapshotted yet
-are snapshotted first, so they survive; at worst, your working-copy change becomes divergent,
-and you resolve it as usual.
+`jj workspace update-stale` snapshots unrecorded edits before updating the files. Your
+working-copy change may become divergent and need resolving.
 
-To have every `jj` command update a stale working copy by itself, set:
+To let `jj` commands update stale files automatically, set:
 
 ```sh
 jj config set --user snapshot.auto-update-stale true
 ```
 
-The cost is that any `jj` command, even `jj log`, can then change files under a running build
-or an open editor. Set it separately on each machine where you want that behavior.
+Then even `jj log` can change files under a build or editor. Set it on each machine where
+you want that behavior.
 
 ## Undo across machines
 
-To jj, another machine is another workspace, so `jj undo` refuses to undo an operation that
-another machine made:
+`jj undo` refuses to undo another machine's operation, as it does another workspace's:
 
 ```text
 Error: Refusing to undo operation bf73e005993e because it was performed in workspace laptop/default
 Hint: Use `--allow-cross-workspace` to undo it anyway, or use `jj op revert` to revert a specific operation
 ```
 
-That keeps `jj undo` here from undoing what you just did on another machine. To undo the other
-machine's operation anyway, pass `--allow-cross-workspace`. To undo one of this machine's own
-operations after others have arrived, revert it by id:
+Pass `--allow-cross-workspace` to undo it anyway. To revert one of this machine's operations
+after others have arrived, use its id:
 
 ```sh
 jj op log            # find the operation
@@ -159,9 +143,8 @@ stale.
 
 ## When machines change the same thing
 
-Changes made on different machines at once combine as jj combines two `jj` commands run at
-once on one machine ([How musubi works](../how-it-works.md#when-machines-change-the-same-thing)).
-To resolve what that leaves:
+Resolve a bookmark conflict or divergent change on any machine; the resolution syncs to the
+others:
 
 - A bookmark moved to different commits on two machines is conflicted everywhere, shown as
   `main??`. Move it once, anywhere, with `jj bookmark set main -r <rev>`.
@@ -175,247 +158,56 @@ In a colocated repository, a conflicted bookmark isn't exported to git, so each 
 
 ## Fetch and push
 
-Remote bookmarks replicate, so `jj git fetch` on one machine updates every machine's remote
-bookmarks and their `.git` remote-tracking refs; there's no need to fetch on each. A
-`jj git push` on one machine shows as pushed on all of them.
+`jj git fetch` on one machine updates every copy's remote bookmarks and `.git` remote-tracking
+refs. A `jj git push` shows as pushed everywhere.
 
-Git remote definitions stay local. You can use one machine for all upstream fetches and
-pushes. Other copies can have no remotes, or keep matching remotes as unused declarations;
-they still receive Git results through musubi and can commit, rewrite, and share work.
-`musubi clone` adds no Git remotes. It checks any remotes inherited from global Git config,
-including conditional includes for the new copy's path, before creating the destination.
-To use another copy for Git access, configure it explicitly:
+Remote definitions stay local. Copies without remotes, or with unused matching remotes, still
+receive Git results and share work. `musubi clone` adds none; it checks inherited global config,
+including conditional includes for the new path, before creating the destination. To fetch or
+push from another copy, configure a remote there:
 
 ```sh
 jj git remote add origin https://github.com/you/app.git
 ```
 
-A remote name is bound to its fetch and push destinations for the lifetime of a hive.
-`musubi join` checks every configured remote against those bindings before joining, including
-when you choose `--hive` or rejoin. A copy may omit a remote. Equivalent URL forms agree,
-but a different repository or push destination needs an unused remote name or another hive.
+A hive binds each remote name to its fetch and push destinations for its lifetime. `musubi join`
+checks them even with `--hive` or when rejoining. A copy may omit a remote; a different repo
+or push destination needs an unused remote name or another hive. Equivalent URL forms agree.
 
-Remote bookmarks such as `main@origin` are shared by name. A rename or removal also renames
-or removes the shared remote bookmarks, while leaving the other machines' configured remotes
-alone. Coordinate those changes before another machine fetches or pushes. The preflight
-checks reported destinations at join time; it cannot inspect an offline machine's current
-files or prevent you changing local config afterwards.
+Renaming or removing a remote renames or removes shared bookmarks such as `main@origin`, but
+leaves other machines' remote definitions alone. Coordinate before anyone fetches or pushes.
+Join checks destinations at that time; it cannot inspect offline config or prevent later edits.
 
-Each machine can use its own equivalent URL and credentials. Git aliases are expanded before
-checking destinations; an SSH host alias that normalizes to a different host is a mismatch. musubi
-records credential-free URL hints when a copy explicitly joins, to match later copies to
-the hive. Bracketed IPv6 forms such as `git@[2001:db8::1]:team/project.git` and
-`ssh://git@[2001:db8::1]/team/project.git` match for joining. After changing a remote URL,
-run `musubi join` again to register an equivalent URL. `--hive` chooses a hive; it never
-bypasses the destination check.
-Credentials are stripped from these hints and from URLs in jj's recorded command arguments.
+After changing a remote URL, run `musubi join` again to register it; the destination must
+still match. See [configuration](../reference/configuration.md) and
+[remote-name refusals](../troubleshooting.md#remote-names--have-different-fetch-or-push-destinations-than-hive--recorded)
+if joining is refused.
 
 ## Configure each machine
 
-jj user, repo, and workspace config stay local. This includes `trunk()`, `immutable_heads()`,
-`git.private-commits`, aliases, and signing settings. `musubi clone` uses the destination
-machine's config to evaluate `trunk()` and adds no Git remotes.
+jj config stays local, including `trunk()`, `immutable_heads()`, `git.private-commits`, aliases
+and signing settings. Clone uses the destination's `trunk()`; its one-time defaults are chosen
+[during setup](setup.md#choose-clone-defaults). See the [configuration
+reference](../reference/configuration.md#settings) for config scope and reload behavior.
 
-When a hive is created or recreated after hub loss, it records the creating copy's configured
-`user.name` and `user.email` as defaults for future clones. Clone fills missing values in its new
-repo config, leaving existing destination settings alone, even when they differ. When they are
-already configured, it creates no identity overrides. This happens once; later changes on any
-machine do not update the defaults or other copies.
-
-To choose other keys, set `musubi.clone-config` before `musubi create`, for example:
-
-```sh
-jj config set --repo musubi.clone-config '["user.name", "user.email", "aliases.l"]'
-```
-
-The list replaces the default selection; `[]` records no defaults. Choose portable settings:
-signing keys, tool paths, and filesystem watchers belong to each machine. Aliases and
-repository protections may depend on other aliases or remote names; include what they need,
-or configure them locally. `musubi.forget-after` remains each copy's own policy and cannot
-be selected. Rejoining an existing hive never changes its recorded clone defaults. If a hub is
-lost or replaced, the first copy to recreate the hive supplies fresh defaults.
-
-Set any protection you need on every machine where it matters. A local `immutable_heads()`
-rule cannot prevent another machine rewriting shared history. `git.private-commits` controls
-that machine's Git pushes; it does not keep commits out of musubi. All committed and
-snapshotted work replicates to the hive.
-
-After changing jj settings, `musubi sync` waits for a sync with the new settings. A sync
-already in progress finishes using its earlier settings. Joining or cloning can set this
-copy's local `musubi.forget-after` default; sync does not copy config values from other
-machines.
-
-## When snapshots pick up too much
-
-Automatic snapshots keep unfinished work recoverable, including files you later remove.
-To limit accidental uploads, musubi holds sending when those snapshots retain more than
-100 extra file paths or 8 MiB beyond explicit change history and content already shared with
-the hive. Receiving continues. A hold means the work stays on this machine until you resolve
-it; the repository still works with jj. For a step-by-step response to accidental files,
-start with [Accidental-file
-recovery](../troubleshooting.md#accidentally-added-files-and-sending-stopped).
-
-An explicit `jj commit`, `describe`, `split`, `squash`, or other command that creates or
-modifies changes makes those change versions intentional history: their content needs no
-approval. Explicitly bookmarking a working-copy version also retains it intentionally; later
-automatic bookmark moves do not approve later content. A partial commit does not approve the
-unselected working-copy remainder.
-
-When jj did not record enough information about a command's changes, musubi may still
-require approval to send that history and cannot prune it safely. This includes some Git imports
-of existing versions and operation-history restores; the exact send override still works. See
-[troubleshooting](../troubleshooting.md#cleanup-cannot-preserve-earlier-changes).
-
-For example, suppose `jj status` snapshots `README.txt`, `AGENTS.md`, and a directory of
-accidental files. You commit only `README.txt`, then remove the accidental directory and run
-`jj status` again. `README.txt` is intentional history. `AGENTS.md` is current work. The
-older snapshots still retain the accidental files, even though they are gone from disk.
-
-Inspect what would go out:
-
-```sh
-musubi sync --outgoing
-```
-
-This reads recorded history without snapshotting or contacting the hub. If unwanted files
-haven't been snapshotted yet, exclude them before running jj. To keep a generated directory
-locally, add it to `.gitignore` and run `jj file untrack <directory>` if jj already tracked it.
-Then `jj status` records the intended current files. Old snapshots may still retain the
-directory, so inspect again before deciding what to prune.
-
-The output lists the extra paths, their bytes and versions, and the operations retaining
-them. Content shared by several snapshots is counted once; the operation rows overlap.
-Ten distinct 900 KB files exceed the default byte budget, even though the file count is small.
-The budget is cumulative across the whole outgoing history, rather than a limit per snapshot.
-It includes current uncommitted work as well as older snapshots. The byte count uses each
-distinct version's full contents, including earlier versions of a file you've since made
-smaller. Explicit change history is exempt, so a repository with thousands of committed files
-can sync normally.
-
-Choose operations from that list, using the ids printed there. For example:
-
-```sh
-musubi sync --prune a12b34c56d78 b23c45d67e89
-```
-
-This previews removing those whole operations. It says how much snapshot content would
-remain, warns that older uncommitted versions may become unrecoverable, and prints an exact
-apply command. The preview removes nothing.
-
-### Inspect older edits before cleanup
-
-Before applying, check whether a selected operation includes an older uncommitted version
-you want to keep. Using an operation id from the report:
-
-```sh
-jj --ignore-working-copy op show --patch a12b34c56d78
-```
-
-If you need an older file, use the commit id shown there to save that version outside the
-repository. Replace `<commit>` with that id; this example saves `AGENTS.md`:
-
-```sh
-jj --at-op a12b34c56d78 file show -r <commit> AGENTS.md > ../AGENTS-before-cleanup.md
-```
-
-`--at-op` reads that historical state without snapshotting current files. Keep the saved
-version until you've compared it with your current work. If you edit files or history while
-checking, preview cleanup again and use its new token.
-
-### Apply the checked preview
-
-Copy the apply command printed by your preview, including its operation ids and token:
-
-```sh
-musubi sync --prune a12b34c56d78 b23c45d67e89 --apply <token-from-preview>
-musubi sync
-```
-
-Cleanup keeps the exact README commit, the current `AGENTS.md`, other current files,
-bookmarks, and workspace positions. If a removed snapshot had an older version of
-`AGENTS.md` alongside the accidental files, that older uncommitted version may be lost.
-Explicit change versions survive even when their operations were selected. No individual
-file is edited out of an old snapshot. Selecting too few operations may leave the same files
-retained elsewhere; the preview shows that, without adding operations to your selection.
-Files still in the current snapshot remain required: exclude unwanted files first, keeping
-them on disk with ignore rules and `jj file untrack` if needed, then run `jj status`.
-
-### Approve the history or change limits
-
-If you want everything to go through instead, `--outgoing` prints the override:
-
-```sh
-musubi sync --approve <token-from-outgoing>
-```
-
-Approval covers exactly the inspected outgoing history and limits. Later snapshots or
-incoming changes can invalidate it; inspect again if musubi asks. If the sync fails or the
-hub is offline, approval stays valid for that exact publication and the daemon can retry it
-later. `--outgoing` then says "Approved for sending". Cleanup similarly refuses
-a stale preview. Before applying it, musubi records unsnapshotted edits; if that changes the
-plan, preview again. This preserves edits made since the preview.
-
-Cleanup only removes history known never to have been offered to the hub. A request whose
-reply was lost may already have propagated, and history from before this tracking began is
-also treated conservatively. For history already sent, see
-[Abandoning operations](#abandoning-operations).
-Pruning disconnects operations; jj's normal garbage collection eventually reclaims objects
-that nothing else needs. It is not immediate disk reclamation or removal of secrets.
-
-Set different limits for a repository, or use `--user` for your default:
-
-```sh
-jj config set --repo musubi.publication.max-files 2000
-jj config set --repo musubi.publication.max-bytes '16 MiB'
-```
-
-Zero disables the corresponding limit. Setting both to zero disables the guard. To prevent
-jj from automatically adding new files at all, jj also offers `snapshot.auto-track = 'none()'`;
-that changes your usual jj workflow and is not required for the publication budget.
+Set protections on every machine that needs them. `immutable_heads()` cannot prevent rewrites
+elsewhere. `git.private-commits` limits that copy's Git pushes, not what jj-musubi shares.
 
 ## Abandoning operations
 
-`jj op abandon` works across machines. The operations you abandon go from every machine's
-operation log, as from this one's, and never come back, even from a machine that was offline
-at the time, so think of it as abandoning them on every machine. As with jj on one machine,
-the repository stays as it was at each operation that's left, and the operations after the
-abandoned ones get new ids: ids you noted from `jj op log` on any machine no longer work.
-musubi adds an operation to the log saying so, `musubi: pass on jj op abandon`.
+`jj op abandon` removes operations from every machine's log, including offline members when
+they return. Remaining operations keep their repo state, but descendants get new ids:
+ids saved from `jj op log` no longer work. jj-musubi logs this as
+`musubi: pass on jj op abandon`.
 
-Trimming every operation already shared with the hive, beneath new work that has not synced
-there yet, keeps the other machines in the hive too. Their next sync takes the abandon as
-usual, even if they were offline while you trimmed the history.
+An offline member can return and take the abandon. If all remaining members took an abandon
+while a copy was forgotten or out of the hive, that copy cannot sync again. The same can
+happen to a copy away before its first `musubi join` or `musubi clone` sync finished: after a
+day without contact, or an hour after a hub restart. It reports "this repository's history
+no longer matches the hive's"; follow the [new-copy recovery
+steps](../troubleshooting.md#this-repositorys-history-no-longer-matches-the-hives-so-it-cant-sync-again).
 
-Trimming all earlier history keeps each copy's own Git refs and HEAD as they were, including
-when a sync is finishing as you trim. Other copies remain in the hive or forgotten as they
-were, including when the trim removes a forget that the hub just accepted.
-
-The hub remembers an abandon until every machine still in the hive has taken it. An offline
-machine therefore delays cleanup. The hub also waits for a copy whose first sync after
-`musubi join` or `musubi clone` hasn't finished, but stops waiting after a day without contact
-from that copy. After a hub restart, the hub keeps every abandon for at least an hour.
-Once those conditions are met, the hub drops the record it kept for passing on the abandon.
-The abandoned operations remain on disk.
-
-A copy can't sync again, and stops with "this repository's history no longer matches the
-hive's" ([what to
-do](../troubleshooting.md#this-repositorys-history-no-longer-matches-the-hives-so-it-cant-sync-again)),
-if another machine abandoned operations while it was:
-
-- forgotten, with `musubi forget` or by its `musubi.forget-after`;
-- out with `musubi leave`, until it ran `musubi join` again;
-- joining, with `musubi join` or `musubi clone`, and away before its first sync finished: for
-  over a day, or for over an hour after the hub restarted.
-
-A `jj` command that was already running on another machine when the abandon reached it,
-such as a long `jj git fetch`, still syncs its work. If a second command there merges that
-work before musubi has seen it, bookmarks the first one changed can come out conflicted, as
-they can after `jj op abandon` on one machine: set them again with `jj bookmark set`.
-
-## Things to avoid
-
-- **A newer `jj`** than the one musubi supports, 0.47.1. Operations with unknown fields stop
-  the sync. [Upgrade jj and musubi
-  together](manage.md#upgrade-musubi).
-- **Copying a repository's directory** to make another machine's copy. Use `musubi clone`, or
-  clone from the remote and `musubi join`.
+A command already running when the abandon arrives, such as `jj git fetch`, still syncs its
+work. If another command merges it before jj-musubi sees it, bookmarks changed by the first
+command can conflict. Set them again with `jj bookmark set`, as after `jj op abandon` on one
+machine.

@@ -92,14 +92,14 @@ the empty digest represents the unchanged empty-record state, and only equality 
 
 The graph, storage contents and closure/ancestry queries are the harness's trusted finite
 abstraction. The production adapters, bundle validation, content hashes, real object graphs,
-sequence exhaustion, other requests and longer histories are not verified here. Their
+sequence exhaustion, other requests and longer histories are outside this check. Their
 existing tests and proofs remain necessary.
 
 ## Mutation evidence and cost
 
-On 2026-11-02, Kani 0.68.0 with CBMC 6.11.0 verified the unmodified harness, with all five
-cover properties satisfied. Each of these independent changes to the production handler
-made verification fail:
+On 2026-11-02, Kani 0.68.0 with CBMC 6.11.0 found no assertion failures in the unmodified
+harness, with all five cover properties satisfied. Each of the following changes, applied on
+its own, made an assertion fail:
 
 | Mutation in `hub::Push::answer` | Failing assertion |
 | --- | --- |

@@ -1,26 +1,26 @@
 # Command reference
 
-Every musubi command, grouped by task.
+Share repositories, check syncing, and run hubs and daemons.
 
-Built-in help is the reference for flags: `-h` gives a summary, and `--help` the full text.
+Use `-h` for a summary or `--help` for all flags:
 
 ```sh
 musubi --help
 musubi <command> --help
 ```
 
-Running `musubi` with no command is `musubi list`. [How musubi works](../how-it-works.md)
+Running `musubi` with no command is `musubi list`. [How jj-musubi works](../how-it-works.md)
 explains hubs, hives, and copies.
 
-## Share repositories
+## Share repos
 
 | Command | Use it to |
 | --- | --- |
-| `create [<name>]` | Start a hive from the repository you're in, for other copies to join. |
-| `join` | Add this machine's copy of a repository to the hive it belongs in. In a copy already part of a hive, make the hive again on a hub that has lost it, or on another hub given with `--hub`. In a repository made by copying a copy's files, which musubi doesn't sync, `--original` syncs it as that copy, which must be gone. |
-| `clone <hive> [<dir>]` | Make a new copy of a hive on this machine, in a new or empty `<dir>` (by default a new directory in the current one, named after the last part of the hive's name, as `jj git clone` names one after its URL: `dotfiles` for `bos/dotfiles`, even given a prefix of the name), making any missing parent directories, and check out `trunk()` using this machine's jj config. It fills missing selected settings once from the hive's creation defaults, including name and email by default. Existing destination settings win. Git remotes are not copied. The copy names its objects with the hive's hash, SHA-1 or SHA-256, whatever jj's `git.object-hash` setting says. |
-| `leave` | Attempt a final sync, then take this repository out of its hive. It keeps everything it has. `--force` permits leaving if the attempt fails; it still attempts to sync. `leave <path>` stops syncing a copy that was at `<path>` and is gone. See [Pause syncing or leave](../guides/manage.md#pause-syncing-or-leave). |
-| `forget <machine>` | Forget another machine's copy that went away without leaving, or an earlier copy on this machine, deleted without it, even if it has no workspaces. `musubi status` lists present copies. Name the machine as its working copies are named here: `laptop` for `laptop/default@`, `laptop-1a2b` for `laptop-1a2b/default@`, or, where even the start of its id is another machine's, its whole id, as in `laptop-1a2b3c4d/default@`. The name `musubi list` gives it also works, if no other machine could have that name. |
+| `create [<name>]` | Start a hive from the repo you're in, for other copies to join. |
+| `join` | Join this copy to its matching hive, or recreate a lost hive on this hub or another named by `--hub`. A filesystem duplicate can take over the original's identity with `--original` once that copy is gone. |
+| `clone <hive> [<dir>]` | Create a copy in a new or empty `<dir>`, making missing parents, and check out `trunk()` using local jj config. Without `<dir>`, use the hive name's last component (`dotfiles` for `bos/dotfiles`) in the current directory, even with an abbreviated hive name. The hive's creation defaults fill missing settings (name and email by default); existing settings win. Git remotes aren't copied. Objects use the hive's SHA-1 or SHA-256 hash, regardless of `git.object-hash`. |
+| `leave` | Attempt a final sync, then leave the hive, keeping the repo and files. `--force` still attempts this sync but leaves even if it fails. `leave <path>` stops looking for a copy that is gone. See [Pause syncing or leave](../guides/manage.md#pause-syncing-or-leave). |
+| `forget <machine>` | Forget another machine's missing copy, or an old deleted copy here, even without workspaces. `musubi status` lists copies. Use the machine part of its workspace name: `laptop` for `laptop/default@`, `laptop-1a2b` for `laptop-1a2b/default@`, or its full id if prefixes collide (`laptop-1a2b3c4d/default@`). The name from `musubi list` also works if unambiguous. |
 
 `create`, `join`, and `clone` take:
 
@@ -30,10 +30,10 @@ explains hubs, hives, and copies.
   [`musubi.hub`](configuration.md#this-machines) names another.
 - `--machine <name>`: this machine's name in the hive, which other machines show its working
   copies under. It defaults to jj's `operation.hostname`.
-- `--lease <duration>`: explicitly forget this temporary copy after that long without a local
+- `--lease <duration>`: forget this copy after that long without a local
   operation, such as `--lease 6h`. Sets `musubi.forget-after` in this copy's repo config.
 
-`create` and `join` also take `--full-history`, to share the repository's whole operation
+`create` and `join` also take `--full-history`, to share the repo's whole operation
 history rather than its current state, and `join` takes `--hive <name>` to join a hive of your
 choosing. Without `--lease`, all three keep the copy's configured
 [`musubi.forget-after`](configuration.md#settings), or set `never` when none is configured.
@@ -43,55 +43,110 @@ Agent-run commands have the same default. See [Set up a hub and machines](../gui
 
 | Command | Use it to |
 | --- | --- |
-| `list` | Show the hubs' hives, this machine's copies of them, and whether each is syncing. `-T` prints only the hubs, hives and copies, with a template of your own, as jj's list commands do (see `musubi list --help`); `-T 'json(self) ++ "\n"'` gives them as JSON, for a script. |
-| `status` | Show what musubi does with the repository you're in: its hive, hub and machine name, its last sync, whether the hub has this machine's latest work, each machine's working copies, each copy in the hive with when it was last used and when it will be forgotten, and the daemon's process, socket and log. Warn of what keeps it from syncing, and say what to do. Outside a hive, show the default hub and the daemon. `-T` prints only the report, with a template of your own (see `musubi status --help`); `-T 'json(self) ++ "\n"'` gives it as JSON, for a script or an agent (see [below](#musubi-status-as-json)). |
-| `sync` | Sync the repository you're in now, and see at once whether it worked. `--outgoing` inspects snapshot overhead without sending; `--approve TOKEN` approves exactly that publication. `--prune OPERATION...` previews discarding selected unpublished operations, and `--prune OPERATION... --apply TOKEN` applies that preview, preserving current work and explicit change versions. See [snapshot cleanup](../guides/working-across-machines.md#when-snapshots-pick-up-too-much). If jj left an operation abandon ambiguous, follow the `jj op integrate` hint to restore the missing history first. |
-| `top` | Watch what flows through the hubs, and which machines are offline, behind, or failing, as it happens. |
+| `list` | Show hubs' hives, local copies and sync state. `-T` uses a template; see `musubi list --help`. Use `-T 'json(self) ++ "\n"'` for JSON. |
+| `status` | Report this copy's hive, hub, workspaces, last sync, pending work, other copies' activity and expiry, and daemon state. Warn of problems with recovery hints. Outside a hive, show the default hub and daemon. `-T` uses a template (`musubi status --help`); `-T 'json(self) ++ "\n"'` produces [JSON](#musubi-status-as-json). |
+| `sync` | Sync this copy now. `--outgoing` inspects snapshot overhead without sending. `--approve TOKEN` approves the inspected history. `--prune OPERATION...` previews discarding unpublished operations; `--prune OPERATION... --apply TOKEN` applies that preview, preserving current work and explicit change versions. See [snapshot cleanup](../guides/snapshots.md). For an ambiguous operation abandon, first restore missing history with the `jj op integrate` hint. |
+| `top` | Watch hub traffic and machines that are offline, behind, or failing. |
 
-`status` never starts the daemon or asks the hub, so it answers at once, and it exits 0
-whatever it reports: run it from a script, an agent, or a shell prompt. Its warnings and hints
-go to standard error, as jj's do.
+`status` reads local state without starting the daemon or contacting the hub. It always exits 0;
+warnings and hints go to standard error.
 
-Sending pauses when outgoing snapshots retain more than 100 extra file paths or 8 MiB beyond
-explicit change history and shared content; receiving continues. `musubi sync --outgoing`
-lists every retained extra path without taking a new snapshot or contacting the hub.
-`Within publication budget` does not mean the work has been sent; it describes what fits the
-limits. See [Snapshot limits and
-cleanup](../guides/working-across-machines.md#when-snapshots-pick-up-too-much) for approval,
-cleanup and configuration.
+Sending pauses above 100 extra file paths or 8 MiB in outgoing snapshots, beyond explicit
+change history and shared content; receiving continues. `musubi sync --outgoing` lists extra
+paths without snapshotting or contacting the hub. `Within publication budget` means the work
+fits, not that it was sent. See [Snapshot limits and cleanup](../guides/snapshots.md) for the
+workflow and [configuration](configuration.md#each-repos) for setting semantics.
 
 ### `musubi status` as JSON
 
-`musubi status -T 'json(self) ++ "\n"'` prints one JSON object, with times as seconds since
-the Unix epoch, and durations in seconds. A value that can't be told, or doesn't apply, is
-`null`, where `-T`'s keywords give an empty string or false. The keyword `problem` is
-`not_synced` here, else `hive.error`; `status` comes from `hive.last_sync`, except during a
-snapshot hold, when it is `sending held: snapshot publication budget`;
-`daemon_running` is `daemon.running`.
+`musubi status -T 'json(self) ++ "\n"'` prints one JSON object. Times are seconds since the Unix
+epoch; durations are seconds. Unknown or inapplicable values are `null`, where `-T` keywords
+give an empty string or false. The keyword `problem` maps to `not_synced`, else `hive.error`;
+`status` comes from `hive.last_sync`, except during a snapshot hold, when it is
+`sending held: snapshot publication budget`; `daemon_running` is `daemon.running`.
 
 | Field | Value |
 | --- | --- |
-| `repository` | The workspace the current directory is in, or `null` outside a jj repository, or when that can't be told, with `not_synced` saying why. |
-| `hive` | The repository's part in its hive, or `null` outside one: `name`, `id`, `hub`, `machine` (this machine's name in the hive), `head` (the hive's head, as of the last sync), `last_sync`, `error` (why its syncing fails), `sent` (whether the hub has all this machine's work, as far as the last sync tells), `forgotten`, `working_copies` (each with `name`, `commit`, `change` and `description`), and `copies` (each with `machine`, `this`, `last_used`, and `forget_after`, `null` for never). |
-| `not_synced` | Why musubi doesn't sync the repository, though it has a hive's record, as when it was made by copying a copy's files; or why that can't be told, as when the current directory, or its workspace's repository, is gone (see [Move, copy or restore a repository](../guides/manage.md#move-copy-or-restore-a-repository)); `hive` is `null` then. `null` otherwise. |
+| `repository` | The workspace containing the current directory. `null` outside a jj repo or if unavailable; `not_synced` explains unavailable state. |
+| `hive` | The repo's part in its hive, or `null` outside one: `name`, `id`, `hub`, `machine` (this machine's name in the hive), `head` (the hive's head, as of the last sync), `last_sync`, `error` (why its syncing fails), `sent` (whether the hub has all this machine's work, as far as the last sync tells), `forgotten`, `working_copies` (each with `name`, `commit`, `change` and `description`), and `copies` (each with `machine`, `this`, `last_used`, and `forget_after`, `null` for never). |
+| `not_synced` | Why a recorded copy does not sync (such as a filesystem duplicate), or why its state is unavailable (such as a missing directory or repo). `hive` is `null` in these cases; otherwise `not_synced` is `null`. See [Move, copy or restore a repo](../guides/manage.md#move-copy-or-restore-a-repo). |
 | `default_hub` | The hub commands use without `--hub`, or `null`. |
-| `daemon` | `running`, or `null` with `error` saying why that can't be told, or that the daemon runs but can't be reached; `pid`; `serving` (whether it serves this repository); `served` (how many repositories it serves); `at_login`; `socket`; `log`; and `upgrade_failed`, with `release` and `error`, if the daemon's latest upgrade to a release newer than this one failed, else `null`. |
+| `daemon` | `running` (`null` if unknown), `error` (why its state is unknown or a running daemon is unreachable), `pid`, `serving` (whether it serves this repo), `served` (repo count), `at_login`, `socket`, `log`, and `upgrade_failed` (`release` and `error` if its last upgrade to a release newer than this command failed, otherwise `null`). |
+
+For unattended checks, read `daemon.running`, `daemon.serving`, `hive.error`, `hive.last_sync`
+and `hive.sent` on each machine, allowing for expected offline periods. An old successful sync
+isn't evidence of current health; a sender's `hive.sent` does not show that every receiver has
+caught up. Neither `status` nor `top --once` signals reported problems with a failing exit status.
+See [Monitor syncing](../guides/manage.md#check-syncing) for the workflow.
+
+### Read `musubi top`
+
+`musubi top` asks the known hubs for their reports and refreshes every five seconds.
+
+```text
+musubi top: 1 hub, every 5s
+This machine's daemon is running, serving 2 repositories.
+Hub devbox: up 3h12m, musubi 0.1.0, 2 hives.
+Issues:
+  app: gpu not heard from in 6m: offline, or its daemon isn't running
+
+HIVE      HEAD  IN/s     OUT/s    OPS  COMMITS  MACHINES  ISSUES
+app       #412  12 KiB/s 40 KiB/s 96   51       2/3       1
+dotfiles  #88   0 B/s    0 B/s    3    1        1/1
+
+app since the hub started:
+  received 4.1 MiB and sent 12 MiB
+  96 operations came in, with 51 commits, and 180 went out
+  40 pushes moved the head, and 2 found it moved already
+  MACHINE  HEARD   AT    MUSUBI  STATE
+  devbox   3s ago  #412  0.1.0   up to date
+  gpu      6m ago  #401  0.1.0   not heard from in 6m: offline, or its daemon isn't running
+  laptop   2s ago  #412  0.1.0   up to date
+
+  AGO     HEAD  FROM    OPS  COMMITS  WHAT
+  2s ago  #412  laptop  1    1        snapshot working copy
+```
+
+The hive rows show transfer rates and incoming operations and commits since hub startup. Pick
+a hive with the arrow keys to see its machines and latest updates, named as `jj op log` names
+them.
+
+| Field | Meaning |
+| --- | --- |
+| `HEAD` | The hub's current update number. |
+| `AT` | A machine's last reported update; compare with `HEAD` to see if it caught up. |
+| `IN/s`, `OUT/s` | Bytes per second received and sent by the hub. |
+| `OPS`, `COMMITS` | Incoming operations and commits since the hub started. |
+| `MACHINES` | Up-to-date reports over listed machines: `2/3` means two of three are up to date. |
+| `ISSUES` | Problems reported for the hive. |
+| `STATE` | The machine's reported sync state. A sleeping machine may be quiet without failing. |
+
+Issues list unreachable hubs, failed requests and machines offline, behind or failing to sync.
+An offline machine appears in the issues list when first found quiet; its row stays red and
+`ISSUES` still counts it. It appears again if heard from and then quiet again. See
+[report messages](../troubleshooting.md#what-musubi-top-reports) for recovery.
+
+`q` quits; space, Enter or `t` refreshes; `d`, `s` or `i` sets the refresh interval; Ctrl-L
+redraws. `+` and `-` refresh less or more often. Without a terminal, or with `--once`, it prints
+one snapshot without rates. `top` sends no unattended alerts; `--once` exits successfully even
+with issues.
+
+Reports live in hub memory. After a restart, machines reappear at their next sync, within half
+a minute. Reports expire after a day without contact.
 
 ## Run the daemon
 
 | Command | Use it to |
 | --- | --- |
-| `daemon install` | Start the daemon at login from now on, and now. |
-| `daemon uninstall` | Stop starting the daemon at login, and stop it. |
+| `daemon install` | Start the daemon now and at login. |
+| `daemon uninstall` | Stop the daemon and remove login startup. |
 | `daemon start` | Start the daemon in the background, unless it is running. |
-| `daemon stop` | Stop background syncing for all copies served by this machine's daemon, keeping hive memberships and the login installation. It leaves the hub running. `create`, `join`, and `clone` can start the daemon again; explicit `sync` still syncs without it. |
-| `daemon restart` | Stop the daemon and start it again, as after upgrading musubi. |
+| `daemon stop` | Stop background syncing for copies served by this daemon, keeping memberships and login startup. The hub keeps running; explicit `sync` still works. |
+| `daemon restart` | Stop the daemon and start it again, as after upgrading jj-musubi. |
 | `daemon` | Run the daemon in the foreground, logging to the terminal. |
 
-`create`, `join`, and `clone` start the daemon if it isn't running, and wait for the
-repository's first sync. `sync` uses the daemon if it is running, and otherwise syncs by
-itself, saying that the daemon isn't running. Each shows on a terminal how far the sync has
-got.
+`create`, `join`, and `clone` start a missing daemon and wait for the first sync. `sync` uses
+the daemon if running, or syncs directly with a warning. Each shows progress on a terminal.
 
 ## Run a hub
 
@@ -102,21 +157,18 @@ got.
 | `hub uninstall` | Stop the hub and remove its login or boot service. Removing a boot service uses sudo. |
 | `hub rename <hive> <new-name>` | Rename a hive. |
 | `hub remove <hive>` | Remove a hive from the hub. Each machine's copy leaves it as it hears. `rm` is an alias. |
-| `hub connect` | Relay standard input and output to this machine's hub. Other machines run it over ssh; you don't need to. |
+| `hub connect` | Relay standard input and output to this machine's hub. Other machines use it over ssh. |
 
-Commands that take a hive accept its name, any prefix of the name that no other hive shares,
-or its id. `hub remove` takes only a whole name or an id.
+Hives can be named by an unambiguous prefix or id. `hub remove` requires a whole name or id.
 
-`musubi hub` prints commands for other machines and says whether commands on this machine
-can leave out `--hub`. It recognizes symbolic links to the default hub's directory. If the
-saved path is too long to connect to it, use the shorter `--hub` path the hub prints.
+`musubi hub` prints commands, including when local commands can omit `--hub`. It recognizes
+symlinks to the default hub directory. If its saved path is too long, use the shorter `--hub`
+path it prints.
 
 ## Complete commands in your shell
 
-musubi completes its commands, flags, and paths, and the names of hives and hubs, in bash,
-zsh, fish, elvish, and PowerShell. Add the line for your shell to its startup file; your shell
-then asks musubi as you type. How it asks can change between releases, so start a new shell
-after upgrading.
+Add the line for your shell to complete commands, flags, paths, hives and hubs as you type.
+Start a new shell after upgrading: the completion interface can change.
 
 | Shell | Startup file | Line |
 | --- | --- | --- |
@@ -126,14 +178,12 @@ after upgrading.
 | elvish | `~/.config/elvish/rc.elv` | `eval (E:COMPLETE=elvish musubi \| slurp)` |
 | PowerShell | `$PROFILE` | `$env:COMPLETE = "powershell"; musubi \| Out-String \| Invoke-Expression; Remove-Item Env:\COMPLETE` |
 
-To complete a hive's name, musubi asks the default hub for its hives, and your shell waits up
-to two seconds for the answer. If none comes in time, as through a slow `ProxyCommand`, musubi
-completes the hives of this machine's copies on that hub instead.
+Hive completion waits up to two seconds for the default hub, then falls back to hives with
+copies on this machine using that hub.
 
-`musubi completion <shell>` instead prints a static script, which completes commands, flags,
-and paths but not hive or hub names. Use it for nushell, which completion as you type doesn't
-support, or to install a completion file with a package. It takes `bash`, `elvish`, `fish`,
-`nushell`, `powershell`, or `zsh`:
+`musubi completion <shell>` prints a static script for commands, flags and paths, without hive
+or hub names. Use it for nushell or packaged completion files. It accepts `bash`, `elvish`,
+`fish`, `nushell`, `powershell` or `zsh`:
 
 ```sh
 source <(musubi completion zsh)
@@ -141,7 +191,12 @@ source <(musubi completion zsh)
 
 ## Investigate
 
-`musubi debug` holds tools for investigating a hive. It is left out of `musubi --help`.
+`musubi debug` investigates hives; it is omitted from `musubi --help`.
+
+Operations include each machine's Git refs and workspaces, so their ids differ between copies
+and the hub. Commands such as `jj op restore <id>` take the local id. Run
+`musubi debug op-id <id>` here to get its hive id, then run `musubi debug op-id` with that id
+in the other machine's repo to find its local counterpart.
 
 | Command | Use it to |
 | --- | --- |
@@ -155,6 +210,5 @@ source <(musubi completion zsh)
 | `--log <filter>` | Choose what this command logs, as a filter in `RUST_LOG`'s syntax, such as `debug` or `musubi_sync=debug`. See [Logging](configuration.md#logging). |
 | `--socket <path>` | Talk to the daemon on another control socket: an absolute path, or one starting with `~/`. See [Files and directories](configuration.md#files-and-directories). |
 
-When whatever reads a command's output stops before the end, as `head` does in `musubi list |
-head`, the command still does all it would, printing nothing more there, and exits with
-status 3, as jj does then.
+If a reader closes stdout early, as in `musubi list | head`, the command finishes its work,
+stops printing and exits 3, as jj does.

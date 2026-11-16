@@ -1,113 +1,41 @@
 # Manage hives, machines, and hubs
 
-Check on syncing, rename or remove hives, take machines out, upgrade, and replace a hub.
+Check syncing, rename or remove hives, take machines out, and replace a hub.
 
-The hub stores and passes on shared history. Each working machine's daemon keeps its copies
-in sync with it. For the arrangement and terms, see [How musubi works](../how-it-works.md).
+A hub passes shared history between copies; each machine's daemon keeps them in sync.
+See [How jj-musubi works](../how-it-works.md).
 
-## Check on syncing
+For release changes, state migrations and automatic installers, see [Upgrading](upgrading.md).
 
-`musubi list` (or just `musubi`) shows every hub this machine knows, the hives on each, which
-machines have copies, and how each copy on this machine is syncing:
+## Check syncing
 
-```text
-Hub devbox:
-  app  2 machines: gpu, laptop
-    here: /home/you/src/app  synced 4s ago
-  dotfiles  1 machine: gpu
-    here: /home/you/dotfiles  synced 12s ago
-Daemon: running, serving 2 repositories; starts at login
-```
+Inside a repository, run `musubi status`. Look for a running daemon serving this repo,
+a recent successful sync, no error or sending hold, and `the hub has all its work`.
 
-`musubi status`, run in a hive's repository, shows that repository's hive, hub and machine
-name, where each machine's working copy is, and whether the hub has this machine's latest
-recorded work. It reads the last known sync without asking the hub. It exits 0 even when it
-reports a problem, so a successful command exit is not a health check.
+The report reads local state without contacting the hub or recording edits, and exits 0 even
+with a problem. Run `musubi sync` to attempt a fresh sync; it reports failures but still sends
+only work jj has recorded. Check for unwanted files before using `jj status` to snapshot edits.
+A [snapshot hold](snapshots.md) pauses sending while receiving continues.
 
-### A healthy baseline
+To check other machines, run `musubi top`, select a hive with the arrow keys and inspect
+`STATE`. A quiet machine may be asleep. If it should be online, or is behind or failing, run
+`musubi status` there and follow its [error](../troubleshooting.md) or inspect its
+[daemon log](../reference/configuration.md#logging).
 
-In each copy, look for a running daemon serving the repository, a recent successful sync,
-no error or sending hold, and `the hub has all its work`. That last phrase covers jj's
-recorded work; unsnapshotted edits on disk are still local. If generated or accidental files
-are present, [exclude them before recording more
-work](../troubleshooting.md#accidentally-added-files-and-sending-stopped).
+A successful send means the hub has the work; it does not establish that every receiver has
+it. [Inspect the received work](working-across-machines.md#pick-up-on-another-machine)
+before a handoff. Reports come from completed syncs, so a long first sync has no report until
+it finishes. After a hub restart, machines reappear as they sync again.
 
-Run `musubi sync` in a copy for a fresh attempt. It reports an error if that attempt fails;
-if it reports a snapshot hold, receiving still continues. Without a running daemon, it syncs
-once and warns that nothing will keep syncing afterward.
+After login, reboot or an upgrade, check that the hub runs and use `musubi list` on each
+working machine expected online. Without a daemon, `musubi sync` syncs once and warns that
+nothing will keep syncing. See [service setup](setup.md#keep-the-hub-running) and
+[daemon troubleshooting](../troubleshooting.md#the-daemon).
 
-After login, reboot or an upgrade, check each machine you expect to be online. On the hub's
-machine, confirm the hub service is running and use `musubi top --once` to inspect the hives.
-On each working machine, use `musubi list`, then `musubi status` in any copy with a problem.
-The [startup instructions](setup.md#keep-the-hub-running) explain user-login services and
-Linux lingering.
-
-For logs, use the daemon's log on the affected working machine and the hub's log on the hub's
-machine. On Linux these are separate journal units, `musubi` and `musubi-hub`. See
-[Logging](../reference/configuration.md#logging).
-
-### Watch every machine
-
-`musubi list` knows only this machine's copies. `musubi top` asks the hubs, which hear from
-every machine's daemon after each sync, and refreshes every five seconds:
-
-```text
-musubi top: 1 hub, every 5s
-This machine's daemon is running, serving 2 repositories.
-Hub devbox: up 3h12m, musubi 0.1.0, 2 hives.
-Issues:
-  app: gpu not heard from in 6m: offline, or its daemon isn't running
-
-HIVE      HEAD  IN/s     OUT/s    OPS  COMMITS  MACHINES  ISSUES
-app       #412  12 KiB/s 40 KiB/s 96   51       2/3       1
-dotfiles  #88   0 B/s    0 B/s    3    1        1/1
-
-app since the hub started:
-  received 4.1 MiB and sent 12 MiB
-  96 operations came in, with 51 commits, and 180 went out
-  40 pushes moved the head, and 2 found it moved already
-  MACHINE  HEARD   AT    MUSUBI  STATE
-  devbox   3s ago  #412  0.1.0   up to date
-  gpu      6m ago  #401  0.1.0   not heard from in 6m: offline, or its daemon isn't running
-  laptop   2s ago  #412  0.1.0   up to date
-
-  AGO     HEAD  FROM    OPS  COMMITS  WHAT
-  2s ago  #412  laptop  1    1        snapshot working copy
-```
-
-Each hive's row shows the bytes a second going into and out of the hub, and the operations and
-commits that came in since the hub started. Below, for the hive you pick with the arrow keys, it
-shows each machine and the latest updates, with the machine each came from and what `jj op log`
-calls it. The issues at the top need attention: a hub out of reach or failing requests, and
-machines offline, stuck behind, or failing to sync. An offline machine is listed only at the
-first refresh that finds it quiet, leaving room for new issues. Its hive's `ISSUES` still counts
-it and its row stays red. It is listed again if it is heard from and then goes quiet again.
-[Troubleshooting](../troubleshooting.md#what-musubi-top-reports) says what to do about each.
-
-`HEAD` is the hub's current update number; `AT` is each machine's last reported update.
-Compare them to see whether that machine has caught up. `MACHINES` counts up-to-date reports
-over listed machines: `2/3` means two of the three listed machines are up to date. Read the
-third machine's `STATE`, and consider whether you expect that machine to be asleep before
-investigating a sync problem.
-
-Its keys are like those of `top` and `atop`: `q` quits; space, Enter or `t` refreshes now; `d`,
-`s` or `i` asks how many seconds to refresh every; and Ctrl-L redraws the screen. `+` and `-`
-also refresh less or more often. Without a terminal, or with `--once`, it prints one snapshot,
-without the rates.
-
-`musubi top` displays issues while you watch; it sends no alerts when you're away.
-`--once` still exits successfully when the report contains issues. For unattended monitoring,
-an external check can read
-[`musubi status` as JSON](../reference/commands.md#musubi-status-as-json)
-on each machine: check `daemon.running`, `daemon.serving`, `hive.error`, `hive.last_sync` and
-`hive.sent`, with the offline periods you expect for sleeping machines. An old successful
-sync alone does not establish that a machine is healthy now. The hub's `top` report helps
-identify missing or behind machines; a sender having sent its work does not prove every
-receiver has taken it.
-
-The hub keeps all this in memory. After the hub restarts, each machine shows up again once its
-daemon next syncs, within half a minute. The hub forgets a machine it hasn't heard from in a
-day.
+`musubi top` sends no alerts; `status` and `top --once` exit successfully even with problems.
+See the [dashboard reference](../reference/commands.md#read-musubi-top) for controls and report
+expiry, and [JSON health checks](../reference/commands.md#musubi-status-as-json) for unattended
+monitoring.
 
 ## Rename or remove a hive
 
@@ -116,64 +44,56 @@ musubi hub rename app work-app
 musubi hub remove work-app
 ```
 
-Renaming changes the name that commands take and `musubi list` and `musubi status` show.
-Copies keep syncing, and each machine picks up the new name as its daemon next syncs, within
-half a minute, or the next time `musubi list` runs there.
+Renaming changes the name commands take and `musubi list` and `musubi status` show. Copies keep
+syncing and learn the name at their next sync, within half a minute, or next `musubi list`.
 
-`musubi hub remove` requires the hive's whole name or its id, and waits for the hub to finish
-what it is doing for the hive's machines, such as sending a large fetch; meanwhile the hub
-serves every other hive as usual. Each machine's copy leaves the hive as it next syncs, as with
-`musubi leave`, keeping everything it has. The hub keeps the hive's data in `removed/` for a day, then only an empty directory, as a
-record that the hive was removed, so that no copy brings it back. To share the repository
-again, start a new hive with `musubi create`, and run `musubi join --hive <name>` in the other
-copies. A plain `musubi join` in a copy whose hive was removed refuses to join another hive
-and says that the old one was removed; run `musubi leave` in it first, after which `musubi
-join` matches it with a hive as it would any repository.
+`musubi hub remove` takes the hive's whole name or id. It waits for ongoing work, such as a
+large fetch, while other hives remain available. Each copy leaves at its next sync, keeping
+everything it has. The hub keeps the data in `removed/` for a day, then an empty directory
+that prevents copies from recreating the removed hive.
+
+To share again, start a hive with `musubi create` and run `musubi join --hive <name>` in other
+copies. A plain `musubi join` refuses while the copy records a removed hive; run
+`musubi leave` first, after which `musubi join` matches it as any other repo.
 
 ## Pause syncing or leave
 
-To pause this machine's background syncing while you investigate, run:
+To pause background syncing on this machine:
 
 ```sh
 musubi daemon stop
 ```
 
-It stops syncing for all copies served by this machine's daemon, keeps their memberships,
-and leaves the hub and other machines alone. Work already sent or received stays. This is a
-stop command, not an undo or a promise to cancel an exchange before any effect. Wait for the
-command to finish before assuming the daemon is stopped, then check `musubi status`.
+This stops syncing for all copies served by the daemon, keeping their memberships and work
+already sent or received. It leaves the hub and other machines alone. Wait for completion,
+then check `musubi status`; stopping does not undo an exchange or guarantee it had no effect.
 
-`musubi daemon start` resumes background syncing. The login installation remains in place;
-`musubi daemon uninstall` stops the daemon and removes that startup too. Explicit
+`musubi daemon start` resumes syncing. Login startup remains installed;
+`musubi daemon uninstall` stops the daemon and removes it. Explicit
 `musubi sync` can still sync while the daemon is stopped, and `create`, `join` and `clone`
 can start it again.
 
-To take just one repository out, use `musubi leave` as below. Leaving attempts a final sync,
-so it is different from pausing the daemon while you decide what to send. Both `musubi leave`
-and `musubi leave --force` attempt to record and send current work. `--force` lets the copy
-leave even if that attempt fails; it does not skip the attempt.
+To remove one copy, [leave its hive](#take-a-repo-or-machine-out). Leaving attempts a
+final sync, even with `musubi leave --force`; pause the daemon while deciding what to send.
 
-## Take a repository or machine out
+## Take a repo or machine out
 
-In a repository, `musubi leave` takes it out of its hive and stops syncing it. It first
-records what changed in the working copy and sends that last work to the hive. The other
-machines then stop showing its working copy (`laptop/default@`), and the hub stops counting
-the machine. The repository keeps everything it has, working copy included, and the other
-machines keep everything it sent: a working-copy commit with changes stays as an ordinary
-commit, and an empty one is dropped.
+In a repo, `musubi leave` snapshots current files and sends the last work before leaving
+the hive and stopping sync. Other machines stop showing its working copy (`laptop/default@`),
+and the hub stops counting it. The repo keeps its files and history; other copies keep
+what it sent. A working-copy commit with changes becomes an ordinary commit; an empty one
+is dropped.
 
-If the final sync fails, `musubi leave` fails and the repository stays in its hive, so
-that a script tearing down a machine knows its last work didn't get out. `musubi leave
---force` tries the same sync but leaves even if it fails; the other machines may go on showing
-the copy until one of them forgets it. See
+If the final sync fails, `musubi leave` fails and the repo stays in its hive.
+`musubi leave --force` attempts the same sync but leaves even if it fails; other machines may
+show the copy until one forgets it. See
 [Troubleshooting](../troubleshooting.md#leaving-a-hive-or-forgetting-a-machine) for the
 messages.
 
 ### Forget a machine that went away
 
-A machine that went away without leaving, such as a short-lived machine, or whose copy was
-deleted, stays in the hive until it is forgotten. Forget it now, from any other machine, by
-the name its working copy has there:
+A machine that disappeared without `musubi leave`, or whose copy was deleted, stays in the hive
+until forgotten. From another machine, use the name its working copy has there:
 
 ```sh
 musubi forget laptop
@@ -182,24 +102,18 @@ musubi forget laptop
 A copy remains present if its last workspace was removed with `jj workspace forget`.
 `musubi status` still lists its name under Copies, and `musubi forget` accepts that name.
 
-The other machines stop showing `laptop/default@` as they sync, and the hub stops counting it. The
-copy keeps its remaining local workspaces. If it still exists after all, it comes back as soon as
-a `jj` command in it records an operation: one that changes something or snapshots a change to the
-working copy. Meanwhile its working copy moves as any machine's does when other machines rewrite
-the commits under it, so the first `jj` command there may find it stale ([what to
-do](working-across-machines.md#when-another-machine-rewrites-your-working-copy)). But if another
-machine runs `jj op abandon` while the copy is away, and every machine still in the hive has taken
-it, the copy can't sync again: it stops with "this repository's history no longer matches the
-hive's" ([what to
-do](../troubleshooting.md#this-repositorys-history-no-longer-matches-the-hives-so-it-cant-sync-again)).
+Other machines stop showing `laptop/default@` as they sync, and the hub stops counting it.
+The copy keeps its local workspaces and returns when a `jj` command records an operation,
+including a snapshot. Other machines' rewrites can make its working copy
+[stale](working-across-machines.md#when-another-machine-rewrites-your-working-copy).
+[Returning after an operation abandon](#rejoin-or-stop-using-jj-musubi) may require a new copy.
 
 A copy deleted and cloned again on the same machine shows beside the new one, both under the
 machine's name with part of their ids, as `laptop-1a2b` and `laptop-3c4d`. `musubi list` and
 `musubi status` say which is the new copy; forget the other by its name.
 
-Copies are never forgotten by default, whether a person or an agent joins them. For a
-short-lived devbox or other temporary copy, give `musubi join`, `create` or `clone` an
-explicit inactivity lease:
+Copies are never forgotten by default, whether joined by a person or agent. Give temporary
+copies an inactivity lease with `musubi join`, `create` or `clone`:
 
 ```sh
 musubi join --lease 6h
@@ -218,261 +132,87 @@ jj config set --repo musubi.forget-after never     # or 30m, '1h 30m', '2 days'
 musubi sync
 ```
 
-The running daemon reads the new setting before its next sync and shares the policy with
-other copies. `musubi sync` waits for that sync; no daemon restart is needed.
+The daemon reads and shares the new policy at its next sync. `musubi sync` waits for it;
+no restart is needed.
 
-Any operation recorded in the copy counts as using it, as does changing this setting. Once a
-copy goes unused for longer than its setting, the first daemon to notice forgets it, as
-`musubi forget` would, within a few minutes; the copy comes back as soon as it's used again,
-with the same exception. In a repository, `musubi status` shows each copy, when it was last
-used, and when it will be forgotten.
+Recording an operation or changing this setting counts as use. After the inactivity limit,
+the first daemon to notice forgets the copy within a few minutes, as `musubi forget` would.
+It returns when used again, subject to the abandon exception below. `musubi status` shows each
+copy's last use and when it will be forgotten.
 
-### Rejoin, or stop using musubi
+### Rejoin, or stop using jj-musubi
 
-To sync a copy again after it has left, run `musubi join` in it. It carries on from the
-history it shared, so a copy that joins a different hive brings its old hive's history along,
-and the new hive's machines show the old hive's working copies too. If another machine ran
-`jj op abandon` while the copy was away, before you ran `musubi join` again, and every machine
-still in the hive has taken it, the copy can't sync again: it stops with "this repository's
-history no longer matches the hive's" ([what to
-do](../troubleshooting.md#this-repositorys-history-no-longer-matches-the-hives-so-it-cant-sync-again)).
-So can a copy whose first sync after joining again doesn't finish for over a day
+After leaving, run `musubi join` to rejoin. Joining a different hive brings the old shared
+history and working-copy names along.
+
+A copy cannot sync again if another machine runs `jj op abandon` while it is away and every
+remaining member takes that abandon: "this repository's history no longer matches the hive's".
+Follow the [recovery
+steps](../troubleshooting.md#this-repositorys-history-no-longer-matches-the-hives-so-it-cant-sync-again).
+A copy can also become unable to sync if its first sync after rejoining takes over a day
 ([more](working-across-machines.md#abandoning-operations)).
 
-To stop using musubi on a machine altogether:
+To stop using jj-musubi on a machine:
 
-1. Take each of its repositories out with `musubi leave`. `musubi list` lists them.
+1. Take each of its repos out with `musubi leave`. `musubi list` lists them.
 2. Run `musubi daemon uninstall`, which stops the daemon and stops it starting at login.
 3. If a hub runs on this machine, stop it (`musubi hub uninstall`, if `musubi hub install`
    runs it at login), delete its directory, and remove the other machines' lines, those
    ending in `musubi@<host>`, from `~/.ssh/authorized_keys` here.
    Move the hub first if other machines still use it: see [Replace or move a
    hub](#replace-or-move-a-hub).
-4. Delete what musubi kept: `.jj/repo/musubi/` in each of those repositories, and its state
+4. Delete what jj-musubi kept: `.jj/repo/musubi/` in each of those repos, and its state
    directory, `~/.local/state/musubi` unless you set `XDG_STATE_HOME` or `MUSUBI_STATE_DIR`
    (`%APPDATA%\musubi` on Windows). [Files and
-   directories](../reference/configuration.md#files-and-directories) lists everything musubi
+   directories](../reference/configuration.md#files-and-directories) lists everything jj-musubi
    writes.
 5. Unset its settings: `jj config list --user musubi` lists them, and
-   `jj config unset --user <key>` unsets each. In each of those repositories, do the same
+   `jj config unset --user <key>` unsets each. In each of those repos, do the same
    with `--repo`, for `musubi.forget-after`.
 6. On the hub's machine, if that is another, remove this machine's line from
    `~/.ssh/authorized_keys`: the one ending in `musubi@<host>`.
 
-## Upgrade musubi
+## Move, copy or restore a repo
 
-Read the [changelog](../../CHANGELOG.md) for the version you're installing before replacing
-any running processes. Protocol changes require the hub and every machine to upgrade together.
-A new installation needs no migration.
+After moving a copy with `mv`, on one disk or between disks, run jj or `musubi` there so the
+daemon finds its new location.
 
-For the current unreleased changes (protocol 22), the hub's stored metadata has changed and
-needs a fresh directory. Your jj repositories keep their history and local configuration.
-If these hives haven't yet been recreated for 0.6.0, use [Recreate hives when upgrading to
-0.6.0](#recreate-hives-when-upgrading-to-060) instead; that also replaces the old local musubi
-state.
+A copy made with `cp -a`, `rsync` or a backup duplicates the original's hive identity.
+jj-musubi refuses to sync it because the two copies would overwrite each other's working
+copy. `musubi status` reports this; `musubi join`, `sync` and `leave` refuse. Use it as a plain
+jj repo, or make another copy with `musubi clone`.
 
-For hives already recreated for 0.6.0:
+This also applies after copying and deleting the original, or restoring onto a new machine.
+Once the original is gone, `musubi join --original` syncs the replacement under its identity.
+A backup restored over the original copy syncs as before and fetches work it lacks.
 
-1. Stop the old hub and each machine's daemon, then install the same new build everywhere.
-2. On the hub's machine, archive its old default hub directory. Run `musubi hub` without
-   `--dir` to create a fresh default directory, so ssh connections find the new hub.
-3. In each existing copy, run `musubi join --hub <hub-host>` to recreate its hive and resume
-   syncing. The first copy recreating a hive supplies its clone defaults; set
-   `musubi.clone-config` there first if you want different defaults.
-4. Check each copy with `musubi status` and the hub with `musubi top`. Restore login startup
-   as described in [setup](setup.md#keep-the-hub-running).
+Deleted copies, unmounted disks and directories replaced by other repos stop syncing;
+jj-musubi writes nothing there. `musubi list` reports "not syncing" and why. A returning copy
+resumes syncing; `musubi leave <path>` stops looking for it. Other machines show it until
+forgotten.
 
-Remote names must mean the same fetch and push destinations across a hive. Give different
-destinations distinct names before rejoining; see
-[Fetch and push](working-across-machines.md#fetch-and-push).
-
-### Recreate hives when upgrading to 0.6.0
-
-Release 0.6.0, the first since 0.1.0, changes operation ids to preserve identity when history
-is abandoned. Its hub state and each copy's musubi state must be made afresh; the jj
-repositories and their work stay.
-
-1. Before upgrading, sync every copy with the old release, and note each copy's
-   [machine name](setup.md#name-machines), which `musubi status` shows. In each copy run
-   `musubi leave`, or `musubi leave --force` if its hub is gone, then stop its daemon with
-   `musubi daemon stop`.
-2. Keep a backup of every repository. Run `jj workspace list` in each copy, then
-   `jj workspace forget <name>` for each workspace belonging to another machine. Keep this
-   machine's own workspaces, including its linked workspaces. A local workspace's name can
-   contain `/`; `jj workspace root --name <name>` shows its recorded local directory.
-   Leaving can leave the other machines' workspaces here; remove them before the next step
-   so that the new hive doesn't treat them as this machine's own. This removes their
-   workspace names from this copy.
-3. Move each repository's `musubi` directory out of its jj repository directory (normally
-   `.jj/repo/musubi`) to a separate archive. Keep that archive; it includes the old hive
-   membership and translation records. For linked workspaces, use the repository directory
-   they share, once for that repository.
-4. Stop the old hub and archive its state directory. Install 0.6.0 on the hub and every
-   machine, then start the hub with an empty state directory, as in the setup guide.
-5. In one preserved repository run `musubi create --machine <machine>`, then in each other
-   copy run `musubi join --machine <machine>`, giving each copy the machine name you noted for
-   it, so that the other machines show its workspaces under the same name as before. Joining
-   starts its daemon. Use the usual join, which shares the present view; do not use
-   `--full-history` to carry old realizations into the new hive.
-
-The old operation history remains in the local jj repositories. Inspect work on every copy
-before discarding any archive.
-
-### Keep machines on the hub's release
-
-Until 1.0, a release may change how machines and hubs talk, and a machine and a hub running
-different releases refuse to sync, saying so. So run the same release on the hub's machine and
-every other machine.
-
-Each machine can follow its hub by itself. Give it a command that installs the release of
-musubi it is told, as a script in your dotfiles:
-
-```sh
-jj config set --user musubi.upgrade-command ~/bin/upgrade-musubi
-```
-
-Whenever the daemon finds a hub running a newer release than its own, it runs the command
-once for that release, with `MUSUBI_UPGRADE_TO` set to it, such as `0.6.0`, or for a build
-[deployed from source](#deploy-a-build-from-source), its name. Once the `musubi`
-the daemon started from says it is that release (`musubi --version`), the daemon starts again
-from it. A machine that was asleep or away does this when it next reaches the hub.
-
-To upgrade, then:
-
-1. Read the release's section of [CHANGELOG.md](../../CHANGELOG.md) for anything else to do.
-2. On the hub's machine, install the new `musubi` in place of the old one. Stop `musubi hub`
-   and start it again, or reinstall its service with `musubi hub install`, keeping `--at-boot`
-   if it starts at boot.
-3. Every machine with `musubi.upgrade-command` upgrades itself. On any other machine, install
-   the new `musubi` and run `musubi daemon restart`.
-
-The command runs through `sh -c` (`cmd /C` on Windows), in the state directory, with no
-terminal and the daemon's environment: where launchd or systemd starts the daemon, the `PATH`
-that `musubi daemon install` saw. Its output goes to `upgrade.log` in the state directory.
-It must install exactly
-`$MUSUBI_UPGRADE_TO`, where the daemon started `musubi` from: if the path changes, run
-`musubi daemon install` again.
-
-Keep the installer in the foreground and preserve its standard input. On Unix, this holds
-the upgrade lock across daemon restarts: restarting leaves a running upgrade alone, and the
-new daemon waits for the lock to be released before trying again.
-
-While the daemon that launched it remains running, the command may run for up to an hour,
-as `cargo install` can. On Unix, the timeout stops the command and children in its process
-group; on Windows it stops the command process. An installer must not detach itself or start
-background installers. If its daemon stops, the surviving command has no timeout monitor;
-see [troubleshooting](../troubleshooting.md#upgrade-upgrading-to-musubi--failed-) if it stalls.
-
-A script that builds musubi with cargo:
-
-```sh
-#!/bin/sh
-set -e
-cargo install --locked --version "$MUSUBI_UPGRADE_TO" jj-musubi
-```
-
-If you build musubi on each machine from a jj repository of its source (made with `jj git
-clone`), copy [contrib/upgrade-from-source](../../contrib/upgrade-from-source) into your
-dotfiles and give it the repository:
-
-```sh
-jj config set --user musubi.upgrade-command '~/bin/upgrade-from-source ~/dev/jj-musubi'
-```
-
-For a release, it builds the release's tag, such as `v0.6.0`, and for a build deployed from
-source, that build's commit, fetching first if the repository lacks it; otherwise it fails,
-saying what it found. It builds a copy of the commit's files, so it never touches the
-repository's working copy, or your edits in progress there. It needs `jj`, `git` and `cargo`
-on the daemon's `PATH`. To try it, name a release; this installs it:
-
-```sh
-MUSUBI_UPGRADE_TO=0.6.0 ~/bin/upgrade-from-source ~/dev/jj-musubi
-```
-
-If the command fails, or installs another release, the daemon carries on as it was, and
-`musubi status` says why. Once the command works, `musubi daemon restart` tries again.
-
-Only a newer release starts the command, or a build deployed later, as below. A build from
-source that wasn't deployed, as with `cargo install --path`, says only the release it follows,
-so it starts nothing, and neither does putting a hub back on an older release: upgrade or go
-back by hand then.
-
-Upgrade `jj` and musubi together: each release of musubi works with one release of jj, and
-refuses operations that a newer jj wrote.
-
-### Deploy a build from source
-
-To run a build of musubi's source on every machine between releases, deploy it from the hub's
-machine with `upgrade-from-source --deploy`:
-
-1. Push the revision where the machines' clones of the source fetch from, as by pushing
-   `main`.
-2. On the hub's machine, deploy it, `main` unless you name another revision. It fetches
-   first, and refuses a revision that no remote has, which the machines couldn't fetch:
-
-   ```sh
-   ~/bin/upgrade-from-source --deploy ~/dev/jj-musubi main
-   ```
-
-   This installs it with `cargo install`, into `~/.cargo/bin` or `CARGO_INSTALL_ROOT`, which
-   must be where the hub runs `musubi` from, as a build named for the release it follows (the
-   `version` in its `Cargo.toml`), the time in UTC, and its commit, such as
-   `musubi 0.3.0+20261102153012.4a0db205e1f0`. `musubi --version` prints that name.
-3. Stop `musubi hub` and start it again, or reinstall its service with `musubi hub install`,
-   keeping `--at-boot` if it starts at boot.
-
-Each machine whose upgrade command is `upgrade-from-source` then follows the hub to that build,
-even if it changes how machines and hubs talk: it builds the build's commit, fetching it if its
-clone lacks it. [`musubi top`](#watch-every-machine) shows which build each machine runs.
-Another upgrade command, such as the cargo one above, can't install a deployed build, and
-`musubi status` says so. A machine that tried before the commit was pushed tries again after
-`musubi daemon restart`, or when you deploy again.
-
-Of two builds that follow the same release, the one deployed later by the clock of the
-machine you deploy on is newer, whatever its commit, so deploying an older revision again takes
-every machine back to it. A deployed build is newer than the release it follows and older than
-the next, so deploying a revision from before the release the machines run starts nothing.
-
-## Move, copy or restore a repository
-
-musubi follows a copy you move, with `mv`, on one disk or to another: once jj or musubi runs
-in it at its new place, the daemon syncs it there.
-
-A repository made by copying a copy's files, with `cp -a`, `rsync` or a backup, is a
-duplicate. It carries the copy's identity in the hive, and two repositories syncing as one
-would overwrite each other's working copy. So musubi doesn't sync a duplicate: `musubi status`
-in it says it isn't synced, and `musubi join`, `sync` and `leave` there refuse. Use it as a
-plain jj repository, or make another copy with `musubi clone`.
-
-musubi also treats a repository as a duplicate if you moved it by copying it and deleting the
-original, or restored it from a backup onto a new machine. Once the original is gone,
-`musubi join --original` syncs the replacement as the original copy.
-A backup restored in place, over the copy, is the copy already: it syncs as before, and
-fetches the work it lacks.
-
-A copy that is deleted, or on a disk that isn't mounted, stops syncing, and musubi writes
-nothing there; it syncs again if it comes back. `musubi list` shows it as "not syncing",
-saying why, and `musubi leave <path>` stops looking for it. The other machines show it until it's
-forgotten. If the directory comes to hold another repository, musubi stops syncing it too,
-and writes nothing there.
-
-Run musubi as the user who owns the repository: it refuses another user's, as under `sudo`.
-And don't let a file-syncing tool, such as Dropbox or Syncthing, sync a copy too: see
+Run `musubi` as the repo's owner; it refuses another user's, as under `sudo`.
+Do not also sync its files with Dropbox, Syncthing or similar tools: see
 [Comparison](../comparison.md#file-syncing-dropbox-syncthing-icloud-rsync-nfs).
+
+## Repo cleanup
+
+The daemon cleans up what `jj util gc` would: operations unreachable from the current one
+and files jj no longer reads, all at least two weeks old. Cleanup runs when enough has
+accumulated, at most weekly, skips cleanup on battery power, and leaves Git objects untouched.
 
 ## Replace or move a hub
 
-Surviving repository copies keep the work they sent and received, so you can rebuild a lost
-hub directory from them. If the hub's entire machine was lost and also held a working copy,
-work that existed only on that machine needs its backup.
+Rebuild a lost hub directory from work retained in surviving copies. Work held only on a lost
+hub machine needs that machine's backup.
 
 Start a new hub at the address machines used before, as in
 [Set up a hub and machines](setup.md#start-the-hub). The new hub knows none of the hives, so
-syncs say it has no record of the repository's hive.
+syncs say it has no record of the repo's hive.
 
-If you replaced the whole hub machine, first verify its SSH host identity through your normal
-trusted channel and update your known-host entry as needed. The new machine also needs the
-clients' restricted musubi keys in `~/.ssh/authorized_keys`. Restore those entries from a
+If you replaced the whole hub machine, compare its SSH host key through your normal trusted
+channel before updating your known-host entry. The new machine also needs the
+clients' restricted jj-musubi keys in `~/.ssh/authorized_keys`. Restore those entries from a
 trusted backup, or run `musubi join --hub <hub-host>` interactively in each client's copy to
 authorize its key again. An unattended daemon cannot answer an SSH password or host-key
 prompt. Test `ssh <hub-host> musubi --version` before expecting daemons to reconnect.
@@ -483,19 +223,16 @@ In one surviving copy of each hive, run:
 musubi join
 ```
 
-That makes the hive again on the hub, with its old id and name. If only the hub directory was
-lost and ssh access still works, the other machines find the hive as their daemons retry,
-within a minute, or at once with `musubi sync`, and fill it with what they retained.
-Check each copy's `musubi status` afterward. Hub rollback can leave divergent changes;
-resolve them with jj as for other concurrent rewrites.
+This recreates the hive with its old id and name. With ssh access working, other daemons find
+it within a minute, or at once with `musubi sync`, and send retained work. Check each copy's
+`musubi status`. Resolve any divergent changes left by rollback with jj, as for concurrent
+rewrites.
 
-Machines don't do this by themselves, because a hub that doesn't know a hive may just be the
-wrong hub, such as one started from another directory by mistake.
+Recreation requires your command: an unknown hive may mean the wrong hub directory was used.
 
-The hive is made again under its own name even when the hub has another hive of the same
-repository, as `musubi create <name>` makes one, so hives kept apart stay apart. To fold its
-copies into that other hive instead, run `musubi leave` then `musubi join --hive <name>` in
-each, and remove the one made again with `musubi hub remove`.
+Recreation keeps hives separate, even if another hive shares the repo's history, as
+`musubi create <name>` does. To combine them, run `musubi leave` then `musubi join --hive <name>`
+in each copy, and remove the recreated hive with `musubi hub remove`.
 
 To move to a hub at another address, start it, and run `musubi join` with its address in each
 machine's copy. The first makes the hive again there, and the others join it:

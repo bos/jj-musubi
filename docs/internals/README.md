@@ -1,19 +1,19 @@
 # Contributor docs
 
 Start with [CONTRIBUTING.md](../../CONTRIBUTING.md) for setup and checks, and
-[AGENTS.md](../../AGENTS.md) for the repository's working agreement. For using musubi, see
+[AGENTS.md](../../AGENTS.md) for the repository's working agreement. For using jj-musubi, see
 the [user guide](../README.md). These documents use the terms defined in the design's
 [Vocabulary](design.md#vocabulary): hive, node, hub, canonical operation, realization.
 
 ## Architecture
 
-- [Design](design.md): What does musubi replicate, how do machines agree, including on
-  local configuration, and why? Read it before changing what musubi does.
-- [Sync protocol](protocol.md): What exactly do nodes and the hub say to each other, and what
+- [Design](design.md): What does jj-musubi replicate, how do machines agree, including on
+  local configuration, and why? Read it before changing what jj-musubi does.
+- [Sync protocol](protocol.md): What do nodes and the hub say to each other, and what
   properties does that guarantee? This owns the state machines and their invariants.
 - [Race catalogue](races.md): What happens when machines change the same thing at once, and
   which test pins each outcome?
-- [Duplicates, moves and keys](copies.md): How does musubi distinguish copies, moves and
+- [Duplicates, moves and keys](copies.md): How does jj-musubi distinguish copies, moves and
   reused machine names, and which cases does it refuse?
 
 ## Verification and testing
@@ -32,13 +32,13 @@ the [user guide](../README.md). These documents use the terms defined in the des
   correspond to the protocol?
 - [Working on Lean proofs](lean.md): How do you state a proof boundary, check its source
   assumptions, develop the proof and connect it to the code?
-- [Benchmarks](../../bench/README.md): How does musubi compare with git and jj's own clone,
+- [Benchmarks](../../bench/README.md): How does jj-musubi compare with git and jj's own clone,
   fetch and push, in time and bytes on the wire? How does the canonical store keep up with a
   long operation log?
 
 ## Review and release
 
-- [Code reviews](code-reviews.md): What does a review look for, in what musubi does and in
+- [Code reviews](code-reviews.md): What does a review look for, in what jj-musubi does and in
   what users see?
 - [Releasing](releasing.md): How is a release made?
 
@@ -69,7 +69,8 @@ The crates, from the bottom up:
   operations ([translate](../../crates/musubi-jj/src/node/translate.rs),
   [realize](../../crates/musubi-jj/src/node/realize.rs)) and joins hives. Its
   [publication](../../crates/musubi-jj/src/node/publication.rs) module accounts for snapshot
-  content, checks exact approvals, and prepares cleanup of unpublished operations.
+  content, binds approvals to outgoing history and limits, and prepares cleanup of unpublished
+  operations.
   Its [supersede](../../crates/musubi-jj/src/node/supersede.rs) module holds record
   state and naming; submodules handle persistence, normalization, detecting abandons, rewriting
   local operations, receiving records, and fix-ups.
@@ -81,7 +82,7 @@ The crates, from the bottom up:
   [hub_dir.rs](../../crates/musubi-hub/src/hub_dir.rs) a hub's directory of them, and
   [matching.rs](../../crates/musubi-hub/src/matching.rs) decides which hive a joining
   repository belongs in.
-- [musubi-sync](../../crates/musubi-sync/src/lib.rs) binds the core to real repositories and
+- [musubi-sync](../../crates/musubi-sync/src/lib.rs) binds the core to jj repositories and
   hub stores, and defines the [wire format](../../crates/musubi-sync/src/wire.rs). Its tests
   hold the race catalogue and the generated end-to-end search.
 - [musubi](../../crates/musubi/src/main.rs) starts the command-line tool and dispatches commands.

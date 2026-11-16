@@ -2,10 +2,10 @@
 
 ## Before you start
 
-Open an issue before writing a substantial change. musubi's correctness rests on a protocol
-proved in Lean and on matching jj's own behaviour exactly, so a change to what it replicates
+Open an issue before writing a substantial change. jj-musubi's correctness rests on a protocol
+proved in Lean and on matching jj's behaviour, so a change to what it replicates
 or how machines agree needs discussing first. [The design](docs/internals/design.md) explains
-the choices and the reasons for them.
+those choices.
 
 Bug reports, documentation fixes, and small focused fixes are welcome without discussion.
 For a security problem, see [SECURITY.md](SECURITY.md).
@@ -20,7 +20,7 @@ design, the protocol, testing, and releasing.
 You need:
 
 - Rust 1.97.1 or later, and `just`.
-- `jj` 0.47.1 and `git` on `PATH`: the tests run them.
+- `jj` and `git` on `PATH`: the tests run them.
 - `cargo-nextest`, `cargo-deny`, `cargo-machete`, and `typos`, for `just check`.
 - Python 3.11 or newer as `python3`, for the fuzz runner and assurance checks in `just check`.
 - Lean, with `lake`, on `PATH`, for the proofs and the conformance oracle. `elan` installs
@@ -96,10 +96,10 @@ CARGO_BUILD_JOBS=4 LEAN_NUM_THREADS=2 NEXTEST_TEST_THREADS=4 TOKIO_WORKER_THREAD
 
 Account for native worker threads and other jobs too; logical CPU count alone is not a
 safe concurrency budget. Nextest reserves the test pool for the two full-state model
-comparisons on macOS, then releases it for the remaining tests. Expensive generated repository
+comparisons on macOS, then releases it for the remaining tests. Expensive generated repo
 walks reserve four slots each. These scheduling rules also apply when selecting tests directly.
 
-Some runs are slow, and not part of `just check`:
+These slower runs are outside `just check`:
 
 ```sh
 just coverage       # diagnostic Rust coverage (needs cargo-llvm-cov and llvm-tools-preview)

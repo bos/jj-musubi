@@ -1,225 +1,87 @@
 # Troubleshooting
 
-Messages musubi prints, and what to do about each.
+Diagnose sync problems and recover from the messages jj-musubi prints.
+
+## Find a problem
+
+- [Start with this copy](#start-with-this-copy)
+- [Hub connections and SSH](#reaching-the-hub)
+- [Hub startup and services](#hub-startup-and-services)
+- [Joining and cloning](#joining-a-hive)
+- [Copies, moves and duplicates](#copies-moves-and-duplicates)
+- [Leaving and leases](#leaving-a-hive-or-forgetting-a-machine)
+- [Upgrading](#upgrading)
+- [Syncing and history rescue](#syncing)
+- [Snapshot holds and cleanup](#sending-held-by-the-snapshot-publication-budget)
+- [Status warnings](#what-musubi-status-reports) and [hub reports](#what-musubi-top-reports)
+- [The daemon](#the-daemon)
 
 ## Start with this copy
 
-Run this inside the affected repository:
+In the affected repository, run:
 
 ```sh
 musubi status
 ```
 
-It reports whether the daemon runs and serves this copy, how the last sync went, and whether
-the hub has this machine's recorded work. It reads local state without contacting the hub,
-and exits 0 even when it reports a problem. “The hub has all its work” does not include edits
-jj hasn't snapshotted yet. The report can be out of date if the daemon has stopped.
+The report reads local state without contacting the hub and exits 0 even with a problem.
+It can be stale if the daemon has stopped. “The hub has all its work” covers only edits jj
+has snapshotted.
 
 | What you find | What to do |
 | --- | --- |
-| Sending held by the snapshot budget | Follow [accidental-file recovery](#accidentally-added-files-and-sending-stopped) below. Receiving continues. |
+| Sending held by the snapshot budget | Follow [accidental-file recovery](#accidentally-added-files-and-sending-stopped). Receiving continues. |
 | Daemon not running or not serving this copy | Follow [status warnings](#what-musubi-status-reports). |
-| A sync error | Find the quoted message on this page. After fixing its cause, `musubi sync` retries now. |
-| Local work sent, but another machine hasn't received it | Run `musubi status` on that receiving machine; use `musubi top` to inspect all machines from the hub's reports. |
+| A sync error | Find the message below, fix its cause, then retry with `musubi sync`. |
+| Local work sent, but not received elsewhere | Run `musubi status` on the receiving machine; `musubi top` shows all machines' reports. |
 
-`musubi sync` makes a fresh sync attempt; it doesn't snapshot saved edits. Before running a
-jj command to record them, exclude any accidental or generated files you want to keep local.
-If you want background traffic stopped while investigating, [pause the
-daemon](guides/manage.md#pause-syncing-or-leave). `musubi leave` attempts a final sync.
+`musubi sync` doesn't snapshot edits. Exclude unwanted files before running jj to record them.
+To stop background traffic, [pause the daemon](guides/manage.md#pause-syncing-or-leave);
+`musubi leave` attempts a final sync.
 
-For connection problems, `musubi list` checks whether the hub is reachable. For other machines,
-`musubi top` shows which ones are quiet, behind, or reporting failures. Neither `status` nor
-`top --once` is a failing-exit health check, and `top` sends no unattended alerts.
+`musubi list` checks hub reachability. `status` and `top --once` exit successfully even with
+problems; `top` sends no unattended alerts.
 
-Read the daemon log on the affected working machine. On Linux use
-`journalctl --user -u musubi`; on macOS use `daemon.log` in `~/.local/state/musubi` unless
-you've moved the state directory. Read the hub log on its machine: its terminal when run in
-the foreground, `journalctl --user -u musubi-hub` on Linux, or `hub.log` in the state directory
-on macOS when installed. [Logging](reference/configuration.md#logging) covers other paths
-and more detail.
-
-Messages below use `devbox` for the hub's machine, `app` for a hive, and `laptop` for a
-machine. A hive is the group of copies of one project; the hub passes history between them.
-
-## Accidentally added files and sending stopped
-
-A jj command can snapshot a directory of generated or accidental files. Deleting those files
-later doesn't remove their older snapshots. By default, musubi pauses sending when those
-snapshots retain more than 100 extra paths or 8 MiB beyond explicit change history and content
-already shared. It keeps receiving. This protects against accidental bulk uploads; smaller
-files can already have reached other machines.
-
-1. **Check what's recorded.** Run `musubi status`, then `musubi sync --outgoing`. A hold says
-   `Sending held`; the report lists every extra path and the operations retaining it.
-   `Within publication budget` means the recorded outgoing work fits, not that it has been
-   sent. Both commands leave unsnapshotted edits alone. If you just created the files and
-   haven't run jj, exclude them before recording anything.
-
-2. **Keep unwanted files out of the current snapshot.** Delete or move files you don't need.
-   To keep a directory such as `scratch/` on disk, add `scratch/` to `.gitignore`. If jj already
-   recorded those files, run `jj file untrack scratch/` too. Ignoring tracked files alone isn't
-   enough. Run `jj status` to record the intended current files, then
-   `musubi sync --outgoing` again.
-   Old snapshots can still retain the excluded directory; that is what cleanup handles.
-
-3. **Preview cleanup.** Choose retaining operation ids from that report, then run
-   `musubi sync --prune <operation>...`, replacing the placeholder with those ids. A preview
-   removes nothing. It shows how much content would remain and warns about older uncommitted
-   versions. Current files and explicit change versions are kept. Before applying, inspect
-   and [save any older edits you
-   need](guides/working-across-machines.md#inspect-older-edits-before-cleanup).
-   Apply only the exact command printed by the preview you have checked. If it says the work
-   changed, preview again; it has preserved your new edits.
-
-4. **Check and send.** Run `musubi sync --outgoing` again. If it is within budget, run
-   `musubi sync`, then `musubi status`. Check the useful files and the receiving machine's
-   `jj log` before switching to it. If content is still held, another snapshot may retain
-   the same files; inspect its operation ids and preview another selection. If you paused the
-   daemon, `musubi daemon start` resumes background syncing once you're ready.
-
-If you want all the listed content shared, use the exact `musubi sync --approve TOKEN`
-command printed by `--outgoing` instead of cleanup. It approves that inspected history;
-new work may need a new inspection. Approval deliberately sends the listed accidental content
-too, so it is optional, not a required recovery step.
-
-If cleanup refuses, the original work remains. You can leave sending held and continue
-receiving while deciding. [Recover wanted work into a new
-copy](#recover-wanted-work-without-approving-held-history) if you don't want to approve that
-history. The [full snapshot
-guide](guides/working-across-machines.md#when-snapshots-pick-up-too-much)
-explains accounting, limits and cleanup guarantees.
-
-## Recover wanted work without approving held history
-
-Keep the original repository. A cleanup refusal means musubi cannot establish that removing
-those operations would preserve earlier work; it does not require you to publish it.
-
-Make a fresh copy with `musubi clone <hive> <new-directory>`. For a few wanted files, copy only
-those files into the new checkout, check their diff, and describe or commit the change with jj.
-Never copy the old `.jj` or `.git` directory over the new one. Check the new copy's
-`musubi sync --outgoing`, sync it, and verify the wanted work on another machine before
-removing the original copy.
-
-For wanted commits, the [new-copy rescue
-steps](#this-repositorys-history-no-longer-matches-the-hives-so-it-cant-sync-again) show fetching
-selected bookmarks from the original. Fetching a commit brings its ancestors too: inspect
-those before deciding that this is the right rescue route. Copying selected files avoids
-bringing that older history. Keep the original until you have checked everything you need.
-
-Cloning can start the daemon, so a [daemon pause](guides/manage.md#pause-syncing-or-leave) is
-not a persistent quarantine. Leaving the original copy, even with `--force`, attempts a final
-sync; see [Pause syncing or leave](guides/manage.md#pause-syncing-or-leave) before doing that.
-
-## Sending held by the snapshot publication budget
-
-### "sending held: snapshots retain ... exceeding the publication budget"
-
-Automatic snapshots retain more than 100 extra file paths or 8 MiB beyond explicit change
-history and shared content, unless you've configured other limits. The counts add up across
-outgoing snapshots, so removed files can still occupy older snapshots. Receiving continues. Run
-`musubi sync --outgoing` to inspect the paths and retaining operations. Its printed approval
-command sends exactly that work. Or remove unwanted files from the working copy, run
-`jj status`, and use `musubi sync --prune OPERATION...` to preview discarding selected
-unpublished operations. Apply only the printed preview command you want.
-
-The [workflow](guides/working-across-machines.md#when-snapshots-pick-up-too-much) includes a
-partial commit with useful files still uncommitted, and explains the defaults and settings.
-`musubi status` reports this as "sending held: snapshot publication budget". The daemon
-continues receiving; restarting it does not clear the hold.
-
-### "outgoing work changed; ..."
-
-The inspected history, limits, or cleanup context changed. Run `musubi sync --outgoing`
-again, or repeat your `musubi sync --prune OPERATION...` preview, and use its new token.
-Cleanup records edits made since the preview before checking the token, so an unsnapshotted
-edit can cause this refusal. Your current work stays intact.
-
-### "operation ... was offered to the hub or predates publication tracking; ..."
-
-This cleanup cannot establish that the operation stayed local. A lost upload reply can leave
-history already shared, and upgrading cannot reconstruct every older attempted upload.
-Choose other operations, approve publication, or use the existing [operation abandonment
-workflow](guides/working-across-machines.md#abandoning-operations) for shared history.
-
-### Cleanup cannot preserve earlier changes
-
-"cannot safely prune this history: jj did not record enough information ..."
-
-The jj command record does not say enough about the changes it selected. This can happen with
-older or custom commands, undo, redo, restoring operation state, or a Git import reusing existing
-versions whose selection jj did not record. An automatic retry of a Git-ref export can also
-leave this kind of record.
-musubi cannot guarantee preserving those versions while pruning, so no history was pruned.
-Inspect with `musubi sync --outgoing`. You can approve exactly that history if you want it
-shared, or keep sending held and [rescue wanted work into a new
-copy](#recover-wanted-work-without-approving-held-history). Receiving continues while held.
-
-### "this selection would change another copy's activity or membership; ..."
-
-Removing these operations would change how a later concurrent forget of another copy resolves.
-No history was pruned. Choose different operations or approve publication. Cleanup makes new
-activity for this copy; it cannot replace another copy's activity with newly invented events.
-
-### "this cleanup cannot preserve ..." or "the prepared cleanup differs from its preview; ..."
-
-musubi checked the prepared operations and could not reproduce the inspected state exactly.
-No history was pruned. Choose a smaller selection or approve publication. A stale workspace
-may need `jj workspace update-stale` before inspecting again.
-
-### "cannot read this copy's record of attempted publications: ..."
-
-The local publication record is damaged. Do not delete it to make history look unpublished.
-Keep this copy's work and follow the [new-copy recovery
-workflow](#this-repositorys-history-no-longer-matches-the-hives-so-it-cant-sync-again).
-
-## jj reports "stack limit reached"
-
-jj 0.47.0's static Linux binary can report `stack limit reached` for its built-in aliases and
-then panic, even in a new repository. Upgrade to jj 0.47.1, which fixes this dependency error
-and is the version this musubi requires. The fixed binaries are in
-[jj 0.47.1's release](https://github.com/jj-vcs/jj/releases/tag/v0.47.1).
-
-Put the new binary first on your `PATH`, then check that `jj --version` reports 0.47.1 and
-rerun the command that failed.
+Read the daemon log on the affected machine and the hub log on the hub's machine.
+[Logging](reference/configuration.md#logging) lists paths for foreground, login and boot services.
+Below, `devbox` is the hub's machine, `app` a hive (copies of one project), and `laptop` a
+working machine.
 
 ## Reaching the hub
 
 ### "no hub given; pass --hub <host>, ..."
 
-This machine has no default hub yet; it saves one the first time it creates, joins, or clones
-a hive, or runs `musubi hub`. Pass `--hub` with the name you ssh to the hub's machine by, as
-`musubi hub` printed; or, to make this machine the hub, run `musubi hub` here, after which
-commands here need no `--hub`. `jj config set --user musubi.hub <hub>` also sets a default.
+Pass `--hub` with the hub's ssh name, as printed by `musubi hub`, or run `musubi hub` here to
+make this machine the hub. Creating, joining or cloning a hive, or running a hub, saves this
+machine's first default. `jj config set --user musubi.hub <hub>` also sets a default.
 
 ### "`musubi` is not on the PATH of non-interactive shells on devbox"
 
-ssh reached the hub's machine, but the shell there couldn't find `musubi`. ssh runs commands
-in a non-interactive shell, which reads less of your startup files than a login does. Put
-`musubi`'s directory on the `PATH` in `~/.zshenv`, or near the top of `~/.bashrc`, before any
-line that returns early for non-interactive shells. Check with:
+ssh's non-interactive shell couldn't find `musubi`. Add its directory to `PATH` in
+`~/.zshenv`, or near the top of `~/.bashrc`, before any early return for non-interactive
+shells. Check from this machine:
 
 ```sh
 ssh devbox musubi --version
 ```
 
-Or give `musubi`'s absolute path in the line musubi added to `~/.ssh/authorized_keys` on the
-hub's machine: `command="/opt/musubi/bin/musubi hub connect"`.
+If you cannot change that `PATH`, use the
+[SSH command-path fallback](reference/configuration.md#ssh).
 
 ### "`musubi hub connect` on devbox failed: ..." or "ssh to devbox worked, but ..."
 
-ssh reached the hub's machine, but no hub of this release answered there. If the message says
-"no hub has run on this machine", `musubi hub` has never run there without `--dir`: start it,
-or for a hub run with `--dir`, add `--dir <dir>` to the `command=` in the line musubi added
-to `~/.ssh/authorized_keys` there. Otherwise the message says what answered instead, such as
-another release of musubi.
+ssh worked, but no hub of this release answered. For "no hub has run on this machine", start
+`musubi hub` there, or, if one already serves with `--dir`, add `--dir <dir>` to its `command=`
+entry in `~/.ssh/authorized_keys`. Otherwise the message identifies what answered, such as
+another release.
 
 ### "ssh to devbox failed: ..."
 
 ssh itself failed; the rest of the message is what ssh said. Check that `ssh devbox` works
-from this machine. The daemon runs ssh with your `~/.ssh/config` but with musubi's own key,
+from this machine. The daemon runs ssh with your `~/.ssh/config` but with jj-musubi's own key,
 and never prompts, so it can't reach a host that needs a password or a hardware key each time.
 
-If ssh refuses musubi's key, its line may have gone from `~/.ssh/authorized_keys` on the
+If ssh refuses jj-musubi's key, its line may have gone from `~/.ssh/authorized_keys` on the
 hub's machine. Add it again, from this machine:
 
 ```sh
@@ -229,597 +91,54 @@ echo "restrict,command=\"musubi hub connect\" $(cat ~/.local/state/musubi/hub_ke
 
 ### "ssh to devbox did not connect" or "ssh to devbox did not connect: ..."
 
-musubi gave up waiting for the hub to answer: after half a minute, or a minute while joining.
-ssh may be hanging, on a `ProxyCommand` say, or on a shell startup file on the hub's machine that
-waits for input; the hub may be stuck; or, if the message goes on "cannot run ssh: ...", ssh
-can't run at all. Check that `ssh devbox true` finishes at once from this machine, and see what
-the hub logs: in its terminal, in `hub.log` in musubi's state directory if launchd runs it, or
-under systemd in `journalctl --user -u musubi-hub`.
+The hub didn't answer within half a minute, or a minute while joining. Check that
+`ssh devbox true` finishes promptly: a `ProxyCommand` or shell startup file may be waiting
+for input. "cannot run ssh: ..." means ssh could not start. If ssh works, check the hub's log
+and restart a stuck hub; see [log locations](#start-with-this-copy).
 
 ### "the hub on devbox ended the connection before greeting"
 
-ssh reached the hub's machine, but the hub never answered: it closed the connection, as it does
-when it stops, or didn't answer within half a minute, as when it's stuck. The daemon tries again
-by itself. If this keeps happening, see what the hub logs, as above, and restart it if it's
-stuck.
+The hub closed the connection or didn't answer within half a minute. The daemon retries.
+If this persists, check the hub's log and restart it if stuck; see
+[log locations](#start-with-this-copy).
 
 ### "the hub at devbox is out of reach", "no hub is serving ...", or "request timed out"
 
-No hub answered. A machine gives up connecting after half a minute, and once connected waits
-two minutes for each reply; a hub working through a large history can take longer, so a
-machine asks again, and gives up with "request timed out" after about ten minutes. Check that
-`musubi hub` is running on the hub's machine, and start it if not; `musubi sync` and
-`musubi list` say why the hub is out of reach, and `musubi status` shows why the last sync
-couldn't reach it. Where the message gives a reason after the colon, such as "ssh to devbox
-failed: ...", that reason's own entry above says more. If the hub is running but its machine
-is idle, see what the hub logs, as above, and restart it if it's stuck.
-Daemons reconnect by themselves: within a few seconds to a hub on the same machine, and within
-about a minute over ssh, which waits longer between tries after each failure.
-After detecting that the machine has woken, the daemon ends old ssh connections and clears
-that delay.
-
-Over a slow link, "request timed out" can also come from a large sync that is still moving.
-Each try carries on from where the last left off, and the daemon tries again by itself, so the
-sync finishes as long as the link has more than about 70 kbit/s to spare for musubi, a
-megabyte in two minutes. On a slower link a large sync can't finish. `musubi sync` in a
-terminal shows how far a sync has got.
-
-If the hub runs with `--dir`, other machines can't find it: the `musubi hub connect` they run
-over ssh finds the hub that `musubi hub` last served without `--dir`. Add `--dir <dir>` to the
-`command=` in the line musubi added to `~/.ssh/authorized_keys` on the hub's machine.
-
-### "hub: no such blob" or "hub: attachment ... was not uploaded"
-
-The hub deleted data a sync still needed, after an hour in which nothing touched it, as when
-this machine slept partway through a large sync. The daemon tries again by itself, and the sync
-carries on from where it can. If this keeps happening while syncs are still moving, upgrade
-musubi on the hub's machine and on this one: earlier releases deleted such data an hour after it
-was last written, however much was still moving.
-
-### "the hub has no record of this repository's hive ..."
-
-The hub has lost this copy's hive, as when its directory was deleted, or this machine now
-reaches a different hub. `musubi list` shows the hive as "(no longer on the hub)". Nothing is
-lost: if this is the right hub, run `musubi join` in the copy to make the hive again from it,
-and the other machines fill it. See
-[Replace or move a hub](guides/manage.md#replace-or-move-a-hub).
-
-### "this repository's hive was removed from the hub, ..."
-
-Someone removed the hive with `musubi hub remove`, and this copy has left it, keeping
-everything it has. To share the repository again, start a new hive with `musubi create`.
-
-### "hub: this hive is being removed from the hub"
-
-Someone ran `musubi hub remove` for this copy's hive, and the hub is finishing what it was
-doing for the hive's machines. Nothing needs doing: once the hive is removed, this copy leaves
-it as it next syncs, keeping everything it has. If the removal fails, the copy syncs as before.
-
-### "this repository's hive, app, was removed from its hub; ..."
-
-A plain `musubi join`, in a copy whose hive was removed, doesn't join another hive whose
-history matches. Choose one with `musubi join --hive <name>`, or start a new one with
-`musubi create`. Or run `musubi leave`, which records that the copy left, as any other that
-left, after which `musubi join` matches it with a hive as it would any repository.
-
-## Copies, moves and duplicates
-
-See [Move, copy or restore a repository](guides/manage.md#move-copy-or-restore-a-repository).
-
-### "this repository duplicates a copy in hive app, ..."
-
-The repository is a duplicate, made by copying a copy's files, as with `cp -a`, `rsync` or a
-backup, so musubi doesn't sync it: two repositories syncing as one would overwrite each
-other's working copy. When the message names the copy's path, that copy is on this machine.
-Use the duplicate as a plain jj repository, or make another copy with `musubi clone`. If it is
-the copy, moved here by copying it and deleting the original, or restored from a backup onto
-this machine, and the original is gone, `musubi join --original` syncs it as the copy.
-
-### "the copy of this repository's key is at ..."
-
-`musubi join --original` refuses while the copy it would replace is still there. Run it only
-once that copy is gone.
-
-### "this repository's record says it is part of hive app, but its machine key or jj config id is missing; ..."
-
-Files musubi or jj keeps in `.jj/repo` were deleted. musubi doesn't make the copy a new
-identity, which the other machines would show as a second copy: make another copy with
-`musubi clone`.
-
-### "this repository belongs to another user (uid ...), not this one (uid ...)"
-
-musubi ran as a user who doesn't own the repository, as under `sudo`. Run it as the owner.
-
-### "the current directory no longer exists"
-
-The directory musubi ran in was deleted after the shell went into it, as when a repository is
-deleted and cloned again in its place. `cd` to it, if it was made again, or to another, and
-run the command again. `musubi status` says so and exits 0, and commands that don't act on a
-repository, such as `musubi list`, work anywhere, given no relative path.
-
-### "can't reach this workspace's repository, ...: ..."
-
-The current directory is in a jj workspace added with `jj workspace add`, whose repository,
-kept in the workspace it was added from, the path the message names, has moved or gone, or
-can't be read; jj fails there too, with "Cannot access ...". Move that workspace back where it
-was. Or, from where it is now, run `jj workspace forget <name>`, naming this workspace, move
-this workspace's directory aside, make it again with `jj workspace add <path> --name <name>`,
-and copy back any files you changed in it.
-
-### `musubi list` shows a copy "not syncing: ..."
-
-The copy was deleted, moved, or is on a disk that isn't mounted, or its directory now holds
-another repository. musubi writes nothing there meanwhile. A copy moved with `mv` syncs again
-once jj or musubi runs in it; one that comes back syncs again by itself. If it's gone,
-`musubi leave <path>` stops looking for it, and `musubi forget` in another copy stops the
-others showing it.
-
-### `musubi list` shows this machine twice, as `laptop-1a2b` and `laptop-3c4d`
-
-Two copies in the hive have this machine's name, as when a copy deleted without `musubi leave`
-is cloned again, or a second copy is made on this machine. musubi tells them apart by part of
-their ids. `musubi list` says which name a copy here has
-(`here: /home/you/src/app as laptop-3c4d  synced 4s ago`), and `musubi status` in a copy
-lists the other with when it was last used. If the other is gone,
-`musubi forget laptop-1a2b`, naming it, stops the hive showing it.
-
-### "incompatible peer: protocol ... but this is protocol ..."
-
-This machine and the hub run releases of musubi that can't talk to each other: before 1.0, a
-release can change how they talk, and so can a build deployed from source. Install the same
-release or build everywhere. Set `musubi.upgrade-command` for a machine to follow its hub by
-itself. See [Upgrade musubi](guides/manage.md#upgrade-musubi).
-
-### "Upgrade: upgrading to musubi ... failed: ..."
-
-A hub runs a newer release, or a newer build deployed from source, and the daemon ran
-`musubi.upgrade-command` to install it, but the command failed, or ran for over an hour, or
-installed some other release or build where the daemon started `musubi` from. The message says
-which; the command's output is in `upgrade.log` in the state directory. Fix the command, as by
-running it yourself with `MUSUBI_UPGRADE_TO` set to the release or build the message names,
-then run `musubi daemon restart` for the daemon to try again. If the command installs
-`musubi` somewhere else now, run `musubi daemon install` too.
-
-On Unix, restarting the daemon leaves an upgrade already running with its lock. The new
-daemon waits for the lock, then tries again on a later sync. The surviving command has no
-timeout monitor once the daemon that launched it stops. If it stalls, inspect `upgrade.log`
-and stop the installer before retrying; leave `upgrade.lock` in place so that retries cannot
-overlap it.
-
-Keep the installer in the foreground and preserve its standard input, which carries the lock.
-While the launching daemon runs, a timeout stops the command and children in its process
-group on Unix, or the command process on Windows. Detached installers are outside that
-cleanup, so check for and stop any yourself before retrying.
-
-If `upgrade.log` ends `upgrade-from-source: no tag ... in ...` or `no commit ... in ...`, this
-machine's clone of musubi's source can't fetch the release's tag, or the commit of the build
-deployed from source, that the hub runs. Push it to where that clone fetches from, then run
-`musubi daemon restart` here. See [Deploy a build from
-source](guides/manage.md#deploy-a-build-from-source).
-
-### "the running daemon is musubi ..., but this is ...; restart it with `musubi daemon restart`"
-
-You installed a new musubi, but the daemon still runs the old one. Run
-`musubi daemon restart`.
-
-## Joining a hive
-
-### "destination ... is not empty; choose a new or empty directory"
-
-`musubi clone` needs a new or empty directory. Choose another destination, or run
-`musubi join` in an existing repository to share that copy. Without a directory,
-`musubi clone` makes one in the current directory, named after the last part of the hive's
-name; if that exists, give a directory, as in `musubi clone <hive> <dir>`, or run it from
-another directory.
-
-### "can't name a directory after hive ..."
-
-The hive's name ends in nothing that can name a directory, such as `..`, so give one, as in
-`musubi clone <hive> <dir>`.
-
-### Joining is refused
-
-The hub decides which hive a copy belongs in: one that shares some of its history and one of
-its remotes' URLs. It refuses when it can't tell, and says why:
-
-- **"this repository has no commits to share yet; commit something first"**: an empty
-  repository matches nothing. Commit something, or clone the hive with `musubi clone`.
-- **"no hive on this hub shares history with this repository; `musubi create` starts one"**:
-  start a hive with `musubi create`, or check that `--hub` names the hub you meant. If the
-  hive's other copies name objects with another hash than this one
-  (`git rev-parse --show-object-format` says which), make a copy with `musubi clone` instead.
-- **"hive app shares history with this repository, but not a remote; ..."**, or **"hives
-  app, web share history ..."**: none of the copy's remotes' URLs match the hive's. A fork
-  whose `origin` is your own fork looks like this, and so does a remote spelled with an ssh
-  host alias. To join anyway, run `musubi join --hive app`; to give a fork its own hive, run
-  `musubi create`.
-- **"this repository matches several hives: app, web; ..."**: choose one with
-  `musubi join --hive <name>`.
-- **"this repository shares no history with hive app; ..."**, from `musubi join --hive app`:
-  `--hive` joins only a hive that shares some history with the copy. Check the name, or start
-  a hive of its own with `musubi create`.
-- **"this hub has no hive named app"**: no hive's name starts with that (for
-  `musubi hub remove`, no hive has that whole name or id). `musubi list` shows the hub's
-  hives.
-- **"this repository belongs in hive app (...); `musubi join` joins it, ..."**, from
-  `musubi create`: the hub already has a hive for this repository. Run `musubi join`, or
-  `musubi create <name>` to start another hive anyway.
-
-### "this repository is already part of hive app; `musubi leave` first to join another"
-
-`musubi create` or `musubi join --hive` would put the repository in a second hive. Run
-`musubi leave` first. To move it, hive and all, to another hub, run `musubi join --hub <hub>`
-instead.
-
-### "the hub lacks this repository's hive, but it belongs in hive app (...): ..."
-
-`musubi join` would make this copy's hive again, but the copy belongs in a hive the hub has,
-and the name it knew its hive by is another hive's, or it knows none: that hive may be its own,
-made meanwhile with `musubi create`, say. Run `musubi leave --force`, then `musubi join`, to
-join that one. If the message says the copy belongs in several, run
-`musubi join --hive <name>` after leaving.
-
-### "this repository's machine is already named laptop"
-
-`--machine` names this machine in a repository the first time it becomes part of a hive, and
-the name stays: other machines show its work under it. Run the command without `--machine`,
-or with the name it has. For a copy under another name, make one with
-`musubi clone <hive> <dir> --machine <name>`. If `musubi status` says the repository is not
-part of a hive, an earlier release named it when a join was refused: delete
-`.jj/repo/musubi/machine`, and run the command again.
-
-### "musubi needs all of a repository's history, and this one is a shallow clone ..."
-
-A shallow or partial clone can't send other machines everything they need. Make a full copy
-with `musubi clone <hive> <dir>`, if a hive has it, or with `jj git clone` without `--depth`.
-
-### "this repository's git names objects with SHA-256, but hive app's with SHA-1, ..."
-
-git names a repository's objects with SHA-1 or SHA-256, chosen when it is made, so the two can
-never have the same commits. Make a copy of the hive with `musubi clone app <dir>`, which uses
-the hive's hash. To carry over work the hive lacks, run `jj diff --git -r <rev>` in this
-repository and `git apply` in the copy, then `jj describe` it there; copy binary files by hand,
-since such a patch can't carry them.
-
-## Leaving a hive or forgetting a machine
-
-### "couldn't tell hive app that this repository leaves: ..."
-
-`musubi leave` couldn't reach the hub to send this copy's last work and its leaving, so the
-repository is still part of the hive, and the daemon syncs it again. That sync takes the
-forget `musubi leave` recorded to the hive, so the other machines stop showing this copy until
-it's next used. Run `musubi leave` again
-once the cause is fixed, or use `musubi leave --force` to leave even if the final sync fails.
-It still attempts that sync. If the hive wasn't told, other machines keep showing this copy
-until one of them runs `musubi forget`. To pause background traffic first, use
-[`musubi daemon stop`](guides/manage.md#pause-syncing-or-leave).
-
-If the message says "work done in this repository while it left kept it in the hive", a
-`jj` command ran in the repository during each of `musubi leave`'s three tries. Stop whatever
-is running `jj` there, and run `musubi leave` again.
-
-### "couldn't record what changed in the working copy: ..."
-
-`musubi leave` first snapshots the working copy, as any `jj` command would, so that the
-repository leaves with all of its work, and jj couldn't; the message says why. Most often
-the working copy is stale, as after another machine rewrote its commit: run
-`jj workspace update-stale`, then `musubi leave` again.
-
-### "Warning: Couldn't put back this repository's working copies (...)."
-
-`musubi leave` takes this copy's working copies out of the view while it tells the hive, then
-puts them back, and couldn't. jj then says a workspace has no working-copy commit. `jj op log`
-lists the operation `musubi: leave`; `jj op restore` to the operation before it brings them
-back.
-
-### "Warning: Couldn't give this repository's working copies new commits (...)."
-
-The repository has left its hive, but a working copy whose commit the hive abandoned didn't
-get a new one. Run `jj new @-` in that workspace.
-
-### "no machine laptop shows here in hive app; `musubi status` names those that do"
-
-No present copy here has that name: it was forgotten already, it left, or it shows
-by another name, such as `laptop-1a2b` when another machine, even one long gone, shares its name
-or a workspace of this machine's own has a name starting `laptop/`, or `laptop-1a2b3c4d` when
-even the start of its id is another's. `musubi forget` takes the name in
-its working copies' names (`laptop` for `laptop/default@`), or the name `musubi list` gives it if
-no other machine could have that name. `musubi status` lists present copies even when they
-have no workspaces.
-
-### "laptop is this machine; `musubi leave` takes this repository out of hive app"
-
-`musubi forget` forgets other machines' copies. To take this one out, run `musubi leave`. If
-another copy has this machine's name, `musubi list` and `musubi status` say which is this one:
-forget the other by its name
-([above](#musubi-list-shows-this-machine-twice-as-laptop-1a2b-and-laptop-3c4d)).
-
-### "musubi.forget-after is neither `never` nor a duration such as `6h`; taking it for never"
-
-The daemon logs this when it can't read the copy's `musubi.forget-after`, or, saying "is
-shorter than a second, the least it can be", when it is a duration under a second, and then
-never has the hive forget the copy. Set it to `never` or a duration of at least a second
-(see [Settings](reference/configuration.md#settings)):
-`jj config set --repo musubi.forget-after 6h`.
-
-### "musubi.forget-after in your user config is neither `never` nor a duration such as `6h`; fix it and run this again"
-
-Or "... is shorter than a second, the least it can be; ...". `musubi join`, `create`, or
-`clone` found a `musubi.forget-after` it can't read, or one under a second, in the config the
-message names, and joined nothing. Fix it there, or unset it to have the command choose
-(`jj config unset --user musubi.forget-after`, or `--repo` for the repo config), then run the
-command again.
-
-
-### Workspace config overrides a lease
-
-"musubi.forget-after in workspace config for … overrides --lease; unset it and run this again"
-
-A workspace setting takes precedence over the repo setting `--lease` writes. The command
-refuses a conflicting policy before joining. The path names the affected workspace, which
-may be the workspace the daemon already serves when you rejoin from another one. Remove
-its override, then retry the lease:
-
-```sh
-jj -R <workspace-path> config unset --workspace musubi.forget-after
-musubi join --lease 6h
-```
-
-## Syncing
-
-### Identical divergent copies after an operation abandon
-
-A command that finishes on an old operation after `jj op abandon` can make jj rebase a child
-again, even though an earlier merge already rebased it. The copies have the same parents and
-contents. This also happens in one jj repository without musubi. Inspect their parents and
-descriptions with `jj log -r '<first> | <second>'`, then compare their contents with
-`jj diff --from <first> --to <second>`.
-
-You can remove an unused leaf copy: no descendants, bookmarks, tags, or working copies use it.
-Inspect its descendants with `jj log -r '<unwanted-commit>::'` and check its references and
-working copies before removing it:
-
-```sh
-jj abandon <unwanted-commit>
-```
-
-Leave a copy in place while other work or references use it. `jj abandon` rebases its descendants
-onto its parents and removes its bookmarks; it does not move them to the equivalent copy.
-
-The [known jj limitations](internals/races.md#known-jj-limitations) describe this race.
-
-### "jj cannot merge this machine's operations with the hive's (...)"
-
-jj 0.47 can't merge some combinations of concurrent operations, such as rebases on two
-machines that form a loop. So that every `jj` command here doesn't fail, musubi holds back the
-hive's latest operations on this machine. The message names the operation to revert, one of
-this machine's that the hive doesn't have yet. Revert it, and musubi catches up:
-
-```sh
-jj op revert <id>
-```
-
-Work done since stays, rebased off what the reverted operation rewrote. A change rewritten
-again since, say described, is left divergent, as `jj op revert` leaves it without musubi:
-`jj abandon` the copy you don't want. If another of this machine's operations conflicts
-too, the next sync names it. Where musubi can't find one to name, the message lists this
-machine's operations that the hive doesn't have yet, newest first; revert the one that
-conflicts with the hive's.
-
-[Known jj limitations](internals/races.md#known-jj-limitations) describes the cases jj can't
-merge.
-
-### "cannot tell which operations jj abandoned"
-
-Two operations can have the same view and metadata. If `jj op abandon` rewrites one into
-another's exact bytes, their ids agree too, and musubi cannot tell which one you meant to keep.
-Syncing stops before passing any removals to the hive. Run the `jj op integrate <operation>`
-command in the hint to restore the missing history, then run `musubi sync` again. This restores
-the history you had published; inspect it before attempting another abandon. `jj op restore`
-restores a view and does not put the missing ancestry back. Avoid forcing equal operation
-timestamps when making operations that may later be abandoned.
-If `jj util gc` has already removed the missing history, the old operation cannot be
-integrated. musubi then gives the history-mismatch error below, whose recovery makes a new
-copy and brings your work across.
-
-### "this repository's history no longer matches the hive's, so it can't sync again"
-
-```text
-this repository's history no longer matches the hive's, so it can't sync again: make a new
-copy with `musubi clone`, bring this one's work across to it, then run `musubi leave --force`
-here
-```
-
-This copy can no longer sync with the hive, but its commits are still in the repository.
-Keep it, make a new copy on this machine with `musubi clone`, and bring across the work the
-hive lacks. That includes changes since the last sync, or all of this copy's work if its
-first sync never finished. You don't need to identify the cause before rescuing the work.
-
-1. In the original copy, choose the commits you need. If you're rescuing files after a
-   publication hold, first check their ancestors for unwanted content; [copying selected
-   files](#recover-wanted-work-without-approving-held-history) is another route.
-
-2. In the original copy, give each commit at the tip of that work a bookmark (`jj log` shows
-   them), and print where this repository keeps its Git data:
-
-   ```sh
-   jj bookmark create rescue-1 -r <change>
-   jj git export
-   jj git root
-   ```
-
-3. In the new copy, fetch only those bookmarks, keep them, and drop the remote, which no other
-   copy needs:
-
-   ```sh
-   jj git remote add rescue <the path jj git root printed>
-   jj git fetch --remote rescue -b 'rescue-*'
-   jj bookmark track 'rescue-*' --remote rescue
-   jj git remote remove rescue
-   ```
-
-   This works because both copies name their commits with the hive's hash, as every copy of
-   a hive does. If `jj log` then shows divergent changes, the hive has rewritten commits this
-   work was on: rebase the work onto the hive's versions with `jj rebase`, then `jj abandon`
-   the old ones.
-
-Back in the original copy, run `musubi leave --force` once you have verified the rescue. It
-keeps that repository and still attempts a final sync before leaving. If `musubi create`
-says this, the hive it made is empty, and this copy can't fill it: run `musubi leave --force`,
-and remove the hive with `musubi hub remove`.
-
-#### Why history can stop matching
-
-This copy's operation history and the hive's have parted in a way musubi can't reconcile.
-Syncing stops to keep abandoned operations from returning to the hive. `musubi status` says
-retrying won't get past it.
-
-That's expected if another machine ran `jj op abandon`, which every machine still in the hive
-has taken, while this copy was out of the hive: forgotten, with `musubi forget` or after its
-`musubi.forget-after`, or gone with `musubi leave` until it ran `musubi join` again. The hub no
-longer remembers that abandon, so it can't pass it on to this copy.
-
-It's expected too for a copy whose first sync after `musubi join` or `musubi clone` didn't
-finish: the command was interrupted, said "the first sync failed", or the machine went to
-sleep during it. The hub waits a day for such a copy, or an hour if the hub restarts while
-it's away. If it hears nothing from the copy for that long while another machine runs
-`jj op abandon`, it stops waiting. If this copy was new to the hive, none of its work reached
-it, not even what it had before joining.
-
-This can also happen after `jj op abandon` removes all history below a command you have not
-synced, if `jj util gc` then removes its earlier form before musubi reads it. That history may
-be needed to tell this copy's workspace names from another machine's. musubi stops rather than
-assigning a workspace to the wrong machine. Bring the work into a new copy using the steps above.
-
-Otherwise, something removed operations from this repository that musubi couldn't account
-for, as when a power cut loses jj's latest update to its op heads. That's a bug: please report
-it at <https://github.com/bos/jj-musubi/issues>, with the daemon's log (`daemon.log`, in the
-[state directory](reference/configuration.md#on-every-machine)).
-
-### "the hub refused this machine's work: ..."
-
-```text
-the hub refused this machine's work: it lacks something the work needs, or brings back
-operations `jj op abandon` removed (the hub's log says which)
-```
-
-The hub checks everything it takes, and refuses this machine's work, every time it syncs, for
-one of two reasons, which the hub's log names (see the top of this page): something the work
-needs didn't reach it, or the work brings back an operation that a `jj op abandon` removed
-from the hive. Either is a bug: please report it at
-<https://github.com/bos/jj-musubi/issues>, with this machine's `daemon.log` and the hub's log.
-
-To carry on here, make a new copy with `musubi clone`, bring across any work this copy made
-since its last sync, then run `musubi leave --force` in this one.
-
-### "unknown field ... (written by a newer jj?)"
-
-A `jj` newer than 0.47.1, the version musubi supports, wrote an operation with fields musubi
-doesn't know, and musubi won't drop them by syncing it. Use jj 0.47.1 with this release of
-musubi, and upgrade the two together.
-
-### "the hub did not supply the objects this machine needs"
-
-The hub's reply left some commits missing, as when the hive was recreated while this machine
-was syncing. If the daemon serves this copy, it retries from the hub's current state.
-Run `musubi sync` to retry at once. If the error persists, check the hub's log; see below if
-every machine fails on the same object.
-
-### Every machine's sync of a hive fails on the same object
-
-If the hub's machine lost power, a file the hub wrote just before may be cut short, and every
-sync that needs it fails. Stop the hub, delete the hive's `heads` file
-(`musubi-hub/<hive id>/heads`), and start the hub again. It finds the store corrupt, sets it
-aside under `removed/`, and makes the hive again, empty, for the machines to fill.
-
-### "the first sync failed: ..."
-
-`create`, `join`, or `clone` set up the repository, but its first sync failed for the reason
-given. The daemon keeps trying: fix the cause, and `musubi status` shows when it succeeds.
-
-### "Warning: Could not start the daemon (...); syncing once instead."
-
-The command synced the repository itself, but no daemon keeps it in sync. Fix the reason
-given, then run `musubi daemon start`.
-
-### "Warning: The daemon isn't running, so this synced in its own process, ..."
-
-`musubi sync` synced the repository itself, since the daemon that serves it isn't running, as
-after `musubi daemon stop`; nothing syncs it otherwise. Run `musubi daemon start`.
-
-## What `musubi status` reports
-
-### "Warning: Syncing fails: ..."
-
-The repository's last sync failed, for the reason quoted: find that message on this page. If
-the daemon serves the repository, it keeps trying, and its log, which the hint names, says
-more. Otherwise `musubi sync` tries again.
-
-### "Warning: The daemon isn't running, so this repository syncs only when you run `musubi sync`."
-
-Start it with `musubi daemon start`, and to have it start at login from now on, run `musubi
-daemon install`. Until then, other machines see this machine's work once you run `musubi sync`.
-
-### "Warning: The daemon doesn't serve this repository."
-
-The daemon runs, but hasn't started serving this repository yet, as just after `musubi join`
-while the daemon restarts. If it stays this way, `musubi join` in the repository has it serve
-the repository again. If musubi's state directory was deleted, or `MUSUBI_STATE_DIR` changed,
-`musubi status` says the repository was made from a copy's files instead: `musubi join
---original` syncs it again, as the copy (see [Move, copy or restore a
-repository](guides/manage.md#move-copy-or-restore-a-repository)).
-
-## What `musubi top` reports
-
-### "... not heard from in 6m: offline, or its daemon isn't running"
-
-A machine's daemon reports to the hub after every sync, at least every half minute, and the
-hub has heard nothing for over two minutes. The machine is asleep or off the network, its
-daemon has stopped, or it can't reach the hub: `musubi status` there says which. It catches up
-when it reconnects. A machine in the middle of a long first sync shows like this too, since it
-reports only once a sync ends, and so, for a day, does one that left the hive or whose copy
-was deleted.
-
-### "... 3 heads behind for 2m"
-
-The machine reports to the hub, but hasn't caught up with what the hub accepted over a minute
-ago, though it syncs as soon as it hears of a new head. Its daemon's log (see the top of this
-page) says why.
-
-### "... sync failing: ..."
-
-The machine's last sync failed, for the reason quoted. Find that message on this page.
-
-### "... the hub failed a request 5m ago: ..."
-
-In the last ten minutes, the hub couldn't answer a request for the hive, for the reason
-quoted; the hub's log says more. The machine that asked retries, and if it keeps failing, it
-shows as failing too.
-
-### "... the hub had trouble 5m ago: its store was damaged, so the hub made it again: ..."
-
-The hub found the hive's store corrupt, as after a power cut, and made it again, empty. The
-machines fill it as they sync, and nothing is lost.
-
-### "not heard from since the hub started" or "not heard from in a day: it may have left the hive"
-
-The hive shows a working copy of this machine, but the hub hasn't heard from its daemon since
-the hub started, or in over a day. A machine that left the hive, or whose copy was deleted,
-still shows its working copy until you forget it with `musubi forget`. A machine still in the
-hive is heard from once it next syncs, within half a minute.
-
-### "This machine's daemon isn't running; `musubi daemon start` starts it."
-
-Nothing keeps this machine's copies in sync. Start the daemon, and to have it start at login
-from now on, run `musubi daemon install`. A machine with no copies, such as a hub's, needs no
-daemon, and `musubi top` says nothing of it there.
+Check that `musubi hub` is running. `musubi sync` and `musubi list` report connection failures;
+`musubi status` shows the last sync's error. A reason after the colon has its own entry above.
+If the hub runs but its machine is idle, check its log and restart it if stuck.
+
+Connecting times out after half a minute. Replies time out after two minutes; a large history
+can take longer, so requests retry for about ten minutes before failing. Daemons reconnect
+within seconds locally or about a minute over ssh, backing off after failures. Detecting wake
+ends old ssh connections and clears that delay.
+
+A slow transfer resumes where each attempt left off. It needs about 70 kbit/s spare bandwidth
+(a megabyte in two minutes); below that, large syncs can't finish. `musubi sync` in a terminal
+shows progress.
+
+With `--dir`, add `--dir <dir>` to the hub's `command=` entry in `~/.ssh/authorized_keys`:
+ssh otherwise reaches the hub last served without `--dir`.
+
+### "ssh-keygen could not derive the missing public key"
+
+jj-musubi keeps an existing private key and recreates its public-key file if missing or empty.
+If this fails, check the `ssh-keygen` error and the private key's permissions or passphrase.
+For a passphrase-protected key, restore `hub_key.pub` and retry. Both key files are in the
+[state directory](reference/configuration.md#files-and-directories).
+
+### "could not save musubi's public SSH key"
+
+If `hub_key.pub` is a directory, remove that obstruction; otherwise fix the reported file or
+permission error, then retry. A new key becomes active only once both files are ready.
+Handle private-key save errors the same way.
+## Hub startup and services
 
 ### "a hub is already running, serving ...; stop it, then run this again"
 
-`musubi hub install` found a hub running that it didn't start, as `musubi hub` in a terminal
-does. Stop that hub, then run `musubi hub install` again. "a hub is already serving ..." is
-the same, for a hub run with `--dir`. Either way, a hub an earlier `musubi hub install` runs
-goes on running.
+`musubi hub install` found a manually started hub. Stop it and retry installation. "a hub is
+already serving ..." is the same refusal with `--dir`. A hub started by an earlier
+`musubi hub install` keeps running.
 
 ### "the hub didn't start; see ..."
 
@@ -853,129 +172,123 @@ or `musubi hub uninstall` as the same user, after obtaining sudo permission for 
 Run the command in your normal shell without a `sudo` prefix, so the hub uses your home and
 state directory. The command asks for administrator permission when installing the service.
 
-## The daemon
-
-### The daemon isn't running after a reboot
-
-`create`, `join`, and `clone` start the daemon, but nothing starts it after a reboot until you
-run `musubi daemon install`. On Linux, a daemon installed this way stops when you log out,
-unless you run `loginctl enable-linger`.
-
-### "the daemon exited (...) before it was ready" or "did not start listening"
-
-The daemon failed as it started. The message includes the end of its log, or names the log.
-
-### "... is not a private directory of this user's ..."
-
-musubi uses a socket only in a directory that belongs to you and that no one else can write
-to, so that no one else can put a socket of their own in its place. musubi makes its own
-directories that way, but not one made otherwise: with `mkdir` under a umask such as `002`, say,
-or for `MUSUBI_STATE_DIR` by an earlier release. If the directory is yours, `chmod 700` it.
-Otherwise remove it, and musubi makes it again, or choose another place for the daemon's
-socket with `MUSUBI_SOCKET`. Don't remove the state directory, which `MUSUBI_STATE_DIR` names:
-it lists the copies the daemon syncs.
-
-### "the daemon's socket ... is a relative path; ..."
-
-`--socket`, `MUSUBI_SOCKET` or `musubi.daemon.socket` gave the daemon's socket relative to the
-current directory, which would make commands run elsewhere start a daemon of their own. Give
-the full path, or one starting with `~/`.
-
-### "this machine's daemon already runs, listening on ..., not ..."
-
-One daemon serves a machine's copies, and it listens on another socket than this command
-would use, as `--socket`, `MUSUBI_SOCKET` or `musubi.daemon.socket` chose another than the
-command that started it did. Commands that choose no socket use the one the daemon listens on,
-so choose the same socket everywhere, or none. To move the daemon, run `musubi daemon stop`,
-then start it with the socket you want; one that starts at login listens where the
-environment `musubi daemon install` ran in says, so run that again with the setting instead.
-Commands that would use the daemon, `musubi list` and `musubi status` among them, say the
-same, rather than going around it. "this machine's daemon already runs, listening on ..."
-without "not" comes from `musubi daemon` run on the socket the daemon listens on already.
-
-### "running (pid ...), but not listening on ..." or "this machine's daemon (pid ...) isn't listening on ..."
-
-The daemon runs, but its socket is gone, as when a temp cleaner deletes files in `/tmp` or
-`$TMPDIR`. It listens there again within seconds, and `musubi daemon stop` stops it meanwhile.
-If the message stays, run `musubi daemon restart`.
-
-### "this machine's daemon (pid ...) isn't listening on ..., and can't be stopped from here" or "running (pid ...) elsewhere, ..."
-
-The daemon runs, but it doesn't answer on its socket, and this command can't signal it, as from
-a container sharing the state directory with a daemon outside it, or on Windows. Stop it where
-it runs, with `musubi daemon stop` there or by ending its process, then start it again.
-
-### "... would be ... bytes longer than this system allows" or "... is ... bytes too long ..."
-
-Unix socket paths are limited to about 100 bytes. For the daemon, choose a shorter path with
-`MUSUBI_SOCKET` or `musubi.daemon.socket` in jj's config. For a hub, serve it from a directory
-with a shorter path.
-
 ### "a hub is already running, serving ...; use --dir to run another"
 
 Only one hub per user runs without `--dir`. Use that one, or stop it first.
 
-## Surprises
+## Joining a hive
 
-### Your working copy is stale
+### "destination ... is not empty; choose a new or empty directory"
 
-Another machine changed the commit your working copy is on. Run `jj workspace update-stale`.
-See [When another machine rewrites your working
-copy](guides/working-across-machines.md#when-another-machine-rewrites-your-working-copy).
+`musubi clone` requires a new or empty directory. Choose one with `musubi clone <hive> <dir>`,
+or run `musubi join` in an existing repo. Without `<dir>`, clone uses the last part of
+the hive name in the current directory; run elsewhere if that path exists.
 
-### `jj log` shows `main*` after a sync
+### "can't name a directory after hive ..."
 
-In a colocated repository, jj exports bookmarks to git only when a command changes something,
-so after a `jj` command that merged other machines' work, git's branches can lag jj's
-bookmarks. The next command that changes something exports them, as does `jj git export`.
+The hive's name ends in nothing that can name a directory, such as `..`, so give one, as in
+`musubi clone <hive> <dir>`.
+
+### Joining is refused
+
+Join matches the copy's history and remote URLs to a hive. Find its refusal below:
+
+- **"this repository has no commits to share yet; commit something first"**: an empty
+  repo matches nothing. Commit something, or clone the hive with `musubi clone`.
+- **"no hive on this hub shares history with this repository; `musubi create` starts one"**:
+  start a hive with `musubi create`, or check that `--hub` names the hub you meant. If the
+  hive's other copies name objects with another hash than this one
+  (`git rev-parse --show-object-format` says which), make a copy with `musubi clone` instead.
+- **"hive app shares history with this repository, but not a remote; ..."**, or **"hives
+  app, web share history ..."**: none of the copy's remotes' URLs match the hive's. A fork
+  whose `origin` is your own fork looks like this, and so does a remote spelled with an ssh
+  host alias. To join anyway, run `musubi join --hive app`; to give a fork its own hive, run
+  `musubi create`.
+- **"this repository matches several hives: app, web; ..."**: choose one with
+  `musubi join --hive <name>`.
+- **"this repository shares no history with hive app; ..."**, from `musubi join --hive app`:
+  `--hive` joins only a hive that shares some history with the copy. Check the name, or start
+  a hive of its own with `musubi create`.
+- **"this hub has no hive named app"**: no hive's name starts with that (for
+  `musubi hub remove`, no hive has that whole name or id). `musubi list` shows the hub's
+  hives.
+- **"this repository belongs in hive app (...); `musubi join` joins it, ..."**, from
+  `musubi create`: the hub already has a hive for this repo. Run `musubi join`, or
+  `musubi create <name>` to start another hive anyway.
+
+### "this repository is already part of hive app; `musubi leave` first to join another"
+
+`musubi create` or `musubi join --hive` would put the repo in a second hive. Run
+`musubi leave` first. To move it, hive and all, to another hub, run `musubi join --hub <hub>`
+instead.
+
+### "the hub lacks this repository's hive, but it belongs in hive app (...): ..."
+
+This copy's old hive is missing, but its history matches another hive on the hub. Its old
+name belongs elsewhere or is unknown. Run `musubi leave --force`, then `musubi join` to join
+the matching hive. If several match, use `musubi join --hive <name>` after leaving.
+
+### "this repository's machine is already named laptop"
+
+A copy's machine name is fixed when it first joins. Omit `--machine` or use its existing name.
+For another name, make a copy with `musubi clone <hive> <dir> --machine <name>`.
+
+If `musubi status` says the repo is not in a hive, an earlier release may have named it
+during a refused join. Delete `.jj/repo/musubi/machine` and retry.
+
+### "musubi needs all of a repository's history, and this one is a shallow clone ..."
+
+A shallow or partial clone can't send other machines everything they need. Make a full copy
+with `musubi clone <hive> <dir>`, if a hive has it, or with `jj git clone` without `--depth`.
+
+### "this repository's git names objects with SHA-256, but hive app's with SHA-1, ..."
+
+The repos use different object hashes and cannot share commit ids. Run
+`musubi clone app <dir>` to use the hive's hash. To carry over work, run
+`jj diff --git -r <rev>` here, `git apply` in the new copy, then `jj describe` there.
+Copy binary files manually; the patch cannot carry them.
+
+### "the hub has no record of this repository's hive ..."
+
+The hub lost the hive, or this machine now reaches a different hub. `musubi list` shows
+"(no longer on the hub)". If this is the intended hub, run `musubi join` in the copy to recreate
+the hive; other machines fill it. Their repos retain the work. See
+[Replace or move a hub](guides/manage.md#replace-or-move-a-hub).
+
+### "this repository's hive was removed from the hub, ..."
+
+Someone removed the hive with `musubi hub remove`, and this copy has left it, keeping
+everything it has. To share the repo again, start a new hive with `musubi create`.
+
+### "hub: this hive is being removed from the hub"
+
+`musubi hub remove` is finishing the hive's pending work. No action is needed: this copy leaves
+on its next sync, keeping everything it has. If removal fails, syncing continues as before.
+
+### "this repository's hive, app, was removed from its hub; ..."
+
+After a hive is removed, plain `musubi join` won't choose a matching hive. Use
+`musubi join --hive <name>`, start one with `musubi create`, or run `musubi leave` then
+`musubi join` to match as a new repo.
 
 ### "remote names ... have different fetch or push destinations than hive ... recorded"
 
-An existing copy may instead report "remote destinations disagree with this hive's recorded
-names" after checking its local history.
+An existing copy may say "remote destinations disagree with this hive's recorded names".
+Remote names have fixed fetch and push destinations in a hive. Join checks effective URLs,
+including Git aliases; `--hive` cannot bypass this. Clone checks global remotes and conditional
+includes for the destination before making directories. Equivalent HTTPS and SSH URLs agree.
 
-A remote name identifies fixed fetch and push destinations within a hive. `musubi join`
-checks effective URLs, including Git aliases, before joining; `--hive` does not bypass this
-check. Clone checks inherited global Git remotes too, including conditional includes for its
-destination path, before creating any directories. Equivalent HTTPS and SSH spellings agree.
-Give different destinations different names,
-for example `jj git remote rename origin fork`, then run `musubi join` again. Use an unused
-name: a rename does not release an earlier binding. A copy can omit a remote entirely.
-
-### "missing field `remote_bindings`" or "missing field `clone_config`" when starting a hub
-
-This hub directory predates the remote-name preflight or clone-defaults format. Use a fresh hub
-directory and rejoin from the existing copies, as [Upgrade
-musubi](guides/manage.md#upgrade-musubi) describes. Keep the old directory as a backup; the
-repositories and their work remain on the copies.
+Rename a different destination with `jj git remote rename origin fork`, using an unused name,
+then retry `musubi join`. Renaming does not release an earlier binding. A copy may omit a
+remote entirely.
 
 ### "hive ... has inconsistent recorded remotes"
 
-The hive has accepted conflicting remote-name bindings, for example from a buggy peer.
-Joining and cloning refuse before applying anything or creating a clone directory. The hub
-does not choose one destination or rewrite local configuration. From a consistently
-configured copy, run `musubi leave --force`, then `musubi create <new-name>` to start another
-hive. Other copies can leave the old hive and join the new one after checking their remotes.
-The existing copies and their work stay where they are.
-
-### "Unable to create '.../refs/heads/main.lock': File exists" or "main@git: Failed to set"
-
-If git names a `.lock` file, or jj fails to export a bookmark, a `git`, `jj` or musubi process
-stopped partway through updating a ref may have left the ref's lock file behind: for bookmark
-`main`, `.git/refs/heads/main.lock`, or `.git/packed-refs.lock`. While it is there, neither
-git nor jj, yours or musubi's, updates that ref. Once the lock is ten minutes old, musubi
-removes it the next time it gets in the way of a sync, and says so in the daemon's log; until
-then your own commands keep failing on it. To clear it sooner, if the lock is still there
-after a minute and no `git` or `jj` command, an editor's included, is running in the
-repository, delete it. Nothing is lost: jj exports the bookmark again at its next export.
-
-### An annotated tag is lightweight on other machines
-
-musubi shares a tag's target commit and leaves git's tag object on the machine that fetched
-it. An annotated tag fetched on one machine is a lightweight tag at the same commit on the
-others: `git describe` without
-`--tags` passes over it, and `git tag -v` has nothing to verify. Fetch the tag on a machine
-that needs it.
+The hive recorded conflicting remote destinations, for example from a buggy peer. Joining
+and cloning refuse without changing config or creating a destination. From a copy with
+consistent remotes, run `musubi leave --force`, then `musubi create <new-name>` to start a hive.
+Check other copies' remotes before leaving the old hive and joining the new one. Their
+repos and work remain in place.
 
 ### "musubi.clone-config cannot include musubi.forget-after"
 
@@ -989,16 +302,570 @@ creating the hive. Select individual portable keys instead; see
 Clone refused the hub's answer before creating its destination. Retry `musubi clone`. If it
 repeats, make sure the hub and this machine run the same build.
 
-### "ssh-keygen could not derive the missing public key"
+## Copies, moves and duplicates
 
-Musubi found the private-key file but could not recreate its public half. Check the reported
-`ssh-keygen` error and the private key's permissions or passphrase. Restore `hub_key.pub`
-if you keep a passphrase-protected key there, then retry the original command. Both files
-are in [musubi's state directory](reference/configuration.md#files-and-directories).
+See [Move, copy or restore a repo](guides/manage.md#move-copy-or-restore-a-repo).
 
-### "could not save musubi's public SSH key"
+### "this repository duplicates a copy in hive app, ..."
 
-Check the reported path and file error. If `hub_key.pub` is a directory, remove that obstruction;
-otherwise make the state directory writable. Retry the original command. A failed first setup
-has not activated a private key. A private-key save error is handled the same way: fix the
-reported file problem and retry.
+A filesystem copy carries the original's identity, so jj-musubi refuses to sync both. A path
+in the message locates the original on this machine. Use the duplicate as a plain jj
+repo, or use `musubi clone` for another syncing copy.
+
+If you moved by copying and deleting the original, or restored a backup here, run
+`musubi join --original` only after the original is gone.
+
+### "the copy of this repository's key is at ..."
+
+`musubi join --original` refuses while the copy it would replace is still there. Run it only
+once that copy is gone.
+
+### "this repository's record says it is part of hive app, but its machine key or jj config id is missing; ..."
+
+Files in `.jj/repo` were deleted. Make a new copy with `musubi clone`; assigning this one a new
+identity would show it as a second copy.
+
+### "this repository belongs to another user (uid ...), not this one (uid ...)"
+
+`musubi` ran as a user who doesn't own the repo, as under `sudo`. Run it as the owner.
+
+### "the current directory no longer exists"
+
+The current directory was deleted. `cd` to its replacement or another directory and retry.
+`musubi status` reports this with exit status 0. Commands such as `musubi list` work anywhere
+unless given a relative path.
+
+### "can't reach this workspace's repository, ...: ..."
+
+A workspace added with `jj workspace add` points to a repo that moved, disappeared or
+became unreadable; jj also reports "Cannot access ...". Move the main workspace back, or:
+
+1. From the main workspace's current location, run `jj workspace forget <name>` for the affected
+   workspace.
+2. Move the affected workspace's directory aside.
+3. Recreate it with `jj workspace add <path> --name <name>`.
+4. Copy back your changed files.
+
+### `musubi list` shows a copy "not syncing: ..."
+
+The copy is missing, its disk is unmounted, or another repo occupies its path. Nothing
+is written there. A copy moved with `mv` resumes when jj or `musubi` runs in it; one returning
+at its old path resumes automatically. `musubi leave <path>` stops looking for a missing copy;
+`musubi forget` from another copy stops showing it there.
+
+### `musubi list` shows this machine twice, as `laptop-1a2b` and `laptop-3c4d`
+
+Two copies share this machine's name, perhaps after cloning a deleted copy without leaving.
+Their id prefixes distinguish them. `musubi list` marks this one
+(`here: /home/you/src/app as laptop-3c4d  synced 4s ago`); `musubi status` shows when the other
+was used. If it's gone, run `musubi forget laptop-1a2b` with its name.
+
+## Leaving a hive or forgetting a machine
+
+### "couldn't tell hive app that this repository leaves: ..."
+
+The final sync failed, so this repo remains in the hive and its daemon keeps trying.
+That retry sends the forget recorded by `musubi leave`, hiding this copy elsewhere until next
+used. Fix the cause and retry `musubi leave`, or use `musubi leave --force`. Force still
+attempts a sync; if it fails, other machines show this copy until `musubi forget` removes it.
+To pause traffic first, run [`musubi daemon stop`](guides/manage.md#pause-syncing-or-leave).
+
+For "work done in this repository while it left kept it in the hive", a jj command ran during
+each of the three leaving attempts. Stop those commands and retry `musubi leave`.
+
+### "couldn't record what changed in the working copy: ..."
+
+`musubi leave` snapshots files before leaving, and jj failed for the reason shown. For a stale
+working copy, run `jj workspace update-stale`, then retry `musubi leave`.
+
+### "Warning: Couldn't put back this repository's working copies (...)."
+
+Leaving temporarily removed working copies from the view and failed to restore them. In
+`jj op log`, find `musubi: leave`; use `jj op restore` on its preceding operation to restore
+the missing working-copy commits.
+
+### "Warning: Couldn't give this repository's working copies new commits (...)."
+
+The repo has left its hive, but a working copy whose commit the hive abandoned didn't
+get a new one. Run `jj new @-` in that workspace.
+
+### "no machine laptop shows here in hive app; `musubi status` names those that do"
+
+The copy left, was forgotten, or has another name. `musubi status` lists present copies, even
+without workspaces. Use the machine part of a workspace name (`laptop` for `laptop/default@`),
+or the unambiguous name from `musubi list`.
+
+Name collisions can require `laptop-1a2b`, including when an old copy shared the name or a local
+workspace starts `laptop/`. If id prefixes also collide, use the full id, as in
+`laptop-1a2b3c4d`.
+
+### "laptop is this machine; `musubi leave` takes this repository out of hive app"
+
+`musubi forget` forgets other machines' copies. To take this one out, run `musubi leave`. If
+another copy has this machine's name, `musubi list` and `musubi status` say which is this one:
+forget the other by its name
+([above](#musubi-list-shows-this-machine-twice-as-laptop-1a2b-and-laptop-3c4d)).
+
+### "musubi.forget-after is neither `never` nor a duration such as `6h`; taking it for never"
+
+The setting is unreadable or under one second (reported as "is shorter than a second, the least
+it can be"). The daemon treats it as `never`. Set `never` or a duration of at least a second:
+`jj config set --repo musubi.forget-after 6h`. See
+[Settings](reference/configuration.md#settings).
+
+### "musubi.forget-after in your user config is neither `never` nor a duration such as `6h`; fix it and run this again"
+
+Or "... is shorter than a second, the least it can be; ...". The command joined nothing because
+`musubi.forget-after` in the named config is unreadable or under one second. Fix it or unset it
+with `jj config unset --user musubi.forget-after` (`--repo` for repo config), then retry
+`musubi join`, `create` or `clone`.
+
+### Workspace config overrides a lease
+
+"musubi.forget-after in workspace config for … overrides --lease; unset it and run this again"
+
+A workspace setting takes precedence over the repo setting `--lease` writes. The command
+refuses a conflicting policy before joining. The path names the affected workspace, which
+may be the workspace the daemon already serves when you rejoin from another one. Remove
+its override, then retry the lease:
+
+```sh
+jj -R <workspace-path> config unset --workspace musubi.forget-after
+musubi join --lease 6h
+```
+
+## Upgrading
+
+See the [upgrade guide](guides/upgrading.md) for coordinated upgrades and installer requirements.
+
+### "incompatible peer: protocol ... but this is protocol ..."
+
+Install the same release or source build on every machine and hub. Before 1.0, either can
+change the protocol. Set `musubi.upgrade-command` to follow the hub automatically; see
+[Upgrade jj-musubi](guides/upgrading.md).
+
+### "Upgrade: upgrading to musubi ... failed: ..."
+
+The daemon's `musubi.upgrade-command` failed, exceeded an hour, or installed a different release
+or build than the hub's. The message says which; `upgrade.log` holds its output. Fix the
+command, running it manually with `MUSUBI_UPGRADE_TO` set to the named release or build, then
+run `musubi daemon restart`. If the install path changed, run `musubi daemon install` too.
+
+On Unix, a running installer survives daemon restart with its lock. The new daemon waits for
+that lock before retrying on a later sync. The surviving command has no timeout monitor:
+inspect `upgrade.log` and stop a stalled installer before retrying. Leave `upgrade.lock` in
+place to prevent overlapping attempts.
+
+Keep installers in the foreground and preserve standard input, which carries the lock. While
+the launching daemon runs, a timeout stops the command and its process group on Unix, or just
+the command process on Windows. Check for and stop detached installers yourself.
+
+For `upgrade-from-source: no tag ... in ...` or `no commit ... in ...`, push the hub's release
+tag or deployed commit to where this machine's source clone fetches, then run
+`musubi daemon restart`. See [Deploy a build from
+source](guides/upgrading.md#deploy-a-build-from-source).
+
+### "the running daemon is musubi ..., but this is ...; restart it with `musubi daemon restart`"
+
+You upgraded jj-musubi, but the daemon still runs the earlier version. Run
+`musubi daemon restart`.
+
+### "missing field `remote_bindings`" or "missing field `clone_config`" when starting a hub
+
+This hub directory predates the remote-name preflight or clone-defaults format. Use a fresh hub
+directory and rejoin from the existing copies, as [Upgrade
+jj-musubi](guides/upgrading.md) describes. Keep the old directory as a backup; the
+repos and their work remain on the copies.
+
+### jj reports "stack limit reached"
+
+jj 0.47.0's static Linux binary could panic with `stack limit reached`, even in a new repo;
+[jj 0.47.1](https://github.com/jj-vcs/jj/releases/tag/v0.47.1) fixed it. Upgrade jj, put the new
+binary first on `PATH`, check `jj --version`, then retry the failed command.
+
+## Syncing
+
+### "hub: no such blob" or "hub: attachment ... was not uploaded"
+
+The hub deleted transfer data untouched for an hour, perhaps while this machine slept. The
+daemon retries from what remains. If this happens during active transfers, upgrade both this
+machine and the hub: earlier releases expired data an hour after its last write, even during
+transfer.
+
+### Identical divergent copies after an operation abandon
+
+A command finishing on an old operation after `jj op abandon` can repeat a rebase already
+performed by a merge, leaving copies with identical parents and contents. This also happens
+without jj-musubi. Compare them with `jj log -r '<first> | <second>'` and
+`jj diff --from <first> --to <second>`.
+
+Only remove an unused leaf: check `jj log -r '<unwanted-commit>::'` for descendants, and check
+bookmarks, tags and working copies before running:
+
+```sh
+jj abandon <unwanted-commit>
+```
+
+Keep copies used by other work or references. `jj abandon` rebases descendants onto the parents
+and removes bookmarks; it does not move them to the equivalent copy. See
+[known jj limitations](internals/races.md#known-jj-limitations).
+
+### "jj cannot merge this machine's operations with the hive's (...)"
+
+jj 0.47 can't merge some concurrent operations, such as rebases that form a loop. jj-musubi
+holds back the incoming operations so jj commands here can still run. The message names a
+local, unsent operation to revert before syncing can continue:
+
+```sh
+jj op revert <id>
+```
+
+Later work stays, rebased off the reverted changes. A change rewritten again since, such as
+by describing it, becomes divergent as with `jj op revert` alone; `jj abandon` the unwanted
+copy. The next sync names any further conflicting operation. If jj-musubi cannot identify one,
+it lists unsent operations newest first; revert the one conflicting with the hive.
+
+[Known jj limitations](internals/races.md#known-jj-limitations) describes the cases jj can't
+merge.
+
+### "cannot tell which operations jj abandoned"
+
+If `jj op abandon` rewrites two operations to identical bytes, their ids also match and
+jj-musubi cannot tell which one you meant to keep, so it stops before passing removals to the
+hive. Run the hinted `jj op integrate <operation>`, then `musubi sync`, and inspect the restored
+history before trying another abandon. `jj op restore` restores a view without the missing
+ancestry. Avoid forcing equal timestamps on operations you may abandon.
+
+If `jj util gc` already removed that history, integration cannot work. Follow the
+[new-copy rescue](#this-repositorys-history-no-longer-matches-the-hives-so-it-cant-sync-again)
+to bring your work into a new copy.
+
+### "this repository's history no longer matches the hive's, so it can't sync again"
+
+```text
+this repository's history no longer matches the hive's, so it can't sync again: make a new
+copy with `musubi clone`, bring this one's work across to it, then run `musubi leave --force`
+here
+```
+
+Keep this repo: its commits remain available. Make a new copy here with `musubi clone`
+and bring across work the hive lacks: changes since the last sync, or all work if the first
+sync never finished. You can rescue the work before diagnosing the cause.
+
+1. In the original copy, choose the commits you need. If you're rescuing files after a
+   publication hold, first check their ancestors for unwanted content. You can also
+   [copy files](guides/snapshots.md#recover-wanted-work).
+
+2. In the original copy, give each commit at the tip of that work a bookmark (`jj log` shows
+   them), and print where this repo keeps its Git data:
+
+   ```sh
+   jj bookmark create rescue-1 -r <change>
+   jj git export
+   jj git root
+   ```
+
+3. In the new copy, fetch and track those bookmarks, then remove the temporary remote:
+
+   ```sh
+   jj git remote add rescue <the path jj git root printed>
+   jj git fetch --remote rescue -b 'rescue-*'
+   jj bookmark track 'rescue-*' --remote rescue
+   jj git remote remove rescue
+   ```
+
+   Both copies use the hive's object hash. If `jj log` shows divergent changes, the hive has
+   rewritten commits beneath this work. Use `jj rebase` onto the hive's versions, then
+   `jj abandon` the old ones.
+
+Back in the original copy, run `musubi leave --force` after checking the rescued files and
+commits in the new copy. It keeps that repo and still attempts a final sync before
+leaving. If `musubi create` says this, the hive it made is empty, and this copy can't fill it:
+run `musubi leave --force`, and remove the hive with `musubi hub remove`.
+
+#### Why history can stop matching
+
+Syncing stops to prevent abandoned operations returning to the hive; `musubi status` says
+retrying won't help. This is expected when:
+
+- The copy left or was forgotten (`musubi forget` or `musubi.forget-after`) while another
+  machine ran `jj op abandon` and every remaining member accepted it. The hub no longer
+  remembers the abandon to pass it on when this copy rejoins.
+- Its first sync after `musubi join` or `musubi clone` never finished. The hub stops waiting
+  after a day without contact, or an hour if the hub restarts while the copy is away, when
+  another machine abandons operations meanwhile. For a new copy, none of its work reached the
+  hive, including work from before joining.
+- `jj op abandon` removed all history below unsynced work, then `jj util gc` deleted the old
+  operations before jj-musubi read them. Those operations may be needed to preserve workspace
+  ownership.
+
+Use the rescue steps above. Otherwise, missing history (such as an op-head update lost in a
+power cut) is a bug: report it at <https://github.com/bos/jj-musubi/issues> with the daemon's
+log (`daemon.log` in the [state directory](reference/configuration.md#on-every-machine)).
+
+### "the hub refused this machine's work: ..."
+
+```text
+the hub refused this machine's work: it lacks something the work needs, or brings back
+operations `jj op abandon` removed (the hub's log says which)
+```
+
+The hub's log identifies missing dependencies or the return of abandoned operations. Either is
+a bug: report it at <https://github.com/bos/jj-musubi/issues> with this machine's `daemon.log`
+and the hub's log; see [log locations](#start-with-this-copy).
+
+To continue, make a copy with `musubi clone`, bring across work since the last sync, then run
+`musubi leave --force` in the original.
+
+### "unknown field ... (written by a newer jj?)"
+
+jj wrote operation fields this build of jj-musubi cannot preserve. Upgrade jj-musubi on the
+machines and hub, following the runtime hint, then retry. See the
+[upgrade guide](guides/upgrading.md).
+
+### "the hub did not supply the objects this machine needs"
+
+The hub's reply left some commits missing, as when the hive was recreated while this machine
+was syncing. If the daemon serves this copy, it retries from the hub's current state.
+Run `musubi sync` to retry at once. If the error persists, check the hub's log; see below if
+every machine fails on the same object.
+
+### Every machine's sync of a hive fails on the same object
+
+If the hub's machine lost power, a file the hub wrote just before may be cut short, and every
+sync that needs it fails. Stop the hub, delete the hive's `heads` file
+(`musubi-hub/<hive id>/heads`), and start the hub again. It finds the store corrupt, sets it
+aside under `removed/`, and creates an empty hive. Surviving copies refill it with work they
+retained; work that existed only on a lost machine needs its backup.
+
+### "the first sync failed: ..."
+
+`create`, `join`, or `clone` set up the repo, but its first sync failed for the reason
+given. The daemon keeps trying: fix the cause, and `musubi status` shows when it succeeds.
+
+### Your working copy is stale
+
+Another machine changed the commit your working copy is on. Run `jj workspace update-stale`.
+See [When another machine rewrites your working
+copy](guides/working-across-machines.md#when-another-machine-rewrites-your-working-copy).
+
+### `jj log` shows `main*` after a sync
+
+In a colocated repo, jj exports bookmarks to git only when a command changes something,
+so after a `jj` command that merged other machines' work, git's branches can lag jj's
+bookmarks. The next command that changes something exports them, as does `jj git export`.
+
+### "Unable to create '.../refs/heads/main.lock': File exists" or "main@git: Failed to set"
+
+An interrupted `git`, `jj` or `musubi` ref update may leave a lock, such as
+`.git/refs/heads/main.lock` or `.git/packed-refs.lock`, blocking later exports. jj-musubi removes
+it at ten minutes old when it next blocks a sync and logs that removal.
+
+To clear it sooner, wait at least a minute and check that no `git` or `jj` command, including
+an editor's, runs in the repo. Then delete the lock. jj exports the bookmark again at
+its next export.
+
+### An annotated tag is lightweight on other machines
+
+jj-musubi shares the target commit, leaving the Git tag object on the fetching machine.
+Elsewhere, `git describe` without `--tags` skips the tag and `git tag -v` cannot verify it.
+Fetch the tag on any machine that needs it.
+
+## Sending held by the snapshot publication budget
+
+### Accidentally added files and sending stopped
+
+Run `musubi sync --outgoing` without snapshotting or contacting the hub, then follow
+[Snapshot limits and cleanup](guides/snapshots.md).
+
+### Recover wanted work without approving held history
+
+Use the [file-rescue workflow](guides/snapshots.md#recover-wanted-work) to keep wanted work
+without importing the held history. For commits, use the
+[bookmark rescue](#this-repositorys-history-no-longer-matches-the-hives-so-it-cant-sync-again);
+fetching also brings ancestors, which may contain unwanted content.
+
+### "sending held: snapshots retain ... exceeding the publication budget"
+
+Follow [Snapshot limits and cleanup](guides/snapshots.md). Restarting the daemon does not clear
+this hold; receiving continues. `musubi status` calls it "sending held: snapshot publication
+budget".
+
+### "outgoing work changed; ..."
+
+The inspected history, limits or cleanup context changed. Repeat `musubi sync --outgoing`
+or your `musubi sync --prune OPERATION...` preview and use its new token. Cleanup snapshots
+edits before checking the token, so new edits can cause this refusal. Current work stays intact.
+
+### Cleanup is refused
+
+These refusals discard no operations; receiving continues. You can keep sending held while
+deciding what to do. Inspect with `musubi sync --outgoing`, then try other operations, approve
+the inspected history if you want it shared, or
+[rescue wanted work](guides/snapshots.md#recover-wanted-work) without publishing it.
+
+Applying cleanup can record edits before refusing a stale token; see
+[outgoing work changed](#outgoing-work-changed-).
+
+#### "operation ... was offered to the hub or predates publication tracking; ..."
+
+Cleanup cannot prove the operation stayed local: an upload reply may have been lost, or the
+operation predates publication tracking. Use [cleanup recovery](#cleanup-is-refused), or
+[abandon shared history](guides/working-across-machines.md#abandoning-operations).
+
+#### Cleanup cannot preserve earlier changes
+
+"cannot safely prune this history: jj did not record enough information ..."
+
+jj did not record which change versions the command selected. This includes older or custom
+commands, undo, redo, operation restores, some Git imports reusing existing versions, and
+Git-ref export retries. Cleanup cannot establish that it would preserve those versions.
+Use [cleanup recovery](#cleanup-is-refused).
+
+#### "this selection would change another copy's activity or membership; ..."
+
+Removing these operations would change how a later concurrent forget of another copy resolves.
+Cleanup can create activity for this copy, but cannot invent activity for another.
+Use [cleanup recovery](#cleanup-is-refused).
+
+#### "this cleanup cannot preserve ..." or "the prepared cleanup differs from its preview; ..."
+
+The prepared cleanup did not reproduce the inspected state. Try fewer operations, or use
+[cleanup recovery](#cleanup-is-refused). Update a stale workspace with `jj workspace update-stale`
+before inspecting again.
+
+### "cannot read this copy's record of attempted publications: ..."
+
+The local publication record is damaged. Do not delete it to make history look unpublished.
+Keep this copy's work and follow the [new-copy recovery
+workflow](#this-repositorys-history-no-longer-matches-the-hives-so-it-cant-sync-again).
+
+## What `musubi status` reports
+
+### "Warning: Syncing fails: ..."
+
+Find the quoted error on this page. A serving daemon retries and logs details at the path in
+the hint; otherwise `musubi sync` retries now.
+
+### "Warning: The daemon isn't running, so this repository syncs only when you run `musubi sync`."
+
+Follow the [daemon startup instructions](#the-daemon-isnt-running-after-a-reboot). Until then,
+run `musubi sync` to send and receive recorded work.
+
+### "Warning: The daemon doesn't serve this repository."
+
+The daemon hasn't started serving this copy, perhaps during restart after `musubi join`.
+If this persists, run `musubi join` here again.
+
+If the state directory was deleted or `MUSUBI_STATE_DIR` changed, `musubi status` instead
+reports a duplicate. Use `musubi join --original`; see
+[Move, copy or restore a repo](guides/manage.md#move-copy-or-restore-a-repo).
+
+## What `musubi top` reports
+
+See [monitoring](guides/manage.md#check-syncing) for checks and the
+[display reference](reference/commands.md#read-musubi-top) for columns and controls.
+
+### "... not heard from in 6m: offline, or its daemon isn't running"
+
+The hub has heard nothing for over two minutes. Check `musubi status` there for a stopped
+daemon or lost connection. Daemons report after each sync, at least every half minute, and
+catch up after reconnecting. A long first sync reports only when done. A departed or deleted
+copy can also show this for a day.
+
+### "... 3 heads behind for 2m"
+
+The machine reports to the hub, but hasn't caught up with what the hub accepted over a minute
+ago, though it syncs as soon as it hears of a new head. Its daemon's log (see the top of this
+page) says why.
+
+### "... sync failing: ..."
+
+The machine's last sync failed, for the reason quoted. Find that message on this page.
+
+### "... the hub failed a request 5m ago: ..."
+
+In the last ten minutes, the hub couldn't answer a request for the hive, for the reason
+quoted; the hub's log says more. The machine that asked retries, and if it keeps failing, it
+shows as failing too.
+
+### "... the hub had trouble 5m ago: its store was damaged, so the hub made it again: ..."
+
+The hub found the hive's store corrupt, as after a power cut, and made it again, empty. The
+surviving copies refill it with the work they retained.
+
+### "not heard from since the hub started" or "not heard from in a day: it may have left the hive"
+
+A departed or deleted copy's workspace remains visible until `musubi forget` removes it.
+An active copy reports once it syncs, within half a minute; check `musubi status` there.
+
+### "This machine's daemon isn't running; `musubi daemon start` starts it."
+
+Follow the [daemon startup instructions](#the-daemon-isnt-running-after-a-reboot). A machine
+with no copies, such as a hub-only machine, needs no daemon and produces no warning.
+
+## The daemon
+
+### The daemon isn't running after a reboot
+
+Run `musubi daemon start` to resume background syncing, or `musubi daemon install` to start
+it now and at login. `create`, `join`, and `clone` start it without installing login startup.
+On Linux, the installed daemon stops at logout unless you run `loginctl enable-linger`.
+
+### "the daemon exited (...) before it was ready" or "did not start listening"
+
+The daemon failed as it started. The message includes the end of its log, or names the log.
+
+### "... is not a private directory of this user's ..."
+
+The socket's directory must belong to you and be writable by you alone. If you own it, run
+`chmod 700` on it. Otherwise remove the socket directory for jj-musubi to recreate, or choose
+another with `MUSUBI_SOCKET`.
+
+Do not remove the state directory named by `MUSUBI_STATE_DIR`: it lists the copies to sync.
+Directories made with a permissive umask (such as `002`) or an earlier release may need fixing.
+
+### "the daemon's socket ... is a relative path; ..."
+
+`--socket`, `MUSUBI_SOCKET` or `musubi.daemon.socket` gave the daemon's socket relative to the
+current directory, which would make commands run elsewhere start a daemon of their own. Give
+the full path, or one starting with `~/`.
+
+### "this machine's daemon already runs, listening on ..., not ..."
+
+This command chose a different socket through `--socket`, `MUSUBI_SOCKET` or
+`musubi.daemon.socket`. Use the same setting everywhere, or omit it to use the running daemon's
+socket. Commands such as `musubi list` and `musubi status` refuse rather than bypassing it.
+
+To move the daemon, run `musubi daemon stop`, then start it with the chosen socket. For login
+startup, run `musubi daemon install` again with that setting. The message without "not" means
+`musubi daemon` was run on the socket already in use.
+
+### "running (pid ...), but not listening on ..." or "this machine's daemon (pid ...) isn't listening on ..."
+
+The socket disappeared, perhaps through a `/tmp` or `$TMPDIR` cleaner. The daemon recreates
+it within seconds; `musubi daemon stop` still works. If this persists, run
+`musubi daemon restart`.
+
+### "this machine's daemon (pid ...) isn't listening on ..., and can't be stopped from here" or "running (pid ...) elsewhere, ..."
+
+The daemon doesn't answer and this command cannot signal it, as on Windows or from a container
+sharing an outside daemon's state directory. Run `musubi daemon stop` where it runs, or end
+its process there, then restart it.
+
+### "... would be ... bytes longer than this system allows" or "... is ... bytes too long ..."
+
+Unix socket paths are limited to about 100 bytes. For the daemon, choose a shorter path with
+`MUSUBI_SOCKET` or `musubi.daemon.socket` in jj's config. For a hub, serve it from a directory
+with a shorter path.
+
+### "Warning: Could not start the daemon (...); syncing once instead."
+
+The command synced once without starting a daemon. Fix the reported error, then follow the
+[daemon startup instructions](#the-daemon-isnt-running-after-a-reboot).
+
+### "Warning: The daemon isn't running, so this synced in its own process, ..."
+
+`musubi sync` ran once without a daemon, as after `musubi daemon stop`. To resume background
+syncing, follow the [daemon startup instructions](#the-daemon-isnt-running-after-a-reboot).
+

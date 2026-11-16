@@ -10,6 +10,10 @@ machine (see [Upgrading](README.md#upgrading)).
 - `musubi sync --outgoing` lists every extra path retained by outgoing snapshots, so you can
   inspect them all before approving the history. Previously it showed only the first 50 paths.
 
+- Commands inheriting the daemon's `SSH_AUTH_SOCK`, directly or through a symbolic link,
+  no longer break its agent access by creating a link cycle. This keeps signing and SSH
+  proxy hops working. No action is needed on upgrading.
+
 - Sending pauses when automatic snapshots retain more than 100 extra paths or 8 MiB beyond
   explicit change history and shared content; receiving continues. `musubi sync --outgoing`
   shows the content and retaining operations. Its exact `--approve TOKEN` override sends

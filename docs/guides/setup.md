@@ -258,8 +258,9 @@ public-key file if missing or empty.
 `command=` means the key can reach the hub and nothing else on that machine. musubi adds it
 through your own ssh, so ssh may ask for your password that once. After that, the daemon uses
 this key and never prompts. It needs an ssh agent only for a `ProxyJump` host, or to sign
-commits with a key the agent holds; it uses the agent of the latest session that ran a musubi
-command.
+commits with a key the agent holds. On Unix, a daemon started by a command uses the latest
+responsive agent supplied by a `musubi` command. Commands inheriting that agent keep using it,
+including through symbolic links.
 
 Anyone who can reach a hub can read and write every hive on it, so other machines reach it
 only over ssh, with keys that can do nothing else ([SECURITY.md](../../SECURITY.md)).

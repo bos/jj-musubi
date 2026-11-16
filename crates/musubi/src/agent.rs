@@ -45,14 +45,20 @@ fn point(link: &Path, agent: &Path) -> anyhow::Result<()> {
     let Some(dir) = link.parent().filter(|dir| dir.is_dir()) else {
         return Ok(());
     };
-    let agent = std::path::absolute(agent)?;
-    if std::fs::read_link(link).is_ok_and(|target| target == agent) || !live(&agent) {
+    // A child of the daemon can inherit this link as SSH_AUTH_SOCK, possibly through
+    // another symlink. Store the resolved socket so a refresh cannot create a cycle,
+    // even if another command replaces the link while this one is refreshing it.
+    let Ok(target) = agent.canonicalize() else {
+        return Ok(());
+    };
+    // Probe the supplied path: its resolved target can exceed Unix socket address limits.
+    if link.canonicalize().is_ok_and(|current| current == target) || !live(agent) {
         return Ok(());
     }
     // Replaced in one step, so that nothing finds it missing.
     let temp = dir.join(format!(".ssh-agent.{}", std::process::id()));
     std::fs::remove_file(&temp).ok();
-    std::os::unix::fs::symlink(&agent, &temp)?;
+    std::os::unix::fs::symlink(&target, &temp)?;
     if let Err(err) = std::fs::rename(&temp, link) {
         std::fs::remove_file(&temp).ok();
         return Err(err.into());
@@ -80,9 +86,10 @@ mod tests {
     #[test]
     fn the_link_follows_the_latest_agent_that_answers() {
         let dir = tempfile::tempdir().unwrap();
-        let link = dir.path().join("ssh-agent");
-        let first = dir.path().join("first.sock");
-        let second = dir.path().join("second.sock");
+        let root = dir.path().canonicalize().unwrap();
+        let link = root.join("ssh-agent");
+        let first = root.join("first.sock");
+        let second = root.join("second.sock");
         let first_agent = UnixListener::bind(&first).unwrap();
         let _second_agent = UnixListener::bind(&second).unwrap();
 
@@ -90,6 +97,26 @@ mod tests {
         assert_eq!(std::fs::read_link(&link).unwrap(), first);
         point(&link, &second).unwrap();
         assert_eq!(std::fs::read_link(&link).unwrap(), second);
+        // A command can inherit the daemon's agent path, directly or through another
+        // symlink. Refreshing it must keep the live socket rather than introduce a cycle.
+        let alias = dir.path().join("agent-alias");
+        std::os::unix::fs::symlink(&link, &alias).unwrap();
+        for agent in [&link, &alias] {
+            point(&link, agent).unwrap();
+            assert_eq!(std::fs::read_link(&link).unwrap(), second);
+        }
+        // A short alias can reach a socket whose resolved path exceeds sockaddr_un.
+        // The daemon's short link can point there too, but the probe needs the alias.
+        let long = root.join("long-agent-directory".repeat(8));
+        std::fs::create_dir(&long).unwrap();
+        let short = root.join("s");
+        std::os::unix::fs::symlink(&long, &short).unwrap();
+        let socket = short.join("agent.sock");
+        let _long_agent = UnixListener::bind(&socket).unwrap();
+        point(&link, &socket).unwrap();
+        assert_eq!(std::fs::read_link(&link).unwrap(), long.join("agent.sock"));
+        assert!(live(&link));
+        point(&link, &second).unwrap();
         // An agent that doesn't answer replaces nothing.
         drop(first_agent);
         point(&link, &first).unwrap();

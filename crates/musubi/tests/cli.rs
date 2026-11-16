@@ -1761,6 +1761,9 @@ fn the_daemon_picks_up_new_repositories() {
     After detecting that the machine has woken, it ends old ssh connections and clears the delay from
     failed ssh attempts.
 
+    On Unix, a daemon started by a command uses the latest responsive SSH agent supplied by a musubi
+    command for signing and proxy hops. Commands inheriting that agent keep using it.
+
     It reloads changed jj settings for a repository before its next sync. Changes made during a sync
     apply to the following one; `musubi sync` waits for one with the new settings. Its own
     `musubi.daemon.*` settings need `musubi daemon restart`.
@@ -2471,6 +2474,9 @@ chmod +x "{exe}.new" && mv "{exe}.new" "{exe}"
 
     After detecting that the machine has woken, it ends old ssh connections and clears the delay from
     failed ssh attempts.
+
+    On Unix, a daemon started by a command uses the latest responsive SSH agent supplied by a musubi
+    command for signing and proxy hops. Commands inheriting that agent keep using it.
 
     It reloads changed jj settings for a repository before its next sync. Changes made during a sync
     apply to the following one; `musubi sync` waits for one with the new settings. Its own

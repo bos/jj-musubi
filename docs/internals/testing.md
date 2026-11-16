@@ -512,6 +512,12 @@ uninstall works even after its service file was removed. On macOS it checks both
 background launchd domains. These tests never reach the real service manager; they do not
 check that it accepts the files or runs musubi.
 
+`agent::tests::the_link_follows_the_latest_agent_that_answers` uses local Unix sockets to check
+that commands select the latest responsive agent and leave it unchanged when inheriting the
+daemon's agent link, directly or through another symlink. It checks socket reachability and
+link targets, including short aliases for paths longer than a Unix socket address allows,
+not SSH authentication or signing.
+
 Two CLI tests put a stand-in for launchctl and systemctl first on the `PATH` instead, one that
 runs the hub an installed unit or agent names as the service manager would.
 `daemon_install_and_uninstall_leave_the_daemon_as_they_say` checks that a daemon install the

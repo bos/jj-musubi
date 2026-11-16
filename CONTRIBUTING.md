@@ -123,6 +123,9 @@ fast.
 When a change alters what users see, update the [user guide](docs/README.md) and the built-in
 help too: see [docs/AGENTS.md](docs/AGENTS.md).
 
+Run `just web` from this repo to copy the user guide into the sibling `../website`
+checkout. It refreshes the generated pages without committing or deploying them.
+
 ## Submitting
 
 Pull requests go to `main`.

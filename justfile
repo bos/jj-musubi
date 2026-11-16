@@ -127,6 +127,12 @@ coverage *args:
 docs:
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --quiet
 
+# Copy the user guide to the sibling website checkout.
+alias web := website-docs
+
+website-docs:
+    JJ_MUSUBI_SOURCE={{ quote(justfile_directory()) }} python3 ../website/scripts/sync-jj-musubi-docs.py
+
 deny:
     cargo deny --log-level error check
 

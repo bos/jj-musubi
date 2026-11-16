@@ -417,6 +417,9 @@ once the repository has a remote, a deploy of a revision the remote lacks. The s
 with musubi's own build script, which names the build. It doesn't fetch a commit or tag from a
 remote.
 
+`publication_budget_inspection_cleanup_and_override` checks that outgoing inspection lists
+the 51st retained path, beyond the old display cap, before approving that exact history.
+
 The existing `hub_join_sync_clone_and_list` fixture also checks `debug op-id` in both
 directions, with odd-length prefixes, invalid hex, and an absent operation, and in a
 repository in no hive, where it makes no machine key. Its snapshots

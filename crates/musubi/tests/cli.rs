@@ -4765,9 +4765,33 @@ fn publication_budget_inspection_cleanup_and_override() {
             ])
             .contains("accident")
     );
-    alpha.write_file("large", &"z".repeat(64));
+    for index in 0..51 {
+        alpha.write_file(&format!("large-{index:02}"), &"z".repeat(64));
+    }
     alpha.jj(&["status"]);
     let outgoing = musubi_in(&env, &logs, &alpha, &["sync", "--outgoing"]);
+    {
+        let mut settings = insta::Settings::clone_current();
+        settings.add_filter(
+            r"(?m)(?:^  large-[0-4][0-9]  64 bytes, 1 version\n){50}",
+            "  [first 50 paths]\n",
+        );
+        let _filters = settings.bind_to_scope();
+        insta::assert_snapshot!(outgoing, @"
+        Sending held: snapshots retain 51 files, 64 bytes beyond intentional history.
+        Limits: 10 files, 32 bytes (0 disables a limit).
+
+        Files (versions shared by operations are counted once):
+          [first 50 paths]
+          large-50  64 bytes, 1 version
+
+        Retaining operations (their byte counts overlap):
+          [operation]  51 files, 64 bytes  snapshot working copy
+
+        Send this work: musubi sync --approve [token]
+        Preview cleanup: musubi sync --prune <operation>...
+        ");
+    }
     let token = outgoing
         .lines()
         .find_map(|line| line.strip_prefix("Send this work: musubi sync --approve "))

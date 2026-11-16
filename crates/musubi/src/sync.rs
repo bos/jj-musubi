@@ -137,7 +137,7 @@ pub fn publication(
         out,
         "\nFiles (versions shared by operations are counted once):"
     )?;
-    for file in report.files.iter().take(50) {
+    for file in &report.files {
         writeln!(
             out,
             "  {}  {} bytes, {}",
@@ -145,9 +145,6 @@ pub fn publication(
             file.bytes,
             counted(file.versions, "version")
         )?;
-    }
-    if report.files.len() > 50 {
-        writeln!(out, "  ... and {} more paths", report.files.len() - 50)?;
     }
     writeln!(out, "\nRetaining operations (their byte counts overlap):")?;
     for operation in &report.operations {

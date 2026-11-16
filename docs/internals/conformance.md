@@ -2038,8 +2038,9 @@ Unknown command records exercise `intentKnown = false` and cleanup refusal. The 
 uploads in the real `Hive` integration fixtures; those assert unwanted commits never reach the
 hub while incoming work still arrives.
 The CLI fixture snapshots inspection, preview, stale application, successful cleanup and exact
-override through real hub and CLI processes. The fixture stops its daemons after setup to
-keep the inspected operation rows reproducible.
+override through real hub and CLI processes. It also checks that inspection includes the
+51st retained path, so approval never depends on a truncated path list. The fixture stops its
+daemons after setup to keep the inspected operation rows reproducible.
 
 The native source contracts remain explicit: jj's creation/rewrite records, automatic snapshot
 flag and pinned command descriptions identifying selected revisions; complete commit/tree-side

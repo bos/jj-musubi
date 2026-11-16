@@ -205,9 +205,10 @@ fn run(cli: Cli, ui: &Ui) -> anyhow::Result<()> {
             action:
                 Some(HubAction::Install {
                     args: HubArgs { dir, advertise },
+                    at_boot,
                 }),
             ..
-        } => hub::install(ui, hub::ServeArgs { dir, advertise }),
+        } => hub::install(ui, hub::ServeArgs { dir, advertise }, at_boot),
         Command::Hub {
             action: Some(HubAction::Uninstall),
             ..
@@ -215,10 +216,10 @@ fn run(cli: Cli, ui: &Ui) -> anyhow::Result<()> {
             if login::uninstall(login::Service::Hub)? {
                 writeln!(
                     ui.stdout(),
-                    "The hub no longer runs at login, and is stopped."
+                    "The hub's service is removed, and the hub is stopped."
                 )?;
             } else {
-                writeln!(ui.stdout(), "The hub wasn't set to run at login.")?;
+                writeln!(ui.stdout(), "The hub had no installed service.")?;
             }
             Ok(())
         }

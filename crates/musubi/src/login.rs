@@ -8,6 +8,7 @@
 //!   runs `musubi daemon start` at login.
 //!
 //! The hub's service runs `musubi hub` in the hub's directory, as the user's one hub.
+//! With `hub install --at-boot`, a system service runs it as that user (see `boot`).
 //!
 //! Where launchd or systemd runs the daemon, commands that need it ask the service manager to
 //! start it rather than starting one themselves, so there is only ever one, and it restarts
@@ -28,6 +29,59 @@ use std::process::Command;
 use anyhow::Context as _;
 
 use crate::config;
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod boot;
+
+/// Whether this hub has a system service, rather than a login service.
+pub fn hub_at_boot() -> bool {
+    Service::Hub
+        .marker()
+        .ok()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .is_some_and(|text| text.starts_with("boot\n"))
+}
+
+/// Obtain privileges before replacing an installed hub. The main process stays the user
+/// whose home, state and executable the service must use.
+pub fn prepare_hub_install(at_boot: bool) -> anyhow::Result<()> {
+    if at_boot || hub_at_boot() {
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            boot::authorize()?;
+            if at_boot && !hub_at_boot() {
+                boot::check_available()?;
+            }
+            return Ok(());
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        anyhow::bail!("musubi can't start a hub at boot on this system");
+    }
+    Ok(())
+}
+
+pub fn install_hub(dir: &Path, at_boot: bool) -> anyhow::Result<String> {
+    if !at_boot {
+        return install(Service::Hub, Some(dir));
+    }
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        let exe = std::env::current_exe()?;
+        let marker = Service::Hub.marker()?;
+        fs::write(&marker, "boot\n")?;
+        // The marker is already complete: never truncate it while a boot service runs.
+        let result = boot::install(&exe, dir);
+        if result.is_err() {
+            // Keep the marker if cleanup fails, so uninstall can retry it.
+            boot::uninstall()
+                .context("removing the failed boot service; retry `musubi hub uninstall`")?;
+            fs::remove_file(marker)?;
+        }
+        result
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    anyhow::bail!("musubi can't start a hub at boot on this system")
+}
 
 /// What starts at login.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -162,7 +216,15 @@ pub fn uninstall(service: Service) -> anyhow::Result<bool> {
     if !installed(service) {
         return Ok(false);
     }
-    platform::uninstall(service)?;
+    if service == Service::Hub && hub_at_boot() {
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            boot::authorize()?;
+            boot::uninstall()?;
+        }
+    } else {
+        platform::uninstall(service)?;
+    }
     fs::remove_file(service.marker()?)?;
     Ok(true)
 }
@@ -174,6 +236,10 @@ pub fn start() -> anyhow::Result<()> {
 
 /// Where the service manager logs the output of `service`.
 pub fn log_hint(service: Service) -> String {
+    #[cfg(target_os = "linux")]
+    if service == Service::Hub && hub_at_boot() {
+        return format!("`sudo journalctl -u {}`", boot::unit_name());
+    }
     platform::log_hint(service)
 }
 
@@ -214,7 +280,7 @@ mod platform {
             fs::create_dir_all(parent)?;
         }
         let log = service.log()?;
-        fs::write(&path, plist(service, exe, dir, &log, &environment()))?;
+        fs::write(&path, plist(service, exe, dir, &log, &environment(), None))?;
         // Replace any earlier version of the agent.
         let label = service.label();
         run("launchctl", &["bootout", &format!("{}/{label}", domain()?)]).ok();
@@ -276,7 +342,7 @@ mod platform {
         {
             environment.push(("SSH_AUTH_SOCK".to_owned(), link.display().to_string()));
         }
-        fs::write(&path, unit(service, exe, dir, &environment))?;
+        fs::write(&path, unit(service, exe, dir, &environment, None))?;
         run("systemctl", &["--user", "daemon-reload"])?;
         run("systemctl", &["--user", "enable", "--now", service.unit()])?;
         Ok(format!("a systemd user unit, {}", path.display()))
@@ -375,6 +441,7 @@ fn plist(
     dir: Option<&Path>,
     log: &Path,
     environment: &[(String, String)],
+    boot_user: Option<(&str, &str)>,
 ) -> String {
     let string = |text: &str| format!("<string>{}</string>", xml_escape(text));
     let mut variables = String::new();
@@ -396,7 +463,23 @@ fn plist(
         )
     });
     let log = string(&log.to_string_lossy());
-    let label = service.label();
+    let (label, identity, session) = if let Some((label, user)) = boot_user {
+        (
+            label,
+            format!("\t<key>UserName</key>\n\t{}\n", string(user)),
+            String::new(),
+        )
+    } else {
+        (
+            service.label(),
+            String::new(),
+            concat!(
+                "\t<key>LimitLoadToSessionType</key>\n\t<array>\n",
+                "\t\t<string>Aqua</string>\n\t\t<string>Background</string>\n\t</array>\n"
+            )
+            .to_owned(),
+        )
+    };
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -409,7 +492,7 @@ fn plist(
 		{exe}
 		<string>{command}</string>
 	</array>
-{working}	<key>EnvironmentVariables</key>
+{identity}{working}	<key>EnvironmentVariables</key>
 	<dict>
 {variables}	</dict>
 	<key>RunAtLoad</key>
@@ -419,12 +502,7 @@ fn plist(
 		<key>SuccessfulExit</key>
 		<false/>
 	</dict>
-	<key>LimitLoadToSessionType</key>
-	<array>
-		<string>Aqua</string>
-		<string>Background</string>
-	</array>
-	<key>ProcessType</key>
+{session}	<key>ProcessType</key>
 	<string>Background</string>
 	<key>StandardOutPath</key>
 	{log}
@@ -451,6 +529,7 @@ fn unit(
     exe: &Path,
     dir: Option<&Path>,
     environment: &[(String, String)],
+    boot_user: Option<u32>,
 ) -> String {
     let mut text = format!(
         "[Unit]\nDescription={}\n\n[Service]\nExecStart={} {}\n",
@@ -458,6 +537,9 @@ fn unit(
         systemd_quote(&exe.to_string_lossy()),
         service.command()
     );
+    if let Some(uid) = boot_user {
+        writeln!(text, "User={uid}").expect("writing to a String");
+    }
     if let Some(dir) = dir {
         // A path, not a word: systemd doesn't unquote it, but expands `%` specifiers in it.
         writeln!(
@@ -475,7 +557,16 @@ fn unit(
         )
         .expect("writing to a String");
     }
-    text.push_str("Restart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n");
+    let target = if boot_user.is_some() {
+        "multi-user.target"
+    } else {
+        "default.target"
+    };
+    write!(
+        text,
+        "Restart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy={target}\n"
+    )
+    .expect("writing to a String");
     text
 }
 
@@ -508,6 +599,7 @@ mod tests {
             None,
             Path::new("/l/daemon.log"),
             &environment(),
+            None,
         );
         assert!(
             text.contains("<string>/opt/bin/mu&lt;s&gt;ubi</string>\n\t\t<string>daemon</string>")
@@ -526,6 +618,7 @@ mod tests {
             Some(Path::new("/srv/my hub")),
             Path::new("/l/hub.log"),
             &environment(),
+            None,
         );
         assert!(
             text.contains("<string>io.github.bos.musubi.hub</string>"),
@@ -548,6 +641,7 @@ mod tests {
             Path::new("/opt/my bin/musubi"),
             None,
             &environment(),
+            None,
         );
         assert!(
             text.contains("ExecStart=\"/opt/my bin/musubi\" daemon\n"),
@@ -573,6 +667,7 @@ mod tests {
             Path::new("/opt/bin/musubi"),
             Some(Path::new("/srv/100% hub")),
             &environment(),
+            None,
         );
         assert!(
             text.contains("ExecStart=\"/opt/bin/musubi\" hub\n"),

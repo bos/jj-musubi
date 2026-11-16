@@ -7,6 +7,12 @@ machine (see [Upgrading](README.md#upgrading)).
 
 ## Unreleased
 
+- `musubi hub install --at-boot` starts the hub without a login on macOS and Linux, and
+  keeps it running after logout. It installs a system service using sudo, running the hub
+  as the installing user. Run it without a sudo prefix. Repeat `--at-boot` when reinstalling;
+  omitting it switches back to login startup. `musubi hub uninstall` removes either kind.
+  Existing installations keep login startup; no action is needed on upgrading.
+
 - `musubi sync --outgoing` lists every extra path retained by outgoing snapshots, so you can
   inspect them all before approving the history. Previously it showed only the first 50 paths.
 

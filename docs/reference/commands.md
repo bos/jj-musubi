@@ -98,8 +98,8 @@ got.
 | Command | Use it to |
 | --- | --- |
 | `hub` | Run a hub, in the foreground. `--dir` chooses its directory, and `--advertise` the host name it tells other machines to use. |
-| `hub install` | Run the hub at login from now on, and now, as `hub` would with the same flags. macOS and Linux only. |
-| `hub uninstall` | Stop running the hub at login, and stop it. |
+| `hub install` | Start the hub now and at login, or at boot with `--at-boot`, as your user. Boot installation uses sudo; run the command without sudo. Accepts the same flags as `hub`. macOS and Linux only. |
+| `hub uninstall` | Stop the hub and remove its login or boot service. Removing a boot service uses sudo. |
 | `hub rename <hive> <new-name>` | Rename a hive. |
 | `hub remove <hive>` | Remove a hive from the hub. Each machine's copy leaves it as it hears. `rm` is an alias. |
 | `hub connect` | Relay standard input and output to this machine's hub. Other machines run it over ssh; you don't need to. |

@@ -509,8 +509,10 @@ config and state directories and stand-ins for launchctl or systemctl. It checks
 installation leaves no marker and no service file, successful installation records one, the
 daemon and hub keep separate markers, only the intended environment reaches the service, and
 uninstall works even after its service file was removed. On macOS it checks both GUI and
-background launchd domains. These tests never reach the real service manager; they do not
-check that it accepts the files or runs musubi.
+background launchd domains. A stand-in for sudo redirects boot-service installation into the
+private home; the tests check authorization refusal, failed installation cleanup, the user
+identity and environment, and retention of the marker when stopping fails. These tests never
+reach the real service manager; they do not check that it accepts the files or runs musubi.
 
 `agent::tests::the_link_follows_the_latest_agent_that_answers` uses local Unix sockets to check
 that commands select the latest responsive agent and leave it unchanged when inheriting the
@@ -524,7 +526,8 @@ runs the hub an installed unit or agent names as the service manager would.
 service manager refuses leaves the daemon running and nothing installed, and, first, that the
 daemon starts under a umask that lets the group write.
 `a_refused_hub_install_leaves_the_installed_hub_running` checks that installing a hub for a
-directory another hub serves refuses before it stops the installed one.
+directory another hub serves refuses before it stops the installed one, that switching startup
+modes replaces the service, and that another state directory cannot replace its boot service.
 `one_daemon_serves_a_machine_wherever_it_listens`, without a service manager, checks the
 daemon's socket: a setting's `~/` and refusal of relative paths, commands finding the daemon
 where it listens, the refusal of a second daemon on another socket, and stopping and listening
@@ -542,6 +545,13 @@ it; on Windows, which runs no hub at login, it checks the refusal, which changes
 so runs always. CI's Linux runners have no systemd user manager without a login session, so
 the workflow enables lingering and starts one first. Logging in itself is the one step no test
 exercises.
+
+`the_hub_runs_through_the_boot_service` exercises the same hub-serving, crash-restart,
+replacement and uninstall behavior through a real system service, and checks the process
+runs as the installing user. It runs only with `MUSUBI_TEST_BOOT_SERVICE=1` on a disposable
+macOS or Linux machine with sudo available; Linux CI enables it. Never enable it where a boot
+hub is installed for real. It doesn't exercise reboot or logout; those require a separate
+machine-level check.
 
 ## Faults
 

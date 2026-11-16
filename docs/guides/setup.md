@@ -87,25 +87,37 @@ stop it and run:
 musubi hub install
 ```
 
-This installs a launchd agent on macOS, or a systemd user unit on Linux, which runs `musubi
-hub` in the hub's directory, and again if it fails. It serves the directory `musubi hub`
-would, taking `--dir` and `--advertise` as `musubi hub` does, and prints what to run
-elsewhere. On Linux, the hub stops when you log out unless you also run `loginctl
-enable-linger`; a server you reach only over ssh needs it. Windows has no `hub install`.
+This installs a launchd agent on macOS or a systemd user unit on Linux, restarting the hub if
+it fails. It uses the same directory, `--dir` and `--advertise` as `musubi hub`, and prints what
+to run elsewhere. Windows has no `hub install`.
 
-The service runs the `musubi` that `hub install` found, with the `PATH` you ran it with. If
-you move `musubi`, or the `git` it runs, or want the hub to serve another directory, run
-`musubi hub install` again. `musubi hub uninstall` stops the hub, and stops it running at
-login.
+The service uses the `musubi` and `PATH` found during installation. Run `musubi hub install`
+again if you move `musubi` or `git`, or change the hub directory.
 
-These are user services. On Linux, `loginctl enable-linger` lets them start without an
-interactive login and survive logout. On macOS they need a logged-in user session; installing
-one does not make a system service that starts before login. Windows starts the daemon at
-user login and has no built-in hub service installer. After reboot, check that the expected
-user session or Linux lingering is in place before relying on sync.
+To start the hub at boot and keep it running after logout, on macOS or Linux:
 
-The hub logs to `hub.log` in musubi's state directory on macOS, and to the journal on Linux:
-`journalctl --user -u musubi-hub`.
+```sh
+musubi hub install --at-boot
+```
+
+Run this as your normal user, without `sudo`: it asks for administrator permission to install
+and manage the service. The hub runs as you, using your home and state directory. On macOS
+this installs a launchd daemon; on Linux, a systemd system unit. It starts only the hub at
+boot; it doesn't enable Linux lingering for your other services. The hub's executable and
+data must be available before login. A sleeping machine remains unreachable.
+
+Keep your existing `--dir` if you use one. Reinstall with `--at-boot` to keep boot startup, or
+without it to switch back to login startup.
+`musubi hub uninstall` stops the hub and removes either kind of service, asking for
+administrator permission when removing a boot service.
+
+Without `--at-boot`, macOS needs a logged-in user session. On Linux, you can also keep the login
+service running without a login using `loginctl enable-linger`; this affects all your user
+services. Windows has no hub installation command.
+
+On macOS the hub logs to `hub.log` in jj-musubi's state directory. On Linux use
+`journalctl --user -u musubi-hub` for a login service, or
+`sudo journalctl -u musubi-hub-$(id -u).service` for a boot service.
 
 ## Share a repository
 

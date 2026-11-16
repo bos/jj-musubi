@@ -125,6 +125,8 @@ jobs:
         env:
           # Runners are thrown away, so tests may install login services for real.
           MUSUBI_TEST_LOGIN_SERVICE: "1"
+          # Linux runners also exercise the hub's system service with passwordless sudo.
+          MUSUBI_TEST_BOOT_SERVICE: ${{ runner.os == 'Linux' && '1' || '' }}
       # Every benchmark script, briefly, so that they keep up with the CLI.
       - name: Benchmark smoke run
         if: runner.os == 'Linux'

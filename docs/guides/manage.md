@@ -341,7 +341,8 @@ To upgrade, then:
 
 1. Read the release's section of [CHANGELOG.md](../../CHANGELOG.md) for anything else to do.
 2. On the hub's machine, install the new `musubi` in place of the old one. Stop `musubi hub`
-   and start it again, or if it runs at login, run `musubi hub install` again.
+   and start it again, or reinstall its service with `musubi hub install`, keeping `--at-boot`
+   if it starts at boot.
 3. Every machine with `musubi.upgrade-command` upgrades itself. On any other machine, install
    the new `musubi` and run `musubi daemon restart`.
 
@@ -417,8 +418,8 @@ machine with `upgrade-from-source --deploy`:
    must be where the hub runs `musubi` from, as a build named for the release it follows (the
    `version` in its `Cargo.toml`), the time in UTC, and its commit, such as
    `musubi 0.3.0+20261102153012.4a0db205e1f0`. `musubi --version` prints that name.
-3. Stop `musubi hub` and start it again, or if it runs at login, run `musubi hub install`
-   again.
+3. Stop `musubi hub` and start it again, or reinstall its service with `musubi hub install`,
+   keeping `--at-boot` if it starts at boot.
 
 Each machine whose upgrade command is `upgrade-from-source` then follows the hub to that build,
 even if it changes how machines and hubs talk: it builds the build's commit, fetching it if its

@@ -440,17 +440,23 @@ pub enum HubAction {
         #[arg(long, add = ArgValueCandidates::new(completion::hubs))]
         hub: Option<String>,
     },
-    /// Run the hub at login from now on (a launchd agent on macOS, a systemd user unit on
-    /// Linux), and now, as this machine's hub.
+    /// Run the hub at login from now on, or at boot with --at-boot, and now, as this
+    /// machine's hub. macOS and Linux only.
     ///
     /// It serves the directory `musubi hub` would, creating it the first time. On Linux,
     /// the hub stops when you log out, unless `loginctl enable-linger` keeps your services
-    /// running. Run it again to serve another directory, or after moving `musubi` or `git`.
+    /// running. With --at-boot, only the hub starts without a login, on either platform.
+    /// Run it again with the same startup choice to serve another directory, or after
+    /// moving `musubi` or `git`.
     Install {
         #[command(flatten)]
         args: HubArgs,
+        /// Start at boot and keep running after logout, as your user. Installs a system
+        /// service using sudo; run this command without sudo.
+        #[arg(long)]
+        at_boot: bool,
     },
-    /// Stop running the hub at login, and stop it.
+    /// Remove the hub's login or boot service, and stop it.
     Uninstall,
     /// Relay stdin and stdout to this machine's hub: what other machines run over ssh to
     /// reach it.

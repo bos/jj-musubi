@@ -230,9 +230,10 @@ pub fn serve(ui: &Ui, args: ServeArgs) -> anyhow::Result<()> {
 }
 
 /// `musubi hub install`: has the service manager run `musubi hub` in the directory it would
-/// serve, as this user's hub, from login on, and waits for the hub to answer.
-pub fn install(ui: &Ui, args: ServeArgs) -> anyhow::Result<()> {
+/// serve, as this user's hub, from login or boot on, and waits for the hub to answer.
+pub fn install(ui: &Ui, args: ServeArgs, at_boot: bool) -> anyhow::Result<()> {
     anyhow::ensure!(!cfg!(windows), "musubi can't run a hub at login on Windows");
+    login::prepare_hub_install(at_boot)?;
     let dir = choose_dir(args.dir)?;
     fs::create_dir_all(&dir).with_context(|| format!("creating {dir:?}"))?;
     // The path the hub, run there, finds its directory by, symbolic links resolved, which it
@@ -296,7 +297,7 @@ pub fn install(ui: &Ui, args: ServeArgs) -> anyhow::Result<()> {
     drop((user_lock, dir_lock));
     // Made a hub's now, the directory is what `musubi hub` serves when run in it.
     settings.save(&dir)?;
-    let described = login::install(Service::Hub, Some(&dir))?;
+    let described = login::install_hub(&dir, at_boot)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -321,17 +322,19 @@ pub fn install(ui: &Ui, args: ServeArgs) -> anyhow::Result<()> {
             )
         })?;
     let mut out = ui.stdout();
+    let when = if at_boot { "boot" } else { "login" };
     writeln!(
         out,
-        "The hub serves {}, and runs at login from now on, through {described}.",
+        "The hub serves {}, and runs at {when} from now on, through {described}.",
         dir.display()
     )?;
     out.write_all(instructions(&settings, &dir)?.as_bytes())?;
-    if cfg!(target_os = "linux") {
+    if cfg!(target_os = "linux") && !at_boot {
         writeln!(
             ui.hint(),
-            "To keep it running while you're logged out, as on a server: `loginctl \
-             enable-linger`"
+            "To start it at boot and keep it running after logout: `musubi hub install \
+             --at-boot --dir {}`",
+            crate::ui::shell_word(&dir.display().to_string())
         )?;
     }
     Ok(())

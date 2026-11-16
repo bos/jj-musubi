@@ -1529,6 +1529,10 @@ fn with_service_manager(env: &TestEnv) -> std::ffi::OsString {
 printf '%s\n' "$*" >> "$HOME/service-calls"
 pid="$HOME/hub-service.pid"
 case "$*" in
+    'print system/'*) test -f "$HOME/system/${2##*/}.plist"; exit $? ;;
+    'show --property=LoadState --value '*)
+        if test -f "$HOME/system/$4"; then echo loaded; else echo not-found; fi
+        exit 0 ;;
     '--user enable --now musubi.service'|'bootstrap '*'/io.github.bos.musubi.plist')
         if test -f "$HOME/fail-install"; then
             echo 'installation refused' >&2
@@ -1537,9 +1541,11 @@ case "$*" in
     '--user enable --now musubi-hub.service')
         dir=$(sed -n 's/^WorkingDirectory=//p' \
             "$XDG_CONFIG_HOME/systemd/user/musubi-hub.service") ;;
-    'bootstrap '*'/io.github.bos.musubi.hub.plist')
+    'enable --now musubi-hub-'*)
+        dir=$(sed -n 's/^WorkingDirectory=//p' "$HOME"/system/musubi-hub-*.service) ;;
+    'bootstrap '*'/io.github.bos.musubi.hub'*'.plist')
         dir=$(sed -n '/<key>WorkingDirectory<\/key>/{n;s/.*<string>\(.*\)<\/string>.*/\1/p;}' "$3") ;;
-    '--user disable --now musubi-hub.service'|'bootout '*'/io.github.bos.musubi.hub')
+    '--user disable --now musubi-hub.service'|'disable --now musubi-hub-'*|'bootout '*'/io.github.bos.musubi.hub'*)
         if test -f "$pid"; then
             kill "$(cat "$pid")"
             rm "$pid"
@@ -1556,6 +1562,32 @@ fi
         fs::write(&path, script).unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
     }
+    let sudo = bin.join("sudo");
+    fs::write(
+        &sudo,
+        r#"#!/bin/sh
+if test "$*" = '-- /usr/bin/true'; then exit 0; fi
+program=$2
+shift 2
+case "$program" in
+    /usr/bin/install)
+        mkdir -p "$HOME/system"
+        while test "$#" -gt 2; do shift; done
+        cp "$1" "$HOME/system/${2##*/}" ;;
+    /bin/rm) rm -f "$HOME/system/${2##*/}" ;;
+    /bin/test) test -e "$HOME/system/${2##*/}" ;;
+    /bin/launchctl)
+        if test "$1" = bootstrap; then
+            exec launchctl "$1" "$2" "$HOME/system/${3##*/}"
+        fi
+        exec launchctl "$@" ;;
+    /usr/bin/systemctl) exec systemctl "$@" ;;
+    *) exit 1 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(sudo, fs::Permissions::from_mode(0o755)).unwrap();
     let path = std::env::var_os("PATH").unwrap_or_default();
     std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&path))).unwrap()
 }
@@ -1587,7 +1619,11 @@ fn a_refused_hub_install_leaves_the_installed_hub_running() {
     let _uninstall = Daemons(vec![uninstall]);
     let installed = env.root().join("installed-hub");
     let installed = installed.to_str().unwrap();
-    run(&env, &logs, hub(&["install", "--dir", installed]));
+    let (ok, _, hint) = try_run(&logs, &env, hub(&["install", "--dir", installed]));
+    assert!(ok, "{hint}");
+    if cfg!(target_os = "linux") {
+        insta::assert_snapshot!(hint, @"Hint: To start it at boot and keep it running after logout: `musubi hub install --at-boot --dir $ROOT/installed-hub`");
+    }
     let pid = fs::read_to_string(home.join("hub-service.pid")).unwrap();
     let calls = fs::read_to_string(home.join("service-calls")).unwrap();
 
@@ -1610,8 +1646,53 @@ fn a_refused_hub_install_leaves_the_installed_hub_running() {
             .unwrap()
             .success()
     );
+    // Switching to boot startup replaces the login service, then switching back removes
+    // the system service. The daemon's separate login service is never touched.
+    if !rustix::process::getuid().is_root() {
+        let out = run(
+            &env,
+            &logs,
+            hub(&["install", "--at-boot", "--dir", installed]),
+        );
+        let first = out.lines().next().unwrap();
+        let uid = rustix::process::getuid().as_raw();
+        let suffix = if cfg!(target_os = "macos") {
+            format!(".{uid}.plist.")
+        } else {
+            format!("-{uid}.service.")
+        };
+        let (prefix, suffix) = (
+            first.strip_suffix(&suffix).unwrap(),
+            if cfg!(target_os = "macos") {
+                ".[uid].plist."
+            } else {
+                "-[uid].service."
+            },
+        );
+        let first = format!("{prefix}{suffix}");
+        if cfg!(target_os = "macos") {
+            insta::assert_snapshot!(first, @"The hub serves $ROOT/installed-hub, and runs at boot from now on, through a launchd daemon, /Library/LaunchDaemons/io.github.bos.musubi.hub.[uid].plist.");
+        } else {
+            insta::assert_snapshot!(first, @"The hub serves $ROOT/installed-hub, and runs at boot from now on, through a systemd system unit, /etc/systemd/system/musubi-hub-[uid].service.");
+        }
+        let calls = fs::read_to_string(home.join("service-calls")).unwrap();
+        assert!(!calls.contains("enable-linger"), "{calls}");
+        let pid = fs::read_to_string(home.join("hub-service.pid")).unwrap();
+        let mut other_state = hub(&["install", "--at-boot", "--dir", installed]);
+        other_state.env("MUSUBI_STATE_DIR", env.root().join("other-state"));
+        let (ok, _, err) = try_run(&logs, &env, other_state);
+        assert!(!ok);
+        insta::assert_snapshot!(err, @"Error: a boot hub service is already installed for this user; uninstall it with its original state directory first");
+        assert_eq!(
+            fs::read_to_string(home.join("hub-service.pid")).unwrap(),
+            pid
+        );
+        run(&env, &logs, hub(&["install", "--dir", installed]));
+    }
     let out = run(&env, &logs, hub(&["uninstall"]));
-    assert_eq!(out, "The hub no longer runs at login, and is stopped.\n");
+    insta::assert_snapshot!(out, @"The hub's service is removed, and the hub is stopped.");
+    let out = run(&env, &logs, hub(&["uninstall"]));
+    insta::assert_snapshot!(out, @"The hub had no installed service.");
 }
 
 /// One daemon serves a machine, whatever socket each command would use, and however it
@@ -4563,15 +4644,20 @@ fn the_daemon_starts_through_the_login_service() {
 }
 
 /// The pid the service manager runs the hub as, if it runs it.
-fn hub_service_pid() -> Option<String> {
+fn hub_service_pid(at_boot: bool) -> Option<String> {
     if cfg!(target_os = "macos") {
         let uid = String::from_utf8(Command::new("id").arg("-u").output().unwrap().stdout).unwrap();
-        ["gui", "user"].iter().find_map(|domain| {
+        let targets = if at_boot {
+            vec![format!("system/io.github.bos.musubi.hub.{}", uid.trim())]
+        } else {
+            ["gui", "user"]
+                .iter()
+                .map(|domain| format!("{domain}/{}/io.github.bos.musubi.hub", uid.trim()))
+                .collect()
+        };
+        targets.iter().find_map(|target| {
             let print = Command::new("launchctl")
-                .args([
-                    "print",
-                    &format!("{domain}/{}/io.github.bos.musubi.hub", uid.trim()),
-                ])
+                .args(["print", target])
                 .output()
                 .unwrap();
             String::from_utf8_lossy(&print.stdout)
@@ -4579,15 +4665,19 @@ fn hub_service_pid() -> Option<String> {
                 .find_map(|line| line.trim().strip_prefix("pid = ").map(str::to_owned))
         })
     } else {
-        let show = Command::new("systemctl")
-            .args([
-                "--user",
-                "show",
-                "-p",
-                "MainPID",
-                "--value",
-                "musubi-hub.service",
-            ])
+        let mut command = Command::new("systemctl");
+        let unit = if at_boot {
+            let uid = Command::new("id").arg("-u").output().unwrap();
+            format!(
+                "musubi-hub-{}.service",
+                String::from_utf8_lossy(&uid.stdout).trim()
+            )
+        } else {
+            command.arg("--user");
+            "musubi-hub.service".to_owned()
+        };
+        let show = command
+            .args(["show", "-p", "MainPID", "--value", &unit])
             .output()
             .unwrap();
         let pid = String::from_utf8_lossy(&show.stdout).trim().to_owned();
@@ -4602,15 +4692,34 @@ fn hub_service_pid() -> Option<String> {
 /// runs only when `MUSUBI_TEST_LOGIN_SERVICE` is set.
 #[test]
 fn the_hub_runs_through_the_login_service() {
+    hub_runs_through_service(false);
+}
+
+/// Opt-in system-service exercise: identity, service-manager acceptance, crash restart,
+/// replacement and removal. It doesn't reboot or log out the test machine.
+#[test]
+fn the_hub_runs_through_the_boot_service() {
+    if cfg!(windows) || std::env::var("MUSUBI_TEST_BOOT_SERVICE").as_deref() != Ok("1") {
+        eprintln!("skipped: set MUSUBI_TEST_BOOT_SERVICE=1 to install a boot service");
+        return;
+    }
+    hub_runs_through_service(true);
+}
+
+fn hub_runs_through_service(at_boot: bool) {
     let env = TestEnv::with_real_op_times();
     let state = env.root().join("hub-state");
     let dir = env.root().join("hub");
     let install = |dir: &Path| {
         let dir = dir.to_str().unwrap();
-        musubi_as_user(
+        let mut command = musubi_as_user(
             &state,
             &["hub", "install", "--dir", dir, "--advertise", "127.0.0.1"],
-        )
+        );
+        if at_boot {
+            command.arg("--at-boot");
+        }
+        command
     };
     if cfg!(windows) {
         let (ok, _, err) = try_run(&Logs::default(), &env, install(&dir));
@@ -4618,7 +4727,7 @@ fn the_hub_runs_through_the_login_service() {
         assert_eq!(err, "Error: musubi can't run a hub at login on Windows\n");
         return;
     }
-    if std::env::var_os("MUSUBI_TEST_LOGIN_SERVICE").is_none() {
+    if !at_boot && std::env::var_os("MUSUBI_TEST_LOGIN_SERVICE").is_none() {
         eprintln!("skipped: set MUSUBI_TEST_LOGIN_SERVICE=1 to install a login service");
         return;
     }
@@ -4633,9 +4742,27 @@ fn the_hub_runs_through_the_login_service() {
     uninstall.stdout(Stdio::null()).stderr(Stdio::null());
     let _uninstall = Daemons(vec![uninstall]);
     let out = run(&env, &logs, install(&dir));
-    assert!(out.contains("runs at login from now on"), "{out}");
+    assert!(
+        out.contains(if at_boot {
+            "runs at boot from now on"
+        } else {
+            "runs at login from now on"
+        }),
+        "{out}"
+    );
     assert!(out.contains("musubi create --hub 127.0.0.1"), "{out}");
-    let first = hub_service_pid().expect("the service manager isn't running the hub");
+    let first = hub_service_pid(at_boot).expect("the service manager isn't running the hub");
+    #[cfg(unix)]
+    if at_boot {
+        let owner = Command::new("ps")
+            .args(["-o", "uid=", "-p", &first])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&owner.stdout).trim(),
+            rustix::process::getuid().as_raw().to_string()
+        );
+    }
 
     // It serves the directory as it would serve it run by hand: the path it names, symbolic
     // links resolved.
@@ -4661,16 +4788,23 @@ fn the_hub_runs_through_the_login_service() {
     // A crash: the service manager starts it again.
     Command::new("kill").args(["-9", &first]).status().unwrap();
     wait_for(&logs, "the service manager to restart the hub", || {
-        hub_service_pid().is_some_and(|pid| pid != first) && syncs(&alpha)
+        hub_service_pid(at_boot).is_some_and(|pid| pid != first) && syncs(&alpha)
     });
 
     // Installing again, for another directory, replaces the hub it runs: the first is
     // stopped by the time it returns, and the second serves.
-    let restarted = hub_service_pid().unwrap();
+    let restarted = hub_service_pid(at_boot).unwrap();
     let other = env.root().join("other-hub");
     let out = run(&env, &logs, install(&other));
-    assert!(out.contains("runs at login from now on"), "{out}");
-    let replaced = hub_service_pid().expect("the service manager isn't running the hub");
+    assert!(
+        out.contains(if at_boot {
+            "runs at boot from now on"
+        } else {
+            "runs at login from now on"
+        }),
+        "{out}"
+    );
+    let replaced = hub_service_pid(at_boot).expect("the service manager isn't running the hub");
     assert_ne!(replaced, restarted);
     let err = musubi_fails(&env, &logs, &alpha, &["sync"]);
     assert!(err.contains("no hub is serving"), "{err}");
@@ -4685,15 +4819,18 @@ fn the_hub_runs_through_the_login_service() {
     );
 
     let out = run(&env, &logs, musubi_as_user(&state, &["hub", "uninstall"]));
-    assert_eq!(out, "The hub no longer runs at login, and is stopped.\n");
+    assert_eq!(
+        out,
+        "The hub's service is removed, and the hub is stopped.\n"
+    );
     // launchd may return while the hub is still on its way out.
     wait_for(&logs, "the hub to stop", || {
-        hub_service_pid().is_none() && !syncs(&beta)
+        hub_service_pid(at_boot).is_none() && !syncs(&beta)
     });
     let err = musubi_fails(&env, &logs, &beta, &["sync"]);
     assert!(err.contains("no hub is serving"), "{err}");
     let out = run(&env, &logs, musubi_as_user(&state, &["hub", "uninstall"]));
-    assert_eq!(out, "The hub wasn't set to run at login.\n");
+    assert_eq!(out, "The hub had no installed service.\n");
 }
 
 /// A held sender can inspect, discard selected recovery history, or approve exactly one

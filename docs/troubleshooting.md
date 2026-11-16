@@ -827,6 +827,32 @@ goes on running.
 seconds. Its log, which the message names, says why. The service manager tries again after a
 failure; `musubi hub uninstall` stops it trying.
 
+### The installed hub stops at logout or doesn't start after reboot
+
+Run `musubi hub install --at-boot` on the hub's machine to start it without a login and keep
+it running after logout. Keep your existing `--dir` if you use one. This replaces its login
+service, on macOS and Linux. Run it without
+`sudo`; it asks for administrator permission. Keep `--at-boot` when reinstalling, or reinstall
+without it to switch back to login startup. The executable and hub data must be accessible
+before login; boot startup doesn't wake a sleeping machine.
+
+### "a boot hub service is already installed for this user; ..."
+
+A hub installed with another state directory already owns this user's boot service. In the
+shell environment used for that installation, run `musubi hub uninstall` first. Restore its
+`MUSUBI_STATE_DIR` or `XDG_STATE_HOME` if you changed one, then uninstall as the same user.
+This refusal leaves that hub running.
+
+### "sudo refused permission to manage the hub's boot service"
+
+The login or boot service already installed is unchanged. Retry `musubi hub install --at-boot`
+or `musubi hub uninstall` as the same user, after obtaining sudo permission for that account.
+
+### "run `musubi hub install --at-boot` without sudo; musubi requests it when needed"
+
+Run the command in your normal shell without a `sudo` prefix, so the hub uses your home and
+state directory. The command asks for administrator permission when installing the service.
+
 ## The daemon
 
 ### The daemon isn't running after a reboot

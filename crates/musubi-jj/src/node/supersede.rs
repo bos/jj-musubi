@@ -717,7 +717,7 @@ impl NodeRepo {
 
     /// Forgets the hub-to-node translation worked out so far, `pending` having changed.
     fn forget_to_node(&mut self) {
-        self.published_history = None;
+        self.invalidate_published_history();
         *self
             .records
             .to_node
@@ -774,10 +774,8 @@ impl NodeRepo {
     /// Forgets what is remembered by local operation id, which a rewrite of local
     /// operations makes stale.
     fn forget_local_caches(&mut self) {
-        self.published_history = None;
-        self.last_realized = None;
-        self.last_own = None;
-        self.prepared = None;
+        self.invalidate_published_history();
+        self.realizing.invalidate();
         self.heads_mapped = false;
         self.join_ancestors = None;
     }

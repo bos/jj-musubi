@@ -18,7 +18,7 @@ use super::NodeError;
 use super::NodeRepo;
 use super::PublicationCache;
 use super::PublicationReport;
-use super::view_roots;
+use super::intent::view_roots;
 use crate::op_id::CanonicalOp;
 use crate::op_id::LocalOp;
 
@@ -38,6 +38,18 @@ fn invalid(message: impl Into<String>) -> NodeError {
 }
 
 impl NodeRepo {
+    pub(super) fn publication_foreign_presence(
+        &self,
+        head: &CanonicalOp,
+    ) -> Result<String, NodeError> {
+        let stamp = self.presence(head)?.to_stamp(|work| work.original.hex());
+        Ok(stamp
+            .lines()
+            .filter(|line| line.split_whitespace().nth(1) != Some(self.machine.key()))
+            .collect::<Vec<_>>()
+            .join("\n"))
+    }
+
     pub(super) fn publication_pending(
         &mut self,
     ) -> Result<(CanonicalOp, Vec<CanonicalOp>), NodeError> {
@@ -482,7 +494,7 @@ impl NodeRepo {
         self.move_workspaces(&movements)?;
         self.heads_mapped = false;
         self.abandon_checked = None;
-        self.published_history = None;
+        self.invalidate_published_history();
         let approval = self.repo_path.join("musubi").join(super::APPROVAL_FILE);
         if let Err(err) = std::fs::remove_file(approval)
             && err.kind() != std::io::ErrorKind::NotFound

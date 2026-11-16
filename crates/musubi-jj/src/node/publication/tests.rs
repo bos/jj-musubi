@@ -1,12 +1,17 @@
 #![allow(clippy::unwrap_used)]
 
+use super::intent::automatic_git_bookkeeping;
 use super::*;
 use crate::op_id::LocalOp;
 use crate::oracle::Oracle;
+use jj_lib::object_id::ObjectId as _;
+use jj_lib::op_store::OperationId;
 use musubi_testutil::TestEnv;
 use musubi_testutil::TestRepo;
+use pollster::FutureExt as _;
 use serde_json::json;
 use std::collections::HashMap;
+use std::fs;
 
 #[test]
 fn import_invocations_follow_jjs_argument_rendering_and_option_boundaries() {

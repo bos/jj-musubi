@@ -13,8 +13,10 @@ use futures::future::Shared;
 use musubi_sync::remote::OpenConnection;
 use musubi_transport::stream::WhileDisconnected;
 
-use super::CONNECT_TIMEOUT;
 use crate::hub::Connection;
+
+/// How long a copy waits to connect: ssh's own ConnectTimeout plus the hub greeting.
+pub(super) const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long a copy waits to open a connection of its own for a large transfer, before it
 /// moves the transfer on the connection it shares.

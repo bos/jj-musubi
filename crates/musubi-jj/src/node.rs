@@ -15,7 +15,6 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::PoisonError;
 use std::thread;
 
 use jj_lib::backend::CommitId;
@@ -62,24 +61,17 @@ use git::NodeGit;
 pub use join::JoinSummary;
 use originals::Originals;
 pub use publication::*;
+use realize::MergeDiagnosis;
+use realize::PublishedHistoryCache;
 pub use realize::REALIZE_AT_ONCE;
-use realize::Unwritten;
+use realize::State as RealizationState;
 pub use supersede::ACCEPTED_PUSH;
 pub use supersede::NodeOp;
 use supersede::Records;
 pub use supersede::WORKED_AT_ATTRIBUTE;
-use view::LocalView;
-use view::PerMachine;
 
 /// The operation attribute naming the canonical operation a realization represents.
 pub const CANONICAL_ATTRIBUTE: &str = "musubi.canonical";
-
-/// Local views made ahead (see `NodeRepo::prepared`).
-type PreparedViews = (
-    Arc<PerMachine>,
-    Arc<BTreeSet<jj_lib::ref_name::WorkspaceNameBuf>>,
-    HashMap<CanonicalOp, LocalView>,
-);
 
 /// The op heads, with their canonical forms, and the names `NodeRepo::reserved_names` gave.
 type ReservedNames = (
@@ -119,29 +111,13 @@ pub struct NodeRepo {
     before_join: BTreeSet<LocalOp>,
     /// jj's repo config file for this repository, used to read this copy's expiry policy.
     repo_config: Option<PathBuf>,
-    /// The last operation realized here, with its per-machine fields: usually the next
-    /// one's parent, which then needn't be read back.
-    last_realized: Option<(LocalOp, Arc<PerMachine>)>,
-    /// Realized operations still being written (see [`Self::realize_pending`]).
-    unwritten: Vec<Unwritten>,
-    /// Local views made ahead of their operations' realization, by canonical operation, with
-    /// the per-machine fields they were made with and the names they keep clear of
-    /// (`reserved_names`): used only while those are what the operations inherit and keep
-    /// clear of (see [`Self::realize_pending`]).
-    prepared: Option<PreparedViews>,
-    /// The last operation realized here, with this machine's own workspaces in its view:
-    /// what the next one keeps where the hive has forgotten this machine.
-    last_own: Option<(
-        LocalOp,
-        Arc<BTreeMap<jj_lib::ref_name::WorkspaceNameBuf, CommitId>>,
-    )>,
-    /// Native ancestry at the last exact head set, extended only across append-only moves.
-    published_history: Option<realize::PublishedHistory>,
+    /// Construction context, prepared views, and writes not yet recorded in the map.
+    realizing: RealizationState,
+    /// Exact native frontier ancestry used when publishing received operations.
+    published: PublishedHistoryCache,
     /// This machine's own names that could clash with another machine's as of the op heads
     /// last asked about, with their canonical forms (see `NodeRepo::reserved_names`).
     reserved_memo: Option<ReservedNames>,
-    /// The names the last line of realizations kept (see `NodeRepo::reserved_for`).
-    kept_memo: Option<realize::KeptMemo>,
     /// The workspace names in the view of the operation `canonical_view` last canonicalized,
     /// usually the next one's parent.
     last_view_names: Mutex<
@@ -158,10 +134,8 @@ pub struct NodeRepo {
     /// This machine's own workspace names as of its latest work, while the hive has forgotten
     /// it (`own_names_in`): the same for every operation until its next work.
     worked_names: Mutex<presence::WorkedNames>,
-    /// The last search for the operation to revert when jj can't merge this machine's
-    /// operations with the hive's (see `first_unmergeable`), so that retries of a sync stuck
-    /// there don't search again.
-    unmergeable: Mutex<UnmergeableMemo>,
+    /// Merge diagnosis retained across retries and reopening the same repository.
+    merge_diagnosis: MergeDiagnosis,
     /// The hive's records this machine took, what it dropped beyond them, and the renamings
     /// they made (docs/internals/design.md, "Abandoning operations").
     records: Records,
@@ -174,23 +148,6 @@ pub struct NodeRepo {
     /// Whether `check_abandon` noticed a `jj op abandon` since [`Self::take_abandon_noticed`]
     /// last said so.
     abandon_noticed: bool,
-}
-
-/// The last search for the operation to revert, and how many searches have run.
-#[derive(Clone, Default)]
-struct UnmergeableMemo {
-    last: Option<UnmergeableSearch>,
-    searches: usize,
-}
-
-/// A search for the operation to revert: what decides its result, and the result.
-#[derive(Clone)]
-struct UnmergeableSearch {
-    /// This machine's op heads, sorted.
-    heads: Vec<LocalOp>,
-    /// The hive's operation, canonical, that jj can't merge with them.
-    theirs: CanonicalOp,
-    culprit: Option<LocalOp>,
 }
 
 impl Drop for NodeRepo {
@@ -269,18 +226,14 @@ impl NodeRepo {
             originals,
             git,
             heads_mapped: false,
-            last_realized: None,
-            last_own: None,
-            published_history: None,
+            realizing: RealizationState::default(),
+            published: PublishedHistoryCache::default(),
+            merge_diagnosis: MergeDiagnosis::default(),
             private_names: Mutex::new(HashMap::new()),
             reserved_memo: None,
-            kept_memo: None,
             last_view_names: Mutex::new(None),
-            prepared: None,
             presences: Arc::default(),
             worked_names: Mutex::default(),
-            unmergeable: Mutex::default(),
-            unwritten: vec![],
             joins: BTreeMap::new(),
             join_points: vec![],
             join_ancestors: None,
@@ -437,23 +390,12 @@ impl NodeRepo {
     /// which operation to revert, as when the daemon reopens a repository after a failed
     /// sync.
     pub fn keep_found(&mut self, previous: &Self) {
-        let previous = previous
-            .unmergeable
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        *self
-            .unmergeable
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = previous;
+        self.merge_diagnosis.keep_from(&previous.merge_diagnosis);
     }
 
     /// How many times this handle has searched for the operation to revert, for tests.
     pub fn unmergeable_searches(&self) -> usize {
-        self.unmergeable
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .searches
+        self.merge_diagnosis.searches()
     }
 
     pub fn local_heads(&self) -> Result<Vec<LocalOp>, NodeError> {
@@ -551,13 +493,9 @@ impl NodeRepo {
     }
 
     fn insert_map(&mut self, local: LocalOp, canonical: CanonicalOp) -> Result<(), NodeError> {
-        if self
-            .published_history
-            .as_ref()
-            .is_some_and(|history| history.locals.contains(&local))
-            && self.canonical_of(&local).as_ref() != Some(&canonical)
+        if self.published.contains(&local) && self.canonical_of(&local).as_ref() != Some(&canonical)
         {
-            self.published_history = None;
+            self.invalidate_published_history();
         }
         self.map
             .insert(local, canonical)

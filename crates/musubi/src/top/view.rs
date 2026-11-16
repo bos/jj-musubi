@@ -23,7 +23,7 @@ use super::sample::HubSample;
 use super::sample::Sample;
 
 /// A daemon reports after every sync, and syncs at least this often (see
-/// `daemon::POLL_INTERVAL`), so one silent for four times as long is offline, or stopped.
+/// `daemon::worker::POLL_INTERVAL`), so one silent for four times as long is offline, or stopped.
 const SILENT: u64 = 120;
 /// A machine syncs as soon as it hears of a new head; one still without it after this long
 /// is stuck.

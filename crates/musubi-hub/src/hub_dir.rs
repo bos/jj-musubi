@@ -467,11 +467,8 @@ impl HubDir {
     pub fn resolve(&self, name: &str) -> Result<HiveId, Refusal> {
         // A prefix of every name.
         names::check_name_given(name)?;
-        if let Some((id, _)) = self.hives.iter().find(|(_, h)| h.meta.name == name) {
-            return Ok(id.clone().into());
-        }
-        if self.hives.contains_key(name) {
-            return Ok(name.to_owned().into());
+        if let Some(id) = self.exact_id(name) {
+            return Ok(id);
         }
         let by_name = |hive: &Hive, _: &str| hive.meta.name.starts_with(name);
         let by_id = |_: &Hive, id: &str| id.starts_with(name);
@@ -499,13 +496,19 @@ impl HubDir {
     /// prefix is too easily mistaken for.
     pub fn resolve_exact(&self, name: &str) -> Result<HiveId, Refusal> {
         names::check_name_given(name)?;
+        self.exact_id(name)
+            .ok_or_else(|| format!("this hub has no hive named {name}"))
+    }
+
+    /// Exact names take precedence over ids, in both kinds of lookup.
+    fn exact_id(&self, name: &str) -> Option<HiveId> {
         if let Some((id, _)) = self.hives.iter().find(|(_, h)| h.meta.name == name) {
-            return Ok(id.clone().into());
+            return Some(id.clone().into());
         }
         if self.hives.contains_key(name) {
-            return Ok(name.to_owned().into());
+            return Some(name.to_owned().into());
         }
-        Err(format!("this hub has no hive named {name}"))
+        None
     }
 
     pub fn info(&self, id: &str) -> Option<HiveInfo> {

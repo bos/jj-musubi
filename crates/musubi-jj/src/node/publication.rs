@@ -907,82 +907,33 @@ impl NodeRepo {
         Ok(roots)
     }
 
-    /// All raw tree sides are walked, including a directory side of a file/directory
-    /// conflict. MergedTree::entries deliberately does not descend those directories.
     fn publication_closure(
         &self,
         roots: impl IntoIterator<Item = CommitId>,
         into: &mut Closure,
         skip: &Closure,
     ) -> Result<(), NodeError> {
-        let store = self.loader.store();
-        let mut commits: Vec<_> = roots.into_iter().collect();
-        while let Some(id) = commits.pop() {
-            if skip.commits.contains(&id) || !into.commits.insert(id.clone()) {
-                continue;
-            }
-            let commit = store.get_commit(&id)?;
-            commits.extend(commit.parent_ids().iter().cloned());
-            let mut trees: Vec<_> = commit
-                .tree_ids()
-                .iter()
-                .map(|id| (RepoPathBuf::root(), id.clone()))
-                .collect();
-            while let Some((path, id)) = trees.pop() {
-                if skip.trees.contains(&(path.clone(), id.clone()))
-                    || !into.trees.insert((path.clone(), id.clone()))
-                {
-                    continue;
-                }
-                let tree = store.get_tree(path.clone(), &id).block_on()?;
-                for entry in tree.entries_non_recursive() {
-                    match entry.value() {
-                        TreeValue::File { id, .. } => {
-                            let id = ContentId::File(id.clone());
-                            into.files.insert(id.clone());
-                            into.versions.insert(FileVersion {
-                                path: path.join(entry.name()),
-                                id,
-                            });
-                        }
-                        TreeValue::Tree(id) => trees.push((path.join(entry.name()), id.clone())),
-                        TreeValue::Symlink(id) => {
-                            let id = ContentId::Symlink(id.clone());
-                            into.files.insert(id.clone());
-                            into.versions.insert(FileVersion {
-                                path: path.join(entry.name()),
-                                id,
-                            });
-                        }
-                        TreeValue::GitSubmodule(id) => {
-                            let id = ContentId::Submodule(id.clone());
-                            into.files.insert(id.clone());
-                            into.versions.insert(FileVersion {
-                                path: path.join(entry.name()),
-                                id,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-        Ok(())
+        self.walk_publication(roots, &mut into.commits, &mut into.trees, &[skip], |file| {
+            into.files.insert(file.id.clone());
+            into.versions.insert(file);
+        })
     }
 
-    fn publication_files(
+    /// Walks all raw tree sides, including a directory side of a file/directory conflict.
+    /// MergedTree::entries deliberately does not descend those directories. Each commit and
+    /// path/tree pair outside `skip` is visited once, recording it in the supplied sets.
+    fn walk_publication(
         &self,
         roots: impl IntoIterator<Item = CommitId>,
-        known: &Closure,
-        intentional: &Closure,
-    ) -> Result<BTreeSet<FileVersion>, NodeError> {
+        seen_commits: &mut HashSet<CommitId>,
+        seen_trees: &mut HashSet<(RepoPathBuf, TreeId)>,
+        skip: &[&Closure],
+        mut visit: impl FnMut(FileVersion),
+    ) -> Result<(), NodeError> {
         let store = self.loader.store();
-        let mut files = BTreeSet::new();
         let mut commits: Vec<_> = roots.into_iter().collect();
-        let mut seen_commits = HashSet::new();
-        let mut seen_trees = HashSet::new();
         while let Some(id) = commits.pop() {
-            if known.commits.contains(&id)
-                || intentional.commits.contains(&id)
+            if skip.iter().any(|known| known.commits.contains(&id))
                 || !seen_commits.insert(id.clone())
             {
                 continue;
@@ -995,54 +946,47 @@ impl NodeRepo {
                 .map(|id| (RepoPathBuf::root(), id.clone()))
                 .collect();
             while let Some((path, id)) = trees.pop() {
-                if known.trees.contains(&(path.clone(), id.clone()))
-                    || intentional.trees.contains(&(path.clone(), id.clone()))
-                    || !seen_trees.insert((path.clone(), id.clone()))
-                {
+                let key = (path.clone(), id.clone());
+                if skip.iter().any(|known| known.trees.contains(&key)) || !seen_trees.insert(key) {
                     continue;
                 }
                 let tree = store.get_tree(path.clone(), &id).block_on()?;
                 for entry in tree.entries_non_recursive() {
                     let path = path.join(entry.name());
-                    match entry.value() {
-                        TreeValue::File { id, .. } => {
-                            let file = FileVersion {
-                                path,
-                                id: ContentId::File(id.clone()),
-                            };
-                            if !known.versions.contains(&file)
-                                && !intentional.versions.contains(&file)
-                            {
-                                files.insert(file);
-                            }
+                    let id = match entry.value() {
+                        TreeValue::File { id, .. } => ContentId::File(id.clone()),
+                        TreeValue::Symlink(id) => ContentId::Symlink(id.clone()),
+                        TreeValue::GitSubmodule(id) => ContentId::Submodule(id.clone()),
+                        TreeValue::Tree(id) => {
+                            trees.push((path, id.clone()));
+                            continue;
                         }
-                        TreeValue::Symlink(id) => {
-                            let file = FileVersion {
-                                path,
-                                id: ContentId::Symlink(id.clone()),
-                            };
-                            if !known.versions.contains(&file)
-                                && !intentional.versions.contains(&file)
-                            {
-                                files.insert(file);
-                            }
-                        }
-                        TreeValue::GitSubmodule(id) => {
-                            let file = FileVersion {
-                                path,
-                                id: ContentId::Submodule(id.clone()),
-                            };
-                            if !known.versions.contains(&file)
-                                && !intentional.versions.contains(&file)
-                            {
-                                files.insert(file);
-                            }
-                        }
-                        TreeValue::Tree(id) => trees.push((path, id.clone())),
-                    }
+                    };
+                    visit(FileVersion { path, id });
                 }
             }
         }
+        Ok(())
+    }
+
+    fn publication_files(
+        &self,
+        roots: impl IntoIterator<Item = CommitId>,
+        known: &Closure,
+        intentional: &Closure,
+    ) -> Result<BTreeSet<FileVersion>, NodeError> {
+        let mut files = BTreeSet::new();
+        self.walk_publication(
+            roots,
+            &mut HashSet::new(),
+            &mut HashSet::new(),
+            &[known, intentional],
+            |file| {
+                if !known.versions.contains(&file) && !intentional.versions.contains(&file) {
+                    files.insert(file);
+                }
+            },
+        )?;
         Ok(files)
     }
 

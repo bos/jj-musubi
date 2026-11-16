@@ -56,19 +56,26 @@ struct Realization {
 
 impl NodeRepo {
     /// Realizes a stored canonical operation, and any unrealized ancestors, without
-    /// publishing it. Returns the local operation id.
+    /// publishing it. Returns the local operation id after [`Self::settle`] completes the
+    /// current write batch. Its error contract also applies here.
     pub fn realize(&mut self, canonical: &CanonicalOp) -> Result<LocalOp, NodeError> {
         let local = self.realize_pending(canonical, &[])?;
         self.settle()?;
         Ok(local)
     }
 
-    /// [`Self::realize`], leaving the realizations to be written meanwhile: the store may
-    /// lack them until [`Self::settle`], which [`Self::realize`], [`Self::advance`] and
-    /// dropping this call, and so must anything else that reads them before then.
-    /// [`Self::local_of`] knows them at once.
+    /// Constructs local representations without publishing them, overlapping construction
+    /// with native writes. The returned id and its ancestors are known to [`Self::local_of`]
+    /// and [`Self::canonical_of`] immediately, but their native operations and views may
+    /// still be unwritten, and their translations may exist only in memory.
     ///
-    /// `next` are the operations likely realized after this one, in order. Making a view
+    /// Call [`Self::settle`] before reading these results from the stores or relying on
+    /// their translations after reopening. [`Self::realize`] and [`Self::advance`] settle
+    /// automatically. Dropping the handle attempts to settle too, but only logs errors and
+    /// skips settling during unwinding; it does not provide the same success guarantee.
+    ///
+    /// `next` is only a preparation hint: operations likely realized after this one, in
+    /// order. It neither realizes nor publishes them. Making a view
     /// local is most of realizing an operation, and it takes several at once to keep up with
     /// writing them, so the views of the operations that follow on, from this one's
     /// unrealized ancestors and then `next`, each with the one before as its only parent and

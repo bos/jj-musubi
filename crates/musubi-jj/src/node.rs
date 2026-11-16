@@ -60,7 +60,21 @@ use git::Colocation;
 use git::NodeGit;
 pub use join::JoinSummary;
 use originals::Originals;
-pub use publication::*;
+pub use publication::APPROVAL_FILE;
+pub use publication::CHECKPOINT_ATTRIBUTE;
+pub(crate) use publication::INTENT_ATTRIBUTE;
+pub use publication::PublicationCache;
+pub use publication::PublicationCleanup;
+pub use publication::PublicationFile;
+pub use publication::PublicationHeld;
+pub use publication::PublicationLimits;
+pub use publication::PublicationOperation;
+pub use publication::PublicationReport;
+pub use publication::approve_publication;
+pub use publication::explicit_git_import;
+pub use publication::publication_approved;
+pub use publication::publication_lock;
+pub(crate) use publication::retained_publication_intent;
 use realize::MergeDiagnosis;
 use realize::PublishedHistoryCache;
 pub use realize::REALIZE_AT_ONCE;
@@ -74,18 +88,34 @@ pub use supersede::WORKED_AT_ATTRIBUTE;
 pub const CANONICAL_ATTRIBUTE: &str = "musubi.canonical";
 
 /// The op heads, with their canonical forms, and the names `NodeRepo::reserved_names` gave.
-type ReservedNames = (
-    Vec<(LocalOp, Option<CanonicalOp>)>,
-    Arc<BTreeSet<jj_lib::ref_name::WorkspaceNameBuf>>,
-);
+struct ReservedNames {
+    heads: Vec<(LocalOp, Option<CanonicalOp>)>,
+    names: Arc<BTreeSet<jj_lib::ref_name::WorkspaceNameBuf>>,
+}
 
 /// The op heads, base and accepted push an abandon was last looked for at, and not found.
-type AbandonChecked = Option<(
-    Vec<LocalOp>,
-    Option<crate::records::HubOp>,
-    Option<crate::records::HubOp>,
-)>;
+#[derive(PartialEq, Eq)]
+struct AbandonObservation {
+    heads: Vec<LocalOp>,
+    base: Option<crate::records::HubOp>,
+    accepted_push: Option<crate::records::HubOp>,
+}
 
+/// A local jj repository's identities, translation, and publication state.
+///
+/// Open with [`Self::open_as`] when joining under a chosen machine identity, or
+/// [`Self::open`] for an existing copy. [`Self::loader`], [`Self::canonical_store`] and
+/// [`Self::object_store`] give the integration layers access to its stores.
+///
+/// [`Self::canonicalize`] translates native history into shared identities. In the other
+/// direction, [`Self::realize`] writes a local representation without publishing it, while
+/// [`Self::advance`] also publishes its native frontier. [`Self::realize_pending`] overlaps
+/// construction and writes; its returned identity is known in memory before the stores and
+/// translation file are complete. Call [`Self::settle`] before reading those queued results.
+///
+/// Dropping a handle attempts to settle pending writes, logging any error. During unwinding
+/// it leaves the writers to finish without recording their translations. Call `settle`
+/// explicitly when its success matters; dropping cannot report failure to the caller.
 pub struct NodeRepo {
     repo_path: PathBuf,
     loader: RepoLoader,
@@ -144,7 +174,7 @@ pub struct NodeRepo {
     /// rewrites.
     late: Vec<LocalOp>,
     /// The op heads, base and accepted push `check_abandon` last checked.
-    abandon_checked: AbandonChecked,
+    abandon_checked: Option<AbandonObservation>,
     /// Whether `check_abandon` noticed a `jj op abandon` since [`Self::take_abandon_noticed`]
     /// last said so.
     abandon_noticed: bool,
@@ -152,9 +182,9 @@ pub struct NodeRepo {
 
 impl Drop for NodeRepo {
     fn drop(&mut self) {
-        // While unwinding, a writer's panic passed on would abort the process; the writes
-        // finish anyway, and what they wrote is realized again next time, identically unless
-        // this machine's own names in its op heads changed meanwhile (`reserved_names`).
+        // Best-effort completion cannot report an error to the caller. While unwinding, a
+        // writer's panic passed on would abort the process; the writes finish anyway, and
+        // their unrecorded translations are reconstructed when needed after reopening.
         if thread::panicking() {
             return;
         }
@@ -335,22 +365,6 @@ impl NodeRepo {
         Ok(())
     }
 
-    /// Writes with `settings` from now on, keeping the stores open. For tests, whose
-    /// clock is their own: jj-lib takes the times it gives commits and operations from the
-    /// settings, and a test hands a node new ones as its clock moves on.
-    pub fn set_settings(&mut self, settings: UserSettings) {
-        let loader = &self.loader;
-        self.loader = RepoLoader::new(
-            settings,
-            loader.store().clone(),
-            loader.workspace_store().clone(),
-            loader.op_store().clone(),
-            loader.op_heads_store().clone(),
-            loader.index_store().clone(),
-            loader.submodule_store().clone(),
-        );
-    }
-
     /// How the repository shares its git repository with a working copy, if it does.
     fn colocation(&self) -> Option<&Colocation> {
         self.git.as_ref()?.colocation()
@@ -391,11 +405,6 @@ impl NodeRepo {
     /// sync.
     pub fn keep_found(&mut self, previous: &Self) {
         self.merge_diagnosis.keep_from(&previous.merge_diagnosis);
-    }
-
-    /// How many times this handle has searched for the operation to revert, for tests.
-    pub fn unmergeable_searches(&self) -> usize {
-        self.merge_diagnosis.searches()
     }
 
     pub fn local_heads(&self) -> Result<Vec<LocalOp>, NodeError> {
@@ -519,6 +528,33 @@ impl NodeRepo {
                 path: self.repo_path.join("musubi/originals"),
                 source,
             })
+    }
+}
+
+// Deliberate test support, compiled for cross-crate integration and fault tests.
+// Keep these controls separate from the normal repository API without changing coverage.
+impl NodeRepo {
+    /// Writes with `settings` from now on, keeping the stores open. For tests, whose
+    /// clock is their own: jj-lib takes the times it gives commits and operations from the
+    /// settings, and a test hands a node new ones as its clock moves on.
+    #[doc(hidden)]
+    pub fn set_settings(&mut self, settings: UserSettings) {
+        let loader = &self.loader;
+        self.loader = RepoLoader::new(
+            settings,
+            loader.store().clone(),
+            loader.workspace_store().clone(),
+            loader.op_store().clone(),
+            loader.op_heads_store().clone(),
+            loader.index_store().clone(),
+            loader.submodule_store().clone(),
+        );
+    }
+
+    /// How many times this handle has searched for the operation to revert, for tests.
+    #[doc(hidden)]
+    pub fn unmergeable_searches(&self) -> usize {
+        self.merge_diagnosis.searches()
     }
 }
 

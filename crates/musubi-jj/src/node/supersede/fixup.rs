@@ -253,13 +253,6 @@ impl NodeRepo {
         )))
     }
 
-    /// For tests of crashes: writes the fix-up's work by its first `written` copies, then
-    /// stops, as a crash would, with the fix-up not yet written. It writes the rest of the
-    /// work, and the forget after it, only when written again.
-    pub fn crash_writing_fixup(&mut self, written: usize) -> Result<(), NodeError> {
-        self.write_fixup_until(Some(written)).map(drop)
-    }
-
     /// Restores only work whose operation the pending records removed before this machine
     /// received its publisher's fix-up. The original identity authenticates its timestamp
     /// in the retained record body; current presence supplies newer work and forgetting.
@@ -552,5 +545,17 @@ impl NodeRepo {
         Ok(Some(NodeOp(
             self.canonicalize(&LocalOp(op.operation().id().clone()))?,
         )))
+    }
+}
+
+// Deliberate test support, compiled for cross-crate integration and fault tests.
+// Keep these controls separate from the normal repository API without changing coverage.
+impl NodeRepo {
+    /// For tests of crashes: writes the fix-up's work by its first `written` copies, then
+    /// stops, as a crash would, with the fix-up not yet written. It writes the rest of the
+    /// work, and the forget after it, only when written again.
+    #[doc(hidden)]
+    pub fn crash_writing_fixup(&mut self, written: usize) -> Result<(), NodeError> {
+        self.write_fixup_until(Some(written)).map(drop)
     }
 }

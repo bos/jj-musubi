@@ -21,6 +21,7 @@ use pollster::FutureExt as _;
 
 use super::NodeError;
 use super::NodeRepo;
+use super::ReservedNames;
 use super::is_visible;
 use super::translate::target_of;
 use crate::canonical::Work;
@@ -622,10 +623,10 @@ impl NodeRepo {
                 (head, canonical)
             })
             .collect();
-        if let Some((known, names)) = &self.reserved_memo
-            && *known == heads
+        if let Some(memo) = &self.reserved_memo
+            && memo.heads == heads
         {
-            return Ok(names.clone());
+            return Ok(memo.names.clone());
         }
         let op_store = self.loader.op_store();
         let mut names = BTreeSet::new();
@@ -650,7 +651,10 @@ impl NodeRepo {
         }
         names.retain(|name| name.as_str().contains('/'));
         let names = Arc::new(names);
-        self.reserved_memo = Some((heads, names.clone()));
+        self.reserved_memo = Some(ReservedNames {
+            heads,
+            names: names.clone(),
+        });
         Ok(names)
     }
 

@@ -644,30 +644,6 @@ impl NodeRepo {
         self.save_records()
     }
 
-    /// For tests of errors: the next write that holds records taken fails, as an I/O error
-    /// would, having written none of it.
-    pub fn fail_holding_records(&mut self) {
-        self.records.stop = Some(TakingStop::Hold);
-    }
-
-    /// For tests of crashes: the next taking of records stops, failing, once it holds them,
-    /// before the op heads move there, or, if `heads_moved`, once they have, before the
-    /// workspaces. Reopening the repository then is a crash there.
-    pub fn crash_taking_records(&mut self, heads_moved: bool) {
-        self.records.stop = Some(if heads_moved {
-            TakingStop::Workspaces
-        } else {
-            TakingStop::Heads
-        });
-    }
-
-    /// For tests of crashes: the next move of the op heads, as taking records makes it,
-    /// stops, failing, once the new op heads are in, before the old ones come out, as a crash
-    /// in jj's update of them leaves them.
-    pub fn crash_publishing_taken_heads(&mut self) {
-        self.records.stop = Some(TakingStop::Publishing);
-    }
-
     /// Fails, once, if a test said to stop taking records `at`.
     pub(super) fn stop_taking(&mut self, at: TakingStop) -> Result<(), NodeError> {
         if self.records.stop != Some(at) {
@@ -699,5 +675,36 @@ impl NodeRepo {
             .clone();
         self.move_taken_workspaces()?;
         Ok(base)
+    }
+}
+
+// Deliberate test support, compiled for cross-crate integration and fault tests.
+// Keep these controls separate from the normal repository API without changing coverage.
+impl NodeRepo {
+    /// For tests of errors: the next write that holds records taken fails, as an I/O error
+    /// would, having written none of it.
+    #[doc(hidden)]
+    pub fn fail_holding_records(&mut self) {
+        self.records.stop = Some(TakingStop::Hold);
+    }
+
+    /// For tests of crashes: the next taking of records stops, failing, once it holds them,
+    /// before the op heads move there, or, if `heads_moved`, once they have, before the
+    /// workspaces. Reopening the repository then is a crash there.
+    #[doc(hidden)]
+    pub fn crash_taking_records(&mut self, heads_moved: bool) {
+        self.records.stop = Some(if heads_moved {
+            TakingStop::Workspaces
+        } else {
+            TakingStop::Heads
+        });
+    }
+
+    /// For tests of crashes: the next move of the op heads, as taking records makes it,
+    /// stops, failing, once the new op heads are in, before the old ones come out, as a crash
+    /// in jj's update of them leaves them.
+    #[doc(hidden)]
+    pub fn crash_publishing_taken_heads(&mut self) {
+        self.records.stop = Some(TakingStop::Publishing);
     }
 }

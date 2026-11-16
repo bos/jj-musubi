@@ -206,10 +206,20 @@ impl NodeRepo {
         Ok(())
     }
 
-    /// Waits for the realizations being written, then records them in the translation
-    /// map's file. If any write failed, the map forgets them all: a later realization may
-    /// refer to the failed one, and realizing them again writes the same operations, unless
-    /// this machine's own names in its op heads changed meanwhile (`reserved_names`).
+    /// Joins every queued realization writer, then records its translation in the map's
+    /// file. On success the batch queued for this call is readable from the native stores
+    /// and its translations have been appended. This does not move op heads or workspaces,
+    /// and makes no guarantee of surviving a power cut.
+    ///
+    /// If a native write failed, all writers are still joined and the map forgets the whole
+    /// batch: a later realization may refer to the failed one. Retrying writes the same
+    /// operations unless this machine's own names in its op heads changed meanwhile
+    /// (`reserved_names`). A writer's panic is propagated after that same cleanup.
+    ///
+    /// A translation-file error can leave only part of the batch recorded, while its
+    /// mappings remain in memory. The queue has already been consumed: a later empty
+    /// `settle` does not retry those appends. Reopen the handle before retrying those
+    /// realizations.
     pub fn settle(&mut self) -> Result<(), NodeError> {
         let unwritten = std::mem::take(&mut self.realizing.unwritten);
         let mut failed = None;
@@ -256,10 +266,15 @@ impl NodeRepo {
         }
         Ok(())
     }
+}
 
+// Deliberate test support, compiled for cross-crate integration and fault tests.
+// Keep these controls separate from the normal repository API without changing coverage.
+impl NodeRepo {
     /// For tests of crashes: waits for the realizations being written, then, as a crash
     /// before [`Self::settle`] would, records none of them, and forgets them as if their
     /// writes had failed. Returns their local ids.
+    #[doc(hidden)]
     pub fn crash_before_settling(&mut self) -> Vec<LocalOp> {
         let mut locals = vec![];
         for Unwritten {

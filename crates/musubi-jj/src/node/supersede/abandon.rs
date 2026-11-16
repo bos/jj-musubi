@@ -16,6 +16,7 @@ use super::Realign;
 use super::dedup;
 
 use crate::canonical::Contraction;
+use crate::node::AbandonObservation;
 use crate::node::CANONICAL_ATTRIBUTE;
 use crate::node::join::fingerprint;
 use crate::op_id::CanonicalOp;
@@ -148,18 +149,26 @@ impl NodeRepo {
             .stored_op(ACCEPTED_PUSH)
             .filter(|pushed| Some(pushed) != base.as_ref());
         let heads = self.local_heads()?;
-        let checked = (heads, base, pushed);
+        let checked = AbandonObservation {
+            heads,
+            base,
+            accepted_push: pushed,
+        };
         // A move that taking records left to do, as after an error, is done whether or not
         // the op heads changed since.
         if self.abandon_checked.as_ref() == Some(&checked) && self.records.realign.is_none() {
             return Ok(false);
         }
-        let (heads, base, pushed) = checked;
-        self.realign_heads(&heads)?;
+        self.realign_heads(&checked.heads)?;
         // Inspect both accepted histories together. The push may contain a surviving
         // operation above a base that was dropped in full: treating it as new while
         // inspecting only the base loses its original identity and presence.
-        let watched: Vec<HubOp> = base.iter().chain(pushed.iter()).cloned().collect();
+        let watched: Vec<HubOp> = checked
+            .base
+            .iter()
+            .chain(checked.accepted_push.iter())
+            .cloned()
+            .collect();
         let noticed = self.notice_abandons(&watched)?;
         // Only the op heads checked: a `jj op abandon` that moved them meanwhile, remembered as
         // checked, would go unnoticed, and the sync would fail for good. Moved here, they're
@@ -167,7 +176,7 @@ impl NodeRepo {
         if noticed {
             self.abandon_noticed = true;
         } else {
-            self.abandon_checked = Some((heads, base, pushed));
+            self.abandon_checked = Some(checked);
         }
         Ok(noticed)
     }

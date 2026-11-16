@@ -81,9 +81,23 @@ touches, then `just check` once before asking for review, saying which checks pa
 ([AGENTS.md, "Checks"](AGENTS.md#checks)):
 
 ```sh
-cargo nextest run -p musubi-jj -E 'test(/^join::/)'    # one test file
-cargo nextest run -p musubi-jj                         # one crate
+just test -p musubi-jj -E 'test(/^join::/)'    # one test file
+just test -p musubi-jj                         # one crate
 ```
+
+Use `just test` for focused runs too: it prepares the Lean oracle once and, on macOS,
+keeps test repositories and their recorded fixtures on the same RAM disk.
+
+On a shared Mac, start with a small resource budget, including for background runs:
+
+```sh
+CARGO_BUILD_JOBS=4 LEAN_NUM_THREADS=2 NEXTEST_TEST_THREADS=4 TOKIO_WORKER_THREADS=2 just check
+```
+
+Account for native worker threads and other jobs too; logical CPU count alone is not a
+safe concurrency budget. Nextest reserves the test pool for the two full-state model
+comparisons on macOS, then releases it for the remaining tests. Expensive generated repository
+walks reserve four slots each. These scheduling rules also apply when selecting tests directly.
 
 Some runs are slow, and not part of `just check`:
 

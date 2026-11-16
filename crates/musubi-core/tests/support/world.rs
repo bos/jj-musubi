@@ -1,6 +1,7 @@
 //! A hub and nodes running the real core over a network the test controls completely, with
 //! every step translated into Lean model actions (docs/internals/conformance.md).
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use musubi_core::hub;
@@ -1402,19 +1403,28 @@ impl World {
                 })
             })
             .collect();
-        let net: BTreeSet<String> = self
+        // Compact JSON remains the ordering/deduplication key. Protocol numbers are integer
+        // IDs and counts, so each key identifies its original Value without reparsing it.
+        let net: BTreeMap<String, &Value> = self
             .net
             .iter()
-            .flat_map(|m| m.model.iter().map(Value::to_string))
+            .flat_map(|message| &message.model)
+            .map(|message| (message.to_string(), message))
             .collect();
-        json!({
-            "next": univ.next(),
-            "ops": ops,
-            "hub": {"ops": self.hub.ops, "objs": self.hub.objs, "head": self.hub.head, "seq": self.hub.seq,
-                "records": records_json(&self.hub.records), "pruned": self.hub.pruned},
-            "nodes": nodes,
-            "net": net.into_iter().map(|m| serde_json::from_str::<Value>(&m).unwrap()).collect::<Vec<_>>(),
-        })
+        Value::Object(
+            [
+                ("next".to_owned(), univ.next().into()),
+                ("ops".to_owned(), Value::Array(ops)),
+                ("hub".to_owned(), json!({
+                    "ops": self.hub.ops, "objs": self.hub.objs, "head": self.hub.head, "seq": self.hub.seq,
+                    "records": records_json(&self.hub.records), "pruned": self.hub.pruned,
+                })),
+                ("nodes".to_owned(), Value::Array(nodes)),
+                ("net".to_owned(), Value::Array(net.into_values().cloned().collect())),
+            ]
+            .into_iter()
+            .collect(),
+        )
     }
 }
 
@@ -1480,11 +1490,15 @@ fn canonical_state(state: &Value) -> Value {
         .collect();
     net.sort_by_cached_key(Value::to_string);
     net.dedup();
-    json!({
-        "next": state["next"],
-        "ops": ops,
-        "hub": with_sets(&state["hub"], &["ops", "objs"]),
-        "nodes": nodes,
-        "net": net,
-    })
+    Value::Object(
+        [
+            ("next".to_owned(), state["next"].clone()),
+            ("ops".to_owned(), Value::Array(ops)),
+            ("hub".to_owned(), with_sets(&state["hub"], &["ops", "objs"])),
+            ("nodes".to_owned(), Value::Array(nodes)),
+            ("net".to_owned(), Value::Array(net)),
+        ]
+        .into_iter()
+        .collect(),
+    )
 }

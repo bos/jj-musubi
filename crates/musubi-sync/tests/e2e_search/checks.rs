@@ -7,7 +7,6 @@ use std::fmt::Write as _;
 use std::fs;
 
 use futures::executor::block_on;
-use jj_lib::settings::UserSettings;
 use musubi_jj::node::NodeRepo;
 use musubi_jj::op_id::CanonicalOp;
 use musubi_jj::op_id::LocalOp;
@@ -144,18 +143,6 @@ impl World {
         }
     }
 
-    fn translation_replay_settings(&self, m: usize) -> UserSettings {
-        let actor = self.fx.hive.members[m].adapter.repo().loader().settings();
-        // A settings clone shares the actor's RNG, and TestRepo::settings takes an
-        // actor seed. Rebuild the complete configuration with a fresh RNG instead.
-        // TestEnv gives every copy this same hermetic home, including replacements.
-        UserSettings::from_config_and_home_dir(
-            actor.config().clone(),
-            Some(self.fx.env.root().join("home")),
-        )
-        .unwrap()
-    }
-
     /// What the protocol's model assumes of translation (protocol.md, "Translation layer"), on
     /// every machine: distinct local operations reachable from its op heads have distinct
     /// canonical forms, and each one's parents canonicalize to its canonical form's parents,
@@ -176,11 +163,10 @@ impl World {
             let copy = dir.path().join("copy");
             musubi_testutil::copy_tree(repo.path(), &copy);
             fs::remove_file(copy.join(".jj/repo/musubi/translation")).ok();
-            let failure =
-                NodeRepo::open(&copy.join(".jj/repo"), &self.translation_replay_settings(m))
-                    .map_err(|err| format!("reopening a copy: {err}"))
-                    .and_then(|mut fresh| translation_failure(node, &mut fresh, &hub))
-                    .err();
+            let failure = NodeRepo::open(&copy.join(".jj/repo"), &self.observer_settings(m))
+                .map_err(|err| format!("reopening a copy: {err}"))
+                .and_then(|mut fresh| translation_failure(node, &mut fresh, &hub))
+                .err();
             if let Some(failure) = failure {
                 self.fail(&format!("{}'s translation: {failure}", self.machine(m)));
             }
@@ -678,7 +664,7 @@ fn translation_replay_preserves_actor_bytes_clock_and_randomness() {
         if observe {
             for m in 0..world.nodes() {
                 let actor = world.fx.hive.members[m].adapter.repo().loader().settings();
-                let replay = world.translation_replay_settings(m);
+                let replay = world.observer_settings(m);
                 assert_eq!(
                     replay.get_string("search-replay.value").unwrap(),
                     "retain the complete actor config"

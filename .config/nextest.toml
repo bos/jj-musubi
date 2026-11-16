@@ -31,6 +31,21 @@ slow-timeout = { period = "300s", terminate-after = 12 }
 filter = "test(=conformance) | test(=survivor_advance_conformance)"
 priority = 100
 
+# On macOS these full-state model comparisons hit the unchanged two-minute limit while
+# competing with native tests in an eight-slot run, even after making comparisons cheaper. Reserve
+# the selected pool while each runs, rather than making its deadline depend on that load.
+[[profile.default.overrides]]
+platform = 'cfg(target_os = "macos")'
+filter = "test(=conformance) | test(=survivor_advance_conformance)"
+threads-required = "num-test-threads"
+
+# These long repository walks also do independent native replays and convergence checks.
+# Give them a share of the pool large enough that those checks can finish under contention.
+[[profile.default.overrides]]
+platform = 'cfg(target_os = "macos")'
+filter = "test(=e2e_dropped_merge) | test(=e2e_command_above_dropped_merge) | test(=e2e_git_change_while_taking_a_trim) | test(=e2e_smoke)"
+threads-required = 4
+
 # Keep all 150 oracle cases on CI: Linux and Windows exceeded the default two-minute
 # limit while the rest of the suite ran. The local 50-case run keeps its normal limit.
 [[profile.ci.overrides]]

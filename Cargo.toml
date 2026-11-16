@@ -124,6 +124,11 @@ debug = false
 opt-level = 0
 debug = false
 
+# The protocol harness spends most of its time comparing full JSON model states. Optimize
+# that package's tests without making the native repository harnesses slower to compile.
+[profile.test.package.musubi-core]
+opt-level = 1
+
 [profile.release]
 debug = "line-tables-only"
 

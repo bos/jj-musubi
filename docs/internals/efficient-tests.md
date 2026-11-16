@@ -19,7 +19,15 @@ the checks [AGENTS.md](../../AGENTS.md#checks) requires.
   isn't installed, or tracing needs a permission you don't have, ask for it rather than guess.
   Tracing exposed thousands of `fdatasync` waits and two `tput` processes per jj command.
 - Compare two versions by running them alternately, several times each, on the same machine,
-  and compare averages.
+  and compare averages. For generated tests, set the same `HEGEL_SEED` and keep the case
+  count and checks unchanged. `MUSUBI_TRACE_STATS` records the protocol harness's actions,
+  so compare those too: a shorter run must still do the same work.
+- Measure compilation separately from execution, including a warm build and a small source
+  edit. An optimization that saves test time can cost more to compile; prefer a package
+  profile override to optimizing every test binary.
+- Hegel's `TooSlow` health check times the whole case, including setup and assertions. Oracle
+  builds, fixture copies and model comparisons can trigger it even when drawing inputs is
+  cheap. Fix that work rather than suppressing the check or increasing a timeout.
 
 ## Keep tests off the disk
 
@@ -45,8 +53,10 @@ seconds to 3.5; with `just test`'s RAM disk on an M4 Max, from 78 to 26.
   force writeback even without an explicit sync.
 - APFS clones a whole directory tree, copy-on-write, in one `clonefile(2)` call, so copying a
   fixture costs almost nothing: a hub snapshot took 13 to 21 ms that way, against 240 to 280
-  ms copying file by file. Linux clones one file at a time (`FICLONE`, on btrfs and XFS but
-  not ext4), which saves nothing on small files, so `copy_tree` copies them there.
+  ms copying file by file. Both paths must be on the same volume: copying a recorded fixture
+  from SSD to a RAM disk falls back to copying every file. Linux clones one file at a time
+  (`FICLONE`, on btrfs and XFS but not ext4), which saves nothing on small files, so
+  `copy_tree` copies them there.
 
 ## Make an expensive fixture once per build
 
@@ -56,7 +66,9 @@ and start each test from a copy.
 
 - `musubi_testutil::recorded` makes a directory once per build, under `CARGO_TARGET_TMPDIR`:
   the first process records it while the others wait on a file lock, and a later run of the
-  same build finds it made. `musubi_testutil::copy_tree` copies it for each test.
+  same build finds it made. On macOS, `just test` sets `MUSUBI_TEST_CACHE_DIR` to its run's
+  RAM disk instead, keeping recordings beside their copies so APFS can clone them. Those
+  recordings live only for that run. `musubi_testutil::copy_tree` copies one for each test.
 - A recording must still work once copied somewhere else. jj keeps no absolute path in a
   repository, so a copy opens as a repository that moved, and the race tests reopen a copied
   hub and its nodes as after a restart. Anything a test goes on generating, such as the seed
@@ -107,6 +119,11 @@ sync once pushed CI's daemon tests there past their timeout. A test that drives 
 
 ## Schedule for the suite, not the test
 
+- Reserve capacity for expensive tests as well as starting them early. On macOS the two
+  full-state protocol comparisons reserve the selected nextest pool, and the four longest
+  generated repository walks each reserve four slots. Their case counts, checks and deadlines
+  stay the same. Increasing concurrency otherwise made a survivor comparison that passed
+  alone exceed its two-minute deadline while native tests ran beside it.
 - Start the longest test first. The conformance test, the longest by far, often started late
   on 4 cores and finished alone after everything else. Its nextest priority in
   `.config/nextest.toml` starts it first.

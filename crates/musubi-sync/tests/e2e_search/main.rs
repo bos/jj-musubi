@@ -33,6 +33,8 @@
 //!   smoke test's;
 //! - `MUSUBI_SEARCH_MASK`: known bugs to look past, comma-separated (see `checks::masked`);
 //! - `MUSUBI_SEARCH_TIMING`: print how long each case took;
+//! - `MUSUBI_SEARCH_VERIFY_OBSERVATIONS`: compare read-only staleness observations with
+//!   the original native `jj` probes, retaining their command seeds;
 //! - `MUSUBI_SEARCH_FINGERPRINTS`: a file to append each case's trace to, without what
 //!   differs between runs of the same case (`World::fingerprint`): comparing two runs'
 //!   files shows whether a case replays exactly;

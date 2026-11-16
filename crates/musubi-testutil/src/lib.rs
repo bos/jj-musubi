@@ -257,7 +257,20 @@ const STALE_RECORDING: Duration = Duration::from_secs(3600);
 /// test in a process of its own, so each would otherwise make it again, many of them at
 /// once in a full run. The first process to ask records it, while the others wait on a
 /// file lock; a later run of the same build finds it there.
+///
+/// A nonempty `MUSUBI_TEST_CACHE_DIR` selects a runner-owned cache root, normally on the
+/// same in-memory filesystem as the test directories. Each original `base` keeps its namespace;
+/// the build identity and locking are unchanged. Without the override, recordings stay in
+/// `base` as before, including when running Cargo directly or keeping test directories.
 pub fn recorded(base: &Path, name: &str, record: impl FnOnce(&Path)) -> PathBuf {
+    let base = match std::env::var_os("MUSUBI_TEST_CACHE_DIR").filter(|root| !root.is_empty()) {
+        Some(root) => {
+            let mut namespace = std::hash::DefaultHasher::new();
+            std::path::absolute(base).unwrap().hash(&mut namespace);
+            PathBuf::from(root).join(format!("{:016x}", namespace.finish()))
+        }
+        None => base.to_owned(),
+    };
     let cache = base.join(name);
     fs::create_dir_all(&cache).unwrap();
     // Not truncated: on Windows that fails while another process holds the lock.
@@ -405,6 +418,13 @@ impl TestRepo {
         let path = self.path.join(name);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, contents).unwrap();
+    }
+
+    /// Reserves the seeds of read-only commands replaced by in-process observations.
+    /// Keeping their place in the command chronology preserves the randomness and times
+    /// assigned to later commands, even though these observations start no subprocess.
+    pub fn reserve_command_seeds(&self, count: u64) {
+        self.seeds.fetch_add(count, Ordering::Relaxed);
     }
 
     /// Runs `jj` in the repository and returns stdout, panicking on failure.

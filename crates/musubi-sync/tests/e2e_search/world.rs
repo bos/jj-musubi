@@ -10,6 +10,8 @@ use std::path::PathBuf;
 use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::repo::Repo as _;
+use jj_lib::settings::UserSettings;
+use jj_lib::workspace::WorkspaceLoaderFactory as _;
 use musubi_core::hub::HubStorage as _;
 use musubi_core::message::HeadKind;
 use musubi_core::message::Reply;
@@ -44,6 +46,13 @@ pub const TAGS: [&str; 2] = ["v1", "v2"];
 pub const WORKSPACES: [&str; 4] = ["default", "work", "second", "third"];
 /// Shared files, so that rebases and merges produce content conflicts.
 pub const FILES: [&str; 3] = ["a.txt", "b.txt", "dir/c.txt"];
+
+/// A read-only observation also preserves the command seeds its native probes took.
+#[derive(Debug, PartialEq, Eq)]
+struct StaleObservation {
+    stale: bool,
+    command_seeds: u64,
+}
 
 /// Operation metadata, which a realization shares with the operation it realizes, so it
 /// identifies an operation across machines even though local ids differ.
@@ -870,9 +879,90 @@ impl World {
     /// since the operation its working copy was last updated at. With several op heads,
     /// assumed so.
     fn is_stale(&self, m: usize, ws: usize) -> bool {
+        let observed = self.stale_observation(m, ws);
+        if std::env::var_os("MUSUBI_SEARCH_VERIFY_OBSERVATIONS").is_some() {
+            // The native probes reserve their own seeds. Comparing before replacing them
+            // leaves the rest of the case's actor chronology exactly as it was.
+            assert_eq!(observed, self.native_stale_observation(m, ws));
+        } else {
+            self.fx
+                .repo(m)
+                .reserve_command_seeds(observed.command_seeds);
+        }
+        observed.stale
+    }
+
+    /// A settings clone shares the actor's RNG, and TestRepo::settings takes an actor
+    /// seed. Rebuild the complete configuration with an independent RNG and the same
+    /// hermetic home, including when observing a replacement copy.
+    pub(crate) fn observer_settings(&self, m: usize) -> UserSettings {
+        let actor = self.fx.hive.members[m].adapter.repo().loader().settings();
+        UserSettings::from_config_and_home_dir(
+            actor.config().clone(),
+            Some(self.fx.env.root().join("home")),
+        )
+        .unwrap()
+    }
+
+    fn stale_observation(&self, m: usize, ws: usize) -> StaleObservation {
         let heads = self.op_heads(m);
         let [head] = heads.as_slice() else {
-            return true;
+            return StaleObservation {
+                stale: true,
+                command_seeds: 0,
+            };
+        };
+        let unavailable = StaleObservation {
+            stale: true,
+            command_seeds: 1,
+        };
+        let path = self.workspaces[m][ws]
+            .path
+            .as_deref()
+            .unwrap_or_else(|| self.fx.repo(m).path());
+        let Ok(loader) = jj_lib::workspace::DefaultWorkspaceLoaderFactory.create(path) else {
+            return unavailable;
+        };
+        let Ok(workspace) = loader.load(
+            &self.observer_settings(m),
+            &jj_lib::default_backend_factories::default_backend_factories(),
+            &jj_lib::default_backend_factories::default_working_copy_factories(),
+        ) else {
+            return unavailable;
+        };
+        let store = workspace.repo_loader().op_store();
+        let view_at = |id: &OpId| {
+            futures::executor::block_on(async {
+                let op = store.read_operation(id).await.ok()?;
+                store.read_view(&op.view_id).await.ok()
+            })
+        };
+        // `debug working-copy` loads the current repo before printing its recorded
+        // operation. Failure there takes just its first command seed.
+        let Some(current) = OpId::try_from_hex(head).and_then(|id| view_at(&id)) else {
+            return unavailable;
+        };
+        let recorded = view_at(workspace.working_copy().operation_id());
+        let name = jj_lib::ref_name::WorkspaceName::new(&self.workspaces[m][ws].name);
+        // jj's `<workspace>@` revset reads this exact binding. A missing binding (or
+        // unavailable old operation) prints no commit id, so compare optional targets.
+        let before = recorded
+            .as_ref()
+            .and_then(|view| view.wc_commit_ids.get(name));
+        StaleObservation {
+            stale: before != current.wc_commit_ids.get(name),
+            command_seeds: 3,
+        }
+    }
+
+    /// Independent native oracle for validating the in-process observer across the search.
+    fn native_stale_observation(&self, m: usize, ws: usize) -> StaleObservation {
+        let heads = self.op_heads(m);
+        let [head] = heads.as_slice() else {
+            return StaleObservation {
+                stale: true,
+                command_seeds: 0,
+            };
         };
         let mut place = vec![];
         if let Some(path) = &self.workspaces[m][ws].path {
@@ -890,7 +980,10 @@ impl World {
             .and_then(|(_, rest)| rest.split_once('"'))
             .map(|(op, _)| op.to_owned())
         else {
-            return true;
+            return StaleObservation {
+                stale: true,
+                command_seeds: 1,
+            };
         };
         let wc = format!("{}@", self.workspaces[m][ws].name);
         let at = |op: &str| {
@@ -906,7 +999,10 @@ impl World {
                 "commit_id",
             ])
         };
-        at(&updated_at) != at(head)
+        StaleObservation {
+            stale: at(&updated_at) != at(head),
+            command_seeds: 3,
+        }
     }
 
     /// Runs a command at an older operation `op` of machine `m`, creating a concurrent
@@ -3946,6 +4042,70 @@ pub(crate) struct ObserverState {
     files: BTreeMap<PathBuf, Vec<u8>>,
     heads: Vec<Vec<String>>,
     clock: std::time::SystemTime,
+}
+
+#[test]
+fn stale_observation_matches_native_without_consuming_actor_state() {
+    let run = |native| {
+        let mut world = World::new(Setup {
+            nodes: 1,
+            naming: Naming::Own,
+            prejoin: false,
+            secondary: true,
+        });
+        let check = |world: &World, ws, stale, command_seeds| {
+            let before = world.observer_state();
+            let observed = world.stale_observation(0, ws);
+            world.assert_observer_state(&before);
+            assert_eq!(
+                observed,
+                StaleObservation {
+                    stale,
+                    command_seeds,
+                }
+            );
+            if native {
+                assert_eq!(observed, world.native_stale_observation(0, ws));
+            } else {
+                assert_eq!(observed.stale, world.is_stale(0, ws));
+            }
+        };
+        world.jj_in(0, 1, &["status"]);
+        world.jj(0, &["status"]);
+        check(&world, 0, false, 3);
+        check(&world, 1, false, 3);
+        world.jj(
+            0,
+            &["describe", "-r", "second@", "-m", "rewritten from primary"],
+        );
+        check(&world, 1, true, 3);
+        world.rename_workspace(0, 1, "renamed");
+        check(&world, 1, false, 3);
+        // A forgotten workspace can still have a physical checkout recording its old
+        // binding. A later user command in it must be judged against the current view.
+        world.jj(0, &["workspace", "forget", "renamed"]);
+        check(&world, 1, true, 3);
+        fs::remove_dir_all(world.workspaces[0][1].path.as_ref().unwrap()).unwrap();
+        check(&world, 1, true, 1);
+        let fork = native_head(world.fx.repo(0));
+        world.jj(0, &["describe", "-m", "first concurrent operation"]);
+        world.jj_at_op(
+            0,
+            &fork.hex(),
+            &["describe", "-m", "second concurrent operation"],
+        );
+        assert_eq!(world.op_heads(0).len(), 2);
+        check(&world, 0, true, 0);
+        check(&world, 1, true, 0);
+        // The actual native commands and the replacement must leave later actors with
+        // identical times, seeds and randomness, not just agree on the stale verdict.
+        (
+            world.fingerprint(),
+            world.fx.env.clock().now(),
+            world.next_actor_randomness(),
+        )
+    };
+    assert_eq!(run(false), run(true));
 }
 
 impl World {

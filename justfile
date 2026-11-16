@@ -1,5 +1,5 @@
 # The full local check. AGENTS.md says when to run it.
-check: fmt-check lint oracle test docs deny machete typos fuzz-runner-test assurance-check
+check: fmt-check lint oracle _test-ready docs deny machete typos fuzz-runner-test assurance-check
 
 # Build musubi: target/debug/musubi.
 dev:
@@ -31,7 +31,7 @@ install profile="release":
     set -euo pipefail
     root="${CARGO_INSTALL_ROOT:-${CARGO_HOME:-$HOME/.cargo}}"
     musubi="$root/bin/musubi"
-    cargo build --locked -p jj-musubi --profile {{profile}}
+    cargo build --locked -p jj-musubi --profile {{ profile }}
     # A running daemon keeps the old binary (and on Windows locks it): stop it, install, and
     # start the new one.
     running=false
@@ -40,7 +40,7 @@ install profile="release":
         echo "$out"
         if [[ $out == Stopped* ]]; then running=true; fi
     fi
-    cargo install --locked --path crates/musubi --profile {{profile}} --root "$root"
+    cargo install --locked --path crates/musubi --profile {{ profile }} --root "$root"
     if $running; then "$musubi" daemon start; fi
 
 fmt:
@@ -55,19 +55,40 @@ lint:
 # On macOS the tests' directories go on a RAM disk made for the run, unless
 # MUSUBI_KEEP_TEST_DIRS keeps them: jj syncs what it writes, and on the SSD the suite takes
 # three times as long.
+# A targeted run needs the executable oracle, not every proof and smoke check.
 [positional-arguments]
-test *args:
+test *args: _test-oracle
+    just _test-ready "$@"
+
+# A supplied oracle may be an assurance relay; its caller already prepared the real one.
+[private]
+_test-oracle:
     #!/usr/bin/env bash
     set -euo pipefail
-    if [[ $OSTYPE == darwin* && -z ${MUSUBI_KEEP_TEST_DIRS:-} ]]; then
-        # 128 MiB, in 512-byte sectors: a run on 14 cores uses at most about 25. Before
-        # macOS 26, only hdiutil attaches one.
-        ram=ram://262144
+    if [[ -z ${MUSUBI_ORACLE+x} ]]; then
+        python3 contrib/build-oracle.py
+    fi
+
+# The caller prepared the oracle: check/coverage run every proof and smoke check first;
+# targeted test runs build only the executable. Keep their filesystem and runner setup shared.
+[positional-arguments]
+[private]
+_test-ready *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export MUSUBI_ORACLE="${MUSUBI_ORACLE-$PWD/formal/.lake/build/bin/oracle}"
+    if [[ $OSTYPE == darwin* && -z ${MUSUBI_KEEP_TEST_DIRS+x} ]]; then
+        # 512 MiB, in 512-byte sectors, shared by active test directories and recordings.
+        # Leave room for concurrent repository cases; four workers alone have used 76 MiB.
+        # Before macOS 26, only hdiutil attaches one.
+        ram=ram://1048576
         dev=$(diskutil image attach --noMount $ram 2>/dev/null || hdiutil attach -nomount $ram)
         dev=${dev%%[[:space:]]*}
         trap 'diskutil eject "$dev" > /dev/null' EXIT
         diskutil erasevolume APFS "musubi-test-$$" "$dev" > /dev/null
         export TMPDIR="/Volumes/musubi-test-$$/"
+        # Directory cloning needs the recordings and their restored copies on one filesystem.
+        export MUSUBI_TEST_CACHE_DIR="${MUSUBI_TEST_CACHE_DIR-${TMPDIR}fixtures}"
     fi
     # The virtual workspace defaults to all members; let -p narrow that selection.
     cargo nextest run "$@"
@@ -99,7 +120,7 @@ coverage *args:
     eval "$coverage_env"
     cargo llvm-cov clean --workspace
     rm -f target/llvm-cov/coverage.json
-    just test "$@"
+    just _test-ready "$@"
     cargo llvm-cov report --html --output-dir target/llvm-cov
     cargo llvm-cov report --json --output-path target/llvm-cov/coverage.json
 
@@ -117,7 +138,7 @@ typos:
 
 # Check the Lean proofs and build the oracle the conformance tests run against.
 oracle:
-    cd formal && lake build && test/run_smoke.sh
+    python3 contrib/build-oracle.py --full
 
 # Run every benchmark script once, as briefly as each allows, against a debug build, so that
 # they keep up with the CLI (see bench/README.md). It measures nothing.
@@ -148,7 +169,7 @@ bench-smoke: dev
 
 # The generated end-to-end search (expensive; not part of `check`).
 property:
-    cargo nextest run --workspace --profile search
+    just test --workspace --profile search
 
 # Fuzz all targets or one across available CPUs (see docs/internals/testing.md).
 [positional-arguments]
@@ -172,7 +193,7 @@ kani *args:
     # ulimit on memory, so stop the run once it holds more than KANI_MEMORY_MB.
     limit=${KANI_MEMORY_MB:-4096}
     set -m # The run in a process group of its own, to add up and stop.
-    cargo kani --workspace {{args}} &
+    cargo kani --workspace {{ args }} &
     run=$!
     # Out of the terminal's foreground group, the run misses its Ctrl-C: pass it on, and stop
     # the run however this ends.
@@ -225,13 +246,13 @@ mutants-adapter *args: oracle
 
 # Collect a new assurance capture; output directories must not contain an earlier run.
 assurance-tests out:
-    python3 contrib/assurance/assurance.py tests --out {{quote(out)}}
+    python3 contrib/assurance/assurance.py tests --out {{ quote(out) }}
 
 assurance-fuzz out:
-    python3 contrib/assurance/assurance.py fuzz --out {{quote(out)}}
+    python3 contrib/assurance/assurance.py fuzz --out {{ quote(out) }}
 
 assurance-mutation out:
-    python3 contrib/assurance/assurance.py mutation --out {{quote(out)}}
+    python3 contrib/assurance/assurance.py mutation --out {{ quote(out) }}
 
 # Check the assurance graph, evidence and renderer; see docs/internals/assurance.md.
 assurance-check:

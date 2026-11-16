@@ -24,7 +24,7 @@ A remote remains the way to share work with other people, and needs no hub. musu
 alongside it: a fetch or push on any machine in a hive updates every machine's remote
 bookmarks.
 
-## File syncing: Dropbox, Syncthing, iCloud, rsync, NFS, ...
+## File syncing: Dropbox, Syncthing, iCloud, rsync, NFS
 
 > [!WARNING] File syncing and source code: just say no
 >
@@ -78,11 +78,15 @@ progress through a git remote under refs of its own, without the operation log.
 
 | | musubi | File syncing | A git remote | "Just use ssh" |
 | --- | --- | --- | --- | --- |
-| **Transfers** | Operations, commits, bookmarks, remotes | Every file, `.jj` and `.git` included | Bookmarked commits | Nothing? |
+| **Transfers** | Operations, commits, bookmarks, remote bookmarks | Every file, `.jj` and `.git` included | Bookmarked commits | Nothing? |
 | **Working copies** | Each machine's own | Shared (and fought over) | Each machine's own | One |
 | **Op log and undo across machines** | Yes | Yes (when it works) | No | Not needed |
 | **Work offline** | Yes | Yes | Yes | No |
 | **By hand** | Nothing | Nothing | Push, fetch, track bookmarks | Nothing |
 | **Needs** | A hub, ssh | A sync service | A remote | Reliable network |
 
-The facts about other tools here were checked on November 5, 2026.
+musubi keeps Git remote definitions and jj configuration local to each machine. Its default
+[snapshot limits](guides/working-across-machines.md#when-snapshots-pick-up-too-much) pause
+sending above 100 extra file paths or 8 MiB; you can approve or clean up the held work.
+
+The facts about other tools here were checked on November 15, 2026.

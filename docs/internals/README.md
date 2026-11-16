@@ -67,8 +67,10 @@ The crates, from the bottom up:
   jj decodes. The
   [node](../../crates/musubi-jj/src/node.rs) module translates between local and canonical
   operations ([translate](../../crates/musubi-jj/src/node/translate.rs),
-  [realize](../../crates/musubi-jj/src/node/realize.rs)), joins hives, and reconciles hive
-  settings. Its [supersede](../../crates/musubi-jj/src/node/supersede.rs) module holds record
+  [realize](../../crates/musubi-jj/src/node/realize.rs)) and joins hives. Its
+  [publication](../../crates/musubi-jj/src/node/publication.rs) module accounts for snapshot
+  content, checks exact approvals, and prepares cleanup of unpublished operations.
+  Its [supersede](../../crates/musubi-jj/src/node/supersede.rs) module holds record
   state and naming; submodules handle persistence, normalization, detecting abandons, rewriting
   local operations, receiving records, and fix-ups.
   [objects](../../crates/musubi-jj/src/objects/mod.rs) moves commits and trees, and

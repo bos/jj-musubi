@@ -1,30 +1,88 @@
-# Correctness and verification
+# Trying musubi safely
 
-musubi keeps copies of a jj repository in sync through a hub; together they form a hive. Its
-verification combines proofs of a protocol model with checks of the Rust implementation and tests
-against jj repositories.
+musubi shares unfinished work and repository history between your machines. Background sync
+leaves checked-out files alone, and you can stop it while keeping ordinary jj repositories.
+It also passes on mistakes, so it helps to know what sync changes before joining active work.
 
-## Required behavior
+## What sync can change
 
-A jj operation records a change to repository state, such as creating or rebasing commits, moving
-bookmarks, or updating workspaces.
+Each machine has its own repository and checkout. A **hub** stores shared history and passes
+updates between the machines; their background sync processes are **daemons**. The copies of
+one project form a **hive**.
 
-Concurrent edits must resolve as jj resolves concurrent commands in a single repository. musubi
-uses jj's merge implementation and sequences updates through the hub to prevent two machines from
-independently rebasing the same concurrent work. Receiving an operation must not create a
-duplicate to send back; merging concurrent edits creates a new operation.
+- **Files in your checkout stay put.** Received work becomes available in the repository.
+  You choose when to check it out. If another machine rewrites the commit you're using, jj
+  reports a stale working copy; [update it when you're
+  ready](guides/working-across-machines.md#when-another-machine-rewrites-your-working-copy).
+- **Repository history and Git refs change.** Commits, bookmarks and the record of repository
+  operations are shared. A mistaken rewrite, restore or operation abandon can therefore reach
+  every machine. [Undo across machines](guides/working-across-machines.md#undo-across-machines)
+  explains how to inspect and reverse repository changes.
+- **Concurrent edits stay visible.** musubi uses jj's merge behavior, as for concurrent
+  commands on one repository. Bookmarks can conflict and changes can become divergent;
+  [resolve them once](guides/working-across-machines.md#when-machines-change-the-same-thing)
+  and that resolution syncs too.
+- **Edits jj hasn't recorded stay local.** Neither `musubi status` nor `musubi sync --outgoing`
+  snapshots files. Newly created, nonignored files normally enter jj's next snapshot and can
+  then spread too. Keep secrets and generated files ignored before recording them.
 
-Once edits and failures stop, copies that resume syncing must converge on the same history.
-Repositories retain the work they send and receive, allowing a replacement hub to be rebuilt from
-those copies. Hub rollback permits duplicate merges, which can leave a change divergent, but must
-not prevent eventual convergence after rollback stops.
+Keep your usual backups. A synced copy carries deliberate deletions and history removals too.
+If a hub loses its state, surviving repositories can [rebuild the
+hub](guides/manage.md#replace-or-move-a-hub) from work they retained. Work that existed only on
+an entirely lost machine needs that machine's backup. Recovery after hub rollback can leave
+changes divergent, which you resolve with jj.
 
-Synchronization must leave working-copy files alone, and leaving a hive must preserve the
-repository. A reconnecting copy must adopt published operation abandonments instead of
-reintroducing the removed history.
+## Try a disposable project first
 
-[Working across machines](guides/working-across-machines.md) explains how concurrent edits and
-operation abandonment appear in jj.
+Use the [setup guide](guides/setup.md) with a project you're comfortable sharing. After its
+[first-sync check](guides/setup.md#check-your-first-sync), pick up the recorded work in the
+second copy and make an edit there. Check that it appears in the first copy's `jj log` while
+its checked-out files stay put. This lets you see the handoff before using active work.
+
+To stop this machine's background syncing, run:
+
+```sh
+musubi daemon stop
+```
+
+This stops the daemon for all its copies on this machine. It keeps their hive memberships,
+repositories and files, and leaves the hub and other machines running. It does not undo
+anything already sent or received. Explicit `musubi sync` still syncs without the daemon;
+`musubi create`, `join` or `clone` can start the daemon again. `musubi daemon uninstall` also
+removes its login startup. [Pause syncing or leave](guides/manage.md#pause-syncing-or-leave)
+explains resuming and removing just one copy.
+
+When you're done trying it, `musubi leave` in each trial copy attempts one last sync, then
+removes that copy from its hive. The files and repository stay. `--force` allows leaving if
+that attempt fails; it still attempts the sync, so use `musubi daemon stop` to pause background
+traffic while deciding what to do.
+
+## When accidental files are recorded
+
+jj's older snapshots can retain files even after you remove them from the current version.
+To limit how much of that content spreads, musubi holds sending above 100 extra file paths or
+8 MiB. Content needed by changes you've deliberately committed or rewritten, and content
+already shared with the hive, doesn't count against the limits. Receiving continues.
+
+[Accidental-file recovery](troubleshooting.md#accidentally-added-files-and-sending-stopped)
+shows how to inspect the hold and keep useful local files. Cleanup has a preview: it preserves
+current work and versions created by deliberate changes such as `jj commit` or `jj describe`,
+but can discard earlier uncommitted versions.
+Exact approval sends the inspected history instead. Files below the limits can still spread;
+these limits do not identify secrets.
+
+## What backs this up
+
+The protocol has machine-checked Lean proofs. Tests compare the Rust implementation with
+those models and run real jj repositories through concurrent commands, crashes, interrupted
+connections and simulated loss of hub state. CLI tests exercise the quick start.
+
+These checks cover different parts of the system. A proof about a protocol model is not a
+proof of every line of jj or musubi, and the tests cover the cases they run. The sections
+below explain the evidence and its boundaries. The [race
+catalogue](internals/races.md) lists tested outcomes and known limitations, with links to the
+tests. The [conformance guide](internals/conformance.md) records where implementation and
+model agree and where obligations remain.
 
 ## Lean proofs
 

@@ -2,27 +2,121 @@
 
 Messages musubi prints, and what to do about each.
 
-Start with `musubi status` in the repository. It shows whether the daemon is running and
-serving the repository, when it last synced or the error its last sync failed with, and
-whether the hub has this machine's latest work. `musubi list` shows whether each hub is
-reachable, and every copy on this machine. `musubi sync` syncs at once and prints any error
-itself. `musubi top` shows every machine's syncing, as the hub hears of it.
+## Start with this copy
 
-For more, read the daemon's log: `daemon.log` in musubi's state directory
-(`~/.local/state/musubi` on Linux and macOS), or under systemd, `journalctl --user -u
-musubi`. The hub logs to its terminal, or run at login, to `hub.log` in the state directory
-on macOS, and to `journalctl --user -u musubi-hub` on Linux. To log more, see
-[Logging](reference/configuration.md#logging).
+Run this inside the affected repository:
+
+```sh
+musubi status
+```
+
+It reports whether the daemon runs and serves this copy, how the last sync went, and whether
+the hub has this machine's recorded work. It reads local state without contacting the hub,
+and exits 0 even when it reports a problem. “The hub has all its work” does not include edits
+jj hasn't snapshotted yet. The report can be out of date if the daemon has stopped.
+
+| What you find | What to do |
+| --- | --- |
+| Sending held by the snapshot budget | Follow [accidental-file recovery](#accidentally-added-files-and-sending-stopped) below. Receiving continues. |
+| Daemon not running or not serving this copy | Follow [status warnings](#what-musubi-status-reports). |
+| A sync error | Find the quoted message on this page. After fixing its cause, `musubi sync` retries now. |
+| Local work sent, but another machine hasn't received it | Run `musubi status` on that receiving machine; use `musubi top` to inspect all machines from the hub's reports. |
+
+`musubi sync` makes a fresh sync attempt; it doesn't snapshot saved edits. Before running a
+jj command to record them, exclude any accidental or generated files you want to keep local.
+If you want background traffic stopped while investigating, [pause the
+daemon](guides/manage.md#pause-syncing-or-leave). `musubi leave` attempts a final sync.
+
+For connection problems, `musubi list` checks whether the hub is reachable. For other machines,
+`musubi top` shows which ones are quiet, behind, or reporting failures. Neither `status` nor
+`top --once` is a failing-exit health check, and `top` sends no unattended alerts.
+
+Read the daemon log on the affected working machine. On Linux use
+`journalctl --user -u musubi`; on macOS use `daemon.log` in `~/.local/state/musubi` unless
+you've moved the state directory. Read the hub log on its machine: its terminal when run in
+the foreground, `journalctl --user -u musubi-hub` on Linux, or `hub.log` in the state directory
+on macOS when installed. [Logging](reference/configuration.md#logging) covers other paths
+and more detail.
 
 Messages below use `devbox` for the hub's machine, `app` for a hive, and `laptop` for a
-machine.
+machine. A hive is the group of copies of one project; the hub passes history between them.
+
+## Accidentally added files and sending stopped
+
+A jj command can snapshot a directory of generated or accidental files. Deleting those files
+later doesn't remove their older snapshots. By default, musubi pauses sending when those
+snapshots retain more than 100 extra paths or 8 MiB beyond explicit change history and content
+already shared. It keeps receiving. This protects against accidental bulk uploads; smaller
+files can already have reached other machines.
+
+1. **Check what's recorded.** Run `musubi status`, then `musubi sync --outgoing`. A hold says
+   `Sending held`; the report lists every extra path and the operations retaining it.
+   `Within publication budget` means the recorded outgoing work fits, not that it has been
+   sent. Both commands leave unsnapshotted edits alone. If you just created the files and
+   haven't run jj, exclude them before recording anything.
+
+2. **Keep unwanted files out of the current snapshot.** Delete or move files you don't need.
+   To keep a directory such as `scratch/` on disk, add `scratch/` to `.gitignore`. If jj already
+   recorded those files, run `jj file untrack scratch/` too. Ignoring tracked files alone isn't
+   enough. Run `jj status` to record the intended current files, then
+   `musubi sync --outgoing` again.
+   Old snapshots can still retain the excluded directory; that is what cleanup handles.
+
+3. **Preview cleanup.** Choose retaining operation ids from that report, then run
+   `musubi sync --prune <operation>...`, replacing the placeholder with those ids. A preview
+   removes nothing. It shows how much content would remain and warns about older uncommitted
+   versions. Current files and explicit change versions are kept. Before applying, inspect
+   and [save any older edits you
+   need](guides/working-across-machines.md#inspect-older-edits-before-cleanup).
+   Apply only the exact command printed by the preview you have checked. If it says the work
+   changed, preview again; it has preserved your new edits.
+
+4. **Check and send.** Run `musubi sync --outgoing` again. If it is within budget, run
+   `musubi sync`, then `musubi status`. Check the useful files and the receiving machine's
+   `jj log` before switching to it. If content is still held, another snapshot may retain
+   the same files; inspect its operation ids and preview another selection. If you paused the
+   daemon, `musubi daemon start` resumes background syncing once you're ready.
+
+If you want all the listed content shared, use the exact `musubi sync --approve TOKEN`
+command printed by `--outgoing` instead of cleanup. It approves that inspected history;
+new work may need a new inspection. Approval deliberately sends the listed accidental content
+too, so it is optional, not a required recovery step.
+
+If cleanup refuses, the original work remains. You can leave sending held and continue
+receiving while deciding. [Recover wanted work into a new
+copy](#recover-wanted-work-without-approving-held-history) if you don't want to approve that
+history. The [full snapshot
+guide](guides/working-across-machines.md#when-snapshots-pick-up-too-much)
+explains accounting, limits and cleanup guarantees.
+
+## Recover wanted work without approving held history
+
+Keep the original repository. A cleanup refusal means musubi cannot establish that removing
+those operations would preserve earlier work; it does not require you to publish it.
+
+Make a fresh copy with `musubi clone <hive> <new-directory>`. For a few wanted files, copy only
+those files into the new checkout, check their diff, and describe or commit the change with jj.
+Never copy the old `.jj` or `.git` directory over the new one. Check the new copy's
+`musubi sync --outgoing`, sync it, and verify the wanted work on another machine before
+removing the original copy.
+
+For wanted commits, the [new-copy rescue
+steps](#this-repositorys-history-no-longer-matches-the-hives-so-it-cant-sync-again) show fetching
+selected bookmarks from the original. Fetching a commit brings its ancestors too: inspect
+those before deciding that this is the right rescue route. Copying selected files avoids
+bringing that older history. Keep the original until you have checked everything you need.
+
+Cloning can start the daemon, so a [daemon pause](guides/manage.md#pause-syncing-or-leave) is
+not a persistent quarantine. Leaving the original copy, even with `--force`, attempts a final
+sync; see [Pause syncing or leave](guides/manage.md#pause-syncing-or-leave) before doing that.
 
 ## Sending held by the snapshot publication budget
 
 ### "sending held: snapshots retain ... exceeding the publication budget"
 
-Automatic snapshots retain too much content beyond explicit change history and shared
-content. Removed files can still occupy older snapshots. Receiving continues. Run
+Automatic snapshots retain more than 100 extra file paths or 8 MiB beyond explicit change
+history and shared content, unless you've configured other limits. The counts add up across
+outgoing snapshots, so removed files can still occupy older snapshots. Receiving continues. Run
 `musubi sync --outgoing` to inspect the paths and retaining operations. Its printed approval
 command sends exactly that work. Or remove unwanted files from the working copy, run
 `jj status`, and use `musubi sync --prune OPERATION...` to preview discarding selected
@@ -30,6 +124,8 @@ unpublished operations. Apply only the printed preview command you want.
 
 The [workflow](guides/working-across-machines.md#when-snapshots-pick-up-too-much) includes a
 partial commit with useful files still uncommitted, and explains the defaults and settings.
+`musubi status` reports this as "sending held: snapshot publication budget". The daemon
+continues receiving; restarting it does not clear the hold.
 
 ### "outgoing work changed; ..."
 
@@ -54,7 +150,9 @@ older or custom commands, undo, redo, restoring operation state, or a Git import
 versions whose selection jj did not record. An automatic retry of a Git-ref export can also
 leave this kind of record.
 musubi cannot guarantee preserving those versions while pruning, so no history was pruned.
-Inspect with `musubi sync --outgoing` and use its exact approval command to send this history.
+Inspect with `musubi sync --outgoing`. You can approve exactly that history if you want it
+shared, or keep sending held and [rescue wanted work into a new
+copy](#recover-wanted-work-without-approving-held-history). Receiving continues while held.
 
 ### "this selection would change another copy's activity or membership; ..."
 
@@ -391,8 +489,10 @@ since such a patch can't carry them.
 repository is still part of the hive, and the daemon syncs it again. That sync takes the
 forget `musubi leave` recorded to the hive, so the other machines stop showing this copy until
 it's next used. Run `musubi leave` again
-once the hub can be reached, or `musubi leave --force` to leave without telling the hive: the
-other machines then go on showing this copy until one of them runs `musubi forget`.
+once the cause is fixed, or use `musubi leave --force` to leave even if the final sync fails.
+It still attempts that sync. If the hive wasn't told, other machines keep showing this copy
+until one of them runs `musubi forget`. To pause background traffic first, use
+[`musubi daemon stop`](guides/manage.md#pause-syncing-or-leave).
 
 If the message says "work done in this repository while it left kept it in the hive", a
 `jj` command ran in the repository during each of `musubi leave`'s three tries. Stop whatever
@@ -530,6 +630,46 @@ copy with `musubi clone`, bring this one's work across to it, then run `musubi l
 here
 ```
 
+This copy can no longer sync with the hive, but its commits are still in the repository.
+Keep it, make a new copy on this machine with `musubi clone`, and bring across the work the
+hive lacks. That includes changes since the last sync, or all of this copy's work if its
+first sync never finished. You don't need to identify the cause before rescuing the work.
+
+1. In the original copy, choose the commits you need. If you're rescuing files after a
+   publication hold, first check their ancestors for unwanted content; [copying selected
+   files](#recover-wanted-work-without-approving-held-history) is another route.
+
+2. In the original copy, give each commit at the tip of that work a bookmark (`jj log` shows
+   them), and print where this repository keeps its Git data:
+
+   ```sh
+   jj bookmark create rescue-1 -r <change>
+   jj git export
+   jj git root
+   ```
+
+3. In the new copy, fetch only those bookmarks, keep them, and drop the remote, which no other
+   copy needs:
+
+   ```sh
+   jj git remote add rescue <the path jj git root printed>
+   jj git fetch --remote rescue -b 'rescue-*'
+   jj bookmark track 'rescue-*' --remote rescue
+   jj git remote remove rescue
+   ```
+
+   This works because both copies name their commits with the hive's hash, as every copy of
+   a hive does. If `jj log` then shows divergent changes, the hive has rewritten commits this
+   work was on: rebase the work onto the hive's versions with `jj rebase`, then `jj abandon`
+   the old ones.
+
+Back in the original copy, run `musubi leave --force` once you have verified the rescue. It
+keeps that repository and still attempts a final sync before leaving. If `musubi create`
+says this, the hive it made is empty, and this copy can't fill it: run `musubi leave --force`,
+and remove the hive with `musubi hub remove`.
+
+#### Why history can stop matching
+
 This copy's operation history and the hive's have parted in a way musubi can't reconcile.
 Syncing stops to keep abandoned operations from returning to the hive. `musubi status` says
 retrying won't get past it.
@@ -549,44 +689,12 @@ it, not even what it had before joining.
 This can also happen after `jj op abandon` removes all history below a command you have not
 synced, if `jj util gc` then removes its earlier form before musubi reads it. That history may
 be needed to tell this copy's workspace names from another machine's. musubi stops rather than
-assigning a workspace to the wrong machine. Bring the work into a new copy as described below.
+assigning a workspace to the wrong machine. Bring the work into a new copy using the steps above.
 
 Otherwise, something removed operations from this repository that musubi couldn't account
 for, as when a power cut loses jj's latest update to its op heads. That's a bug: please report
 it at <https://github.com/bos/jj-musubi/issues>, with the daemon's log (`daemon.log`, in the
 [state directory](reference/configuration.md#on-every-machine)).
-
-To carry on here, make a new copy on this machine with `musubi clone`, and bring across this
-copy's work that the hive lacks: what it made since its last sync, or all of it if it was new
-to the hive and its first sync never finished. Its commits are still in this repository:
-
-1. Here, give each commit at the tip of that work a bookmark (`jj log` shows them), and print
-   where this repository keeps its Git data:
-
-   ```sh
-   jj bookmark create rescue-1 -r <change>
-   jj git export
-   jj git root
-   ```
-
-2. In the new copy, fetch only those bookmarks, keep them, and drop the remote, which no other
-   copy needs:
-
-   ```sh
-   jj git remote add rescue <the path jj git root printed>
-   jj git fetch --remote rescue -b 'rescue-*'
-   jj bookmark track 'rescue-*' --remote rescue
-   jj git remote remove rescue
-   ```
-
-   This works because both copies name their commits with the hive's hash, as every copy of
-   a hive does. If `jj log` then shows divergent changes, the hive has rewritten commits this
-   work was on: rebase the work onto the hive's versions with `jj rebase`, then `jj abandon`
-   the old ones.
-
-Then run `musubi leave --force` here, which keeps all this repository has. If `musubi create`
-says this, the hive it made is empty, and this copy can't fill it: run `musubi leave --force`,
-and remove the hive with `musubi hub remove`.
 
 ### "the hub refused this machine's work: ..."
 

@@ -3,7 +3,8 @@
 See other machines' work, update a stale working copy, undo, and configure each copy.
 
 Once a repository is in a hive, keep using `jj` as you always do. Its daemon keeps it in sync
-with the other machines.
+with the other machines. A hive is the group of copies of one project; their background
+daemons exchange history through the hub. Each machine keeps its own checkout files.
 
 ## Pick up on another machine
 
@@ -14,8 +15,19 @@ the laptop was working on is already in `jj log`, as `laptop/default@`. Carry on
 jj new laptop/default@   # a new change on top of the laptop's
 ```
 
-When you open the laptop again, its daemon reconnects and brings in what you did on the
-devbox; there's nothing to run.
+This creates a new child change on the devbox, based on the laptop's recorded change. It
+checks out that content here and leaves the original change as its parent. You can build on
+unfinished work without moving the laptop's checkout.
+
+When you open the laptop again, its daemon receives the devbox's history. The laptop's files
+still stay put. To continue on top of the devbox's latest work, run there:
+
+```sh
+jj new devbox/default@
+```
+
+Use the machine and workspace names shown by `musubi status`. If jj first reports a stale
+working copy, [update it](#when-another-machine-rewrites-your-working-copy) before proceeding.
 
 What reaches the devbox is the laptop's work as of its last `jj` command, since that's when
 jj records edits. To have jj record them each time you save a file, without running a command,
@@ -26,8 +38,10 @@ jj config set --user fsmonitor.backend watchman
 jj config set --user fsmonitor.watchman.register-snapshot-trigger true
 ```
 
-Keep secrets in ignored files. The snapshot publication budget below limits accidental bulk
-content; it does not identify secrets or stop small accidental files from syncing.
+If the laptop's work hasn't arrived, run `musubi status` there. Sending pauses when outgoing
+snapshots retain more than 100 extra file paths or 8 MiB; [inspect the held work, then approve
+or clean it up](#when-snapshots-pick-up-too-much) before switching machines. Keep secrets in
+ignored files: smaller accidental files can still sync.
 
 ## Coding agents
 
@@ -77,7 +91,9 @@ snapshotted yet stay on the laptop.
 `laptop/default`.
 
 `musubi status`, run in the repository, shows each machine's working copy at a glance, when
-this copy last synced, and whether the hub has its latest work:
+this copy last synced, and whether the hub has its latest recorded work. It doesn't contact
+the hub or record edits on disk. Its successful exit status can accompany a warning; read
+the report. For example:
 
 ```text
 Hive: app on devbox
@@ -231,8 +247,14 @@ machines.
 
 ## When snapshots pick up too much
 
-musubi holds sending when automatic snapshots retain more than 100 file paths or 8 MiB
-beyond explicit change history and content already shared with the hive. Receiving continues.
+Automatic snapshots keep unfinished work recoverable, including files you later remove.
+To limit accidental uploads, musubi holds sending when those snapshots retain more than
+100 extra file paths or 8 MiB beyond explicit change history and content already shared with
+the hive. Receiving continues. A hold means the work stays on this machine until you resolve
+it; the repository still works with jj. For a step-by-step response to accidental files,
+start with [Accidental-file
+recovery](../troubleshooting.md#accidentally-added-files-and-sending-stopped).
+
 An explicit `jj commit`, `describe`, `split`, `squash`, or other command that creates or
 modifies changes makes those change versions intentional history: their content needs no
 approval. Explicitly bookmarking a working-copy version also retains it intentionally; later
@@ -255,10 +277,20 @@ Inspect what would go out:
 musubi sync --outgoing
 ```
 
+This reads recorded history without snapshotting or contacting the hub. If unwanted files
+haven't been snapshotted yet, exclude them before running jj. To keep a generated directory
+locally, add it to `.gitignore` and run `jj file untrack <directory>` if jj already tracked it.
+Then `jj status` records the intended current files. Old snapshots may still retain the
+directory, so inspect again before deciding what to prune.
+
 The output lists the extra paths, their bytes and versions, and the operations retaining
 them. Content shared by several snapshots is counted once; the operation rows overlap.
 Ten distinct 900 KB files exceed the default byte budget, even though the file count is small.
 The budget is cumulative across the whole outgoing history, rather than a limit per snapshot.
+It includes current uncommitted work as well as older snapshots. The byte count uses each
+distinct version's full contents, including earlier versions of a file you've since made
+smaller. Explicit change history is exempt, so a repository with thousands of committed files
+can sync normally.
 
 Choose operations from that list, using the ids printed there. For example:
 
@@ -268,7 +300,31 @@ musubi sync --prune a12b34c56d78 b23c45d67e89
 
 This previews removing those whole operations. It says how much snapshot content would
 remain, warns that older uncommitted versions may become unrecoverable, and prints an exact
-apply command. Copy that command, including its token:
+apply command. The preview removes nothing.
+
+### Inspect older edits before cleanup
+
+Before applying, check whether a selected operation includes an older uncommitted version
+you want to keep. Using an operation id from the report:
+
+```sh
+jj --ignore-working-copy op show --patch a12b34c56d78
+```
+
+If you need an older file, use the commit id shown there to save that version outside the
+repository. Replace `<commit>` with that id; this example saves `AGENTS.md`:
+
+```sh
+jj --at-op a12b34c56d78 file show -r <commit> AGENTS.md > ../AGENTS-before-cleanup.md
+```
+
+`--at-op` reads that historical state without snapshotting current files. Keep the saved
+version until you've compared it with your current work. If you edit files or history while
+checking, preview cleanup again and use its new token.
+
+### Apply the checked preview
+
+Copy the apply command printed by your preview, including its operation ids and token:
 
 ```sh
 musubi sync --prune a12b34c56d78 b23c45d67e89 --apply <token-from-preview>
@@ -281,8 +337,10 @@ bookmarks, and workspace positions. If a removed snapshot had an older version o
 Explicit change versions survive even when their operations were selected. No individual
 file is edited out of an old snapshot. Selecting too few operations may leave the same files
 retained elsewhere; the preview shows that, without adding operations to your selection.
-Files still in the current working copy remain required: remove unwanted files first and
-run `jj status`.
+Files still in the current snapshot remain required: exclude unwanted files first, keeping
+them on disk with ignore rules and `jj file untrack` if needed, then run `jj status`.
+
+### Approve the history or change limits
 
 If you want everything to go through instead, `--outgoing` prints the override:
 
@@ -332,12 +390,12 @@ Trimming all earlier history keeps each copy's own Git refs and HEAD as they wer
 when a sync is finishing as you trim. Other copies remain in the hive or forgotten as they
 were, including when the trim removes a forget that the hub just accepted.
 
-The hub remembers an abandon until every machine still in the hive has taken it, so a machine
-that's offline delays this until it syncs. It waits too for a copy whose first sync after
-`musubi join` or `musubi clone` hasn't finished, until it has heard nothing from it for a day,
-and it keeps every abandon for an hour after it starts. Then it forgets the abandon, so
-trimming old history with `jj op abandon ..<operation>` doesn't leave the hub remembering every
-abandoned operation, though it keeps them on its disk.
+The hub remembers an abandon until every machine still in the hive has taken it. An offline
+machine therefore delays cleanup. The hub also waits for a copy whose first sync after
+`musubi join` or `musubi clone` hasn't finished, but stops waiting after a day without contact
+from that copy. After a hub restart, the hub keeps every abandon for at least an hour.
+Once those conditions are met, the hub drops the record it kept for passing on the abandon.
+The abandoned operations remain on disk.
 
 A copy can't sync again, and stops with "this repository's history no longer matches the
 hive's" ([what to

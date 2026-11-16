@@ -47,7 +47,7 @@ musubi reads these as `jj` would in the repository, so any of jj's config files 
 | Key | Effect |
 | --- | --- |
 | `musubi.forget-after` | How long this copy may go unused before the hive forgets it: `never`, or a duration of at least a second, such as `30m`, `6h`, `1h 30m`, or `2 days`: numbers with units from `s`, `min` or `m`, `h` or `hours`, `d` or `days`, `w` or `weeks`, and so on (`M` is months, not minutes). `musubi create`, `join`, and `clone` default to `never` unless jj's config sets it already, regardless of who runs them. `--lease 6h` explicitly sets this copy's repo value, replacing an existing policy. Not shared across a hive. See [Take a repository or machine out](../guides/manage.md#take-a-repository-or-machine-out). |
-| `musubi.publication.max-files` | Maximum extra file paths retained by outgoing snapshots: `100` by default. Explicit change history and already shared content are exempt. `0` disables this limit. Sending pauses above either publication limit; receiving continues. See [snapshot cleanup](../guides/working-across-machines.md#when-snapshots-pick-up-too-much). |
+| `musubi.publication.max-files` | Maximum distinct extra file paths across all outgoing snapshots: `100` by default, including current uncommitted work and older snapshots. Explicit change history and already shared content are exempt. `0` disables this limit. Sending pauses above either publication limit; receiving continues. See [snapshot cleanup](../guides/working-across-machines.md#when-snapshots-pick-up-too-much). |
 | `musubi.publication.max-bytes` | Maximum extra content bytes retained by outgoing snapshots: `8 MiB` by default. Accepts jj byte sizes such as `16 MiB`, or a number of bytes. Identical content is counted once across paths and snapshots. `0` disables this limit. |
 | `musubi.clone-config` | Keys whose effective values are recorded when a hive is created or recreated after hub loss, as one-time defaults for future clones. Defaults to `["user.name", "user.email"]`; set `[]` to record none. A clone fills only settings absent from its destination's explicit config, in its own repo config. Built-in jj defaults do not count as explicit config. Existing values win, even when different. Later edits and joins to an existing hive never update the recorded defaults. `musubi.forget-after` cannot be selected. |
 | `operation.hostname` | This machine's name in a hive, unless `--machine` gives another. |
@@ -180,6 +180,6 @@ Outside it, each machine that reaches the hub over ssh adds a line to
 `musubi hub connect`. See [The ssh key musubi
 adds](../guides/setup.md#the-ssh-key-musubi-adds).
 
-Nothing in the hub's directory needs backing up: every machine keeps what it synced, so losing
-the directory loses no work. See
+The hub's directory can be rebuilt from surviving repository copies and the work they retained.
+Keep your usual backups of working repositories, including any on the hub's machine. See
 [Replace or move a hub](../guides/manage.md#replace-or-move-a-hub).

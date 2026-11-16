@@ -417,6 +417,9 @@ once the repository has a remote, a deploy of a revision the remote lacks. The s
 with musubi's own build script, which names the build. It doesn't fetch a commit or tag from a
 remote.
 
+`the_quick_start_works_as_written` also checks a healthy status report in both copies and
+records an unfinished edit with `jj status`, then syncs the sender and receiver before
+checking its content at the sender's workspace revision, as the setup verification does.
 `publication_budget_inspection_cleanup_and_override` checks that outgoing inspection lists
 the 51st retained path, beyond the old display cap, before approving that exact history.
 

@@ -4336,11 +4336,18 @@ fn the_quick_start_works_as_written() {
     musubi_on(&beta, &strs(&join), true);
     // From now on, no command needs --hub.
     musubi_on(&beta, &["list"], true);
+    musubi_on(&alpha, &["sync"], true);
+    musubi_on(&beta, &["sync"], true);
+    musubi_on(&alpha, &["status"], true);
+    musubi_on(&beta, &["status"], true);
     alpha.write_file("b", "later");
-    alpha.jj(&["commit", "-m", "later"]);
-    wait_for(&logs, "beta's daemon to bring alpha's commit", || {
-        try_log(&beta).is_some_and(|log| log.contains("later"))
-    });
+    alpha.jj(&["status"]);
+    musubi_on(&alpha, &["sync"], true);
+    musubi_on(&beta, &["sync"], true);
+    assert_eq!(
+        beta.jj(&["file", "show", "-r", "alpha/alpha@", "b"]),
+        "later"
+    );
     let gamma = env.repo_handle("gamma");
     let dir = gamma.path().to_str().unwrap();
     let args: Vec<&str> = strs(&clone)
@@ -4352,9 +4359,22 @@ fn the_quick_start_works_as_written() {
         })
         .collect();
     musubi_on(&beta, &args, true);
-    assert!(log(&gamma).contains("later"));
+    assert_eq!(
+        gamma.jj(&["file", "show", "-r", "alpha/alpha@", "b"]),
+        "later"
+    );
 
     let _filters = snapshot_filters(&env);
+    let mut settings = insta::Settings::clone_current();
+    settings.add_filter(r"(?m)^(\S+@): [k-z]{8} [0-9a-f]{8} ", "$1: [ids] ");
+    settings.add_filter(
+        &format!(
+            "Hive: alpha on {}",
+            regex_escape(&whoami::hostname().unwrap())
+        ),
+        "Hive: alpha on $$HOST",
+    );
+    let _filters = settings.bind_to_scope();
     insta::assert_snapshot!(transcript, @"
     $ musubi hub
     Created a new hub in $ROOT/home/musubi-hub
@@ -4378,6 +4398,34 @@ fn the_quick_start_works_as_written() {
       alpha  2 machines: alpha, beta
         here: $ROOT/beta  synced N ago
     Daemon: running, serving 1 repository; doesn't start at login; `musubi daemon install` makes it
+    alpha$ musubi sync
+    beta$ musubi sync
+    alpha$ musubi status
+    Hive: alpha on $ROOT/home/musubi-hub
+    This machine: alpha, synced N ago; the hub has all its work
+    Working copies:
+    alpha@: [ids] (no description set)
+    beta/beta@: [ids] (no description set)
+    Copies:
+    alpha (this machine): used N ago, never forgotten
+    beta: used N ago, never forgotten
+    Daemon: running (pid N), serving this repository; doesn't start at login
+    Daemon socket: [daemon socket]
+    Daemon log: $ROOT/home/musubi-alpha/daemon.log
+    beta$ musubi status
+    Hive: alpha on $HOST
+    This machine: beta, synced N ago; the hub has all its work
+    Working copies:
+    beta@: [ids] (no description set)
+    alpha/alpha@: [ids] (no description set)
+    Copies:
+    beta (this machine): used N ago, never forgotten
+    alpha: used N ago, never forgotten
+    Daemon: running (pid N), serving this repository; doesn't start at login
+    Daemon socket: [daemon socket]
+    Daemon log: $ROOT/home/musubi-beta/daemon.log
+    alpha$ musubi sync
+    beta$ musubi sync
     beta$ musubi clone alpha $ROOT/gamma --hub $HOST
     Cloned hive alpha into $ROOT/gamma
     ");

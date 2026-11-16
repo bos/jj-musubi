@@ -1,40 +1,50 @@
-# jj-musubi
+# jj-musubi: live sync for jj repos
 
-musubi keeps your [jj](https://jj-vcs.dev) repositories in sync across machines. Work on your
-laptop, then pick up on your devbox: the change you were working on is already there.
+jj-musubi keeps your [jj](https://jj-vcs.dev) repositories in sync across machines. Work on your
+laptop, then pick up on a development machine: your unfinished work is already in its
+repository, ready for you to check out. Your files on that machine stay put until you choose
+what to work on.
 
-jj is a git-compatible version control system. To sync its repositories with musubi, you need ssh
-to one machine that's usually on.
+jj is a git-compatible version control system. A `jj` command snapshots your files, recording
+unfinished edits in a working-copy commit. musubi shares those commits too, so you can switch
+machines without first committing and pushing a branch. You keep using GitHub or another Git
+remote to share work with other people.
 
-Engineers at Meta get this from Sapling's Commit Cloud, which uploads every commit as soon as
-it's made, and engineers at Google have something like it in an internal jj server that keeps
-their repositories' history in the cloud. musubi brings that to your own repositories, on your
-own machines, over plain ssh, with no service to sign up for.
+One machine that's usually on runs the **hub**, a musubi process that stores shared history
+and passes updates between your machines. Each machine you work on runs a **daemon**, a
+background process that sends and receives updates. The copies of one project form a
+**hive**: your laptop's and devbox's copies of `app`, for example. A hub can serve many hives.
+Your machines reach it over ssh; there's no service to sign up for.
 
-## What you get
+Engineers at Meta get similar workflows from Sapling's Commit Cloud, and engineers at Google
+from an internal jj server. musubi brings them to repositories on your own machines.
 
-- Run Claude Code or Codex on your laptop and a couple of devboxes, each in its own jj workspace.
+## Things you can do
+
+In jj, a workspace is a checkout with its own files, and a bookmark names a commit, much like
+a Git branch. musubi shows each other machine's workspace as a name you can use in jj commands;
+it doesn't create another checkout directory here.
+
+- Run your coding agent on your laptop and a couple of devboxes, each in its own jj workspace.
   `jj log` shows each agent's working-copy commit as `devbox/default@` or `laptop/agent-2@`,
-  updated after its latest `jj` command. You can review or build on that commit from any machine,
-  or hand it to another agent with `jj new devbox/default@`. A [skill for
+  updated after its latest `jj` command. You can review or build on that commit from any
+  machine, or hand it to another agent with `jj new devbox/default@`. A [skill for
   agents](skills/jj-musubi/SKILL.md) helps them work alongside each other.
-- Each machine receives every commit, bookmark and change within a second or so of the `jj`
-  command that made it. Shut your laptop halfway through a change, and the devbox has your work as
-  `laptop/default@`. Run `jj new laptop/default@` there to carry on. The laptop catches up within
-  seconds of waking.
+- Each machine normally receives every commit, bookmark and edit within a second or so of the
+  `jj` command that made it. Shut your laptop halfway through something you're working on, and
+  the devbox has your work as `laptop/default@`. Run `jj new laptop/default@` there to carry on.
+  The laptop catches up within seconds of waking.
 - `jj git fetch` on one machine and every machine has the new `main@origin`. `jj git push` from
   the devbox and the laptop shows it pushed.
-- jj records every command you run, so that `jj undo` can take any of them back. musubi shares
-  that record, so a mistake made on one machine can be put right from any other.
-- musubi never writes to your working copy. When another machine rewrites the commit you're on, jj
-  says so, and `jj workspace update-stale` brings your files up to date when you're ready.
+- musubi shares jj's record of repository changes, so you can inspect and revert a mistake
+  from another machine. [Undo across
+  machines](docs/guides/working-across-machines.md#undo-across-machines)
+  explains the commands and which changes their results affect.
+- Background sync leaves your working-copy files alone. When another machine rewrites your
+  commit, jj says so. Run `jj workspace update-stale` to update the files when you're ready.
 - jj never needs the hub. Work on a plane, and the laptop catches up when it lands.
-- The sync protocol is modelled and proved correct in the Lean theorem prover, the Rust code is
-  checked against that model step by step, and a search runs jj commands on repositories through
-  crashes, lost connections and power cuts. [How musubi keeps your work safe](docs/safety.md)
-  explains what each check covers.
 
-Here a change described on the laptop shows up on the devbox a second later:
+Here a change described on the laptop shows up in the devbox's repository a second later:
 
 ```text
 laptop:~/src/app$ jj describe -m "Add retry logic to the fetcher"
@@ -49,12 +59,31 @@ devbox:~/src/app$ jj log
 ◆  zzzzzzzz root() 00000000
 ```
 
+`jj new laptop/default@` on the devbox checks out a new change based on that recorded work.
+It leaves the laptop's change available as its parent. The [handoff
+guide](docs/guides/working-across-machines.md#pick-up-on-another-machine) also covers switching
+back.
+
+## Try it and keep control
+
+Background sync changes repository history and Git refs, while leaving checked-out files alone.
+Concurrent work combines as jj combines commands in separate workspaces; conflicts remain
+visible for you to resolve. You can keep working offline.
+
+The protocol has machine-checked proofs, tests comparing the Rust implementation with those
+models, and tests against real jj repositories under injected failures. [Trying musubi
+safely](docs/safety.md) explains the checks, their limits, and a way to try a disposable project.
+
+`musubi daemon stop` stops background syncing for all this machine's copies. `musubi leave`
+takes one repository out after attempting to send its latest work, and keeps the repository
+and files. See [Pause syncing or leave](docs/guides/manage.md#pause-syncing-or-leave).
+
 ## Install
 
-Install jj-musubi, start a hub, and share a repository between your machines.
+Install musubi on the machines you work on and on the machine that will run the hub.
 
-Install musubi on every machine, the hub's included. Download the archive for your platform
-from the [latest release](https://github.com/bos/jj-musubi/releases/latest) and put the
+Download the archive for your platform from the
+[latest release](https://github.com/bos/jj-musubi/releases/latest) and put the
 `musubi` in it on your `PATH`. There are builds for Linux (static), macOS, and Windows, each
 for x86_64 and aarch64. The release's `SHA256SUMS` lists each archive's checksum, and
 `gh attestation verify <archive> --repo bos/jj-musubi` checks that this repository's release
@@ -81,25 +110,31 @@ To complete musubi's commands and hive names in your shell, see
 
 ## Quick start
 
-One machine that is usually on runs a **hub**. Each repository it shares is a **hive**, and
-every machine's copy of the repository joins it. A **daemon** on each machine keeps its copies
-in sync with the hub.
+These steps connect your laptop and a development machine called `devbox`. Replace `devbox`
+with the name you use for ssh. You can try them with a disposable project first.
 
 You need:
 
 - `jj` 0.47.1 and `git` on every machine;
-- a repository with at least one commit and all of its history (musubi refuses shallow and
+- a jj repository with at least one commit and all of its history (musubi refuses shallow and
   partial clones);
 - ssh access to the hub's machine from every other machine: if `ssh devbox` works, so does
   musubi;
 - `musubi` on the `PATH` of non-interactive shells on the hub's machine, since other machines
   run it over ssh: check with `ssh devbox musubi --version`.
 
+If you have no jj repository yet, start with `jj git clone <url> <dir>` and run the repository
+commands below inside `<dir>`. For an existing Git checkout, see jj's
+[Git compatibility guide](https://docs.jj-vcs.dev/latest/git-compatibility/).
+
 On the hub's machine:
 
 ```sh
 musubi hub
 ```
+
+Leave this terminal running: the hub stays in the foreground. Use another terminal for the
+remaining commands, even if you work on the devbox too.
 
 It creates `~/musubi-hub` the first time, and prints what to run on the other machines:
 
@@ -119,7 +154,9 @@ musubi create --hub devbox
 ```
 
 The hive is named after the repository's `origin` remote (`jj-musubi`, say), or its
-directory. In each other machine's copy, join it:
+directory. By default, sharing starts with the repository's current state; older undo history
+stays local. Add `--full-history` to `musubi create` or `musubi join` if you want to share that
+older history too. In each other machine's copy, join it:
 
 ```sh
 musubi join --hub devbox
@@ -130,14 +167,23 @@ The hub works out which hive a copy belongs in from its history and remotes. `cr
 time a machine uses a hub, musubi adds an ssh key of its own to `~/.ssh/authorized_keys` on
 the hub's machine, allowed only to reach the hub; ssh may ask for your password that once.
 
-To start a new machine from a hive instead:
+To start a new machine from a hive instead, use the name `musubi create` printed. In this
+example it is `jj-musubi`:
 
 ```sh
 musubi clone jj-musubi ~/src/jj-musubi --hub devbox
 ```
 
-To keep the daemon running across reboots, run `musubi daemon install` on each machine.
-[Set up a hub and machines](docs/guides/setup.md) covers each step in more depth.
+Run `musubi status` inside each copy. Look for a running daemon serving the repository, a
+recent sync, and `the hub has all its work`. This means all work jj has recorded, not edits
+since your last `jj` command. The [setup verification](docs/guides/setup.md#check-your-first-sync)
+walks through checking work arriving on the other machine.
+
+To start the daemon at login, run `musubi daemon install` on each machine you work on.
+On the hub's machine, stop the foreground hub with Ctrl-C and run `musubi hub install`
+(macOS or Linux). Linux servers also need `loginctl enable-linger` to keep user services
+running after logout. [Keep the hub running](docs/guides/setup.md#keep-the-hub-running)
+explains platform support and login requirements.
 
 ## Day to day
 
@@ -148,9 +194,9 @@ musubi's own commands are for checking on it:
 
 - `musubi` (or `musubi list`) shows the hub's hives, this machine's copies of them, and
   whether each is syncing.
-- `musubi status` shows the current repository's hive, whether it syncs and whether the hub
-  has its latest work, every machine's working copies, and the daemon, and warns of what's
-  wrong. It answers at once, for scripts and agents to ask.
+- `musubi status` reports the current repository's sync state, whether the hub has its latest
+  recorded work, every machine's working copies, and the daemon's status. It returns
+  immediately and includes warnings when something needs attention.
 - `musubi top` shows the hub's traffic and every machine's syncing, live.
 - `musubi sync` syncs the current repository now; `musubi leave` takes it out of its hive.
 - `musubi forget <machine>` forgets a machine that went away without leaving. A temporary
@@ -161,6 +207,17 @@ musubi's own commands are for checking on it:
 - `musubi hub install` runs the hub at login; `musubi hub rename` and `musubi hub remove`
   manage the hub's hives.
 
+Automatic snapshots can keep accidental files even after you delete them. To limit how much
+of that content spreads, musubi pauses sending when snapshots retain more than **100 extra
+file paths or 8 MiB**. Receiving continues. The limits add up across snapshots. Content needed
+by changes you've deliberately committed or rewritten, and content already shared with the
+hive, doesn't count against them.
+
+If work hasn't arrived, start with `musubi status` on the sending machine. A snapshot hold
+names `musubi sync --outgoing`, which lists what's waiting. [Accidental files and stopped
+sending](docs/troubleshooting.md#accidentally-added-files-and-sending-stopped) walks through
+checking the hold, keeping files locally, and cleaning up or approving the recorded work.
+
 The daemon logs to `daemon.log` in musubi's state directory (`~/.local/state/musubi` on Linux
 and macOS), or under systemd, to `journalctl --user -u musubi`. See
 [Logging](docs/reference/configuration.md#logging).
@@ -168,8 +225,8 @@ and macOS), or under systemd, to `journalctl --user -u musubi`. See
 ## Learn more
 
 - [How musubi works](docs/how-it-works.md): what replicates, and what stays on each machine.
-- [How musubi keeps your work safe](docs/safety.md): the proofs, the tests, and the design
-  choices that keep every machine's work intact.
+- [Trying musubi safely](docs/safety.md): what sync changes, how to stop it, and the evidence
+  behind its safety properties.
 - [Set up a hub and machines](docs/guides/setup.md): ssh, keeping the hub running, forks,
   machine names, and more than one repository.
 - [Work across machines](docs/guides/working-across-machines.md): picking up on another

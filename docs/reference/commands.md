@@ -19,7 +19,7 @@ explains hubs, hives, and copies.
 | `create [<name>]` | Start a hive from the repository you're in, for other copies to join. |
 | `join` | Add this machine's copy of a repository to the hive it belongs in. In a copy already part of a hive, make the hive again on a hub that has lost it, or on another hub given with `--hub`. In a repository made by copying a copy's files, which musubi doesn't sync, `--original` syncs it as that copy, which must be gone. |
 | `clone <hive> [<dir>]` | Make a new copy of a hive on this machine, in a new or empty `<dir>` (by default a new directory in the current one, named after the last part of the hive's name, as `jj git clone` names one after its URL: `dotfiles` for `bos/dotfiles`, even given a prefix of the name), making any missing parent directories, and check out `trunk()` using this machine's jj config. It fills missing selected settings once from the hive's creation defaults, including name and email by default. Existing destination settings win. Git remotes are not copied. The copy names its objects with the hive's hash, SHA-1 or SHA-256, whatever jj's `git.object-hash` setting says. |
-| `leave` | Take the repository you're in out of its hive, telling the hive, and stop syncing it. It keeps everything it has. `--force` leaves without telling the hive, if its hub can't be reached. `leave <path>` stops syncing a copy that was at `<path>` and is gone. |
+| `leave` | Attempt a final sync, then take this repository out of its hive. It keeps everything it has. `--force` permits leaving if the attempt fails; it still attempts to sync. `leave <path>` stops syncing a copy that was at `<path>` and is gone. See [Pause syncing or leave](../guides/manage.md#pause-syncing-or-leave). |
 | `forget <machine>` | Forget another machine's copy that went away without leaving, or an earlier copy on this machine, deleted without it, even if it has no workspaces. `musubi status` lists present copies. Name the machine as its working copies are named here: `laptop` for `laptop/default@`, `laptop-1a2b` for `laptop-1a2b/default@`, or, where even the start of its id is another machine's, its whole id, as in `laptop-1a2b3c4d/default@`. The name `musubi list` gives it also works, if no other machine could have that name. |
 
 `create`, `join`, and `clone` take:
@@ -52,12 +52,21 @@ Agent-run commands have the same default. See [Set up a hub and machines](../gui
 whatever it reports: run it from a script, an agent, or a shell prompt. Its warnings and hints
 go to standard error, as jj's do.
 
+Sending pauses when outgoing snapshots retain more than 100 extra file paths or 8 MiB beyond
+explicit change history and shared content; receiving continues. `musubi sync --outgoing`
+lists every retained extra path without taking a new snapshot or contacting the hub.
+`Within publication budget` does not mean the work has been sent; it describes what fits the
+limits. See [Snapshot limits and
+cleanup](../guides/working-across-machines.md#when-snapshots-pick-up-too-much) for approval,
+cleanup and configuration.
+
 ### `musubi status` as JSON
 
 `musubi status -T 'json(self) ++ "\n"'` prints one JSON object, with times as seconds since
 the Unix epoch, and durations in seconds. A value that can't be told, or doesn't apply, is
 `null`, where `-T`'s keywords give an empty string or false. The keyword `problem` is
-`not_synced` here, else `hive.error`; `status` comes from `hive.last_sync`, and
+`not_synced` here, else `hive.error`; `status` comes from `hive.last_sync`, except during a
+snapshot hold, when it is `sending held: snapshot publication budget`;
 `daemon_running` is `daemon.running`.
 
 | Field | Value |
@@ -75,7 +84,7 @@ the Unix epoch, and durations in seconds. A value that can't be told, or doesn't
 | `daemon install` | Start the daemon at login from now on, and now. |
 | `daemon uninstall` | Stop starting the daemon at login, and stop it. |
 | `daemon start` | Start the daemon in the background, unless it is running. |
-| `daemon stop` | Stop the daemon. |
+| `daemon stop` | Stop background syncing for all copies served by this machine's daemon, keeping hive memberships and the login installation. It leaves the hub running. `create`, `join`, and `clone` can start the daemon again; explicit `sync` still syncs without it. |
 | `daemon restart` | Stop the daemon and start it again, as after upgrading musubi. |
 | `daemon` | Run the daemon in the foreground, logging to the terminal. |
 

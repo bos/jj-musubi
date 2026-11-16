@@ -5,15 +5,21 @@ up, what to expect day to day, and what to do when something goes wrong.
 
 ## Start here
 
-- [What you get](../README.md#what-you-get)
-- [Quick start](../README.md#quick-start)
-- [How musubi works](how-it-works.md)
-- [How musubi keeps your work safe](safety.md)
+| What you need | Where to start |
+| --- | --- |
+| Understand why you'd use this | [Things you can do](../README.md#things-you-can-do), then [How musubi works](how-it-works.md) |
+| Decide whether to try it with your work | [Trying musubi safely](safety.md) |
+| Connect your first two machines | [Quick start](../README.md#quick-start) or [Step-by-step setup](guides/setup.md) |
+| Find out why work hasn't arrived | [Start with this copy](troubleshooting.md#start-with-this-copy) |
+| Recover after accidentally adding many files | [Accidental-file recovery](troubleshooting.md#accidentally-added-files-and-sending-stopped) |
+| Pause syncing or stop using musubi | [Pause syncing or leave](guides/manage.md#pause-syncing-or-leave) |
+| Keep background services healthy | [A healthy baseline](guides/manage.md#a-healthy-baseline), then [Watch every machine](guides/manage.md#watch-every-machine) |
 
 ## Guides
 
 - [Set up a hub and machines](guides/setup.md)
 - [Work across machines](guides/working-across-machines.md)
+- [Snapshot limits and cleanup](guides/working-across-machines.md#when-snapshots-pick-up-too-much)
 - [Manage hives, machines, and hubs](guides/manage.md)
 
 ## Reference and troubleshooting

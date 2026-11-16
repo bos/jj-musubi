@@ -17,6 +17,22 @@ Say what a jj term means in a few words the first time it matters, and don't lea
 operation log, which few jj users look at: it's how musubi works, not why anyone wants it.
 Don't hedge about how new musubi is.
 
+Introduce concepts where the reader first needs them. Say what a hub, hive, daemon or
+snapshot does and why it matters before relying on the term, including on pages reached
+directly from search. A definition later in the guide doesn't fix an unexplained first use.
+Distinguish recorded work arriving in a repository from checkout files changing on disk.
+
+Write guides around the reader's task. Setup names the machine, terminal and directory for
+each step, explains commands that keep running, and ends with a successful-sync check.
+Troubleshooting starts with the symptom, how to establish the current state, and safe next
+actions; explanations of rare causes follow the recovery steps. State when a diagnostic is
+cached, snapshots files, contacts the hub, or exits successfully despite reporting a problem.
+
+Give safety reassurance through concrete behavior and evidence. Explain what sync changes,
+what mistakes propagate, how to pause or leave, and what survives each action. Describe the
+scope of proofs and tests without turning them into a blanket guarantee. Keep operating
+instructions near the actions that need them, with links to deeper evidence.
+
 Use musubi's own nouns consistently:
 
 - A **hub** is a `musubi hub` process and its directory. "The hub's machine" is where it

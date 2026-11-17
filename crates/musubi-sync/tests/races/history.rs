@@ -4322,6 +4322,58 @@ fn a_full_trim_below_unpublished_work_keeps_workspace_owners() {
     );
 }
 
+/// `jj op abandon` of the operation where a sync showed another machine's workspace again,
+/// under a command not yet published, reparents that command onto a view without the name.
+/// The command didn't make the name: it is still the other machine's workspace.
+#[test]
+fn abandoning_where_a_sync_showed_a_workspace_again_keeps_its_owner() {
+    let mut hive = default_workspaces();
+    hive.sync();
+    hive.repo(0).jj(&["workspace", "forget", "beta/default"]);
+    hive.hive.sync(0).unwrap();
+    let (shown, description) = op_log(hive.repo(0))[0].clone();
+    assert_eq!(description, "musubi: show other machines' workspaces");
+    hive.repo(0).jj(&["new", "-m", "unpublished work"]);
+    hive.repo(0).jj(&["op", "abandon", &shown]);
+    hive.sync();
+    hive.assert_converged();
+    assert_eq!(
+        hive.workspace_names(0),
+        BTreeSet::from(["default".to_owned(), "beta/default".to_owned()])
+    );
+    assert_eq!(
+        hive.workspace_names(1),
+        BTreeSet::from(["default".to_owned(), "alpha/default".to_owned()])
+    );
+}
+
+/// As above, but a second abandon, of the operation the first moved the command onto, moves it
+/// again before a sync: the command started from the view of the operation it was first on.
+#[test]
+fn abandoning_twice_where_a_sync_showed_a_workspace_again_keeps_its_owner() {
+    let mut hive = default_workspaces();
+    hive.sync();
+    hive.repo(0).jj(&["workspace", "forget", "beta/default"]);
+    hive.repo(0).jj(&["new", "-m", "before the sync"]);
+    let before = op_log(hive.repo(0))[0].0.clone();
+    hive.hive.sync(0).unwrap();
+    let (shown, description) = op_log(hive.repo(0))[0].clone();
+    assert_eq!(description, "musubi: show other machines' workspaces");
+    hive.repo(0).jj(&["new", "-m", "unpublished work"]);
+    hive.repo(0).jj(&["op", "abandon", &shown]);
+    hive.repo(0).jj(&["op", "abandon", &before]);
+    hive.sync();
+    hive.assert_converged();
+    assert_eq!(
+        hive.workspace_names(0),
+        BTreeSet::from(["default".to_owned(), "beta/default".to_owned()])
+    );
+    assert_eq!(
+        hive.workspace_names(1),
+        BTreeSet::from(["default".to_owned(), "alpha/default".to_owned()])
+    );
+}
+
 /// Saved trim bindings must not claim a new local workspace after the foreign copy leaves.
 #[test]
 fn a_trim_does_not_reserve_a_forgotten_copys_workspace_name() {

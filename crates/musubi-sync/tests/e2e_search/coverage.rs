@@ -355,6 +355,14 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         "a_full_trim_below_unpublished_work_keeps_workspace_owners",
         Some(&["op_abandon", "new_commit"]),
     ),
+    (
+        "abandoning_where_a_sync_showed_a_workspace_again_keeps_its_owner",
+        Some(&["forget_other_workspace", "sync", "op_abandon"]),
+    ),
+    (
+        "abandoning_twice_where_a_sync_showed_a_workspace_again_keeps_its_owner",
+        Some(&["forget_other_workspace", "sync", "op_abandon"]),
+    ),
     // The search has no owned slash-name rule or operation-restore rule.
     (
         "restoring_an_older_view_does_not_inherit_private_workspace_ownership",

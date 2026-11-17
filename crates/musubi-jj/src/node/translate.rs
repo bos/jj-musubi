@@ -145,36 +145,8 @@ impl NodeRepo {
         if roots.is_empty() {
             return Ok(RecoveredSources::default());
         }
-        let path = self.repo_path.join("op_store/operations");
-        let files = fs::read_dir(&path).map_err(|source| NodeError::Io {
-            path: path.clone(),
-            source,
-        })?;
         let store = self.loader.op_store().clone();
-        let mut sources: HashMap<LocalOp, Vec<LocalOp>> = HashMap::new();
-        for file in files {
-            let file = file.map_err(|source| NodeError::Io {
-                path: path.clone(),
-                source,
-            })?;
-            let Some(id) = file
-                .file_name()
-                .to_str()
-                .and_then(OperationId::try_from_hex)
-            else {
-                continue;
-            };
-            let op = match store.read_operation(&id).block_on() {
-                Ok(op) => op,
-                Err(jj_lib::op_store::OpStoreError::ObjectNotFound { .. }) => continue,
-                Err(err) => return Err(err.into()),
-            };
-            if op.parents != [self.root_op_id().0.clone()]
-                && let Some(root) = roots.get(&fingerprint(&op))
-            {
-                sources.entry(root.clone()).or_default().push(LocalOp(id));
-            }
-        }
+        let sources = self.native_twins(&roots)?;
         let mut found = RecoveredSources::default();
         let mut historical = HashMap::new();
         for (root, twins) in sources {
@@ -224,6 +196,185 @@ impl NodeRepo {
             }
         }
         Ok(found)
+    }
+
+    /// Recover the sources of commands jj reparented when `jj op abandon` dropped what they
+    /// were on (`dropping`, operations the hub accepted), onto operations still reached
+    /// (`reached`), and that stand for nothing the hive has (`counterparts`): each one's
+    /// pre-abandon twin, on operations it has canonical forms of, one of them dropped, given a
+    /// canonical form there, so that what the command made is judged against the views it
+    /// started from, not those jj put under it. Otherwise a name an abandoned operation showed,
+    /// as one where a sync showed another machine's workspace again, would be one the command
+    /// added, and so this machine's own. Returns, for each command recovered, the current image
+    /// of its twin's canonical operation, and for that twin, the operation. Where abandons
+    /// moved a command more than once, the twin furthest up the history is the one jj first
+    /// moved. A command whose twins can't be ordered so, or whose twin can't be translated, is
+    /// left as it is.
+    pub(super) fn unpublished_reparented_sources(
+        &mut self,
+        unmapped: &[(LocalOp, StoreOperation)],
+        reached: &HashSet<LocalOp>,
+        dropping: &HashSet<CanonicalOp>,
+        counterparts: &HashMap<LocalOp, CanonicalOp>,
+    ) -> Result<RecoveredSources, NodeError> {
+        let mut commands: HashMap<String, Option<LocalOp>> = HashMap::new();
+        for (id, op) in unmapped {
+            let parents = LocalOp::parents_of(op);
+            if !counterparts.contains_key(id)
+                && parents != [self.root_op_id().clone()]
+                && parents.iter().all(|parent| reached.contains(parent))
+                && op.metadata.workspace_name.is_some()
+                && OpAttrs(&op.metadata.attributes).canonical().is_none()
+                && !OpAttrs(&op.metadata.attributes).has_namespace()
+                && self.records.source(id).is_none()
+                && !self.is_before_join(id, op)?
+            {
+                // Two commands alike but for their parents: neither says which was moved.
+                commands
+                    .entry(fingerprint(op))
+                    .and_modify(|found| *found = None)
+                    .or_insert_with(|| Some(id.clone()));
+            }
+        }
+        let commands: HashMap<String, LocalOp> = commands
+            .into_iter()
+            .filter_map(|(key, id)| Some((key, id?)))
+            .collect();
+        if commands.is_empty() {
+            return Ok(RecoveredSources::default());
+        }
+        let mut found = RecoveredSources::default();
+        let mut memo = HashMap::new();
+        let store = self.loader.op_store().clone();
+        for (command, mut twins) in self.native_twins(&commands)? {
+            twins.sort();
+            // A twin still reached is matched as any other operation is. Only one on what this
+            // abandon drops is what the command was before it: one on what an earlier abandon or
+            // trim rewrote, as a `jj --at-op` command can be, started from other views.
+            let mut rebuilt: Vec<(LocalOp, CanonicalOp, CanonicalOp)> = vec![];
+            for twin in twins {
+                if reached.contains(&twin) || unmapped.iter().any(|(id, _)| *id == twin) {
+                    continue;
+                }
+                let op = store.read_operation(&twin.0).block_on()?;
+                let mut known = true;
+                let mut on_dropped = false;
+                for parent in LocalOp::parents_of(&op) {
+                    match self.canonical_of(&parent) {
+                        Some(canonical) => on_dropped |= dropping.contains(&canonical),
+                        None => known = false,
+                    }
+                }
+                if !known || !on_dropped {
+                    continue;
+                }
+                let source = self.historical_native_source(&twin, &mut memo);
+                let original = match source {
+                    Ok(Some(original)) => original,
+                    Ok(None)
+                    | Err(NodeError::RewrittenRealization | NodeError::AmbiguousAbandon(_)) => {
+                        continue;
+                    }
+                    Err(err) => return Err(err),
+                };
+                if let [now] = self.current_ids(&original)?.as_slice()
+                    && self.canonical.original_id(now)? == self.canonical.original_id(&original)?
+                {
+                    rebuilt.push((twin, original, now.clone()));
+                }
+            }
+            // By the twins' own parents, as jj moved them: their images can share parents.
+            let mut first = None;
+            for (index, (_, original, _)) in rebuilt.iter().enumerate() {
+                if self.above_all(original, rebuilt.iter().map(|(_, other, _)| other))? {
+                    first = Some(index);
+                    break;
+                }
+            }
+            // Twins that can't be ordered so, but judged alike, say the same of the command.
+            if first.is_none() && !rebuilt.is_empty() {
+                let mut views = HashSet::new();
+                for (_, original, _) in &rebuilt {
+                    views.insert(self.canonical.read_operation(original)?.view_id);
+                }
+                if views.len() == 1 {
+                    first = Some(0);
+                }
+            }
+            if let Some(index) = first {
+                let (twin, original, now) = rebuilt.swap_remove(index);
+                found.roots.insert(command, now);
+                found.twins.insert(twin, original);
+            }
+        }
+        Ok(found)
+    }
+
+    /// Whether every parent of each of `others` is below a parent of `op`: `op` is as far up
+    /// the history as any of them.
+    fn above_all<'a>(
+        &self,
+        op: &CanonicalOp,
+        others: impl Iterator<Item = &'a CanonicalOp>,
+    ) -> Result<bool, NodeError> {
+        let parents = self.canonical.parents(op)?;
+        for other in others {
+            for below in self.canonical.parents(other)? {
+                let mut found = false;
+                for parent in &parents {
+                    if self.canonical.is_ancestor_of(&below, parent)? {
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    /// Every other operation in the op store with the full nonparent content of one of
+    /// `commands`, by fingerprint: what jj's reparenting left of each.
+    fn native_twins(
+        &self,
+        commands: &HashMap<String, LocalOp>,
+    ) -> Result<HashMap<LocalOp, Vec<LocalOp>>, NodeError> {
+        let path = self.repo_path.join("op_store/operations");
+        let files = fs::read_dir(&path).map_err(|source| NodeError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        let store = self.loader.op_store().clone();
+        let mut sources: HashMap<LocalOp, Vec<LocalOp>> = HashMap::new();
+        for file in files {
+            let file = file.map_err(|source| NodeError::Io {
+                path: path.clone(),
+                source,
+            })?;
+            let Some(id) = file
+                .file_name()
+                .to_str()
+                .and_then(OperationId::try_from_hex)
+            else {
+                continue;
+            };
+            let op = match store.read_operation(&id).block_on() {
+                Ok(op) => op,
+                Err(jj_lib::op_store::OpStoreError::ObjectNotFound { .. }) => continue,
+                Err(err) => return Err(err.into()),
+            };
+            if let Some(command) = commands.get(&fingerprint(&op))
+                && command.0 != id
+            {
+                sources
+                    .entry(command.clone())
+                    .or_default()
+                    .push(LocalOp(id));
+            }
+        }
+        Ok(sources)
     }
 
     /// Rebuild an unpublished source on its actual historical inputs before dropping them.

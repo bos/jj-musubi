@@ -304,7 +304,9 @@ whose prefix is one that a known machine other than this one can be shown under 
 - the operation made it: it is in none of the views of the operation's local parents. An
   operation that goes back to an older one (an undo, redo, restore or revert) makes no names: a
   name is its own if it was among this machine's own names as of that older operation or its
-  parents.
+  parents. Nor does a `jj` command make one that it found in the view of an operation `jj op
+  abandon` dropped from under it: its parents are those it had before the abandon moved it
+  ([Publishing an abandon](#publishing-an-abandon)).
 
 Otherwise `canonical_view` doesn't publish it. `show_other_workspaces` also drops it from the
 local view, unless jj's workspace store says this machine has a working copy for it.
@@ -1084,6 +1086,18 @@ it through the applied and pending drops. An older accepted view cannot supply i
 the unpublished command may have forgotten a foreign workspace and created its own under the
 same literal name. Conflicting twins are refused. If gc removed the input needed to distinguish
 an owned literal from a foreign alias, the copy is refused rather than assigned guessed owners.
+
+So too where the abandon keeps history below: a command not yet published that jj moved off an
+operation the abandon drops, onto operations that stay, stands for its twin there, given a
+canonical form on the parents it had and contracted like any other operation. Judged on its new
+parents, it would make every name the dropped operations' views had and theirs lack, as one a sync
+showed again after this machine forgot another machine's workspace, and the workspace would become
+this machine's own. Only a twin on operations with canonical forms, one of them among what the
+abandon drops, is what the command was before it: one on an operation an earlier abandon or trim
+rewrote, as a `jj --at-op` command can be, started from other views. Where abandons moved the
+command more than once, the twin furthest up the history, by its own parents, is the one jj first
+moved; twins that can't be ordered so do as well if they are judged alike. A command whose twins
+disagree, or whose twin can't be translated, is taken as it is.
 
 Recovered sources go through the ordinary abandon calculation, fix-up and counted source
 binding. Historical twins retain their original canonical correspondence; the root rewrite

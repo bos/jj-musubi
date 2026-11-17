@@ -436,6 +436,23 @@ impl NodeRepo {
                 counterparts.insert(id.clone(), c);
             }
         }
+        // A command not yet published that jj moved off what it dropped stands for its
+        // pre-abandon twin, on the parents it had, as one jj moved to the root does: looked
+        // for only where something the hub accepted is gone, which reading every operation in
+        // the op store is worth.
+        let stood_for: HashSet<&CanonicalOp> = counterparts.values().collect();
+        let dropping: HashSet<CanonicalOp> = region
+            .iter()
+            .filter(|op| !stood_for.contains(op))
+            .cloned()
+            .collect();
+        if !recovered && !self.records.moving && !dropping.is_empty() {
+            let reached: HashSet<LocalOp> = mapped.iter().map(|(local, _)| local.clone()).collect();
+            let sources =
+                self.unpublished_reparented_sources(&unmapped, &reached, &dropping, &counterparts)?;
+            counterparts.extend(sources.roots);
+            historical_sources.extend(sources.twins);
+        }
         // Dropped: what this machine had below the base, or below what jj rewrote, that no
         // operation it reaches stands for now.
         if self.records.moving {

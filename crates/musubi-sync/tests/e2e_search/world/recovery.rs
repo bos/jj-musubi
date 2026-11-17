@@ -15,6 +15,29 @@ use super::OperationHistory;
 use super::World;
 
 impl World {
+    /// Integrates on machine `m` the history `target` that an ambiguous-abandon refusal of
+    /// `what` names, as its hint says, once for each copy and history: asked again, the
+    /// recovery didn't help, and the case fails, saying `err`.
+    pub(super) fn integrate_named_history(
+        &mut self,
+        m: usize,
+        what: &str,
+        target: &str,
+        err: &str,
+    ) {
+        if self.recovery_actions >= MAX_RECOVERIES
+            || !self
+                .integrated_history
+                .insert((self.fx.machine_key(m), target.to_owned()))
+        {
+            self.fail(&format!(
+                "{what} keeps asking to restore the same history: {err}"
+            ));
+        }
+        self.recovery_actions += 1;
+        self.jj(m, &["op", "integrate", target]);
+    }
+
     /// Recovers from a sync of node `m` that failed, as a user would from what it says: from
     /// a stop behind records the hub pruned, by making a new copy (`stopped_behind_prune`);
     /// by integrating the history named by an ambiguous-abandon hint; or from a known jj
@@ -35,17 +58,7 @@ impl World {
                 _ => None,
             })
         {
-            if self.recovery_actions >= MAX_RECOVERIES
-                || !self
-                    .integrated_history
-                    .insert((self.fx.machine_key(m), target.clone()))
-            {
-                self.fail(&format!(
-                    "{what} keeps asking to restore the same history: {err:#}"
-                ));
-            }
-            self.recovery_actions += 1;
-            self.jj(m, &["op", "integrate", &target]);
+            self.integrate_named_history(m, what, &target, &format!("{err:#}"));
             return;
         }
         let found = err

@@ -1596,6 +1596,51 @@ fn raw_source_collectors_leave_pending_and_known_native_operations_untouched() {
     assert_eq!(run(false), run(true));
 }
 
+/// `musubi forget` refuses as a sync does where jj's reparenting recreated an abandoned
+/// operation's exact id, so that which of the hive's operations was dropped can't be told:
+/// abandoning the snapshot below a commit rewrites the commit, a stale working copy brings
+/// the original back, and abandoning that puts the rewrite on the snapshot, the original's
+/// bytes. The search follows the refusal's hint, as a user would, and forgets again.
+#[test]
+fn forget_follows_an_ambiguous_abandon_hint() {
+    let mut world = World::new(Setup {
+        nodes: 2,
+        naming: Naming::Own,
+        prejoin: false,
+        secondary: false,
+    });
+    world.commit(0, 0, 1);
+    let commit = world.latest_op_head(0);
+    let store = world.fx.node(0).loader().op_store().clone();
+    let id = OpId::try_from_hex(&commit).unwrap();
+    let snapshot = futures::executor::block_on(store.read_operation(&id))
+        .unwrap()
+        .parents[0]
+        .hex();
+    world.forget_copy(0, 1);
+    world.op_abandon(0, &snapshot);
+    world.sync(0);
+    world.sync(0);
+    world.commit(0, 0, 0);
+    world.op_abandon(0, &commit);
+    world.commit(0, 0, 2);
+    let (trace, credit) = (world.trace.len(), world.recovery_actions);
+    world.forget_copy(0, 1);
+    assert_eq!(world.recovery_actions, credit + 1);
+    let [(copy, target)] = Vec::from_iter(world.integrated_history.clone())
+        .try_into()
+        .unwrap();
+    assert_eq!(copy, world.fx.machine_key(0));
+    assert_eq!(
+        &world.trace[trace..],
+        &[
+            "alpha: musubi forget beta".to_owned(),
+            format!("alpha: jj op integrate {target}"),
+            "alpha: musubi forget beta".to_owned(),
+        ]
+    );
+}
+
 #[test]
 fn ambiguous_abandon_recovery_integrates_the_real_hint_once() {
     use std::path::Path;

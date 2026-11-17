@@ -1849,13 +1849,13 @@ fn the_daemon_picks_up_new_repositories() {
     apply to the following one; `musubi sync` waits for one with the new settings. Its own
     `musubi.daemon.*` settings need `musubi daemon restart`.
 
-    When a hub runs a newer release of musubi, or a newer build deployed from source, the daemon runs
-    the command `musubi.upgrade-command` names, if set, with `MUSUBI_UPGRADE_TO` set to it, and once the
-    `musubi` it started from is that, starts again from it. Keep the installer in the foreground and
-    preserve its standard input, which on Unix holds the upgrade lock across daemon restarts. While the
-    daemon that launched it runs, the command may run for up to an hour; a timeout stops its process
-    group on Unix, or the command process on Windows. A command surviving its daemon has no timeout
-    monitor.
+    When a hub runs a newer release of musubi, the daemon runs the command named by
+    `musubi.upgrade-command`, if set, with `MUSUBI_UPGRADE_TO` set to that release. Once the command
+    installs that release at the daemon's executable path, the daemon restarts from it. Keep the
+    installer in the foreground and preserve its standard input, which on Unix holds the upgrade lock
+    across daemon restarts. While the daemon that launched it runs, the command may run for up to an
+    hour; a timeout stops its process group on Unix, or the command process on Windows. A command
+    surviving its daemon has no timeout monitor.
     ");
     logs.daemon_of(&env, &alpha);
     logs.daemon_of(&env, &beta);
@@ -2563,13 +2563,13 @@ chmod +x "{exe}.new" && mv "{exe}.new" "{exe}"
     apply to the following one; `musubi sync` waits for one with the new settings. Its own
     `musubi.daemon.*` settings need `musubi daemon restart`.
 
-    When a hub runs a newer release of musubi, or a newer build deployed from source, the daemon runs
-    the command `musubi.upgrade-command` names, if set, with `MUSUBI_UPGRADE_TO` set to it, and once the
-    `musubi` it started from is that, starts again from it. Keep the installer in the foreground and
-    preserve its standard input, which on Unix holds the upgrade lock across daemon restarts. While the
-    daemon that launched it runs, the command may run for up to an hour; a timeout stops its process
-    group on Unix, or the command process on Windows. A command surviving its daemon has no timeout
-    monitor.
+    When a hub runs a newer release of musubi, the daemon runs the command named by
+    `musubi.upgrade-command`, if set, with `MUSUBI_UPGRADE_TO` set to that release. Once the command
+    installs that release at the daemon's executable path, the daemon restarts from it. Keep the
+    installer in the foreground and preserve its standard input, which on Unix holds the upgrade lock
+    across daemon restarts. While the daemon that launched it runs, the command may run for up to an
+    hour; a timeout stops its process group on Unix, or the command process on Windows. A command
+    surviving its daemon has no timeout monitor.
 
     Usage: musubi daemon [OPTIONS] [COMMAND]
 
@@ -3930,11 +3930,11 @@ fn op_abandon_syncs_but_history_otherwise_lost_stops_syncing() {
     retries from the hub's current state. Run `musubi sync` again to retry at once.
 
     Automatic snapshots may retain files you subsequently removed. Sending pauses if that content
-    exceeds 100 paths or 8 MiB beyond explicit change history and shared content; receiving continues.
-    Inspect with --outgoing, approve exactly what it shows with --approve TOKEN, or preview discarding
-    selected unpublished operations with --prune OPERATION... . Apply a preview with --prune
-    OPERATION... --apply TOKEN; current work and explicit change versions are retained, but earlier
-    uncommitted versions may become unrecoverable. jj config keys musubi.publication.max-files and
+    exceeds 1,000 paths or 64 MiB beyond explicit change history and shared content; receiving
+    continues. Inspect with --outgoing, approve exactly what it shows with --approve TOKEN, or discard
+    selected unpublished operations with --prune OPERATION... . Add --dry-run to preview without
+    changing history; current work and explicit change versions are retained, but earlier uncommitted
+    versions may become unrecoverable. jj config keys musubi.publication.max-files and
     musubi.publication.max-bytes set the limits; 0 disables the corresponding limit.
 
     Trimming earlier history with `jj op abandon` preserves each copy's own Git state. Other copies
@@ -3953,10 +3953,10 @@ fn op_abandon_syncs_but_history_otherwise_lost_stops_syncing() {
               Send the exact publication inspected with --outgoing, despite its snapshot budget
 
           --prune <OPERATION>...
-              Preview discarding these unpublished operations while retaining current work
+              Snapshot current edits, then discard selected unpublished operations
 
-          --apply <TOKEN>
-              Apply the exact cleanup preview identified by this token
+          --dry-run
+              Preview recorded history without discarding operations or snapshotting current files
 
       -h, --help
               Print help (see a summary with '-h')
@@ -4834,7 +4834,7 @@ fn hub_runs_through_service(at_boot: bool) {
 }
 
 /// A held sender can inspect, discard selected recovery history, or approve exactly one
-/// publication. A stale cleanup records unsnapshotted edits before refusing to discard it.
+/// publication. Dry runs leave history alone; cleanup snapshots and preserves current edits.
 #[test]
 fn publication_budget_inspection_cleanup_and_override() {
     let env = TestEnv::with_real_op_times();
@@ -4896,7 +4896,7 @@ fn publication_budget_inspection_cleanup_and_override() {
       [operation]  2 files, 68 bytes  snapshot working copy
 
     Send this work: musubi sync --approve [token]
-    Preview cleanup: musubi sync --prune <operation>...
+    Preview cleanup: musubi sync --prune <operation>... --dry-run
     ");
     let selectors = |outgoing: &str| {
         outgoing
@@ -4911,36 +4911,50 @@ fn publication_budget_inspection_cleanup_and_override() {
     let selected = selectors(&outgoing);
     let mut prune = vec!["sync", "--prune"];
     prune.extend(selected.iter().map(String::as_str));
-    let preview = musubi_in(&env, &logs, &alpha, &prune);
+    alpha.write_file("AGENTS.md", "unsnapshotted at preview");
+    let head = || {
+        alpha.jj(&[
+            "--ignore-working-copy",
+            "op",
+            "log",
+            "--no-graph",
+            "-n",
+            "1",
+            "-T",
+            "id",
+        ])
+    };
+    let before = head();
+    let mut dry_run = prune.clone();
+    dry_run.push("--dry-run");
+    let preview = musubi_in(&env, &logs, &alpha, &dry_run);
     insta::assert_snapshot!(preview, @"
     Discard 3 unpublished operations.
     Keep all current commits, bookmarks, workspaces and files.
     Earlier versions of uncommitted files may become unrecoverable.
     Snapshot content: 2 files, 68 bytes -> 1 file, 4 bytes.
-    Apply: musubi sync --prune [operation] [operation] [operation] --apply [token]
     ");
-    let token = preview.split_whitespace().last().unwrap();
+    assert_eq!(
+        head(),
+        before,
+        "a dry run must not snapshot edits or prune history"
+    );
+    assert_eq!(musubi_in(&env, &logs, &alpha, &dry_run), preview);
     alpha.write_file("AGENTS.md", "latest");
-    let mut apply = prune.clone();
-    apply.extend(["--apply", token]);
-    insta::assert_snapshot!(musubi_fails(&env, &logs, &alpha, &apply), @"Error: outgoing work changed; preview the cleanup again before applying it");
+    let mut command = alpha.program(musubi());
+    command.args(&prune);
+    let (ok, stdout, stderr) = try_run(&logs, &env, command);
+    assert!(ok, "{stdout}{stderr}\n{}", logs.dump());
+    insta::assert_snapshot!(stderr, @"Discarded 3 unpublished operations; current work is unchanged.");
     assert_eq!(
         fs::read_to_string(alpha.path().join("AGENTS.md")).unwrap(),
         "latest"
     );
-    let outgoing = musubi_in(&env, &logs, &alpha, &["sync", "--outgoing"]);
-    let selected = selectors(&outgoing);
-    let mut prune = vec!["sync", "--prune"];
-    prune.extend(selected.iter().map(String::as_str));
-    let preview = musubi_in(&env, &logs, &alpha, &prune);
-    let token = preview.split_whitespace().last().unwrap();
-    let mut apply = prune;
-    apply.extend(["--apply", token]);
-    let mut command = alpha.program(musubi());
-    command.args(&apply);
-    let (ok, stdout, stderr) = try_run(&logs, &env, command);
-    assert!(ok, "{stdout}{stderr}\n{}", logs.dump());
-    insta::assert_snapshot!(stderr, @"Discarded 4 unpublished operations; current work is unchanged.");
+    // Cleanup records current edits without requiring a separate jj command.
+    assert_eq!(
+        alpha.jj(&["--ignore-working-copy", "file", "show", "AGENTS.md"]),
+        "latest"
+    );
     musubi_in(&env, &logs, &alpha, &["sync"]);
     musubi_in(&env, &logs, &beta, &["sync"]);
     assert!(
@@ -4956,6 +4970,97 @@ fn publication_budget_inspection_cleanup_and_override() {
             ])
             .contains("accident")
     );
+    // Deleting accidental files and pruning is one command even when jj has not
+    // recorded their removal. The cleanup's own snapshot must not retain the accident.
+    alpha.write_file("one-command-accident", &"x".repeat(64));
+    alpha.jj(&["status"]);
+    let outgoing = musubi_in(&env, &logs, &alpha, &["sync", "--outgoing"]);
+    let selected = selectors(&outgoing);
+    assert!(!selected.is_empty(), "{outgoing}");
+    fs::remove_file(alpha.path().join("one-command-accident")).unwrap();
+    alpha.write_file("AGENTS.md", "newest");
+    let mut prune = vec!["sync", "--prune"];
+    prune.extend(selected.iter().map(String::as_str));
+    let mut command = alpha.program(musubi());
+    command.args(&prune);
+    let (ok, stdout, stderr) = try_run(&logs, &env, command);
+    assert!(ok, "{stdout}{stderr}\n{}", logs.dump());
+    assert_eq!(
+        alpha.jj(&["--ignore-working-copy", "file", "show", "AGENTS.md"]),
+        "newest"
+    );
+    assert!(!alpha.path().join("one-command-accident").exists());
+    let outgoing = musubi_in(&env, &logs, &alpha, &["sync", "--outgoing"]);
+    assert!(!outgoing.contains("one-command-accident"), "{outgoing}");
+    musubi_in(&env, &logs, &alpha, &["sync"]);
+
+    // Snapshotting the invoking workspace must not bypass secondary-workspace checks.
+    let other_path = env.root().join("other-workspace");
+    alpha.jj(&[
+        "workspace",
+        "add",
+        "--name",
+        "other",
+        other_path.to_str().unwrap(),
+    ]);
+    let other = alpha.another_copy(&other_path);
+    alpha.write_file("stale-probe", &"p".repeat(64));
+    alpha.jj(&["status"]);
+    fs::remove_file(alpha.path().join("stale-probe")).unwrap();
+    alpha.jj(&["status"]);
+    alpha.jj(&["restore", "--from", "@", "--into", "other@", "AGENTS.md"]);
+    assert!(!other.path().join("AGENTS.md").exists());
+    let outgoing = musubi_in(&env, &logs, &alpha, &["sync", "--outgoing"]);
+    let selected = selectors(&outgoing);
+    assert!(!selected.is_empty(), "{outgoing}");
+    let mut prune = vec!["sync", "--prune"];
+    prune.extend(selected.iter().map(String::as_str));
+    let err = musubi_fails(&env, &logs, &alpha, &prune);
+    assert!(
+        err.contains("workspace other must be updated before pruning"),
+        "{err}"
+    );
+    assert!(!other.path().join("AGENTS.md").exists());
+    other.jj(&["status"]);
+
+    // Even when jj's automatic stale recovery is enabled, pruning must not check out
+    // another tree in the invoking workspace. Leave recovery to an explicit jj command.
+    other.write_file("stale-source", "from other");
+    other.jj(&["commit", "-m", "other work"]);
+    other.jj(&[
+        "restore",
+        "--from",
+        "@-",
+        "--into",
+        "alpha@",
+        "stale-source",
+    ]);
+    alpha.write_file("AGENTS.md", "pending stale edit");
+    let before = head();
+    alpha.jj(&["config", "set", "--user", "ui.color", "always"]);
+    let mut stale_prune = vec!["--color=never"];
+    stale_prune.extend(prune.iter().copied());
+    let err = musubi_fails(&env, &logs, &alpha, &stale_prune);
+    alpha.jj(&["config", "set", "--user", "ui.color", "never"]);
+    insta::assert_snapshot!(err, @"
+    Error: The working copy is stale (not updated since operation [operation]).
+    Hint: Run `jj workspace update-stale` to update it.
+    See https://docs.jj-vcs.dev/latest/working-copy/#stale-working-copy for more information.
+    ");
+    assert_eq!(head(), before);
+    assert!(!alpha.path().join("stale-source").exists());
+    assert_eq!(
+        fs::read_to_string(alpha.path().join("AGENTS.md")).unwrap(),
+        "pending stale edit"
+    );
+    alpha.jj(&["workspace", "update-stale"]);
+    let outgoing = musubi_in(&env, &logs, &alpha, &["sync", "--outgoing"]);
+    let selected = selectors(&outgoing);
+    let mut prune = vec!["sync", "--prune"];
+    prune.extend(selected.iter().map(String::as_str));
+    musubi_in(&env, &logs, &alpha, &prune);
+    musubi_in(&env, &logs, &alpha, &["sync"]);
+
     for index in 0..51 {
         alpha.write_file(&format!("large-{index:02}"), &"z".repeat(64));
     }
@@ -4980,7 +5085,7 @@ fn publication_budget_inspection_cleanup_and_override() {
           [operation]  51 files, 64 bytes  snapshot working copy
 
         Send this work: musubi sync --approve [token]
-        Preview cleanup: musubi sync --prune <operation>...
+        Preview cleanup: musubi sync --prune <operation>... --dry-run
         ");
     }
     let token = outgoing

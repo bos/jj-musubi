@@ -25,14 +25,14 @@ fn counted(count: usize, noun: &str) -> String {
     format!("{count} {noun}{}", if count == 1 { "" } else { "s" })
 }
 
-/// Inspection, scoped approval, and preview/application of selected snapshot cleanup.
+/// Inspection, scoped approval, and selected snapshot cleanup with an optional dry run.
 pub fn publication(
     ui: &Ui,
     start: &Path,
     socket: &Socket,
     approve: Option<&str>,
     prune: &[String],
-    apply: Option<&str>,
+    dry_run: bool,
 ) -> anyhow::Result<()> {
     let (located, _, _) = the_copy(ui, start, socket)?;
     // An older daemon does not honor the guard or publication lock.
@@ -41,22 +41,44 @@ pub fn publication(
     let mut node = located.open()?;
     let mut cache = musubi_jj::node::PublicationCache::default();
     if !prune.is_empty() {
-        if let Some(token) = apply {
-            // Preserve unsnapshotted edits too. If recording them changes the inspected
-            // source, the token check refuses and asks for a new preview.
+        if !dry_run {
+            let requested = node.preview_publication_cleanup(prune, &mut cache)?;
+            // jj records its arguments on every snapshot. A unique, command-only config
+            // argument identifies this invocation without selecting concurrent snapshots.
+            let invocation = uuid::Uuid::new_v4().simple().to_string();
+            let marker = format!("--config=musubi.prune-snapshot={invocation}");
+            // Record current edits and deletions before planning cleanup. Never let stale
+            // recovery update files implicitly; the workspace checks below still apply.
             let mut jj = std::process::Command::new("jj");
             musubi_jj::git_command::without_repository_env(&mut jj);
             let output = jj
-                .args(["util", "snapshot"])
+                .args([
+                    "--color=never",
+                    "--config=snapshot.auto-update-stale=false",
+                    &marker,
+                    "util",
+                    "snapshot",
+                ])
                 .current_dir(&located.workspace_root)
-                .output()?;
-            anyhow::ensure!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
+                .output()
+                .context("running `jj util snapshot` before pruning")?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let message = stderr.trim();
+                if message.is_empty() {
+                    anyhow::bail!("`jj util snapshot` failed: {}", output.status);
+                }
+                // musubi adds its own error heading; retain jj's message and recovery hint.
+                anyhow::bail!("{}", message.strip_prefix("Error: ").unwrap_or(message));
+            }
             node = located.open()?;
-            let count = node.apply_publication_cleanup(prune, token, &mut cache)?;
+            cache = musubi_jj::node::PublicationCache::default();
+            // Keep the resolved operation identities if native work changes prefixes meanwhile.
+            let mut selected = requested.selected.clone();
+            selected.extend(node.publication_snapshots_from(&invocation)?);
+            let plan = node.preview_publication_cleanup(&selected, &mut cache)?;
+            node.apply_publication_cleanup(&selected, &plan.token, &mut cache)?;
+            let count = requested.selected.len();
             writeln!(
                 ui.stderr(),
                 "Discarded {}; current work is unchanged.",
@@ -92,12 +114,6 @@ pub fn publication(
                     "The remaining snapshot content would still exceed the budget."
                 )?;
             }
-            writeln!(
-                out,
-                "Apply: musubi sync --prune {} --apply {}",
-                prune.join(" "),
-                plan.token
-            )?;
         }
         return Ok(());
     }
@@ -165,7 +181,10 @@ pub fn publication(
         )?;
     }
     if report.cleanup_available {
-        writeln!(out, "Preview cleanup: musubi sync --prune <operation>...")?;
+        writeln!(
+            out,
+            "Preview cleanup: musubi sync --prune <operation>... --dry-run"
+        )?;
     } else {
         writeln!(
             out,

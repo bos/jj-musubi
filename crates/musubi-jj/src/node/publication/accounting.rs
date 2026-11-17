@@ -35,14 +35,14 @@ impl PublicationLimits {
             files: config
                 .get("musubi.publication.max-files")
                 .optional()?
-                .unwrap_or(100),
+                .unwrap_or(1000),
             bytes: config
                 .get_value_with(
                     "musubi.publication.max-bytes",
                     jj_lib::settings::HumanByteSize::try_from,
                 )
                 .optional()?
-                .map_or(8 * 1024 * 1024, |bytes| bytes.0),
+                .map_or(64 * 1024 * 1024, |bytes| bytes.0),
         })
     }
 

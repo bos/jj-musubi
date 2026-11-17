@@ -14,6 +14,20 @@ use std::collections::HashMap;
 use std::fs;
 
 #[test]
+fn default_publication_limits_allow_typical_work_and_hold_above_each_boundary() {
+    let settings = jj_lib::settings::UserSettings::from_config_and_home_dir(
+        jj_lib::config::StackedConfig::with_defaults(),
+        None,
+    )
+    .unwrap();
+    let limits = PublicationLimits::load(&settings).unwrap();
+    assert!(limits.fits(120, 9_000_000));
+    assert!(limits.fits(1000, 64 * 1024 * 1024));
+    assert!(!limits.fits(1001, 0));
+    assert!(!limits.fits(1, 64 * 1024 * 1024 + 1));
+}
+
+#[test]
 fn import_invocations_follow_jjs_argument_rendering_and_option_boundaries() {
     for args in [
         "jj git import",
@@ -541,7 +555,17 @@ fn snapshot_bytes_are_unique_and_intentional_commits_are_exempt() {
 fn a_small_number_of_large_transient_files_hits_the_byte_budget() {
     let env = TestEnv::new();
     let repo = env.init_repo("alpha");
-    let mut node = start(&repo);
+    let mut config = repo.settings().config().clone();
+    config.add_layer(
+        jj_lib::config::ConfigLayer::parse(
+            jj_lib::config::ConfigSource::CommandArg,
+            "musubi.publication.max-bytes = '8 MiB'",
+        )
+        .unwrap(),
+    );
+    let settings = repo.settings().with_new_config(config).unwrap();
+    let mut node = NodeRepo::open(&repo.repo_path(), &settings).unwrap();
+    node.create_join_operation("musubi: test joins").unwrap();
     for i in 0..10 {
         let contents = char::from(b'a' + i).to_string().repeat(900_000);
         repo.write_file(&format!("junk/{i}"), &contents);
@@ -554,6 +578,404 @@ fn a_small_number_of_large_transient_files_hits_the_byte_budget() {
     assert_eq!(report.bytes, 9_000_000);
     assert!(report.held());
     compare_model(&mut node, &[]);
+}
+
+// Exercise cleanup directly, without a CLI preflight snapshot, then let jj recover
+// the workspace as it normally would after a history rewrite.
+fn cleanup_without_snapshot(stale: bool, secondary: bool, same_tree: bool) {
+    let env = TestEnv::new();
+    let repo = env.init_repo("alpha");
+    let mut node = start(&repo);
+    let join = node.local_heads().unwrap()[0].clone();
+    let second_path = env.root().join("second");
+    repo.jj(&[
+        "workspace",
+        "add",
+        "--name",
+        "second",
+        second_path.to_str().unwrap(),
+    ]);
+    let second = repo.another_copy(&second_path);
+    let (actor, other, name) = if secondary {
+        (&second, &repo, "second@")
+    } else {
+        (&repo, &second, "alpha@")
+    };
+    actor.write_file("accident", "unwanted history");
+    actor.jj(&["status"]);
+    fs::remove_file(actor.path().join("accident")).unwrap();
+    actor.jj(&["status"]);
+    actor.write_file("local", "unsnapshotted work");
+    if stale {
+        if same_tree {
+            other.jj(&["describe", "-r", name, "-m", "rewritten elsewhere"]);
+        } else {
+            other.write_file("upstream", "recorded elsewhere");
+            other.jj(&["commit", "-m", "upstream"]);
+            other.jj(&["restore", "--from", "@-", "--into", name]);
+        }
+    }
+    let select = |node: &mut NodeRepo| {
+        let (_, pending) = node.publication_pending().unwrap();
+        pending
+            .iter()
+            .filter_map(|id| node.local_of(id))
+            .filter(|id| *id != join)
+            .map(|id| id.0.hex())
+            .collect::<Vec<_>>()
+    };
+    if stale {
+        let selected = select(&mut node);
+        let heads = node.local_heads().unwrap();
+        let mut cache = PublicationCache::default();
+        let plan = node
+            .preview_publication_cleanup(&selected, &mut cache)
+            .unwrap();
+        let err = node
+            .apply_publication_cleanup(&selected, &plan.token, &mut cache)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("must be updated before pruning"),
+            "{err}"
+        );
+        assert_eq!(
+            node.local_heads().unwrap(),
+            heads,
+            "refusal must not prune history"
+        );
+        assert_eq!(
+            fs::read_to_string(actor.path().join("local")).unwrap(),
+            "unsnapshotted work"
+        );
+        assert!(!actor.path().join("upstream").exists());
+        actor.jj(&["status"]);
+        node = open(&repo);
+    }
+    let before = report(&mut node);
+    assert!(before.files.iter().any(|file| file.path == "accident"));
+    let selected = select(&mut node);
+    let recorded = actor.jj(&[
+        "--ignore-working-copy",
+        "op",
+        "log",
+        "--no-graph",
+        "-n",
+        "1",
+        "-T",
+        "id",
+    ]);
+    let files = || {
+        (
+            fs::read(actor.path().join("local")).ok(),
+            fs::read(actor.path().join("upstream")).ok(),
+        )
+    };
+    let disk = files();
+    let mut cache = PublicationCache::default();
+    let plan = node
+        .preview_publication_cleanup(&selected, &mut cache)
+        .unwrap();
+    node.apply_publication_cleanup(&selected, &plan.token, &mut cache)
+        .unwrap();
+    assert_eq!(
+        files(),
+        disk,
+        "cleanup must leave checked-out files untouched"
+    );
+    assert!(
+        !report(&mut open(&repo))
+            .files
+            .iter()
+            .any(|file| file.path == "accident")
+    );
+    let history = actor.jj(&[
+        "--ignore-working-copy",
+        "op",
+        "log",
+        "--no-graph",
+        "-T",
+        "id ++ \"\\n\"",
+    ]);
+    assert!(
+        !history.lines().any(|id| id == recorded),
+        "the recorded basis must actually be pruned"
+    );
+    repo.jj(&["--ignore-working-copy", "util", "gc", "--expire", "now"]);
+    actor.jj(&["status"]);
+    assert_eq!(
+        actor.jj(&[
+            "--ignore-working-copy",
+            "file",
+            "show",
+            "local",
+            "-r",
+            "heads(all() & files(local))"
+        ]),
+        "unsnapshotted work"
+    );
+    assert!(
+        !report(&mut open(&repo))
+            .files
+            .iter()
+            .any(|file| file.path == "accident"),
+        "jj recovery must not resurrect pruned history"
+    );
+}
+
+#[test]
+fn cleanup_without_snapshot_preserves_fresh_workspace_edits() {
+    cleanup_without_snapshot(false, false, false);
+}
+
+#[test]
+fn cleanup_without_snapshot_preserves_stale_invoking_workspace_edits() {
+    cleanup_without_snapshot(true, false, false);
+}
+
+#[test]
+fn cleanup_without_snapshot_preserves_stale_secondary_workspace_edits() {
+    cleanup_without_snapshot(true, true, false);
+}
+
+#[test]
+fn cleanup_without_snapshot_checks_commit_identity_even_when_trees_match() {
+    cleanup_without_snapshot(true, true, true);
+}
+
+#[test]
+fn cleanup_refuses_unavailable_or_reassigned_workspace_paths() {
+    let env = TestEnv::new();
+    let repo = env.init_simple_repo("alpha");
+    let mut node = start(&repo);
+    let join = node.local_heads().unwrap()[0].clone();
+    let second = env.root().join("second");
+    repo.jj(&[
+        "workspace",
+        "add",
+        "--name",
+        "feat/x",
+        second.to_str().unwrap(),
+    ]);
+    repo.write_file("accident", "unwanted history");
+    repo.jj(&["status"]);
+    fs::remove_file(repo.path().join("accident")).unwrap();
+    repo.jj(&["status"]);
+    let before = report(&mut node);
+    let selected: Vec<_> = before.operations.iter().map(|op| op.id.clone()).collect();
+    let mut cache = PublicationCache::default();
+    let plan = node
+        .preview_publication_cleanup(&selected, &mut cache)
+        .unwrap();
+    let heads = node.local_heads().unwrap();
+    let saved = env.root().join("saved-second");
+    fs::rename(&second, &saved).unwrap();
+    let err = node
+        .apply_publication_cleanup(&selected, &plan.token, &mut cache)
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("cannot read workspace feat/x"),
+        "{err}"
+    );
+    assert_eq!(node.local_heads().unwrap(), heads);
+
+    let foreign = env.init_repo_with_workspace("second", "feat/x");
+    foreign.write_file("private", "another repo's pending work");
+    let foreign_head = || {
+        foreign.jj(&[
+            "--ignore-working-copy",
+            "op",
+            "log",
+            "--no-graph",
+            "-n",
+            "1",
+            "-T",
+            "id",
+        ])
+    };
+    let old = foreign_head();
+    let err = node
+        .apply_publication_cleanup(&selected, &plan.token, &mut cache)
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("no longer identifies this repo"),
+        "{err}"
+    );
+    assert_eq!(node.local_heads().unwrap(), heads);
+    assert_eq!(foreign_head(), old);
+    assert_eq!(
+        fs::read_to_string(second.join("private")).unwrap(),
+        "another repo's pending work"
+    );
+    fs::rename(&second, env.root().join("foreign-repo")).unwrap();
+    fs::rename(&saved, &second).unwrap();
+    let name = jj_lib::ref_name::WorkspaceName::new("feat/x");
+    // A workspace can predate jj's path registry. Exercise that supported store state
+    // through the public store API, without inventing any checked-out file state.
+    node.loader.workspace_store().forget(&[name]).unwrap();
+    let err = node
+        .apply_publication_cleanup(&selected, &plan.token, &mut cache)
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("cannot locate workspace feat/x"),
+        "{err}"
+    );
+    assert_eq!(node.local_heads().unwrap(), heads);
+    node.loader.workspace_store().add(name, &second).unwrap();
+
+    // Native jj permits a moved workspace's old path to be reused by another.
+    // The earlier name must not be silently overwritten when collecting the paths.
+    let reused = env.root().join("reused");
+    repo.jj(&[
+        "workspace",
+        "add",
+        "--name",
+        "aaa",
+        reused.to_str().unwrap(),
+    ]);
+    let moved = env.root().join("moved-aaa");
+    fs::rename(&reused, &moved).unwrap();
+    fs::write(moved.join("pending"), "moved workspace's edit").unwrap();
+    repo.jj(&[
+        "workspace",
+        "add",
+        "--name",
+        "zzz",
+        reused.to_str().unwrap(),
+    ]);
+    node = open(&repo);
+    let (_, pending) = node.publication_pending().unwrap();
+    let selected: Vec<_> = pending
+        .iter()
+        .filter_map(|id| node.local_of(id))
+        .filter(|id| *id != join)
+        .map(|id| id.0.hex())
+        .collect();
+    let mut cache = PublicationCache::default();
+    let plan = node
+        .preview_publication_cleanup(&selected, &mut cache)
+        .unwrap();
+    let heads = node.local_heads().unwrap();
+    let err = node
+        .apply_publication_cleanup(&selected, &plan.token, &mut cache)
+        .unwrap_err();
+    assert!(err.to_string().contains("share a registered path"), "{err}");
+    assert_eq!(node.local_heads().unwrap(), heads);
+    node.loader
+        .workspace_store()
+        .add(jj_lib::ref_name::WorkspaceName::new("aaa"), &moved)
+        .unwrap();
+
+    node.apply_publication_cleanup(&selected, &plan.token, &mut cache)
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(moved.join("pending")).unwrap(),
+        "moved workspace's edit"
+    );
+    assert!(
+        !report(&mut open(&repo))
+            .files
+            .iter()
+            .any(|file| file.path == "accident")
+    );
+}
+
+#[test]
+fn cleanup_includes_only_its_own_preflight_snapshots() {
+    let env = TestEnv::new();
+    let repo = env.init_repo("alpha");
+    let mut node = start(&repo);
+    // An unselected snapshot keeps an older version even though its file is now gone.
+    repo.write_file("unselected", "keep this recovery version");
+    repo.jj(&["status"]);
+    fs::remove_file(repo.path().join("unselected")).unwrap();
+    repo.jj(&["status"]);
+    repo.write_file("accident", "remove this version");
+    repo.jj(&["status"]);
+    let selected = repo.jj(&[
+        "--ignore-working-copy",
+        "op",
+        "log",
+        "--no-graph",
+        "-n1",
+        "-T",
+        "id",
+    ]);
+    fs::remove_file(repo.path().join("accident")).unwrap();
+    let invocation = "5d0e52764e834f55a86ad193beaf1820";
+    repo.jj(&[
+        "--config=musubi.prune-snapshot=5d0e52764e834f55a86ad193beaf1820",
+        "util",
+        "snapshot",
+    ]);
+    // A later native command must not be mistaken for the preflight capture.
+    repo.write_file("later", "keep later work");
+    repo.jj(&["status"]);
+    let mut selected = vec![selected];
+    let captures = node.publication_snapshots_from(invocation).unwrap();
+    assert_eq!(captures.len(), 1);
+    selected.extend(captures);
+    let mut cache = PublicationCache::default();
+    let plan = node
+        .preview_publication_cleanup(&selected, &mut cache)
+        .unwrap();
+    node.apply_publication_cleanup(&selected, &plan.token, &mut cache)
+        .unwrap();
+    let outgoing = report(&mut open(&repo));
+    assert!(outgoing.files.iter().any(|file| file.path == "unselected"));
+    assert!(!outgoing.files.iter().any(|file| file.path == "accident"));
+    assert_eq!(
+        repo.jj(&["--ignore-working-copy", "file", "show", "later"]),
+        "keep later work"
+    );
+    repo.jj(&["status"]);
+    assert!(
+        !report(&mut open(&repo))
+            .files
+            .iter()
+            .any(|file| file.path == "accident")
+    );
+}
+
+#[test]
+fn cleanup_requires_jj_to_record_file_removals() {
+    let env = TestEnv::new();
+    let repo = env.init_repo("alpha");
+    let mut node = start(&repo);
+    let join = node.local_heads().unwrap()[0].clone();
+    repo.write_file("accident", "unwanted history");
+    repo.jj(&["status"]);
+    fs::remove_file(repo.path().join("accident")).unwrap();
+    for recorded_removal in [false, true] {
+        if recorded_removal {
+            repo.jj(&["status"]);
+            node = open(&repo);
+        }
+        let (_, pending) = node.publication_pending().unwrap();
+        let selected: Vec<_> = pending
+            .iter()
+            .filter_map(|id| node.local_of(id))
+            .filter(|id| *id != join)
+            .map(|id| id.0.hex())
+            .collect();
+        let mut cache = PublicationCache::default();
+        let plan = node
+            .preview_publication_cleanup(&selected, &mut cache)
+            .unwrap();
+        assert_eq!(
+            plan.after.files.iter().any(|file| file.path == "accident"),
+            !recorded_removal
+        );
+        node.apply_publication_cleanup(&selected, &plan.token, &mut cache)
+            .unwrap();
+        assert!(!repo.path().join("accident").exists());
+        assert_eq!(
+            report(&mut open(&repo))
+                .files
+                .iter()
+                .any(|file| file.path == "accident"),
+            !recorded_removal
+        );
+    }
 }
 
 #[test]

@@ -417,19 +417,12 @@ fn run(cli: Cli, ui: &Ui) -> anyhow::Result<()> {
             outgoing,
             approve,
             prune,
-            apply,
+            dry_run,
         } => {
             let start = cwd()?;
             let socket = socket()?;
             if outgoing || approve.is_some() || !prune.is_empty() {
-                sync::publication(
-                    ui,
-                    &start,
-                    &socket,
-                    approve.as_deref(),
-                    &prune,
-                    apply.as_deref(),
-                )
+                sync::publication(ui, &start, &socket, approve.as_deref(), &prune, dry_run)
             } else {
                 sync::sync(ui, &start, &socket)
             }

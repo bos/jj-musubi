@@ -45,13 +45,13 @@ Agent-run commands have the same default. See [Set up a hub and machines](../gui
 | --- | --- |
 | `list` | Show hubs' hives, local copies and sync state. `-T` uses a template; see `musubi list --help`. Use `-T 'json(self) ++ "\n"'` for JSON. |
 | `status` | Report this copy's hive, hub, workspaces, last sync, pending work, other copies' activity and expiry, and daemon state. Warn of problems with recovery hints. Outside a hive, show the default hub and daemon. `-T` uses a template (`musubi status --help`); `-T 'json(self) ++ "\n"'` produces [JSON](#musubi-status-as-json). |
-| `sync` | Sync this copy now. `--outgoing` inspects snapshot overhead without sending. `--approve TOKEN` approves the inspected history. `--prune OPERATION...` previews discarding unpublished operations; `--prune OPERATION... --apply TOKEN` applies that preview, preserving current work and explicit change versions. See [snapshot cleanup](../guides/snapshots.md). For an ambiguous operation abandon, first restore missing history with the `jj op integrate` hint. |
+| `sync` | Sync this copy now. `--outgoing` inspects snapshot overhead without sending. `--approve TOKEN` approves the inspected history. `--prune OPERATION...` snapshots current edits and deletions, then discards unpublished operations while preserving current work and explicit change versions. Add `--dry-run` to preview recorded history without snapshotting or changing it. See [snapshot cleanup](../guides/snapshots.md). For an ambiguous operation abandon, first restore missing history with the `jj op integrate` hint. |
 | `top` | Watch hub traffic and machines that are offline, behind, or failing. |
 
 `status` reads local state without starting the daemon or contacting the hub. It always exits 0;
 warnings and hints go to standard error.
 
-Sending pauses above 100 extra file paths or 8 MiB in outgoing snapshots, beyond explicit
+Sending pauses above 1,000 extra file paths or 64 MiB in outgoing snapshots, beyond explicit
 change history and shared content; receiving continues. `musubi sync --outgoing` lists extra
 paths without snapshotting or contacting the hub. `Within publication budget` means the work
 fits, not that it was sent. See [Snapshot limits and cleanup](../guides/snapshots.md) for the
@@ -124,7 +124,7 @@ them.
 Issues list unreachable hubs, failed requests and machines offline, behind or failing to sync.
 An offline machine appears in the issues list when first found quiet; its row stays red and
 `ISSUES` still counts it. It appears again if heard from and then quiet again. See
-[report messages](../troubleshooting.md#what-musubi-top-reports) for recovery.
+[troubleshooting](../troubleshooting.md#start-with-this-copy) for recovery.
 
 `q` quits; space, Enter or `t` refreshes; `d`, `s` or `i` sets the refresh interval; Ctrl-L
 redraws. `+` and `-` refresh less or more often. Without a terminal, or with `--once`, it prints

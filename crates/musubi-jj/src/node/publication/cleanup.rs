@@ -4,10 +4,16 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::btree_map::Entry;
+use std::path::PathBuf;
 
 use jj_lib::backend::CommitId;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::OperationId;
+use jj_lib::ref_name::WorkspaceNameBuf;
+use jj_lib::repo::Repo as _;
+use jj_lib::working_copy::LockedWorkingCopy;
+use jj_lib::workspace::WorkspaceLoaderFactory as _;
 use pollster::FutureExt as _;
 use serde::Deserialize;
 use serde::Serialize;
@@ -33,11 +39,146 @@ pub struct PublicationCleanup {
 
 type CleanupEffect = (usize, HashMap<LocalOp, Vec<LocalOp>>, LocalOp);
 
+struct CleanupWorkspace {
+    name: WorkspaceNameBuf,
+    root: PathBuf,
+    locked: Box<dyn LockedWorkingCopy>,
+}
+
 fn invalid(message: impl Into<String>) -> NodeError {
     NodeError::Publication(message.into())
 }
 
 impl NodeRepo {
+    /// Lock metadata before op heads, as jj does. Cleanup keeps the current view, so
+    /// every local working copy needs that exact recorded commit as its snapshot basis.
+    /// Otherwise later stale recovery could merge the discarded ancestry back in.
+    fn lock_cleanup_workspaces(&self, head: &LocalOp) -> Result<Vec<CleanupWorkspace>, NodeError> {
+        let repo = self.repo_at(head)?;
+        let canonical = self
+            .canonical_of(head)
+            .ok_or_else(|| invalid("the current operation changed; run the cleanup again"))?;
+        let mut own: BTreeSet<_> = self
+            .own_workspaces(&repo, &canonical)?
+            .into_keys()
+            .collect();
+        own.extend(self.own_names(&canonical)?);
+        let mut paths: BTreeMap<PathBuf, WorkspaceNameBuf> = BTreeMap::new();
+        let names: BTreeSet<_> = repo
+            .view()
+            .wc_commit_ids()
+            .keys()
+            .chain(own.iter())
+            .collect();
+        for name in names {
+            let label = name.as_str();
+            match self.loader.workspace_store().get_workspace_path(name) {
+                Ok(Some(path)) => {
+                    let path = path.canonicalize().map_err(|err| {
+                        invalid(format!(
+                            "cannot read workspace {label} at {}: {err}",
+                            path.display()
+                        ))
+                    })?;
+                    match paths.entry(path) {
+                        Entry::Vacant(entry) => {
+                            entry.insert(name.clone());
+                        }
+                        Entry::Occupied(entry) => {
+                            return Err(invalid(format!(
+                                "workspaces {} and {label} share a registered path at {}; restore their paths or forget the obsolete workspace before pruning",
+                                entry.get().as_str(),
+                                entry.key().display()
+                            )));
+                        }
+                    }
+                }
+                Ok(None) if !own.contains(name) => {}
+                Ok(None) => {
+                    return Err(invalid(format!(
+                        "cannot locate workspace {label}; recreate or forget it before pruning"
+                    )));
+                }
+                Err(err) => return Err(invalid(format!("cannot locate workspace {label}: {err}"))),
+            }
+        }
+        let expected_repo = self
+            .repo_path
+            .canonicalize()
+            .map_err(|source| NodeError::Io {
+                path: self.repo_path.clone(),
+                source,
+            })?;
+        let mut locked = Vec::new();
+        for (root, name) in paths {
+            let label = name.as_str();
+            let cannot_read = |err: &dyn std::fmt::Display| {
+                invalid(format!(
+                    "cannot read workspace {label} at {}: {err}",
+                    root.display()
+                ))
+            };
+            let workspace = jj_lib::workspace::DefaultWorkspaceLoaderFactory
+                .create(&root)
+                .map_err(|err| cannot_read(&err))?
+                .load(
+                    self.loader.settings(),
+                    &jj_lib::default_backend_factories::default_backend_factories(),
+                    &jj_lib::default_backend_factories::default_working_copy_factories(),
+                )
+                .map_err(|err| cannot_read(&err))?;
+            if workspace.workspace_name().as_str() != name.as_str()
+                || workspace
+                    .repo_path()
+                    .canonicalize()
+                    .map_err(|err| cannot_read(&err))?
+                    != expected_repo
+            {
+                return Err(invalid(format!(
+                    "workspace {label} at {} no longer identifies this repo; recreate or forget it before pruning",
+                    root.display()
+                )));
+            }
+            let guard = workspace
+                .working_copy()
+                .start_mutation()
+                .block_on()
+                .map_err(|err| cannot_read(&err))?;
+            let recorded = self
+                .loader
+                .op_store()
+                .read_operation(guard.old_operation_id())
+                .block_on()
+                .map_err(|err| cannot_read(&err))?;
+            let view = self
+                .loader
+                .op_store()
+                .read_view(&recorded.view_id)
+                .block_on()
+                .map_err(|err| cannot_read(&err))?;
+            let current = repo.view().get_wc_commit_id(&name).ok_or_else(|| {
+                invalid(format!(
+                    "workspace {label} is no longer in the current view"
+                ))
+            })?;
+            let commit = repo.store().get_commit_async(current).block_on()?;
+            if view.wc_commit_ids.get(&name) != Some(current)
+                || guard.old_tree().tree_ids_and_labels() != commit.tree().tree_ids_and_labels()
+            {
+                return Err(invalid(format!(
+                    "workspace {label} must be updated before pruning\nHint: run `jj status` in {}",
+                    root.display()
+                )));
+            }
+            locked.push(CleanupWorkspace {
+                name,
+                root,
+                locked: guard,
+            });
+        }
+        Ok(locked)
+    }
+
     pub(super) fn publication_foreign_presence(
         &self,
         head: &CanonicalOp,
@@ -142,6 +283,37 @@ impl NodeRepo {
         Ok(roots)
     }
 
+    /// Snapshots made by a caller's uniquely marked jj invocation. The CLI uses this to
+    /// fold its own pre-cleanup capture into the checkpoint: retaining the capture would
+    /// also retain the predecessor containing files the user just deleted. Concurrent
+    /// commands and earlier snapshots remain outside this implicit selection.
+    pub fn publication_snapshots_from(
+        &mut self,
+        invocation: &str,
+    ) -> Result<Vec<String>, NodeError> {
+        if invocation.is_empty() {
+            return Err(invalid("the snapshot invocation marker is empty"));
+        }
+        let (_, pending) = self.publication_pending()?;
+        let mut snapshots = Vec::new();
+        for id in pending {
+            let Some(local) = self.local_of(&id) else {
+                continue;
+            };
+            let operation = self.loader.op_store().read_operation(&local.0).block_on()?;
+            if operation.metadata.is_snapshot
+                && operation
+                    .metadata
+                    .attributes
+                    .get("args")
+                    .is_some_and(|args| args.contains(invocation))
+            {
+                snapshots.push(local.0.hex());
+            }
+        }
+        Ok(snapshots)
+    }
+
     /// Preview whole-operation removal. The current view and every explicit commit version
     /// remain referenced by a new checkpoint; any unwanted content they need remains charged.
     pub fn preview_publication_cleanup(
@@ -233,19 +405,20 @@ impl NodeRepo {
     ) -> Result<CleanupEffect, NodeError> {
         let plan = self.preview_publication_cleanup(selectors, cache)?;
         if token != plan.token {
-            return Err(invalid(
-                "outgoing work changed; preview the cleanup again before applying it",
-            ));
+            return Err(invalid("outgoing work changed; run the cleanup again"));
         }
         let (base, ops) = self.publication_pending()?;
         let selected = self.publication_selection(selectors, &ops)?;
+        let source = LocalOp(
+            OperationId::try_from_hex(&plan.heads[0])
+                .ok_or_else(|| invalid("invalid cleanup source operation"))?,
+        );
+        let workspaces = self.lock_cleanup_workspaces(&source)?;
         let op_heads = self.loader.op_heads_store().clone();
         let lock = op_heads.lock().block_on()?;
         let heads = self.local_heads()?;
         if heads.iter().map(|id| id.0.hex()).collect::<Vec<_>>() != plan.heads {
-            return Err(invalid(
-                "outgoing work changed; preview the cleanup again before applying it",
-            ));
+            return Err(invalid("outgoing work changed; run the cleanup again"));
         }
         let head = heads[0].clone();
         let selected_ids: HashSet<_> = selected.iter().map(|id| id.0.clone()).collect();
@@ -488,10 +661,18 @@ impl NodeRepo {
             .update_op_heads(std::slice::from_ref(&head.0), &checkpoint)
             .block_on()?;
         drop(lock);
-        let contraction = movements.clone();
+        let contraction = movements;
         let checkpoint = LocalOp(checkpoint);
-        movements.insert(head, vec![checkpoint.clone()]);
-        self.move_workspaces(&movements)?;
+        let mut finish_errors = Vec::new();
+        for workspace in workspaces {
+            if let Err(err) = workspace.locked.finish(checkpoint.0.clone()).block_on() {
+                finish_errors.push(format!(
+                    "{} at {}: {err}",
+                    workspace.name.as_str(),
+                    workspace.root.display()
+                ));
+            }
+        }
         self.heads_mapped = false;
         self.abandon_checked = None;
         self.invalidate_published_history();
@@ -503,6 +684,12 @@ impl NodeRepo {
         }
         // A later jj command can finish on old unpublished ancestry. It is checked by the
         // same publication guard; pruning never grants approval to that late work.
+        if !finish_errors.is_empty() {
+            return Err(invalid(format!(
+                "cleanup finished, but workspace metadata could not be updated for {}",
+                finish_errors.join("; ")
+            )));
+        }
         Ok((plan.selected.len(), contraction, checkpoint))
     }
 }

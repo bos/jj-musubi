@@ -286,10 +286,10 @@ pub enum Command {
     /// at once.
     ///
     /// Automatic snapshots may retain files you subsequently removed. Sending pauses if
-    /// that content exceeds 100 paths or 8 MiB beyond explicit change history and shared
+    /// that content exceeds 1,000 paths or 64 MiB beyond explicit change history and shared
     /// content; receiving continues. Inspect with --outgoing, approve exactly what it shows
-    /// with --approve TOKEN, or preview discarding selected unpublished operations with
-    /// --prune OPERATION... . Apply a preview with --prune OPERATION... --apply TOKEN;
+    /// with --approve TOKEN, or discard selected unpublished operations with
+    /// --prune OPERATION... . Add --dry-run to preview without changing history;
     /// current work and explicit change versions are retained, but earlier uncommitted
     /// versions may become unrecoverable. jj config keys musubi.publication.max-files and
     /// musubi.publication.max-bytes set the limits; 0 disables the corresponding limit.
@@ -301,22 +301,17 @@ pub enum Command {
     /// `jj op integrate` command to restore the missing history before trying again.
     Sync {
         /// Inspect the snapshot content waiting to be sent, without sending or snapshotting.
-        #[arg(long, conflicts_with_all = ["approve", "prune", "apply"])]
+        #[arg(long, conflicts_with_all = ["approve", "prune", "dry_run"])]
         outgoing: bool,
         /// Send the exact publication inspected with --outgoing, despite its snapshot budget.
         #[arg(long, value_name = "TOKEN", conflicts_with = "prune")]
         approve: Option<String>,
-        /// Preview discarding these unpublished operations while retaining current work.
+        /// Snapshot current edits, then discard selected unpublished operations.
         #[arg(long, num_args = 1.., value_name = "OPERATION")]
         prune: Vec<String>,
-        /// Apply the exact cleanup preview identified by this token.
-        #[arg(
-            long,
-            value_name = "TOKEN",
-            requires = "prune",
-            conflicts_with = "approve"
-        )]
-        apply: Option<String>,
+        /// Preview recorded history without discarding operations or snapshotting current files.
+        #[arg(long, requires = "prune", conflicts_with = "approve")]
+        dry_run: bool,
     },
     /// Run the daemon that keeps this machine's repositories in sync, or control it.
     ///
@@ -335,9 +330,10 @@ pub enum Command {
     /// during a sync apply to the following one; `musubi sync` waits for one with the new
     /// settings. Its own `musubi.daemon.*` settings need `musubi daemon restart`.
     ///
-    /// When a hub runs a newer release of musubi, or a newer build deployed from source, the
-    /// daemon runs the command `musubi.upgrade-command` names, if set, with `MUSUBI_UPGRADE_TO`
-    /// set to it, and once the `musubi` it started from is that, starts again from it.
+    /// When a hub runs a newer release of musubi, the daemon runs the command named by
+    /// `musubi.upgrade-command`, if set, with `MUSUBI_UPGRADE_TO` set to that release.
+    /// Once the command installs that release at the daemon's executable path, the daemon
+    /// restarts from it.
     /// Keep the installer in the foreground and preserve its standard input, which on
     /// Unix holds the upgrade lock across daemon restarts. While the daemon that launched
     /// it runs, the command may run for up to an hour; a timeout stops its process group on
@@ -490,6 +486,34 @@ mod tests {
 
     use super::Cli;
     use super::Command;
+
+    #[test]
+    fn cleanup_dry_run_requires_prune_and_replaces_apply() {
+        for dry_run in [false, true] {
+            let mut args = vec!["musubi", "sync", "--prune", "abc", "def"];
+            if dry_run {
+                args.push("--dry-run");
+            }
+            let Command::Sync {
+                prune,
+                dry_run: actual,
+                ..
+            } = Cli::try_parse_from(args).unwrap().command.unwrap()
+            else {
+                panic!("not a sync command");
+            };
+            assert_eq!(prune, ["abc", "def"]);
+            assert_eq!(actual, dry_run);
+        }
+        for args in [
+            vec!["sync", "--dry-run"],
+            vec!["sync", "--outgoing", "--dry-run"],
+            vec!["sync", "--approve", "token", "--prune", "abc", "--dry-run"],
+            vec!["sync", "--prune", "abc", "--apply", "token"],
+        ] {
+            assert!(Cli::try_parse_from(std::iter::once("musubi").chain(args)).is_err());
+        }
+    }
 
     #[test]
     fn leases_are_explicit_durations_on_every_join_command() {

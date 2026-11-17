@@ -7,4 +7,5 @@ __pycache__/
 /formal/.lake
 /mutants.out*
 /target
+/target.partial
 .claude/

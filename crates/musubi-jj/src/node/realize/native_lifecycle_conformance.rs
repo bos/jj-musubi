@@ -557,6 +557,7 @@ fn receipt_custody_materialization_matches_lifecycle_oracle() {
         .iter()
         .filter_map(|event| match event {
             Event::Write { op, records } => {
+                assert!(!op.parents.is_empty());
                 Some((OperationId::new(blake2b_hash(op).to_vec()), records))
             }
             _ => None,
@@ -632,6 +633,19 @@ fn second_name_publication_matches_lifecycle_oracle() {
         ["a", "b"]
     );
     let expected = PerMachine::of(&raw(&fx.node, &before.heads[0]).1);
+    assert_ne!(
+        expected,
+        PerMachine::of(&raw(&fx.node, &child).1),
+        "the current Git observation must differ from the cached child's"
+    );
+    let physical = gix::open(fx.repo.path())
+        .unwrap()
+        .find_reference("refs/heads/x")
+        .unwrap()
+        .target()
+        .try_id()
+        .unwrap()
+        .to_string();
     let raw_before = raw_capture(&fx.node, &fx.repo, &before);
     let events = Arc::new(Mutex::new(Vec::new()));
     let observed = events.clone();
@@ -781,6 +795,17 @@ fn second_name_publication_matches_lifecycle_oracle() {
     );
     assert_eq!(PerMachine::of(&raw(&fx.node, &published).1), expected);
     assert_eq!(request["before"]["physical"], request["after"]["physical"]);
+    assert_eq!(
+        gix::open(fx.repo.path())
+            .unwrap()
+            .find_reference("refs/heads/x")
+            .unwrap()
+            .target()
+            .try_id()
+            .unwrap()
+            .to_string(),
+        physical
+    );
 }
 
 fn interleaving_snapshot(node: &NodeRepo, repo: &TestRepo) -> Value {

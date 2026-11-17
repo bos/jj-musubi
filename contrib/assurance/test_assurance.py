@@ -107,9 +107,6 @@ class GraphTests(unittest.TestCase):
 
 
 class EvidenceTests(unittest.TestCase):
-    def test_catalog_references_current_sources_and_symbols(self):
-        build.load_catalog()
-
     def test_catalog_covers_every_oracle_operation(self):
         catalog = build.load_catalog()
         handler = (ROOT / "formal/Musubi/ExecJson.lean").read_text().split(

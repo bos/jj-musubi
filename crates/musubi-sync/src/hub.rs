@@ -18,6 +18,7 @@ use musubi_hub::store::HubStore;
 use musubi_jj::canonical::CanonicalError;
 use musubi_jj::objects::Backend;
 use musubi_jj::op_id::CanonicalOp;
+use musubi_jj::presence::Presence;
 use musubi_jj::records::HubOp;
 
 use crate::Attachment;
@@ -65,6 +66,49 @@ pub struct Machines {
     opened: Instant,
     /// How far tests have moved the hub's clock on ([`HubAdapter::age`]).
     aged: Duration,
+}
+
+impl Machines {
+    fn retire_joins<Op: Clone + Ord>(&mut self, presence: &Presence<Op>, now: Instant) {
+        self.joining.retain(|machine, heard| {
+            !presence.is_present(machine) && now.duration_since(*heard) < JOINING_LIFETIME
+        });
+    }
+
+    fn waits_after_opening(&self, now: Instant) -> bool {
+        now.duration_since(self.opened) < WAIT_AFTER_OPENING
+    }
+
+    fn waited_for<Op: Clone + Ord>(
+        &mut self,
+        presence: &Presence<Op>,
+        now: Instant,
+    ) -> BTreeSet<String> {
+        // A forgotten copy's reports count only while it is explicitly joining again.
+        let joining = &self.joining;
+        self.reports.retain(|machine, (_, when)| {
+            presence.is_present(machine)
+                || joining.contains_key(machine)
+                || (!presence.known().contains(machine)
+                    && now.duration_since(*when) < JOINING_LIFETIME)
+        });
+        let mut waited: BTreeSet<String> = presence.copies().map(str::to_owned).collect();
+        waited.extend(self.reports.keys().cloned());
+        waited
+    }
+
+    fn report(&mut self, machine: &str, records: &RecordState, now: Instant) {
+        if let Some(heard) = self.joining.get_mut(machine) {
+            *heard = now;
+        }
+        match self.reports.get_mut(machine) {
+            Some((taken, when)) if taken == records => *when = now,
+            _ => {
+                self.reports
+                    .insert(machine.to_owned(), (records.clone(), now));
+            }
+        }
+    }
 }
 
 impl HubAdapter {
@@ -176,11 +220,9 @@ impl HubAdapter {
         // saying what it took, its join mustn't keep the hub waiting.
         if !self.machines.joining.is_empty() {
             let presence = self.store.presence()?;
-            self.machines.joining.retain(|machine, heard| {
-                !presence.is_present(machine) && now.duration_since(*heard) < JOINING_LIFETIME
-            });
+            self.machines.retire_joins(presence.as_ref(), now);
         }
-        if now.duration_since(self.machines.opened) < WAIT_AFTER_OPENING {
+        if self.machines.waits_after_opening(now) {
             return Ok(None);
         }
         let records = HubStorage::records(self);
@@ -196,17 +238,7 @@ impl HubAdapter {
             return Ok(None);
         }
         let presence = self.store.presence()?;
-        // What the others said no longer counts: a copy the hive forgot, unless it is joining
-        // again, or a machine it doesn't know that hasn't said anything for a day.
-        let joining = &self.machines.joining;
-        self.machines.reports.retain(|machine, (_, when)| {
-            presence.is_present(machine)
-                || joining.contains_key(machine)
-                || (!presence.known().contains(machine)
-                    && now.duration_since(*when) < JOINING_LIFETIME)
-        });
-        let mut waited: BTreeSet<String> = presence.copies().map(str::to_owned).collect();
-        waited.extend(self.machines.reports.keys().cloned());
+        let waited = self.machines.waited_for(presence.as_ref(), now);
         let pruned = musubi_core::hub::prune(self, &waited)?;
         if let Some(count) = pruned {
             tracing::info!("pruned the first {count} records, which every machine has taken");
@@ -274,17 +306,7 @@ impl HubStorage for HubAdapter {
 
     fn report(&mut self, machine: &str, records: &RecordState) {
         let now = self.now();
-        if let Some(heard) = self.machines.joining.get_mut(machine) {
-            *heard = now;
-        }
-        match self.machines.reports.get_mut(machine) {
-            Some((taken, when)) if taken == records => *when = now,
-            _ => {
-                self.machines
-                    .reports
-                    .insert(machine.to_owned(), (records.clone(), now));
-            }
-        }
+        self.machines.report(machine, records, now);
     }
 
     fn reported(&self, machine: &str) -> Option<RecordState> {
@@ -459,5 +481,131 @@ impl HubStorage for HubAdapter {
         }
         let ancestry = canonical.ancestors_until(&[CanonicalOp(op.clone())], |_| false)?;
         Ok(ancestry.contains(&CanonicalOp(ancestor.clone())))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use musubi_jj::presence::Kind;
+
+    use super::*;
+
+    fn machines(opened: Instant) -> Machines {
+        Machines {
+            reports: HashMap::new(),
+            joining: HashMap::new(),
+            opened,
+            aged: Duration::ZERO,
+        }
+    }
+
+    fn records(count: u64) -> RecordState {
+        RecordState {
+            count,
+            digest: vec![count as u8],
+        }
+    }
+
+    /// The native examples retain successful join/rejoin and a stranded copy's refusal.
+    /// This table pins the restart grace and expiry policy without making repositories.
+    #[test]
+    fn pruning_waits_for_recent_joins_and_restart_grace() {
+        let start = Instant::now();
+        let tick = Duration::from_nanos(1);
+        let hour = Duration::from_secs(3600);
+        let day = Duration::from_secs(24 * 3600);
+        for (elapsed, waiting) in [(hour - tick, true), (hour, false), (hour + tick, false)] {
+            let state = machines(start);
+            assert_eq!(state.waits_after_opening(start + elapsed), waiting);
+        }
+
+        // Restart loses reports and explicit joins; a fresh opening starts a new grace.
+        let restarted = machines(start + day);
+        assert!(restarted.reports.is_empty() && restarted.joining.is_empty());
+        assert!(restarted.waits_after_opening(start + day + hour - tick));
+        assert!(!restarted.waits_after_opening(start + day + hour));
+
+        for (known, present, rejoining, protected) in [
+            (false, false, false, true), // A new copy's first fetch has reported.
+            (true, false, true, true),   // A forgotten copy explicitly joins again.
+            (true, false, false, false), // A forgotten daemon's reports don't count.
+            (true, true, false, true),   // A present copy never expires.
+            (true, true, true, true),    // Its first push retires the explicit join.
+        ] {
+            let mut presence = Presence::<usize>::default();
+            if known {
+                presence = presence.apply(
+                    &1,
+                    &Kind {
+                        work: Some("gamma".to_owned()),
+                        ..Kind::default()
+                    },
+                );
+            }
+            if known && !present {
+                presence = presence.apply(
+                    &2,
+                    &Kind {
+                        forgets: ["gamma".to_owned()].into(),
+                        ..Kind::default()
+                    },
+                );
+            }
+            // Even without a report, every present copy must be waited for.
+            let mut unreported = machines(start);
+            assert_eq!(
+                unreported.waited_for(&presence, start).contains("gamma"),
+                present
+            );
+            for (elapsed, recent) in [
+                (23 * hour, true),
+                (day - tick, true),
+                (day, false),
+                (25 * hour, false),
+            ] {
+                let now = start + elapsed;
+                let mut state = machines(start);
+                if rejoining {
+                    state.joining.insert("gamma".to_owned(), start);
+                }
+                state.report("gamma", &records(0), start);
+                state.retire_joins(&presence, now);
+                let waited = state.waited_for(&presence, now);
+                let expected = protected && (present || recent);
+                assert_eq!(
+                    waited.contains("gamma"),
+                    expected,
+                    "{known}, {present}, {rejoining}, {elapsed:?}"
+                );
+                assert_eq!(state.reports.contains_key("gamma"), expected);
+                assert_eq!(
+                    state.joining.contains_key("gamma"),
+                    rejoining && !present && recent
+                );
+            }
+        }
+
+        // Reporting unchanged records refreshes the day from the last fetch, including
+        // an explicit rejoin of a known, absent copy. A new report also replaces its value.
+        let absent = Presence::<usize>::default().apply(
+            &1,
+            &Kind {
+                forgets: ["gamma".to_owned()].into(),
+                ..Kind::default()
+            },
+        );
+        let mut state = machines(start);
+        state.joining.insert("gamma".to_owned(), start);
+        state.report("gamma", &records(0), start);
+        let halfway = start + day / 2;
+        state.report("gamma", &records(0), halfway);
+        let renewed = halfway + day - tick;
+        state.retire_joins(&absent, renewed);
+        assert!(state.waited_for(&absent, renewed).contains("gamma"));
+        state.report("gamma", &records(1), renewed);
+        assert_eq!(state.reports["gamma"], (records(1), renewed));
+        let expired = renewed + day;
+        state.retire_joins(&absent, expired);
+        assert!(state.waited_for(&absent, expired).is_empty());
     }
 }

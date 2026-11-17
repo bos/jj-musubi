@@ -4861,6 +4861,10 @@ fn a_forgotten_copy_behind_pruned_records_stops() {
                 .any(|c| c.ends_with("gamma's last work")),
             "{machine}"
         );
+        assert!(
+            !has_operation(hive.repo(machine), &abandoned.1),
+            "{machine}"
+        );
     }
 }
 
@@ -5088,31 +5092,6 @@ fn joining_machine_away(hive: &mut Fixture) -> String {
     abandoned.1
 }
 
-/// Asserts that machine `machine`'s sync stops for good, as one behind records the hub pruned
-/// does, saying its history no longer matches the hive's; that nothing it has, `work` among
-/// it, reaches alpha and beta; and that the operation `abandoned` doesn't come back.
-fn stops_behind_pruned_records(hive: &mut Fixture, machine: usize, work: &str, abandoned: &str) {
-    let head = hive.hive.hub_head();
-    let err = hive.hive.sync(machine).unwrap_err();
-    assert!(
-        matches!(
-            err.downcast_ref::<musubi_jj::node::NodeError>(),
-            Some(musubi_jj::node::NodeError::PrunedRecords)
-        ),
-        "{err:#}"
-    );
-    assert!(history_lost(&err));
-    assert_eq!(hive.hive.hub_head(), head);
-    for other in 0..2 {
-        hive.hive.sync(other).unwrap();
-        assert!(
-            !hive.visible(other).iter().any(|c| c.ends_with(work)),
-            "{other}"
-        );
-        assert!(!has_operation(hive.repo(other), abandoned), "{other}");
-    }
-}
-
 /// A machine whose first sync stopped before its first push landed, away while the others
 /// take an abandon, comes back within the hour after the hub restarted: the hub, which no
 /// longer remembers that the machine was joining, prunes nothing for an hour after opening its
@@ -5143,40 +5122,6 @@ fn a_joining_machine_back_within_an_hour_of_a_hub_restart_carries_on() {
     for machine in 0..3 {
         assert!(!has_operation(hive.repo(machine), &abandoned), "{machine}");
     }
-}
-
-/// …but one away for over an hour after the restart is stranded, a known limitation: the hub
-/// has forgotten that it was joining, and prunes without it once the others have taken the
-/// abandon. It stops syncing, as a forgotten copy does, and nothing it has reaches the hive.
-#[test]
-fn a_joining_machine_away_for_over_an_hour_after_a_hub_restart_stops() {
-    let mut hive = Fixture::new(&["alpha", "beta"]);
-    let abandoned = joining_machine_away(&mut hive);
-    hive.hive.restart_hub().unwrap();
-    hive.hive.hub.age(HOUR + MINUTE);
-    hive.hive.sync(0).unwrap();
-    hive.hive.sync(1).unwrap();
-    assert_eq!(hive.hive.hub.store().pruned(), 1);
-    stops_behind_pruned_records(&mut hive, 2, "gamma's own work", &abandoned);
-}
-
-/// The hub waits a day for a machine its history doesn't know whose first sync stopped before its
-/// first push landed, from when it last said what it took; `a_copy_joining_again_is_waited_for`
-/// checks the wait from a join, which `musubi join` asks for too. One away longer, which the hub
-/// has pruned without, can't take the records it pruned, and could hold operations they drop: it
-/// stops syncing, with the message for a history that no longer matches the hive's, and nothing
-/// it has reaches the hive.
-#[test]
-fn a_joining_machine_away_for_over_a_day_stops() {
-    let mut hive = Fixture::new(&["alpha", "beta"]);
-    let abandoned = joining_machine_away(&mut hive);
-    hive.hive.hub.age(23 * HOUR);
-    hive.hive.sync(0).unwrap();
-    assert_eq!(hive.hive.hub.store().pruned(), 0);
-    hive.hive.hub.age(2 * HOUR);
-    hive.hive.sync(0).unwrap();
-    assert_eq!(hive.hive.hub.store().pruned(), 1);
-    stops_behind_pruned_records(&mut hive, 2, "gamma's own work", &abandoned);
 }
 
 /// Gamma, a copy that left, joins again with work of its own: it asks the hub to join the
@@ -5252,16 +5197,6 @@ fn a_copy_joining_again_is_waited_for() {
         hive.hive.sync(1).unwrap();
     }
     assert_eq!(hive.hive.hub.store().pruned(), 2);
-}
-
-/// …but one away for over a day stops, as a new machine joining does
-/// (`a_joining_machine_away_for_over_a_day_stops`).
-#[test]
-fn a_copy_joining_again_away_for_over_a_day_stops() {
-    let mut hive = Fixture::new(&["alpha", "beta", "gamma"]);
-    let abandoned = copy_joining_again_away(&mut hive, 25 * HOUR);
-    assert_eq!(hive.hive.hub.store().pruned(), 1);
-    stops_behind_pruned_records(&mut hive, 2, "gamma's work", &abandoned);
 }
 
 /// A hub that loses the `heads` log it wrote pruning, as a power cut can make it, goes back

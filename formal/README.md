@@ -468,11 +468,12 @@ hub restarted and for over an hour after, is covered for safety by the relationa
 may prune anything the hub dropped, and its refusal by `behind_not_carried`: the hub takes no
 supersede from it. The liveness theorems assume `AllPruned` of every node, so they say nothing of
 a run with such a machine, not even that the others converge.
-`history::a_joining_machine_back_within_an_hour_of_a_hub_restart_carries_on`,
-`history::a_joining_machine_away_for_over_an_hour_after_a_hub_restart_stops`,
-`history::a_joining_machine_away_for_over_a_day_stops`,
-`history::a_copy_joining_again_is_waited_for` and
-`history::a_copy_joining_again_away_for_over_a_day_stops` check the native wait.
+`history::a_joining_machine_back_within_an_hour_of_a_hub_restart_carries_on` and
+`history::a_copy_joining_again_is_waited_for` check the native wait and successful recovery.
+`hub::tests::pruning_waits_for_recent_joins_and_restart_grace` checks restart grace, join/rejoin
+expiry and renewal with synthetic presence and reports. The native
+`history::a_forgotten_copy_behind_pruned_records_stops` retains the stranded copy's refusal and
+checks that none of its work is uploaded.
 
 The measure puts `(drops not yet on the hub, drops not yet on each node)` before `rmeasure`. A
 node can wait on another: with a head the hub dropped, or on a hub head it dropped and isn't

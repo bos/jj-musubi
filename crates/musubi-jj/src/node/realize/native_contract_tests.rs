@@ -332,11 +332,16 @@ fn record_stores(node: &mut NodeRepo) -> Arc<Mutex<Vec<Event>>> {
 fn second_owned_name_survives_complete_native_capture() {
     let mut fx = Fixture::new();
     let before = fx.node.local_heads().unwrap();
+    let complete = raw(&fx.node, &before[0]).1.wc_commit_ids;
+    assert!(complete.keys().any(|name| name.as_str().contains('/')));
     let current = fx.node.own_at_heads(&before).unwrap();
     assert_eq!(
         current.keys().map(|name| name.as_str()).collect::<Vec<_>>(),
         ["a", "b"]
     );
+    assert!(complete.len() > current.len());
+    // Filtering ownership leaves the complete native map available to the consumer.
+    assert_eq!(raw(&fx.node, &before[0]).1.wc_commit_ids, complete);
     // Capture a real native source with only the second name. It is a binding observation,
     // not a supplied ownership/overlap answer for the future model.
     fx.repo.jj(&["workspace", "forget", "a"]);
@@ -366,27 +371,6 @@ fn second_owned_name_survives_complete_native_capture() {
         fx.node.own_at_heads(&empty).unwrap().is_empty(),
         "observed empty is deletion, not missing evidence"
     );
-}
-
-#[test]
-fn foreign_spelling_is_not_owned_overlap() {
-    let mut fx = Fixture::new();
-    let heads = fx.node.local_heads().unwrap();
-    let canonical = fx.node.canonicalize(&heads[0]).unwrap();
-    let (op, view) = raw(&fx.node, &heads[0]);
-    let actual = view.wc_commit_ids.clone();
-    assert!(actual.keys().any(|name| name.as_str().contains('/')));
-    let own = fx
-        .node
-        .own_of_view(actual.clone(), &canonical, &op)
-        .unwrap();
-    assert_eq!(
-        own.keys().map(|name| name.as_str()).collect::<Vec<_>>(),
-        ["a", "b"]
-    );
-    assert!(actual.len() > own.len());
-    // The complete native map, including foreign slots, remains available to the consumer.
-    assert_eq!(raw(&fx.node, &heads[0]).1.wc_commit_ids, actual);
 }
 
 #[test]
@@ -515,58 +499,6 @@ fn current_git_merge_precedes_first_export() {
         physical.trim()
     );
     assert_eq!(fx.repo.git(&["rev-parse", "refs/heads/x"]), physical);
-}
-
-#[test]
-fn custody_is_saved_before_named_write() {
-    let mut fx = Fixture::new();
-    fx.repo
-        .jj(&["describe", "-m", "unpublished native survivor"]);
-    head(&mut fx.node);
-    let prefix = RecordPrefix::none();
-    assert!(fx.records.iter().any(|record| record.ops().len() > 1));
-    // Expected responsibility comes from the incoming receipt before the call, including
-    // every dropped original and its exact preceding digest in the receipt chain.
-    let mut before = prefix.digest.clone();
-    let expected: Vec<_> = fx
-        .records
-        .iter()
-        .map(|record| {
-            let entry = (
-                jj_lib::hex_util::encode_hex(before.bytes()),
-                record
-                    .ops()
-                    .iter()
-                    .map(|op| op.0.0.hex())
-                    .collect::<Vec<_>>(),
-            );
-            before = before.then(record);
-            entry
-        })
-        .collect();
-    let expected = serde_json::to_value(expected).unwrap();
-    let effects = record_stores(&mut fx.node);
-    fx.node.prepare_records(&prefix, &fx.records).unwrap();
-    fx.node.settle().unwrap();
-    let effects = effects.lock().unwrap();
-    let writes: Vec<_> = effects
-        .iter()
-        .filter_map(|effect| match effect {
-            Event::Write { op, records } => Some((op, records)),
-            _ => None,
-        })
-        .collect();
-    assert!(
-        !writes.is_empty(),
-        "preparation must really write renamed native bodies"
-    );
-    for (op, saved) in writes {
-        assert!(!op.parents.is_empty());
-        assert_eq!(
-            saved["custody"], expected,
-            "the exact incoming responsibility must already be on disk at the native write"
-        );
-    }
 }
 
 #[test]
@@ -948,93 +880,5 @@ fn complete_candidates_keep_ambiguous_published_aliases() {
             .sources
             .keys()
             .all(|id| inputs.native.contains_key(id))
-    );
-}
-
-#[test]
-fn second_owned_name_selects_current_git() {
-    let mut fx = Fixture::new();
-    fx.repo.jj(&["workspace", "forget", "b"]);
-    fx.repo.jj(&["workspace", "rename", "b"]);
-    // Publish the forgotten parent while b is the only actual owned slot. The child
-    // subsequently inherits that published source, rather than the current root inputs.
-    fx.node.advance(&fx.incoming).unwrap();
-    let child = fx.node.realize(&fx.child).unwrap();
-    fx.node.settle().unwrap();
-    let (op, view) = raw(&fx.node, &child);
-    let target = fx
-        .node
-        .own_of_view(view.wc_commit_ids, &fx.child, &op)
-        .unwrap();
-    assert_eq!(
-        target.keys().map(|name| name.as_str()).collect::<Vec<_>>(),
-        ["b"]
-    );
-    let path = fx._env.root().join("new-a");
-    fx.repo.jj(&[
-        "workspace",
-        "add",
-        "--name",
-        "a",
-        "-r",
-        "b@",
-        path.to_str().unwrap(),
-    ]);
-    fx.repo
-        .jj(&["--ignore-working-copy", "bookmark", "set", "x", "-r", "a@"]);
-    fx.repo.jj(&["--ignore-working-copy", "git", "export"]);
-    let heads = fx.node.local_heads().unwrap();
-    let current = fx.node.own_at_heads(&heads).unwrap();
-    assert_eq!(
-        current.keys().map(|name| name.as_str()).collect::<Vec<_>>(),
-        ["a", "b"]
-    );
-    assert!(
-        fx.node.native_receipt().is_none(),
-        "this exercises non-root-base private selection"
-    );
-    let (_, current_view) = raw(&fx.node, &heads[0]);
-    let expected = PerMachine::of(&current_view);
-    assert_ne!(
-        expected,
-        PerMachine::of(&raw(&fx.node, &child).1),
-        "the current Git observation must differ from the cached child's"
-    );
-    let physical = gix::open(fx.repo.path())
-        .unwrap()
-        .find_reference("refs/heads/x")
-        .unwrap()
-        .target()
-        .try_id()
-        .unwrap()
-        .to_string();
-    let loader = fx.node.loader.clone();
-    let exported = Arc::new(Mutex::new(vec![]));
-    let seen = exported.clone();
-    let _observe = Observe::new(move |event| {
-        if let Event::Export(id) = event {
-            let op = loader.op_store().read_operation(&id.0).block_on().unwrap();
-            let view = loader.op_store().read_view(&op.view_id).block_on().unwrap();
-            seen.lock().unwrap().push((op, view));
-        }
-    });
-    let published = fx.node.advance(&fx.child).unwrap();
-    let inputs = exported.lock().unwrap();
-    let (first, _) = inputs.first().unwrap();
-    assert!(
-        first.parents.len() > 1,
-        "overlap at b must merge before the first export"
-    );
-    assert_eq!(PerMachine::of(&raw(&fx.node, &published).1), expected);
-    assert_eq!(
-        gix::open(fx.repo.path())
-            .unwrap()
-            .find_reference("refs/heads/x")
-            .unwrap()
-            .target()
-            .try_id()
-            .unwrap()
-            .to_string(),
-        physical
     );
 }

@@ -51,27 +51,28 @@ The reviewed #151 slice is integrated at
 `crates/musubi-jj/src/node/realize/native_contract_tests.rs`. Its
 [handoff](https://github.com/bos/jj-musubi/issues/151#issuecomment-6874082815) and
 [custody disposition](https://github.com/bos/jj-musubi/issues/151#issuecomment-6874189861)
-describe its scope. These fixtures support the following individual obligations; they do not
-authenticate arbitrary `NativeFacts` entries or prove their universality.
+describe its scope. Custody and private-current assertions are consolidated in the sibling
+`native_lifecycle_conformance.rs`. These fixtures support the following individual obligations;
+they do not authenticate arbitrary `NativeFacts` entries or prove their universality.
 
 - Raw observation: `complete_receipt_and_body_observation_is_pure` captures full readable
   bodies/views, receipt, expected observations and musubi bytes; checks repository bytes,
   clock and next actor RNG draw.
-- Qualified ownership: `second_owned_name_survives_complete_native_capture` and
-  `foreign_spelling_is_not_owned_overlap` retain the complete native map and distinguish
-  observed empty from missing.
+- Qualified ownership: `second_owned_name_survives_complete_native_capture` retains the
+  complete native map, excludes foreign slots from ownership and distinguishes observed
+  empty from missing.
 - Selected parent: `receipt_parent_precedes_preferred_alias` checks conditional renderer
   priority over supplied physical role maps; arbitrary prepared-map authentication is open.
 - Git refresh: `changed_physical_parent_refreshes_git_fields` observes changed physical
   parents and inherited fields; it is a refresh case with different raw I.
 - Capture retry: `native_command_before_validation_forces_refresh` observes capture,
   preparation, lock/reread mismatch and retry before publication.
-- Private-current selection: `second_owned_name_selects_current_git` exercises the second
-  owned name in real non-root publication, with no receipt.
+- Private-current selection: `second_name_publication_matches_lifecycle_oracle` exercises the
+  second owned name in real non-root publication, with no receipt.
 - Export order: `current_git_merge_precedes_first_export` observes shared merge before first
   export and cleanup after lock release.
-- Custody: `custody_is_saved_before_named_write` compares the exact incoming prefix/record/
-  digest chain at actual native writes, including a multi-ID record.
+- Custody: `receipt_custody_materialization_matches_lifecycle_oracle` compares the exact incoming
+  prefix/record/digest chain at actual native writes, including a multi-ID record.
 - Move/restart: `move_intent_precedes_old_head_removal` observes saved intent at
   add-before-remove and real recovery.
 - Alias visibility: `complete_candidates_keep_ambiguous_published_aliases` retains all
@@ -198,17 +199,17 @@ The next integration is a new child of main
 `cd2e1b5374229c01161f5c6bd146252aab5e32bd`. The reviewed model snapshots remain untouched.
 Only these two existing native fixtures are connected:
 
-- A: `custody_is_saved_before_named_write`, using actual `prepare_records`, its incoming
-  multi-ID record and prefix, exact stored custody at every native write, and the raw native
-  receipt projection (not every internal Taking field). The model independently computes
+- A: `receipt_custody_materialization_matches_lifecycle_oracle`, using actual `prepare_records`,
+  its incoming multi-ID record and prefix, exact stored custody at every native write, and the raw
+  native receipt projection (not every internal Taking field). The model independently computes
   contraction and locals before the observed map or
   observed write sequence is consulted. Observed writes must have exactly the independently
   predicted body-ID set; their actual order selects the materialization sequence certified by
   `certifiedRun`. Parent readability is checked at every such model write. Canonical-store
   write ordering remains an explicit cross-store simulation obligation.
-- B: `second_owned_name_selects_current_git`, using actual `advance`, complete `{a,b}` current
-  and `{b}` target inputs, no active receipt and non-root policy. An explicit actor prelude
-  canonicalizes the current native command before raw capture; observation itself never writes
+- B: `second_name_publication_matches_lifecycle_oracle`, using actual `advance`, complete `{a,b}`
+  current and `{b}` target inputs, no active receipt and non-root policy. An explicit actor
+  prelude canonicalizes the current native command before raw capture; observation itself never writes
   identities. The model computes source/ownership/render/Git policy and the publication-order
   cut. The test compares the actual source reread, native ordered merge parents, complete
   per-machine Git fields and physical bookmark `x`. The pre-export `with_per_machine` copy is

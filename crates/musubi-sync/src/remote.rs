@@ -149,6 +149,49 @@ const RESTARTS: usize = 3;
 /// link too slow to carry its chunks within their deadlines, goes on as long as it does.
 pub const RESENDS: u32 = 4;
 
+/// Whether to try a request again after it fails: a timeout counts against [`RESENDS`], unless
+/// the try moved chunks further than any before it in the call, which starts the count over.
+/// One policy for a request and for a download.
+struct Patience {
+    /// Timeouts in a row that moved nothing further.
+    resends: u32,
+    /// How far the call had got before the try now judged.
+    further: u64,
+}
+
+/// Why [`Patience`] goes on.
+enum Patient {
+    /// The try moved chunks further.
+    Moved,
+    /// The try moved nothing further, and there are resends left.
+    Resent,
+}
+
+impl Patience {
+    /// Starts counting with the call `further` along.
+    fn new(further: u64) -> Self {
+        Self {
+            resends: 0,
+            further,
+        }
+    }
+
+    /// Judges a try that failed with `err` and left the call `further` along: why to go on,
+    /// or `None` to give up with `err`. Only a timeout goes on.
+    fn after(&mut self, err: &anyhow::Error, further: u64) -> Option<Patient> {
+        let before = std::mem::replace(&mut self.further, further);
+        if timed_out(err) && further > before {
+            self.resends = 0;
+            Some(Patient::Moved)
+        } else if self.resends < RESENDS && timed_out(err) {
+            self.resends += 1;
+            Some(Patient::Resent)
+        } else {
+            None
+        }
+    }
+}
+
 /// Whether `err` is a request timing out.
 fn timed_out(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
@@ -274,19 +317,19 @@ impl RemoteHub {
         };
         let mut lanes = Lanes::new(self);
         let mut furthest = Furthest::default();
-        let mut resends = 0;
+        let mut patience = Patience::new(furthest.further);
         let reply = loop {
-            let further = furthest.further;
-            match self.ask(&mut attempt, &mut lanes, &mut furthest).await {
-                Err(err) if timed_out(&err) && furthest.further > further => {
-                    resends = 0;
+            let result = self.ask(&mut attempt, &mut lanes, &mut furthest).await;
+            let Err(err) = &result else { break result? };
+            match patience.after(err, furthest.further) {
+                Some(Patient::Moved) => {
                     tracing::debug!("no reply in time, having moved some chunks; going on");
                 }
-                Err(err) if resends < RESENDS && timed_out(&err) => {
-                    resends += 1;
+                Some(Patient::Resent) => {
+                    let resends = patience.resends;
                     tracing::debug!("no reply in time; asking again ({resends} of {RESENDS})");
                 }
-                reply => break reply?,
+                None => break result?,
             }
         };
         self.receive(reply, &mut lanes, &mut furthest).await
@@ -568,17 +611,16 @@ impl RemoteHub {
         later: &[BlobId],
         furthest: &mut Furthest,
     ) -> anyhow::Result<PathBuf> {
-        let mut tries = 0;
+        let mut patience = Patience::new(furthest.further);
         loop {
-            let further = furthest.further;
-            match self
+            let result = self
                 .download(blob, total, transport, received, later, furthest)
-                .await
-            {
-                Err(err) if timed_out(&err) && furthest.further > further => tries = 0,
-                Err(err) if tries < RESENDS && timed_out(&err) => tries += 1,
-                result => return result,
+                .await;
+            let Err(err) = &result else { return result };
+            if patience.after(err, furthest.further).is_none() {
+                return result;
             }
+            let tries = patience.resends;
             tracing::debug!("no chunk in time; going on with {blob:?} ({tries} of {RESENDS})");
         }
     }

@@ -363,6 +363,15 @@ pub const CATALOGUE: &[(&str, Option<&[&str]>)] = &[
         "abandoning_twice_where_a_sync_showed_a_workspace_again_keeps_its_owner",
         Some(&["forget_other_workspace", "sync", "op_abandon"]),
     ),
+    (
+        "abandoning_a_rename_a_forget_saw_keeps_the_new_name",
+        Some(&[
+            "workspace_rename",
+            "hub_goes_back",
+            "forget_copy",
+            "op_abandon",
+        ]),
+    ),
     // The search has no owned slash-name rule or operation-restore rule.
     (
         "restoring_an_older_view_does_not_inherit_private_workspace_ownership",

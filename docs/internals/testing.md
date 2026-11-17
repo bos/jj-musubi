@@ -1060,7 +1060,9 @@ live work with a different change from the forgotten branch's stale binding.
 The private-workspace parent selector's
 `node::realize::tests::concrete_work_keeps_the_namespace_after_a_deletion`
 uses an actual native workspace add and forget, then an erased original marker, to check
-that concrete work wins in either parent order while two erased identities stay unordered.
+that concrete work wins in either parent order while two erased identities stay unordered, and
+that later work an abandon dropped wins, in either order, on the line whose history has the
+older concrete work.
 `world::abandoned_originals_do_not_include_other_native_parent_versions` constructs two native
 parent versions with equal metadata, verifies that an exact dropped original still fails
 before propagation, preserves the alternate original after convergence and clone replacement,

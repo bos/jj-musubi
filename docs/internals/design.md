@@ -352,21 +352,24 @@ A machine the hive has forgotten keeps its own working copies. When it realizes 
 canonical view leaves it out, it keeps its workspaces as the realization of the parent with its
 latest work had them (`Presence::worked`), following the operation's rewrites
 (`with_own_workspaces`). So at a merge of a forget that saw its latest work with an operation that
-saw only earlier work, it keeps the workspaces the forget's realization had. Work an abandon
-removed is below surviving concrete work for this choice, as it is for presence; an erased older
-marker cannot make the selector fall back to a parent with obsolete workspace names. It keeps them
-so too at work by it that another machine wrote, a [fix-up](#the-fix-up)'s, where it is present: a
-machine that had forgotten it wrote that view without its workspaces, and only its own operations
-remove them. Where another machine rewrote its working-copy commit, as one can while no other
-machine sees it as a working copy, it follows the rewrite (`replace_abandoned_working_copies`).
-Where the forget abandoned an empty working-copy commit, it stays on the hidden commit, since a
-new one would be an empty commit of no one's on every other machine. jj's next snapshot, or any
-command that rewrites `@`, makes a new visible commit of it, and that work publishes the machine's
-workspaces again. No other machine sees the commit as a working copy, so jj doesn't rebase it when
-another machine rewrites or abandons its parents, and the snapshot would bring them back. So the
-machine rebases it itself, as jj would have rebased a working-copy commit it saw, writing it
-hidden and recording no rewrite, in an operation that isn't its work, so that it stays forgotten
-(`replace_abandoned_working_copies`).
+saw only earlier work, it keeps the workspaces the forget's realization had. A parent whose
+history has every other parent's latest work by the machine, none of it its own latest, has later
+work, even if an abandon has dropped that since: a forget that saw a rename the machine then
+abandoned still has the newer names, beside a line of history that saw only the work before the
+rename. Otherwise, work an abandon removed is below surviving concrete work for this choice, as it
+is for presence; an erased older marker cannot make the selector fall back to a parent with
+obsolete workspace names. It keeps them so too at work by it that another machine wrote, a
+[fix-up](#the-fix-up)'s, where it is present: a machine that had forgotten it wrote that view
+without its workspaces, and only its own operations remove them. Where another machine rewrote its
+working-copy commit, as one can while no other machine sees it as a working copy, it follows the
+rewrite (`replace_abandoned_working_copies`). Where the forget abandoned an empty working-copy
+commit, it stays on the hidden commit, since a new one would be an empty commit of no one's on
+every other machine. jj's next snapshot, or any command that rewrites `@`, makes a new visible
+commit of it, and that work publishes the machine's workspaces again. No other machine sees the
+commit as a working copy, so jj doesn't rebase it when another machine rewrites or abandons its
+parents, and the snapshot would bring them back. So the machine rebases it itself, as jj would
+have rebased a working-copy commit it saw, writing it hidden and recording no rewrite, in an
+operation that isn't its work, so that it stays forgotten (`replace_abandoned_working_copies`).
 
 When contraction leaves a root parent with no private bindings, realization takes them from
 the exact native heads, qualified before their aliases are read and merged over their native

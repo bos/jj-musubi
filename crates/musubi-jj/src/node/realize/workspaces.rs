@@ -234,7 +234,7 @@ impl NodeRepo {
                     .unwrap_or_default())
             })
             .collect::<Result<_, NodeError>>()?;
-        latest_work_index(&self.canonical, &worked)
+        latest_work_index(&self.canonical, parents, &worked)
     }
 
     /// This machine's own workspaces in a local view: every one but those named for another
@@ -292,14 +292,32 @@ pub(super) fn with_kept(mut local: LocalView, kept: &Kept) -> LocalView {
     local
 }
 
-/// Pick the branch whose concrete work includes every other branch's work. Dropped work
-/// is compared by the same relation as presence, rather than given a separate ordering.
+/// Pick the branch of `parents` whose work includes every other branch's, given each one's
+/// latest work, `worked`. A parent whose history has every other's latest work, none of it its
+/// own latest, did later work, even work an abandon dropped since: as a forget's line that saw
+/// a rename the abandon dropped, beside a line that saw only the work before it. Otherwise
+/// the branch whose concrete work includes every other's; dropped work is compared there by
+/// the same relation as presence, rather than given a separate ordering.
 pub(super) fn latest_work_index(
     store: &crate::canonical::CanonicalStore,
+    parents: &[CanonicalOp],
     worked: &[BTreeSet<crate::canonical::Work>],
 ) -> Result<usize, NodeError> {
     if worked.iter().all(|ops| *ops == worked[0]) {
         return Ok(0);
+    }
+    'seen: for (index, (parent, mine)) in parents.iter().zip(worked).enumerate() {
+        for theirs in worked {
+            for work in theirs.difference(mine) {
+                let Some(op) = &work.op else {
+                    continue 'seen;
+                };
+                if !store.is_ancestor_of(op, parent)? {
+                    continue 'seen;
+                }
+            }
+        }
+        return Ok(index);
     }
     'parents: for (index, mine) in worked.iter().enumerate() {
         for theirs in worked {

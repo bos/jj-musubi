@@ -424,19 +424,53 @@ mod tests {
         let old_names = BTreeSet::from([dropped.clone()]);
         let deleted = BTreeSet::from([concrete]);
         assert_eq!(
-            latest_work_index(store, &[old_names.clone(), deleted.clone()]).unwrap(),
+            latest_work_index(
+                store,
+                &[old.clone(), current.clone()],
+                &[old_names.clone(), deleted.clone()]
+            )
+            .unwrap(),
             1
         );
         assert_eq!(
-            latest_work_index(store, &[deleted, old_names.clone()]).unwrap(),
+            latest_work_index(
+                store,
+                &[current.clone(), old.clone()],
+                &[deleted, old_names.clone()]
+            )
+            .unwrap(),
             0
         );
         let mut other_dropped = Work::of(store, &current).unwrap();
         other_dropped.op = None;
         assert_eq!(
-            latest_work_index(store, &[old_names, BTreeSet::from([other_dropped])]).unwrap(),
+            latest_work_index(
+                store,
+                &[old.clone(), current.clone()],
+                &[old_names, BTreeSet::from([other_dropped])]
+            )
+            .unwrap(),
             0,
             "two erased operations provide no ordering evidence"
+        );
+        // Newer work an abandon dropped, on a line that saw the older concrete work, as
+        // a forget that saw a rename: that line has the newer workspaces.
+        let older = BTreeSet::from([Work::of(store, &old).unwrap()]);
+        let mut newer = Work::of(store, &current).unwrap();
+        newer.op = None;
+        let newer = BTreeSet::from([newer]);
+        assert_eq!(
+            latest_work_index(
+                store,
+                &[old.clone(), current.clone()],
+                &[older.clone(), newer.clone()]
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            latest_work_index(store, &[current, old], &[newer, older]).unwrap(),
+            0
         );
     }
 }

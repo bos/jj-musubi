@@ -4374,6 +4374,36 @@ fn abandoning_twice_where_a_sync_showed_a_workspace_again_keeps_its_owner() {
     );
 }
 
+/// A machine takes another copy's rename of its workspace, the hub goes back and loses it, and
+/// the machine forgets the copy, while a third machine works on what the hub kept, which has
+/// the copy's workspace under its old name. Then the copy abandons its rename. Where the
+/// copy is forgotten, it keeps its workspaces as the line of history with its latest work
+/// has them: the forget's, which saw the rename, though the abandon dropped it.
+#[test]
+fn abandoning_a_rename_a_forget_saw_keeps_the_new_name() {
+    let mut hive = Fixture::new(&["alpha", "beta", "gamma"]);
+    hive.commit(1, "b", "beta's first");
+    hive.repo(2).jj(&["workspace", "rename", "renamed"]);
+    let rename = op_log(hive.repo(2))[0].0.clone();
+    hive.hive.sync(1).unwrap();
+    let before = hive.hive.hub.store().head().0;
+    hive.hive.sync(2).unwrap();
+    hive.hive.sync(0).unwrap();
+    goes_back_then_an_hour_passes(&mut hive.hive, before);
+    let gamma = hive.machine_key(2);
+    hive.node(0).forget_copy(&gamma, "gamma").unwrap();
+    hive.repo(2).jj(&["op", "abandon", &rename]);
+    hive.commit(1, "b", "beta's second");
+    hive.sync();
+    hive.assert_converged();
+    let own: BTreeSet<String> = hive
+        .workspace_names(2)
+        .into_iter()
+        .filter(|name| !name.contains('/'))
+        .collect();
+    assert_eq!(own, BTreeSet::from(["renamed".to_owned()]));
+}
+
 /// Saved trim bindings must not claim a new local workspace after the foreign copy leaves.
 #[test]
 fn a_trim_does_not_reserve_a_forgotten_copys_workspace_name() {

@@ -15,6 +15,9 @@
   If you then run a `jj` command and, before syncing, `jj op abandon` the sync's operation, the
   workspace stays the laptop's. It used to become a workspace of this machine's own, and the
   laptop's showed beside it as `laptop-1a2b/default`.
+- You rename a workspace, and later `jj op abandon` the rename. If another machine had seen the
+  rename and then forgotten this machine with `musubi forget`, this machine sometimes got the
+  old name back beside the new one. It keeps only the new name now.
 
 ## 0.47.0
 
